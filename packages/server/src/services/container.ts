@@ -17,6 +17,7 @@ import type { ServerConfig } from "../config.js";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import { SessionBroker } from "./session-broker.js";
+import { TerminalService } from "./terminal.js";
 import { makeFakeQuery } from "./fake-sdk.js";
 import { TitleService, makeFakeTitleQuery } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
@@ -37,6 +38,7 @@ export interface ServiceBase {
 /** Injectable service overrides (tests supply fakes; prod omits them). */
 export interface ServiceOverrides {
   broker?: SessionBroker;
+  terminals?: TerminalService;
   title?: TitleService;
   checkpoints?: CheckpointService;
   worktrees?: WorktreeService;
@@ -50,6 +52,7 @@ export interface ServiceOverrides {
 /** Everything the routes/WS layer needs, wired to one bus + store. */
 export interface Services extends ServiceBase {
   broker: SessionBroker;
+  terminals: TerminalService;
   title: TitleService;
   checkpoints: CheckpointService;
   worktrees: WorktreeService;
@@ -75,12 +78,15 @@ export function createServices(
   // and unit tests (which inject their own broker) are untouched.
   const brokerDeps =
     process.env.CM_FAKE_SDK === "1" ? { query: makeFakeQuery() } : undefined;
+  // Persistent named shells exposed to sessions as `mcp__manager__terminal`.
+  const terminals = overrides.terminals ?? new TerminalService({ bus });
   const broker =
     overrides.broker ??
     new SessionBroker({
       store,
       bus,
       maxActiveSessions: config.maxActiveSessions,
+      terminals,
       deps: brokerDeps,
     });
   const title =
@@ -117,6 +123,7 @@ export function createServices(
     store,
     bus,
     broker,
+    terminals,
     title,
     checkpoints,
     worktrees,
@@ -191,6 +198,8 @@ export function createServices(
       attention.stop();
       await runner.stopAll().catch(() => {});
       await broker.dispose().catch(() => {});
+      // Kill any lingering persistent shells after the broker unwinds.
+      terminals.dispose();
     },
   };
 

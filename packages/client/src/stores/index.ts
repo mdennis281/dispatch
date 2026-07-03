@@ -17,6 +17,7 @@ import { useChats } from "./chats.js";
 import { useMessages } from "./messages.js";
 import { useAttention } from "./attention.js";
 import { useRunners } from "./runners.js";
+import { useTerminals } from "./terminals.js";
 import { usePanels } from "./panels.js";
 import { useCheckpoints } from "./checkpoints.js";
 import { useNotices } from "./notices.js";
@@ -43,6 +44,7 @@ export { useChats, useProjectChats } from "./chats.js";
 export { useMessages, useChatMessages } from "./messages.js";
 export { useAttention, useAttentionCount } from "./attention.js";
 export { useRunners, useChatRunners } from "./runners.js";
+export { useTerminals, useChatTerminals } from "./terminals.js";
 export { usePanels } from "./panels.js";
 export { useCheckpoints, useHasCheckpoint } from "./checkpoints.js";
 export { useNotices } from "./notices.js";
@@ -136,6 +138,22 @@ export function applyServerEvent(evt: WsServerEvent): void {
       usePanels.getState().upsertWorktree(evt.worktree);
       return;
 
+    case "terminal-update":
+      useTerminals.getState().upsert(evt.terminal);
+      return;
+
+    case "terminal-output":
+      useTerminals.getState().appendLine(evt.terminalId, {
+        stream: evt.stream,
+        chunk: evt.chunk,
+        ts: evt.ts,
+      });
+      return;
+
+    case "terminal-closed":
+      useTerminals.getState().close(evt.terminalId);
+      return;
+
     case "checkpoint":
       // Rollback anchor — record it so the chat can offer "Roll back here" only
       // where a restore point exists.
@@ -196,15 +214,16 @@ const loadedChats = new Set<string>();
  * core lists are unreachable (backend down) — the caller then keeps the mock.
  */
 export async function hydrateFromServer(): Promise<boolean> {
-  let projects, agents, modes, chats, attention, runners;
+  let projects, agents, modes, chats, attention, runners, terminals;
   try {
-    [projects, agents, modes, chats, attention, runners] = await Promise.all([
+    [projects, agents, modes, chats, attention, runners, terminals] = await Promise.all([
       api.projects.list(),
       api.agents.list(),
       api.modes.list(),
       api.chats.list(),
       api.attention.list(),
       api.runners.list(),
+      api.terminals.list().catch(() => []),
     ]);
   } catch {
     return false;
@@ -218,6 +237,7 @@ export async function hydrateFromServer(): Promise<boolean> {
   useChats.getState().hydrate(chats);
   useAttention.getState().hydrate(attention);
   useRunners.getState().hydrate(runners, {});
+  useTerminals.getState().hydrate(terminals, {});
   useMessages.getState().hydrate({});
   useCheckpoints.getState().reset();
   usePanels.getState().hydrate({ worktrees: [], diffs: {}, prs: [], workflowRuns: [] });

@@ -46,12 +46,34 @@ export interface ManagerMcpBroker {
   getStatus(chatId: string): ChatStatus | undefined;
 }
 
+/**
+ * The narrow terminal surface the manager MCP needs — a single `run` that
+ * executes a command in a named PERSISTENT shell (cwd/env survive across calls),
+ * already bound to this session's chat + default cwd by the broker.
+ */
+export interface ManagerMcpTerminals {
+  run(args: {
+    name: string;
+    command: string;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<{
+    output: string;
+    exitCode: number | null;
+    cwd: string;
+    error?: string;
+    timedOut?: boolean;
+  }>;
+}
+
 /** Per-session context the factory closes over. */
 export interface ManagerMcpContext {
   /** The chat this session drives (for the waiting status label). */
   chatId: string;
   bus: EventBus;
   broker: ManagerMcpBroker;
+  /** Persistent-terminal runner for this session (omitted → no `terminal` tool). */
+  terminals?: ManagerMcpTerminals;
   /** The session's abort signal — cancels in-flight waits on stop/fork. */
   signal?: AbortSignal;
   now?: () => number;
@@ -276,7 +298,47 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
-  return { wait, waitForChat };
+  const terminal = tool(
+    "terminal",
+    "Run a shell command in a NAMED, PERSISTENT terminal whose working directory " +
+      "and environment SURVIVE between calls (unlike Bash, which resets each time). " +
+      "Reuse the same `name` to keep a cwd (e.g. `cd` once, then run builds from " +
+      "there) or an env var across commands. Returns the command output, its exit " +
+      "code, and the terminal's current working directory.",
+    {
+      name: z
+        .string()
+        .describe("Terminal name to run in (created on first use, e.g. 'build')."),
+      command: z.string().describe("The shell command to execute."),
+      timeoutMs: z
+        .number()
+        .optional()
+        .describe("Give up waiting after this long (the command keeps running)."),
+    },
+    async (args, extra): Promise<CallToolResult> => {
+      if (!ctx.terminals) {
+        return textResult("The terminal tool is not available in this session.", true);
+      }
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      const command = typeof args.command === "string" ? args.command : "";
+      if (!name) return textResult("terminal requires a non-empty name.", true);
+      if (!command.trim()) return textResult("terminal requires a command.", true);
+
+      const res = await ctx.terminals.run({
+        name,
+        command,
+        timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : undefined,
+        signal: extraSignal(extra) ?? ctx.signal,
+      });
+
+      const header = `[${name}] cwd=${res.cwd} exit=${res.exitCode ?? "n/a"}`;
+      const body = res.output ? `\n${res.output}` : "";
+      const note = res.error ? `\n(${res.error})` : "";
+      return textResult(`${header}${body}${note}`, !!res.error && !res.timedOut);
+    },
+  );
+
+  return { wait, waitForChat, terminal };
 }
 
 /**
@@ -287,10 +349,13 @@ export function createManagerTools(ctx: ManagerMcpContext) {
 export function createManagerMcpServer(
   ctx: ManagerMcpContext,
 ): McpSdkServerConfigWithInstance {
-  const { wait, waitForChat } = createManagerTools(ctx);
+  const { wait, waitForChat, terminal } = createManagerTools(ctx);
+  // The `terminal` tool is only meaningful when a TerminalService is wired in;
+  // omit it otherwise so the agent isn't offered a dead tool.
+  const tools = ctx.terminals ? [wait, waitForChat, terminal] : [wait, waitForChat];
   return createSdkMcpServer({
     name: "manager",
     version: "1.0.0",
-    tools: [wait, waitForChat],
+    tools,
   });
 }

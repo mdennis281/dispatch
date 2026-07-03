@@ -19,6 +19,7 @@ import {
   PRInfoSchema,
   WorkflowRunSchema,
   WorktreeInfoSchema,
+  TerminalInfoSchema,
 } from "./domain.js";
 import {
   ChatMessageSchema,
@@ -123,6 +124,31 @@ export const WorktreeUpdateEventSchema = z.object({
   worktree: WorktreeInfoSchema,
 });
 
+/** A persistent terminal was created / changed state (cwd/status/busy). */
+export const TerminalUpdateEventSchema = z.object({
+  type: z.literal("terminal-update"),
+  terminal: TerminalInfoSchema,
+});
+
+/** A line (or chunk) of terminal I/O for the live read-only view. `command` is
+ *  the agent-issued command line echoed by the manager (shells run with stdin
+ *  piped and no prompt echo); stdout/stderr are the shell's real streams. */
+export const TerminalOutputEventSchema = z.object({
+  type: z.literal("terminal-output"),
+  terminalId: z.string(),
+  chatId: z.string(),
+  stream: z.enum(["command", "stdout", "stderr"]),
+  chunk: z.string(),
+  ts: z.number().int(),
+});
+
+/** A terminal was torn down (chat deleted / cap teardown / shell exit). */
+export const TerminalClosedEventSchema = z.object({
+  type: z.literal("terminal-closed"),
+  terminalId: z.string(),
+  chatId: z.string(),
+});
+
 /** A per-turn rollback checkpoint was written. */
 export const CheckpointEventSchema = z.object({
   type: z.literal("checkpoint"),
@@ -182,6 +208,9 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   PrUpdateEventSchema,
   WorkflowUpdateEventSchema,
   WorktreeUpdateEventSchema,
+  TerminalUpdateEventSchema,
+  TerminalOutputEventSchema,
+  TerminalClosedEventSchema,
   CheckpointEventSchema,
   ChatUpdateEventSchema,
   ChatDeletedEventSchema,

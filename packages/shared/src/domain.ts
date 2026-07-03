@@ -321,6 +321,36 @@ export const RunnerInstanceSchema = z.object({
 });
 export type RunnerInstance = z.infer<typeof RunnerInstanceSchema>;
 
+/* --------------------------------------------------------------- terminals */
+
+/** Lifecycle of a persistent named shell managed by TerminalService. */
+export const TerminalStatusSchema = z.enum(["live", "exited"]);
+export type TerminalStatus = z.infer<typeof TerminalStatusSchema>;
+
+/**
+ * A persistent, named shell whose cwd/env survive across commands — the agent's
+ * `mcp__manager__terminal` sessions, visualized read-only in the UI. Keyed by
+ * `${chatId}::${name}`.
+ */
+export const TerminalInfoSchema = z.object({
+  id: z.string(),
+  chatId: z.string(),
+  /** Agent-chosen terminal name (e.g. "build", "server"). */
+  name: z.string(),
+  /** Live working directory (tracked after every command). */
+  cwd: z.string(),
+  status: TerminalStatusSchema,
+  /** True while a command is executing in this shell. */
+  busy: z.boolean().optional(),
+  /** The most recent command run in this shell (header display). */
+  lastCommand: z.string().optional(),
+  /** Exit code of the most recent command (null = cmdlet / no native exit). */
+  lastExitCode: z.number().int().nullable().optional(),
+  createdAt: z.number().int(),
+  updatedAt: z.number().int().optional(),
+});
+export type TerminalInfo = z.infer<typeof TerminalInfoSchema>;
+
 /* -------------------------------------------------- checkpoints / workflow */
 
 /** Per-message git-shadow-ref checkpoint (rollback map value). */

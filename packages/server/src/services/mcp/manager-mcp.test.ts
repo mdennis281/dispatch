@@ -185,6 +185,71 @@ describe("manager-mcp — wait_for_chat", () => {
   });
 });
 
+/* -------------------------------------------------------------- terminal */
+
+describe("manager-mcp — terminal", () => {
+  it("runs a command in a named terminal and returns output/exit/cwd", async () => {
+    const calls: { name: string; command: string }[] = [];
+    const { terminal } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      terminals: {
+        run: async ({ name, command }) => {
+          calls.push({ name, command });
+          return { output: "build ok", exitCode: 0, cwd: "C:\\repo" };
+        },
+      },
+    });
+
+    const res = await terminal.handler({ name: "build", command: "pnpm build", timeoutMs: undefined }, {});
+    expect(calls).toEqual([{ name: "build", command: "pnpm build" }]);
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("[build]");
+    expect(resultText(res)).toContain("cwd=C:\\repo");
+    expect(resultText(res)).toContain("exit=0");
+    expect(resultText(res)).toContain("build ok");
+  });
+
+  it("surfaces a runner error as an error result", async () => {
+    const { terminal } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      terminals: {
+        run: async () => ({
+          output: "",
+          exitCode: null,
+          cwd: "",
+          error: "Terminal cap reached (8 shells for this chat).",
+        }),
+      },
+    });
+    const res = await terminal.handler({ name: "x", command: "ls", timeoutMs: undefined }, {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("cap reached");
+  });
+
+  it("reports unavailable when no TerminalService is wired", async () => {
+    const { terminal } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}) });
+    const res = await terminal.handler({ name: "x", command: "ls", timeoutMs: undefined }, {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("not available");
+  });
+
+  it("validates a non-empty command", async () => {
+    const { terminal } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      terminals: { run: async () => ({ output: "", exitCode: 0, cwd: "" }) },
+    });
+    const res = await terminal.handler({ name: "x", command: "   ", timeoutMs: undefined }, {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("requires a command");
+  });
+});
+
 /* --------------------------------------------------------- server assembly */
 
 describe("manager-mcp — server factory", () => {

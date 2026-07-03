@@ -31,7 +31,7 @@ import {
 import { actions } from "../../lib/actions.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
-import { requestFocusPanel } from "../panels/panelBus.js";
+import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
 import { requestOpenProjectPrs } from "../prs/projectPrsBus.js";
 import { Kbd } from "../ui/Kbd.js";
 import { cn } from "../../lib/cn.js";
@@ -174,9 +174,10 @@ export function CommandPalette({
         keywords: "rename ai summarize",
         run: () => actions.regenerateTitle(activeChatId),
       });
-      const panelCmds: { id: string; title: string; icon: ReactNode; tab: "worktrees" | "apps" | "prs" }[] = [
+      const panelCmds: { id: string; title: string; icon: ReactNode; tab: FocusPanelTab }[] = [
         { id: "go-worktrees", title: "Go to Worktrees", icon: <GitBranch />, tab: "worktrees" },
         { id: "go-apps", title: "Go to Apps", icon: <TerminalSquare />, tab: "apps" },
+        { id: "go-terminals", title: "Go to Terminals", icon: <TerminalSquare />, tab: "terminals" },
         { id: "go-prs", title: "Go to PRs", icon: <GitPullRequest />, tab: "prs" },
       ];
       for (const p of panelCmds) {

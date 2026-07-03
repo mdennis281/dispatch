@@ -13,6 +13,7 @@ import type {
   AttentionItem,
   PermissionRequest,
   RunnerInstance,
+  TerminalInfo,
   WorktreeInfo,
   PRInfo,
   WorkflowDef,
@@ -215,6 +216,16 @@ export const api = {
     stop: (id: string) => del<void>(`/api/runners/${id}`),
     logs: (id: string) =>
       get<{ stream: string; line: string; ts: number }[]>(`/api/runners/${id}/logs`),
+  },
+
+  /* persistent terminals (agent-driven named shells) */
+  terminals: {
+    list: (chatId?: string) =>
+      get<TerminalInfo[]>(`/api/terminals${qs({ chatId })}`),
+    output: (id: string) =>
+      get<{ stream: "command" | "stdout" | "stderr"; chunk: string; ts: number }[]>(
+        `/api/terminals/${encodeURIComponent(id)}/output`,
+      ),
   },
 
   /* worktrees */

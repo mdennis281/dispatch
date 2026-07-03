@@ -23,7 +23,7 @@ export function requestOpenFile(req: OpenFileRequest): void {
 }
 
 /** The right-panel tabs the command palette can jump to. */
-export type FocusPanelTab = "worktrees" | "apps" | "prs";
+export type FocusPanelTab = "worktrees" | "apps" | "terminals" | "prs";
 
 export const FOCUS_PANEL_EVENT = "cm:focus-panel";
 
