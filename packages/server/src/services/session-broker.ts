@@ -49,6 +49,7 @@ import type {
 } from "@cm/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
+import { createManagerMcpServer } from "./mcp/manager-mcp.js";
 
 /* ------------------------------------------------------------------ deps */
 
@@ -1412,9 +1413,20 @@ export class SessionBroker {
         append: appends.join("\n\n"),
       };
     }
-    if (project?.mcpServers) {
-      options.mcpServers = project.mcpServers as unknown as Record<string, SdkMcpServerConfig>;
-    }
+    // Register the in-process "manager" MCP on EVERY session so the agent can
+    // self-pace (mcp__manager__wait / __wait_for_chat). Merge it alongside any
+    // project-configured MCP servers; the session's abort signal cancels any
+    // in-flight wait on stop/fork.
+    options.mcpServers = {
+      ...(project?.mcpServers as unknown as Record<string, SdkMcpServerConfig> | undefined),
+      manager: createManagerMcpServer({
+        chatId: session.chatId,
+        bus: this.bus,
+        broker: this,
+        signal: session.abortController?.signal,
+        now: this.now,
+      }),
+    };
     if (session.fork) {
       if (session.resumeSessionId) options.resume = session.resumeSessionId;
       if (session.forkAtUuid) options.resumeSessionAt = session.forkAtUuid;
