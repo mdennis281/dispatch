@@ -380,6 +380,15 @@ export const RemoveWorktreeActionSchema = z.object({
   worktreePath: z.string(),
 });
 
+/** Detach a worktree from a chat's ATTRIBUTION only — unlink the record without
+ *  deleting the worktree on disk. Lets the user fix a mis-attributed worktree row
+ *  (a sibling task's worktree wrongly shown under this chat). */
+export const DetachWorktreeActionSchema = z.object({
+  type: z.literal("detach-worktree"),
+  chatId: z.string(),
+  worktreePath: z.string(),
+});
+
 /** A GitHub control-plane operation (PRs + Actions). */
 export const GhActionSchema = z.object({
   type: z.literal("gh-action"),
@@ -429,6 +438,7 @@ export const WsClientActionSchema = z.discriminatedUnion("type", [
   StopRunnerActionSchema,
   CreateWorktreeActionSchema,
   RemoveWorktreeActionSchema,
+  DetachWorktreeActionSchema,
   GhActionSchema,
 ]);
 export type WsClientAction = z.infer<typeof WsClientActionSchema>;

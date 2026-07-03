@@ -370,6 +370,37 @@ describe("WorktreeService on a real temp repo", () => {
     expect(afterRemove!.worktrees).not.toContain(info.path);
   });
 
+  it("detachFromChat unlinks a worktree path WITHOUT touching disk (idempotent)", async () => {
+    const store = new Store(join(root, "data-detach"));
+    await store.init();
+    const chat: Chat = {
+      id: "chatB",
+      projectId: "p1",
+      title: "T",
+      modeId: "auto",
+      effort: "medium",
+      worktrees: ["/wt/keep", "/wt/wrong"],
+      prs: [],
+      createdAt: Date.now(),
+    };
+    await store.saveChat(chat);
+    const svc2 = new WorktreeService({ bus, store });
+    const before = events.length;
+
+    // First detach: the mis-attributed path leaves worktrees[], the other stays.
+    const first = await svc2.detachFromChat("chatB", "/wt/wrong");
+    expect(first).toBe(true);
+    const reloaded = await store.getChat("chatB");
+    expect(reloaded!.worktrees).toEqual(["/wt/keep"]);
+    expect(events.slice(before).some((e) => e.type === "chat-update")).toBe(true);
+
+    // Second detach of the same path is a no-op (already gone) → false, no re-save.
+    const mid = events.length;
+    const second = await svc2.detachFromChat("chatB", "/wt/wrong");
+    expect(second).toBe(false);
+    expect(events.slice(mid).some((e) => e.type === "chat-update")).toBe(false);
+  });
+
   it("refuses to create a duplicate worktree path", async () => {
     await svc.create(project(), "feat/dup", { base: "main", noFetch: true });
     await expect(

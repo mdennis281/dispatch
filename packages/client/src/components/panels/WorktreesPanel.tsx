@@ -10,6 +10,7 @@ import {
   FolderOpen,
   Check,
   Trash2,
+  Unlink,
 } from "lucide-react";
 import type { Chat, WorktreeInfo, PRInfo } from "@cm/shared";
 import { usePanels, type WorktreeDiff } from "../../stores/panels.js";
@@ -132,7 +133,17 @@ function WorktreePrRow({ pr }: { pr: PRInfo }) {
   );
 }
 
-function WorktreeCard({ wt, diff, pr }: { wt: WorktreeInfo; diff?: WorktreeDiff; pr?: PRInfo }) {
+function WorktreeCard({
+  wt,
+  diff,
+  pr,
+  chatId,
+}: {
+  wt: WorktreeInfo;
+  diff?: WorktreeDiff;
+  pr?: PRInfo;
+  chatId: string;
+}) {
   const [copied, setCopied] = useState(false);
   const base = wt.base ?? "main";
 
@@ -212,10 +223,18 @@ function WorktreeCard({ wt, diff, pr }: { wt: WorktreeInfo; diff?: WorktreeDiff;
         </Button>
         <IconButton
           size="sm"
+          tip="Unlink from this chat (keeps the worktree on disk)"
+          className="ml-auto hover:text-warn"
+          onClick={() => actions.detachWorktree({ chatId, worktreePath: wt.path })}
+        >
+          <Unlink />
+        </IconButton>
+        <IconButton
+          size="sm"
           tip={wt.isDirty ? "Commit or discard changes first" : "Remove worktree"}
           disabled={wt.isDirty}
-          className="ml-auto hover:text-danger"
-          onClick={() => actions.removeWorktree({ worktreePath: wt.path, chatId: wt.chatId })}
+          className="hover:text-danger"
+          onClick={() => actions.removeWorktree({ worktreePath: wt.path, chatId })}
         >
           <Trash2 />
         </IconButton>
@@ -252,8 +271,16 @@ function PendingWorktreeCard({ path, chatId }: { path: string; chatId: string })
         </Button>
         <IconButton
           size="sm"
+          tip="Unlink from this chat (keeps the worktree on disk)"
+          className="ml-auto hover:text-warn"
+          onClick={() => actions.detachWorktree({ chatId, worktreePath: path })}
+        >
+          <Unlink />
+        </IconButton>
+        <IconButton
+          size="sm"
           tip="Remove worktree"
-          className="ml-auto hover:text-danger"
+          className="hover:text-danger"
           onClick={() => actions.removeWorktree({ worktreePath: path, chatId })}
         >
           <Trash2 />
@@ -313,7 +340,7 @@ export function WorktreesPanel({ chat }: { chat: Chat }) {
         <NewWorktreeButton chat={chat} />
       </div>
       {mine.map((wt) => (
-        <WorktreeCard key={wt.path} wt={wt} diff={diffs[wt.path]} pr={prFor(wt.branch)} />
+        <WorktreeCard key={wt.path} wt={wt} diff={diffs[wt.path]} pr={prFor(wt.branch)} chatId={chat.id} />
       ))}
       {pending.map((p) => (
         <PendingWorktreeCard key={p} path={p} chatId={chat.id} />

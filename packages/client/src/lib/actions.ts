@@ -180,6 +180,11 @@ export const actions = {
   removeWorktree(input: { worktreePath: string; chatId?: string }): void {
     ws.send({ type: "remove-worktree", ...input });
   },
+  /** Unlink a worktree from a chat's attribution (keeps it on disk) — fixes a
+   *  worktree wrongly shown under this chat. */
+  detachWorktree(input: { chatId: string; worktreePath: string }): void {
+    ws.send({ type: "detach-worktree", ...input });
+  },
 
   /* ---------------------------------------------- github control plane */
 

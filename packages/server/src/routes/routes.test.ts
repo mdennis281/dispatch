@@ -371,6 +371,46 @@ describe("routes — WebSocket", () => {
     ws.close();
   });
 
+  it("detach-worktree unlinks a mis-attributed worktree from the chat (no disk delete)", async () => {
+    await boot(makeFakeQuery(() => [resultMsg()]));
+    const projectId = await makeProject();
+    const chatId = (
+      await app.inject({
+        method: "POST",
+        url: "/api/chats",
+        payload: { projectId, title: "Task 1" },
+      })
+    ).json().id as string;
+
+    // Simulate a stale mis-attribution: a sibling task's worktree wrongly recorded
+    // on this chat's `worktrees[]`.
+    const chat = await store.getChat(chatId);
+    await store.saveChat({
+      ...chat!,
+      worktrees: [`${dir}/wt/feat-mine`, `${dir}/wt/feat-wrong`],
+    });
+
+    const ws = await connect(port);
+    await ws.waitFor((e) => e.type === "hello");
+    ws.send({ type: "detach-worktree", chatId, worktreePath: `${dir}/wt/feat-wrong` });
+
+    const upd = await ws.waitFor(
+      (e) =>
+        e.type === "chat-update" &&
+        e.chat.id === chatId &&
+        !e.chat.worktrees.includes(`${dir}/wt/feat-wrong`),
+    );
+    expect(upd.type).toBe("chat-update");
+    if (upd.type === "chat-update") {
+      expect(upd.chat.worktrees).toEqual([`${dir}/wt/feat-mine`]);
+    }
+
+    // The record is persisted (disk worktree — had there been one — is untouched).
+    const persisted = await app.inject({ method: "GET", url: `/api/chats/${chatId}` });
+    expect(persisted.json().worktrees).toEqual([`${dir}/wt/feat-mine`]);
+    ws.close();
+  });
+
   it("permission request lands in the Attention Queue and answer-permission resolves it", async () => {
     // The fake awaits the broker's canUseTool promise, which only settles once
     // the host answers the permission (via the answer-permission action).

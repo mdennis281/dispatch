@@ -19,6 +19,7 @@ import type {
   Project,
   Effort,
   ImageRef,
+  WorktreeInfo,
 } from "@cm/shared";
 import { COPILOT_LOGIN } from "../services/github.js";
 import type { Services } from "../services/container.js";
@@ -135,6 +136,26 @@ async function chatBranch(
   } catch {
     return { cwd: wtPath };
   }
+}
+
+/**
+ * Republish a worktree with its `chatId` tag cleared so the (per-chat) worktrees
+ * panel drops it from `chatId` after a `detach-worktree`. The panel matches a
+ * runtime worktree to a chat by EITHER the chat's `worktrees[]` OR the worktree's
+ * own `chatId` tag; the detach clears the former, this clears the latter. We emit
+ * a minimal, tag-less record (branch derived from the path, which is the branch
+ * with `/`→`-`) rather than shelling out to git per click — the card is leaving
+ * this chat, so only the now-empty attribution matters; the next detector
+ * reconcile / diff load refreshes any remaining detail.
+ */
+function clearWorktreeAttribution(
+  services: Services,
+  worktreePath: string,
+): void {
+  const branch =
+    worktreePath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? worktreePath;
+  const worktree: WorktreeInfo = { path: worktreePath, branch };
+  services.bus.publish({ type: "worktree-update", worktree });
 }
 
 /* --------------------------------------------------------------- gh-action */
@@ -407,6 +428,17 @@ export async function dispatchClientAction(
       case "remove-worktree":
         await worktrees.remove(action.worktreePath, { chatId: action.chatId });
         return;
+
+      case "detach-worktree": {
+        // Attribution-only unlink: drop the path from the chat's `worktrees[]`
+        // WITHOUT deleting it on disk (fixes a mis-attributed row). The panel also
+        // attributes a runtime worktree by its `chatId` tag, so clear that too —
+        // otherwise the card lingers under this chat even after it leaves the
+        // record. Best-effort: a no-op detach still clears the tag.
+        await worktrees.detachFromChat(action.chatId, action.worktreePath);
+        clearWorktreeAttribution(services, action.worktreePath);
+        return;
+      }
 
       case "gh-action":
         await runGhAction(services, action);
