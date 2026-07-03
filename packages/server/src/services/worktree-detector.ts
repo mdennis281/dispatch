@@ -13,14 +13,24 @@
  * agent has torn down are detached.
  *
  * ATTRIBUTION (bug fix). Detection is project-wide, not "whatever chat's turn
- * just completed". We record, per chat, the branch(es) that chat's session
- * created by parsing its Bash `tool_use` rows (`git worktree add -b <branch>` /
- * `pnpm worktree <branch>`), fed off the `chat-message` bus. A detected worktree
- * is attached to the chat whose recorded branch matches it. When the branch is
- * unknown we fall back to the currently-active chat that most recently ran a
- * worktree command (or, on a turn-complete pass, the completing chat if it ran
- * one); with no such chat the worktree is LEFT UNATTACHED rather than dumped on
- * an arbitrary chat. A worktree already owned by a chat is never re-attributed.
+ * just completed". Ownership is reconstructed from each chat's OWN transcript:
+ * we scan its persisted `tool_use` rows (+ the live `chat-message` bus) for a
+ * worktree-CREATE command (`git worktree add -b <branch>` / `pnpm worktree
+ * <branch>`) and record `chatId → branch → earliest-ts`. That yields a global
+ * `branch → owning-chat` map (earliest creator wins a tie); fallbacks cover a
+ * branch with no create-command (a chat whose history referenced the worktree
+ * PATH, then a chat whose persisted `prs[]` carries the branch, then an existing
+ * unambiguous attribution — never overriding a stronger signal). A branch with
+ * no owner is LEFT UNATTACHED rather than dumped on an arbitrary chat.
+ *
+ * SELF-HEALING REWRITE (bug fix). Every reconcile (startup heal + each poll +
+ * turn-complete) REWRITES each chat's `worktrees[]` to EXACTLY the live worktrees
+ * it owns — removing a stale/wrong attribution and adding a correctly-owned one —
+ * then persists the corrected `chat.json` and emits `chat-update` /
+ * `worktree-update`. Because ownership is derived from history (not "newness"),
+ * a bad attribution PERSISTED by an older build is re-healed on the next start,
+ * not frozen in place. PRs correlate to a chat by the same branch → chat map
+ * (the per-chat PRs view scopes to a chat's worktree branches).
  *
  * LIVE SYNC (bug fix). Turn-complete is not enough: in Bypass mode a whole
  * session is one long running turn, so a worktree created mid-turn wouldn't show
@@ -105,11 +115,13 @@ export class WorktreeDetector {
   private readonly known = new Set<string>();
   /** Project ids whose baseline has been captured. */
   private readonly seeded = new Set<string>();
-  /** chatId → branch names that chat's session created (from tool_use rows). */
-  private readonly chatBranches = new Map<string, Set<string>>();
-  /** chatId → epoch ms it last ran a worktree-creating command (fallback rank). */
-  private readonly lastWorktreeCmdAt = new Map<string, number>();
-  /** Chats whose session is currently active (drives polling + fallback). */
+  /** chatId → (branch → earliest epoch ms it CREATED it), from history + live tool_use. */
+  private readonly chatBranches = new Map<string, Map<string, number>>();
+  /** chatId → canonical worktree paths its history referenced (fallback attribution). */
+  private readonly chatPathRefs = new Map<string, Set<string>>();
+  /** Chats whose persisted transcript has already been scanned for create-commands. */
+  private readonly historyLoaded = new Set<string>();
+  /** Chats whose session is currently active (drives polling). */
   private readonly activeChats = new Set<string>();
 
   /** Serializes all detector work so a seed lands before its detection. */
@@ -142,6 +154,10 @@ export class WorktreeDetector {
       );
     }
     await this.enqueue(() => this.seedAll());
+    // Heal persisted attribution on every boot: reconstruct ownership from each
+    // chat's transcript and rewrite `chat.worktrees[]` to truth. This re-corrects
+    // bad data an older build persisted (a server restart used to freeze it).
+    await this.enqueue(() => this.healAll());
   }
 
   /** Unsubscribe from the bus + stop polling (teardown). */
@@ -222,14 +238,28 @@ export class WorktreeDetector {
     if (!looksLikeWorktreeCreate(command)) return;
     // Record the branch(es) this chat created + when, so detection can attribute
     // a matching worktree to it (not to whoever's turn happens to complete first).
-    this.lastWorktreeCmdAt.set(chatId, message.ts ?? this.now());
-    let set = this.chatBranches.get(chatId);
-    for (const branch of parseWorktreeBranches(command)) {
-      if (!set) {
-        set = new Set<string>();
-        this.chatBranches.set(chatId, set);
-      }
-      set.add(branch);
+    this.recordChatBranches(
+      chatId,
+      parseWorktreeBranches(command),
+      message.ts ?? this.now(),
+    );
+  }
+
+  /** Fold created-branch(es) into the chat's map, keeping the EARLIEST ts per branch. */
+  private recordChatBranches(
+    chatId: string,
+    branches: string[],
+    ts: number,
+  ): void {
+    if (branches.length === 0) return;
+    let map = this.chatBranches.get(chatId);
+    if (!map) {
+      map = new Map<string, number>();
+      this.chatBranches.set(chatId, map);
+    }
+    for (const branch of branches) {
+      const prev = map.get(branch);
+      if (prev === undefined || ts < prev) map.set(branch, ts);
     }
   }
 
@@ -322,11 +352,69 @@ export class WorktreeDetector {
     }
   }
 
+  /** Startup heal: reconcile every project so persisted attribution self-corrects. */
+  private async healAll(): Promise<void> {
+    let projects: Project[];
+    try {
+      projects = await this.store.listProjects();
+    } catch {
+      return;
+    }
+    for (const project of projects) {
+      await this.reconcileProject(project).catch(() => undefined);
+    }
+  }
+
   /**
-   * Turn-complete entry: reconcile the whole project (attributing each newcomer
-   * to the chat that created it), then return just `chatId`'s slice. `chatId` is
-   * the preferred fallback owner (it just ran, demonstrably), but branch-matched
-   * worktrees still go to their real creators, not to `chatId`.
+   * Scan a chat's persisted transcript ONCE and fold its worktree-CREATE commands
+   * into `chatBranches` (branch→earliest-ts) + `chatPathRefs` (referenced worktree
+   * paths, for fallback attribution). This is what rebuilds ownership from history
+   * on a fresh boot — the in-memory `chatBranches` is empty after a restart, so
+   * without this the persisted (possibly-wrong) attribution could never re-heal.
+   */
+  private async ensureHistoryLoaded(project: Project, chatId: string): Promise<void> {
+    if (this.historyLoaded.has(chatId)) return;
+    this.historyLoaded.add(chatId);
+    let messages: ChatMessage[];
+    try {
+      messages = await this.store.readMessages(chatId);
+    } catch {
+      return;
+    }
+    const rootCanon = canonPath(
+      resolve(project.repoPath, project.worktreeRoot),
+    );
+    for (const m of messages) {
+      if (m.kind !== "tool_use") continue;
+      const command = (m.input as { command?: unknown } | undefined)?.command;
+      if (typeof command !== "string" || !command) continue;
+      // Path references (`cd <worktree>` …): any token under the worktree root is
+      // a signal this chat worked in that worktree (tier-2 fallback).
+      for (const token of command.split(/\s+/)) {
+        const t = token.replace(/^["']|["']$/g, "");
+        if (!t) continue;
+        const c = canonPath(t);
+        if (c === rootCanon || !c.startsWith(rootCanon)) continue;
+        let refs = this.chatPathRefs.get(chatId);
+        if (!refs) {
+          refs = new Set<string>();
+          this.chatPathRefs.set(chatId, refs);
+        }
+        refs.add(c);
+      }
+      if (!looksLikeWorktreeCreate(command)) continue;
+      this.recordChatBranches(
+        chatId,
+        parseWorktreeBranches(command),
+        m.ts ?? this.now(),
+      );
+    }
+  }
+
+  /**
+   * Turn-complete entry: reconcile the whole project (rewriting each chat's
+   * `worktrees[]` to the ones it actually owns), then return just `chatId`'s
+   * slice — its attaches/removes this pass.
    */
   async detectForChat(chatId: string): Promise<WorktreeDetectionResult> {
     const empty: WorktreeDetectionResult = { chatId, attached: [], removed: [] };
@@ -336,22 +424,19 @@ export class WorktreeDetector {
       .getProject(chat.projectId)
       .catch(() => null);
     if (!project) return empty;
-    const results = await this.reconcileProject(project, {
-      preferChatId: chatId,
-    });
+    const results = await this.reconcileProject(project);
     return results.get(chatId) ?? empty;
   }
 
   /**
-   * Diff a project's live worktrees against everything we've accounted for:
-   * attach each newcomer to the chat that CREATED it, detach any that vanished
-   * from disk, and fold owned newcomers back into `known`. Unattributable
-   * newcomers are LEFT OUT of `known` so a later pass (once its branch record or
-   * an active chat appears) can still pick them up.
+   * Rewrite every chat's `worktrees[]` to EXACTLY the live worktrees it owns,
+   * reconstructing ownership from transcript history (see `buildBranchOwners`).
+   * A wrongly-attributed worktree is moved to its real creator (or dropped if it
+   * left disk); a correctly-owned one that's missing is added. Persists the
+   * corrected `chat.json` and emits `chat-update` / `worktree-update`.
    */
   private async reconcileProject(
     project: Project,
-    opts: { preferChatId?: string } = {},
   ): Promise<Map<string, WorktreeDetectionResult>> {
     const results = new Map<string, WorktreeDetectionResult>();
     const resultFor = (chatId: string): WorktreeDetectionResult => {
@@ -372,58 +457,69 @@ export class WorktreeDetector {
     }
 
     const repoCanon = canonPath(project.repoPath);
-    const currentCanon = new Set(infos.map((i) => canonPath(i.path)));
+    // Live TASK worktrees (drop the primary checkout + bare/detached/unknown).
+    const infoByCanon = new Map<string, WorktreeInfo>();
+    for (const info of infos) {
+      const c = canonPath(info.path);
+      if (c === repoCanon) continue;
+      if (info.branch.startsWith("(")) continue;
+      infoByCanon.set(c, info);
+    }
 
-    // Snapshot every chat in the project so we never steal a worktree another
-    // chat already owns, and so removals can be reconciled project-wide.
     const projectChats = await this.store
       .listChats(project.id)
       .catch(() => [] as Chat[]);
-    const projectChatIds = new Set(projectChats.map((c) => c.id));
-    const ownerByPath = new Map<string, string>();
-    for (const c of projectChats) {
-      for (const p of c.worktrees) ownerByPath.set(canonPath(p), c.id);
+    // Rebuild each chat's create-history once (empty in memory after a restart).
+    for (const c of projectChats) await this.ensureHistoryLoaded(project, c.id);
+
+    const owners = this.buildBranchOwners(projectChats, [
+      ...infoByCanon.values(),
+    ]);
+
+    // Desired live paths per chat (git's current path spelling).
+    const desiredByChat = new Map<string, string[]>();
+    for (const info of infoByCanon.values()) {
+      const owner = owners.get(info.branch);
+      if (!owner) continue;
+      const arr = desiredByChat.get(owner) ?? [];
+      arr.push(info.path);
+      desiredByChat.set(owner, arr);
     }
 
-    // Attribute newcomers to their creators.
-    for (const info of infos) {
-      const c = canonPath(info.path);
-      if (c === repoCanon) continue; // the primary checkout is never a task worktree
-      if (info.branch === "(bare)") continue; // a bare parent, not a worktree
-      if (this.known.has(c)) continue; // pre-existing / already attributed
-      if (ownerByPath.has(c)) continue; // already owned by some chat
+    // Rewrite each chat to its desired set (add owned, drop wrong/vanished).
+    for (const chat of projectChats) {
+      const desired = desiredByChat.get(chat.id) ?? [];
+      const desiredCanon = new Set(desired.map(canonPath));
+      const currentCanon = new Set(chat.worktrees.map(canonPath));
 
-      const ownerChatId = this.attributeWorktree(
-        info,
-        projectChatIds,
-        projectChats,
-        opts.preferChatId,
+      const toAdd = desired.filter((p) => !currentCanon.has(canonPath(p)));
+      const toRemove = chat.worktrees.filter(
+        (p) => !desiredCanon.has(canonPath(p)),
       );
-      // Unknown creator → leave unattached AND out of `known`, so a later pass
-      // (branch record / active chat arrives) can still attribute it.
-      if (!ownerChatId) continue;
+      if (toAdd.length === 0 && toRemove.length === 0) continue;
 
-      const linked = await this.worktrees.attachToChat(ownerChatId, info.path);
-      this.known.add(c);
-      ownerByPath.set(c, ownerChatId);
-      if (linked) {
-        resultFor(ownerChatId).attached.push(info.path);
-        this.bus.publish({
-          type: "worktree-update",
-          chatId: ownerChatId,
-          worktree: { ...info, chatId: ownerChatId },
-        });
+      const updated = await this.store
+        .saveChat({ ...chat, worktrees: desired, updatedAt: this.now() })
+        .catch(() => null);
+      if (!updated) continue;
+      this.bus.publish({ type: "chat-update", chat: updated });
+
+      const r = resultFor(chat.id);
+      for (const p of toAdd) {
+        this.known.add(canonPath(p));
+        r.attached.push(p);
+        const info = infoByCanon.get(canonPath(p));
+        if (info) {
+          this.bus.publish({
+            type: "worktree-update",
+            chatId: chat.id,
+            worktree: { ...info, chatId: chat.id },
+          });
+        }
       }
-    }
-
-    // Removals: an attached worktree no longer on disk → detach it wherever it
-    // was recorded, and forget it so a recreation at the same path re-detects.
-    for (const c of projectChats) {
-      for (const p of c.worktrees) {
-        if (currentCanon.has(canonPath(p))) continue;
-        const detached = await this.worktrees.detachFromChat(c.id, p);
+      for (const p of toRemove) {
         this.known.delete(canonPath(p));
-        if (detached) resultFor(c.id).removed.push(p);
+        r.removed.push(p);
       }
     }
 
@@ -431,38 +527,81 @@ export class WorktreeDetector {
   }
 
   /**
-   * Decide which chat owns a newly-seen worktree.
-   *   1. The chat whose recorded branch matches the worktree's branch (the
-   *      creator) — the authoritative signal.
-   *   2. Fallback: the chat that most recently ran a worktree command, limited to
-   *      the just-completed chat (`preferChatId`) or a currently-active chat.
-   *   3. Else `undefined` — leave it unattached (don't dump on an arbitrary chat).
+   * Build the authoritative `branch → owning-chatId` map for a project from each
+   * chat's OWN signals, in priority order:
+   *   1. Create-command (history + live tool_use) — EARLIEST creator wins a tie.
+   *   2. A chat whose history referenced the worktree PATH (`cd <path>` …).
+   *   3. A chat whose persisted `prs[]` carries a PR on that branch.
+   *   4. An existing, UNAMBIGUOUS attribution (covers manager-created worktrees
+   *      with no transcript signal) — only reached when 1–3 are silent, so it can
+   *      never override a real creator and re-introduce the mis-attribution bug.
+   * A branch no chat claims is absent from the map → left unattached.
    */
-  private attributeWorktree(
-    info: WorktreeInfo,
-    projectChatIds: Set<string>,
+  private buildBranchOwners(
     projectChats: Chat[],
-    preferChatId?: string,
-  ): string | undefined {
-    // 1. Branch match, scoped to a chat that belongs to THIS project.
-    for (const [chatId, branches] of this.chatBranches) {
-      if (projectChatIds.has(chatId) && branches.has(info.branch)) return chatId;
-    }
+    infos: WorktreeInfo[],
+  ): Map<string, string> {
+    const owners = new Map<string, string>();
+    const projectChatIds = new Set(projectChats.map((c) => c.id));
 
-    // 2. Most-recent worktree command among eligible (active / just-completed) chats.
-    let best: string | undefined;
-    let bestTs = Number.NEGATIVE_INFINITY;
+    // Existing attribution: canonPath → chatId, but only when a single chat claims
+    // it (an ambiguous path is dropped from the tier-4 fallback).
+    const currentOwner = new Map<string, string>();
+    const ambiguous = new Set<string>();
     for (const c of projectChats) {
-      const ts = this.lastWorktreeCmdAt.get(c.id);
-      if (ts === undefined) continue;
-      const eligible = c.id === preferChatId || this.activeChats.has(c.id);
-      if (!eligible) continue;
-      if (ts > bestTs) {
-        bestTs = ts;
-        best = c.id;
+      for (const p of c.worktrees) {
+        const cp = canonPath(p);
+        if (currentOwner.has(cp) && currentOwner.get(cp) !== c.id) {
+          ambiguous.add(cp);
+        } else {
+          currentOwner.set(cp, c.id);
+        }
       }
     }
-    return best;
+
+    for (const info of infos) {
+      // 1. Earliest create-command owner (scoped to this project's chats).
+      let bestChat: string | undefined;
+      let bestTs = Number.POSITIVE_INFINITY;
+      for (const [chatId, branches] of this.chatBranches) {
+        if (!projectChatIds.has(chatId)) continue;
+        const ts = branches.get(info.branch);
+        if (ts === undefined) continue;
+        if (ts < bestTs) {
+          bestTs = ts;
+          bestChat = chatId;
+        }
+      }
+      if (bestChat) {
+        owners.set(info.branch, bestChat);
+        continue;
+      }
+
+      // 2. A chat whose history referenced this worktree path.
+      const cp = canonPath(info.path);
+      const pathRef = projectChats.find((c) =>
+        this.chatPathRefs.get(c.id)?.has(cp),
+      );
+      if (pathRef) {
+        owners.set(info.branch, pathRef.id);
+        continue;
+      }
+
+      // 3. A chat with a persisted PR on this branch.
+      const prOwner = projectChats.find((c) =>
+        (c.prs ?? []).some((r) => r.branch === info.branch),
+      );
+      if (prOwner) {
+        owners.set(info.branch, prOwner.id);
+        continue;
+      }
+
+      // 4. Preserve an existing, unambiguous attribution.
+      if (!ambiguous.has(cp) && currentOwner.has(cp)) {
+        owners.set(info.branch, currentOwner.get(cp)!);
+      }
+    }
+    return owners;
   }
 }
 

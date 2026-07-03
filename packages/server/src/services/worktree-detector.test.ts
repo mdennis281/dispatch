@@ -74,6 +74,27 @@ async function agentCreatesWorktree(
   return agentAddsWorktree(branch);
 }
 
+/**
+ * PERSIST a worktree-create tool_use row into a chat's transcript (messages.jsonl)
+ * — the durable signal history-based reconstruction reads after a restart (the bus
+ * events above are only in-memory).
+ */
+async function persistWorktreeCommand(
+  chatId: string,
+  branch: string,
+  ts: number,
+): Promise<void> {
+  await store.appendMessage({
+    kind: "tool_use",
+    id: `m-${chatId}-${branch}`,
+    chatId,
+    ts,
+    toolUseId: `tu-${chatId}-${branch}`,
+    name: "Bash",
+    input: { command: `pnpm worktree ${branch}` },
+  });
+}
+
 function mkProject(over: Partial<Project> = {}): Project {
   return {
     id: "p1",
@@ -463,5 +484,75 @@ describe("WorktreeDetector live-sync polling (bug: only fires on turn-complete)"
   it("does not poll when no chat is active", async () => {
     await detector.start();
     expect(detector.isPolling()).toBe(false);
+  });
+});
+
+describe("WorktreeDetector history-based heal (bug: persisted mis-attribution)", () => {
+  it("rebuilds attribution from each chat's transcript + DROPS a pre-seeded wrong one", async () => {
+    // Two worktrees on disk, each CREATED by a distinct chat (recorded in history).
+    const pA = await agentAddsWorktree("feat/aaa");
+    const pB = await agentAddsWorktree("feat/bbb");
+    await persistWorktreeCommand("chatA", "feat/aaa", 1000);
+    await persistWorktreeCommand("chatB", "feat/bbb", 2000);
+
+    // Persisted BAD state an older build left: chatA WRONGLY owns feat/bbb; chatB
+    // (the real creator) owns nothing.
+    await store.saveChat(mkChat({ id: "chatA", worktrees: [pB] }));
+    await store.saveChat(mkChat({ id: "chatB", worktrees: [] }));
+
+    // A FRESH detector (empty in-memory maps) = a server restart. Its startup heal
+    // must reconstruct ownership from the transcripts and rewrite chat.json.
+    const fresh = new WorktreeDetector({ store, bus, worktrees });
+    try {
+      await fresh.start();
+      await fresh.drain();
+    } finally {
+      fresh.stop();
+    }
+
+    const a = await store.getChat("chatA");
+    const b = await store.getChat("chatB");
+    const norm = (p: string) => p.replace(/\\/g, "/");
+
+    // chatA: the wrong feat/bbb is gone, its real feat/aaa is in.
+    expect(a!.worktrees).toHaveLength(1);
+    expect(norm(a!.worktrees[0])).toContain("feat-aaa");
+    expect(a!.worktrees.some((p) => norm(p).includes("feat-bbb"))).toBe(false);
+    // chatB: gains the worktree it actually created.
+    expect(b!.worktrees).toHaveLength(1);
+    expect(norm(b!.worktrees[0])).toContain("feat-bbb");
+
+    // The corrected records fanned out, and feat/aaa's worktree-update is tagged
+    // to its true owner (chatA) — not whoever the bad data pointed at.
+    expect(chatUpdates().some((e) => e.chat.id === "chatA")).toBe(true);
+    expect(chatUpdates().some((e) => e.chat.id === "chatB")).toBe(true);
+    const wuA = worktreeUpdates().find((e) => e.worktree.branch === "feat/aaa");
+    expect(wuA?.chatId).toBe("chatA");
+    const wuB = worktreeUpdates().find((e) => e.worktree.branch === "feat/bbb");
+    expect(wuB?.chatId).toBe("chatB");
+
+    expect(pA).toBeTruthy();
+  });
+
+  it("leaves a worktree no chat's history claims UNATTACHED after a heal", async () => {
+    // feat/ownerless exists on disk but no chat's transcript created it.
+    await agentAddsWorktree("feat/ownerless");
+    await persistWorktreeCommand("chatA", "feat/mine", 1000);
+    const pMine = await agentAddsWorktree("feat/mine");
+    await store.saveChat(mkChat({ id: "chatA", worktrees: [] }));
+
+    const fresh = new WorktreeDetector({ store, bus, worktrees });
+    try {
+      await fresh.start();
+      await fresh.drain();
+    } finally {
+      fresh.stop();
+    }
+
+    const a = await store.getChat("chatA");
+    // chatA gets only its own; the ownerless worktree is on nobody.
+    expect(a!.worktrees).toHaveLength(1);
+    expect(a!.worktrees[0].replace(/\\/g, "/")).toContain("feat-mine");
+    expect(pMine).toBeTruthy();
   });
 });

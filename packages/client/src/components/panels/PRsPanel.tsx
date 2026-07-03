@@ -29,6 +29,7 @@ import type {
 import { usePanels } from "../../stores/panels.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
+import { worktreeMatchesChat } from "./panelBus.js";
 import { GithubActionsSection } from "./GithubActionsPanel.js";
 import { Chip, type Tone } from "../ui/Chip.js";
 import { Button } from "../ui/Button.js";
@@ -588,16 +589,25 @@ function PrCard({
 
 export function PRsPanel({ chat }: { chat: Chat }) {
   const prs = usePanels((s) => s.prs);
+  const worktrees = usePanels((s) => s.worktrees);
 
   // Scope the panel to THIS chat's PRs. `prs` is the whole project's roster, so
   // an unscoped fallback would surface — and act on (Merge/Hold/Rerun) — a PR
-  // belonging to a different chat. Only fall back to an owned PR of any state.
+  // belonging to a different chat. A PR is this chat's when its head branch is one
+  // of the chat's OWNED worktree branches (the same branch↔chat correlation the
+  // server heals), or when it's already persisted on the chat (covers a merged PR
+  // whose worktree is gone). Only fall back to an owned PR of any state.
+  const chatBranches = new Set<string>([
+    ...worktrees.filter((w) => worktreeMatchesChat(w, chat)).map((w) => w.branch),
+    ...chat.prs.map((p) => p.branch),
+  ]);
   const chatPrNumbers = new Set(chat.prs.map((p) => p.number));
+  const ownsPr = (p: PRInfo) =>
+    chatPrNumbers.has(p.number) || chatBranches.has(p.branch);
   const primary =
-    prs.find((p) => chatPrNumbers.has(p.number) && p.state === "open") ??
-    prs.find((p) => chatPrNumbers.has(p.number));
+    prs.find((p) => ownsPr(p) && p.state === "open") ?? prs.find(ownsPr);
   const history = prs.filter(
-    (p) => chatPrNumbers.has(p.number) && p.number !== primary?.number,
+    (p) => ownsPr(p) && p.number !== primary?.number,
   );
 
   // Live-refresh the primary card's rich status (checks/decision/threads/counts).

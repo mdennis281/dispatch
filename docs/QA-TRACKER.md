@@ -56,8 +56,11 @@
 - [ ] SCREENSHOT-TO-UI (agent screenshots a browser tab via Claude-in-Chrome MCP → renders in transcript).
 - [ ] SCHEDULED CHECK-IN MCP (user request): agent can delay itself until a subagent completes or for a set duration (a wait/sleep-until tool).
 
-## ACCEPTANCE: DONE ✓ — ALL 3 PRs shipped via the manager: #77 settings-modal-cleanup, #78 steam-cloud-save, #79 necromancer-elite. Full pipeline proven end-to-end (worktree→diff→commit→ship→PR→live status→GH controls). Batches 1/2/3/5 + worktree live-sync&attribution all shipped + tests green (135).
-## STILL TODO: live-DRIVE Batch 5 features (AskUserQuestion/todos/code-pointers/tooltips/diff-ruler — built+unit-tested, not yet hand-verified in browser); clean stale worktree mis-attribution rows; BATCH 6 (subagents-in-chat+nested viz, persistent terminals, screenshot-to-UI, scheduled-checkin MCP).
+## ACCEPTANCE: DONE ✓ — ALL 3 PRs shipped via the manager: #77 settings-modal-cleanup, #78 steam-cloud-save, #79 necromancer-elite. Full pipeline proven end-to-end.
+## REPO: claude-manager is now its OWN git repo (baseline commit cd7a1be; node_modules/dist/.data gitignored). Overnight work is diffable/revertible.
+## BATCH 5: FULLY VERIFIED LIVE (2026-07-03) ✓ — todos strip, header-button tooltip (no clip), modal-header tooltip "Inline diff" (no clip), diff overview ruler (green right-edge), Monaco diff+File/Diff+vs-main, code pointers (clickable `damage.ts:123-128` chips open preview), AskUserQuestion round-trip (card→Attention badge→answer→resume).
+## IN PROGRESS: worktree↔chat + PR↔chat attribution SELF-HEAL (agent acd8c3bb9608f09b2). Root: worktrees created in the earlier buggy window got persisted under the WRONG chat (Settings owns necromancer #79 + steam #78); live-only rebuild never re-heals. FIX = reconstruct branch→chat from each chat's transcript history, rewrite chat.worktrees[] on reconcile (heals + survives restart), correlate PRs by branch. Expected: Settings→settings-modal-cleanup+#77, necro chat→necromancer-elite+#79, steam chat→steam-cloud-save+#78.
+## BATCH 6: PAUSED (stopped mid-Feature-1 Checkin-MCP; WIP discarded to clean baseline). RESUME via Workflow({scriptPath: ".../workflows/scripts/cm-batch6-wf_266cc18d-a15.js", resumeFromRunId:"wf_266cc18d-a15"}) AFTER the attribution fix commits. Features: 1 scheduled-checkin MCP, 2 persistent terminals(PTY), 3 screenshot-to-UI, 4 subagents+nested viz, 5 integrate/review+unlink-worktree control.
 
 ## FINAL
 - [ ] Full live re-verification (drive EVERY control with vision)
