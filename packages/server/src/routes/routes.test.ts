@@ -1,0 +1,426 @@
+/**
+ * Integration tests for the routes/WS layer. Real Fastify app (listening on an
+ * ephemeral port), real Store + EventBus + service container, with only the SDK
+ * `query` (SessionBroker) and `gh`/execa (GitHubService) replaced by scripted
+ * fakes — no subprocess, no network, no real git/gh. Exercises REST CRUD, the
+ * multiplexed WS event stream, inbound-action dispatch (send-message, permission
+ * answer), the global Attention Queue, and a gh-action.
+ */
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import type { FastifyInstance } from "fastify";
+import { buildApp } from "../app.js";
+import { loadConfig } from "../config.js";
+import { EventBus } from "../bus.js";
+import { Store } from "../store/index.js";
+import { SessionBroker, type QueryFn } from "../services/session-broker.js";
+import { GitHubService, type ExecaLike } from "../services/github.js";
+import type { WsServerEvent } from "@cm/shared";
+
+/* --------------------------------------------------------------- scripted SDK */
+
+interface FakeCtl {
+  canUseTool?: (
+    n: string,
+    i: Record<string, unknown>,
+    o: Record<string, unknown>,
+  ) => Promise<{ behavior: string; [k: string]: unknown }>;
+  pushed: string[];
+}
+type PerTurn = (
+  text: string,
+  ctl: FakeCtl,
+) => Promise<Record<string, unknown>[]> | Record<string, unknown>[];
+
+function extractText(um: unknown): string {
+  const content = (um as { message?: { content?: unknown } })?.message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((b) => b && typeof b === "object" && (b as { type?: string }).type === "text")
+      .map((b) => (b as { text: string }).text)
+      .join("");
+  }
+  return "";
+}
+function initMsg(sessionId: string) {
+  return {
+    type: "system",
+    subtype: "init",
+    session_id: sessionId,
+    model: "claude-test",
+    apiKeySource: "none",
+    tools: [],
+    mcp_servers: [],
+    permissionMode: "default",
+  };
+}
+function assistantText(text: string) {
+  return {
+    type: "assistant",
+    parent_tool_use_id: null,
+    uuid: "a-uuid",
+    message: { role: "assistant", content: [{ type: "text", text }] },
+  };
+}
+function resultMsg() {
+  return {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    num_turns: 1,
+    result: "ok",
+    duration_ms: 5,
+  };
+}
+
+function makeFakeQuery(perTurn: PerTurn, sessionId = "sess-1"): QueryFn {
+  return ({ prompt, options }) => {
+    const ctl: FakeCtl = {
+      canUseTool: (options as { canUseTool?: FakeCtl["canUseTool"] } | undefined)?.canUseTool,
+      pushed: [],
+    };
+    async function* gen(): AsyncGenerator<unknown, void> {
+      yield initMsg(sessionId);
+      for await (const um of prompt as AsyncIterable<unknown>) {
+        const text = extractText(um);
+        ctl.pushed.push(text);
+        const msgs = await perTurn(text, ctl);
+        for (const m of msgs) yield m;
+      }
+    }
+    const g = gen() as unknown as Record<string, unknown>;
+    g.interrupt = async () => {};
+    g.setPermissionMode = async () => {};
+    g.setModel = async () => {};
+    g.setMaxThinkingTokens = async () => {};
+    g.setMcpPermissionModeOverride = async () => ({});
+    return g as unknown as ReturnType<QueryFn>;
+  };
+}
+
+/* ------------------------------------------------------------- scripted gh */
+
+const PR_JSON = {
+  number: 5,
+  url: "https://github.com/acme/widget/pull/5",
+  title: "Test PR",
+  state: "OPEN",
+  headRefName: "feat/x",
+  baseRefName: "main",
+  isDraft: false,
+  labels: [] as Array<{ name: string }>,
+  mergeable: "MERGEABLE",
+};
+
+const fakeGhExec: ExecaLike = async (_file, args = []) => {
+  const a = args.join(" ");
+  if (a.includes("repo view")) return { stdout: "acme/widget", exitCode: 0 };
+  if (a.startsWith("pr view")) return { stdout: JSON.stringify(PR_JSON), exitCode: 0 };
+  if (a.startsWith("pr checks")) return { stdout: "[]", exitCode: 0 };
+  if (a.startsWith("api graphql")) {
+    return {
+      stdout: JSON.stringify({
+        data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } },
+      }),
+      exitCode: 0,
+    };
+  }
+  return { stdout: "", exitCode: 0 };
+};
+
+/* --------------------------------------------------------------- ws helpers */
+
+interface WsClient {
+  events: WsServerEvent[];
+  send(obj: unknown): void;
+  waitFor(pred: (e: WsServerEvent) => boolean, ms?: number): Promise<WsServerEvent>;
+  close(): void;
+}
+
+function connect(port: number): Promise<WsClient> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const events: WsServerEvent[] = [];
+    const waiters: Array<{ pred: (e: WsServerEvent) => boolean; resolve: (e: WsServerEvent) => void }> = [];
+    ws.addEventListener("message", (ev) => {
+      const e = JSON.parse(String((ev as MessageEvent).data)) as WsServerEvent;
+      events.push(e);
+      for (let i = waiters.length - 1; i >= 0; i--) {
+        if (waiters[i].pred(e)) {
+          waiters[i].resolve(e);
+          waiters.splice(i, 1);
+        }
+      }
+    });
+    ws.addEventListener("error", () => reject(new Error("ws error")));
+    ws.addEventListener("open", () => {
+      resolve({
+        events,
+        send: (obj) => ws.send(JSON.stringify(obj)),
+        waitFor: (pred, ms = 3000) =>
+          new Promise<WsServerEvent>((res, rej) => {
+            const hit = events.find(pred);
+            if (hit) return res(hit);
+            const t = setTimeout(() => rej(new Error("waitFor: timeout")), ms);
+            waiters.push({ pred, resolve: (e) => { clearTimeout(t); res(e); } });
+          }),
+        close: () => ws.close(),
+      });
+    });
+  });
+}
+
+/* ------------------------------------------------------------------ fixtures */
+
+let dir: string;
+let store: Store;
+let bus: EventBus;
+let app: FastifyInstance;
+let port: number;
+
+async function boot(query: QueryFn): Promise<void> {
+  dir = await mkdtemp(join(tmpdir(), "cm-routes-"));
+  store = new Store(dir);
+  await store.init();
+  bus = new EventBus();
+  const broker = new SessionBroker({ store, bus, deps: { query } });
+  const github = new GitHubService({ bus, store, exec: fakeGhExec });
+  const config = { ...loadConfig(), dataDir: dir };
+  app = await buildApp({ config, store, bus, serviceOverrides: { broker, github } });
+  await app.listen({ port: 0, host: "127.0.0.1" });
+  port = (app.server.address() as AddressInfo).port;
+}
+
+afterEach(async () => {
+  await app?.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+async function makeProject(): Promise<string> {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/projects",
+    payload: { name: "Widget", repoPath: dir, worktreeRoot: "wt" },
+  });
+  expect(res.statusCode).toBe(201);
+  return res.json().id as string;
+}
+
+/* -------------------------------------------------------------------- tests */
+
+describe("routes — REST CRUD", () => {
+  beforeEach(async () => {
+    await boot(makeFakeQuery(() => [assistantText("hi"), resultMsg()]));
+  });
+
+  it("health, project + chat CRUD, messages, attention snapshot", async () => {
+    const health = await app.inject({ method: "GET", url: "/api/health" });
+    expect(health.json()).toEqual({ ok: true });
+
+    const projectId = await makeProject();
+    const projects = await app.inject({ method: "GET", url: "/api/projects" });
+    expect(projects.json().map((p: { id: string }) => p.id)).toContain(projectId);
+
+    const chatRes = await app.inject({
+      method: "POST",
+      url: "/api/chats",
+      payload: { projectId, title: "First" },
+    });
+    expect(chatRes.statusCode).toBe(201);
+    const chatId = chatRes.json().id as string;
+
+    const chats = await app.inject({
+      method: "GET",
+      url: `/api/chats?projectId=${projectId}`,
+    });
+    expect(chats.json().map((c: { id: string }) => c.id)).toContain(chatId);
+
+    const msgs = await app.inject({ method: "GET", url: `/api/chats/${chatId}/messages` });
+    expect(msgs.json()).toEqual([]);
+
+    const att = await app.inject({ method: "GET", url: "/api/attention" });
+    expect(att.json()).toEqual([]);
+  });
+
+  it("rejects a chat with no projectId and a project with no name", async () => {
+    const badChat = await app.inject({ method: "POST", url: "/api/chats", payload: {} });
+    expect(badChat.statusCode).toBe(400);
+    const badProject = await app.inject({ method: "POST", url: "/api/projects", payload: {} });
+    expect(badProject.statusCode).toBe(400);
+  });
+
+  it("DELETE /api/chats/:id removes the chat + its transcript", async () => {
+    const projectId = await makeProject();
+    const chatId = (
+      await app.inject({
+        method: "POST",
+        url: "/api/chats",
+        payload: { projectId, title: "Junk" },
+      })
+    ).json().id as string;
+
+    const del = await app.inject({ method: "DELETE", url: `/api/chats/${chatId}` });
+    expect(del.statusCode).toBe(204);
+
+    const after = await app.inject({ method: "GET", url: `/api/chats/${chatId}` });
+    expect(after.statusCode).toBe(404);
+
+    const list = await app.inject({
+      method: "GET",
+      url: `/api/chats?projectId=${projectId}`,
+    });
+    expect(list.json().map((c: { id: string }) => c.id)).not.toContain(chatId);
+  });
+
+  it("DELETE broadcasts chat-deleted + resolves the 'Session ended' attention of an interacted chat", async () => {
+    const projectId = await makeProject();
+    const chatId = (
+      await app.inject({
+        method: "POST",
+        url: "/api/chats",
+        payload: { projectId, title: "Junk" },
+      })
+    ).json().id as string;
+
+    // Interact so a live broker session exists — delete then settles it via
+    // onDone, which publishes the "Session ended" attention item that (pre-fix)
+    // stranded on every client because no resolve/delete event ever followed.
+    const ws = await connect(port);
+    await ws.waitFor((e) => e.type === "hello");
+    ws.send({ type: "send-message", chatId, text: "hi" });
+    await ws.waitFor(
+      (e) => e.type === "chat-status" && e.chatId === chatId && e.status === "idle",
+    );
+
+    // Subscribe just before delete so we capture the delete-driven fan-out.
+    const seen: WsServerEvent[] = [];
+    bus.subscribe((e) => seen.push(e));
+
+    const del = await app.inject({ method: "DELETE", url: `/api/chats/${chatId}` });
+    expect(del.statusCode).toBe(204);
+
+    const added = seen.find(
+      (e) => e.type === "attention-add" && e.item.chatId === chatId && e.item.kind === "done",
+    );
+    expect(added).toBeDefined();
+    const addedId = (added as Extract<WsServerEvent, { type: "attention-add" }>).item.id;
+    expect(
+      seen.some((e) => e.type === "attention-resolve" && e.id === addedId),
+    ).toBe(true);
+    expect(
+      seen.some((e) => e.type === "chat-deleted" && e.chatId === chatId),
+    ).toBe(true);
+
+    ws.close();
+    // Server queue is empty too (no phantom lingers server-side).
+    const att = await app.inject({ method: "GET", url: "/api/attention" });
+    expect(att.json()).toEqual([]);
+  });
+});
+
+describe("routes — WebSocket", () => {
+  it("connect gets hello; send-message streams assistant + status over the socket", async () => {
+    await boot(makeFakeQuery(() => [assistantText("echo"), resultMsg()]));
+    const projectId = await makeProject();
+    const chatRes = await app.inject({
+      method: "POST",
+      url: "/api/chats",
+      payload: { projectId },
+    });
+    const chatId = chatRes.json().id as string;
+
+    const ws = await connect(port);
+    await ws.waitFor((e) => e.type === "hello");
+
+    ws.send({ type: "send-message", chatId, text: "hello" });
+
+    const asst = await ws.waitFor(
+      (e) => e.type === "chat-message" && e.chatId === chatId && e.message.kind === "assistant",
+    );
+    expect(asst.type).toBe("chat-message");
+    await ws.waitFor((e) => e.type === "chat-status" && e.chatId === chatId && e.status === "idle");
+    ws.close();
+  });
+
+  it("set-title renames the chat and broadcasts chat-update", async () => {
+    await boot(makeFakeQuery(() => [resultMsg()]));
+    const projectId = await makeProject();
+    const chatId = (
+      await app.inject({
+        method: "POST",
+        url: "/api/chats",
+        payload: { projectId, title: "Old title" },
+      })
+    ).json().id as string;
+
+    const ws = await connect(port);
+    await ws.waitFor((e) => e.type === "hello");
+    ws.send({ type: "set-title", chatId, title: "Renamed" });
+
+    const upd = await ws.waitFor(
+      (e) => e.type === "chat-update" && e.chat.id === chatId && e.chat.title === "Renamed",
+    );
+    expect(upd.type).toBe("chat-update");
+
+    const persisted = await app.inject({ method: "GET", url: `/api/chats/${chatId}` });
+    expect(persisted.json().title).toBe("Renamed");
+    ws.close();
+  });
+
+  it("permission request lands in the Attention Queue and answer-permission resolves it", async () => {
+    // The fake awaits the broker's canUseTool promise, which only settles once
+    // the host answers the permission (via the answer-permission action).
+    const query = makeFakeQuery(async (_text, ctl) => {
+      if (!ctl.canUseTool) return [assistantText("no-tool"), resultMsg()];
+      await ctl.canUseTool("Write", { file_path: "a.txt" }, {});
+      return [assistantText("done"), resultMsg()];
+    });
+    await boot(query);
+    const projectId = await makeProject();
+    const chatId = (
+      await app.inject({ method: "POST", url: "/api/chats", payload: { projectId } })
+    ).json().id as string;
+
+    const ws = await connect(port);
+    await ws.waitFor((e) => e.type === "hello");
+    ws.send({ type: "send-message", chatId, text: "edit the file" });
+
+    const permEvt = await ws.waitFor((e) => e.type === "permission-request");
+    const requestId =
+      permEvt.type === "permission-request" ? permEvt.request.id : "";
+    expect(requestId).toBeTruthy();
+
+    // The global Attention Queue REST snapshot now shows the pending permission.
+    const att = await app.inject({ method: "GET", url: "/api/attention" });
+    const items = att.json() as Array<{ kind: string; chatId: string }>;
+    expect(items.some((i) => i.kind === "permission" && i.chatId === chatId)).toBe(true);
+
+    ws.send({ type: "answer-permission", chatId, requestId, decision: "allow" });
+    await ws.waitFor((e) => e.type === "permission-resolved");
+    // The canUseTool promise resolved → the fake proceeds to its result → idle.
+    await ws.waitFor((e) => e.type === "chat-status" && e.chatId === chatId && e.status === "idle");
+    ws.close();
+  });
+});
+
+describe("routes — gh-action", () => {
+  it("POST /api/github/action refresh publishes a pr-update", async () => {
+    await boot(makeFakeQuery(() => [resultMsg()]));
+    const projectId = await makeProject();
+    const seen: WsServerEvent[] = [];
+    bus.subscribe((e) => seen.push(e));
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/github/action",
+      payload: { op: "refresh", projectId, prNumber: 5 },
+    });
+    expect(res.statusCode).toBe(202);
+    const pr = seen.find((e) => e.type === "pr-update");
+    expect(pr && pr.type === "pr-update" && pr.pr.number).toBe(5);
+  });
+});

@@ -1,0 +1,1047 @@
+/**
+ * GitHubService — the GitHub control plane. Wraps the `gh` CLI via execa,
+ * reusing the exact command shapes proven in scripts/agent/{ship,auto-merge}.mjs
+ * (Copilot review request, graphql review-thread queries, squash-merge + delete).
+ *
+ * Design notes
+ * ------------
+ * - Every external call goes through `gh` with an **argv array** (execa, no shell)
+ *   so nothing in owner/repo/branch/label can be reinterpreted by a shell.
+ * - owner/repo is validated strictly (alnum . _ - only, exactly one "/") before it
+ *   is ever interpolated into a GraphQL query — mirrors auto-merge.mjs.
+ * - GraphQL uses typed VARIABLES (`-f owner=…`, `-F number=…`) rather than string
+ *   interpolation wherever a value could be attacker-influenced (thread ids).
+ * - Read methods (`prForBranch`, `prList`, `prChecks`, `reviewThreads`, `comments`)
+ *   are pure — they fetch + parse + return, with NO bus side effects. Mutating ops
+ *   (`ship`, `merge`, `setLabel`/`hold`, `requestReview`, `rerun*`, `resolveThread`,
+ *   `addComment`, `dispatch`, `getRun`) publish domain events on the EventBus.
+ * - execa is injectable (`deps.exec`) so tests assert exact argv construction and
+ *   drive JSON parsing without any real `gh`/network calls.
+ */
+import { join, resolve } from "node:path";
+import { execa } from "execa";
+import { parse as parseYaml } from "yaml";
+import type {
+  Project,
+  PRInfo,
+  PRRef,
+  CheckRun,
+  ReviewThread,
+  ReviewDecision,
+  WorkflowDef,
+  WorkflowRun,
+  WorkflowWithLastRun,
+  WorkflowInput,
+} from "@cm/shared";
+import {
+  PRInfoSchema,
+  CheckRunSchema,
+  ReviewThreadSchema,
+  WorkflowDefSchema,
+  WorkflowRunSchema,
+  WorkflowWithLastRunSchema,
+  WorkflowInputSchema,
+} from "@cm/shared";
+import type { EventBus } from "../bus.js";
+import type { Store } from "../store/index.js";
+
+/* ------------------------------------------------------------------ execa seam */
+
+/** Result surface we depend on from an execa call. */
+export interface ExecResult {
+  stdout: string;
+  stderr?: string;
+  exitCode?: number | null;
+  failed?: boolean;
+}
+
+/** The execa-shaped function this service calls. Injectable for tests. */
+export type ExecaLike = (
+  file: string,
+  args?: readonly string[],
+  options?: { cwd?: string; reject?: boolean; env?: NodeJS.ProcessEnv },
+) => Promise<ExecResult>;
+
+/** Default: the real execa, with reject:false handling delegated to callers. */
+const defaultExec: ExecaLike = (file, args = [], options) =>
+  execa(file, args as string[], {
+    cwd: options?.cwd,
+    reject: options?.reject,
+    env: options?.env,
+  }) as unknown as Promise<ExecResult>;
+
+/* --------------------------------------------------------------------- consts */
+
+/** owner/repo shape — GitHub-valid chars only (alnum . _ -). Strict on purpose. */
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+/** The reviewer login ship requests (matches ship.mjs / auto-merge.mjs). */
+export const COPILOT_LOGIN = "copilot-pull-request-reviewer[bot]";
+
+/** `--json` field list for a rich PR view/list. */
+const PR_JSON_FIELDS =
+  "number,url,title,state,headRefName,baseRefName,isDraft,author,body,mergeable,mergeStateStatus,labels,additions,deletions,updatedAt,createdAt";
+
+/**
+ * `--json` field list for the GLOBAL open-PR list (`projectOpenPrs`). Adds the
+ * `statusCheckRollup` (inline per-check status, so we don't fan out one
+ * `pr checks` call per PR), `reviewDecision`, and `comments` (mapped to a count).
+ */
+const PR_LIST_JSON_FIELDS =
+  "number,title,headRefName,state,isDraft,statusCheckRollup,reviewDecision,comments,updatedAt,url,labels";
+
+/**
+ * `--json` field list for a single PR's rich detail (`prDetail`): the full PR
+ * view plus the inline check rollup, review decision, and comments (count).
+ */
+const PR_DETAIL_JSON_FIELDS =
+  "number,url,title,state,headRefName,baseRefName,isDraft,author,body,mergeable,mergeStateStatus,labels,additions,deletions,updatedAt,createdAt,statusCheckRollup,reviewDecision,comments";
+
+/** `--json` field list for `gh pr checks`. */
+const CHECK_JSON_FIELDS = "name,state,bucket,link,workflow";
+
+/** `--json` field list for `gh run list` / `gh run view`. */
+const RUN_JSON_FIELDS =
+  "databaseId,name,workflowName,status,conclusion,event,headBranch,url,createdAt,updatedAt";
+
+const RUN_STATUSES = new Set<WorkflowRun["status"]>([
+  "queued",
+  "in_progress",
+  "completed",
+  "requested",
+  "waiting",
+  "pending",
+]);
+
+/** Merge strategies (gh flags). */
+export type MergeMethod = "squash" | "merge" | "rebase";
+
+/** A PR issue-comment (no @cm/shared schema — light shape). */
+export interface PRComment {
+  id: string;
+  author?: string;
+  body: string;
+  createdAt?: string;
+  url?: string;
+}
+
+/** Optional per-call context threaded onto published events. */
+export interface OpCtx {
+  chatId?: string;
+}
+
+/* ----------------------------------------------------------------- raw shapes */
+
+interface RawPr {
+  number: number;
+  url: string;
+  title?: string;
+  state?: string;
+  headRefName?: string;
+  baseRefName?: string;
+  isDraft?: boolean;
+  author?: { login?: string } | null;
+  body?: string;
+  mergeable?: string;
+  mergeStateStatus?: string;
+  reviewDecision?: string | null;
+  labels?: Array<{ name: string }>;
+  /** Present only when `statusCheckRollup` was requested (list/detail). */
+  statusCheckRollup?: RawRollupEntry[] | null;
+  /** Present only when `comments` was requested — we keep just the count. */
+  comments?: unknown[];
+  additions?: number;
+  deletions?: number;
+  updatedAt?: string;
+  createdAt?: string;
+}
+/** One entry of a PR's `statusCheckRollup` — either a CheckRun or a StatusContext. */
+interface RawRollupEntry {
+  __typename?: string;
+  // CheckRun shape
+  name?: string;
+  status?: string;
+  conclusion?: string | null;
+  detailsUrl?: string;
+  workflowName?: string;
+  // StatusContext shape
+  context?: string;
+  state?: string;
+  targetUrl?: string;
+}
+interface RawCheck {
+  name: string;
+  state?: string;
+  bucket?: string;
+  link?: string;
+}
+interface RawThreadNode {
+  id: string;
+  isResolved?: boolean;
+  isOutdated?: boolean;
+  path?: string;
+  line?: number | null;
+  comments?: { nodes?: Array<{ author?: { login?: string } | null; body?: string }> };
+}
+interface RawGraphqlThreads {
+  data?: {
+    repository?: {
+      pullRequest?: { reviewThreads?: { nodes?: RawThreadNode[] } } | null;
+    } | null;
+  };
+}
+interface RawWorkflow {
+  id: number;
+  name: string;
+  path: string;
+  state?: string;
+}
+interface RawRun {
+  databaseId: number;
+  name?: string;
+  workflowName?: string;
+  status?: string;
+  conclusion?: string | null;
+  event?: string;
+  headBranch?: string;
+  url?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+interface RawComment {
+  id?: string | number;
+  author?: { login?: string } | null;
+  body?: string;
+  createdAt?: string;
+  url?: string;
+}
+
+/* -------------------------------------------------------------------- mappers */
+
+function mapMergeable(m: unknown): boolean | null {
+  const v = String(m ?? "").toUpperCase();
+  if (v === "MERGEABLE") return true;
+  if (v === "CONFLICTING") return false;
+  return null;
+}
+
+function mapCheckStatus(state: unknown): CheckRun["status"] {
+  const v = String(state ?? "").toUpperCase();
+  if (v === "QUEUED") return "queued";
+  if (v === "IN_PROGRESS" || v === "PENDING" || v === "WAITING") return "in_progress";
+  return "completed";
+}
+
+function mapCheckConclusion(bucket: unknown, state: unknown): CheckRun["conclusion"] {
+  switch (String(bucket ?? "").toLowerCase()) {
+    case "pass":
+      return "success";
+    case "fail":
+      return "failure";
+    case "skipping":
+      return "skipped";
+    case "cancel":
+      return "cancelled";
+    case "pending":
+      return null;
+  }
+  // Fall back to the raw state for anything the bucket didn't classify.
+  const s = String(state ?? "").toLowerCase();
+  if (s === "success") return "success";
+  if (s === "failure" || s === "error") return "failure";
+  if (s === "skipped") return "skipped";
+  if (s === "cancelled") return "cancelled";
+  if (s === "timed_out") return "timed_out";
+  if (s === "neutral") return "neutral";
+  if (s === "action_required") return "action_required";
+  if (s === "stale") return "stale";
+  return null;
+}
+
+function normalizeRunStatus(s: unknown): WorkflowRun["status"] {
+  const v = String(s ?? "").toLowerCase().replace(/\s+/g, "_") as WorkflowRun["status"];
+  return RUN_STATUSES.has(v) ? v : "pending";
+}
+
+/** GitHub `reviewDecision` (uppercase) → our lowercase enum, or null when unset. */
+function mapReviewDecision(v: unknown): ReviewDecision | null {
+  switch (String(v ?? "").toUpperCase()) {
+    case "APPROVED":
+      return "approved";
+    case "CHANGES_REQUESTED":
+      return "changes_requested";
+    case "REVIEW_REQUIRED":
+      return "review_required";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Normalize a raw conclusion/state string (from a rollup CheckRun conclusion or a
+ * StatusContext state) to our CheckRun["conclusion"] enum (null = still pending).
+ */
+function mapConclusionString(v: unknown): CheckRun["conclusion"] {
+  switch (String(v ?? "").toLowerCase()) {
+    case "success":
+      return "success";
+    case "failure":
+    case "error":
+    case "startup_failure":
+      return "failure";
+    case "neutral":
+      return "neutral";
+    case "cancelled":
+      return "cancelled";
+    case "skipped":
+      return "skipped";
+    case "timed_out":
+      return "timed_out";
+    case "action_required":
+      return "action_required";
+    case "stale":
+      return "stale";
+    default:
+      // pending / expected / "" / anything unknown → not concluded yet.
+      return null;
+  }
+}
+
+/** Map one `statusCheckRollup` entry (CheckRun or StatusContext) to a CheckRun. */
+function mapRollupEntry(e: RawRollupEntry): CheckRun {
+  // A StatusContext has `context`/`state` (legacy commit statuses); a CheckRun
+  // has `name`/`status`/`conclusion`. Disambiguate on the typename or shape.
+  const isContext =
+    e.__typename === "StatusContext" || (e.context !== undefined && e.name === undefined);
+  if (isContext) {
+    const state = String(e.state ?? "").toUpperCase();
+    const status: CheckRun["status"] =
+      state === "PENDING" || state === "EXPECTED" ? "in_progress" : "completed";
+    return CheckRunSchema.parse({
+      name: e.context ?? "status",
+      status,
+      conclusion: mapConclusionString(e.state),
+      url: e.targetUrl || undefined,
+    });
+  }
+  return CheckRunSchema.parse({
+    name: e.name || e.workflowName || "check",
+    status: mapCheckStatus(e.status),
+    conclusion: mapConclusionString(e.conclusion),
+    url: e.detailsUrl || undefined,
+  });
+}
+
+/** Whitelist a raw `workflow_dispatch` input type; unknown → undefined. */
+function normalizeInputType(t: unknown): WorkflowInput["type"] | undefined {
+  switch (String(t ?? "").toLowerCase()) {
+    case "string":
+      return "string";
+    case "boolean":
+      return "boolean";
+    case "choice":
+      return "choice";
+    case "number":
+      return "number";
+    case "environment":
+      return "environment";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Parse a workflow YAML string into its `workflow_dispatch` inputs. Best-effort:
+ * returns [] on a parse failure or when the workflow declares no dispatch inputs.
+ *
+ * Uses the YAML 1.2 core schema (the `yaml` package's default), which — unlike
+ * YAML 1.1 / js-yaml — keeps the bare `on:` key as the STRING "on" rather than
+ * coercing it to a boolean, so `doc.on.workflow_dispatch` resolves correctly.
+ */
+function parseWorkflowInputs(yamlText: string): WorkflowInput[] {
+  let doc: unknown;
+  try {
+    doc = parseYaml(yamlText);
+  } catch {
+    return [];
+  }
+  if (!doc || typeof doc !== "object") return [];
+  const on = (doc as Record<string, unknown>).on;
+  // `on` may be a scalar/array (no dispatch config) or a map holding it.
+  if (!on || typeof on !== "object" || Array.isArray(on)) return [];
+  const wd = (on as Record<string, unknown>).workflow_dispatch;
+  if (!wd || typeof wd !== "object") return [];
+  const inputs = (wd as Record<string, unknown>).inputs;
+  if (!inputs || typeof inputs !== "object") return [];
+  const out: WorkflowInput[] = [];
+  for (const [name, raw] of Object.entries(inputs as Record<string, unknown>)) {
+    const s = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    out.push(
+      WorkflowInputSchema.parse({
+        name,
+        description: typeof s.description === "string" ? s.description : undefined,
+        type: normalizeInputType(s.type),
+        required: typeof s.required === "boolean" ? s.required : undefined,
+        default: s.default !== undefined ? String(s.default) : undefined,
+        options: Array.isArray(s.options) ? s.options.map((o) => String(o)) : undefined,
+      }),
+    );
+  }
+  return out;
+}
+
+/* ==================================================================== service */
+
+export interface GitHubServiceDeps {
+  bus: EventBus;
+  store?: Store;
+  /** Injectable execa (tests). Defaults to the real execa. */
+  exec?: ExecaLike;
+}
+
+export class GitHubService {
+  private readonly bus: EventBus;
+  private readonly store?: Store;
+  private readonly exec: ExecaLike;
+
+  constructor(deps: GitHubServiceDeps) {
+    this.bus = deps.bus;
+    this.store = deps.store;
+    this.exec = deps.exec ?? defaultExec;
+  }
+
+  /* -------------------------------------------------------- repo resolution */
+
+  /** Validate + return an owner/repo slug, throwing on anything malformed. */
+  assertRepo(repo: string): string {
+    if (!REPO_RE.test(repo)) {
+      throw new Error(`GitHubService: invalid repo "${repo}" (expected owner/repo)`);
+    }
+    return repo;
+  }
+
+  private splitRepo(repo: string): { owner: string; name: string } {
+    const [owner, name] = this.assertRepo(repo).split("/");
+    return { owner, name };
+  }
+
+  /** Discover owner/repo from a working directory via `gh repo view`. */
+  async resolveRepo(cwd: string): Promise<string> {
+    const out = await this.gh(
+      ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+      { cwd },
+    );
+    return this.assertRepo(out.trim());
+  }
+
+  /** owner/repo for a project (from its checkout). */
+  repoForProject(project: Project): Promise<string> {
+    return this.resolveRepo(project.repoPath);
+  }
+
+  /** owner/repo for a project id (reads the project via Store). */
+  async repoForProjectId(projectId: string): Promise<string> {
+    if (!this.store) throw new Error("GitHubService: no Store configured");
+    const project = await this.store.getProject(projectId);
+    if (!project) throw new Error(`GitHubService: project "${projectId}" not found`);
+    return this.repoForProject(project);
+  }
+
+  /** Worktree path for a branch (slug = branch with "/" flattened to "-"). */
+  worktreePath(project: Project, branch: string): string {
+    // Mirror WorktreeService: resolve a relative worktreeRoot against the repo,
+    // not process.cwd(), so ship()'s fallback cwd points at the real worktree.
+    return join(resolve(project.repoPath, project.worktreeRoot), branch.replace(/\//g, "-"));
+  }
+
+  /* ---------------------------------------------------------- gh primitives */
+
+  /** Run `gh <args>`; throw on non-zero unless allowFail. Returns trimmed stdout. */
+  private async gh(
+    args: string[],
+    opts: { cwd?: string; allowFail?: boolean } = {},
+  ): Promise<string> {
+    const res = await this.exec("gh", args, { cwd: opts.cwd, reject: false });
+    if (!opts.allowFail && res.exitCode !== 0) {
+      const detail = (res.stderr || res.stdout || "").trim();
+      throw new Error(`gh ${args.join(" ")} failed (exit ${res.exitCode}): ${detail}`);
+    }
+    return (res.stdout ?? "").trim();
+  }
+
+  /** Run gh and JSON.parse stdout (null when empty). */
+  private async ghJson<T>(
+    args: string[],
+    opts: { cwd?: string; allowFail?: boolean } = {},
+  ): Promise<T | null> {
+    const out = await this.gh(args, opts);
+    if (!out) return null;
+    try {
+      return JSON.parse(out) as T;
+    } catch (e) {
+      throw new Error(`gh ${args.slice(0, 2).join(" ")}: invalid JSON (${String(e)})`);
+    }
+  }
+
+  /* ------------------------------------------------------------------- READ */
+
+  /** Most-recent PR for a branch (open or closed), or null. */
+  async prForBranch(repo: string, branch: string): Promise<PRInfo | null> {
+    const r = this.assertRepo(repo);
+    const raw =
+      (await this.ghJson<RawPr[]>([
+        "pr", "list", "--repo", r, "--head", branch,
+        "--state", "all", "--json", PR_JSON_FIELDS, "--limit", "1",
+      ])) ?? [];
+    return raw.length ? this.mapPr(raw[0]) : null;
+  }
+
+  /** List PRs (default: open, 30). */
+  async prList(
+    repo: string,
+    opts: { state?: "open" | "closed" | "merged" | "all"; base?: string; limit?: number } = {},
+  ): Promise<PRInfo[]> {
+    const r = this.assertRepo(repo);
+    const args = [
+      "pr", "list", "--repo", r,
+      "--state", opts.state ?? "open",
+      "--json", PR_JSON_FIELDS,
+      "--limit", String(opts.limit ?? 30),
+    ];
+    if (opts.base) args.push("--base", opts.base);
+    const raw = (await this.ghJson<RawPr[]>(args)) ?? [];
+    return raw.map((p) => this.mapPr(p));
+  }
+
+  /**
+   * ALL open PRs for the project — the GLOBAL project PR view (not per-chat).
+   * Uses the inline `statusCheckRollup` so each PR carries its check status
+   * without a per-PR `pr checks` fan-out; also folds in reviewDecision + a
+   * comment count. Pure read (no bus side effects).
+   */
+  async projectOpenPrs(repo: string): Promise<PRInfo[]> {
+    const r = this.assertRepo(repo);
+    const raw =
+      (await this.ghJson<RawPr[]>([
+        "pr", "list", "--repo", r,
+        "--state", "open",
+        "--json", PR_LIST_JSON_FIELDS,
+        "--limit", "100",
+      ])) ?? [];
+    return raw.map((p) => this.mapPr(p));
+  }
+
+  /**
+   * Rich detail for ONE PR: check rollup (per-check name/status/conclusion),
+   * review decision, review threads + comment count, and mergeable/mergeState.
+   * Pure read (no bus emit) — the GET endpoint the detail view calls. Checks come
+   * from the inline rollup; if that's empty we fall back to `pr checks`.
+   */
+  async prDetail(repo: string, prNumber: number): Promise<PRInfo | null> {
+    const r = this.assertRepo(repo);
+    const raw = await this.ghJson<RawPr>(
+      ["pr", "view", String(prNumber), "--repo", r, "--json", PR_DETAIL_JSON_FIELDS],
+      { allowFail: true },
+    );
+    if (!raw) return null;
+    const pr = this.mapPr(raw);
+    // Rollup can be empty (e.g. no required checks configured yet) — fall back to
+    // `gh pr checks` so the detail view still shows in-flight/failed CI.
+    if (pr.checks.length === 0) {
+      try {
+        pr.checks = await this.prChecks(r, prNumber);
+      } catch {
+        /* keep [] */
+      }
+    }
+    try {
+      pr.reviewThreads = await this.reviewThreads(r, prNumber);
+    } catch {
+      /* threads optional */
+    }
+    return pr;
+  }
+
+  /** Fetch a single PR by number (lightweight — no checks/threads). */
+  async getPr(repo: string, prNumber: number): Promise<PRInfo | null> {
+    const raw = await this.ghJson<RawPr>(
+      ["pr", "view", String(prNumber), "--repo", this.assertRepo(repo), "--json", PR_JSON_FIELDS],
+      { allowFail: true },
+    );
+    return raw ? this.mapPr(raw) : null;
+  }
+
+  /** CI checks for a PR. `gh pr checks` exits non-zero while pending → allowFail. */
+  async prChecks(repo: string, prNumber: number): Promise<CheckRun[]> {
+    const raw =
+      (await this.ghJson<RawCheck[]>(
+        ["pr", "checks", String(prNumber), "--repo", this.assertRepo(repo), "--json", CHECK_JSON_FIELDS],
+        { allowFail: true },
+      )) ?? [];
+    return raw.map((c) =>
+      CheckRunSchema.parse({
+        name: c.name,
+        status: mapCheckStatus(c.state),
+        conclusion: mapCheckConclusion(c.bucket, c.state),
+        url: c.link || undefined,
+      }),
+    );
+  }
+
+  /** Review threads (with resolve state) via GraphQL — typed variables, no interpolation of ids. */
+  async reviewThreads(repo: string, prNumber: number): Promise<ReviewThread[]> {
+    const { owner, name } = this.splitRepo(repo);
+    const query =
+      "query($owner:String!,$repo:String!,$number:Int!)" +
+      "{repository(owner:$owner,name:$repo){pullRequest(number:$number){" +
+      "reviewThreads(first:100){nodes{id isResolved isOutdated path line " +
+      "comments(first:1){nodes{author{login} body}}}}}}}";
+    const data = await this.ghJson<RawGraphqlThreads>([
+      "api", "graphql",
+      "-f", `query=${query}`,
+      "-f", `owner=${owner}`,
+      "-f", `repo=${name}`,
+      "-F", `number=${prNumber}`,
+    ]);
+    const nodes = data?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
+    return nodes.map((t) =>
+      ReviewThreadSchema.parse({
+        id: t.id,
+        isResolved: !!t.isResolved,
+        isOutdated: t.isOutdated ?? undefined,
+        path: t.path ?? undefined,
+        line: t.line ?? null,
+        author: t.comments?.nodes?.[0]?.author?.login ?? undefined,
+        body: t.comments?.nodes?.[0]?.body ?? undefined,
+      }),
+    );
+  }
+
+  /** Issue comments on a PR. */
+  async comments(repo: string, prNumber: number): Promise<PRComment[]> {
+    const data = await this.ghJson<{ comments?: RawComment[] }>([
+      "pr", "view", String(prNumber), "--repo", this.assertRepo(repo), "--json", "comments",
+    ]);
+    return (data?.comments ?? []).map((c) => ({
+      id: String(c.id ?? ""),
+      author: c.author?.login ?? undefined,
+      body: c.body ?? "",
+      createdAt: c.createdAt ?? undefined,
+      url: c.url ?? undefined,
+    }));
+  }
+
+  /* -------------------------------------------------------------------- ACT */
+
+  /**
+   * Ship a branch. Runs `project.shipCmd` in the worktree when set (Hivebreak →
+   * `pnpm ship`, which pushes + opens the PR + requests Copilot). Otherwise
+   * `gh pr create --base <default> --head <branch> --fill` then requests Copilot.
+   * Emits pr-update with the enriched PR.
+   */
+  async ship(
+    project: Project,
+    branch: string,
+    opts: { cwd?: string; chatId?: string } = {},
+  ): Promise<PRInfo | null> {
+    const chatId = opts.chatId;
+    const cwd = opts.cwd ?? this.worktreePath(project, branch);
+    const repo = await this.resolveRepo(project.repoPath);
+
+    if (project.shipCmd) {
+      await this.runCommand(project.shipCmd, cwd);
+      this.emitNotice(`Ran ship command \`${project.shipCmd}\` for ${branch}`, "info", chatId);
+    } else {
+      const base = project.defaultBranch ?? "main";
+      await this.gh(
+        ["pr", "create", "--repo", repo, "--base", base, "--head", branch, "--fill"],
+        { cwd, allowFail: true },
+      );
+    }
+
+    const pr = await this.prForBranch(repo, branch);
+    if (!pr) {
+      this.emitNotice(`Ship ran for ${branch} but no PR was found`, "warn", chatId);
+      return null;
+    }
+    // `gh pr create` path requests the review itself; shipCmd already did.
+    if (!project.shipCmd) await this.requestReview(repo, pr.number, COPILOT_LOGIN, { chatId });
+    const full = await this.enrich(repo, pr, chatId);
+    // Persist the PR onto the chat so the per-chat PRs panel (and the PR badge /
+    // header chip) can scope to it. Without this the chat's `prs` stayed `[]` in
+    // production and the whole panel was unreachable — the pr-update event only
+    // feeds the GLOBAL panel roster, never the chat record.
+    if (chatId) await this.attachPrToChat(chatId, full, repo);
+    this.emitNotice(`Shipped PR #${pr.number}`, "info", chatId);
+    return full;
+  }
+
+  /**
+   * Attach (or update, deduped by number) a lightweight PRRef on a chat and fan out
+   * `chat-update` so every client scopes the per-chat PRs panel to it. Best-effort:
+   * a store/chat miss must never fail the ship. No-op without a Store (unit tests).
+   */
+  private async attachPrToChat(chatId: string, pr: PRInfo, repo: string): Promise<void> {
+    if (!this.store) return;
+    try {
+      const chat = await this.store.getChat(chatId);
+      if (!chat) return;
+      const ref: PRRef = {
+        number: pr.number,
+        url: pr.url,
+        branch: pr.branch,
+        repo,
+        title: pr.title,
+        state: pr.state,
+      };
+      const others = (chat.prs ?? []).filter((p) => p.number !== pr.number);
+      const saved = await this.store.saveChat({
+        ...chat,
+        prs: [ref, ...others],
+        updatedAt: Date.now(),
+      });
+      this.bus.publish({ type: "chat-update", chat: saved });
+    } catch {
+      /* best-effort — a chat-attach failure shouldn't fail the ship */
+    }
+  }
+
+  /** Request a review from a reviewer (defaults to Copilot). Mirrors ship.mjs. */
+  async requestReview(
+    repo: string,
+    prNumber: number,
+    reviewer: string = COPILOT_LOGIN,
+    opts: OpCtx = {},
+  ): Promise<void> {
+    const r = this.assertRepo(repo);
+    await this.gh(
+      [
+        "api", "--method", "POST",
+        `repos/${r}/pulls/${prNumber}/requested_reviewers`,
+        "-f", `reviewers[]=${reviewer}`,
+      ],
+      { allowFail: true },
+    );
+    this.emitNotice(`Requested review from ${reviewer} on PR #${prNumber}`, "info", opts.chatId);
+  }
+
+  /** Re-run a single run's failed jobs (default) or the whole run. */
+  async rerunRun(
+    repo: string,
+    runId: number,
+    opts: { failedOnly?: boolean; chatId?: string } = {},
+  ): Promise<void> {
+    const r = this.assertRepo(repo);
+    const args = ["run", "rerun", String(runId), "--repo", r];
+    if (opts.failedOnly !== false) args.push("--failed");
+    await this.gh(args);
+    this.emitNotice(
+      `Re-ran ${opts.failedOnly === false ? "" : "failed jobs of "}run ${runId}`,
+      "info",
+      opts.chatId,
+    );
+    const run = await this.getRun(repo, runId, { chatId: opts.chatId });
+    if (run) this.emitRun(run, opts.chatId);
+  }
+
+  /** Re-run the failed workflow runs on a PR's head branch. Returns count. */
+  async rerunFailedChecks(
+    repo: string,
+    prNumber: number,
+    opts: { limit?: number; chatId?: string } = {},
+  ): Promise<number> {
+    const pr = await this.getPr(repo, prNumber);
+    if (!pr) throw new Error(`rerunFailedChecks: PR #${prNumber} not found`);
+    const runs = await this.listRuns(repo, undefined, {
+      branch: pr.branch,
+      limit: opts.limit ?? 20,
+    });
+    const failed = runs.filter(
+      (x) =>
+        x.conclusion === "failure" ||
+        x.conclusion === "cancelled" ||
+        x.conclusion === "timed_out",
+    );
+    for (const run of failed) {
+      await this.gh(["run", "rerun", String(run.id), "--repo", this.assertRepo(repo), "--failed"]);
+    }
+    this.emitNotice(
+      `Re-ran ${failed.length} failed run(s) on PR #${prNumber}`,
+      "info",
+      opts.chatId,
+    );
+    return failed.length;
+  }
+
+  /** Resolve a review thread (global node id) via GraphQL mutation. */
+  async resolveThread(threadId: string, opts: OpCtx = {}): Promise<void> {
+    if (!threadId || typeof threadId !== "string") {
+      throw new Error("resolveThread: threadId required");
+    }
+    const mutation =
+      "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}";
+    await this.gh(["api", "graphql", "-f", `query=${mutation}`, "-f", `id=${threadId}`]);
+    this.emitNotice(`Resolved review thread`, "info", opts.chatId);
+  }
+
+  /** Post a comment on a PR. */
+  async addComment(
+    repo: string,
+    prNumber: number,
+    body: string,
+    opts: OpCtx = {},
+  ): Promise<void> {
+    await this.gh([
+      "pr", "comment", String(prNumber), "--repo", this.assertRepo(repo), "--body", body,
+    ]);
+    this.emitNotice(`Commented on PR #${prNumber}`, "info", opts.chatId);
+  }
+
+  /** Merge a PR (default squash + delete branch). Emits the merged PR. */
+  async merge(
+    repo: string,
+    prNumber: number,
+    method: MergeMethod = "squash",
+    opts: { deleteBranch?: boolean; chatId?: string } = {},
+  ): Promise<PRInfo | null> {
+    const r = this.assertRepo(repo);
+    const flag = method === "merge" ? "--merge" : method === "rebase" ? "--rebase" : "--squash";
+    const args = ["pr", "merge", String(prNumber), "--repo", r, flag];
+    if (opts.deleteBranch !== false) args.push("--delete-branch");
+    await this.gh(args);
+    this.emitNotice(`Merged PR #${prNumber} (${method})`, "info", opts.chatId);
+    return this.refreshPr(repo, prNumber, { chatId: opts.chatId });
+  }
+
+  /** Add or remove a label. Emits the refreshed PR. */
+  async setLabel(
+    repo: string,
+    prNumber: number,
+    label: string,
+    on: boolean = true,
+    opts: OpCtx = {},
+  ): Promise<PRInfo | null> {
+    const r = this.assertRepo(repo);
+    const args = ["pr", "edit", String(prNumber), "--repo", r];
+    args.push(on ? "--add-label" : "--remove-label", label);
+    await this.gh(args);
+    this.emitNotice(
+      `${on ? "Added" : "Removed"} label "${label}" ${on ? "on" : "from"} PR #${prNumber}`,
+      "info",
+      opts.chatId,
+    );
+    return this.refreshPr(repo, prNumber, { chatId: opts.chatId });
+  }
+
+  /** Hold / un-hold a PR (the `hold` label the auto-merge gate honours). */
+  hold(repo: string, prNumber: number, on: boolean = true, opts: OpCtx = {}): Promise<PRInfo | null> {
+    return this.setLabel(repo, prNumber, "hold", on, opts);
+  }
+
+  /** Fetch a PR by number, enrich with checks + threads, and emit pr-update. */
+  async refreshPr(repo: string, prNumber: number, opts: OpCtx = {}): Promise<PRInfo | null> {
+    const pr = await this.getPr(repo, prNumber);
+    if (!pr) return null;
+    return this.enrich(repo, pr, opts.chatId);
+  }
+
+  /* -------------------------------------------------------------- ACTIONS */
+
+  /** List a repo's GitHub Actions workflows. */
+  async listWorkflows(repo: string): Promise<WorkflowDef[]> {
+    const raw =
+      (await this.ghJson<RawWorkflow[]>([
+        "workflow", "list", "--repo", this.assertRepo(repo), "--json", "id,name,path,state",
+      ])) ?? [];
+    return raw.map((w) =>
+      WorkflowDefSchema.parse({
+        id: w.id,
+        name: w.name,
+        path: w.path,
+        state: w.state ?? undefined,
+      }),
+    );
+  }
+
+  /**
+   * Every workflow paired with its LATEST run (status/conclusion/branch/time/url)
+   * — the default Actions view (replaces a flat chronological run history). One
+   * `run list --limit 1` per workflow; a workflow that has never run → lastRun
+   * null. Pure read (no bus emit).
+   */
+  async workflowsWithLastRun(repo: string): Promise<WorkflowWithLastRun[]> {
+    const r = this.assertRepo(repo);
+    const workflows = await this.listWorkflows(r);
+    const out: WorkflowWithLastRun[] = [];
+    for (const workflow of workflows) {
+      // `gh run list --workflow` takes the file basename (or id); path is the
+      // repo-relative ".github/workflows/<file>".
+      const file = workflow.path.split("/").pop() || String(workflow.id);
+      let lastRun: WorkflowRun | null = null;
+      try {
+        const runs = await this.listRuns(r, file, { limit: 1 });
+        lastRun = runs[0] ?? null;
+      } catch {
+        lastRun = null;
+      }
+      out.push(WorkflowWithLastRunSchema.parse({ workflow, lastRun }));
+    }
+    return out;
+  }
+
+  /**
+   * The `workflow_dispatch` input schema for a workflow (name/type/required/
+   * default/options) so the client can render a real Run form. Reads the YAML via
+   * `gh workflow view <file> --yaml` and parses it. Best-effort: returns [] when
+   * the workflow has no dispatch inputs or the fetch/parse fails.
+   */
+  async workflowInputs(repo: string, workflowFile: string): Promise<WorkflowInput[]> {
+    const r = this.assertRepo(repo);
+    // Reject a leading `-` so the value can't be reinterpreted by gh as a flag.
+    if (!workflowFile || workflowFile.startsWith("-")) {
+      throw new Error(`workflowInputs: invalid workflow "${workflowFile}"`);
+    }
+    const yamlText = await this.gh(
+      ["workflow", "view", workflowFile, "--repo", r, "--yaml"],
+      { allowFail: true },
+    );
+    if (!yamlText) return [];
+    return parseWorkflowInputs(yamlText);
+  }
+
+  /** Dispatch a workflow (`gh workflow run`) with `-f key=value` inputs. */
+  async dispatch(
+    repo: string,
+    workflow: string,
+    ref: string,
+    inputs: Record<string, string> = {},
+    opts: OpCtx = {},
+  ): Promise<void> {
+    const r = this.assertRepo(repo);
+    // `workflow` is the first positional; reject a leading `-` so a value like
+    // `--help` / `-R other/repo` can't be reinterpreted by gh as a flag.
+    if (workflow.startsWith("-")) {
+      throw new Error(`dispatch: invalid workflow "${workflow}"`);
+    }
+    const args = ["workflow", "run", workflow, "--repo", r, "--ref", ref];
+    for (const [k, v] of Object.entries(inputs)) args.push("-f", `${k}=${v}`);
+    await this.gh(args);
+    this.emitNotice(`Dispatched workflow "${workflow}" on ${ref}`, "info", opts.chatId);
+  }
+
+  /** List workflow runs (optionally filtered by workflow file/name or branch). */
+  async listRuns(
+    repo: string,
+    workflow?: string,
+    opts: { branch?: string; limit?: number } = {},
+  ): Promise<WorkflowRun[]> {
+    const r = this.assertRepo(repo);
+    const args = ["run", "list", "--repo", r, "--json", RUN_JSON_FIELDS, "--limit", String(opts.limit ?? 20)];
+    if (workflow) args.push("--workflow", workflow);
+    if (opts.branch) args.push("--branch", opts.branch);
+    const raw = (await this.ghJson<RawRun[]>(args)) ?? [];
+    return raw.map((x) => this.mapRun(x));
+  }
+
+  /** View one run by id. Emits workflow-update. */
+  async getRun(repo: string, runId: number, opts: OpCtx = {}): Promise<WorkflowRun | null> {
+    const raw = await this.ghJson<RawRun>(
+      ["run", "view", String(runId), "--repo", this.assertRepo(repo), "--json", RUN_JSON_FIELDS],
+      { allowFail: true },
+    );
+    if (!raw) return null;
+    const run = this.mapRun(raw);
+    this.emitRun(run, opts.chatId);
+    return run;
+  }
+
+  /* --------------------------------------------------------------- internals */
+
+  /** Enrich a PR with CI checks + review threads (best-effort), emit, return. */
+  private async enrich(repo: string, pr: PRInfo, chatId?: string): Promise<PRInfo> {
+    try {
+      pr.checks = await this.prChecks(repo, pr.number);
+    } catch {
+      /* keep default [] */
+    }
+    try {
+      pr.reviewThreads = await this.reviewThreads(repo, pr.number);
+    } catch {
+      /* threads optional */
+    }
+    this.emitPr(pr, chatId);
+    return pr;
+  }
+
+  /** Run a whitespace-split shell-style command line via execa (argv array, no shell). */
+  private async runCommand(cmdline: string, cwd: string): Promise<void> {
+    const parts = cmdline.trim().split(/\s+/);
+    const [cmd, ...args] = parts;
+    if (!cmd) throw new Error("runCommand: empty command");
+    const res = await this.exec(cmd, args, { cwd, reject: false });
+    if (res.exitCode !== 0) {
+      const detail = (res.stderr || res.stdout || "").trim().slice(0, 500);
+      throw new Error(`command \`${cmdline}\` failed (exit ${res.exitCode}): ${detail}`);
+    }
+  }
+
+  private mapPr(p: RawPr): PRInfo {
+    return PRInfoSchema.parse({
+      number: p.number,
+      url: p.url,
+      title: p.title ?? "",
+      state: String(p.state ?? "OPEN").toLowerCase(),
+      branch: p.headRefName ?? "",
+      baseBranch: p.baseRefName ?? "main",
+      isDraft: !!p.isDraft,
+      author: p.author?.login ?? undefined,
+      body: p.body ?? undefined,
+      mergeable: mapMergeable(p.mergeable),
+      mergeStateStatus: p.mergeStateStatus ?? undefined,
+      // Only set when the caller requested `reviewDecision` (list/detail) — a
+      // bare `pr view` omits it, so leave it absent rather than forcing null.
+      reviewDecision: p.reviewDecision !== undefined ? mapReviewDecision(p.reviewDecision) : undefined,
+      labels: (p.labels ?? []).map((l) => l.name),
+      // `statusCheckRollup` (requested by list/detail) folds inline into checks;
+      // the plain PR fetch omits it and enriches via `prChecks` instead.
+      checks: p.statusCheckRollup ? p.statusCheckRollup.map(mapRollupEntry) : [],
+      commentCount: p.comments !== undefined ? p.comments.length : undefined,
+      additions: p.additions ?? undefined,
+      deletions: p.deletions ?? undefined,
+      updatedAt: p.updatedAt ?? undefined,
+      createdAt: p.createdAt ?? undefined,
+    });
+  }
+
+  private mapRun(x: RawRun): WorkflowRun {
+    return WorkflowRunSchema.parse({
+      id: x.databaseId,
+      name: x.name || x.workflowName || String(x.databaseId),
+      workflowName: x.workflowName ?? undefined,
+      status: normalizeRunStatus(x.status),
+      conclusion: x.conclusion ? String(x.conclusion).toLowerCase() : null,
+      event: x.event ?? undefined,
+      headBranch: x.headBranch ?? undefined,
+      url: x.url ?? undefined,
+      createdAt: x.createdAt ?? undefined,
+      updatedAt: x.updatedAt ?? undefined,
+    });
+  }
+
+  /* ----------------------------------------------------------------- events */
+
+  private emitPr(pr: PRInfo, chatId?: string): void {
+    this.bus.publish({ type: "pr-update", chatId, pr });
+  }
+  private emitRun(run: WorkflowRun, chatId?: string): void {
+    this.bus.publish({ type: "workflow-update", chatId, run });
+  }
+  private emitNotice(text: string, level: "info" | "warn" | "error", chatId?: string): void {
+    this.bus.publish({ type: "notice", chatId, level, text });
+  }
+}
+
+/** Convenience factory (matches the DI shape used elsewhere). */
+export function createGitHubService(deps: GitHubServiceDeps): GitHubService {
+  return new GitHubService(deps);
+}

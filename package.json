@@ -1,0 +1,21 @@
+{
+  "name": "claude-manager",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Local control plane for Claude Code agents — multi-chat, worktrees, subApp runner, GitHub. Built on the Claude Agent SDK.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "start": "pnpm --filter @cm/server start",
+    "dev": "concurrently -k -n server,client -c blue,magenta \"pnpm --filter @cm/server dev\" \"pnpm --filter @cm/client dev\"",
+    "test": "pnpm --filter @cm/server exec vitest run",
+    "spike": "pnpm --filter @cm/server spike"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.2"
+  }
+}

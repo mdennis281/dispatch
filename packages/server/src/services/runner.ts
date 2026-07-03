@@ -1,0 +1,504 @@
+/**
+ * RunnerService — the per-worktree subApp process manager.
+ *
+ * One RunnerService drives many `RunnerInstance`s. For each start it:
+ *   1. allocates a free port per declared `subApp.ports` entry (offset upward from
+ *      the declared base if it's in use), setting the primary as `PORT` in env;
+ *   2. if the subApp declares a `dockerCompose` file, runs `docker compose up -d`
+ *      in that file's directory FIRST;
+ *   3. spawns `subApp.dev` (via a shell) in `worktreePath/subApp.path` with `PORT`
+ *      injected, registering a `RunnerInstance` in `runners.json`;
+ *   4. streams stdout/stderr line-by-line as `runner-log` bus events and keeps a
+ *      bounded in-memory ring for `logs(id)`.
+ *
+ * stop() tree-kills the process (Windows-safe via tree-kill) and, if docker was
+ * used, runs `docker compose down`. reconcile() runs at boot to mark runners whose
+ * pid no longer exists as stopped (the server that owned them died).
+ *
+ * All process/port/kill/docker primitives are injectable so tests never touch a
+ * real docker daemon; the default wiring uses execa + get-port + tree-kill.
+ */
+import { dirname, basename, resolve } from "node:path";
+import { execa } from "execa";
+import getPort, { portNumbers } from "get-port";
+import treeKill from "tree-kill";
+import { nanoid } from "nanoid";
+import type {
+  RunnerInstance,
+  RunnerStatus,
+  SubApp,
+  WsServerEvent,
+} from "@cm/shared";
+import type { Store } from "../store/index.js";
+import type { EventBus } from "../bus.js";
+
+/* ----------------------------------------------------------- injectable seams */
+
+/** Minimal shape of a spawned child we depend on (execa subprocess satisfies it). */
+export interface ChildLike {
+  pid?: number;
+  stdout?: NodeJS.ReadableStream | null;
+  stderr?: NodeJS.ReadableStream | null;
+  once(event: string, listener: (...args: unknown[]) => void): unknown;
+  kill(signal?: NodeJS.Signals | number): boolean;
+}
+
+export interface SpawnOptions {
+  cwd: string;
+  /** Extra env overlaid on the parent env (e.g. `PORT`). */
+  env: Record<string, string>;
+}
+
+/** Spawns the long-running dev command (a full shell command string). */
+export type SpawnFn = (command: string, opts: SpawnOptions) => ChildLike;
+
+export interface RunOnceResult {
+  exitCode?: number | undefined;
+}
+
+/** Runs a one-shot command to completion (docker compose up/down). */
+export type RunOnceFn = (
+  file: string,
+  args: string[],
+  opts: { cwd: string; env?: Record<string, string> },
+) => Promise<RunOnceResult>;
+
+/** Allocates a free port, preferring `preferred` and offsetting upward if taken. */
+export type GetPortFn = (preferred?: number) => Promise<number>;
+
+/** Tree-kills a process (all descendants) — Windows-safe. */
+export type KillTreeFn = (pid: number) => Promise<void>;
+
+export interface RunnerDeps {
+  store: Store;
+  bus: EventBus;
+  spawn?: SpawnFn;
+  runOnce?: RunOnceFn;
+  getPort?: GetPortFn;
+  killTree?: KillTreeFn;
+  isPidAlive?: (pid: number) => boolean;
+  now?: () => number;
+  genId?: () => string;
+  /** Max stdout/stderr lines retained per runner for `logs()`. */
+  maxLogLines?: number;
+}
+
+/** One captured output line, returned by `logs()`. */
+export interface RunnerLogLine {
+  stream: "stdout" | "stderr";
+  line: string;
+  ts: number;
+}
+
+/* -------------------------------------------------------------- default wiring */
+
+const defaultSpawn: SpawnFn = (command, opts) => {
+  const child = execa(command, {
+    shell: true,
+    cwd: opts.cwd,
+    env: opts.env,
+    buffer: false,
+    reject: false,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  // Never let the subprocess promise reject unhandled (reject:false already guards).
+  void (child as unknown as Promise<unknown>).catch(() => {});
+  return child as unknown as ChildLike;
+};
+
+const defaultRunOnce: RunOnceFn = async (file, args, opts) => {
+  const res = await execa(file, args, {
+    cwd: opts.cwd,
+    env: opts.env,
+    reject: false,
+    buffer: true,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return { exitCode: res.exitCode };
+};
+
+const defaultGetPort: GetPortFn = (preferred) => {
+  if (preferred === undefined) return getPort();
+  if (preferred >= 1024 && preferred < 65535) {
+    return getPort({ port: portNumbers(preferred, Math.min(preferred + 100, 65535)) });
+  }
+  return getPort({ port: preferred });
+};
+
+const defaultKillTree: KillTreeFn = (pid) =>
+  new Promise((res) => treeKill(pid, "SIGTERM", () => res()));
+
+function defaultIsPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM = process exists but we can't signal it → still alive.
+    return (e as { code?: string }).code === "EPERM";
+  }
+}
+
+/** Per-instance live handle (not persisted). */
+interface LiveRunner {
+  child?: ChildLike;
+  usedDocker: boolean;
+  composeDir?: string;
+  composeFile?: string;
+  stopping: boolean;
+  logs: RunnerLogLine[];
+}
+
+const TERMINAL: ReadonlySet<RunnerStatus> = new Set<RunnerStatus>([
+  "stopped",
+  "crashed",
+  "exited",
+]);
+
+/* -------------------------------------------------------------- the service */
+
+export class RunnerService {
+  private readonly store: Store;
+  private readonly bus: EventBus;
+  private readonly spawn: SpawnFn;
+  private readonly runOnce: RunOnceFn;
+  private readonly getPort: GetPortFn;
+  private readonly killTree: KillTreeFn;
+  private readonly isPidAlive: (pid: number) => boolean;
+  private readonly now: () => number;
+  private readonly genId: () => string;
+  private readonly maxLogLines: number;
+
+  private readonly live = new Map<string, LiveRunner>();
+
+  constructor(deps: RunnerDeps) {
+    this.store = deps.store;
+    this.bus = deps.bus;
+    this.spawn = deps.spawn ?? defaultSpawn;
+    this.runOnce = deps.runOnce ?? defaultRunOnce;
+    this.getPort = deps.getPort ?? defaultGetPort;
+    this.killTree = deps.killTree ?? defaultKillTree;
+    this.isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;
+    this.now = deps.now ?? (() => Date.now());
+    this.genId = deps.genId ?? (() => nanoid());
+    this.maxLogLines = deps.maxLogLines ?? 2000;
+  }
+
+  /* --------------------------------------------------------------- lifecycle */
+
+  /**
+   * Boot reconciliation: any persisted runner that was still "live" but whose pid
+   * is gone (the owning server died) is flipped to `stopped`. We can no longer
+   * manage those processes/streams, so they're treated as terminated.
+   */
+  async reconcile(): Promise<void> {
+    const runners = await this.store.listRunners();
+    for (const r of runners) {
+      if (TERMINAL.has(r.status)) continue;
+      const alive = r.pid !== undefined && this.isPidAlive(r.pid);
+      if (alive) continue;
+      // The owning server died. A docker stack was started detached, so it almost
+      // certainly survived the restart — bring it down (from the PERSISTED compose
+      // paths, since the live map is empty at boot) so containers don't leak and
+      // the UI stops showing a phantom "running".
+      if (r.usedDocker) {
+        await this.dockerDown(r.id, r.composeDir, r.composeFile);
+      }
+      await this.saveAndEmit({ ...r, status: "stopped" });
+    }
+  }
+
+  /**
+   * Start a subApp in a worktree. Returns the registered RunnerInstance (its
+   * status is `running` on success, or `crashed` if docker/spawn failed).
+   */
+  async start(
+    worktreePath: string,
+    subApp: SubApp,
+    ctx: { projectId?: string; chatId?: string } = {},
+  ): Promise<RunnerInstance> {
+    const hasDev = !!subApp.dev;
+    const usedDocker = !!subApp.dockerCompose;
+    if (!hasDev && !usedDocker) {
+      throw new Error(`subApp "${subApp.id}" declares neither dev nor dockerCompose`);
+    }
+
+    const id = this.genId();
+
+    // Port allocation: one free port per declared base (offset upward if taken).
+    const bases = subApp.ports && subApp.ports.length ? subApp.ports : [];
+    const ports: number[] = [];
+    for (const base of bases) ports.push(await this.getPort(base));
+    if (ports.length === 0 && hasDev) ports.push(await this.getPort());
+    const primary = ports[0];
+
+    const url = subApp.url
+      ? subApp.url.replace("{port}", String(primary ?? ""))
+      : primary !== undefined
+        ? `http://localhost:${primary}`
+        : undefined;
+
+    const live: LiveRunner = { usedDocker, stopping: false, logs: [] };
+    this.live.set(id, live);
+
+    // Resolve + persist the compose location up front so stop()/reconcile() can
+    // tear the stack down later (even after a restart) without the live map.
+    let composeDir: string | undefined;
+    let composeFile: string | undefined;
+    if (usedDocker) {
+      const composePath = resolve(worktreePath, subApp.dockerCompose!);
+      composeDir = dirname(composePath);
+      composeFile = basename(composePath);
+      live.composeDir = composeDir;
+      live.composeFile = composeFile;
+    }
+
+    let runner: RunnerInstance = {
+      id,
+      projectId: ctx.projectId,
+      chatId: ctx.chatId,
+      worktreePath,
+      subAppId: subApp.id,
+      kind: hasDev ? "process" : "docker",
+      port: primary,
+      ports: ports.length ? ports : undefined,
+      url,
+      usedDocker: usedDocker || undefined,
+      composeDir,
+      composeFile,
+      status: "starting",
+      startedAt: this.now(),
+    };
+    runner = await this.saveAndEmit(runner);
+
+    const portEnv: Record<string, string> =
+      primary !== undefined ? { PORT: String(primary) } : {};
+
+    // 1) docker compose up -d (in the compose file's directory), if declared.
+    if (usedDocker && composeDir && composeFile) {
+      this.pushLog(id, "stdout", `$ docker compose -f ${composeFile} up -d`);
+      const res = await this.runOnce(
+        "docker",
+        ["compose", "-f", composeFile, "up", "-d"],
+        { cwd: composeDir, env: portEnv },
+      );
+      // exitCode is `undefined` for a signal-killed process — treat that as a
+      // failure too (only exit 0 counts as "up").
+      if ((res.exitCode ?? 1) !== 0) {
+        this.pushLog(id, "stderr", `docker compose up failed (exit ${res.exitCode})`);
+        runner = await this.saveAndEmit({
+          ...runner,
+          status: "crashed",
+          exitCode: res.exitCode ?? null,
+        });
+        this.live.delete(id);
+        return runner;
+      }
+      // A stop() can land during the multi-second `up` await. Don't spawn the dev
+      // process or report "running"; ensure the stack is down and finalize.
+      if (live.stopping) {
+        await this.dockerDown(id, composeDir, composeFile);
+        return this.finalizeStopped(id, runner);
+      }
+    }
+
+    // 2) spawn the long-running dev process (if any).
+    if (hasDev) {
+      const child = this.spawn(subApp.dev!, {
+        cwd: resolve(worktreePath, subApp.path),
+        env: portEnv,
+      });
+      live.child = child;
+      this.wireChild(id, child);
+      // A stop() during startup would otherwise orphan this freshly-spawned child
+      // and leave a bogus "running" record. Kill it now and finalize as stopped.
+      if (live.stopping) {
+        if (child.pid !== undefined) await this.killTree(child.pid);
+        else child.kill();
+        return this.finalizeStopped(id, { ...runner, pid: child.pid });
+      }
+      runner = await this.saveAndEmit({ ...runner, pid: child.pid, status: "running" });
+    } else {
+      // docker-only stack: it's up (a mid-startup stop was handled above).
+      runner = await this.saveAndEmit({ ...runner, status: "running" });
+    }
+
+    return runner;
+  }
+
+  /** Stop a runner: tree-kill its process, `docker compose down` if it used docker. */
+  async stop(instanceId: string): Promise<void> {
+    const live = this.live.get(instanceId);
+    const runner = await this.store.getRunner(instanceId);
+    if (!runner) return;
+    if (live) live.stopping = true;
+
+    if (!TERMINAL.has(runner.status)) {
+      await this.saveAndEmit({ ...runner, status: "stopping" });
+    }
+
+    // Kill the process tree (Windows-safe). The 'exit' handler flips a process
+    // runner to `stopped`; for docker-only runners we finalize below.
+    const pid = runner.pid ?? live?.child?.pid;
+    if (pid !== undefined) {
+      await this.killTree(pid);
+    } else if (live?.child) {
+      live.child.kill();
+    }
+
+    // Tear docker down from the PERSISTED record so this still works when the live
+    // map was pruned (process already exited) or lost (server restart).
+    const usedDocker = runner.usedDocker ?? live?.usedDocker ?? false;
+    if (usedDocker) {
+      await this.dockerDown(
+        instanceId,
+        runner.composeDir ?? live?.composeDir,
+        runner.composeFile ?? live?.composeFile,
+      );
+    }
+
+    // Finalize when there is no live child to emit an 'exit' (docker-only, or the
+    // process had already exited before stop was called). Prune the live entry so
+    // its log ring doesn't leak and stopAll() never re-stops a terminated runner.
+    if (!live?.child) {
+      const after = await this.store.getRunner(instanceId);
+      if (after && !TERMINAL.has(after.status)) {
+        await this.saveAndEmit({ ...after, status: "stopped" });
+      }
+      this.live.delete(instanceId);
+    }
+  }
+
+  /** Stop every live runner (server teardown / test cleanup). */
+  async stopAll(): Promise<void> {
+    const ids = [...this.live.keys()];
+    await Promise.all(ids.map((id) => this.stop(id).catch(() => {})));
+  }
+
+  /** All persisted runner instances. */
+  list(): Promise<RunnerInstance[]> {
+    return this.store.listRunners();
+  }
+
+  /** The retained (bounded) output lines for a runner, oldest-first. */
+  logs(instanceId: string): RunnerLogLine[] {
+    return this.live.get(instanceId)?.logs.slice() ?? [];
+  }
+
+  /* ----------------------------------------------------------------- internals */
+
+  private wireChild(id: string, child: ChildLike): void {
+    const out = this.makeLineSplitter(id, "stdout");
+    const err = this.makeLineSplitter(id, "stderr");
+    child.stdout?.on("data", out.onData);
+    child.stderr?.on("data", err.onData);
+
+    child.once("exit", (...args: unknown[]) => {
+      out.flush();
+      err.flush();
+      const code = args[0];
+      void this.onExit(id, typeof code === "number" ? code : null, false);
+    });
+    child.once("error", (...args: unknown[]) => {
+      const e = args[0] as Error | undefined;
+      this.pushLog(id, "stderr", `spawn error: ${e?.message ?? String(e)}`);
+      out.flush();
+      err.flush();
+      void this.onExit(id, null, true);
+    });
+  }
+
+  /** Buffers a stream into whole `\n`-delimited lines. */
+  private makeLineSplitter(id: string, stream: "stdout" | "stderr") {
+    let buf = "";
+    return {
+      onData: (chunk: Buffer | string) => {
+        buf += chunk.toString();
+        let idx: number;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx).replace(/\r$/, "");
+          buf = buf.slice(idx + 1);
+          this.pushLog(id, stream, line);
+        }
+      },
+      flush: () => {
+        if (buf.length) {
+          this.pushLog(id, stream, buf.replace(/\r$/, ""));
+          buf = "";
+        }
+      },
+    };
+  }
+
+  private async onExit(
+    id: string,
+    code: number | null,
+    errored: boolean,
+  ): Promise<void> {
+    const live = this.live.get(id);
+    if (live) live.child = undefined;
+    const runner = await this.store.getRunner(id);
+    if (!runner || TERMINAL.has(runner.status)) {
+      this.live.delete(id); // don't retain a terminated runner's log ring
+      return;
+    }
+    const status: RunnerStatus = live?.stopping
+      ? "stopped"
+      : errored || (code !== null && code !== 0)
+        ? "crashed"
+        : "exited";
+    await this.saveAndEmit({ ...runner, status, exitCode: code });
+    this.live.delete(id);
+  }
+
+  /** `docker compose down` for a stack (best-effort; no-op without both paths). */
+  private async dockerDown(
+    id: string,
+    composeDir?: string,
+    composeFile?: string,
+  ): Promise<void> {
+    if (!composeDir || !composeFile) return;
+    this.pushLog(id, "stdout", `$ docker compose -f ${composeFile} down`);
+    try {
+      await this.runOnce("docker", ["compose", "-f", composeFile, "down"], {
+        cwd: composeDir,
+      });
+    } catch {
+      /* best-effort teardown: a missing docker daemon must not throw here */
+    }
+  }
+
+  /** Persist a terminal `stopped` (unless already terminal) and prune the live entry. */
+  private async finalizeStopped(
+    id: string,
+    fallback: RunnerInstance,
+  ): Promise<RunnerInstance> {
+    const after = (await this.store.getRunner(id)) ?? fallback;
+    const saved = TERMINAL.has(after.status)
+      ? after
+      : await this.saveAndEmit({ ...after, status: "stopped" });
+    this.live.delete(id);
+    return saved;
+  }
+
+  private pushLog(id: string, stream: "stdout" | "stderr", line: string): void {
+    const ts = this.now();
+    const live = this.live.get(id);
+    if (live) {
+      live.logs.push({ stream, line, ts });
+      if (live.logs.length > this.maxLogLines) live.logs.shift();
+    }
+    this.emit({ type: "runner-log", runnerId: id, stream, line, ts });
+  }
+
+  private async saveAndEmit(runner: RunnerInstance): Promise<RunnerInstance> {
+    const saved = await this.store.saveRunner(runner);
+    this.emit({ type: "runner-update", runner: saved });
+    return saved;
+  }
+
+  private emit(evt: WsServerEvent): void {
+    this.bus.publish(evt);
+  }
+}

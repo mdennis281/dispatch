@@ -1,0 +1,351 @@
+/**
+ * Domain / config / persisted entities. These are the JSON records the Store
+ * reads and writes (projects, subApps, agents, modes, chats) plus the runtime
+ * views (worktrees, runners, PRs, workflow runs). Zod = source of truth.
+ */
+import * as z from "zod";
+import {
+  EffortSchema,
+  McpServerConfigSchema,
+  PermissionModeSchema,
+  ChatStatusSchema,
+} from "./common.js";
+
+/* ------------------------------------------------------------------ subApps */
+
+/** A runnable app inside a project repo (game, metrics-server, studio-director…). */
+export const SubAppSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  /** Path relative to the repo root (or worktree root). */
+  path: z.string(),
+  install: z.string().optional(),
+  dev: z.string().optional(),
+  build: z.string().optional(),
+  test: z.string().optional(),
+  /** Ports the app binds; used for per-worktree offset allocation. */
+  ports: z.array(z.number().int()).optional(),
+  /** One-click URL template, e.g. "http://localhost:{port}". */
+  url: z.string().optional(),
+  /** Path to a docker-compose file to `docker compose up` instead of a process. */
+  dockerCompose: z.string().optional(),
+});
+export type SubApp = z.infer<typeof SubAppSchema>;
+
+/* ----------------------------------------------------------------- projects */
+
+/** A project = one git repo with many subApps. */
+export const ProjectSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  /** Absolute path to the repo working copy. */
+  repoPath: z.string(),
+  /** Directory under which per-task worktrees are created. */
+  worktreeRoot: z.string(),
+  /** Custom worktree command (Hivebreak → "pnpm worktree"). */
+  worktreeCmd: z.string().optional(),
+  /** Custom ship command (Hivebreak → "pnpm ship"). */
+  shipCmd: z.string().optional(),
+  /** MCP servers passed through to every session in this project. */
+  mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
+  subApps: z.array(SubAppSchema).default([]),
+  /** Default branch for diff-vs-base / PR base (default "main"). */
+  defaultBranch: z.string().optional(),
+  createdAt: z.number().int(),
+});
+export type Project = z.infer<typeof ProjectSchema>;
+
+/* ------------------------------------------------------------ agents & modes */
+
+/** Config scope: global (all projects) or a single project. */
+export const ConfigScopeSchema = z.enum(["global", "project"]);
+export type ConfigScope = z.infer<typeof ConfigScopeSchema>;
+
+/** A custom agent: instructions + permission profile + tool gating. */
+export const AgentConfigSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  /** System-prompt append / agent prompt. */
+  instructions: z.string(),
+  permissionMode: PermissionModeSchema,
+  allowedTools: z.array(z.string()).optional(),
+  disallowedTools: z.array(z.string()).optional(),
+  model: z.string().optional(),
+  scope: ConfigScopeSchema.default("global"),
+  /** Set when scope === "project". */
+  projectId: z.string().optional(),
+  createdAt: z.number().int().optional(),
+});
+export type AgentConfig = z.infer<typeof AgentConfigSchema>;
+
+/** A mode = a named permission posture + optional instruction overlay. */
+export const ModeConfigSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  permissionMode: PermissionModeSchema,
+  instructions: z.string().optional(),
+  scope: ConfigScopeSchema.default("global"),
+  projectId: z.string().optional(),
+});
+export type ModeConfig = z.infer<typeof ModeConfigSchema>;
+
+/* ------------------------------------------------------------ PRs & workflows */
+
+/** Lightweight PR reference persisted on a chat. */
+export const PRRefSchema = z.object({
+  number: z.number().int(),
+  url: z.string(),
+  branch: z.string(),
+  /** "owner/repo" if known. */
+  repo: z.string().optional(),
+  title: z.string().optional(),
+  state: z.enum(["open", "closed", "merged"]).optional(),
+});
+export type PRRef = z.infer<typeof PRRefSchema>;
+
+/** A single CI check / status on a PR. */
+export const CheckRunSchema = z.object({
+  name: z.string(),
+  status: z.enum(["queued", "in_progress", "completed"]),
+  conclusion: z
+    .enum([
+      "success",
+      "failure",
+      "neutral",
+      "cancelled",
+      "skipped",
+      "timed_out",
+      "action_required",
+      "stale",
+    ])
+    .nullable()
+    .optional(),
+  url: z.string().optional(),
+});
+export type CheckRun = z.infer<typeof CheckRunSchema>;
+
+/** A PR's aggregate review decision (GitHub `reviewDecision`). */
+export const ReviewDecisionSchema = z.enum([
+  "approved",
+  "changes_requested",
+  "review_required",
+]);
+export type ReviewDecision = z.infer<typeof ReviewDecisionSchema>;
+
+/** A GitHub review thread (for resolve tracking). */
+export const ReviewThreadSchema = z.object({
+  id: z.string(),
+  isResolved: z.boolean(),
+  isOutdated: z.boolean().optional(),
+  path: z.string().optional(),
+  line: z.number().int().nullable().optional(),
+  author: z.string().optional(),
+  body: z.string().optional(),
+});
+export type ReviewThread = z.infer<typeof ReviewThreadSchema>;
+
+/** Rich runtime PR view produced by GitHubService. */
+export const PRInfoSchema = z.object({
+  number: z.number().int(),
+  url: z.string(),
+  title: z.string(),
+  state: z.enum(["open", "closed", "merged"]),
+  branch: z.string(),
+  baseBranch: z.string(),
+  isDraft: z.boolean(),
+  repo: z.string().optional(),
+  author: z.string().optional(),
+  body: z.string().optional(),
+  mergeable: z.boolean().nullable().optional(),
+  mergeStateStatus: z.string().optional(),
+  /** Aggregate review decision (null = none yet). */
+  reviewDecision: ReviewDecisionSchema.nullable().optional(),
+  labels: z.array(z.string()).optional(),
+  checks: z.array(CheckRunSchema).default([]),
+  reviewThreads: z.array(ReviewThreadSchema).optional(),
+  /** Count of issue-comments on the PR (from a list/detail fetch). */
+  commentCount: z.number().int().optional(),
+  additions: z.number().int().optional(),
+  deletions: z.number().int().optional(),
+  updatedAt: z.string().optional(),
+  createdAt: z.string().optional(),
+});
+export type PRInfo = z.infer<typeof PRInfoSchema>;
+
+/** A GitHub Actions workflow definition. */
+export const WorkflowDefSchema = z.object({
+  id: z.number().int(),
+  name: z.string(),
+  path: z.string(),
+  state: z.string().optional(),
+});
+export type WorkflowDef = z.infer<typeof WorkflowDefSchema>;
+
+/** A GitHub Actions run (dispatched or observed). */
+export const WorkflowRunSchema = z.object({
+  id: z.number().int(),
+  name: z.string(),
+  workflowName: z.string().optional(),
+  status: z.enum([
+    "queued",
+    "in_progress",
+    "completed",
+    "requested",
+    "waiting",
+    "pending",
+  ]),
+  conclusion: z
+    .enum([
+      "success",
+      "failure",
+      "neutral",
+      "cancelled",
+      "skipped",
+      "timed_out",
+      "action_required",
+      "stale",
+    ])
+    .nullable()
+    .optional(),
+  event: z.string().optional(),
+  headBranch: z.string().optional(),
+  url: z.string().optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+});
+export type WorkflowRun = z.infer<typeof WorkflowRunSchema>;
+
+/** A workflow paired with its most-recent run (the default Actions view). */
+export const WorkflowWithLastRunSchema = z.object({
+  workflow: WorkflowDefSchema,
+  /** The latest run of this workflow, or null when it has never run. */
+  lastRun: WorkflowRunSchema.nullable(),
+});
+export type WorkflowWithLastRun = z.infer<typeof WorkflowWithLastRunSchema>;
+
+/** One `workflow_dispatch` input, parsed from the workflow YAML (for a Run form). */
+export const WorkflowInputSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  type: z.enum(["string", "boolean", "choice", "number", "environment"]).optional(),
+  required: z.boolean().optional(),
+  /** Stringified default (booleans/numbers coerced to text for form binding). */
+  default: z.string().optional(),
+  /** Allowed values when `type === "choice"`. */
+  options: z.array(z.string()).optional(),
+});
+export type WorkflowInput = z.infer<typeof WorkflowInputSchema>;
+
+/* -------------------------------------------------------------------- chats */
+
+/** A chat: the crown-jewel session. May own many worktrees/PRs over its life. */
+export const ChatSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  title: z.string(),
+  /** SDK session id captured from the init message (for resume/fork). */
+  sessionId: z.string().optional(),
+  agentId: z.string().optional(),
+  modeId: z.string(),
+  effort: EffortSchema,
+  /** SDK model id backing the session (unset = SDK/subscription default). */
+  model: z.string().optional(),
+  /** Worktree paths this chat has created/owns. */
+  worktrees: z.array(z.string()).default([]),
+  prs: z.array(PRRefSchema).default([]),
+  /** Last-known live status (authoritative source is the SessionBroker). */
+  status: ChatStatusSchema.optional(),
+  archived: z.boolean().optional(),
+  createdAt: z.number().int(),
+  updatedAt: z.number().int().optional(),
+});
+export type Chat = z.infer<typeof ChatSchema>;
+
+/* --------------------------------------------------------------- worktrees */
+
+/** Result of `git worktree` inspection + diff-vs-base stats. */
+export const WorktreeInfoSchema = z.object({
+  path: z.string(),
+  branch: z.string(),
+  /** HEAD commit sha. */
+  head: z.string().optional(),
+  /** Base branch this was cut from (default "main"). */
+  base: z.string().optional(),
+  isDirty: z.boolean().optional(),
+  ahead: z.number().int().optional(),
+  behind: z.number().int().optional(),
+  locked: z.boolean().optional(),
+  projectId: z.string().optional(),
+  chatId: z.string().optional(),
+  createdAt: z.number().int().optional(),
+});
+export type WorktreeInfo = z.infer<typeof WorktreeInfoSchema>;
+
+/* ----------------------------------------------------------------- runners */
+
+export const RunnerStatusSchema = z.enum([
+  "starting",
+  "running",
+  "stopping",
+  "stopped",
+  "crashed",
+  "exited",
+]);
+export type RunnerStatus = z.infer<typeof RunnerStatusSchema>;
+
+/** A live subApp process (or docker-compose stack) under RunnerService. */
+export const RunnerInstanceSchema = z.object({
+  id: z.string(),
+  projectId: z.string().optional(),
+  chatId: z.string().optional(),
+  worktreePath: z.string(),
+  subAppId: z.string(),
+  kind: z.enum(["process", "docker"]).default("process"),
+  pid: z.number().int().optional(),
+  /** Primary allocated port after offset. */
+  port: z.number().int().optional(),
+  /** All allocated ports (offset-mapped from subApp.ports). */
+  ports: z.array(z.number().int()).optional(),
+  /** Resolved one-click URL. */
+  url: z.string().optional(),
+  /** True when a docker-compose stack backs this runner (needs `down` to stop). */
+  usedDocker: z.boolean().optional(),
+  /** Directory to run `docker compose` from — persisted so a post-restart
+   *  reconcile / stop can tear the detached stack down without the live map. */
+  composeDir: z.string().optional(),
+  /** Compose file basename passed to `docker compose -f`. */
+  composeFile: z.string().optional(),
+  status: RunnerStatusSchema,
+  startedAt: z.number().int().optional(),
+  exitCode: z.number().int().nullable().optional(),
+});
+export type RunnerInstance = z.infer<typeof RunnerInstanceSchema>;
+
+/* -------------------------------------------------- checkpoints / workflow */
+
+/** Per-message git-shadow-ref checkpoint (rollback map value). */
+export const CheckpointSchema = z.object({
+  messageId: z.string(),
+  chatId: z.string(),
+  /** Hidden git ref holding the tree snapshot. */
+  ref: z.string(),
+  /** SDK message uuid to fork/resume the session at. */
+  sessionMessageUuid: z.string().optional(),
+  worktreePath: z.string().optional(),
+  createdAt: z.number().int(),
+});
+export type Checkpoint = z.infer<typeof CheckpointSchema>;
+
+/** A tracked GitHub workflow-dispatch job initiated from the UI. */
+export const WorkflowRunRequestSchema = z.object({
+  id: z.string(),
+  projectId: z.string().optional(),
+  chatId: z.string().optional(),
+  workflow: z.string(),
+  ref: z.string(),
+  inputs: z.record(z.string(), z.string()).optional(),
+  runId: z.number().int().optional(),
+  status: z.string().optional(),
+  createdAt: z.number().int(),
+});
+export type WorkflowRunRequest = z.infer<typeof WorkflowRunRequestSchema>;

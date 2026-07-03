@@ -1,0 +1,44 @@
+{
+  "name": "@cm/client",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Claude-manager React SPA — the Linear/Zed cockpit (served by @cm/server).",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4321 --strictPort",
+    "typecheck": "tsc --noEmit",
+    "shot": "node scripts/shot.mjs"
+  },
+  "dependencies": {
+    "@cm/shared": "workspace:*",
+    "@monaco-editor/react": "^4.6.0",
+    "@tiptap/extension-placeholder": "^2.10.4",
+    "@tiptap/pm": "^2.10.4",
+    "@tiptap/react": "^2.10.4",
+    "@tiptap/starter-kit": "^2.10.4",
+    "clsx": "^2.1.1",
+    "cropro": "^1.6.0",
+    "lucide-react": "^0.469.0",
+    "markerjs2": "^2.32.7",
+    "monaco-editor": "^0.55.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "react-syntax-highlighter": "^15.6.1",
+    "remark-gfm": "^4.0.1",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@tailwindcss/vite": "^4.1.13",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}

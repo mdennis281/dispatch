@@ -1,0 +1,152 @@
+/**
+ * Sidebar dialog kit — a portal-mounted modal shell + a few dense form controls,
+ * all built from the shared Linear/Zed tokens (same surface/overlay/rise as the
+ * Popover) so orchestration dialogs match the design system without forking it.
+ */
+import {
+  useEffect,
+  type ReactNode,
+  type InputHTMLAttributes,
+  type TextareaHTMLAttributes,
+} from "react";
+import { createPortal } from "react-dom";
+import { X, AlertCircle } from "lucide-react";
+import { cn } from "../../lib/cn.js";
+import { IconButton } from "../ui/IconButton.js";
+
+export interface ModalProps {
+  open: boolean;
+  onClose: () => void;
+  title: ReactNode;
+  icon?: ReactNode;
+  description?: ReactNode;
+  children: ReactNode;
+  footer?: ReactNode;
+  width?: number;
+}
+
+/** A centered, backdrop-dimmed dialog. Escape / backdrop-click / ✕ all close. */
+export function Modal({
+  open,
+  onClose,
+  title,
+  icon,
+  description,
+  children,
+  footer,
+  width = 480,
+}: ModalProps) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-start justify-center overflow-y-auto p-6 sm:pt-[9vh]">
+      <div
+        className="fixed inset-0 bg-black/55 backdrop-blur-[2px]"
+        onClick={onClose}
+        aria-hidden
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        className={
+          "relative z-10 w-full rounded-lg border border-line-strong bg-overlay/98 " +
+          "backdrop-blur-md shadow-[var(--shadow-pop)] cm-anim-rise"
+        }
+        style={{ maxWidth: width }}
+      >
+        <header className="flex items-center gap-2.5 px-4 py-3 cm-hairline-b">
+          {icon && (
+            <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-accent-ghost text-accent ring-1 ring-accent-line [&_svg]:size-3.5">
+              {icon}
+            </span>
+          )}
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-[13px] font-semibold text-primary">{title}</h2>
+            {description && (
+              <p className="mt-px truncate text-[11px] text-muted">{description}</p>
+            )}
+          </div>
+          <IconButton tip="Close" onClick={onClose}>
+            <X />
+          </IconButton>
+        </header>
+
+        <div className="cm-scroll max-h-[68vh] overflow-y-auto px-4 py-4">{children}</div>
+
+        {footer && (
+          <footer className="flex items-center gap-2 px-4 py-3 cm-hairline-t">{footer}</footer>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/* --------------------------------------------------------------- form kit */
+
+const controlCls =
+  "w-full rounded-md border border-line bg-inset px-2.5 py-[7px] text-[12.5px] text-primary " +
+  "placeholder:text-faint outline-none transition-colors hover:border-line-strong focus:border-accent-line";
+
+export function Field({
+  label,
+  hint,
+  required,
+  children,
+  className,
+}: {
+  label: ReactNode;
+  hint?: ReactNode;
+  required?: boolean;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <label className={cn("block", className)}>
+      <span className="mb-1 flex items-baseline gap-1.5">
+        <span className="text-[11px] font-medium text-secondary">{label}</span>
+        {required && <span className="text-[11px] text-danger">*</span>}
+        {hint && <span className="ml-auto text-[10.5px] text-faint">{hint}</span>}
+      </span>
+      {children}
+    </label>
+  );
+}
+
+export function TextInput({
+  mono,
+  className,
+  ...rest
+}: InputHTMLAttributes<HTMLInputElement> & { mono?: boolean }) {
+  return <input className={cn(controlCls, mono && "cm-mono !text-[11.5px]", className)} {...rest} />;
+}
+
+export function TextArea({
+  className,
+  rows = 4,
+  ...rest
+}: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return (
+    <textarea rows={rows} className={cn(controlCls, "resize-none leading-relaxed", className)} {...rest} />
+  );
+}
+
+/** A short inline error strip for a failed REST call. */
+export function InlineError({ message }: { message?: string | null }) {
+  if (!message) return null;
+  return (
+    <div className="flex items-start gap-1.5 rounded-md border border-danger/30 bg-danger-ghost px-2.5 py-1.5 text-[11.5px] text-danger [&_svg]:mt-px [&_svg]:size-3.5 [&_svg]:shrink-0">
+      <AlertCircle />
+      <span className="min-w-0">{message}</span>
+    </div>
+  );
+}
