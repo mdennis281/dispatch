@@ -143,6 +143,34 @@ function toolResultMsg(toolUseId: string, content: unknown, isError = false) {
     },
   };
 }
+/** A tool_result whose content carries an inline base64 image block (the shape
+ *  a Claude-in-Chrome screenshot / any image-returning MCP produces). */
+function toolResultImageMsg(
+  toolUseId: string,
+  data: string,
+  mediaType = "image/png",
+  extraText = "screenshot captured",
+) {
+  return {
+    type: "user",
+    parent_tool_use_id: null,
+    session_id: "sess-1",
+    message: {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: toolUseId,
+          is_error: false,
+          content: [
+            { type: "text", text: extraText },
+            { type: "image", source: { type: "base64", media_type: mediaType, data } },
+          ],
+        },
+      ],
+    },
+  };
+}
 function streamStart() {
   return {
     type: "stream_event",
@@ -771,5 +799,111 @@ describe("SessionBroker — teardown hygiene", () => {
     // dispose() iterates ALL sessions incl. the finished one — must not re-run onDone.
     await broker.dispose();
     expect(doneItems()).toBe(1);
+  });
+});
+
+describe("SessionBroker — tool_result images (screenshot-to-UI)", () => {
+  // A 1x1 transparent PNG, base64 — stand-in for a screenshot an MCP returns.
+  const PNG_1PX =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+  it("persists a tool_result image to the chat assets + emits a render event with an ImageRef", async () => {
+    const { fn } = makeFakeQuery((_t) => [
+      toolUseMsg("mcp__claude-in-chrome__computer", { action: "screenshot" }, "tool-1"),
+      toolResultImageMsg("tool-1", PNG_1PX),
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "take a screenshot");
+    await idleP;
+
+    // A `chat-message` render event carrying the tool_result row with an ImageRef.
+    const resultEvt = events.find(
+      (e): e is Extract<WsServerEvent, { type: "chat-message" }> =>
+        e.type === "chat-message" &&
+        e.chatId === "c1" &&
+        e.message.kind === "tool_result",
+    );
+    expect(resultEvt).toBeDefined();
+    const row = resultEvt!.message;
+    if (row.kind !== "tool_result") throw new Error("expected tool_result row");
+    expect(row.images).toBeDefined();
+    expect(row.images).toHaveLength(1);
+    const ref = row.images![0]!;
+    expect(ref.mimeType).toBe("image/png");
+    expect(ref.path.startsWith("assets/")).toBe(true);
+
+    // The bytes were actually written to the assets store and round-trip.
+    const name = ref.path.split("/").pop()!;
+    const buf = await store.readChatAsset("c1", name);
+    expect(buf).not.toBeNull();
+    expect(buf!.equals(Buffer.from(PNG_1PX, "base64"))).toBe(true);
+
+    // The bulky base64 is stripped from the persisted content (lightweight ref).
+    const stripped = JSON.stringify(row.content);
+    expect(stripped).not.toContain(PNG_1PX);
+    expect(stripped).toContain("assets/");
+
+    // The persisted transcript row also carries the ImageRef (survives reload).
+    const rows = await store.readMessages("c1");
+    const persisted = rows.find((r) => r.kind === "tool_result");
+    expect(persisted && "images" in persisted ? persisted.images?.length : 0).toBe(1);
+  });
+
+  it("leaves an image-free tool_result untouched (no images key)", async () => {
+    const { fn } = makeFakeQuery((_t) => [
+      toolUseMsg("Bash", { command: "ls" }, "tool-1"),
+      toolResultMsg("tool-1", "file-a\nfile-b"),
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "list");
+    await idleP;
+
+    const rows = await store.readMessages("c1");
+    const row = rows.find((r) => r.kind === "tool_result");
+    expect(row && "images" in row ? row.images : undefined).toBeUndefined();
+  });
+});
+
+describe("SessionBroker — MCP passthrough", () => {
+  it("merges a project's configured MCP servers into the session alongside 'manager'", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const broker = makeBroker(fn);
+    const project = {
+      id: "p1",
+      name: "Proj",
+      repoPath: dir,
+      worktreeRoot: dir,
+      mcpServers: {
+        "claude-in-chrome": { type: "sse", url: "http://127.0.0.1:9999/sse" },
+      },
+      subApps: [],
+      createdAt: 1,
+    };
+    await store.saveProject(project);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"), project);
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    const opts = controllers[0]!.options as { mcpServers?: Record<string, unknown> };
+    expect(opts.mcpServers).toBeDefined();
+    // The in-process manager server is preserved (not clobbered)…
+    expect(opts.mcpServers!.manager).toBeDefined();
+    // …and the project's MCP server passes through for the agent to use.
+    expect(opts.mcpServers!["claude-in-chrome"]).toMatchObject({
+      url: "http://127.0.0.1:9999/sse",
+    });
   });
 });

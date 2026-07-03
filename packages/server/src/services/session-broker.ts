@@ -153,6 +153,30 @@ function parseMcpServer(name: string): string | undefined {
   return i >= 0 ? rest.slice(0, i) : rest;
 }
 
+/** Pick a file extension for a stored asset from its media type (inverse of
+ *  {@link mediaTypeFromName}); defaults to `.png` for anything unrecognized. */
+function extFromMediaType(mime: string | undefined): string {
+  switch ((mime ?? "").toLowerCase()) {
+    case "image/png":
+      return ".png";
+    case "image/jpeg":
+    case "image/jpg":
+      return ".jpg";
+    case "image/gif":
+      return ".gif";
+    case "image/webp":
+      return ".webp";
+    case "image/svg+xml":
+      return ".svg";
+    case "image/avif":
+      return ".avif";
+    case "image/bmp":
+      return ".bmp";
+    default:
+      return ".png";
+  }
+}
+
 /** Guess an image media type from a stored asset filename. */
 function mediaTypeFromName(name: string): string {
   const dot = name.lastIndexOf(".");
@@ -1058,6 +1082,11 @@ export class SessionBroker {
         // Surface tool_result blocks; ignore plain echoes of our own input.
         for (const b of this.contentBlocks(m)) {
           if (b.type !== "tool_result") continue;
+          // Persist any image content the tool returned (e.g. a Claude-in-Chrome
+          // screenshot) to the chat's assets dir and hand the client small
+          // ImageRefs; the enriched `tool_result` row IS the render event (fanned
+          // out as `chat-message`, drawn inline in the ToolCallCard).
+          const { images, content } = await this.persistContentImages(session, b.content);
           await this.emit(session, {
             kind: "tool_result",
             id: this.genId(),
@@ -1068,7 +1097,8 @@ export class SessionBroker {
             toolUseId: String(b.tool_use_id ?? ""),
             ok: !b.is_error,
             isError: b.is_error ? true : undefined,
-            content: b.content,
+            content,
+            images: images.length ? images : undefined,
           });
         }
         return;
@@ -1150,6 +1180,60 @@ export class SessionBroker {
     return content.filter(
       (b): b is Record<string, unknown> => !!b && typeof b === "object",
     );
+  }
+
+  /**
+   * Scan a tool_result's `content` for image blocks the agent received, persist
+   * any inline base64 image to the chat's assets dir, and return the resulting
+   * ImageRefs plus a sanitized copy of the content. The bulky base64 payload is
+   * stripped from the persisted block (replaced with a lightweight `asset` ref)
+   * so the JSONL transcript stays small and the text/JSON result view never
+   * dumps megabytes. A remote `url` image source becomes an ImageRef pointing at
+   * the URL and passes through untouched. Kept general: ANY MCP that returns
+   * image content blocks (Claude-in-Chrome screenshots and beyond) renders
+   * inline with no per-tool wiring.
+   */
+  private async persistContentImages(
+    session: LiveSession,
+    content: unknown,
+  ): Promise<{ images: ImageRef[]; content: unknown }> {
+    if (!Array.isArray(content)) return { images: [], content };
+    const images: ImageRef[] = [];
+    const out: unknown[] = [];
+    for (const raw of content) {
+      const block = raw as Record<string, unknown> | null;
+      if (!block || typeof block !== "object" || block.type !== "image") {
+        out.push(raw);
+        continue;
+      }
+      const source = block.source as Record<string, unknown> | undefined;
+      const srcType = source ? String(source.type ?? "") : "";
+      if (srcType === "base64" && typeof source?.data === "string") {
+        const mime =
+          typeof source.media_type === "string" ? source.media_type : "image/png";
+        try {
+          const name = `${this.genId()}${extFromMediaType(mime)}`;
+          const buf = Buffer.from(source.data, "base64");
+          const relPath = await this.store.writeChatAsset(session.chatId, name, buf);
+          images.push({ id: this.genId(), path: relPath, mimeType: mime });
+          out.push({ type: "image", media_type: mime, asset: relPath });
+        } catch {
+          // Persist failed (bad base64 / disk) → keep the raw block, no ref.
+          out.push(raw);
+        }
+      } else if (srcType === "url" && typeof source?.url === "string") {
+        images.push({
+          id: this.genId(),
+          path: source.url,
+          mimeType:
+            typeof source.media_type === "string" ? source.media_type : undefined,
+        });
+        out.push(raw);
+      } else {
+        out.push(raw);
+      }
+    }
+    return { images, content: out };
   }
 
   /* --------------------------------------------------------- permission */

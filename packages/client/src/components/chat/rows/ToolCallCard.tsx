@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import type { ToolUseRow, ToolResultRow } from "@cm/shared";
 import { RowShell } from "./RowShell.js";
+import { ImageThumb } from "./ImageThumb.js";
 import { Chip } from "../../ui/Chip.js";
 import { Spinner } from "../../ui/Spinner.js";
 import { cn } from "../../../lib/cn.js";
@@ -123,6 +124,14 @@ export function ToolCallCard({ use, result, defaultOpen = false }: ToolCallCardP
             </button>
           )}
         </div>
+
+        {result?.images && result.images.length > 0 && (
+          <div className="flex flex-wrap gap-2 border-t border-line-soft px-3 py-2.5">
+            {result.images.map((img) => (
+              <ImageThumb key={img.id} chatId={use.chatId} img={img} />
+            ))}
+          </div>
+        )}
 
         {open && (
           <div className="cm-anim-rise space-y-2 border-t border-line-soft px-3 py-2.5">

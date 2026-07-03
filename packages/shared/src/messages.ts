@@ -72,6 +72,12 @@ export const ToolResultRowSchema = z.object({
   content: z.unknown().optional(),
   isError: z.boolean().optional(),
   durationMs: z.number().int().optional(),
+  /**
+   * Image blocks returned by the tool (e.g. a Claude-in-Chrome screenshot),
+   * persisted to the chat's assets dir and rendered inline in the ToolCallCard.
+   * The bulky base64 is stripped from `content` and lives here as an ImageRef.
+   */
+  images: z.array(ImageRefSchema).optional(),
 });
 export type ToolResultRow = z.infer<typeof ToolResultRowSchema>;
 
