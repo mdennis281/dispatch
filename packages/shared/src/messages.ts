@@ -45,6 +45,12 @@ export const AssistantMessageRowSchema = z.object({
   /** SDK assistant message uuid (for rollback/fork anchoring). */
   uuid: z.string().optional(),
   subagentType: z.string().optional(),
+  /**
+   * When set, this row was produced BY a subagent — it is the tool_use id of the
+   * `Task` call that spawned it (SDK `parent_tool_use_id`). The client nests every
+   * row sharing a `parentToolUseId` under that Task tool card as a sub-transcript.
+   */
+  parentToolUseId: z.string().nullable().optional(),
 });
 export type AssistantMessageRow = z.infer<typeof AssistantMessageRowSchema>;
 
@@ -57,7 +63,10 @@ export const ToolUseRowSchema = z.object({
   input: z.record(z.string(), z.unknown()),
   /** MCP server id parsed from an `mcp__<server>__<tool>` name. */
   server: z.string().optional(),
+  /** Non-null when this tool_use itself runs inside a subagent (nested Task). */
   parentToolUseId: z.string().nullable().optional(),
+  /** Subagent type that produced this tool_use (when it runs inside one). */
+  subagentType: z.string().optional(),
   uuid: z.string().optional(),
 });
 export type ToolUseRow = z.infer<typeof ToolUseRowSchema>;
@@ -78,6 +87,10 @@ export const ToolResultRowSchema = z.object({
    * The bulky base64 is stripped from `content` and lives here as an ImageRef.
    */
   images: z.array(ImageRefSchema).optional(),
+  /** Non-null when this result belongs to a subagent's own tool call (nesting). */
+  parentToolUseId: z.string().nullable().optional(),
+  /** Subagent type that produced this result (when it runs inside one). */
+  subagentType: z.string().optional(),
 });
 export type ToolResultRow = z.infer<typeof ToolResultRowSchema>;
 

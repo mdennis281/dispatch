@@ -874,6 +874,135 @@ describe("SessionBroker — tool_result images (screenshot-to-UI)", () => {
   });
 });
 
+describe("SessionBroker — subagent nesting", () => {
+  // A subagent (spawned via the Task tool) tags every message it emits with the
+  // spawning tool_use id (`parent_tool_use_id`) + its own `subagent_type`.
+  function subAssistant(text: string, parentId: string, subagentType: string) {
+    return {
+      type: "assistant",
+      parent_tool_use_id: parentId,
+      subagent_type: subagentType,
+      uuid: "sa-uuid",
+      session_id: "sess-1",
+      message: { role: "assistant", content: [{ type: "text", text }] },
+    };
+  }
+  function subToolUse(
+    name: string,
+    input: Record<string, unknown>,
+    id: string,
+    parentId: string,
+    subagentType: string,
+  ) {
+    return {
+      type: "assistant",
+      parent_tool_use_id: parentId,
+      subagent_type: subagentType,
+      uuid: "st-uuid",
+      session_id: "sess-1",
+      message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] },
+    };
+  }
+  function subToolResult(
+    toolUseId: string,
+    content: unknown,
+    parentId: string,
+    subagentType: string,
+  ) {
+    return {
+      type: "user",
+      parent_tool_use_id: parentId,
+      subagent_type: subagentType,
+      session_id: "sess-1",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: toolUseId, content, is_error: false }],
+      },
+    };
+  }
+
+  it("tags subagent rows with parentToolUseId + subagentType and routes them to the spawning Task", async () => {
+    const { fn } = makeFakeQuery((_text) => [
+      // The in-chat agent spawns a subagent via the Task tool (top-level).
+      toolUseMsg("Task", { subagent_type: "code-reviewer", description: "Review the diff" }, "task-1"),
+      // The subagent's own transcript — every row tagged with parent_tool_use_id "task-1".
+      subAssistant("Looking at the changes…", "task-1", "code-reviewer"),
+      subToolUse("Read", { file_path: "a.ts" }, "sub-tool-1", "task-1", "code-reviewer"),
+      subToolResult("sub-tool-1", "file contents", "task-1", "code-reviewer"),
+      // The Task tool's own result closes the subagent (top-level, parent null).
+      toolResultMsg("task-1", "Review complete."),
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "review it");
+    await idleP;
+
+    const rows = await store.readMessages("c1");
+
+    // The spawning Task tool_use is a ROOT (no parent) — the nest anchor.
+    const task = rows.find((r) => r.kind === "tool_use" && r.name === "Task");
+    expect(task && "parentToolUseId" in task ? task.parentToolUseId : "x").toBeFalsy();
+    const taskId = task && "toolUseId" in task ? task.toolUseId : "";
+    expect(taskId).toBe("task-1");
+
+    // The subagent's assistant row is tagged with the parent + its type.
+    const subAsst = rows.find(
+      (r) => r.kind === "assistant" && r.text === "Looking at the changes…",
+    );
+    expect(subAsst && "parentToolUseId" in subAsst ? subAsst.parentToolUseId : null).toBe("task-1");
+    expect(subAsst && "subagentType" in subAsst ? subAsst.subagentType : null).toBe("code-reviewer");
+
+    // The subagent's tool_use + tool_result carry the same nesting key.
+    const subTool = rows.find((r) => r.kind === "tool_use" && r.name === "Read");
+    expect(subTool && "parentToolUseId" in subTool ? subTool.parentToolUseId : null).toBe("task-1");
+    expect(subTool && "subagentType" in subTool ? subTool.subagentType : null).toBe("code-reviewer");
+    const subRes = rows.find(
+      (r) => r.kind === "tool_result" && r.toolUseId === "sub-tool-1",
+    );
+    expect(subRes && "parentToolUseId" in subRes ? subRes.parentToolUseId : null).toBe("task-1");
+    expect(subRes && "subagentType" in subRes ? subRes.subagentType : null).toBe("code-reviewer");
+
+    // The Task's own result is a ROOT (parent null) — it belongs to the parent turn.
+    const taskResult = rows.find(
+      (r) => r.kind === "tool_result" && r.toolUseId === "task-1",
+    );
+    expect(taskResult && "parentToolUseId" in taskResult ? taskResult.parentToolUseId : "x").toBeFalsy();
+
+    // Grouping (the client's nest): every row whose parentToolUseId === the Task id
+    // is one subagent group; the Task tool_use itself + its result are roots.
+    const grouped = rows.filter(
+      (r) => "parentToolUseId" in r && r.parentToolUseId === taskId,
+    );
+    expect(grouped.map((r) => r.kind)).toEqual(["assistant", "tool_use", "tool_result"]);
+  });
+
+  it("leaves a top-level (non-subagent) tool_use with a null parentToolUseId", async () => {
+    const { fn } = makeFakeQuery((_t) => [
+      toolUseMsg("Bash", { command: "ls" }, "tool-1"),
+      toolResultMsg("tool-1", "ok"),
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "list");
+    await idleP;
+
+    const rows = await store.readMessages("c1");
+    const tool = rows.find((r) => r.kind === "tool_use");
+    // A plain tool never nests: its parentToolUseId is null (falsy) so it's a root.
+    expect(tool && "parentToolUseId" in tool ? tool.parentToolUseId : "x").toBeFalsy();
+    const res = rows.find((r) => r.kind === "tool_result");
+    expect(res && "subagentType" in res ? res.subagentType : undefined).toBeUndefined();
+  });
+});
+
 describe("SessionBroker — MCP passthrough", () => {
   it("merges a project's configured MCP servers into the session alongside 'manager'", async () => {
     const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);

@@ -1016,6 +1016,12 @@ export class SessionBroker {
         return;
       }
       case "assistant": {
+        // A subagent (spawned via the Task tool) tags every message it emits with
+        // the spawning tool_use id + its own type. Capture both so the finalized
+        // rows carry the nesting key the client groups on.
+        const parentToolUseId =
+          (m as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null;
+        const subagentType = (m as { subagent_type?: string }).subagent_type;
         const blocks = this.contentBlocks(m);
         let text = "";
         let thinking = "";
@@ -1044,7 +1050,8 @@ export class SessionBroker {
             thinking: thinking || undefined,
             model: session.model,
             uuid: (m as { uuid?: string }).uuid,
-            subagentType: (m as { subagent_type?: string }).subagent_type,
+            subagentType,
+            parentToolUseId,
           });
         }
         for (const tb of toolBlocks) {
@@ -1072,13 +1079,20 @@ export class SessionBroker {
             name,
             input,
             server: parseMcpServer(name),
-            parentToolUseId: ((m as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null),
+            parentToolUseId,
+            subagentType,
             uuid: (m as { uuid?: string }).uuid,
           });
         }
         return;
       }
       case "user": {
+        // A subagent's tool_result rides a `user` message tagged with the spawning
+        // Task tool_use id — carry that (and the subagent type) onto the row so it
+        // nests under the same Task card as the subagent's assistant/tool_use rows.
+        const parentToolUseId =
+          (m as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null;
+        const subagentType = (m as { subagent_type?: string }).subagent_type;
         // Surface tool_result blocks; ignore plain echoes of our own input.
         for (const b of this.contentBlocks(m)) {
           if (b.type !== "tool_result") continue;
@@ -1099,6 +1113,8 @@ export class SessionBroker {
             isError: b.is_error ? true : undefined,
             content,
             images: images.length ? images : undefined,
+            parentToolUseId,
+            subagentType,
           });
         }
         return;
