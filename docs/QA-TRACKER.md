@@ -61,7 +61,17 @@
 ## BATCH 5: FULLY VERIFIED LIVE (2026-07-03) ✓ — todos strip, header-button tooltip (no clip), modal-header tooltip "Inline diff" (no clip), diff overview ruler (green right-edge), Monaco diff+File/Diff+vs-main, code pointers (clickable `damage.ts:123-128` chips open preview), AskUserQuestion round-trip (card→Attention badge→answer→resume).
 ## attribution SELF-HEAL: DONE ✓ VERIFIED LIVE (commit 5ebb74c, 137 tests). worktree↔chat + PR↔chat reconstructed from each chat's transcript history, rewritten on every reconcile+restart (durable). VERIFIED: Settings→settings-modal-cleanup+#77 (checks ✓1✗1 flaky guard, 4 unresolved threads), necro chat→necromancer-elite+#79 (✓3, 2 threads, Merge/Hold/Rerun), steam→steam-cloud-save+#78. Each chat's PRs tab shows live status/checks/comments + GH controls, correctly scoped. worktree-detector.ts core rewrite + PRsPanel branch-scoping.
 ## OPEN (user's call): #77 CI red on flaky "Movement lag-regression guard"; #79 has 2 unresolved Copilot threads → auto-merge holding on both.
-## BATCH 6: PAUSED (stopped mid-Feature-1 Checkin-MCP; WIP discarded to clean baseline). RESUME via Workflow({scriptPath: ".../workflows/scripts/cm-batch6-wf_266cc18d-a15.js", resumeFromRunId:"wf_266cc18d-a15"}) AFTER the attribution fix commits. Features: 1 scheduled-checkin MCP, 2 persistent terminals(PTY), 3 screenshot-to-UI, 4 subagents+nested viz, 5 integrate/review+unlink-worktree control.
+## BATCH 6: BUILT + 4/5 VERIFIED LIVE (2026-07-03). Commits 5f82670(checkin-mcp) 64d9e35(terminals) 57e9ebd(screenshot-ui) 74b88b1(subagents-nested) 39acc3d(unlink). 169 tests green, build green, tree clean.
+##   ✅ Persistent terminals — `mcp__manager__terminal`, named shell, cwd PERSISTS across calls (proven: Set-Location packages/simulation → separate pwd shows it); live Terminals tab+badge with scrollback/cwd/exit-code.
+##   ✅ Nested subagent viz — subagent card expands to its inner transcript (Read tool nested); collapsible.
+##   ✅ Scheduled check-in — `mcp__manager__wait(seconds,reason)` + `wait_for_chat(chatId)`; renders as manager›wait MCP card.
+##   ✅ Unlink-from-chat control — 4th icon on worktree card (manual attribution override).
+##   ⏳ Screenshot-to-UI (57e9ebd) — image-block persist+inline-render path built + unit-tested, NOT yet live-driven; needs claude-in-chrome MCP added to the Hivebreak project mcpServers config, then agent screenshots a tab → renders in transcript. ONLY remaining live-drive.
+
+## IN FLIGHT (parallel, disjoint scopes, 2026-07-05):
+##   - PER-PROJECT AGENT MEMORY (agent a1aee34bfde166caa): .data/projects/<id>/memory/*.md + MEMORY.md index; read-at-start injection into buildOptions systemPrompt; remember/recall/forget on manager MCP; Memory RightPanel tab. OWNS server/shared/client src.
+##   - PLAYWRIGHT VERIFY HARNESS (agent ac34f80cf5b87d0e3): headless chromium drives running :4319, PNGs→.verify-shots/, tools/verify/shot.mjs + flows(app/chat/panels) + e2e smoke + README(connectOverCDP for auth). OWNS tools/verify + e2e + playwright.config + package.json scripts. REASON: replace slow tab-stealing Chrome MCP for UI verification.
+##   - STILL PENDING live-drive: screenshot-to-UI (Batch 6 #3) — verify via the new Playwright harness once it lands, after wiring claude-in-chrome MCP into the project.
 
 ## FINAL
 - [ ] Full live re-verification (drive EVERY control with vision)
