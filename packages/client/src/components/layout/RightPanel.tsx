@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { GitBranch, AppWindow, SquareTerminal, GitPullRequest } from "lucide-react";
+import { GitBranch, AppWindow, SquareTerminal, GitPullRequest, Brain } from "lucide-react";
 import type { Chat } from "@cm/shared";
 import { Tabs, type TabDef } from "../ui/Tabs.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
@@ -7,9 +7,11 @@ import { WorktreesPanel } from "../panels/WorktreesPanel.js";
 import { RunnerPanel } from "../panels/RunnerPanel.js";
 import { TerminalsPanel } from "../panels/TerminalsPanel.js";
 import { PRsPanel } from "../panels/PRsPanel.js";
+import { MemoryPanel } from "../panels/MemoryPanel.js";
 import { usePanels } from "../../stores/panels.js";
 import { useRunners } from "../../stores/runners.js";
 import { useTerminals } from "../../stores/terminals.js";
+import { useProjectMemories } from "../../stores/memory.js";
 import {
   worktreeMatchesChat,
   FOCUS_PANEL_EVENT,
@@ -21,11 +23,17 @@ type PanelTab = FocusPanelTab;
 export function RightPanel({ chat }: { chat: Chat }) {
   const [tab, setTab] = useState<PanelTab>("worktrees");
 
-  // Let the command palette jump straight to a tab (Worktrees / Apps / Terminals / PRs).
+  // Let the command palette jump straight to a tab (Worktrees / Apps / Terminals / PRs / Memory).
   useEffect(() => {
     const onFocus = (e: Event) => {
       const next = (e as CustomEvent<FocusPanelTab>).detail;
-      if (next === "worktrees" || next === "apps" || next === "terminals" || next === "prs") {
+      if (
+        next === "worktrees" ||
+        next === "apps" ||
+        next === "terminals" ||
+        next === "prs" ||
+        next === "memory"
+      ) {
         setTab(next);
       }
     };
@@ -42,12 +50,14 @@ export function RightPanel({ chat }: { chat: Chat }) {
   );
   const chatPrNumbers = new Set(chat.prs.map((p) => p.number));
   const prOpen = usePanels((s) => s.prs.filter((p) => p.state === "open" && chatPrNumbers.has(p.number)).length);
+  const memCount = useProjectMemories(chat.projectId).length;
 
   const tabs: TabDef[] = [
     { id: "worktrees", label: "Worktrees", icon: <GitBranch />, count: wtCount },
     { id: "apps", label: "Apps", icon: <AppWindow />, count: runnerCount },
     { id: "terminals", label: "Terminals", icon: <SquareTerminal />, count: termCount },
     { id: "prs", label: "PRs", icon: <GitPullRequest />, count: prOpen },
+    { id: "memory", label: "Memory", icon: <Brain />, count: memCount },
   ];
 
   return (
@@ -60,6 +70,7 @@ export function RightPanel({ chat }: { chat: Chat }) {
         {tab === "apps" && <RunnerPanel chat={chat} />}
         {tab === "terminals" && <TerminalsPanel chat={chat} />}
         {tab === "prs" && <PRsPanel chat={chat} />}
+        {tab === "memory" && <MemoryPanel chat={chat} />}
       </ScrollArea>
     </aside>
   );

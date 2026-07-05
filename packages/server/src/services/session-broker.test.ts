@@ -10,6 +10,7 @@ import {
   EFFORT_THINKING_TOKENS,
   type QueryFn,
 } from "./session-broker.js";
+import { MemoryService } from "./memory.js";
 
 /* ------------------------------------------------------------------ fixtures */
 
@@ -1000,6 +1001,65 @@ describe("SessionBroker — subagent nesting", () => {
     expect(tool && "parentToolUseId" in tool ? tool.parentToolUseId : "x").toBeFalsy();
     const res = rows.find((r) => r.kind === "tool_result");
     expect(res && "subagentType" in res ? res.subagentType : undefined).toBeUndefined();
+  });
+});
+
+describe("SessionBroker — project memory injection", () => {
+  /** Build a broker wired to a MemoryService (kept out of the shared makeBroker). */
+  function makeMemoryBroker(fn: QueryFn, memory: MemoryService): SessionBroker {
+    let idc = 0;
+    let clock = 1000;
+    const broker = new SessionBroker({
+      store,
+      bus,
+      memory,
+      deps: { query: fn, genId: () => `id-${++idc}`, now: () => ++clock },
+    });
+    brokers.push(broker);
+    return broker;
+  }
+
+  it("injects the project's memory index (index + descriptions) into the system prompt append", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const memory = new MemoryService({ store, bus });
+    await memory.write("p1", {
+      name: "deploy-runbook",
+      description: "how we ship to prod",
+      type: "project",
+      body: "run pnpm ship, the bot merges",
+    });
+    const broker = makeMemoryBroker(fn, memory);
+    await store.saveChat(chatFor("c1", "p1"));
+    broker.create(chatFor("c1", "p1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    const opts = controllers[0]!.options as { systemPrompt?: { append?: string } };
+    expect(opts.systemPrompt?.append).toBeDefined();
+    const append = opts.systemPrompt!.append!;
+    expect(append).toContain("Project memory");
+    expect(append).toContain("deploy-runbook");
+    expect(append).toContain("how we ship to prod");
+    // Bounded — the full body is not injected.
+    expect(append).not.toContain("the bot merges");
+  });
+
+  it("injects nothing for a project with no memories", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const memory = new MemoryService({ store, bus });
+    const broker = makeMemoryBroker(fn, memory);
+    await store.saveChat(chatFor("c1", "p1"));
+    broker.create(chatFor("c1", "p1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    // No mode instructions + no memories → no systemPrompt append at all.
+    const opts = controllers[0]!.options as { systemPrompt?: unknown };
+    expect(opts.systemPrompt).toBeUndefined();
   });
 });
 

@@ -50,6 +50,7 @@ import type {
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import type { TerminalService } from "./terminal.js";
+import type { MemoryService } from "./memory.js";
 import { createManagerMcpServer } from "./mcp/manager-mcp.js";
 
 /* ------------------------------------------------------------------ deps */
@@ -74,6 +75,8 @@ export interface SessionBrokerOptions {
   maxActiveSessions?: number;
   /** Persistent-terminal service exposed to sessions as `mcp__manager__terminal`. */
   terminals?: TerminalService;
+  /** Per-project agent memory: injected at start + exposed as `mcp__manager__remember|recall|forget`. */
+  memory?: MemoryService;
   deps?: SessionBrokerDeps;
 }
 
@@ -445,6 +448,7 @@ export class SessionBroker {
   private readonly bus: EventBus;
   private readonly cap: number;
   private readonly terminals?: TerminalService;
+  private readonly memory?: MemoryService;
   private readonly query: QueryFn;
   private readonly genId: () => string;
   private readonly now: () => number;
@@ -458,6 +462,7 @@ export class SessionBroker {
     this.bus = opts.bus;
     this.cap = Math.max(1, opts.maxActiveSessions ?? 6);
     this.terminals = opts.terminals;
+    this.memory = opts.memory;
     this.query = opts.deps?.query ?? (sdkQuery as unknown as QueryFn);
     this.genId = opts.deps?.genId ?? (() => nanoid());
     this.now = opts.deps?.now ?? (() => Date.now());
@@ -1501,6 +1506,19 @@ export class SessionBroker {
     const appends: string[] = [];
     if (mode?.instructions) appends.push(mode.instructions);
 
+    // Read-at-start: inject the project's durable memory (index + one-line
+    // descriptions, bounded — never full bodies) so every session begins knowing
+    // the team's recorded facts. Empty project → nothing injected. Best-effort: a
+    // read failure must never block a turn from starting.
+    if (this.memory && session.projectId) {
+      try {
+        const injection = await this.memory.buildInjection(session.projectId);
+        if (injection) appends.push(injection);
+      } catch {
+        /* no memory injection this turn */
+      }
+    }
+
     if (agent) {
       const def: AgentDefinition = {
         description: agent.name || "Custom agent",
@@ -1527,6 +1545,8 @@ export class SessionBroker {
     // project-configured MCP servers; the session's abort signal cancels any
     // in-flight wait on stop/fork.
     const terminals = this.terminals;
+    const memory = this.memory;
+    const projectId = session.projectId;
     options.mcpServers = {
       ...(project?.mcpServers as unknown as Record<string, SdkMcpServerConfig> | undefined),
       manager: createManagerMcpServer({
@@ -1541,6 +1561,16 @@ export class SessionBroker {
                 terminals.run({ chatId: session.chatId, cwd, ...a }),
             }
           : undefined,
+        // Bind the memory runner to this session's project, so remember/recall/
+        // forget just name the fact (scoped to the chat's project).
+        memory:
+          memory && projectId
+            ? {
+                remember: (input) => memory.write(projectId, input),
+                recall: (query) => memory.recall(projectId, query),
+                forget: (name) => memory.delete(projectId, name),
+              }
+            : undefined,
         signal: session.abortController?.signal,
         now: this.now,
       }),

@@ -20,6 +20,7 @@ import {
   WorkflowRunSchema,
   WorktreeInfoSchema,
   TerminalInfoSchema,
+  ProjectMemorySchema,
 } from "./domain.js";
 import {
   ChatMessageSchema,
@@ -178,6 +179,20 @@ export const ProjectUpdateEventSchema = z.object({
   project: ProjectSchema,
 });
 
+/** A project memory was created or updated (agent `remember` or panel edit). */
+export const MemoryUpdateEventSchema = z.object({
+  type: z.literal("memory-update"),
+  projectId: z.string(),
+  memory: ProjectMemorySchema,
+});
+
+/** A project memory was deleted (agent `forget` or panel delete). */
+export const MemoryDeletedEventSchema = z.object({
+  type: z.literal("memory-deleted"),
+  projectId: z.string(),
+  name: z.string(),
+});
+
 /** A transient toast/notice. */
 export const NoticeEventSchema = z.object({
   type: z.literal("notice"),
@@ -215,6 +230,8 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   ChatUpdateEventSchema,
   ChatDeletedEventSchema,
   ProjectUpdateEventSchema,
+  MemoryUpdateEventSchema,
+  MemoryDeletedEventSchema,
   NoticeEventSchema,
   ErrorEventSchema,
 ]);

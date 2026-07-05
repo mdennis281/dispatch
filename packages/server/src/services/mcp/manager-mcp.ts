@@ -25,7 +25,7 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod";
-import type { ChatStatus } from "@cm/shared";
+import { MemoryTypeSchema, type ChatStatus, type ProjectMemory } from "@cm/shared";
 import type { EventBus } from "../../bus.js";
 
 /** Hard ceiling on a single `wait` (also the default `wait_for_chat` timeout). */
@@ -66,6 +66,23 @@ export interface ManagerMcpTerminals {
   }>;
 }
 
+/**
+ * The narrow project-memory surface the manager MCP needs — already bound to the
+ * session's project by the broker, so the agent just names the fact. Omitted when
+ * the session has no project (then the `remember` / `recall` / `forget` tools
+ * aren't offered).
+ */
+export interface ManagerMcpMemory {
+  remember(input: {
+    name: string;
+    description: string;
+    type: "user" | "feedback" | "project" | "reference";
+    body: string;
+  }): Promise<ProjectMemory>;
+  recall(query?: string): Promise<{ index: string; matches: ProjectMemory[] }>;
+  forget(name: string): Promise<boolean>;
+}
+
 /** Per-session context the factory closes over. */
 export interface ManagerMcpContext {
   /** The chat this session drives (for the waiting status label). */
@@ -74,6 +91,8 @@ export interface ManagerMcpContext {
   broker: ManagerMcpBroker;
   /** Persistent-terminal runner for this session (omitted → no `terminal` tool). */
   terminals?: ManagerMcpTerminals;
+  /** Project-memory runner for this session (omitted → no memory tools). */
+  memory?: ManagerMcpMemory;
   /** The session's abort signal — cancels in-flight waits on stop/fork. */
   signal?: AbortSignal;
   now?: () => number;
@@ -338,7 +357,115 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
-  return { wait, waitForChat, terminal };
+  const remember = tool(
+    "remember",
+    "Record a DURABLE fact about THIS project that should survive across chats " +
+      "(a preference, a piece of feedback, an architecture fact, or a pointer to " +
+      "reference material). It is saved to the project's shared memory and injected " +
+      "into every future session at start. Reuse the same `name` to UPDATE an " +
+      "existing memory. Keep `description` to one line; put the detail in `body`.",
+    {
+      name: z
+        .string()
+        .describe("Short kebab-case identity, e.g. 'deploy-runbook'. Reusing it overwrites."),
+      description: z
+        .string()
+        .describe("One-line summary shown in the index + injected into future prompts."),
+      type: MemoryTypeSchema.describe(
+        "user = a durable preference; feedback = a correction/lesson; project = a " +
+          "codebase/architecture fact; reference = a pointer to docs/material.",
+      ),
+      body: z.string().describe("The full fact, in markdown."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.memory) {
+        return textResult("Project memory is not available in this session.", true);
+      }
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      if (!name) return textResult("remember requires a non-empty name.", true);
+      try {
+        const memory = await ctx.memory.remember({
+          name,
+          description: typeof args.description === "string" ? args.description : "",
+          type: args.type,
+          body: typeof args.body === "string" ? args.body : "",
+        });
+        return textResult(
+          `Remembered "${memory.name}" (${memory.type}). It's saved to project memory ` +
+            "and will be injected into future sessions. Use recall to read it back.",
+        );
+      } catch (err) {
+        return textResult(
+          `Could not record that memory: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const recall = tool(
+    "recall",
+    "Look up this project's durable memory. With no query you get the index (one " +
+      "line per memory); with a query you also get the FULL body of every memory " +
+      "whose name/description/body matches — use it to pull a fact on demand.",
+    {
+      query: z
+        .string()
+        .optional()
+        .describe("Optional search term; omit to just list the memory index."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.memory) {
+        return textResult("Project memory is not available in this session.", true);
+      }
+      const query = typeof args.query === "string" ? args.query.trim() : "";
+      try {
+        const { index, matches } = await ctx.memory.recall(query || undefined);
+        if (!query) return textResult(index);
+        if (!matches.length) {
+          return textResult(`No memories matched "${query}".\n\n${index}`);
+        }
+        const bodies = matches
+          .map((m) => `### ${m.name} (${m.type})\n${m.description}\n\n${m.body}`)
+          .join("\n\n---\n\n");
+        return textResult(`${matches.length} match(es) for "${query}":\n\n${bodies}`);
+      } catch (err) {
+        return textResult(
+          `Could not recall memory: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const forget = tool(
+    "forget",
+    "Delete a durable project memory by name. Use when a recorded fact is wrong or " +
+      "no longer relevant so it stops being injected into future sessions.",
+    {
+      name: z.string().describe("The memory's name (as shown by recall)."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.memory) {
+        return textResult("Project memory is not available in this session.", true);
+      }
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      if (!name) return textResult("forget requires a non-empty name.", true);
+      try {
+        const removed = await ctx.memory.forget(name);
+        return removed
+          ? textResult(`Forgot memory "${name}".`)
+          : textResult(`No memory named "${name}" to forget.`, true);
+      } catch (err) {
+        return textResult(
+          `Could not forget that memory: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  return { wait, waitForChat, terminal, remember, recall, forget };
 }
 
 /**
@@ -349,10 +476,16 @@ export function createManagerTools(ctx: ManagerMcpContext) {
 export function createManagerMcpServer(
   ctx: ManagerMcpContext,
 ): McpSdkServerConfigWithInstance {
-  const { wait, waitForChat, terminal } = createManagerTools(ctx);
-  // The `terminal` tool is only meaningful when a TerminalService is wired in;
-  // omit it otherwise so the agent isn't offered a dead tool.
-  const tools = ctx.terminals ? [wait, waitForChat, terminal] : [wait, waitForChat];
+  const { wait, waitForChat, terminal, remember, recall, forget } =
+    createManagerTools(ctx);
+  // Each tool is only meaningful when its backing service is wired in; omit the
+  // dead ones so the agent isn't offered a tool it can't use.
+  const tools = [
+    wait,
+    waitForChat,
+    ...(ctx.terminals ? [terminal] : []),
+    ...(ctx.memory ? [remember, recall, forget] : []),
+  ];
   return createSdkMcpServer({
     name: "manager",
     version: "1.0.0",

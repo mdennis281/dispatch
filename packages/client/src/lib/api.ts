@@ -22,6 +22,8 @@ import type {
   WorkflowInput,
   ImageRef,
   Checkpoint,
+  ProjectMemory,
+  MemoryType,
 } from "@cm/shared";
 
 /**
@@ -197,6 +199,31 @@ export const api = {
     update: (id: string, body: Partial<ModeConfig>) =>
       put<ModeConfig>(`/api/modes/${id}`, body),
     remove: (id: string) => del<void>(`/api/modes/${id}`),
+  },
+
+  /* per-project agent memory (durable, cross-chat facts) */
+  memory: {
+    list: (projectId: string) =>
+      get<ProjectMemory[]>(`/api/projects/${projectId}/memory`),
+    get: (projectId: string, name: string) =>
+      get<ProjectMemory>(
+        `/api/projects/${projectId}/memory/${encodeURIComponent(name)}`,
+      ),
+    create: (
+      projectId: string,
+      body: { name: string; description: string; type: MemoryType; body: string },
+    ) => post<ProjectMemory>(`/api/projects/${projectId}/memory`, body),
+    update: (
+      projectId: string,
+      name: string,
+      body: { description: string; type: MemoryType; body: string },
+    ) =>
+      put<ProjectMemory>(
+        `/api/projects/${projectId}/memory/${encodeURIComponent(name)}`,
+        body,
+      ),
+    remove: (projectId: string, name: string) =>
+      del<void>(`/api/projects/${projectId}/memory/${encodeURIComponent(name)}`),
   },
 
   /* attention queue snapshot */

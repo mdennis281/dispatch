@@ -18,6 +18,7 @@ import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
+import { MemoryService } from "./memory.js";
 import { makeFakeQuery } from "./fake-sdk.js";
 import { TitleService, makeFakeTitleQuery } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
@@ -39,6 +40,7 @@ export interface ServiceBase {
 export interface ServiceOverrides {
   broker?: SessionBroker;
   terminals?: TerminalService;
+  memory?: MemoryService;
   title?: TitleService;
   checkpoints?: CheckpointService;
   worktrees?: WorktreeService;
@@ -53,6 +55,7 @@ export interface ServiceOverrides {
 export interface Services extends ServiceBase {
   broker: SessionBroker;
   terminals: TerminalService;
+  memory: MemoryService;
   title: TitleService;
   checkpoints: CheckpointService;
   worktrees: WorktreeService;
@@ -80,6 +83,9 @@ export function createServices(
     process.env.CM_FAKE_SDK === "1" ? { query: makeFakeQuery() } : undefined;
   // Persistent named shells exposed to sessions as `mcp__manager__terminal`.
   const terminals = overrides.terminals ?? new TerminalService({ bus });
+  // Per-project durable agent memory: injected at session start + exposed to the
+  // agent as `mcp__manager__remember|recall|forget`, and curated in the UI.
+  const memory = overrides.memory ?? new MemoryService({ store, bus });
   const broker =
     overrides.broker ??
     new SessionBroker({
@@ -87,6 +93,7 @@ export function createServices(
       bus,
       maxActiveSessions: config.maxActiveSessions,
       terminals,
+      memory,
       deps: brokerDeps,
     });
   const title =
@@ -124,6 +131,7 @@ export function createServices(
     bus,
     broker,
     terminals,
+    memory,
     title,
     checkpoints,
     worktrees,

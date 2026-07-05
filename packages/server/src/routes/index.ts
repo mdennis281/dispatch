@@ -10,6 +10,7 @@ import { registerChatRoutes } from "./chats.js";
 import { registerAssetRoutes } from "./assets.js";
 import { registerAgentRoutes } from "./agents.js";
 import { registerModeRoutes } from "./modes.js";
+import { registerMemoryRoutes } from "./memory.js";
 import { registerWorktreeRoutes } from "./worktrees.js";
 import { registerRunnerRoutes } from "./runner.js";
 import { registerTerminalRoutes } from "./terminals.js";
@@ -24,6 +25,7 @@ export function registerRoutes(app: FastifyInstance): void {
   registerAssetRoutes(app);
   registerAgentRoutes(app);
   registerModeRoutes(app);
+  registerMemoryRoutes(app);
   registerWorktreeRoutes(app);
   registerRunnerRoutes(app);
   registerTerminalRoutes(app);

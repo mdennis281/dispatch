@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { ChatStatus, WsServerEvent } from "@cm/shared";
+import type { ChatStatus, WsServerEvent, ProjectMemory } from "@cm/shared";
 import { EventBus } from "../../bus.js";
 import {
   createManagerTools,
   createManagerMcpServer,
   WAIT_CAP_SECONDS,
   type ManagerMcpBroker,
+  type ManagerMcpMemory,
 } from "./manager-mcp.js";
 
 /* ------------------------------------------------------------------ fixtures */
@@ -247,6 +248,131 @@ describe("manager-mcp — terminal", () => {
     const res = await terminal.handler({ name: "x", command: "   ", timeoutMs: undefined }, {});
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("requires a command");
+  });
+});
+
+/* --------------------------------------------------------------- memory */
+
+/** An in-memory ManagerMcpMemory (round-trip without touching the fs). */
+function fakeMemory(): ManagerMcpMemory & { data: Map<string, ProjectMemory> } {
+  const data = new Map<string, ProjectMemory>();
+  const slug = (s: string) =>
+    s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return {
+    data,
+    remember: async (input) => {
+      const name = slug(input.name);
+      const m: ProjectMemory = {
+        projectId: "p1",
+        name,
+        description: input.description,
+        type: input.type,
+        body: input.body,
+        file: `${name}.md`,
+        updatedAt: 1,
+      };
+      data.set(name, m);
+      return m;
+    },
+    recall: async (query) => {
+      const all = [...data.values()];
+      const index = `# Project memory\n${all
+        .map((m) => `- [${m.name}](${m.file}) — ${m.description}`)
+        .join("\n")}`;
+      if (!query) return { index, matches: [] };
+      const q = query.toLowerCase();
+      return {
+        index,
+        matches: all.filter(
+          (m) =>
+            m.name.includes(q) ||
+            m.description.toLowerCase().includes(q) ||
+            m.body.toLowerCase().includes(q),
+        ),
+      };
+    },
+    forget: async (name) => data.delete(slug(name)),
+  };
+}
+
+describe("manager-mcp — memory tools", () => {
+  it("remember → recall → forget round-trips a project memory", async () => {
+    const mem = fakeMemory();
+    const { remember, recall, forget } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      memory: mem,
+    });
+
+    const rem = await remember.handler(
+      { name: "Deploy Runbook", description: "how we ship", type: "project", body: "run pnpm ship" },
+      {},
+    );
+    expect(rem.isError).toBeFalsy();
+    expect(resultText(rem)).toContain("deploy-runbook");
+    expect(mem.data.has("deploy-runbook")).toBe(true);
+
+    // recall with no query returns the index…
+    const idx = await recall.handler({ query: undefined }, {});
+    expect(resultText(idx)).toContain("[deploy-runbook](deploy-runbook.md)");
+
+    // …and a query returns the full body.
+    const hit = await recall.handler({ query: "ship" }, {});
+    expect(resultText(hit)).toContain("run pnpm ship");
+
+    const gone = await forget.handler({ name: "deploy-runbook" }, {});
+    expect(gone.isError).toBeFalsy();
+    expect(resultText(gone)).toContain("Forgot");
+    expect(mem.data.has("deploy-runbook")).toBe(false);
+  });
+
+  it("recall reports no matches (still returns the index) for a miss", async () => {
+    const mem = fakeMemory();
+    await mem.remember({ name: "x", description: "d", type: "project", body: "b" });
+    const { recall } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), memory: mem });
+    const res = await recall.handler({ query: "nomatch" }, {});
+    expect(resultText(res)).toContain('No memories matched "nomatch"');
+  });
+
+  it("forget of a missing memory is an informative error result", async () => {
+    const { forget } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      memory: fakeMemory(),
+    });
+    const res = await forget.handler({ name: "ghost" }, {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("No memory named");
+  });
+
+  it("remember requires a non-empty name", async () => {
+    const { remember } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      memory: fakeMemory(),
+    });
+    const res = await remember.handler({ name: "   ", description: "", type: "project", body: "b" }, {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("non-empty name");
+  });
+
+  it("reports unavailable when no MemoryService is wired", async () => {
+    const { remember, recall, forget } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+    });
+    for (const res of [
+      await remember.handler({ name: "a", description: "", type: "project", body: "b" }, {}),
+      await recall.handler({ query: undefined }, {}),
+      await forget.handler({ name: "a" }, {}),
+    ]) {
+      expect(res.isError).toBe(true);
+      expect(resultText(res)).toContain("not available");
+    }
   });
 });
 

@@ -77,6 +77,16 @@ export class Store {
   private projectsDir() {
     return join(this.dataDir, "projects");
   }
+  /**
+   * Absolute path to a project's agent-memory dir — one markdown file per memory
+   * plus a generated `MEMORY.md` index. Lives beside the `projects/<id>.json`
+   * entity (a `<id>` DIRECTORY next to the `<id>.json` FILE; no collision, and
+   * `listProjects` only reads `.json` files). Owned by the MemoryService, which
+   * creates it on demand.
+   */
+  projectMemoryDir(projectId: string) {
+    return join(this.projectsDir(), projectId, "memory");
+  }
   private agentsDir() {
     return join(this.dataDir, "agents");
   }

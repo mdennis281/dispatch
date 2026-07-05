@@ -366,6 +366,41 @@ export const CheckpointSchema = z.object({
 });
 export type Checkpoint = z.infer<typeof CheckpointSchema>;
 
+/* ------------------------------------------------------------- agent memory */
+
+/**
+ * Classification of a durable project memory. Mirrors the kinds the human's own
+ * Claude Code memory uses (a durable user preference, a piece of feedback, a
+ * project fact, or a pointer to reference material).
+ */
+export const MemoryTypeSchema = z.enum(["user", "feedback", "project", "reference"]);
+export type MemoryType = z.infer<typeof MemoryTypeSchema>;
+
+/**
+ * One durable, cross-chat fact scoped to a PROJECT. Persisted as a single
+ * markdown file (frontmatter `{ name, description, type }` + a markdown body)
+ * under `.data/projects/<projectId>/memory/<file>`, listed by a generated
+ * `MEMORY.md` index. The index + descriptions are injected into every session at
+ * start (read); agents append via `mcp__manager__remember` (write); the Memory
+ * panel curates them.
+ */
+export const ProjectMemorySchema = z.object({
+  /** Owning project id. */
+  projectId: z.string(),
+  /** Kebab-case slug — the memory's stable identity within its project. */
+  name: z.string(),
+  /** One-line description shown in the index + injected into the prompt. */
+  description: z.string(),
+  type: MemoryTypeSchema,
+  /** Full markdown body (the fact itself). */
+  body: z.string(),
+  /** Markdown filename within the project's memory dir (e.g. "my-fact.md"). */
+  file: z.string(),
+  /** Last write time (epoch ms). */
+  updatedAt: z.number().int().optional(),
+});
+export type ProjectMemory = z.infer<typeof ProjectMemorySchema>;
+
 /** A tracked GitHub workflow-dispatch job initiated from the UI. */
 export const WorkflowRunRequestSchema = z.object({
   id: z.string(),

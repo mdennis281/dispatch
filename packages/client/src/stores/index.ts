@@ -19,6 +19,7 @@ import { useAttention } from "./attention.js";
 import { useRunners } from "./runners.js";
 import { useTerminals } from "./terminals.js";
 import { usePanels } from "./panels.js";
+import { useMemory } from "./memory.js";
 import { useCheckpoints } from "./checkpoints.js";
 import { useNotices } from "./notices.js";
 
@@ -46,6 +47,7 @@ export { useAttention, useAttentionCount } from "./attention.js";
 export { useRunners, useChatRunners } from "./runners.js";
 export { useTerminals, useChatTerminals } from "./terminals.js";
 export { usePanels } from "./panels.js";
+export { useMemory, useProjectMemories } from "./memory.js";
 export { useCheckpoints, useHasCheckpoint } from "./checkpoints.js";
 export { useNotices } from "./notices.js";
 export type { Toast, NoticeLevel } from "./notices.js";
@@ -176,6 +178,16 @@ export function applyServerEvent(evt: WsServerEvent): void {
       useProjects.getState().upsertProject(evt.project);
       return;
 
+    case "memory-update":
+      // A memory was created/updated (agent `remember` or a panel edit) — upsert
+      // it so the Memory panel live-updates without a refetch.
+      useMemory.getState().upsert(evt.memory);
+      return;
+
+    case "memory-deleted":
+      useMemory.getState().remove(evt.projectId, evt.name);
+      return;
+
     case "notice":
       useNotices.getState().push({
         level: evt.level,
@@ -240,6 +252,7 @@ export async function hydrateFromServer(): Promise<boolean> {
   useTerminals.getState().hydrate(terminals, {});
   useMessages.getState().hydrate({});
   useCheckpoints.getState().reset();
+  useMemory.getState().reset();
   usePanels.getState().hydrate({ worktrees: [], diffs: {}, prs: [], workflowRuns: [] });
 
   // Keep the user where they were after a reconnect.
@@ -304,6 +317,17 @@ export async function loadProjectPanels(projectId: string): Promise<void> {
     prs,
     workflowRuns,
   });
+  void loadProjectMemory(projectId);
+}
+
+/** Fetch a project's durable agent memory into the store (Memory panel spine). */
+export async function loadProjectMemory(projectId: string): Promise<void> {
+  try {
+    const memories = await api.memory.list(projectId);
+    useMemory.getState().setForProject(projectId, memories);
+  } catch {
+    /* a failed fetch just leaves the panel empty until the next attempt */
+  }
 }
 
 /** Fetch + cache a worktree's diff-vs-base summary (stat line for the panel). */
