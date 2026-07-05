@@ -9,7 +9,9 @@
     "build": "vite build",
     "preview": "vite preview --port 4321 --strictPort",
     "typecheck": "tsc --noEmit",
-    "shot": "node scripts/shot.mjs"
+    "shot": "node scripts/shot.mjs",
+    "e2e": "playwright test",
+    "e2e:smoke": "playwright test verify-smoke"
   },
   "dependencies": {
     "@cm/shared": "workspace:*",

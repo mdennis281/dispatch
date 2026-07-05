@@ -12,7 +12,8 @@
     "start": "pnpm --filter @cm/server start",
     "dev": "concurrently -k -n server,client -c blue,magenta \"pnpm --filter @cm/server dev\" \"pnpm --filter @cm/client dev\"",
     "test": "pnpm --filter @cm/server exec vitest run",
-    "spike": "pnpm --filter @cm/server spike"
+    "spike": "pnpm --filter @cm/server spike",
+    "verify": "node tools/verify/shot.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

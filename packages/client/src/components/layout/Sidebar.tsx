@@ -237,6 +237,7 @@ function ChatRow({
   return (
     <div className="group/row relative">
       <button
+        data-testid="chat-row"
         onClick={onClick}
         className={cn(
           "relative flex w-full items-center gap-2.5 rounded-md py-1.5 pl-2.5 pr-8 text-left transition-colors",
