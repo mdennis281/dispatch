@@ -86,15 +86,20 @@ export function createServices(
     process.env.CM_FAKE_SDK === "1" ? { query: makeFakeQuery() } : undefined;
   // Persistent named shells exposed to sessions as `mcp__manager__terminal`.
   const terminals = overrides.terminals ?? new TerminalService({ bus });
-  // Per-project durable agent memory: injected at session start + exposed to the
-  // agent as `mcp__manager__remember|recall|forget`, and curated in the UI.
-  const memory = overrides.memory ?? new MemoryService({ store, bus });
   // Self-contained `.claude-manager/` project config: discovers + validates the
   // authored config in a managed repo, syncs it into the project store (authored
   // overrides `.data`), and watches it for live reload. Projects without a
   // `.claude-manager/` fall back to the `.data` store untouched (back-compat).
+  // Constructed before `memory` so it can relocate a config-dir project's memory
+  // to the repo's committable `.claude-manager/memory/` source of truth.
   const projectConfig =
     overrides.projectConfig ?? new ProjectConfigService({ store, bus });
+  // Per-project durable agent memory: injected at session start + exposed to the
+  // agent as `mcp__manager__remember|recall|forget`, and curated in the UI. Reads
+  // from the repo `.claude-manager/memory/` when the project has a config dir
+  // (source of truth), else the `.data` store (back-compat).
+  const memory =
+    overrides.memory ?? new MemoryService({ store, bus, projectConfig });
   // GitHub control plane (PRs + Actions). Constructed before the broker so it can
   // back the session MCP's `wait_for_pr` PR merge-state poll.
   const github = overrides.github ?? new GitHubService({ bus, store });
@@ -136,6 +141,7 @@ export function createServices(
 
   let offCheckpoint: (() => void) | undefined;
   let offTitle: (() => void) | undefined;
+  let offMemoryMigrate: (() => void) | undefined;
 
   const services: Services = {
     config,
@@ -155,6 +161,15 @@ export function createServices(
     attention,
 
     async start(): Promise<void> {
+      // One-time transparent memory migration: when a project has (or gains) a
+      // `.claude-manager/` config, copy any legacy `.data` memories into the
+      // repo `memory/` source of truth. Subscribed BEFORE `projectConfig.start()`
+      // so the per-project load events it fires drive migration on boot too.
+      // Idempotent + best-effort.
+      offMemoryMigrate = bus.on("project-config-update", (evt) => {
+        if (evt.config) void memory.migrateProject(evt.projectId).catch(() => {});
+      });
+
       // Discover + sync every project's `.claude-manager/` config FIRST so the
       // store reflects authored overrides before the detector/broker read it.
       // Best-effort — a bad config surfaces as a structured error, never a block.
@@ -215,6 +230,8 @@ export function createServices(
       offCheckpoint = undefined;
       offTitle?.();
       offTitle = undefined;
+      offMemoryMigrate?.();
+      offMemoryMigrate = undefined;
       // Unsubscribe FIRST (so broker teardown's `done` events don't enqueue new
       // detection), then drain any in-flight pass so no `git` subprocess outlives
       // the dataDir/worktree it was spawned against.

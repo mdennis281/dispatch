@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
@@ -151,5 +151,118 @@ describe("MemoryService — injection + recall", () => {
     const hit = await memory.recall("p1", "deploy");
     expect(hit.matches.map((m) => m.name)).toEqual(["beta"]);
     expect(hit.matches[0]?.body).toBe("DEPLOY DETAIL");
+  });
+});
+
+describe("MemoryService — .claude-manager/ config dir source of truth", () => {
+  // Project "cfg" has a config dir → memory lives in the repo memory dir;
+  // project "plain" has none → back-compat `.data` store.
+  let repoMemoryDir: string;
+  let cfgMemory: MemoryService;
+
+  beforeEach(() => {
+    repoMemoryDir = join(dir, "repo", ".claude-manager", "memory");
+    const resolver = {
+      getConfig: (projectId: string) =>
+        projectId === "cfg" ? { memoryDir: repoMemoryDir } : null,
+    };
+    let clock = 2000;
+    cfgMemory = new MemoryService({ store, bus, now: () => ++clock, projectConfig: resolver });
+  });
+
+  it("writes a config-dir project's memory into the repo dir (+ index) — not .data — and injection reflects it", async () => {
+    await cfgMemory.write("cfg", {
+      name: "repo-fact",
+      description: "lives in the repo",
+      type: "project",
+      body: "REPO BODY",
+    });
+
+    // The `.md` + regenerated `MEMORY.md` land in the REPO dir…
+    expect(existsSync(join(repoMemoryDir, "repo-fact.md"))).toBe(true);
+    const idx = await readFile(join(repoMemoryDir, "MEMORY.md"), "utf8");
+    expect(idx).toContain("- [repo-fact](repo-fact.md) — lives in the repo");
+    // …and NOT in the legacy `.data` store.
+    expect(existsSync(join(store.projectMemoryDir("cfg"), "repo-fact.md"))).toBe(false);
+
+    // Reads + injection route through the repo dir too.
+    expect((await cfgMemory.read("cfg", "repo-fact"))?.body).toBe("REPO BODY");
+    const injection = await cfgMemory.buildInjection("cfg");
+    expect(injection).toContain("**repo-fact** (project) — lives in the repo");
+
+    // The memory-update event fired as usual (client sees no difference).
+    expect(events.some((e) => e.type === "memory-update" && e.memory.name === "repo-fact")).toBe(true);
+  });
+
+  it("forget removes a config-dir memory from the repo dir + regenerates the index", async () => {
+    await cfgMemory.write("cfg", { name: "keep", description: "stays", type: "project", body: "1" });
+    await cfgMemory.write("cfg", { name: "drop", description: "goes", type: "project", body: "2" });
+    expect(existsSync(join(repoMemoryDir, "drop.md"))).toBe(true);
+
+    expect(await cfgMemory.delete("cfg", "drop")).toBe(true);
+    expect(existsSync(join(repoMemoryDir, "drop.md"))).toBe(false);
+    const idx = await readFile(join(repoMemoryDir, "MEMORY.md"), "utf8");
+    expect(idx).not.toContain("drop.md");
+    expect(idx).toContain("keep.md");
+    expect(events.some((e) => e.type === "memory-deleted" && e.name === "drop")).toBe(true);
+  });
+
+  it("a project WITHOUT a config dir still uses the .data store (back-compat)", async () => {
+    await cfgMemory.write("plain", { name: "legacy-home", description: "d", type: "project", body: "b" });
+    expect(existsSync(join(store.projectMemoryDir("plain"), "legacy-home.md"))).toBe(true);
+    expect(existsSync(join(repoMemoryDir, "legacy-home.md"))).toBe(false);
+  });
+
+  it("migrates legacy .data memories into the repo dir, idempotently, without deleting the originals", async () => {
+    // Seed a legacy `.data` memory via the plain (config-less) service.
+    await memory.write("cfg", { name: "legacy", description: "from .data", type: "project", body: "LEGACY BODY" });
+    const legacyPath = join(store.projectMemoryDir("cfg"), "legacy.md");
+    expect(existsSync(legacyPath)).toBe(true);
+
+    events.length = 0;
+    await cfgMemory.migrateProject("cfg");
+
+    // Copied into the repo dir (+ index regenerated) …
+    expect(existsSync(join(repoMemoryDir, "legacy.md"))).toBe(true);
+    expect((await cfgMemory.read("cfg", "legacy"))?.body).toBe("LEGACY BODY");
+    expect(await readFile(join(repoMemoryDir, "MEMORY.md"), "utf8")).toContain("[legacy](legacy.md)");
+    // … the legacy original is left in place …
+    expect(existsSync(legacyPath)).toBe(true);
+    // … and a memory-update fired so open UIs refresh.
+    expect(events.some((e) => e.type === "memory-update" && e.memory.name === "legacy")).toBe(true);
+
+    // Idempotent: re-running does NOT clobber a repo copy that has since diverged.
+    await writeFile(
+      join(repoMemoryDir, "legacy.md"),
+      "---\nname: legacy\ndescription: edited in repo\ntype: project\n---\n\nEDITED BODY\n",
+      "utf8",
+    );
+    await cfgMemory.migrateProject("cfg");
+    expect((await cfgMemory.read("cfg", "legacy"))?.body).toBe("EDITED BODY");
+  });
+
+  it("migrateProject is a no-op for a project without a config dir", async () => {
+    await memory.write("plain", { name: "x", description: "d", type: "project", body: "b" });
+    // Should neither throw nor create anything under a (non-existent) repo dir.
+    await cfgMemory.migrateProject("plain");
+    expect(existsSync(join(dir, "plain-repo"))).toBe(false);
+  });
+
+  it("copies every legacy memory but skips ones already present in the repo dir", async () => {
+    await memory.write("cfg", { name: "a", description: "da", type: "project", body: "A" });
+    await memory.write("cfg", { name: "b", description: "db", type: "project", body: "B" });
+    // Pre-seed one of them in the repo dir with a divergent body.
+    await mkdir(repoMemoryDir, { recursive: true });
+    await writeFile(
+      join(repoMemoryDir, "a.md"),
+      "---\nname: a\ndescription: repo wins\ntype: project\n---\n\nREPO A\n",
+      "utf8",
+    );
+
+    await cfgMemory.migrateProject("cfg");
+
+    // "b" copied fresh; "a" kept the pre-existing repo version.
+    expect((await cfgMemory.read("cfg", "b"))?.body).toBe("B");
+    expect((await cfgMemory.read("cfg", "a"))?.body).toBe("REPO A");
   });
 });
