@@ -13,6 +13,9 @@ interface ProjectsStore {
     modes: ModeConfig[];
   }) => void;
   upsertProject: (p: Project) => void;
+  /** Replace just the agent/mode picker lists (e.g. after a `.claude-manager/`
+   *  config reload) without disturbing projects or the active selection. */
+  setConfigLists: (data: { agents: AgentConfig[]; modes: ModeConfig[] }) => void;
 }
 
 /** Projects + their agents/modes config, and which project is in focus. */
@@ -35,6 +38,7 @@ export const useProjects = create<ProjectsStore>((set) => ({
       const projects = i === -1 ? [...s.projects, p] : s.projects.map((x) => (x.id === p.id ? p : x));
       return { projects };
     }),
+  setConfigLists: ({ agents, modes }) => set({ agents, modes }),
 }));
 
 /** Selector: the currently-focused project record (or null). */

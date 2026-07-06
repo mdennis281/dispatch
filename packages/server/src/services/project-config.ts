@@ -35,6 +35,7 @@ import {
   ProjectConfigResultSchema,
   AgentConfigSchema,
   ConfigModeSchema,
+  ModeConfigSchema,
   PermissionModeSchema,
   CONFIG_DIR_NAME,
   MANIFEST_FILE,
@@ -48,6 +49,7 @@ import {
   type ProjectConfigError,
   type NormalizedInstruction,
   type ConfigMode,
+  type ModeConfig,
   type AgentConfig,
   type SubApp,
   type McpServerConfig,
@@ -75,6 +77,64 @@ export interface ProjectConfigServiceOptions {
 }
 
 /* ------------------------------------------------------------------ helpers */
+
+/**
+ * Upper bound on the authored-instructions text injected into a session's
+ * system prompt. Long-form instructions live in the append; a runaway file is
+ * clamped (with a visible marker) so it can't blow the prompt budget.
+ */
+export const MAX_INSTRUCTION_INJECTION_CHARS = 24_000;
+
+/**
+ * Render a project's concatenated authored instructions into a clearly-delimited,
+ * bounded system-prompt append section. Returns null for empty/blank text so an
+ * unconfigured (or instruction-less) project injects nothing.
+ */
+export function renderInstructionsInjection(
+  text: string | null | undefined,
+): string | null {
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed) return null;
+  const bounded =
+    trimmed.length > MAX_INSTRUCTION_INJECTION_CHARS
+      ? `${trimmed.slice(0, MAX_INSTRUCTION_INJECTION_CHARS)}\n\n… (instructions truncated)`
+      : trimmed;
+  return [
+    "## Project instructions",
+    "_Authored in `.claude-manager/` — project-specific house rules for this repo._",
+    "",
+    bounded,
+  ].join("\n");
+}
+
+/** Map a config-authored {@link ConfigMode} onto the store {@link ModeConfig}
+ *  shape (a named permission posture) so it flows through the same mode
+ *  registry the broker/UI already consume. Config modes are project-scoped. */
+export function configModeToModeConfig(
+  mode: ConfigMode,
+  projectId: string,
+): ModeConfig {
+  return ModeConfigSchema.parse({
+    id: mode.id,
+    name: mode.name,
+    permissionMode: mode.permissionMode,
+    scope: "project",
+    projectId,
+  });
+}
+
+/**
+ * Merge two id-keyed lists with `preferred` winning on id collision: every
+ * `preferred` entry, plus each `fallback` entry whose id isn't already present.
+ * Used so config-sourced agents/modes take precedence over `.data`-defined ones.
+ */
+export function mergeById<T extends { id: string }>(
+  preferred: T[],
+  fallback: T[],
+): T[] {
+  const seen = new Set(preferred.map((e) => e.id));
+  return [...preferred, ...fallback.filter((e) => !seen.has(e.id))];
+}
 
 /** Kebab-case slug — a stable id from a free-text name / filename. */
 export function slugifyConfigName(name: string): string {
@@ -230,6 +290,63 @@ export class ProjectConfigService {
   /** True when a project has a valid `.claude-manager/` config loaded. */
   hasConfig(projectId: string): boolean {
     return !!this.cache.get(projectId)?.config;
+  }
+
+  /* ----------------------------------------------------- agent/mode registry */
+
+  /**
+   * Every config-sourced agent across all loaded projects (already
+   * project-scoped {@link AgentConfig}s). The broker + the `GET /api/agents`
+   * listing merge these OVER the `.data` store (config wins on id collision).
+   */
+  configAgents(): AgentConfig[] {
+    const out: AgentConfig[] = [];
+    for (const result of this.cache.values()) {
+      if (result.config) out.push(...result.config.agents);
+    }
+    return out;
+  }
+
+  /** A config-sourced agent by id (first match across projects), else null. */
+  getAgent(id: string): AgentConfig | null {
+    for (const result of this.cache.values()) {
+      const found = result.config?.agents.find((a) => a.id === id);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /**
+   * Every config-sourced mode mapped onto the store {@link ModeConfig} shape,
+   * across all loaded projects. Consumed by the broker's permission-mode
+   * resolution + the `GET /api/modes` listing (config wins on id collision).
+   */
+  configModes(): ModeConfig[] {
+    const out: ModeConfig[] = [];
+    for (const [projectId, result] of this.cache) {
+      for (const mode of result.config?.modes ?? []) {
+        out.push(configModeToModeConfig(mode, projectId));
+      }
+    }
+    return out;
+  }
+
+  /** A config-sourced mode by id (first match across projects), else null. */
+  getMode(id: string): ModeConfig | null {
+    for (const [projectId, result] of this.cache) {
+      const found = result.config?.modes.find((m) => m.id === id);
+      if (found) return configModeToModeConfig(found, projectId);
+    }
+    return null;
+  }
+
+  /**
+   * The bounded, clearly-delimited system-prompt append for a project's authored
+   * custom instructions (from its `.claude-manager/` config), or null when the
+   * project has no config / no instructions — so nothing is injected.
+   */
+  buildInstructionsInjection(projectId: string): string | null {
+    return renderInstructionsInjection(this.getConfig(projectId)?.instructionsText);
   }
 
   /**

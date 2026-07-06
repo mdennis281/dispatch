@@ -1,16 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
-import type { WsServerEvent, Chat } from "@cm/shared";
+import type { WsServerEvent, Chat, Project } from "@cm/shared";
 import {
   SessionBroker,
   EFFORT_THINKING_TOKENS,
   type QueryFn,
 } from "./session-broker.js";
 import { MemoryService } from "./memory.js";
+import { ProjectConfigService } from "./project-config.js";
 
 /* ------------------------------------------------------------------ fixtures */
 
@@ -19,6 +20,8 @@ let store: Store;
 let bus: EventBus;
 let events: WsServerEvent[];
 let brokers: SessionBroker[];
+/** Extra temp dirs (e.g. managed-repo `.claude-manager/` roots) to clean up. */
+let tempDirs: string[];
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "cm-broker-"));
@@ -27,6 +30,7 @@ beforeEach(async () => {
   bus = new EventBus();
   events = [];
   brokers = [];
+  tempDirs = [];
   bus.subscribe((e) => events.push(e));
 });
 afterEach(async () => {
@@ -37,6 +41,9 @@ afterEach(async () => {
   // awaits each run loop; the retrying rm absorbs any last straggler on Windows.
   await Promise.all(brokers.map((b) => b.dispose().catch(() => {})));
   await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  for (const d of tempDirs) {
+    await rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
 });
 
 function chatFor(id: string, projectId = "p1"): Chat {
@@ -1058,6 +1065,130 @@ describe("SessionBroker — project memory injection", () => {
     await idleP;
 
     // No mode instructions + no memories → no systemPrompt append at all.
+    const opts = controllers[0]!.options as { systemPrompt?: unknown };
+    expect(opts.systemPrompt).toBeUndefined();
+  });
+});
+
+describe("SessionBroker — config-sourced instructions / agents / modes", () => {
+  /** Write a file under a repo's `.claude-manager/` dir (creating parents). */
+  async function writeConfig(repoDir: string, rel: string, body: string): Promise<void> {
+    const abs = join(repoDir, ".claude-manager", rel);
+    await mkdir(join(abs, ".."), { recursive: true });
+    await writeFile(abs, body, "utf8");
+  }
+
+  /**
+   * Seed a managed repo with an instruction file + agent + mode, register a
+   * project pointing at it, and return a loaded ProjectConfigService.
+   */
+  async function loadedConfig(): Promise<ProjectConfigService> {
+    const repoDir = await mkdtemp(join(tmpdir(), "cm-broker-repo-"));
+    tempDirs.push(repoDir);
+    const project: Project = {
+      id: "p1",
+      name: "Seed",
+      repoPath: repoDir,
+      worktreeRoot: join(repoDir, "..", "wt"),
+      subApps: [],
+      createdAt: 1,
+    };
+    await store.saveProject(project);
+    await writeConfig(
+      repoDir,
+      "project.yaml",
+      ["name: Configured", "instructions:", "  - file: instructions/house.md"].join("\n"),
+    );
+    await writeConfig(repoDir, "instructions/house.md", "Always run pnpm lint before shipping.");
+    await writeConfig(
+      repoDir,
+      "agents/builder.md",
+      ["---", "name: Builder", "permissionMode: plan", "---", "You are the CONFIG builder."].join("\n"),
+    );
+    await writeConfig(repoDir, "modes/careful.yaml", ["name: Careful", "permissionMode: plan"].join("\n"));
+    const svc = new ProjectConfigService({ store, bus });
+    await svc.reload("p1");
+    return svc;
+  }
+
+  function makeConfigBroker(fn: QueryFn, projectConfig: ProjectConfigService): SessionBroker {
+    let idc = 0;
+    let clock = 1000;
+    const broker = new SessionBroker({
+      store,
+      bus,
+      projectConfig,
+      deps: { query: fn, genId: () => `id-${++idc}`, now: () => ++clock },
+    });
+    brokers.push(broker);
+    return broker;
+  }
+
+  it("injects the project's authored instructions into the systemPrompt append", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const svc = await loadedConfig();
+    const broker = makeConfigBroker(fn, svc);
+    await store.saveChat(chatFor("c1", "p1"));
+    broker.create(chatFor("c1", "p1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    const opts = controllers[0]!.options as { systemPrompt?: { append?: string } };
+    const append = opts.systemPrompt?.append ?? "";
+    expect(append).toContain("Project instructions");
+    expect(append).toContain("Always run pnpm lint before shipping.");
+  });
+
+  it("uses config-sourced agent + mode, winning over identically-id'd .data entries", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const svc = await loadedConfig();
+    // A colliding `.data` agent + mode with the SAME ids but different content —
+    // the config (source of truth) must win.
+    await store.saveAgent({
+      id: "builder",
+      name: "Store Builder",
+      instructions: "You are the STORE builder.",
+      permissionMode: "default",
+      scope: "global",
+    });
+    await store.saveMode({ id: "careful", name: "Store Careful", permissionMode: "acceptEdits", scope: "global" });
+
+    const broker = makeConfigBroker(fn, svc);
+    const chat = { ...chatFor("c1", "p1"), modeId: "careful", agentId: "builder" };
+    await store.saveChat(chat);
+    broker.create(chat);
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    const opts = controllers[0]!.options as {
+      permissionMode?: string;
+      agent?: string;
+      agents?: Record<string, { prompt?: string; permissionMode?: string }>;
+    };
+    // Mode: the config "careful" (plan) wins over the store's acceptEdits.
+    expect(opts.permissionMode).toBe("plan");
+    // Agent: the config builder prompt wins over the store's.
+    expect(opts.agent).toBe("builder");
+    expect(opts.agents?.builder?.prompt).toBe("You are the CONFIG builder.");
+    expect(opts.agents?.builder?.permissionMode).toBe("plan");
+  });
+
+  it("injects nothing for a project without a .claude-manager/ config", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const svc = await loadedConfig();
+    const broker = makeConfigBroker(fn, svc);
+    // Chat on a DIFFERENT project that has no loaded config.
+    await store.saveChat(chatFor("c2", "no-config"));
+    broker.create(chatFor("c2", "no-config"));
+
+    const idleP = broker.waitFor("c2", "idle");
+    await broker.sendMessage("c2", "hi");
+    await idleP;
+
     const opts = controllers[0]!.options as { systemPrompt?: unknown };
     expect(opts.systemPrompt).toBeUndefined();
   });

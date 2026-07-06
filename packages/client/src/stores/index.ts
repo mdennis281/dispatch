@@ -187,9 +187,18 @@ export function applyServerEvent(evt: WsServerEvent): void {
       return;
 
     case "project-config-update":
-      // A managed repo's `.claude-manager/` config was (re)loaded. Phase 1 only
-      // syncs the store (a `project-update` follows when authored fields change);
-      // a later phase renders the config/errors panel from this event.
+      // A managed repo's `.claude-manager/` config was (re)loaded. Phase 1 syncs
+      // the store (a `project-update` follows when authored fields change); a
+      // later phase renders the config/errors panel from this event. Refresh the
+      // agent/mode picker lists so config-authored agents/modes appear/update
+      // live after an edit to `.claude-manager/` (no restart, next turn picks up).
+      void Promise.all([api.agents.list(), api.modes.list()])
+        .then(([agents, modes]) =>
+          useProjects.getState().setConfigLists({ agents, modes }),
+        )
+        .catch(() => {
+          /* best-effort — the next hydrate/reconnect will resync the pickers */
+        });
       return;
 
     case "memory-update":

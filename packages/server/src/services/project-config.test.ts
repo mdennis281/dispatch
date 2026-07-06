@@ -8,6 +8,9 @@ import type { Project, WsServerEvent } from "@cm/shared";
 import {
   ProjectConfigService,
   mergeProject,
+  mergeById,
+  configModeToModeConfig,
+  renderInstructionsInjection,
   parseFrontmatter,
   slugifyConfigName,
   type ConfigWatcher,
@@ -362,6 +365,104 @@ describe("ProjectConfigService — mergeProject precedence", () => {
     // Omitted authored fields fall back to the stored record.
     expect(merged.worktreeCmd).toBe("keep-cmd");
     expect(merged.shipCmd).toBe("keep-ship");
+  });
+});
+
+/* ------------------------------------------------ agent/mode registry (P3) */
+
+describe("project-config registry helpers", () => {
+  it("mergeById lets `preferred` win on id collision, keeping unique fallbacks", () => {
+    const preferred = [{ id: "a", v: 1 }, { id: "b", v: 1 }];
+    const fallback = [{ id: "b", v: 2 }, { id: "c", v: 2 }];
+    const merged = mergeById(preferred, fallback);
+    expect(merged.map((e) => e.id)).toEqual(["a", "b", "c"]);
+    expect(merged.find((e) => e.id === "b")?.v).toBe(1); // preferred won
+    expect(merged.find((e) => e.id === "c")?.v).toBe(2); // unique fallback kept
+  });
+
+  it("configModeToModeConfig maps a ConfigMode onto the store ModeConfig shape", () => {
+    const mode = configModeToModeConfig(
+      { id: "careful", name: "Careful", permissionMode: "plan", allowedTools: ["Read"] },
+      "p1",
+    );
+    expect(mode).toMatchObject({
+      id: "careful",
+      name: "Careful",
+      permissionMode: "plan",
+      scope: "project",
+      projectId: "p1",
+    });
+  });
+
+  it("renderInstructionsInjection delimits non-empty text and returns null for blank", () => {
+    const out = renderInstructionsInjection("House rules here.");
+    expect(out).toContain("Project instructions");
+    expect(out).toContain(".claude-manager/");
+    expect(out).toContain("House rules here.");
+    expect(renderInstructionsInjection("")).toBeNull();
+    expect(renderInstructionsInjection("   \n  ")).toBeNull();
+    expect(renderInstructionsInjection(undefined)).toBeNull();
+  });
+});
+
+describe("ProjectConfigService — agent/mode/instruction registry (config-sourced)", () => {
+  async function loadedService(): Promise<ProjectConfigService> {
+    await seedProject();
+    await writeConfig(
+      "project.yaml",
+      ["name: X", "instructions:", "  - file: instructions/house.md"].join("\n"),
+    );
+    await writeConfig("instructions/house.md", "Always run pnpm lint before shipping.");
+    await writeConfig(
+      "agents/builder.md",
+      ["---", "name: Builder", "permissionMode: plan", "---", "You are a builder."].join("\n"),
+    );
+    await writeConfig("modes/careful.yaml", ["name: Careful", "permissionMode: plan"].join("\n"));
+    const svc = new ProjectConfigService({ store, bus });
+    await svc.reload("p1");
+    return svc;
+  }
+
+  it("exposes config agents + modes through the registry accessors after a reload", async () => {
+    const svc = await loadedService();
+
+    expect(svc.configAgents().map((a) => a.id)).toEqual(["builder"]);
+    expect(svc.getAgent("builder")).toMatchObject({
+      id: "builder",
+      permissionMode: "plan",
+      scope: "project",
+      projectId: "p1",
+      instructions: "You are a builder.",
+    });
+    expect(svc.getAgent("nope")).toBeNull();
+
+    expect(svc.configModes().map((m) => m.id)).toEqual(["careful"]);
+    expect(svc.getMode("careful")).toMatchObject({
+      id: "careful",
+      permissionMode: "plan",
+      scope: "project",
+      projectId: "p1",
+    });
+    expect(svc.getMode("nope")).toBeNull();
+  });
+
+  it("builds a bounded, delimited instructions injection (empty project → null)", async () => {
+    const svc = await loadedService();
+    const injection = svc.buildInstructionsInjection("p1");
+    expect(injection).toContain("Project instructions");
+    expect(injection).toContain("Always run pnpm lint before shipping.");
+
+    // A project with no loaded config injects nothing.
+    expect(svc.buildInstructionsInjection("absent")).toBeNull();
+  });
+
+  it("registry is empty before any config is loaded (no cache entry)", () => {
+    const svc = new ProjectConfigService({ store, bus });
+    expect(svc.configAgents()).toEqual([]);
+    expect(svc.configModes()).toEqual([]);
+    expect(svc.getAgent("builder")).toBeNull();
+    expect(svc.getMode("careful")).toBeNull();
+    expect(svc.buildInstructionsInjection("p1")).toBeNull();
   });
 });
 

@@ -112,6 +112,9 @@ export function createServices(
       terminals,
       memory,
       github,
+      // Self-contained `.claude-manager/` config: authored agents/modes/
+      // instructions (source of truth) resolved config-first, `.data` fallback.
+      projectConfig,
       deps: brokerDeps,
     });
   const title =

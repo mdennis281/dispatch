@@ -46,6 +46,8 @@ import type {
   PermissionRequest,
   ChatMessage,
   ImageRef,
+  AgentConfig,
+  ModeConfig,
 } from "@cm/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -69,6 +71,24 @@ export interface SessionBrokerDeps {
   now?: () => number;
 }
 
+/**
+ * The slice of {@link ProjectConfigService} the broker consumes: a managed
+ * repo's self-contained `.claude-manager/` config as the SOURCE OF TRUTH for
+ * authored agents, modes, and custom instructions. Config-sourced agents/modes
+ * take precedence over `.data`-defined ones (resolved config-first, store-
+ * fallback), and the authored instructions are injected into the session's
+ * system prompt. A minimal interface keeps the dependency one-way + stubbable.
+ */
+export interface BrokerProjectConfig {
+  /** A config-sourced agent by id, or null when none is authored. */
+  getAgent(id: string): AgentConfig | null;
+  /** A config-sourced mode by id (mapped to the store shape), or null. */
+  getMode(id: string): ModeConfig | null;
+  /** The bounded, delimited system-prompt append for a project's authored
+   *  instructions, or null when it has none (inject nothing). */
+  buildInstructionsInjection(projectId: string): string | null;
+}
+
 export interface SessionBrokerOptions {
   store: Store;
   bus: EventBus;
@@ -80,6 +100,9 @@ export interface SessionBrokerOptions {
   memory?: MemoryService;
   /** GitHub control plane: backs `mcp__manager__wait_for_pr`'s PR merge-state poll. */
   github?: GitHubService;
+  /** Self-contained `.claude-manager/` config: source of truth for authored
+   *  agents/modes/instructions (config wins over `.data` on id collision). */
+  projectConfig?: BrokerProjectConfig;
   deps?: SessionBrokerDeps;
 }
 
@@ -453,6 +476,7 @@ export class SessionBroker {
   private readonly terminals?: TerminalService;
   private readonly memory?: MemoryService;
   private readonly github?: GitHubService;
+  private readonly projectConfig?: BrokerProjectConfig;
   private readonly query: QueryFn;
   private readonly genId: () => string;
   private readonly now: () => number;
@@ -468,6 +492,7 @@ export class SessionBroker {
     this.terminals = opts.terminals;
     this.memory = opts.memory;
     this.github = opts.github;
+    this.projectConfig = opts.projectConfig;
     this.query = opts.deps?.query ?? (sdkQuery as unknown as QueryFn);
     this.genId = opts.deps?.genId ?? (() => nanoid());
     this.now = opts.deps?.now ?? (() => Date.now());
@@ -1469,9 +1494,31 @@ export class SessionBroker {
   /* ---------------------------------------------------------- options */
 
   private async resolvePermissionMode(modeId: string): Promise<PermissionMode> {
-    const mode = await this.store.getMode(modeId).catch(() => null);
+    const mode = await this.resolveMode(modeId);
     if (mode) return mode.permissionMode;
     return BUILTIN_MODE_PERMISSION[modeId] ?? "default";
+  }
+
+  /**
+   * Resolve a mode by id, config-first: a `.claude-manager/`-authored mode
+   * (the source of truth) wins over a `.data`-defined one on id collision.
+   */
+  private async resolveMode(modeId: string): Promise<ModeConfig | null> {
+    return (
+      this.projectConfig?.getMode(modeId) ??
+      (await this.store.getMode(modeId).catch(() => null))
+    );
+  }
+
+  /**
+   * Resolve an agent by id, config-first: a `.claude-manager/`-authored agent
+   * (the source of truth) wins over a `.data`-defined one on id collision.
+   */
+  private async resolveAgent(agentId: string): Promise<AgentConfig | null> {
+    return (
+      this.projectConfig?.getAgent(agentId) ??
+      (await this.store.getAgent(agentId).catch(() => null))
+    );
   }
 
   private async buildOptions(session: LiveSession): Promise<Options> {
@@ -1503,13 +1550,22 @@ export class SessionBroker {
     // *reports* at init and would otherwise feed the "[1m]" display id back in.)
     if (session.modelOverride) options.model = session.modelOverride;
 
-    const mode = await this.store.getMode(session.modeId).catch(() => null);
-    const agent = session.agentId
-      ? await this.store.getAgent(session.agentId).catch(() => null)
-      : null;
+    // Config-sourced agents/modes (the `.claude-manager/` source of truth) win
+    // over `.data`-defined ones on id collision.
+    const mode = await this.resolveMode(session.modeId);
+    const agent = session.agentId ? await this.resolveAgent(session.agentId) : null;
 
     const appends: string[] = [];
     if (mode?.instructions) appends.push(mode.instructions);
+
+    // Inject the project's authored custom instructions from its
+    // `.claude-manager/` config — a clearly-delimited, bounded section alongside
+    // the mode overlay + memory. Empty (no config / no instructions) → nothing,
+    // and it never clobbers the existing appends.
+    if (this.projectConfig && session.projectId) {
+      const instructions = this.projectConfig.buildInstructionsInjection(session.projectId);
+      if (instructions) appends.push(instructions);
+    }
 
     // Read-at-start: inject the project's durable memory (index + one-line
     // descriptions, bounded — never full bodies) so every session begins knowing
