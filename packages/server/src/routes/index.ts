@@ -6,6 +6,7 @@
 import type { FastifyInstance } from "fastify";
 import { registerWsRoutes } from "./ws.js";
 import { registerProjectRoutes } from "./projects.js";
+import { registerProjectConfigRoutes } from "./project-config.js";
 import { registerChatRoutes } from "./chats.js";
 import { registerAssetRoutes } from "./assets.js";
 import { registerAgentRoutes } from "./agents.js";
@@ -22,6 +23,7 @@ import { registerSettingsRoutes } from "./settings.js";
 export function registerRoutes(app: FastifyInstance): void {
   registerWsRoutes(app);
   registerProjectRoutes(app);
+  registerProjectConfigRoutes(app);
   registerChatRoutes(app);
   registerAssetRoutes(app);
   registerAgentRoutes(app);

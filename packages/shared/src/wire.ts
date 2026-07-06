@@ -27,6 +27,7 @@ import {
   PermissionRequestSchema,
   AttentionItemSchema,
 } from "./messages.js";
+import { ProjectConfigSchema, ProjectConfigErrorSchema } from "./project-config.js";
 
 /* =============================================================== server → client */
 
@@ -179,6 +180,20 @@ export const ProjectUpdateEventSchema = z.object({
   project: ProjectSchema,
 });
 
+/**
+ * A project's authored `.claude-manager/` config was (re)loaded — on discovery,
+ * a watcher-triggered reload, or an explicit reload request. Carries the source
+ * dir (null when the project has no `.claude-manager/`), the normalized config
+ * (null on none / an unparseable manifest), and any structured load errors.
+ */
+export const ProjectConfigUpdateEventSchema = z.object({
+  type: z.literal("project-config-update"),
+  projectId: z.string(),
+  sourceDir: z.string().nullable(),
+  config: ProjectConfigSchema.nullable(),
+  errors: z.array(ProjectConfigErrorSchema).default([]),
+});
+
 /** A project memory was created or updated (agent `remember` or panel edit). */
 export const MemoryUpdateEventSchema = z.object({
   type: z.literal("memory-update"),
@@ -230,6 +245,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   ChatUpdateEventSchema,
   ChatDeletedEventSchema,
   ProjectUpdateEventSchema,
+  ProjectConfigUpdateEventSchema,
   MemoryUpdateEventSchema,
   MemoryDeletedEventSchema,
   NoticeEventSchema,

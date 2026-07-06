@@ -5,6 +5,7 @@
  */
 export * from "./common.js";
 export * from "./domain.js";
+export * from "./project-config.js";
 export * from "./mcp.js";
 export * from "./messages.js";
 export * from "./wire.js";

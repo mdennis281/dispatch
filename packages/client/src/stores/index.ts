@@ -186,6 +186,12 @@ export function applyServerEvent(evt: WsServerEvent): void {
       useProjects.getState().upsertProject(evt.project);
       return;
 
+    case "project-config-update":
+      // A managed repo's `.claude-manager/` config was (re)loaded. Phase 1 only
+      // syncs the store (a `project-update` follows when authored fields change);
+      // a later phase renders the config/errors panel from this event.
+      return;
+
     case "memory-update":
       // A memory was created/updated (agent `remember` or a panel edit) — upsert
       // it so the Memory panel live-updates without a refetch.

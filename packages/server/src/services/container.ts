@@ -19,6 +19,7 @@ import type { EventBus } from "../bus.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
 import { MemoryService } from "./memory.js";
+import { ProjectConfigService } from "./project-config.js";
 import { makeFakeQuery } from "./fake-sdk.js";
 import { TitleService, makeFakeTitleQuery } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
@@ -41,6 +42,7 @@ export interface ServiceOverrides {
   broker?: SessionBroker;
   terminals?: TerminalService;
   memory?: MemoryService;
+  projectConfig?: ProjectConfigService;
   title?: TitleService;
   checkpoints?: CheckpointService;
   worktrees?: WorktreeService;
@@ -56,6 +58,7 @@ export interface Services extends ServiceBase {
   broker: SessionBroker;
   terminals: TerminalService;
   memory: MemoryService;
+  projectConfig: ProjectConfigService;
   title: TitleService;
   checkpoints: CheckpointService;
   worktrees: WorktreeService;
@@ -86,6 +89,12 @@ export function createServices(
   // Per-project durable agent memory: injected at session start + exposed to the
   // agent as `mcp__manager__remember|recall|forget`, and curated in the UI.
   const memory = overrides.memory ?? new MemoryService({ store, bus });
+  // Self-contained `.claude-manager/` project config: discovers + validates the
+  // authored config in a managed repo, syncs it into the project store (authored
+  // overrides `.data`), and watches it for live reload. Projects without a
+  // `.claude-manager/` fall back to the `.data` store untouched (back-compat).
+  const projectConfig =
+    overrides.projectConfig ?? new ProjectConfigService({ store, bus });
   // GitHub control plane (PRs + Actions). Constructed before the broker so it can
   // back the session MCP's `wait_for_pr` PR merge-state poll.
   const github = overrides.github ?? new GitHubService({ bus, store });
@@ -135,6 +144,7 @@ export function createServices(
     broker,
     terminals,
     memory,
+    projectConfig,
     title,
     checkpoints,
     worktrees,
@@ -145,6 +155,11 @@ export function createServices(
     attention,
 
     async start(): Promise<void> {
+      // Discover + sync every project's `.claude-manager/` config FIRST so the
+      // store reflects authored overrides before the detector/broker read it.
+      // Best-effort — a bad config surfaces as a structured error, never a block.
+      await projectConfig.start().catch(() => {});
+
       attention.start();
       notifier.start();
 
@@ -205,6 +220,7 @@ export function createServices(
       // the dataDir/worktree it was spawned against.
       worktreeDetector.stop();
       await worktreeDetector.drain().catch(() => {});
+      projectConfig.stop();
       notifier.stop();
       attention.stop();
       await runner.stopAll().catch(() => {});
