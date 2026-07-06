@@ -28,6 +28,13 @@ interface MessagesStore {
   ) => void;
   /** mark a pending permission row resolved (for the transcript) */
   resolvePermission: (chatId: string, requestId: string, decision: "allow" | "deny") => void;
+  /**
+   * Drop EVERY in-flight streaming buffer for a chat. Called when a turn ends /
+   * is interrupted / errors (a `chat-status` leaving `running`), so a streamed
+   * assistant message whose finalized `chat-message` never arrived can't strand a
+   * perpetual typing pulse (a stuck `StreamingRow`) that resurfaces next turn.
+   */
+  clearStreaming: (chatId: string) => void;
 }
 
 type StreamMap = Record<string, { text: string; thinking: string }>;
@@ -88,8 +95,14 @@ export const useMessages = create<MessagesStore>((set) => ({
     set((s) => {
       const rows = s.byChat[chatId] ?? [];
       // A finalized row supersedes its in-flight streaming buffer — clear it so
-      // `streaming` doesn't grow unbounded over a long session.
-      const streaming = dropStreamKey(s.streaming, `${chatId}:${message.id}`);
+      // `streaming` doesn't grow unbounded over a long session. A `result` row is
+      // the TURN-END marker: clear EVERY of the chat's streaming buffers, so an
+      // assistant message whose finalized row never landed (interrupt / abort /
+      // mid-stream persist failure) can't leave a stuck StreamingRow behind.
+      const streaming =
+        message.kind === "result"
+          ? dropChatStreaming(s.streaming, chatId)
+          : dropStreamKey(s.streaming, `${chatId}:${message.id}`);
       // Permission rows are keyed by requestId, not id: a resolved row from the
       // server replaces the earlier pending card in place (keeping its position)
       // instead of stacking a duplicate.
@@ -158,6 +171,13 @@ export const useMessages = create<MessagesStore>((set) => ({
           ),
         },
       };
+    }),
+
+  clearStreaming: (chatId) =>
+    set((s) => {
+      const streaming = dropChatStreaming(s.streaming, chatId);
+      // Identity-stable when there was nothing to drop (no needless re-render).
+      return streaming === s.streaming ? {} : { streaming };
     }),
 }));
 

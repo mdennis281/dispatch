@@ -83,7 +83,7 @@ function toRaw(item: unknown): Raw | null {
   if (!item || typeof item !== "object") return null;
   const o = item as Record<string, unknown>;
   const content =
-    str(o.content) ?? str(o.text) ?? str(o.title) ?? str(o.task) ?? str(o.description);
+    str(o.content) ?? str(o.text) ?? str(o.title) ?? str(o.subject) ?? str(o.task) ?? str(o.description);
   if (!content) return null;
   return {
     id: str(o.id) ?? str(o.taskId),
@@ -104,7 +104,8 @@ function toPatch(item: unknown): RawPatch | null {
   const o = item as Record<string, unknown>;
   const patch: RawPatch = {
     id: str(o.id) ?? str(o.taskId),
-    content: str(o.content) ?? str(o.text) ?? str(o.title) ?? str(o.task) ?? str(o.description),
+    content:
+      str(o.content) ?? str(o.text) ?? str(o.title) ?? str(o.subject) ?? str(o.task) ?? str(o.description),
     activeForm: str(o.activeForm) ?? str(o.active_form),
     status: o.status !== undefined ? normStatus(o.status) : undefined,
   };
@@ -126,10 +127,18 @@ function toPatch(item: unknown): RawPatch | null {
 export function deriveTodos(messages: ChatMessage[]): TodoSummary {
   const order: Raw[] = [];
   const byId = new Map<string, number>();
+  // The SDK Task tool assigns each task a sequential 1-based id ("1", "2", …) in
+  // creation order but does NOT echo that id in the `TaskCreate` INPUT — only a
+  // later `TaskUpdate { taskId, status }` references it. Mirror that numbering so
+  // a completion patch actually lands on the task it created; without it every
+  // `TaskUpdate` targets an id no `TaskCreate` ever registered, so the flip is a
+  // silent no-op and the strip stays stuck at 0/N. `TodoWrite`'s reset rewinds it.
+  let createSeq = 0;
 
   const reset = () => {
     order.length = 0;
     byId.clear();
+    createSeq = 0;
   };
 
   // Patch-by-id when the id is known, otherwise append. A re-put that omits a
@@ -200,6 +209,9 @@ export function deriveTodos(messages: ChatMessage[]): TodoSummary {
         const r = toRaw(it);
         if (r) {
           sawAny = true;
+          // Stamp the SDK's implicit sequential id when the create carries none,
+          // so a later `TaskUpdate { taskId }` can match (and complete) it.
+          if (r.id === undefined) r.id = String(++createSeq);
           put(r);
         }
       }

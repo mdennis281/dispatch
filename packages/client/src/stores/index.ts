@@ -94,6 +94,13 @@ export function applyServerEvent(evt: WsServerEvent): void {
 
     case "chat-status":
       useChats.getState().setStatus(evt.chatId, evt.status, evt.activity);
+      // A turn that leaves the running/awaiting state (idle turn-end, session
+      // done, or error) has no in-flight assistant stream: clear any lingering
+      // streaming buffers so an interrupted/aborted message's partial text can't
+      // leave a stuck StreamingRow (perpetual ●●●) that resurfaces next turn.
+      if (evt.status === "idle" || evt.status === "done" || evt.status === "error") {
+        useMessages.getState().clearStreaming(evt.chatId);
+      }
       return;
 
     case "permission-request":
