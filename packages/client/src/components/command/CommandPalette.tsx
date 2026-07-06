@@ -25,6 +25,7 @@ import {
   GitPullRequest,
   Sparkles,
   Blocks,
+  FileCog,
   CornerDownLeft,
   ArrowUp,
   ArrowDown,
@@ -35,6 +36,7 @@ import { useProjects } from "../../stores/projects.js";
 import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
 import { requestOpenProjectPrs } from "../prs/projectPrsBus.js";
 import { requestOpenMcpCatalog } from "../mcp/mcpCatalogBus.js";
+import { requestOpenProjectConfig } from "../config/configViewBus.js";
 import { Kbd } from "../ui/Kbd.js";
 import { cn } from "../../lib/cn.js";
 
@@ -173,6 +175,17 @@ export function CommandPalette({
         icon: <Blocks />,
         keywords: "mcp tool endpoint schema server manager show visualize catalog",
         run: () => requestOpenMcpCatalog(),
+      });
+      // Project config — the loaded `.claude-manager/` (instructions/subApps/
+      // MCP/agents/modes/memory) + reload / export / import.
+      list.push({
+        id: "project-config",
+        title: "Project config",
+        subtitle: `.claude-manager/ for ${project.name}`,
+        group: "Navigate",
+        icon: <FileCog />,
+        keywords: "config claude-manager manifest instructions subapps mcp agents modes memory export import cm scaffold reload",
+        run: () => requestOpenProjectConfig(),
       });
     }
 

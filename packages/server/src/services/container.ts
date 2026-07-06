@@ -20,6 +20,7 @@ import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
 import { MemoryService } from "./memory.js";
 import { ProjectConfigService } from "./project-config.js";
+import { ProjectConfigArchive } from "./project-config-archive.js";
 import { makeFakeQuery } from "./fake-sdk.js";
 import { TitleService, makeFakeTitleQuery } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
@@ -43,6 +44,7 @@ export interface ServiceOverrides {
   terminals?: TerminalService;
   memory?: MemoryService;
   projectConfig?: ProjectConfigService;
+  projectConfigArchive?: ProjectConfigArchive;
   title?: TitleService;
   checkpoints?: CheckpointService;
   worktrees?: WorktreeService;
@@ -59,6 +61,7 @@ export interface Services extends ServiceBase {
   terminals: TerminalService;
   memory: MemoryService;
   projectConfig: ProjectConfigService;
+  projectConfigArchive: ProjectConfigArchive;
   title: TitleService;
   checkpoints: CheckpointService;
   worktrees: WorktreeService;
@@ -100,6 +103,12 @@ export function createServices(
   // (source of truth), else the `.data` store (back-compat).
   const memory =
     overrides.memory ?? new MemoryService({ store, bus, projectConfig });
+  // Export/import a project's `.claude-manager/` as a portable `.cm` zip, and
+  // scaffold a fresh one from the `.data` record. Reads the config dir, (re)watches
+  // + reloads through `projectConfig` so an import/scaffold takes effect live.
+  const projectConfigArchive =
+    overrides.projectConfigArchive ??
+    new ProjectConfigArchive({ store, projectConfig });
   // GitHub control plane (PRs + Actions). Constructed before the broker so it can
   // back the session MCP's `wait_for_pr` PR merge-state poll.
   const github = overrides.github ?? new GitHubService({ bus, store });
@@ -154,6 +163,7 @@ export function createServices(
     terminals,
     memory,
     projectConfig,
+    projectConfigArchive,
     title,
     checkpoints,
     worktrees,

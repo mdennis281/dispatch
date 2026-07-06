@@ -25,6 +25,7 @@ import type {
   ProjectMemory,
   MemoryType,
   McpCatalog,
+  ProjectConfigResult,
 } from "@cm/shared";
 
 /**
@@ -200,6 +201,30 @@ export const api = {
     update: (id: string, body: Partial<ModeConfig>) =>
       put<ModeConfig>(`/api/modes/${id}`, body),
     remove: (id: string) => del<void>(`/api/modes/${id}`),
+  },
+
+  /* self-contained `.claude-manager/` project config */
+  projectConfig: {
+    /** The loaded config + errors (cached load, or a fresh one). */
+    get: (projectId: string) =>
+      get<ProjectConfigResult>(`/api/projects/${projectId}/config`),
+    /** Re-read `.claude-manager/` from disk (sync store + broadcast). */
+    reload: (projectId: string) =>
+      post<ProjectConfigResult>(`/api/projects/${projectId}/config/reload`),
+    /** Derive a `.claude-manager/` from the project's `.data` record. */
+    scaffold: (projectId: string, force?: boolean) =>
+      post<{ created: boolean; sourceDir: string; files: string[]; result: ProjectConfigResult }>(
+        `/api/projects/${projectId}/config/scaffold`,
+        { force },
+      ),
+    /** A GET URL that downloads the project's `.cm` archive. */
+    exportUrl: (projectId: string) => `${BASE}/api/projects/${projectId}/config/export`,
+    /** Import a `.cm` archive (base64) into the repo, then reload. */
+    import: (projectId: string, data: string) =>
+      post<{ sourceDir: string; files: string[]; result: ProjectConfigResult }>(
+        `/api/projects/${projectId}/config/import`,
+        { data },
+      ),
   },
 
   /* per-project agent memory (durable, cross-chat facts) */

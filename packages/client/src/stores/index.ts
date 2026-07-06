@@ -21,6 +21,7 @@ import { useTerminals } from "./terminals.js";
 import { usePanels } from "./panels.js";
 import { useMemory } from "./memory.js";
 import { useMcp } from "./mcp.js";
+import { useConfig } from "./config.js";
 import { useCheckpoints } from "./checkpoints.js";
 import { useNotices } from "./notices.js";
 
@@ -188,10 +189,16 @@ export function applyServerEvent(evt: WsServerEvent): void {
 
     case "project-config-update":
       // A managed repo's `.claude-manager/` config was (re)loaded. Phase 1 syncs
-      // the store (a `project-update` follows when authored fields change); a
-      // later phase renders the config/errors panel from this event. Refresh the
-      // agent/mode picker lists so config-authored agents/modes appear/update
-      // live after an edit to `.claude-manager/` (no restart, next turn picks up).
+      // the store (a `project-update` follows when authored fields change). Feed
+      // the Project config view's store so it live-updates on a watcher edit /
+      // scaffold / import. Refresh the agent/mode picker lists so config-authored
+      // agents/modes appear/update live after an edit to `.claude-manager/` (no
+      // restart, next turn picks up).
+      useConfig.getState().set(evt.projectId, {
+        sourceDir: evt.sourceDir,
+        config: evt.config,
+        errors: evt.errors,
+      });
       void Promise.all([api.agents.list(), api.modes.list()])
         .then(([agents, modes]) =>
           useProjects.getState().setConfigLists({ agents, modes }),
@@ -277,6 +284,7 @@ export async function hydrateFromServer(): Promise<boolean> {
   useCheckpoints.getState().reset();
   useMemory.getState().reset();
   useMcp.getState().reset();
+  useConfig.getState().reset();
   usePanels.getState().hydrate({ worktrees: [], diffs: {}, prs: [], workflowRuns: [] });
 
   // Keep the user where they were after a reconnect.

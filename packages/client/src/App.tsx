@@ -6,6 +6,7 @@ import { ChatView } from "./components/chat/ChatView.js";
 import { CodeViewerHost } from "./components/monaco/index.js";
 import { ProjectPRsView } from "./components/prs/ProjectPRsView.js";
 import { McpCatalogView } from "./components/mcp/McpCatalogView.js";
+import { ProjectConfigView } from "./components/config/ProjectConfigView.js";
 import { Toasts } from "./components/Toasts.js";
 import { useChats } from "./stores/chats.js";
 
@@ -45,6 +46,7 @@ export default function App() {
       <CodeViewerHost />
       <ProjectPRsView />
       <McpCatalogView />
+      <ProjectConfigView />
       <Toasts />
     </div>
   );
