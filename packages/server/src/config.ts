@@ -3,7 +3,9 @@
  * No secrets: auth is the Claude subscription (~/.claude/.credentials.json),
  * never an API key.
  */
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 
 export interface ServerConfig {
   /** HTTP + WebSocket port. */
@@ -18,9 +20,26 @@ export interface ServerConfig {
 
 const DEFAULT_PORT = 4319;
 const DEFAULT_HOST = "127.0.0.1";
-const DEFAULT_DATA_DIR = resolve(
-  "C:/Users/Michael/projects/zombie/claude-manager/.data",
-);
+/**
+ * The app root = nearest ancestor of this module containing `pnpm-workspace.yaml`.
+ * Keeps `.data` co-located with the app so the whole folder stays portable — moving
+ * or renaming the app dir just works (no baked-in absolute path). `CM_DATA_DIR`
+ * still overrides.
+ */
+function findAppRoot(): string {
+  const start = dirname(fileURLToPath(import.meta.url));
+  let dir = start;
+  for (let i = 0; i < 8; i++) {
+    if (existsSync(resolve(dir, "pnpm-workspace.yaml"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Fallback: built layout is <root>/packages/server/dist/<file>.js → up three.
+  return resolve(start, "../../..");
+}
+
+const DEFAULT_DATA_DIR = resolve(findAppRoot(), ".data");
 const DEFAULT_MAX_ACTIVE = 6;
 
 function intFromEnv(name: string, fallback: number): number {
