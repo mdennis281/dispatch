@@ -76,7 +76,9 @@
 ## 2026-07-06 bug fixes + MCP:
 ##   - fix(chat) 1387d8e: stuck StreamingRows pruned on interrupt/turn-end (were only dropped on exact-id finalize); TASKS strip 0/N bug — id-less TaskCreate never indexed under SDK implicit ids "1".."11" so TaskUpdate completions were no-ops → now stamped sequential ids (necrarch verified 10/11 live). +client vitest.
 ##   - test(mcp) d68e4f7: all 6 manager MCP tools AUDITED CORRECT (no behavioral bug) + deterministic integration tests + LIVE smokes (wait/wait_for_chat/remember/recall/forget all pass; ~$1.44, auto-cleaned). 190 server tests. Added reusable headless CHAT-DRIVE flow: `node tools/verify/shot.mjs --flow drive --project hivebreak --mode bypass --title X --cleanup --prompt "..."` (creates chat, sends via UI, waits idle, captures transcript+memory). USE THIS to verify agent behavior headless.
-##   - IN FLIGHT feat(mcp) wait_for_pr (agent aebb4f51ddbf1028e): the real loop-cause fix — no tool waited on a PR merge (only wait_for_chat waits on a chat), so agents hand-rolled poll loops. Polls gh server-side, resolves on merge/close, timeout+cancel like wait. Building per user greenlight.
+##   - feat(mcp) wait_for_pr 6a41787: polls gh server-side, resolves on merge/close, timeout(1800/cap3600)+cancel like wait, "waiting on PR #N" status. 203 tests. VERIFIED in catalog.
+##   - feat(mcp) MCP CATALOG 52043c0: GET /api/projects/:id/mcp enumerates servers+tools (custom manager via z.toJSONSchema descriptors; external via MCP-SDK tools/list probe, 4s timeout, 15s cache, graceful fail). Modal via ⌘K "MCP tools" / TopBar Blocks icon / event cm:open-mcp-catalog. 210 tests. VERIFIED LIVE (headless): 7 manager tools incl wait_for_pr w/ params+schema; "No external servers" (hivebreak has none). To screenshot the modal headless: scratchpad mcp-shot.mjs dispatches cm:open-mcp-catalog.
+##   - PRs #77/#78/#79 now MERGED. External-MCP probe path unverified against a real server (needs claude-in-chrome wired into hivebreak mcpServers — would also enable screenshot-to-UI live-drive).
 
 ## FINAL
 - [ ] Full live re-verification (drive EVERY control with vision)
