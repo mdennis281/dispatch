@@ -14,9 +14,15 @@
  *     ANOTHER chat's broker state reaches a terminal state (idle/done/error),
  *     or the timeout fires. Returns the final state. An unknown chatId yields an
  *     informative (error-flagged) result rather than throwing.
+ *   - `mcp__manager__wait_for_pr({ number, repo?, timeoutSeconds? })` — poll a
+ *     GitHub PR (via {@link ManagerMcpGitHub}, reusing GitHubService's `gh`) until
+ *     it is merged/closed or the timeout fires, so an agent told to "wait for PR
+ *     #N to merge" never hand-rolls an expensive `gh pr view` sleep loop. Returns
+ *     the final state as JSON; an unknown PR / gh error is an informative error.
  *
- * Both handlers await a REAL promise (a `setTimeout` and/or a `chat-status` bus
- * subscription) and unwind cleanly the instant the owning session aborts
+ * Every handler awaits a REAL promise (a `setTimeout`, a poll `setInterval`,
+ * and/or a `chat-status` bus subscription) and unwinds cleanly the instant the
+ * owning session aborts
  * (stop/fork) — every timer + listener is cleared on the first settle. This is
  * the reusable in-process-MCP pattern the later Batch-6 features build on: a
  * per-session factory closed over `{ chatId, bus, broker, signal }`.
@@ -30,6 +36,12 @@ import type { EventBus } from "../../bus.js";
 
 /** Hard ceiling on a single `wait` (also the default `wait_for_chat` timeout). */
 export const WAIT_CAP_SECONDS = 3600;
+
+/** How often `wait_for_pr` re-polls a PR's merge/close state. */
+export const PR_POLL_INTERVAL_MS = 20_000;
+
+/** Default `wait_for_pr` timeout (30 min); still capped at {@link WAIT_CAP_SECONDS}. */
+export const WAIT_FOR_PR_DEFAULT_TIMEOUT_SECONDS = 1800;
 
 /** Broker states that end `wait_for_chat` (the target turn/session is at rest). */
 const TERMINAL_STATES: ReadonlySet<ChatStatus> = new Set<ChatStatus>([
@@ -83,6 +95,25 @@ export interface ManagerMcpMemory {
   forget(name: string): Promise<boolean>;
 }
 
+/** Terminal-state view of a PR the `wait_for_pr` tool polls on. */
+export interface PrPollResult {
+  number: number;
+  state: "open" | "closed" | "merged";
+  merged: boolean;
+  mergedAt?: string;
+}
+
+/**
+ * The narrow GitHub surface the manager MCP needs — a single PR merge/close-state
+ * poll, already bound to this session's default repo (its worktree cwd, else the
+ * project root) by the broker. `repo` is an optional `owner/name` override. A null
+ * result means the PR/repo couldn't be resolved (unknown PR / gh error). Omitted
+ * from the ctx → the `wait_for_pr` tool isn't offered.
+ */
+export interface ManagerMcpGitHub {
+  prMergeState(prNumber: number, repo?: string): Promise<PrPollResult | null>;
+}
+
 /** Per-session context the factory closes over. */
 export interface ManagerMcpContext {
   /** The chat this session drives (for the waiting status label). */
@@ -93,6 +124,8 @@ export interface ManagerMcpContext {
   terminals?: ManagerMcpTerminals;
   /** Project-memory runner for this session (omitted → no memory tools). */
   memory?: ManagerMcpMemory;
+  /** GitHub PR poller for this session (omitted → no `wait_for_pr` tool). */
+  github?: ManagerMcpGitHub;
   /** The session's abort signal — cancels in-flight waits on stop/fork. */
   signal?: AbortSignal;
   now?: () => number;
@@ -212,6 +245,100 @@ function waitForChatState(
   });
 }
 
+interface WaitForPrOutcome {
+  kind: "terminal" | "timeout" | "aborted" | "error";
+  /** The terminal state (kind==="terminal") or the last non-terminal read seen. */
+  state?: PrPollResult;
+  /** Set only when kind==="error". */
+  error?: string;
+}
+
+/**
+ * Poll `poll()` every `intervalMs` until the PR reaches a terminal state (merged
+ * or closed), a signal aborts, or `timeoutMs` elapses. Polls IMMEDIATELY first,
+ * so an already-terminal PR resolves with zero waiting. A null poll (unknown PR /
+ * unresolvable repo) or a thrown gh error settles as `error`. Mirrors the
+ * `sleep`/`waitForChatState` cancel-on-abort discipline: the interval, the
+ * timeout timer, and every abort listener are torn down on the FIRST settle, so a
+ * stopped/forked session never strands a poll loop.
+ */
+function waitForPrState(
+  poll: () => Promise<PrPollResult | null>,
+  opts: {
+    intervalMs: number;
+    timeoutMs: number;
+    signals: (AbortSignal | undefined)[];
+  },
+): Promise<WaitForPrOutcome> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let inFlight = false;
+    let lastState: PrPollResult | undefined;
+    const cleanups: (() => void)[] = [];
+    const finish = (r: WaitForPrOutcome): void => {
+      if (settled) return;
+      settled = true;
+      for (const c of cleanups) c();
+      resolve(r);
+    };
+
+    const doPoll = async (): Promise<void> => {
+      // Guard against overlapping polls (a slow gh) and post-settle stragglers.
+      if (settled || inFlight) return;
+      inFlight = true;
+      let result: PrPollResult | null;
+      try {
+        result = await poll();
+      } catch (err) {
+        finish({
+          kind: "error",
+          error: err instanceof Error ? err.message : String(err),
+          state: lastState,
+        });
+        return;
+      } finally {
+        inFlight = false;
+      }
+      if (settled) return;
+      if (result === null) {
+        finish({
+          kind: "error",
+          error: "PR not found (unknown number or the repo could not be resolved)",
+          state: lastState,
+        });
+        return;
+      }
+      lastState = result;
+      if (result.state === "merged" || result.state === "closed") {
+        finish({ kind: "terminal", state: result });
+      }
+    };
+
+    const timer = setTimeout(
+      () => finish({ kind: "timeout", state: lastState }),
+      opts.timeoutMs,
+    );
+    cleanups.push(() => clearTimeout(timer));
+
+    for (const sig of opts.signals) {
+      if (!sig) continue;
+      if (sig.aborted) {
+        finish({ kind: "aborted", state: lastState });
+        return;
+      }
+      const onAbort = (): void => finish({ kind: "aborted", state: lastState });
+      sig.addEventListener("abort", onAbort);
+      cleanups.push(() => sig.removeEventListener("abort", onAbort));
+    }
+
+    const interval = setInterval(() => void doPoll(), opts.intervalMs);
+    cleanups.push(() => clearInterval(interval));
+
+    // Poll now so an already-terminal PR resolves without a first-interval wait.
+    void doPoll();
+  });
+}
+
 /* -------------------------------------------------------------------- tools */
 
 /** The manager tool definitions, closed over one session's context. */
@@ -313,6 +440,98 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           finalState: outcome.finalState,
           timedOut: outcome.timedOut,
         })}`,
+      );
+    },
+  );
+
+  const waitForPr = tool(
+    "wait_for_pr",
+    "Block until a GitHub pull request reaches a TERMINAL state (merged or " +
+      "closed), or until a timeout. Use this the moment you're told to 'wait for " +
+      "PR #N to merge' — do NOT hand-roll a `gh pr view` / sleep polling loop. " +
+      "Returns the PR's final state as JSON.",
+    {
+      number: z.number().describe("The PR number to wait on."),
+      repo: z
+        .string()
+        .optional()
+        .describe("Optional 'owner/name' override; defaults to the chat's repo."),
+      timeoutSeconds: z
+        .number()
+        .optional()
+        .describe(
+          `Give up after this long (default ${WAIT_FOR_PR_DEFAULT_TIMEOUT_SECONDS}s, ` +
+            `cap ${WAIT_CAP_SECONDS}s). On timeout you get the last-known state with timedOut:true.`,
+        ),
+    },
+    async (args, extra): Promise<CallToolResult> => {
+      if (!ctx.github) {
+        return textResult("The wait_for_pr tool is not available in this session.", true);
+      }
+      const number =
+        typeof args.number === "number" && Number.isInteger(args.number) ? args.number : NaN;
+      if (!Number.isFinite(number) || number <= 0) {
+        return textResult("wait_for_pr requires a positive integer PR number.", true);
+      }
+      const repo =
+        typeof args.repo === "string" && args.repo.trim() ? args.repo.trim() : undefined;
+      const timeoutMs =
+        clampSeconds(
+          args.timeoutSeconds ?? WAIT_FOR_PR_DEFAULT_TIMEOUT_SECONDS,
+          WAIT_CAP_SECONDS,
+        ) * 1000;
+
+      // Advertise the wait in the UI header (reuses the working-status surface).
+      ctx.bus.publish({
+        type: "chat-status",
+        chatId: ctx.chatId,
+        status: "running",
+        activity: {
+          state: "tool",
+          label: `waiting on PR #${number}${repo ? ` (${repo})` : ""}`,
+          toolName: "wait_for_pr",
+        },
+      });
+
+      const github = ctx.github;
+      const outcome = await waitForPrState(() => github.prMergeState(number, repo), {
+        intervalMs: PR_POLL_INTERVAL_MS,
+        timeoutMs,
+        signals: [ctx.signal, extraSignal(extra)],
+      });
+
+      if (outcome.kind === "aborted") {
+        return textResult(`Wait for PR #${number} was cancelled after being interrupted.`);
+      }
+      if (outcome.kind === "error") {
+        return textResult(
+          `Could not wait on PR #${number}: ${outcome.error}. Check the number and, ` +
+            "if the repo can't be auto-detected here, pass `repo` as 'owner/name'.",
+          true,
+        );
+      }
+      if (outcome.kind === "timeout") {
+        const last = outcome.state;
+        return textResult(
+          `Timed out waiting for PR #${number} to merge/close (last state: ` +
+            `${last?.state ?? "unknown"}).\n${JSON.stringify({
+              number,
+              state: last?.state ?? "unknown",
+              merged: last?.merged ?? false,
+              timedOut: true,
+            })}`,
+        );
+      }
+      // terminal
+      const s = outcome.state!;
+      return textResult(
+        `PR #${s.number} reached terminal state "${s.state}"${s.merged ? " (merged)" : ""}.\n` +
+          JSON.stringify({
+            number: s.number,
+            state: s.state,
+            merged: s.merged,
+            ...(s.mergedAt ? { mergedAt: s.mergedAt } : {}),
+          }),
       );
     },
   );
@@ -465,7 +684,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
-  return { wait, waitForChat, terminal, remember, recall, forget };
+  return { wait, waitForChat, waitForPr, terminal, remember, recall, forget };
 }
 
 /**
@@ -476,13 +695,14 @@ export function createManagerTools(ctx: ManagerMcpContext) {
 export function createManagerMcpServer(
   ctx: ManagerMcpContext,
 ): McpSdkServerConfigWithInstance {
-  const { wait, waitForChat, terminal, remember, recall, forget } =
+  const { wait, waitForChat, waitForPr, terminal, remember, recall, forget } =
     createManagerTools(ctx);
   // Each tool is only meaningful when its backing service is wired in; omit the
   // dead ones so the agent isn't offered a tool it can't use.
   const tools = [
     wait,
     waitForChat,
+    ...(ctx.github ? [waitForPr] : []),
     ...(ctx.terminals ? [terminal] : []),
     ...(ctx.memory ? [remember, recall, forget] : []),
   ];

@@ -32,6 +32,7 @@ import { Store } from "../../store/index.js";
 import { SessionBroker, type QueryFn } from "../session-broker.js";
 import { TerminalService, type ShellProcess, type SpawnShell } from "../terminal.js";
 import { MemoryService } from "../memory.js";
+import { GitHubService, type ExecResult } from "../github.js";
 import {
   createManagerTools,
   type ManagerMcpBroker,
@@ -312,6 +313,90 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
     expect(
       events.some((e) => e.type === "terminal-closed" && e.chatId === "c1"),
     ).toBe(true);
+  });
+});
+
+/* -------------------------------------------------- wait_for_pr: real GitHubService */
+
+describe("manager-mcp integration — wait_for_pr over a real GitHubService", () => {
+  it("reuses GitHubService's gh invocation and resolves an already-merged PR", async () => {
+    const bus = new EventBus();
+    const calls: { file: string; args: readonly string[]; cwd?: string }[] = [];
+    const exec = async (
+      file: string,
+      args: readonly string[] = [],
+      options?: { cwd?: string },
+    ): Promise<ExecResult> => {
+      calls.push({ file, args, cwd: options?.cwd });
+      return {
+        stdout: JSON.stringify({
+          number: 79,
+          state: "MERGED",
+          merged: true,
+          mergedAt: "2026-07-05T21:51:59Z",
+        }),
+        exitCode: 0,
+      };
+    };
+    const github = new GitHubService({ bus, exec });
+
+    // Bind exactly as SessionBroker.buildOptions does — cwd baked in so `gh`
+    // auto-detects the repo; the agent supplies only the number.
+    const { waitForPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: nullBroker,
+      github: { prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd: "C:\\repo" }) },
+    });
+
+    const res = await waitForPr.handler(
+      { number: 79, repo: undefined, timeoutSeconds: 1800 },
+      {},
+    );
+
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain('reached terminal state "merged"');
+    expect(resultText(res)).toContain('"merged":true');
+    expect(resultText(res)).toContain('"mergedAt":"2026-07-05T21:51:59Z"');
+    // One `gh pr view` with the minimal merge-state field list, in the bound cwd.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.file).toBe("gh");
+    expect(calls[0]!.args).toEqual([
+      "pr",
+      "view",
+      "79",
+      "--json",
+      "number,state,merged,mergedAt",
+    ]);
+    expect(calls[0]!.cwd).toBe("C:\\repo");
+  });
+
+  it("scopes to an explicit owner/name override via --repo", async () => {
+    const bus = new EventBus();
+    const calls: { args: readonly string[] }[] = [];
+    const exec = async (_file: string, args: readonly string[] = []): Promise<ExecResult> => {
+      calls.push({ args });
+      return {
+        stdout: JSON.stringify({ number: 12, state: "CLOSED", merged: false }),
+        exitCode: 0,
+      };
+    };
+    const github = new GitHubService({ bus, exec });
+    const { waitForPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: nullBroker,
+      github: { prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd: "C:\\repo" }) },
+    });
+
+    const res = await waitForPr.handler(
+      { number: 12, repo: "octo/demo", timeoutSeconds: 1800 },
+      {},
+    );
+
+    expect(resultText(res)).toContain('reached terminal state "closed"');
+    expect(calls[0]!.args).toContain("--repo");
+    expect(calls[0]!.args).toContain("octo/demo");
   });
 });
 

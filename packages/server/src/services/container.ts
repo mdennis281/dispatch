@@ -86,6 +86,9 @@ export function createServices(
   // Per-project durable agent memory: injected at session start + exposed to the
   // agent as `mcp__manager__remember|recall|forget`, and curated in the UI.
   const memory = overrides.memory ?? new MemoryService({ store, bus });
+  // GitHub control plane (PRs + Actions). Constructed before the broker so it can
+  // back the session MCP's `wait_for_pr` PR merge-state poll.
+  const github = overrides.github ?? new GitHubService({ bus, store });
   const broker =
     overrides.broker ??
     new SessionBroker({
@@ -94,6 +97,7 @@ export function createServices(
       maxActiveSessions: config.maxActiveSessions,
       terminals,
       memory,
+      github,
       deps: brokerDeps,
     });
   const title =
@@ -118,7 +122,6 @@ export function createServices(
   // or a worktree recreated at the same path would never be re-attributed.
   worktrees.onWorktreeRemoved = (path) => worktreeDetector.forget(path);
   const runner = overrides.runner ?? new RunnerService({ store, bus });
-  const github = overrides.github ?? new GitHubService({ bus, store });
   const notifier = overrides.notifier ?? new Notifier({ bus, store });
   const attention = overrides.attention ?? new AttentionQueue({ bus });
 

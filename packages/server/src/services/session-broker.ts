@@ -51,6 +51,7 @@ import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import type { TerminalService } from "./terminal.js";
 import type { MemoryService } from "./memory.js";
+import type { GitHubService } from "./github.js";
 import { createManagerMcpServer } from "./mcp/manager-mcp.js";
 
 /* ------------------------------------------------------------------ deps */
@@ -77,6 +78,8 @@ export interface SessionBrokerOptions {
   terminals?: TerminalService;
   /** Per-project agent memory: injected at start + exposed as `mcp__manager__remember|recall|forget`. */
   memory?: MemoryService;
+  /** GitHub control plane: backs `mcp__manager__wait_for_pr`'s PR merge-state poll. */
+  github?: GitHubService;
   deps?: SessionBrokerDeps;
 }
 
@@ -449,6 +452,7 @@ export class SessionBroker {
   private readonly cap: number;
   private readonly terminals?: TerminalService;
   private readonly memory?: MemoryService;
+  private readonly github?: GitHubService;
   private readonly query: QueryFn;
   private readonly genId: () => string;
   private readonly now: () => number;
@@ -463,6 +467,7 @@ export class SessionBroker {
     this.cap = Math.max(1, opts.maxActiveSessions ?? 6);
     this.terminals = opts.terminals;
     this.memory = opts.memory;
+    this.github = opts.github;
     this.query = opts.deps?.query ?? (sdkQuery as unknown as QueryFn);
     this.genId = opts.deps?.genId ?? (() => nanoid());
     this.now = opts.deps?.now ?? (() => Date.now());
@@ -1546,6 +1551,7 @@ export class SessionBroker {
     // in-flight wait on stop/fork.
     const terminals = this.terminals;
     const memory = this.memory;
+    const github = this.github;
     const projectId = session.projectId;
     options.mcpServers = {
       ...(project?.mcpServers as unknown as Record<string, SdkMcpServerConfig> | undefined),
@@ -1571,6 +1577,12 @@ export class SessionBroker {
                 forget: (name) => memory.delete(projectId, name),
               }
             : undefined,
+        // Bind the PR poller to this session's default cwd so `gh` auto-detects
+        // the repo (the chat's worktree, else the project root); the agent may
+        // still pass an explicit owner/name override.
+        github: github
+          ? { prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd }) }
+          : undefined,
         signal: session.abortController?.signal,
         now: this.now,
       }),
