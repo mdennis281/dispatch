@@ -17,16 +17,42 @@ import {
   ensureChatOpen,
   panelTabs,
   DEFAULT_BASE,
+  createChat,
+  deleteChat,
+  selectChatByTitle,
+  driveChat,
+  summarizeRow,
+  listMemory,
+  deleteMemory,
 } from "./lib.mjs";
 
 function parseArgs(argv) {
-  const args = { base: DEFAULT_BASE, out: undefined, flow: "app", scale: 2, help: false };
+  const args = {
+    base: DEFAULT_BASE,
+    out: undefined,
+    flow: "app",
+    scale: 2,
+    help: false,
+    // --- drive flow ---
+    project: undefined,
+    prompt: undefined,
+    mode: "bypass",
+    title: undefined,
+    cleanup: false,
+    timeout: 120_000,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--base") args.base = argv[++i];
     else if (a === "--out") args.out = argv[++i];
     else if (a === "--flow") args.flow = argv[++i];
     else if (a === "--scale") args.scale = Number(argv[++i]) || 2;
+    else if (a === "--project") args.project = argv[++i];
+    else if (a === "--prompt") args.prompt = argv[++i];
+    else if (a === "--mode") args.mode = argv[++i];
+    else if (a === "--title") args.title = argv[++i];
+    else if (a === "--timeout") args.timeout = Number(argv[++i]) || 120_000;
+    else if (a === "--cleanup") args.cleanup = true;
     else if (a === "--help" || a === "-h") args.help = true;
   }
   return args;
@@ -81,6 +107,68 @@ const FLOWS = {
       await ctx.shot(`panel-${label}`);
     }
   },
+
+  // Drive a REAL agent turn end-to-end: create a chat under a project, send a
+  // prompt through the UI, wait for the turn to finish, and capture the
+  // transcript. Makes a genuine LLM call — use for MCP-tool smoke tests.
+  //
+  //   node tools/verify/shot.mjs --flow drive --project <id> \
+  //     --prompt "…" [--mode bypass] [--title "MCP smoke"] [--cleanup]
+  //
+  // Prints every finalized transcript row (summarized) so the caller can confirm
+  // the tool cards succeeded, and (when --project) dumps the project's memory
+  // before + after so a remember/forget round-trip is observable.
+  async drive(ctx, args) {
+    if (!args.project) throw new Error("--flow drive requires --project <projectId>");
+    if (!args.prompt) throw new Error("--flow drive requires --prompt <text>");
+
+    const title = args.title ?? `MCP smoke ${new Date().toISOString().slice(11, 19)}`;
+    console.log(`[verify] creating chat "${title}" in project ${args.project} (mode ${args.mode})`);
+    const chat = await createChat(ctx.base, {
+      projectId: args.project,
+      title,
+      modeId: args.mode,
+    });
+    console.log(`[verify] chat id ${chat.id}`);
+
+    const memBefore = await listMemory(ctx.base, args.project).catch(() => []);
+    console.log(`[verify] memory before: [${memBefore.map((m) => m.name).join(", ")}]`);
+
+    try {
+      await gotoApp(ctx.page, ctx.base);
+      await selectChatByTitle(ctx.page, title);
+      await ctx.shot("drive-selected");
+
+      console.log(`[verify] sending prompt + awaiting idle (timeout ${args.timeout}ms)…`);
+      const rows = await driveChat(ctx.page, ctx.base, chat.id, args.prompt, {
+        timeoutMs: args.timeout,
+      });
+
+      await ctx.page.waitForTimeout(800);
+      await ctx.shot("drive-transcript", { fullPage: true });
+
+      console.log(`\n[verify] transcript (${rows.length} rows):`);
+      for (const r of rows) console.log(`   ${summarizeRow(r)}`);
+
+      const memAfter = await listMemory(ctx.base, args.project).catch(() => []);
+      console.log(`\n[verify] memory after: [${memAfter.map((m) => m.name).join(", ")}]`);
+
+      // Screenshot the Memory panel so the add/remove is visible in the UI too.
+      const memTab = ctx.page.locator("aside").last().getByRole("tab", { name: /memory/i }).first();
+      if (await memTab.count()) {
+        await memTab.click();
+        await ctx.page.waitForTimeout(400);
+        await ctx.shot("drive-memory-panel");
+      }
+    } finally {
+      if (args.cleanup) {
+        // Best-effort cleanup: drop any `mcp-smoke` memory + the smoke chat.
+        await deleteMemory(ctx.base, args.project, "mcp-smoke").catch(() => {});
+        await deleteChat(ctx.base, chat.id).catch(() => {});
+        console.log(`[verify] cleaned up chat ${chat.id} + mcp-smoke memory`);
+      }
+    }
+  },
 };
 
 function usage() {
@@ -94,6 +182,14 @@ function usage() {
       "  --out    output dir for PNGs        (default <repoRoot>/.verify-shots)",
       `  --flow   ${Object.keys(FLOWS).join(" | ")} | all   (default app)`,
       "  --scale  device scale factor        (default 2)",
+      "",
+      "  drive flow (real agent turn):",
+      "  --project <id>   project to create the chat under (required)",
+      "  --prompt  <text> message to send                  (required)",
+      "  --mode    <id>   chat mode                         (default bypass)",
+      "  --title   <text> chat title                        (default 'MCP smoke …')",
+      "  --timeout <ms>   idle wait cap                      (default 120000)",
+      "  --cleanup        delete the smoke chat + mcp-smoke memory afterward",
     ].join("\n"),
   );
 }
@@ -118,7 +214,7 @@ async function main() {
   try {
     for (const f of flows) {
       console.log(`[verify] flow: ${f}  (base ${ctx.base})`);
-      await FLOWS[f](ctx);
+      await FLOWS[f](ctx, args);
     }
   } finally {
     await ctx.close();

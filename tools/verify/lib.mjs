@@ -142,3 +142,102 @@ export async function ensureChatOpen(page) {
   if ((await panelTabs(page).count()) > 0) return true;
   return selectFirstChat(page);
 }
+
+/* --------------------------------------------------------------- REST helpers */
+
+/** Small JSON fetch against the running server's REST API. Throws on non-2xx. */
+export async function api(base, path, { method = "GET", body } = {}) {
+  const res = await fetch(`${base}${path}`, {
+    method,
+    headers: body ? { "content-type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`${method} ${path} → ${res.status} ${text}`);
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+export const listChats = (base, projectId) =>
+  api(base, `/api/chats${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`);
+export const createChat = (base, params) =>
+  api(base, "/api/chats", { method: "POST", body: params });
+export const deleteChat = (base, id) =>
+  api(base, `/api/chats/${encodeURIComponent(id)}`, { method: "DELETE" });
+export const readMessages = (base, id) =>
+  api(base, `/api/chats/${encodeURIComponent(id)}/messages`);
+export const listMemory = (base, projectId) =>
+  api(base, `/api/projects/${encodeURIComponent(projectId)}/memory`);
+export const deleteMemory = (base, projectId, name) =>
+  api(base, `/api/projects/${encodeURIComponent(projectId)}/memory/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+
+/* ------------------------------------------------------------- drive a chat */
+
+/** Count `result` rows (turn-done signals) currently in a chat's transcript. */
+async function resultCount(base, chatId) {
+  const rows = await readMessages(base, chatId).catch(() => []);
+  return rows.filter((r) => r.kind === "result").length;
+}
+
+/**
+ * Poll the transcript until a NEW `result` row appears beyond `sinceResults`
+ * (the turn finished → the session is idle) or `timeoutMs` elapses. Returns the
+ * final message list. Never throws on timeout — the caller inspects the rows.
+ */
+export async function waitForChatIdle(base, chatId, sinceResults, timeoutMs = 120_000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    const rows = await readMessages(base, chatId).catch(() => []);
+    const results = rows.filter((r) => r.kind === "result").length;
+    if (results > sinceResults) return rows;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return readMessages(base, chatId).catch(() => []);
+}
+
+/** Select a specific chat row in the sidebar by its title text. */
+export async function selectChatByTitle(page, title, timeout = 15_000) {
+  const row = page.getByTestId("chat-row").filter({ hasText: title }).first();
+  await row.waitFor({ timeout });
+  await row.click();
+  await page.locator("[data-transcript]").first().waitFor({ timeout: 8_000 }).catch(() => {});
+  await page.waitForTimeout(400);
+}
+
+/** Type `text` into the composer's TipTap editor and send it (⌘/Ctrl+↵). */
+export async function typeAndSend(page, text) {
+  // TipTap renders a ProseMirror contenteditable inside the composer's `.cm-prose`.
+  const box = page.locator('.cm-prose [contenteditable="true"]').first();
+  await box.waitFor({ timeout: 10_000 });
+  await box.click();
+  await box.pressSequentially(text, { delay: 4 });
+  await page.keyboard.press("Control+Enter");
+}
+
+/**
+ * End-to-end "drive a chat": type `prompt` into the open chat, send it, wait for
+ * the turn to finish (a new `result` row), and return the final transcript rows.
+ * The chat must already be selected/open (see selectChatByTitle / ensureChatOpen).
+ */
+export async function driveChat(page, base, chatId, prompt, { timeoutMs = 120_000 } = {}) {
+  const before = await resultCount(base, chatId);
+  await typeAndSend(page, prompt);
+  const rows = await waitForChatIdle(base, chatId, before, timeoutMs);
+  return rows;
+}
+
+/** Compact one transcript row to a readable line for console/report scraping. */
+export function summarizeRow(r) {
+  if (r.kind === "assistant") return `assistant: ${(r.text ?? "").slice(0, 200)}`;
+  if (r.kind === "tool_use") return `tool_use: ${r.name}(${JSON.stringify(r.input).slice(0, 160)})`;
+  if (r.kind === "tool_result")
+    return `tool_result[${r.ok ? "ok" : "ERR"}]: ${JSON.stringify(r.content).slice(0, 200)}`;
+  if (r.kind === "permission") return `permission: ${r.toolName} → ${r.decision}`;
+  if (r.kind === "result") return `result[${r.isError ? "error" : "ok"}]`;
+  if (r.kind === "user") return `user: ${(r.text ?? "").slice(0, 120)}`;
+  return `${r.kind}`;
+}
