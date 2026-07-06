@@ -68,10 +68,10 @@
 ##   ✅ Unlink-from-chat control — 4th icon on worktree card (manual attribution override).
 ##   ⏳ Screenshot-to-UI (57e9ebd) — image-block persist+inline-render path built + unit-tested, NOT yet live-driven; needs claude-in-chrome MCP added to the Hivebreak project mcpServers config, then agent screenshots a tab → renders in transcript. ONLY remaining live-drive.
 
-## IN FLIGHT (parallel, disjoint scopes, 2026-07-05):
-##   - PER-PROJECT AGENT MEMORY (agent a1aee34bfde166caa): .data/projects/<id>/memory/*.md + MEMORY.md index; read-at-start injection into buildOptions systemPrompt; remember/recall/forget on manager MCP; Memory RightPanel tab. OWNS server/shared/client src.
-##   - PLAYWRIGHT VERIFY HARNESS (agent ac34f80cf5b87d0e3): headless chromium drives running :4319, PNGs→.verify-shots/, tools/verify/shot.mjs + flows(app/chat/panels) + e2e smoke + README(connectOverCDP for auth). OWNS tools/verify + e2e + playwright.config + package.json scripts. REASON: replace slow tab-stealing Chrome MCP for UI verification.
-##   - STILL PENDING live-drive: screenshot-to-UI (Batch 6 #3) — verify via the new Playwright harness once it lands, after wiring claude-in-chrome MCP into the project.
+## DONE 2026-07-05 (both committed, build+184 tests green):
+##   - PER-PROJECT AGENT MEMORY (ac0de5c): .data/projects/<id>/memory/*.md + generated MEMORY.md index; read-at-start injection into buildOptions systemPrompt (bounded: index+descriptions, empty→nothing); remember/recall/forget on manager MCP; Memory RightPanel tab (Brain icon, live count, create/edit/delete). VERIFIED LIVE via Playwright: panel + API-write + on-disk .md/index. Injection unit-tested. Starter memory "deploy-runbook" left in hivebreak.
+##   - PLAYWRIGHT VERIFY HARNESS (8b3e80f): headless chromium drives running :4319 → PNGs in .verify-shots/ (gitignored). RUN: `node tools/verify/shot.mjs --flow all` (flows app/chat/panels; --base/--out/--scale flags). Auto-discovers panel tabs. e2e smoke at packages/client/e2e/verify-smoke.spec.ts. README has connectOverCDP(:9222)/persistent-profile for auth-bearing Chrome. data-testid="chat-row" added to Sidebar. THIS is the fast, no-tab replacement for the Chrome MCP — use it for all UI verification.
+##   - STILL PENDING live-drive: screenshot-to-UI (Batch 6 #3) — wire claude-in-chrome MCP into hivebreak project mcpServers, then verify via harness.
 
 ## FINAL
 - [ ] Full live re-verification (drive EVERY control with vision)
