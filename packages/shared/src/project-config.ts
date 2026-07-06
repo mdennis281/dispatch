@@ -31,6 +31,7 @@ export const DEFAULT_INSTRUCTIONS_DIR = "instructions";
 export const DEFAULT_AGENTS_DIR = "agents";
 export const DEFAULT_MODES_DIR = "modes";
 export const DEFAULT_MEMORY_DIR = "memory";
+export const DEFAULT_SKILLS_DIR = "skills";
 
 /* =============================================================== manifest */
 
@@ -125,6 +126,8 @@ export const ProjectManifestSchema = z.object({
   agents: z.string().optional(),
   /** Dir override for modes (default `modes/`). */
   modes: z.string().optional(),
+  /** Dir override for skills (default `skills/`). */
+  skills: z.string().optional(),
   /** Dir override for instruction files (default `instructions/`). */
   instructionsDir: z.string().optional(),
 });
@@ -168,6 +171,36 @@ export const ConfigModeSchema = z.object({
 export type ConfigMode = z.infer<typeof ConfigModeSchema>;
 
 /**
+ * A skill authored under `skills/`. Claude Code skills (a `SKILL.md` document
+ * with `{ name, description }` frontmatter + a body of instructions, optionally
+ * with supporting files) are the one config kind the Agent SDK has no direct
+ * "source" option for: it only discovers `<cwd>/.claude/skills/`. So a config
+ * skill is MATERIALIZED into the session cwd's `.claude/skills/` at launch (a
+ * MERGE that never clobbers a skill the repo already ships) — `dir`/`path`/
+ * `layout` describe the on-disk source for that copy.
+ *
+ * Two layouts are supported:
+ *   - `skills/<dir>/SKILL.md` — a skill directory (SKILL.md + any supporting
+ *     files); the whole dir is copied, and
+ *   - flat `skills/<name>.md` — a single-file skill.
+ */
+export const SkillConfigSchema = z.object({
+  /** Slug of the skill name (its stable identity within the project). */
+  id: z.string(),
+  /** Skill name — frontmatter `name`, else the dir / file base name. */
+  name: z.string(),
+  /** One-line description (frontmatter `description`), if any. */
+  description: z.string().optional(),
+  /** Directory name to materialize under `.claude/skills/` (never clobbered). */
+  dir: z.string(),
+  /** Absolute path to the SKILL.md source file (or the flat `<name>.md`). */
+  path: z.string(),
+  /** On-disk layout: a `<dir>/SKILL.md` skill dir, or a flat `<name>.md`. */
+  layout: z.enum(["dir", "flat"]),
+});
+export type SkillConfig = z.infer<typeof SkillConfigSchema>;
+
+/**
  * The normalized, in-memory project config the server loads from a managed
  * repo's `.claude-manager/`. This is the shape the API exposes and phases 2-4
  * consume. Store shapes are reused where they exist ({@link SubAppSchema},
@@ -197,12 +230,16 @@ export const ProjectConfigSchema = z.object({
   agents: z.array(AgentConfigSchema).default([]),
   /** Modes loaded from `modes/*.yaml`. */
   modes: z.array(ConfigModeSchema).default([]),
+  /** Skills loaded from `skills/` — materialized into `<cwd>/.claude/skills/`. */
+  skills: z.array(SkillConfigSchema).default([]),
   /** Absolute resolved memory dir (the memory SOURCE OF TRUTH). */
   memoryDir: z.string(),
   /** Absolute resolved agents dir. */
   agentsDir: z.string(),
   /** Absolute resolved modes dir. */
   modesDir: z.string(),
+  /** Absolute resolved skills dir. */
+  skillsDir: z.string(),
   /** Absolute resolved instructions dir. */
   instructionsDir: z.string(),
 });
@@ -214,6 +251,7 @@ export const ProjectConfigErrorScopeSchema = z.enum([
   "instruction",
   "agent",
   "mode",
+  "skill",
   "io",
 ]);
 export type ProjectConfigErrorScope = z.infer<typeof ProjectConfigErrorScopeSchema>;

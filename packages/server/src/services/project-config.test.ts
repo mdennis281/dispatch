@@ -220,18 +220,107 @@ describe("ProjectConfigService — load a valid .claude-manager/", () => {
     expect(cfg.modesDir).toContain("modes");
   });
 
-  it("honors dir overrides (memory/agents/modes/instructionsDir)", async () => {
+  it("honors dir overrides (memory/agents/modes/skills/instructionsDir)", async () => {
     const project = await seedProject();
     await writeConfig(
       "project.yaml",
-      ["name: X", "memory: mem", "agents: bots", "modes: postures", "instructionsDir: docs"].join("\n"),
+      ["name: X", "memory: mem", "agents: bots", "modes: postures", "skills: powers", "instructionsDir: docs"].join("\n"),
     );
     const svc = new ProjectConfigService({ store, bus });
     const cfg = (await svc.load(project)).config!;
     expect(cfg.memoryDir.endsWith("mem")).toBe(true);
     expect(cfg.agentsDir.endsWith("bots")).toBe(true);
     expect(cfg.modesDir.endsWith("postures")).toBe(true);
+    expect(cfg.skillsDir.endsWith("powers")).toBe(true);
     expect(cfg.instructionsDir.endsWith("docs")).toBe(true);
+  });
+});
+
+/* --------------------------------------------------------------- skills */
+
+describe("ProjectConfigService — skills (both layouts + resilience)", () => {
+  it("loads a SKILL.md dir skill AND a flat `<name>.md` skill into ProjectConfig", async () => {
+    const project = await seedProject();
+    await writeConfig("project.yaml", "name: X");
+    // Layout A: a skill directory with SKILL.md (+ a supporting file).
+    await writeConfig(
+      "skills/sprite-gen/SKILL.md",
+      ["---", "name: Sprite Gen", "description: Generate a sprite sheet", "---", "Do sprites."].join("\n"),
+    );
+    await writeConfig("skills/sprite-gen/gen.py", "print('hi')\n");
+    // Layout B: a flat single-file skill.
+    await writeConfig(
+      "skills/add-npc.md",
+      ["---", "name: Add NPC", "description: Import a new enemy", "---", "Add the NPC."].join("\n"),
+    );
+
+    const svc = new ProjectConfigService({ store, bus });
+    const result = await svc.load(project);
+    expect(result.errors).toEqual([]);
+    const skills = result.config!.skills;
+    expect(skills.map((s) => s.id).sort()).toEqual(["add-npc", "sprite-gen"]);
+
+    const dirSkill = skills.find((s) => s.id === "sprite-gen")!;
+    expect(dirSkill).toMatchObject({
+      name: "Sprite Gen",
+      description: "Generate a sprite sheet",
+      dir: "sprite-gen",
+      layout: "dir",
+    });
+    expect(dirSkill.path.replace(/\\/g, "/")).toContain("skills/sprite-gen/SKILL.md");
+
+    const flatSkill = skills.find((s) => s.id === "add-npc")!;
+    expect(flatSkill).toMatchObject({
+      name: "Add NPC",
+      description: "Import a new enemy",
+      dir: "add-npc",
+      layout: "flat",
+    });
+    expect(flatSkill.path.replace(/\\/g, "/")).toContain("skills/add-npc.md");
+  });
+
+  it("names a skill from its dir/file when frontmatter has no name", async () => {
+    const project = await seedProject();
+    await writeConfig("project.yaml", "name: X");
+    await writeConfig("skills/lonely/SKILL.md", "Just a body, no frontmatter.");
+    const svc = new ProjectConfigService({ store, bus });
+    const skills = (await svc.load(project)).config!.skills;
+    expect(skills).toHaveLength(1);
+    expect(skills[0]).toMatchObject({ id: "lonely", name: "lonely", dir: "lonely", layout: "dir" });
+  });
+
+  it("a skill dir without SKILL.md → structured `skill` error, other skills still load", async () => {
+    const project = await seedProject();
+    await writeConfig("project.yaml", "name: X");
+    await writeConfig("skills/good/SKILL.md", ["---", "name: Good", "---", "ok"].join("\n"));
+    // A directory with no SKILL.md is malformed.
+    await writeConfig("skills/broken/notes.txt", "not a skill");
+    const svc = new ProjectConfigService({ store, bus });
+    const result = await svc.load(project);
+    expect(result.config!.skills.map((s) => s.id)).toEqual(["good"]);
+    expect(
+      result.errors.some((e) => e.scope === "skill" && e.file === "broken/SKILL.md"),
+    ).toBe(true);
+  });
+
+  it("exposes config skills via getSkills after a reload (empty before / for unknown)", async () => {
+    await seedProject({ name: "Seed" });
+    await writeConfig("project.yaml", "name: X");
+    await writeConfig("skills/foo/SKILL.md", ["---", "name: Foo", "---", "b"].join("\n"));
+    const svc = new ProjectConfigService({ store, bus });
+    expect(svc.getSkills("p1")).toEqual([]); // nothing loaded yet
+    await svc.reload("p1");
+    expect(svc.getSkills("p1").map((s) => s.id)).toEqual(["foo"]);
+    expect(svc.getSkills("nope")).toEqual([]);
+  });
+
+  it("no skills/ dir → empty skills array (never an error)", async () => {
+    const project = await seedProject();
+    await writeConfig("project.yaml", "name: X");
+    const svc = new ProjectConfigService({ store, bus });
+    const result = await svc.load(project);
+    expect(result.config!.skills).toEqual([]);
+    expect(result.errors.some((e) => e.scope === "skill")).toBe(false);
   });
 });
 

@@ -49,6 +49,7 @@ import type {
   AgentConfig,
   ModeConfig,
   McpServerConfig,
+  SkillConfig,
 } from "@cm/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -56,6 +57,7 @@ import type { TerminalService } from "./terminal.js";
 import type { MemoryService } from "./memory.js";
 import type { GitHubService } from "./github.js";
 import { createManagerMcpServer } from "./mcp/manager-mcp.js";
+import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
 
 /* ------------------------------------------------------------------ deps */
 
@@ -91,6 +93,9 @@ export interface BrokerProjectConfig {
   /** A project's config-sourced external MCP servers (name → config), or `{}`.
    *  Merged into the session's `Options.mcpServers` alongside `manager`. */
   getMcpServers(projectId: string): Record<string, McpServerConfig>;
+  /** A project's config-sourced skills (from `.claude-manager/skills/`), or `[]`.
+   *  Materialized into the session cwd's `.claude/skills/` so the SDK finds them. */
+  getSkills(projectId: string): SkillConfig[];
 }
 
 export interface SessionBrokerOptions {
@@ -469,6 +474,9 @@ interface LiveSession {
   resumeSessionId?: string;
   forkAtUuid?: string;
   fork: boolean;
+  /** Skill dirs materialized into `<cwd>/.claude/skills/` for this query (the
+   *  ones WE created), removed on teardown so a repo-owned skill is never touched. */
+  materializedSkillDirs?: string[];
 }
 
 /* =============================================================== SessionBroker */
@@ -1386,6 +1394,7 @@ export class SessionBroker {
     session.query = undefined;
     session.input = undefined;
     session.stopping = false;
+    this.cleanupSkills(session);
     this.resolveIdleAttention(session);
     this.setStatus(session, "done", { state: "idle" });
     this.bus.publish({
@@ -1412,10 +1421,11 @@ export class SessionBroker {
     this.drainPendingPermissions(session, "Session ended.");
 
     if (session.stopping) {
-      // Deliberate stop/fork abort — settle as a clean done.
+      // Deliberate stop/fork abort — settle as a clean done (which cleans skills).
       this.onDone(session);
       return;
     }
+    this.cleanupSkills(session);
     this.setStatus(session, "error");
     const message = err instanceof Error ? err.message : String(err);
     this.bus.publish({ type: "error", chatId: session.chatId, message });
@@ -1657,6 +1667,25 @@ export class SessionBroker {
         now: this.now,
       }),
     };
+    // Skills: the managed repo's `.claude-manager/skills/` is the SOURCE OF TRUTH,
+    // but the SDK only DISCOVERS `<cwd>/.claude/skills/` (there's no option to
+    // point it elsewhere). So materialize the config skills into the session cwd's
+    // `.claude/skills/` — a MERGE that never clobbers a skill the repo already
+    // ships — then flip `skills: 'all'` so every discovered skill (the repo's own
+    // AND the config-authored ones) is enabled. Tracked dirs are removed on
+    // teardown. Only touched when the project actually authors skills, so a repo
+    // without `.claude-manager/skills/` keeps the CLI's default skill behavior.
+    if (this.projectConfig && projectId && cwd) {
+      const skills = this.projectConfig.getSkills(projectId);
+      if (skills.length) {
+        try {
+          session.materializedSkillDirs = await materializeSkills(cwd, skills);
+        } catch {
+          /* best-effort: a copy failure must never block a turn from starting */
+        }
+        options.skills = "all";
+      }
+    }
     if (session.fork) {
       if (session.resumeSessionId) options.resume = session.resumeSessionId;
       if (session.forkAtUuid) options.resumeSessionAt = session.forkAtUuid;
@@ -1665,6 +1694,14 @@ export class SessionBroker {
       options.resume = session.resumeSessionId;
     }
     return options;
+  }
+
+  /** Remove ONLY the skill dirs we materialized for this session's query (never a
+   *  repo-owned skill). Idempotent — clears the tracked list so it runs once. */
+  private cleanupSkills(session: LiveSession): void {
+    const dirs = session.materializedSkillDirs;
+    session.materializedSkillDirs = undefined;
+    if (dirs?.length) void cleanupMaterializedSkills(dirs);
   }
 
   /* ------------------------------------------------------ persistence */

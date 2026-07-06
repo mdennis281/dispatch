@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../store/index.js";
@@ -1238,6 +1239,78 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     expect(opts.mcpServers!["claude-in-chrome"]).toMatchObject({
       url: "http://127.0.0.1:9999/sse",
     });
+  });
+
+  it("materializes a `.claude-manager/skills/` skill into the session cwd + enables skills:'all'", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const repoDir = await mkdtemp(join(tmpdir(), "cm-broker-skill-"));
+    tempDirs.push(repoDir);
+    const project: Project = {
+      id: "ps",
+      name: "Seed",
+      repoPath: repoDir,
+      worktreeRoot: join(repoDir, "..", "wt"),
+      subApps: [],
+      createdAt: 1,
+    };
+    await store.saveProject(project);
+    await writeConfig(repoDir, "project.yaml", "name: Configured");
+    // A skill authored ONLY in `.claude-manager/skills/` (the repo has no
+    // `.claude/skills/<name>` of its own).
+    await writeConfig(
+      repoDir,
+      "skills/sprite-gen/SKILL.md",
+      ["---", "name: Sprite Gen", "description: make sprites", "---", "Do the sprites."].join("\n"),
+    );
+    const svc = new ProjectConfigService({ store, bus });
+    await svc.reload("ps");
+    const broker = makeConfigBroker(fn, svc);
+
+    await store.saveChat(chatFor("c1", "ps"));
+    broker.create(chatFor("c1", "ps"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    // The SDK is told to enable every discovered skill…
+    const opts = controllers[0]!.options as { skills?: unknown; cwd?: string };
+    expect(opts.skills).toBe("all");
+    // …and the config skill was materialized into the effective `<cwd>/.claude/skills/`
+    // so the SDK (settingSources project/local) discovers it.
+    const materialized = join(repoDir, ".claude", "skills", "sprite-gen", "SKILL.md");
+    expect(existsSync(materialized)).toBe(true);
+    expect(await readFile(materialized, "utf8")).toContain("Do the sprites.");
+  });
+
+  it("does not clobber an existing `.claude/skills/<name>` and leaves skills default when none authored", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const repoDir = await mkdtemp(join(tmpdir(), "cm-broker-skill2-"));
+    tempDirs.push(repoDir);
+    const project: Project = {
+      id: "pn",
+      name: "Seed",
+      repoPath: repoDir,
+      worktreeRoot: join(repoDir, "..", "wt"),
+      subApps: [],
+      createdAt: 1,
+    };
+    await store.saveProject(project);
+    await writeConfig(repoDir, "project.yaml", "name: Configured");
+    const svc = new ProjectConfigService({ store, bus });
+    await svc.reload("pn");
+    const broker = makeConfigBroker(fn, svc);
+
+    await store.saveChat(chatFor("c1", "pn"));
+    broker.create(chatFor("c1", "pn"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    // No authored skills → the SDK skill option is left untouched (CLI default).
+    const opts = controllers[0]!.options as { skills?: unknown };
+    expect(opts.skills).toBeUndefined();
   });
 });
 

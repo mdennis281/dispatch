@@ -36,6 +36,7 @@ import {
   AgentConfigSchema,
   ConfigModeSchema,
   ModeConfigSchema,
+  SkillConfigSchema,
   PermissionModeSchema,
   CONFIG_DIR_NAME,
   MANIFEST_FILE,
@@ -43,6 +44,7 @@ import {
   DEFAULT_AGENTS_DIR,
   DEFAULT_MODES_DIR,
   DEFAULT_MEMORY_DIR,
+  DEFAULT_SKILLS_DIR,
   type Project,
   type ProjectConfig,
   type ProjectConfigResult,
@@ -51,6 +53,7 @@ import {
   type ConfigMode,
   type ModeConfig,
   type AgentConfig,
+  type SkillConfig,
   type SubApp,
   type McpServerConfig,
 } from "@cm/shared";
@@ -373,6 +376,17 @@ export class ProjectConfigService {
   }
 
   /**
+   * A project's config-sourced skills (loaded from `.claude-manager/skills/`),
+   * or `[]` when it has no `.claude-manager/`. The broker MATERIALIZES these into
+   * a session's effective `<cwd>/.claude/skills/` at launch (a merge that never
+   * clobbers a skill the repo already ships) so the Agent SDK discovers them.
+   * Consulted config-first (not the store) so a live watcher edit is reflected.
+   */
+  getSkills(projectId: string): SkillConfig[] {
+    return [...(this.getConfig(projectId)?.skills ?? [])];
+  }
+
+  /**
    * Load a project's `.claude-manager/` from disk into a normalized result.
    * Pure read — no store writes, no events. Resilient: any parse/read failure
    * becomes a structured error, never a throw.
@@ -416,6 +430,7 @@ export class ProjectConfigService {
     const instructionsDir = join(sourceDir, manifest.instructionsDir ?? DEFAULT_INSTRUCTIONS_DIR);
     const agentsDir = join(sourceDir, manifest.agents ?? DEFAULT_AGENTS_DIR);
     const modesDir = join(sourceDir, manifest.modes ?? DEFAULT_MODES_DIR);
+    const skillsDir = join(sourceDir, manifest.skills ?? DEFAULT_SKILLS_DIR);
     const memoryDir = join(sourceDir, manifest.memory ?? DEFAULT_MEMORY_DIR);
 
     // --- instructions ---
@@ -451,6 +466,9 @@ export class ProjectConfigService {
     // --- modes ---
     const modes = await this.loadModes(modesDir, errors);
 
+    // --- skills ---
+    const skills = await this.loadSkills(skillsDir, errors);
+
     // --- subApps (cwd → path, docker → dockerCompose) ---
     const subApps: SubApp[] = (manifest.subApps ?? []).map((s) => ({
       id: s.id,
@@ -484,9 +502,11 @@ export class ProjectConfigService {
       mcpServers,
       agents,
       modes,
+      skills,
       memoryDir,
       agentsDir,
       modesDir,
+      skillsDir,
       instructionsDir,
     });
 
@@ -715,6 +735,101 @@ export class ProjectConfigService {
       }
     }
     return out;
+  }
+
+  /**
+   * Load `.claude-manager/skills/` into {@link SkillConfig}s. Two layouts:
+   *   - a skill DIRECTORY `skills/<dir>/SKILL.md` (frontmatter `{ name,
+   *     description }` + body; the whole dir is the skill), and
+   *   - a FLAT `skills/<name>.md` single-file skill.
+   * Resilient: a dir without a `SKILL.md`, a duplicate id, or a read failure
+   * yields a structured `skill` error and the other skills still load.
+   */
+  private async loadSkills(
+    skillsDir: string,
+    errors: ProjectConfigError[],
+  ): Promise<SkillConfig[]> {
+    if (!existsSync(skillsDir)) return [];
+    let entries: { name: string; isDir: boolean; isFile: boolean }[];
+    try {
+      entries = (await readdir(skillsDir, { withFileTypes: true })).map((e) => ({
+        name: e.name,
+        isDir: e.isDirectory(),
+        isFile: e.isFile(),
+      }));
+    } catch (err) {
+      errors.push({ scope: "skill", message: msg(err) });
+      return [];
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    const out: SkillConfig[] = [];
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      // A skill directory: `skills/<dir>/SKILL.md` (+ any supporting files).
+      if (entry.isDir) {
+        const file = join(skillsDir, entry.name, "SKILL.md");
+        if (!existsSync(file)) {
+          errors.push({ scope: "skill", file: `${entry.name}/SKILL.md`, message: "missing SKILL.md" });
+          continue;
+        }
+        await this.pushSkill(out, seen, errors, {
+          file,
+          rel: `${entry.name}/SKILL.md`,
+          dir: entry.name,
+          layout: "dir",
+          fallbackName: entry.name,
+        });
+        continue;
+      }
+      // A flat single-file skill: `skills/<name>.md`.
+      if (entry.isFile && entry.name.toLowerCase().endsWith(".md")) {
+        const base = entry.name.replace(/\.md$/i, "");
+        await this.pushSkill(out, seen, errors, {
+          file: join(skillsDir, entry.name),
+          rel: entry.name,
+          dir: base,
+          layout: "flat",
+          fallbackName: base,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** Read one skill's SKILL.md/`.md`, build a {@link SkillConfig}, dedupe by id. */
+  private async pushSkill(
+    out: SkillConfig[],
+    seen: Set<string>,
+    errors: ProjectConfigError[],
+    src: { file: string; rel: string; dir: string; layout: "dir" | "flat"; fallbackName: string },
+  ): Promise<void> {
+    try {
+      const raw = await readFile(src.file, "utf8");
+      const { data } = parseFrontmatter(raw);
+      const name =
+        typeof data.name === "string" && data.name.trim() ? data.name.trim() : src.fallbackName;
+      const id = slugifyConfigName(name);
+      if (!id) {
+        errors.push({ scope: "skill", file: src.rel, message: "skill name is empty" });
+        return;
+      }
+      if (seen.has(id)) {
+        errors.push({ scope: "skill", file: src.rel, message: `duplicate skill id "${id}"` });
+        return;
+      }
+      const skill = SkillConfigSchema.parse({
+        id,
+        name,
+        description: typeof data.description === "string" ? oneLine(data.description) : undefined,
+        dir: src.dir,
+        path: src.file,
+        layout: src.layout,
+      });
+      seen.add(id);
+      out.push(skill);
+    } catch (err) {
+      errors.push({ scope: "skill", file: src.rel, message: msg(err) });
+    }
   }
 }
 

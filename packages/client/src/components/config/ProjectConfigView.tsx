@@ -25,6 +25,7 @@ import {
   FolderGit2,
   TriangleAlert,
   Sparkles,
+  Wand2,
   type LucideIcon,
 } from "lucide-react";
 import type { ProjectConfig, ProjectConfigError } from "@cm/shared";
@@ -133,6 +134,11 @@ function ConfigBody({ config, memoryCount }: { config: ProjectConfig; memoryCoun
       <Section icon={ShieldCheck} label="Modes" count={config.modes.length}>
         {config.modes.map((m) => (
           <Row key={m.id} title={m.id} sub={m.permissionMode} />
+        ))}
+      </Section>
+      <Section icon={Wand2} label="Skills" count={config.skills.length}>
+        {config.skills.map((s) => (
+          <Row key={s.id} title={s.name} sub={s.description} />
         ))}
       </Section>
       <Section icon={Brain} label="Memory" count={memoryCount} />
