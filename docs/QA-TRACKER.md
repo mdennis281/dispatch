@@ -73,6 +73,11 @@
 ##   - PLAYWRIGHT VERIFY HARNESS (8b3e80f): headless chromium drives running :4319 → PNGs in .verify-shots/ (gitignored). RUN: `node tools/verify/shot.mjs --flow all` (flows app/chat/panels; --base/--out/--scale flags). Auto-discovers panel tabs. e2e smoke at packages/client/e2e/verify-smoke.spec.ts. README has connectOverCDP(:9222)/persistent-profile for auth-bearing Chrome. data-testid="chat-row" added to Sidebar. THIS is the fast, no-tab replacement for the Chrome MCP — use it for all UI verification.
 ##   - STILL PENDING live-drive: screenshot-to-UI (Batch 6 #3) — wire claude-in-chrome MCP into hivebreak project mcpServers, then verify via harness.
 
+## 2026-07-06 bug fixes + MCP:
+##   - fix(chat) 1387d8e: stuck StreamingRows pruned on interrupt/turn-end (were only dropped on exact-id finalize); TASKS strip 0/N bug — id-less TaskCreate never indexed under SDK implicit ids "1".."11" so TaskUpdate completions were no-ops → now stamped sequential ids (necrarch verified 10/11 live). +client vitest.
+##   - test(mcp) d68e4f7: all 6 manager MCP tools AUDITED CORRECT (no behavioral bug) + deterministic integration tests + LIVE smokes (wait/wait_for_chat/remember/recall/forget all pass; ~$1.44, auto-cleaned). 190 server tests. Added reusable headless CHAT-DRIVE flow: `node tools/verify/shot.mjs --flow drive --project hivebreak --mode bypass --title X --cleanup --prompt "..."` (creates chat, sends via UI, waits idle, captures transcript+memory). USE THIS to verify agent behavior headless.
+##   - IN FLIGHT feat(mcp) wait_for_pr (agent aebb4f51ddbf1028e): the real loop-cause fix — no tool waited on a PR merge (only wait_for_chat waits on a chat), so agents hand-rolled poll loops. Polls gh server-side, resolves on merge/close, timeout+cancel like wait. Building per user greenlight.
+
 ## FINAL
 - [ ] Full live re-verification (drive EVERY control with vision)
 - [ ] Ship the 3 Hivebreak tasks through the UI → real PRs:
