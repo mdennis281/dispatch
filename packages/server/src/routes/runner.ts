@@ -6,10 +6,11 @@
  *   GET    /api/runners/:id/logs       → RunnerLogLine[]
  */
 import type { FastifyInstance } from "fastify";
+import { mergeById } from "../services/project-config.js";
 
 export function registerRunnerRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
-  const { runner } = app.services;
+  const { runner, projectConfig } = app.services;
 
   app.get("/api/runners", async () => runner.list());
 
@@ -36,7 +37,12 @@ export function registerRunnerRoutes(app: FastifyInstance): void {
     }
     const project = await store.getProject(projectId);
     if (!project) return reply.code(404).send({ error: "project not found" });
-    const subApp = project.subApps.find((s) => s.id === body.subAppId);
+    // Resolve against the effective sub-app set a session sees: the repo's
+    // `.claude-manager/` config-sourced sub-apps layered over the `.data` record
+    // (config wins on id; a `.data`-only sub-app survives). The config carries
+    // the dev/ports/docker the runner spawns.
+    const subApps = mergeById(projectConfig.getSubApps(project.id), project.subApps);
+    const subApp = subApps.find((s) => s.id === body.subAppId);
     if (!subApp) return reply.code(404).send({ error: "subApp not found" });
     try {
       const instance = await runner.start(body.worktreePath, subApp, {

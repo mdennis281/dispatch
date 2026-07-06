@@ -264,6 +264,13 @@ export interface BuildCatalogOptions {
   probe?: McpProbe;
   /** Per-server probe timeout. */
   timeoutMs?: number;
+  /**
+   * The effective external servers to enumerate, OVERRIDING `project.mcpServers`.
+   * The route passes the session's real merged set — the `.data` record layered
+   * with the `.claude-manager/` config-sourced servers (config wins per-name) —
+   * so the catalog reflects EXACTLY what a session gets in `buildOptions`.
+   */
+  mcpServers?: Record<string, McpServerConfig>;
 }
 
 /**
@@ -294,7 +301,9 @@ export async function buildProjectMcpCatalog(
     ),
   };
 
-  const external = (project.mcpServers ?? {}) as Record<string, McpServerConfig>;
+  const external = (opts.mcpServers ??
+    project.mcpServers ??
+    {}) as Record<string, McpServerConfig>;
   const externalEntries = await Promise.all(
     Object.entries(external).map(([name, config]) =>
       buildExternalEntry(name, config, probe, timeoutMs),

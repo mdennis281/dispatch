@@ -142,6 +142,32 @@ describe("mcp-catalog — builder", () => {
     ]);
   });
 
+  it("enumerates the `mcpServers` override (config-sourced set) instead of project.mcpServers", async () => {
+    const okProbe: McpProbe = async () => ({
+      status: "ok",
+      tools: [
+        {
+          name: "screenshot",
+          description: "Capture the active tab",
+          inputSchema: { type: "object", properties: { tab: { type: "string" } } },
+        },
+      ],
+    });
+    // The project record has no external servers, but the config supplies one —
+    // exactly the merged set the route hands in. The catalog must list it.
+    const catalog = await buildProjectMcpCatalog(makeProject(), {
+      mcpServers: { "claude-in-chrome": { type: "sse", url: "http://127.0.0.1:9999/sse" } },
+      probe: okProbe,
+    });
+    // manager is always first; the config server shows up probed + ok.
+    expect(catalog.servers[0]!.name).toBe("manager");
+    const chrome = catalog.servers.find((s) => s.name === "claude-in-chrome")!;
+    expect(chrome.kind).toBe("external");
+    expect(chrome.status).toBe("ok");
+    expect(chrome.transport).toEqual({ type: "sse", url: "http://127.0.0.1:9999/sse" });
+    expect(chrome.tools[0]!.qualifiedName).toBe("mcp__claude-in-chrome__screenshot");
+  });
+
   it("marks a transport-less external server unconfigured and never probes it", async () => {
     let probed = false;
     const probe: McpProbe = async () => {

@@ -48,6 +48,7 @@ import type {
   ImageRef,
   AgentConfig,
   ModeConfig,
+  McpServerConfig,
 } from "@cm/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -87,6 +88,9 @@ export interface BrokerProjectConfig {
   /** The bounded, delimited system-prompt append for a project's authored
    *  instructions, or null when it has none (inject nothing). */
   buildInstructionsInjection(projectId: string): string | null;
+  /** A project's config-sourced external MCP servers (name → config), or `{}`.
+   *  Merged into the session's `Options.mcpServers` alongside `manager`. */
+  getMcpServers(projectId: string): Record<string, McpServerConfig>;
 }
 
 export interface SessionBrokerOptions {
@@ -1609,8 +1613,18 @@ export class SessionBroker {
     const memory = this.memory;
     const github = this.github;
     const projectId = session.projectId;
+    // The managed repo's `.claude-manager/` config is the SOURCE OF TRUTH for
+    // external MCP servers: layer the config-sourced servers OVER the `.data`
+    // record (config wins per-name, a `.data`-only server survives), then apply
+    // `manager` LAST so it's never clobbered (even by a config server named
+    // "manager"). Consulting the config directly (not just the store-synced copy)
+    // keeps a live watcher edit effective for this session.
+    const configMcp = (
+      this.projectConfig && projectId ? this.projectConfig.getMcpServers(projectId) : {}
+    ) as unknown as Record<string, SdkMcpServerConfig>;
     options.mcpServers = {
       ...(project?.mcpServers as unknown as Record<string, SdkMcpServerConfig> | undefined),
+      ...configMcp,
       manager: createManagerMcpServer({
         chatId: session.chatId,
         bus: this.bus,

@@ -366,6 +366,75 @@ describe("ProjectConfigService — mergeProject precedence", () => {
     expect(merged.worktreeCmd).toBe("keep-cmd");
     expect(merged.shipCmd).toBe("keep-ship");
   });
+
+  it("MERGES subApps by id: config overrides a colliding id, a .data-only sub-app survives", async () => {
+    const stored = await seedProject({
+      name: "Seed",
+      subApps: [
+        { id: "game", name: "Game (data)", path: "apps/old", dev: "old-dev" },
+        { id: "metrics", name: "Metrics", path: "services/metrics", dev: "metrics-dev" },
+      ],
+    });
+    const svc = new ProjectConfigService({ store, bus });
+    await writeConfig(
+      "project.yaml",
+      [
+        "name: Authored",
+        "subApps:",
+        "  - id: game",
+        "    name: Game (config)",
+        "    cwd: apps/new",
+        "    dev: new-dev",
+        "    ports: [5173]",
+        "    docker: docker-compose.yml",
+      ].join("\n"),
+    );
+    const cfg = (await svc.load(stored)).config!;
+    const merged = mergeProject(stored, cfg);
+
+    const byId = Object.fromEntries(merged.subApps.map((s) => [s.id, s]));
+    // Config wins on the colliding `game` id — its dev/ports/docker are used.
+    expect(byId.game).toMatchObject({
+      name: "Game (config)",
+      path: "apps/new",
+      dev: "new-dev",
+      ports: [5173],
+      dockerCompose: "docker-compose.yml",
+    });
+    // The .data-only `metrics` sub-app survives (not dropped).
+    expect(byId.metrics).toMatchObject({ path: "services/metrics", dev: "metrics-dev" });
+    // No duplicate ids.
+    expect(merged.subApps.map((s) => s.id).sort()).toEqual(["game", "metrics"]);
+  });
+
+  it("getMcpServers / getSubApps expose the config-sourced set (empty for an unconfigured project)", async () => {
+    await seedProject({ name: "Seed" });
+    await writeConfig(
+      "project.yaml",
+      [
+        "name: Authored",
+        "subApps:",
+        "  - id: app",
+        "    name: App",
+        "    cwd: apps/app",
+        "    dev: pnpm dev",
+        "mcpServers:",
+        "  - name: chrome",
+        "    transport: { type: stdio, command: npx, args: [ -y, chrome-mcp ] }",
+      ].join("\n"),
+    );
+    const svc = new ProjectConfigService({ store, bus });
+    // Before load → nothing (no config cached yet).
+    expect(svc.getMcpServers("p1")).toEqual({});
+    expect(svc.getSubApps("p1")).toEqual([]);
+
+    await svc.reload("p1");
+    expect(svc.getMcpServers("p1").chrome).toMatchObject({ type: "stdio", command: "npx" });
+    expect(svc.getSubApps("p1")[0]).toMatchObject({ id: "app", path: "apps/app", dev: "pnpm dev" });
+    // An unknown project → empty (never throws).
+    expect(svc.getMcpServers("nope")).toEqual({});
+    expect(svc.getSubApps("nope")).toEqual([]);
+  });
 });
 
 /* ------------------------------------------------ agent/mode registry (P3) */

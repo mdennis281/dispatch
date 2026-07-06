@@ -350,6 +350,29 @@ export class ProjectConfigService {
   }
 
   /**
+   * A project's config-sourced external MCP servers (name → config), or `{}` when
+   * it has no `.claude-manager/`. The broker merges these into every session's
+   * `Options.mcpServers` (config wins over the `.data` record; the in-process
+   * `manager` server is always applied last and never clobbered), and the MCP
+   * catalog probes them — so a config-declared server appears wherever a session's
+   * servers do. Kept config-first (not just the store-synced copy) so a live
+   * watcher edit is reflected even for a session that captured a stale project.
+   */
+  getMcpServers(projectId: string): Record<string, McpServerConfig> {
+    return { ...(this.getConfig(projectId)?.mcpServers ?? {}) };
+  }
+
+  /**
+   * A project's config-sourced sub-apps (mapped onto the store {@link SubApp}
+   * shape), or `[]` when it has no `.claude-manager/`. These are merged over the
+   * `.data` record (config wins on id; `.data`-only sub-apps survive) into the
+   * project the RunnerService + Apps panel consume.
+   */
+  getSubApps(projectId: string): SubApp[] {
+    return [...(this.getConfig(projectId)?.subApps ?? [])];
+  }
+
+  /**
    * Load a project's `.claude-manager/` from disk into a normalized result.
    * Pure read — no store writes, no events. Resilient: any parse/read failure
    * becomes a structured error, never a throw.
@@ -706,9 +729,9 @@ function msg(err: unknown): string {
  * Produce the effective project record: authored `.claude-manager/` fields
  * OVERRIDE the stored `.data` project. Absent manifest fields keep the stored
  * value (never clobbered). Identity/runtime fields (id, repoPath, createdAt,
- * defaultBranch) are always preserved. subApps are REPLACED when the manifest
- * declares any; mcpServers are MERGED (authored wins per-name) so a manually
- * added `.data` server isn't lost.
+ * defaultBranch) are always preserved. subApps AND mcpServers are MERGED
+ * (authored wins per-id/-name; a `.data`-only entry survives) so a manually
+ * added sub-app or MCP server isn't lost.
  */
 export function mergeProject(stored: Project, config: ProjectConfig): Project {
   return {
@@ -717,7 +740,7 @@ export function mergeProject(stored: Project, config: ProjectConfig): Project {
     worktreeRoot: config.worktreeRoot ?? stored.worktreeRoot,
     worktreeCmd: config.worktreeCmd ?? stored.worktreeCmd,
     shipCmd: config.shipCmd ?? stored.shipCmd,
-    subApps: config.subApps.length ? config.subApps : stored.subApps,
+    subApps: mergeById(config.subApps, stored.subApps),
     mcpServers:
       Object.keys(config.mcpServers).length || stored.mcpServers
         ? { ...(stored.mcpServers ?? {}), ...config.mcpServers }

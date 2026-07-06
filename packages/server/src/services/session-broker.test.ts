@@ -1192,6 +1192,53 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     const opts = controllers[0]!.options as { systemPrompt?: unknown };
     expect(opts.systemPrompt).toBeUndefined();
   });
+
+  it("merges the config's external MCP servers into the session alongside 'manager'", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    // A managed repo whose `.claude-manager/` declares an external MCP server.
+    const repoDir = await mkdtemp(join(tmpdir(), "cm-broker-mcp-"));
+    tempDirs.push(repoDir);
+    const project: Project = {
+      id: "pm",
+      name: "Seed",
+      repoPath: repoDir,
+      worktreeRoot: join(repoDir, "..", "wt"),
+      subApps: [],
+      createdAt: 1,
+    };
+    await store.saveProject(project);
+    await writeConfig(
+      repoDir,
+      "project.yaml",
+      [
+        "name: Configured",
+        "mcpServers:",
+        "  - name: claude-in-chrome",
+        "    transport: { type: sse, url: 'http://127.0.0.1:9999/sse' }",
+      ].join("\n"),
+    );
+    const svc = new ProjectConfigService({ store, bus });
+    await svc.reload("pm");
+    const broker = makeConfigBroker(fn, svc);
+
+    await store.saveChat(chatFor("c1", "pm"));
+    // Pass a project record WITHOUT mcpServers so the only source of the external
+    // server is the `.claude-manager/` config (via projectConfig.getMcpServers).
+    broker.create(chatFor("c1", "pm"), { ...project, mcpServers: undefined });
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    const opts = controllers[0]!.options as { mcpServers?: Record<string, unknown> };
+    expect(opts.mcpServers).toBeDefined();
+    // The in-process manager server is always present (never clobbered)…
+    expect(opts.mcpServers!.manager).toBeDefined();
+    // …and the config-declared external server passes through for the agent.
+    expect(opts.mcpServers!["claude-in-chrome"]).toMatchObject({
+      url: "http://127.0.0.1:9999/sse",
+    });
+  });
 });
 
 describe("SessionBroker — MCP passthrough", () => {

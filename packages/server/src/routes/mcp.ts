@@ -36,6 +36,14 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       const hit = cache.get(project.id);
       if (!fresh && hit && now - hit.at < CACHE_TTL_MS) return hit.catalog;
 
+      // The effective set a session gets: the `.data` record layered with the
+      // repo's `.claude-manager/` config-sourced servers (config wins per-name),
+      // mirroring the broker's `buildOptions` merge — so a config-declared server
+      // shows up here with its live probe status.
+      const mcpServers = {
+        ...(project.mcpServers ?? {}),
+        ...services.projectConfig.getMcpServers(project.id),
+      };
       const catalog = await buildProjectMcpCatalog(project, {
         // terminal/memory/github are all wired in production, so their manager
         // tools show as available; a missing binding flips the tool to unavailable.
@@ -44,6 +52,7 @@ export function registerMcpRoutes(app: FastifyInstance): void {
           terminals: !!services.terminals,
           memory: !!services.memory,
         },
+        mcpServers,
       });
       cache.set(project.id, { at: now, catalog });
       return catalog;
