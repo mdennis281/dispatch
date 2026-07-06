@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Hexagon, Search, Settings, Command, GitPullRequest } from "lucide-react";
+import { Hexagon, Search, Settings, Command, GitPullRequest, Blocks } from "lucide-react";
 import { AttentionPopover } from "../attention/AttentionPopover.js";
 import { CommandPalette } from "../command/CommandPalette.js";
 import { SettingsPanel } from "../settings/SettingsPanel.js";
 import { requestOpenProjectPrs } from "../prs/projectPrsBus.js";
+import { requestOpenMcpCatalog } from "../mcp/mcpCatalogBus.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Kbd } from "../ui/Kbd.js";
 import { StatusDot, type DotTone } from "../ui/StatusDot.js";
@@ -56,6 +57,9 @@ export function TopBar() {
 
       <div className="ml-auto flex items-center gap-1.5">
         <AttentionPopover />
+        <IconButton tip="MCP tools" onClick={requestOpenMcpCatalog}>
+          <Blocks />
+        </IconButton>
         <IconButton tip="Open pull requests" onClick={requestOpenProjectPrs}>
           <GitPullRequest />
         </IconButton>

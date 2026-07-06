@@ -24,6 +24,7 @@ import type {
   Checkpoint,
   ProjectMemory,
   MemoryType,
+  McpCatalog,
 } from "@cm/shared";
 
 /**
@@ -224,6 +225,12 @@ export const api = {
       ),
     remove: (projectId: string, name: string) =>
       del<void>(`/api/projects/${projectId}/memory/${encodeURIComponent(name)}`),
+  },
+
+  /* MCP catalog — every tool endpoint (custom manager + external) per project */
+  mcp: {
+    catalog: (projectId: string, opts?: { fresh?: boolean }) =>
+      get<McpCatalog>(`/api/projects/${projectId}/mcp${qs({ fresh: opts?.fresh ? 1 : undefined })}`),
   },
 
   /* attention queue snapshot */

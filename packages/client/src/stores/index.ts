@@ -20,6 +20,7 @@ import { useRunners } from "./runners.js";
 import { useTerminals } from "./terminals.js";
 import { usePanels } from "./panels.js";
 import { useMemory } from "./memory.js";
+import { useMcp } from "./mcp.js";
 import { useCheckpoints } from "./checkpoints.js";
 import { useNotices } from "./notices.js";
 
@@ -260,6 +261,7 @@ export async function hydrateFromServer(): Promise<boolean> {
   useMessages.getState().hydrate({});
   useCheckpoints.getState().reset();
   useMemory.getState().reset();
+  useMcp.getState().reset();
   usePanels.getState().hydrate({ worktrees: [], diffs: {}, prs: [], workflowRuns: [] });
 
   // Keep the user where they were after a reconnect.

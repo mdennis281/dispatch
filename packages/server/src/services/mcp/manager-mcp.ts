@@ -687,6 +687,72 @@ export function createManagerTools(ctx: ManagerMcpContext) {
   return { wait, waitForChat, waitForPr, terminal, remember, recall, forget };
 }
 
+/* ------------------------------------------------------------- catalog */
+
+/**
+ * Which session binding gates a manager tool being OFFERED to the agent (see the
+ * `createManagerMcpServer` tools array). `null` = always offered. The catalog
+ * view reads this to mark each tool `available` for a given session's bindings.
+ */
+const MANAGER_TOOL_GATE: Record<string, "github" | "terminals" | "memory" | null> = {
+  wait: null,
+  wait_for_chat: null,
+  wait_for_pr: "github",
+  terminal: "terminals",
+  remember: "memory",
+  recall: "memory",
+  forget: "memory",
+};
+
+/** A catalog descriptor for one manager tool (no live session needed). */
+export interface ManagerToolDescriptor {
+  /** Bare tool name, e.g. "wait". */
+  name: string;
+  description: string;
+  /** JSON Schema (draft 2020-12) of the tool's input parameters. */
+  inputSchema: Record<string, unknown>;
+  /** Whether the tool is offered given the supplied session bindings. */
+  available: boolean;
+}
+
+/** No-op bus/broker for descriptor extraction — the tool factory only READS the
+ *  static metadata (name/description/schema) at build time; no handler runs, so
+ *  these are never actually invoked. */
+const NOOP_DESCRIPTOR_CTX = {
+  chatId: "",
+  bus: { publish() {}, subscribe: () => () => {}, on: () => () => {} } as unknown as EventBus,
+  broker: { has: () => false, getStatus: () => undefined } as ManagerMcpBroker,
+} satisfies ManagerMcpContext;
+
+/**
+ * Enumerate every manager tool as a catalog descriptor — the SINGLE SOURCE the
+ * MCP catalog endpoint consumes, derived from the very same {@link createManagerTools}
+ * definitions the SDK registration uses (name/description/`inputSchema` come off
+ * each `tool(...)` result, so the two can never drift). `createManagerTools`
+ * always builds all seven definitions regardless of ctx — the ctx bindings only
+ * decide which are REGISTERED — so a no-op ctx yields every tool's static shape.
+ * `bindings` reflects which backing services the session has, so gated tools
+ * (wait_for_pr/terminal/remember/recall/forget) report the right `available`.
+ */
+export function managerToolDescriptors(
+  bindings: { github?: boolean; terminals?: boolean; memory?: boolean } = {},
+): ManagerToolDescriptor[] {
+  const tools = createManagerTools(NOOP_DESCRIPTOR_CTX);
+  return Object.values(tools).map((t) => {
+    const gate = MANAGER_TOOL_GATE[t.name] ?? null;
+    const available = gate === null ? true : Boolean(bindings[gate]);
+    return {
+      name: t.name,
+      description: t.description,
+      inputSchema: z.toJSONSchema(z.object(t.inputSchema as z.ZodRawShape)) as Record<
+        string,
+        unknown
+      >,
+      available,
+    };
+  });
+}
+
 /**
  * Build the in-process "manager" MCP server for one session. Drop the result
  * into `Options.mcpServers.manager` — the SDK exposes its tools to the agent as

@@ -24,6 +24,7 @@ import {
   TerminalSquare,
   GitPullRequest,
   Sparkles,
+  Blocks,
   CornerDownLeft,
   ArrowUp,
   ArrowDown,
@@ -33,6 +34,7 @@ import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
 import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
 import { requestOpenProjectPrs } from "../prs/projectPrsBus.js";
+import { requestOpenMcpCatalog } from "../mcp/mcpCatalogBus.js";
 import { Kbd } from "../ui/Kbd.js";
 import { cn } from "../../lib/cn.js";
 
@@ -161,6 +163,16 @@ export function CommandPalette({
         icon: <GitPullRequest />,
         keywords: "pr pull request github review merge hold board project all open",
         run: () => requestOpenProjectPrs(),
+      });
+      // MCP catalog — every tool endpoint (custom manager + external) for the project.
+      list.push({
+        id: "mcp-catalog",
+        title: "MCP tools",
+        subtitle: `every MCP endpoint in ${project.name}`,
+        group: "Navigate",
+        icon: <Blocks />,
+        keywords: "mcp tool endpoint schema server manager show visualize catalog",
+        run: () => requestOpenMcpCatalog(),
       });
     }
 
