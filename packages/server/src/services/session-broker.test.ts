@@ -1086,7 +1086,7 @@ describe("SessionBroker — project memory injection", () => {
     // Capture the visible transcript rows for user turns.
     const userTexts: string[] = [];
     const off = bus.subscribe((e) => {
-      if (e.type === "chat-message" && e.message.kind === "user") userTexts.push(e.message.text);
+      if (e.type === "chat-message" && e.message.kind === "user") userTexts.push(e.message.text ?? "");
     });
 
     const idle1 = broker.waitFor("c1", "idle");

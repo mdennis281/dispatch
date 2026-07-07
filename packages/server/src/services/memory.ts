@@ -166,6 +166,19 @@ export function extractLinks(body: string): string[] {
   return out;
 }
 
+/**
+ * Clamp a memory body to `max` chars with a truncation note, so a single huge
+ * memory can't blow the MCP tool-result token limit (recall) or bloat a turn's
+ * context (auto-surface). The full body stays readable in the Memory view.
+ */
+export function clampBody(body: string, max: number): string {
+  if (body.length <= max) return body;
+  return (
+    body.slice(0, max) +
+    `\n\n…[truncated ${body.length - max} more chars — open this memory in the Memory view for the full text]`
+  );
+}
+
 /** A memory plus its relevance score + why it surfaced (for ranked search). */
 export interface ScoredMemory extends ProjectMemory {
   /** Relevance score for the query (higher = better). */
@@ -452,15 +465,19 @@ export class MemoryService {
     const out: ScoredMemory[] = top.map((s) => ({ ...s.m, score: s.score }));
 
     if (opts.expandLinks) {
+      const MAX_LINKS = 5; // bound the fan-out so a hub memory can't balloon output
       const have = new Set(out.map((m) => m.name));
       const byName = new Map(all.map((m) => [m.name, m]));
-      for (const s of top) {
+      let added = 0;
+      outer: for (const s of top) {
         for (const link of extractLinks(s.m.body)) {
+          if (added >= MAX_LINKS) break outer;
           if (have.has(link)) continue;
           const neighbour = byName.get(link);
           if (!neighbour) continue;
           have.add(link);
           out.push({ ...neighbour, score: 0, linked: true });
+          added++;
         }
       }
     }
@@ -518,7 +535,7 @@ export class MemoryService {
       .map(
         (m) =>
           `### ${m.name} (${m.type})${m.linked ? " — linked" : ""}\n` +
-          `${m.description}\n\n${m.body}`,
+          `${m.description}\n\n${clampBody(m.body, 4000)}`,
       )
       .join("\n\n");
     const block =

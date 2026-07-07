@@ -569,6 +569,26 @@ describe("manager-mcp — memory tools", () => {
     expect(resultText(res)).toContain('No memories matched "nomatch"');
   });
 
+  it("recall bounds its output size for huge / many matches (never blows the tool limit)", async () => {
+    const mem = fakeMemory();
+    // Ten memories with 20k-char bodies all matching "big" → naive rendering would
+    // be ~200k chars, over the MCP tool-result cap.
+    for (let i = 0; i < 10; i++) {
+      await mem.remember({
+        name: `big-${i}`,
+        description: `big memory ${i}`,
+        type: "project",
+        body: "big " + "x".repeat(20000),
+      });
+    }
+    const { recall } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), memory: mem });
+    const res = await recall.handler({ query: "big", type: undefined }, {});
+    const text = resultText(res);
+    expect(text.length).toBeLessThan(30000);
+    // Long bodies are clamped and/or extra matches are summarized, not dumped.
+    expect(text).toMatch(/truncated .* more chars|match\(es\) omitted/);
+  });
+
   it("forget of a missing memory is an informative error result", async () => {
     const { forget } = createManagerTools({
       chatId: "c1",

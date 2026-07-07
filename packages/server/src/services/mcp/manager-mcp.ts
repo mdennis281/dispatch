@@ -33,6 +33,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod";
 import { MemoryTypeSchema, type ChatStatus, type ProjectMemory } from "@cm/shared";
 import type { EventBus } from "../../bus.js";
+import { clampBody } from "../memory.js";
 
 /** Hard ceiling on a single `wait` (also the default `wait_for_chat` timeout). */
 export const WAIT_CAP_SECONDS = 3600;
@@ -663,15 +664,32 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         if (!matches.length) {
           return textResult(`No memories matched "${query}".\n\n${index}`);
         }
-        const bodies = matches
-          .map(
-            (m) =>
-              `### ${m.name} (${m.type})${
-                (m as { linked?: boolean }).linked ? " — linked" : ""
-              }\n${m.description}\n\n${m.body}`,
-          )
-          .join("\n\n---\n\n");
-        return textResult(`${matches.length} match(es) for "${query}":\n\n${bodies}`);
+        // Render within a total char budget so a broad query over a large memory
+        // store can never exceed the MCP tool-result token cap. Bodies are clamped
+        // individually; once the budget runs out the rest are listed by name only.
+        const MAX_TOTAL = 24000;
+        const MAX_BODY = 5000;
+        const sections: string[] = [];
+        const omitted: string[] = [];
+        let budget = MAX_TOTAL;
+        for (const m of matches) {
+          const linked = (m as { linked?: boolean }).linked ? " — linked" : "";
+          const head = `### ${m.name} (${m.type})${linked}\n${m.description}`;
+          const section = `${head}\n\n${clampBody(m.body, MAX_BODY)}`;
+          if (section.length <= budget) {
+            sections.push(section);
+            budget -= section.length;
+          } else {
+            omitted.push(m.name);
+          }
+        }
+        const tail = omitted.length
+          ? `\n\n---\n\n_${omitted.length} more match(es) omitted to stay within the size limit: ` +
+            `${omitted.join(", ")}. Narrow your query or recall by name/type._`
+          : "";
+        return textResult(
+          `${matches.length} match(es) for "${query}":\n\n${sections.join("\n\n---\n\n")}${tail}`,
+        );
       } catch (err) {
         return textResult(
           `Could not recall memory: ${err instanceof Error ? err.message : String(err)}`,
