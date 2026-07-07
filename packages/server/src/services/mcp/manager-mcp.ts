@@ -91,7 +91,10 @@ export interface ManagerMcpMemory {
     type: "user" | "feedback" | "project" | "reference";
     body: string;
   }): Promise<ProjectMemory>;
-  recall(query?: string): Promise<{ index: string; matches: ProjectMemory[] }>;
+  recall(
+    query?: string,
+    opts?: { type?: "user" | "feedback" | "project" | "reference" },
+  ): Promise<{ index: string; matches: ProjectMemory[] }>;
   forget(name: string): Promise<boolean>;
 }
 
@@ -578,23 +581,33 @@ export function createManagerTools(ctx: ManagerMcpContext) {
 
   const remember = tool(
     "remember",
-    "Record a DURABLE fact about THIS project that should survive across chats " +
-      "(a preference, a piece of feedback, an architecture fact, or a pointer to " +
-      "reference material). It is saved to the project's shared memory and injected " +
-      "into every future session at start. Reuse the same `name` to UPDATE an " +
-      "existing memory. Keep `description` to one line; put the detail in `body`.",
+    "Record a DURABLE fact about THIS project that should survive across chats — a " +
+      "user preference, a correction/lesson, an architecture decision, or a pointer " +
+      "to reference material. Reach for this WHENEVER you learn something you'd want " +
+      "a future session to know without being re-told: it's saved to the project's " +
+      "shared memory, listed in its index, and the relevant ones are auto-surfaced " +
+      "in later turns. Keep each memory ONE focused fact. Reuse the same `name` to " +
+      "UPDATE (it overwrites). Keep `description` to one line; put detail in `body`.",
     {
       name: z
         .string()
         .describe("Short kebab-case identity, e.g. 'deploy-runbook'. Reusing it overwrites."),
       description: z
         .string()
-        .describe("One-line summary shown in the index + injected into future prompts."),
+        .describe(
+          "One-line summary — this is the retrieval signal shown in the index and " +
+            "matched against future turns, so make it specific and searchable.",
+        ),
       type: MemoryTypeSchema.describe(
         "user = a durable preference; feedback = a correction/lesson; project = a " +
           "codebase/architecture fact; reference = a pointer to docs/material.",
       ),
-      body: z.string().describe("The full fact, in markdown."),
+      body: z
+        .string()
+        .describe(
+          "The full fact, in markdown. For feedback/project, follow it with a **Why:** " +
+            "line so the rationale survives. Link related memories with [[their-name]].",
+        ),
     },
     async (args): Promise<CallToolResult> => {
       if (!ctx.memory) {
@@ -625,27 +638,38 @@ export function createManagerTools(ctx: ManagerMcpContext) {
   const recall = tool(
     "recall",
     "Look up this project's durable memory. With no query you get the index (one " +
-      "line per memory); with a query you also get the FULL body of every memory " +
-      "whose name/description/body matches — use it to pull a fact on demand.",
+      "line per memory); with a query you get the FULL body of the most RELEVANT " +
+      "memories, ranked (plus any they `[[link]]` to) — use it to pull a fact on " +
+      "demand. The most relevant memories are already surfaced automatically as you " +
+      "work; call this to dig deeper or when you need a fact that wasn't surfaced.",
     {
       query: z
         .string()
         .optional()
         .describe("Optional search term; omit to just list the memory index."),
+      type: MemoryTypeSchema.optional().describe(
+        "Optionally restrict to one kind: user | feedback | project | reference.",
+      ),
     },
     async (args): Promise<CallToolResult> => {
       if (!ctx.memory) {
         return textResult("Project memory is not available in this session.", true);
       }
       const query = typeof args.query === "string" ? args.query.trim() : "";
+      const type = args.type;
       try {
-        const { index, matches } = await ctx.memory.recall(query || undefined);
+        const { index, matches } = await ctx.memory.recall(query || undefined, { type });
         if (!query) return textResult(index);
         if (!matches.length) {
           return textResult(`No memories matched "${query}".\n\n${index}`);
         }
         const bodies = matches
-          .map((m) => `### ${m.name} (${m.type})\n${m.description}\n\n${m.body}`)
+          .map(
+            (m) =>
+              `### ${m.name} (${m.type})${
+                (m as { linked?: boolean }).linked ? " — linked" : ""
+              }\n${m.description}\n\n${m.body}`,
+          )
           .join("\n\n---\n\n");
         return textResult(`${matches.length} match(es) for "${query}":\n\n${bodies}`);
       } catch (err) {

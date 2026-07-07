@@ -22,8 +22,9 @@ export function requestOpenFile(req: OpenFileRequest): void {
   window.dispatchEvent(new CustomEvent<OpenFileRequest>(OPEN_FILE_EVENT, { detail: req }));
 }
 
-/** The right-panel tabs the command palette can jump to. */
-export type FocusPanelTab = "worktrees" | "apps" | "terminals" | "prs" | "memory";
+/** The right-panel tabs the command palette can jump to. (Memory is now a
+ *  top-level, chat-independent view — see stores/view.ts — not a panel tab.) */
+export type FocusPanelTab = "worktrees" | "apps" | "terminals" | "prs";
 
 export const FOCUS_PANEL_EVENT = "cm:focus-panel";
 

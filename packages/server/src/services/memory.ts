@@ -95,24 +95,29 @@ function serialize(m: {
   description: string;
   type: MemoryType;
   body: string;
+  updatedAt?: number;
 }): string {
   const body = m.body.replace(/\r\n/g, "\n").replace(/\s+$/, "");
-  return (
-    [
-      "---",
-      `name: ${m.name}`,
-      `description: ${oneLine(m.description)}`,
-      `type: ${m.type}`,
-      "---",
-      "",
-    ].join("\n") + (body ? `${body}\n` : "")
-  );
+  const front = [
+    "---",
+    `name: ${m.name}`,
+    `description: ${oneLine(m.description)}`,
+    `type: ${m.type}`,
+  ];
+  // Persist the write time so recency survives a re-read (ranking + UI "edited"
+  // display). Older files without it simply read back as `updatedAt: undefined`.
+  if (typeof m.updatedAt === "number" && Number.isFinite(m.updatedAt)) {
+    front.push(`updatedAt: ${Math.trunc(m.updatedAt)}`);
+  }
+  front.push("---", "");
+  return front.join("\n") + (body ? `${body}\n` : "");
 }
 
 interface ParsedFile {
   name?: string;
   description?: string;
   type?: string;
+  updatedAt?: number;
   body: string;
 }
 
@@ -133,8 +138,81 @@ function parseFile(raw: string): ParsedFile {
     if (key === "name") out.name = value;
     else if (key === "description") out.description = value;
     else if (key === "type") out.type = value;
+    else if (key === "updatedAt" || key === "updated") {
+      const n = Number(value);
+      if (Number.isFinite(n)) out.updatedAt = Math.trunc(n);
+    }
   }
   return out;
+}
+
+/**
+ * Extract `[[wikilink]]` targets from a memory body, normalized to name slugs.
+ * These weave the per-project memories into a graph: surfacing one memory can
+ * pull in the neighbours it explicitly points at.
+ */
+export function extractLinks(body: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const re = /\[\[([^\]]+)\]\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(body)) !== null) {
+    const slug = slugifyMemoryName(m[1] ?? "");
+    if (slug && !seen.has(slug)) {
+      seen.add(slug);
+      out.push(slug);
+    }
+  }
+  return out;
+}
+
+/** A memory plus its relevance score + why it surfaced (for ranked search). */
+export interface ScoredMemory extends ProjectMemory {
+  /** Relevance score for the query (higher = better). */
+  score: number;
+  /** True when surfaced only because a scored match `[[links]]` to it. */
+  linked?: boolean;
+}
+
+/** Split arbitrary text into lowercased word tokens (≥2 chars) for scoring. */
+function tokenize(text: string): string[] {
+  return String(text)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 2);
+}
+
+/**
+ * Score one memory against a set of query tokens. Field weight mirrors intent:
+ * a hit in the name is worth far more than one buried in the body, and an exact
+ * whole-token hit beats a mere substring. Returns 0 when nothing matches.
+ */
+function scoreMemory(m: ProjectMemory, tokens: string[], rawQuery: string): number {
+  if (!tokens.length) return 0;
+  const name = m.name.toLowerCase();
+  const desc = m.description.toLowerCase();
+  const body = m.body.toLowerCase();
+  const nameTokens = new Set(tokenize(m.name));
+  const descTokens = new Set(tokenize(m.description));
+  const bodyTokens = new Set(tokenize(m.body));
+
+  let score = 0;
+  for (const t of tokens) {
+    if (nameTokens.has(t)) score += 10;
+    else if (name.includes(t)) score += 5;
+    if (descTokens.has(t)) score += 4;
+    else if (desc.includes(t)) score += 2;
+    if (bodyTokens.has(t)) score += 2;
+    else if (body.includes(t)) score += 1;
+  }
+  // Whole-phrase hits are strong intent signals — reward them on top.
+  const q = rawQuery.trim().toLowerCase();
+  if (q.length >= 3) {
+    if (name.includes(q)) score += 8;
+    if (desc.includes(q)) score += 4;
+    if (body.includes(q)) score += 3;
+  }
+  return score;
 }
 
 /** Coerce a parsed `type` string to a valid MemoryType (default "project"). */
@@ -233,6 +311,7 @@ export class MemoryService {
       type: coerceType(parsed.type),
       body: parsed.body,
       file: `${name}.md`,
+      ...(parsed.updatedAt !== undefined ? { updatedAt: parsed.updatedAt } : {}),
     };
     return ProjectMemorySchema.parse(memory);
   }
@@ -339,25 +418,119 @@ export class MemoryService {
   }
 
   /**
+   * Rank a project's memories against free text (the shared relevance core used
+   * by {@link recall}, the auto-surface injection, and the UI search box). A
+   * weighted token+substring scorer favours name over description over body and
+   * whole-token over substring hits; ties break by recency then name. Only
+   * positive-scoring memories are returned, capped to `limit`. With
+   * `expandLinks`, any `[[wikilink]]` neighbours of the top matches are appended
+   * (marked `linked`) so surfacing one fact pulls in the ones it points at.
+   */
+  async search(
+    projectId: string,
+    query: string,
+    opts: { limit?: number; type?: MemoryType; expandLinks?: boolean } = {},
+  ): Promise<ScoredMemory[]> {
+    const raw = String(query ?? "").trim();
+    if (!raw) return [];
+    const all = await this.list(projectId);
+    const pool = opts.type ? all.filter((m) => m.type === opts.type) : all;
+    const tokens = [...new Set(tokenize(raw))];
+
+    const scored = pool
+      .map((m) => ({ m, score: scoreMemory(m, tokens, raw) }))
+      .filter((s) => s.score > 0)
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          (b.m.updatedAt ?? 0) - (a.m.updatedAt ?? 0) ||
+          a.m.name.localeCompare(b.m.name),
+      );
+
+    const limit = Math.max(1, opts.limit ?? 8);
+    const top = scored.slice(0, limit);
+    const out: ScoredMemory[] = top.map((s) => ({ ...s.m, score: s.score }));
+
+    if (opts.expandLinks) {
+      const have = new Set(out.map((m) => m.name));
+      const byName = new Map(all.map((m) => [m.name, m]));
+      for (const s of top) {
+        for (const link of extractLinks(s.m.body)) {
+          if (have.has(link)) continue;
+          const neighbour = byName.get(link);
+          if (!neighbour) continue;
+          have.add(link);
+          out.push({ ...neighbour, score: 0, linked: true });
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
    * Recall memories for an agent. With no query, returns just the index (bounded);
-   * with a query, also returns the memories whose name/description/body/type match
-   * so the agent can pull the full fact on demand.
+   * with a query, returns the top-ranked matching memories (with linked
+   * neighbours) so the agent can pull the full fact on demand.
    */
   async recall(
     projectId: string,
     query?: string,
-  ): Promise<{ index: string; matches: ProjectMemory[] }> {
+    opts: { limit?: number; type?: MemoryType } = {},
+  ): Promise<{ index: string; matches: ScoredMemory[] }> {
     const index = await this.index(projectId);
-    const q = String(query ?? "").trim().toLowerCase();
+    const q = String(query ?? "").trim();
     if (!q) return { index, matches: [] };
-    const matches = (await this.list(projectId)).filter(
-      (m) =>
-        m.name.toLowerCase().includes(q) ||
-        m.description.toLowerCase().includes(q) ||
-        m.type.toLowerCase().includes(q) ||
-        m.body.toLowerCase().includes(q),
-    );
+    const matches = await this.search(projectId, q, {
+      limit: opts.limit ?? 6,
+      type: opts.type,
+      expandLinks: true,
+    });
     return { index, matches };
+  }
+
+  /**
+   * Auto-surface the memories most relevant to a piece of free text (a user's
+   * turn) as a ready-to-inject `<system-reminder>` block — the "push" that puts
+   * the right fact in front of the agent WITHOUT it having to call `recall`.
+   * Returns null when nothing clears the relevance bar. `exclude` holds names
+   * already surfaced this session so a memory isn't re-injected turn after turn;
+   * the returned `names` are the ones to add to that set.
+   */
+  async surfaceFor(
+    projectId: string,
+    text: string,
+    opts: { exclude?: ReadonlySet<string>; limit?: number; minScore?: number } = {},
+  ): Promise<{ block: string; names: string[] } | null> {
+    const minScore = opts.minScore ?? 6;
+    const limit = Math.max(1, opts.limit ?? 3);
+    // Over-fetch, then drop already-surfaced + below-threshold before capping, so
+    // filtering never starves the result below what the caller asked for.
+    const ranked = await this.search(projectId, text, { limit: limit * 4, expandLinks: true });
+    const exclude = opts.exclude ?? new Set<string>();
+    const picked = ranked
+      .filter((m) => !exclude.has(m.name))
+      // A directly-linked neighbour rides along even below threshold (score 0).
+      .filter((m) => m.linked || m.score >= minScore)
+      .slice(0, limit);
+    if (!picked.length) return null;
+
+    const sections = picked
+      .map(
+        (m) =>
+          `### ${m.name} (${m.type})${m.linked ? " — linked" : ""}\n` +
+          `${m.description}\n\n${m.body}`,
+      )
+      .join("\n\n");
+    const block =
+      "<system-reminder>\n" +
+      "Relevant durable project memories your team recorded (surfaced automatically " +
+      "because they match this turn). Treat them as trusted background context and " +
+      "act on them; they reflect what was true when written, so sanity-check against " +
+      "live code before betting on a specific detail. If any is now wrong, fix it " +
+      "with `mcp__manager__remember` (same name overwrites) or `mcp__manager__forget`.\n\n" +
+      sections +
+      "\n</system-reminder>";
+    return { block, names: picked.map((m) => m.name) };
   }
 
   /** The `MEMORY.md` index content for a project (regenerated, not cached). */
@@ -367,24 +540,47 @@ export class MemoryService {
   }
 
   /**
-   * The bounded system-prompt injection for a project (index + one-line
-   * descriptions, never full bodies). Null when the project has no memories so
-   * an empty project injects nothing.
+   * The bounded system-prompt injection for a project (the memory catalogue as
+   * one-line, grouped descriptions — never full bodies). Directive framing so
+   * the agent actually consults + grows the memory rather than ignoring it. Null
+   * when the project has no memories so an empty project injects nothing.
    */
   async buildInjection(projectId: string): Promise<string | null> {
     const memories = await this.list(projectId);
     if (!memories.length) return null;
-    const lines = memories.map(
-      (m) => `- **${m.name}** (${m.type}) — ${m.description || "(no description)"}`,
-    );
+
+    const order: MemoryType[] = ["user", "feedback", "project", "reference"];
+    const labels: Record<MemoryType, string> = {
+      user: "Preferences",
+      feedback: "Feedback & lessons",
+      project: "Project facts",
+      reference: "Reference pointers",
+    };
+    const lines: string[] = [];
+    for (const type of order) {
+      const group = memories.filter((m) => m.type === type);
+      if (!group.length) continue;
+      lines.push(`**${labels[type]}**`);
+      for (const m of group) {
+        lines.push(`- \`${m.name}\` — ${m.description || "(no description)"}`);
+      }
+      lines.push("");
+    }
+
     return [
-      "## Project memory (durable facts your team recorded; verify against live code before relying on them)",
+      "## Project memory",
+      "",
+      "Durable facts your team recorded for THIS project. The most relevant ones are " +
+        "surfaced in full automatically as you work — but this is the full catalogue. " +
+        "Consult it before asking the user something they may have already answered, " +
+        "and treat these as the team's standing context.",
       "",
       ...lines,
-      "",
-      "These are one-line summaries. Call `mcp__manager__recall({ query })` to read the full body of any memory, " +
-        "`mcp__manager__remember({ name, description, type, body })` to record a new durable fact, or " +
-        "`mcp__manager__forget({ name })` to remove one.",
+      "When something here is relevant, call `mcp__manager__recall({ query })` to read the " +
+        "full body. When you learn a durable fact — a preference, a correction, an " +
+        "architecture decision, a reference — record it with " +
+        "`mcp__manager__remember({ name, description, type, body })` so it outlives this " +
+        "chat; reuse a name to update, and `mcp__manager__forget({ name })` when one goes stale.",
     ].join("\n");
   }
 

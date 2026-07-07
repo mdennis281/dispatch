@@ -1069,6 +1069,45 @@ describe("SessionBroker — project memory injection", () => {
     const opts = controllers[0]!.options as { systemPrompt?: unknown };
     expect(opts.systemPrompt).toBeUndefined();
   });
+
+  it("auto-surfaces a relevant memory body into the SDK message (not the transcript), once per session", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const memory = new MemoryService({ store, bus });
+    await memory.write("p1", {
+      name: "deploy-runbook",
+      description: "how we ship to prod",
+      type: "project",
+      body: "run pnpm ship, the bot merges",
+    });
+    const broker = makeMemoryBroker(fn, memory);
+    await store.saveChat(chatFor("c1", "p1"));
+    broker.create(chatFor("c1", "p1"));
+
+    // Capture the visible transcript rows for user turns.
+    const userTexts: string[] = [];
+    const off = bus.subscribe((e) => {
+      if (e.type === "chat-message" && e.message.kind === "user") userTexts.push(e.message.text);
+    });
+
+    const idle1 = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "how do we deploy to prod?");
+    await idle1;
+
+    // The SDK saw the full memory body prepended as a system-reminder…
+    expect(controllers[0]!.pushed[0]).toContain("<system-reminder>");
+    expect(controllers[0]!.pushed[0]).toContain("run pnpm ship, the bot merges");
+    expect(controllers[0]!.pushed[0]).toContain("how do we deploy to prod?");
+    // …but the visible transcript row is just the user's text.
+    expect(userTexts[0]).toBe("how do we deploy to prod?");
+    expect(userTexts[0]).not.toContain("system-reminder");
+
+    // Same memory, second matching turn → not pushed again (once per session).
+    const idle2 = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "remind me how to deploy?");
+    await idle2;
+    expect(controllers[0]!.pushed[1]).not.toContain("run pnpm ship, the bot merges");
+    off();
+  });
 });
 
 describe("SessionBroker — config-sourced instructions / agents / modes", () => {

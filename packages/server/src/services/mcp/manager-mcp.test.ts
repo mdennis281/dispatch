@@ -548,11 +548,11 @@ describe("manager-mcp — memory tools", () => {
     expect(mem.data.has("deploy-runbook")).toBe(true);
 
     // recall with no query returns the index…
-    const idx = await recall.handler({ query: undefined }, {});
+    const idx = await recall.handler({ query: undefined, type: undefined }, {});
     expect(resultText(idx)).toContain("[deploy-runbook](deploy-runbook.md)");
 
     // …and a query returns the full body.
-    const hit = await recall.handler({ query: "ship" }, {});
+    const hit = await recall.handler({ query: "ship", type: undefined }, {});
     expect(resultText(hit)).toContain("run pnpm ship");
 
     const gone = await forget.handler({ name: "deploy-runbook" }, {});
@@ -565,7 +565,7 @@ describe("manager-mcp — memory tools", () => {
     const mem = fakeMemory();
     await mem.remember({ name: "x", description: "d", type: "project", body: "b" });
     const { recall } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), memory: mem });
-    const res = await recall.handler({ query: "nomatch" }, {});
+    const res = await recall.handler({ query: "nomatch", type: undefined }, {});
     expect(resultText(res)).toContain('No memories matched "nomatch"');
   });
 
@@ -601,7 +601,7 @@ describe("manager-mcp — memory tools", () => {
     });
     for (const res of [
       await remember.handler({ name: "a", description: "", type: "project", body: "b" }, {}),
-      await recall.handler({ query: undefined }, {}),
+      await recall.handler({ query: undefined, type: undefined }, {}),
       await forget.handler({ name: "a" }, {}),
     ]) {
       expect(res.isError).toBe(true);

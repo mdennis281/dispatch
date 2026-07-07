@@ -425,6 +425,12 @@ interface OutboxItem {
   images?: ImageRef[];
   /** Pre-resolved SDK image sources (local asset files inlined as base64). */
   imageSources?: Record<string, unknown>[];
+  /**
+   * Auto-surfaced project-memory context (a `<system-reminder>` block) prepended
+   * to the SDK message ONLY — never emitted on the visible transcript row. Set
+   * when the turn's text matched relevant, not-yet-surfaced memories.
+   */
+  memoryContext?: string;
   priority: MessagePriority;
 }
 
@@ -477,6 +483,12 @@ interface LiveSession {
   /** Skill dirs materialized into `<cwd>/.claude/skills/` for this query (the
    *  ones WE created), removed on teardown so a repo-owned skill is never touched. */
   materializedSkillDirs?: string[];
+  /**
+   * Names of project memories already auto-surfaced into this session, so a
+   * relevant memory is injected once (not re-pushed every matching turn). Reset
+   * only with the session; the agent still has the memory in-context after.
+   */
+  surfacedMemories: Set<string>;
 }
 
 /* =============================================================== SessionBroker */
@@ -535,6 +547,7 @@ export class SessionBroker {
         turn: 0,
         stopping: false,
         fork: false,
+        surfacedMemories: new Set(),
       };
       this.sessions.set(chat.id, session);
     }
@@ -584,15 +597,46 @@ export class SessionBroker {
       ? await this.resolveImageSources(chatId, o.images)
       : undefined;
 
+    // Auto-surface the durable memories most relevant to THIS turn as an invisible
+    // <system-reminder> prepended to the SDK message (never on the transcript row
+    // emitted above). Once-per-session per memory, best-effort — a lookup failure
+    // must never block the turn.
+    const memoryContext = await this.surfaceMemory(session, text);
+
     this.resolveIdleAttention(session);
     session.outbox.push({
       id,
       text,
       images: o.images,
       imageSources,
+      memoryContext,
       priority: o.priority ?? "next",
     });
     this.schedule(session);
+  }
+
+  /**
+   * Rank this project's durable memories against a turn's text and return an
+   * invisible `<system-reminder>` block for the SDK message when relevant,
+   * not-yet-surfaced ones clear the bar. Records what it surfaced on the session
+   * so a memory pushes at most once per session. Best-effort: any failure (or no
+   * memory service / no project) yields undefined and the turn proceeds normally.
+   */
+  private async surfaceMemory(
+    session: LiveSession,
+    text: string,
+  ): Promise<string | undefined> {
+    if (!this.memory || !session.projectId || !text.trim()) return undefined;
+    try {
+      const surfaced = await this.memory.surfaceFor(session.projectId, text, {
+        exclude: session.surfacedMemories,
+      });
+      if (!surfaced) return undefined;
+      for (const name of surfaced.names) session.surfacedMemories.add(name);
+      return surfaced.block;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -1653,7 +1697,7 @@ export class SessionBroker {
           memory && projectId
             ? {
                 remember: (input) => memory.write(projectId, input),
-                recall: (query) => memory.recall(projectId, query),
+                recall: (query, opts) => memory.recall(projectId, query, opts),
                 forget: (name) => memory.delete(projectId, name),
               }
             : undefined,
@@ -1745,7 +1789,10 @@ export class SessionBroker {
   /* ---------------------------------------------------------- helpers */
 
   private toSdkUserMessage(item: OutboxItem): SDKUserMessage {
-    let content: unknown = item.text;
+    // Auto-surfaced memory rides in front of the user's text (SDK-only; the
+    // transcript row keeps just item.text) so the agent sees the fact in context.
+    const prefix = item.memoryContext ? `${item.memoryContext}\n\n` : "";
+    let content: unknown = `${prefix}${item.text}`;
     const sources =
       item.imageSources && item.imageSources.length > 0
         ? item.imageSources
@@ -1754,6 +1801,7 @@ export class SessionBroker {
             .filter((s): s is Record<string, unknown> => !!s);
     if (sources.length > 0) {
       const blocks: unknown[] = [];
+      if (item.memoryContext) blocks.push({ type: "text", text: item.memoryContext });
       if (item.text) blocks.push({ type: "text", text: item.text });
       for (const source of sources) blocks.push({ type: "image", source });
       content = blocks;

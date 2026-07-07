@@ -7,8 +7,10 @@ import { CodeViewerHost } from "./components/monaco/index.js";
 import { ProjectPRsView } from "./components/prs/ProjectPRsView.js";
 import { McpCatalogView } from "./components/mcp/McpCatalogView.js";
 import { ProjectConfigView } from "./components/config/ProjectConfigView.js";
+import { MemoryView } from "./components/memory/MemoryView.js";
 import { Toasts } from "./components/Toasts.js";
 import { useChats } from "./stores/chats.js";
+import { useView } from "./stores/view.js";
 
 /** Empty state when no chat is selected. */
 function NoChat() {
@@ -26,6 +28,7 @@ function NoChat() {
 export default function App() {
   const activeChatId = useChats((s) => s.activeChatId);
   const chat = useChats((s) => (activeChatId ? s.byId[activeChatId] : undefined));
+  const view = useView((s) => s.view);
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-app text-primary antialiased">
@@ -33,7 +36,9 @@ export default function App() {
       <div className="flex min-h-0 flex-1">
         <Sidebar />
         <main className="flex min-w-0 flex-1">
-          {chat ? (
+          {view === "memory" ? (
+            <MemoryView />
+          ) : chat ? (
             <>
               <ChatView chat={chat} />
               <RightPanel chat={chat} />

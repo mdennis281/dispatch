@@ -509,9 +509,9 @@ describe("manager-mcp integration — memory tools over a real MemoryService", (
     expect((await memory.list("p1")).map((m) => m.name)).toEqual(["mcp-smoke"]);
 
     // (2) recall (query) returns the FULL body; recall (no query) lists the index.
-    const hit = await recall.handler({ query: "smoke" }, {});
+    const hit = await recall.handler({ query: "smoke", type: undefined }, {});
     expect(resultText(hit)).toContain("BODY-DETAIL");
-    const idx = await recall.handler({ query: undefined }, {});
+    const idx = await recall.handler({ query: undefined, type: undefined }, {});
     expect(resultText(idx)).toContain("[mcp-smoke](mcp-smoke.md)");
 
     // (3) the broker's start-of-session injection reflects the tool's write —

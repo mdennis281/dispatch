@@ -133,8 +133,9 @@ describe("MemoryService — injection + recall", () => {
     const injection = await memory.buildInjection("p1");
     expect(injection).toBeTruthy();
     expect(injection).toContain("Project memory");
-    expect(injection).toContain("**one** (project) — first fact");
-    expect(injection).toContain("**two** (reference) — second fact");
+    // Grouped by type, one-line per memory (name + description).
+    expect(injection).toContain("`one` — first fact");
+    expect(injection).toContain("`two` — second fact");
     // Bounded — the full body is NOT injected.
     expect(injection).not.toContain("body 1");
     expect(injection).toContain("mcp__manager__recall");
@@ -151,6 +152,61 @@ describe("MemoryService — injection + recall", () => {
     const hit = await memory.recall("p1", "deploy");
     expect(hit.matches.map((m) => m.name)).toEqual(["beta"]);
     expect(hit.matches[0]?.body).toBe("DEPLOY DETAIL");
+  });
+
+  it("ranks matches: a name hit outranks a body-only hit", async () => {
+    await memory.write("p1", { name: "deploy-runbook", description: "shipping steps", type: "project", body: "steps" });
+    await memory.write("p1", { name: "misc", description: "notes", type: "project", body: "mentions deploy once" });
+
+    const ranked = await memory.search("p1", "deploy");
+    expect(ranked.map((m) => m.name)).toEqual(["deploy-runbook", "misc"]);
+    expect(ranked[0]!.score).toBeGreaterThan(ranked[1]!.score);
+  });
+
+  it("expandLinks pulls in [[wikilink]] neighbours of a match (marked linked)", async () => {
+    await memory.write("p1", { name: "auth-flow", description: "how auth works", type: "project", body: "see [[token-store]]" });
+    await memory.write("p1", { name: "token-store", description: "where tokens live", type: "project", body: "redis" });
+
+    const ranked = await memory.search("p1", "auth", { expandLinks: true });
+    const byName = new Map(ranked.map((m) => [m.name, m]));
+    expect(byName.has("auth-flow")).toBe(true);
+    expect(byName.get("token-store")?.linked).toBe(true);
+  });
+
+  it("recall can restrict to one type", async () => {
+    await memory.write("p1", { name: "pref-x", description: "wants tabs", type: "user", body: "tabs" });
+    await memory.write("p1", { name: "fact-x", description: "uses tabs", type: "project", body: "tabs" });
+
+    const hit = await memory.recall("p1", "tabs", { type: "user" });
+    expect(hit.matches.map((m) => m.name)).toEqual(["pref-x"]);
+  });
+
+  it("surfaceFor returns a system-reminder block once per memory (respects exclude)", async () => {
+    await memory.write("p1", { name: "deploy-runbook", description: "how we ship to prod", type: "project", body: "run the pipeline" });
+
+    const first = await memory.surfaceFor("p1", "how do we deploy to prod?");
+    expect(first).not.toBeNull();
+    expect(first!.block).toContain("<system-reminder>");
+    expect(first!.block).toContain("run the pipeline");
+    expect(first!.names).toEqual(["deploy-runbook"]);
+
+    // Already surfaced → excluded → nothing to push again.
+    const again = await memory.surfaceFor("p1", "how do we deploy to prod?", {
+      exclude: new Set(first!.names),
+    });
+    expect(again).toBeNull();
+  });
+
+  it("surfaceFor stays quiet for an irrelevant turn", async () => {
+    await memory.write("p1", { name: "deploy-runbook", description: "how we ship to prod", type: "project", body: "pipeline" });
+    expect(await memory.surfaceFor("p1", "what colour is the sky")).toBeNull();
+  });
+
+  it("persists updatedAt into the frontmatter and reads it back", async () => {
+    const written = await memory.write("p1", { name: "stamped", description: "d", type: "project", body: "b" });
+    expect(written.updatedAt).toBeTypeOf("number");
+    const reread = await memory.read("p1", "stamped");
+    expect(reread?.updatedAt).toBe(written.updatedAt);
   });
 });
 
@@ -188,7 +244,7 @@ describe("MemoryService — .claude-manager/ config dir source of truth", () => 
     // Reads + injection route through the repo dir too.
     expect((await cfgMemory.read("cfg", "repo-fact"))?.body).toBe("REPO BODY");
     const injection = await cfgMemory.buildInjection("cfg");
-    expect(injection).toContain("**repo-fact** (project) — lives in the repo");
+    expect(injection).toContain("`repo-fact` — lives in the repo");
 
     // The memory-update event fired as usual (client sees no difference).
     expect(events.some((e) => e.type === "memory-update" && e.memory.name === "repo-fact")).toBe(true);
