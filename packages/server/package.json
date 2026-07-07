@@ -5,7 +5,7 @@
   "version": "0.0.0",
   "scripts": {
     "spike": "tsx spikes/sdk-smoke.ts",
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --clear-screen=false --ignore \"**/client/**\" src/dev.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -27,9 +27,11 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@fastify/middie": "^9.0.3",
     "@types/node": "^26.1.0",
     "tsx": "^4.22.4",
     "typescript": "^5.9.3",
+    "vite": "^6.0.7",
     "vitest": "^4.1.9"
   }
 }

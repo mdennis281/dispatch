@@ -10,13 +10,12 @@
   "scripts": {
     "build": "pnpm -r build",
     "start": "pnpm --filter @cm/server start",
-    "dev": "concurrently -k -n server,client -c blue,magenta \"pnpm --filter @cm/server dev\" \"pnpm --filter @cm/client dev\"",
+    "dev": "pnpm --filter @cm/server dev",
     "test": "pnpm --filter @cm/server exec vitest run",
     "spike": "pnpm --filter @cm/server spike",
     "verify": "node tools/verify/shot.mjs"
   },
   "devDependencies": {
-    "concurrently": "^9.1.0",
     "typescript": "^5.7.2"
   }
 }

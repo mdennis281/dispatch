@@ -46,6 +46,8 @@ export interface BuildAppOptions {
   serviceOverrides?: ServiceOverrides;
   /** Override the client dist dir (defaults to ../client/dist relative to this file). */
   clientDist?: string;
+  /** Dev mode: serve the SPA + HMR via Vite middleware on this same port. */
+  dev?: boolean;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -73,9 +75,17 @@ export async function buildApp(
 
   await app.register(fastifyWebsocket);
 
-  const clientDist = opts.clientDist ?? resolve(here, "../../client/dist");
-  if (existsSync(clientDist)) {
-    await app.register(fastifyStatic, { root: clientDist });
+  if (opts.dev) {
+    // Dev: Vite runs in-process (middleware mode) so the SPA and HMR are served
+    // from this same port. `/api` + `/ws` still resolve to their Fastify handlers.
+    // Loaded dynamically so vite never enters the prod/test dependency graph.
+    const { attachViteDev } = await import("./dev-vite.js");
+    await attachViteDev(app);
+  } else {
+    const clientDist = opts.clientDist ?? resolve(here, "../../client/dist");
+    if (existsSync(clientDist)) {
+      await app.register(fastifyStatic, { root: clientDist });
+    }
   }
 
   app.get("/api/health", async () => ({ ok: true }));

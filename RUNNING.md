@@ -19,7 +19,9 @@ Open **http://127.0.0.1:4319**
 ```
 pnpm -C claude-manager dev
 ```
-Client with HMR on **http://127.0.0.1:5173**, backend on `:4319` (auto-proxied).
+Open **http://127.0.0.1:4319** — same URL as prod. In dev the server runs Vite in
+middleware mode, so the SPA, REST, WebSocket, and HMR are all on one port and one
+process. No separate client server, no second port to open.
 
 ## First steps in the UI
 1. **Project** — pick or add one (a git repo + its subApps). *Hivebreak is pre-seeded.*
