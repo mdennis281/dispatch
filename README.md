@@ -10,6 +10,8 @@ visibility — built on the Claude Agent SDK. Runs entirely on your machine.
 - **Workhorse concurrency:** 3+ chats running at once per project, with a global Attention
   Queue that tells you exactly which chat needs your input.
 - **Projects → subApps:** one repo, many runnable subApps (e.g. game, metrics-server,
-  studio-director), each launchable per worktree on offset ports.
+  studio-director), each launchable per branch/worktree on offset ports — with live logs
+  and a ports/orphan reaper for the dev servers that outlive their runner.
 
-> Status: under active construction (Phase 0). Architecture lives in the project plan.
+See **[RUNNING.md](./RUNNING.md)** for setup, the UI walkthrough, and how to declare and
+spin up dev-mode processes (subApps).
