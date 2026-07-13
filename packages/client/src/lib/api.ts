@@ -15,6 +15,7 @@ import type {
   RunnerInstance,
   TerminalInfo,
   WorktreeInfo,
+  BranchInfo,
   PRInfo,
   WorkflowDef,
   WorkflowRun,
@@ -26,6 +27,8 @@ import type {
   MemoryType,
   McpCatalog,
   ProjectConfigResult,
+  UsageSnapshot,
+  ContextUsage,
 } from "@cm/shared";
 
 /**
@@ -42,6 +45,32 @@ export interface AppSettings {
     url?: string;
     enabled?: boolean;
   };
+  /** Native SDK auto-compaction: summarize + continue when the window fills. */
+  autoCompact?: {
+    enabled?: boolean;
+    /** Optional compaction reserve window (tokens); omit = SDK default. */
+    window?: number;
+  };
+}
+
+/** An OS process LISTENING on a project's port (mirrors server ProjectProcess). */
+export interface ProjectProcess {
+  port: number;
+  pid: number;
+  name?: string;
+  /** True when this port belongs to an active claude-manager runner. */
+  tracked: boolean;
+  runnerId?: string;
+  subAppId?: string;
+  branch?: string;
+  worktreePath?: string;
+}
+
+/** Per-pid outcome of a bulk kill (mirrors server KillResult). */
+export interface KillResult {
+  pid: number;
+  ok: boolean;
+  error?: string;
 }
 
 /** One file's structured change vs a base ref (mirrors the server FileDiff). */
@@ -182,6 +211,9 @@ export const api = {
         `/api/chats/${id}/messages${qs({ limit: opts?.limit, afterId: opts?.afterId })}`,
       ),
     checkpoints: (id: string) => get<Checkpoint[]>(`/api/chats/${id}/checkpoints`),
+    /** Live context-window breakdown (null when the subprocess isn't live). */
+    contextUsage: (id: string) =>
+      get<{ usage: ContextUsage | null }>(`/api/chats/${id}/context-usage`),
     /** Upload a pasted/dropped image; returns an ImageRef usable in send-message. */
     uploadAsset: (id: string, body: UploadAssetBody) =>
       post<ImageRef>(`/api/chats/${id}/assets`, body),
@@ -270,11 +302,24 @@ export const api = {
   /* runners */
   runners: {
     list: () => get<RunnerInstance[]>("/api/runners"),
-    start: (body: { worktreePath: string; subAppId: string; projectId?: string; chatId?: string }) =>
-      post<RunnerInstance>("/api/runners", body),
+    start: (body: {
+      subAppId: string;
+      worktreePath?: string;
+      branch?: string;
+      projectId?: string;
+      chatId?: string;
+    }) => post<RunnerInstance>("/api/runners", body),
     stop: (id: string) => del<void>(`/api/runners/${id}`),
     logs: (id: string) =>
       get<{ stream: string; line: string; ts: number }[]>(`/api/runners/${id}/logs`),
+  },
+
+  /* OS-level process inspector — what's actually holding a project's ports */
+  processes: {
+    list: (projectId: string) =>
+      get<ProjectProcess[]>(`/api/projects/${projectId}/processes`),
+    kill: (projectId: string, pids: number[]) =>
+      post<KillResult[]>(`/api/projects/${projectId}/processes/kill`, { pids }),
   },
 
   /* persistent terminals (agent-driven named shells) */
@@ -291,6 +336,9 @@ export const api = {
   worktrees: {
     list: (projectId: string) =>
       get<WorktreeInfo[]>(`/api/worktrees${qs({ projectId })}`),
+    /** Local branches (recency-sorted) for the launch picker. */
+    branches: (projectId: string) =>
+      get<BranchInfo[]>(`/api/branches${qs({ projectId })}`),
     create: (body: { projectId: string; branch: string; chatId?: string; base?: string }) =>
       post<WorktreeInfo>("/api/worktrees", body),
     remove: (body: { worktreePath: string; chatId?: string; force?: boolean }) =>
@@ -302,6 +350,13 @@ export const api = {
       get<WorktreeFileContent>(
         `/api/worktrees/file${qs({ worktreePath, relPath, ref })}`,
       ),
+    /** Save edited working-tree file content (editable Monaco). */
+    writeFile: (worktreePath: string, relPath: string, content: string) =>
+      put<{ path: string; size: number }>("/api/worktrees/file", {
+        worktreePath,
+        relPath,
+        content,
+      }),
   },
 
   /* github control plane */
@@ -338,6 +393,13 @@ export const api = {
   settings: {
     get: () => get<AppSettings>("/api/settings"),
     update: (body: Partial<AppSettings>) => put<AppSettings>("/api/settings", body),
+  },
+
+  /* subscription usage (5h + weekly) for the header meter */
+  usage: {
+    get: () => get<UsageSnapshot>("/api/usage"),
+    /** Force a fresh fetch now (the "refresh" button). */
+    refresh: () => post<UsageSnapshot>("/api/usage/refresh"),
   },
 };
 

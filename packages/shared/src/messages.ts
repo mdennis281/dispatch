@@ -104,6 +104,19 @@ export const ResultRowSchema = z.object({
   durationMs: z.number().int().optional(),
   result: z.string().optional(),
   usage: z.unknown().optional(),
+  /**
+   * Context-window occupancy (tokens) of the latest main-loop request at turn
+   * end — the last top-level assistant message's own input+cache+output usage,
+   * NOT the session-cumulative `usage` above. Drives the composer context meter.
+   */
+  contextTokens: z.number().int().optional(),
+  /**
+   * The model's context-window size (tokens) for this session — the authoritative
+   * `maxTokens` reported by the SDK's context-usage control, so the composer meter
+   * divides by the RIGHT window (e.g. 1M for the Opus 1M variant, not a hardcoded
+   * 200k). Absent until the session has reported usage at least once.
+   */
+  contextWindow: z.number().int().optional(),
   costUsd: z.number().optional(),
 });
 export type ResultRow = z.infer<typeof ResultRowSchema>;

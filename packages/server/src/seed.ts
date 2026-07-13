@@ -59,17 +59,22 @@ function hivebreakProject(now: number): Project {
       {
         id: "game",
         name: "game",
-        path: "apps/client",
+        // Root dev orchestrator (scripts/dev.mjs) starts BOTH client + server and
+        // scans each from its allocated base (passed as CLIENT_PORT/SERVER_PORT),
+        // so parallel worktrees never collide. Not bare `apps/client` vite.
+        path: ".",
         dev: "pnpm dev",
-        build: "pnpm build",
-        ports: [5173],
+        build: "pnpm --filter @zombie/client build",
+        ports: [5173, 2567],
+        env: { CLIENT_PORT: "{port}", SERVER_PORT: "{port2}" },
         url: "http://localhost:{port}",
       },
       {
+        // Pure docker stack: `dockerCompose` alone (no `dev`) → one compose up,
+        // not the double-start the old `dev: docker compose up` caused.
         id: "metrics-server",
         name: "metrics-server",
         path: "services/metrics-server",
-        dev: "docker compose up",
         dockerCompose: "docker-compose.yml",
         ports: [8080, 5432],
         url: "http://localhost:{port}",

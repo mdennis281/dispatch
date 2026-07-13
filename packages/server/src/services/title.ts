@@ -2,16 +2,17 @@
  * TitleService — cheap, best-effort AI chat titles.
  *
  * After a chat's FIRST turn completes (wired in the container off the `result`
- * transcript row) we generate a concise 3-6 word title from the opening user
- * message via a ONE-SHOT Agent SDK `query()` on the cheapest model
+ * transcript row) we generate a short title (aim ~35 chars) from the opening
+ * user message via a ONE-SHOT Agent SDK `query()` on the cheapest model
  * (`claude-haiku-4-5`), with `settingSources: []` + `maxTurns: 1` so it never
  * loads repo settings / MCP and never turns into a real agent loop. The result
  * is sanitized to a short title, saved to `chat.title`, and broadcast via
  * `chat-update`. Everything is fire-and-forget: any failure leaves the chat on
  * its default "New chat" title.
  *
- * `regenerate(chatId)` re-runs the same generator from the chat's recent
+ * `regenerate(chatId)` re-runs the same generator from the chat's recent USER
  * messages (ignoring the default-title gate) so a user can force a fresh title.
+ * Both flows read ONLY user messages — assistant output never seeds a title.
  *
  * The `query` fn + `now` are injectable so tests script a fake stream without a
  * `claude` subprocess or the network.
@@ -61,10 +62,15 @@ function sanitizeTitle(raw: string): string {
   // Drop trailing sentence punctuation.
   t = t.replace(/[.!?,;:]+$/, "").trim();
   if (!t) return "";
-  // Cap at 6 words and 60 chars — a title, not a sentence.
-  const words = t.split(" ");
-  if (words.length > 6) t = words.slice(0, 6).join(" ");
-  if (t.length > 60) t = t.slice(0, 60).trim();
+  // No hard word/short-char cap: we ASK the model to aim for ~35 chars but allow
+  // a longer title when it's genuinely clearer. Only guard against a runaway
+  // paragraph, trimming back to a word boundary so we never cut mid-word.
+  if (t.length > 80) {
+    t = t.slice(0, 80);
+    const lastSpace = t.lastIndexOf(" ");
+    if (lastSpace > 40) t = t.slice(0, lastSpace);
+    t = t.trim();
+  }
   return t;
 }
 
@@ -95,23 +101,30 @@ function firstUserText(messages: ChatMessage[]): string {
   return "";
 }
 
-/** A compact digest of recent user+assistant text for regeneration. */
-function conversationDigest(messages: ChatMessage[]): string {
+/**
+ * Recent USER message text — the seed for regeneration. We deliberately IGNORE
+ * assistant/AI output: the title should describe what the user is working on,
+ * not how the AI narrated its work (that's how you get useless titles like
+ * "Three PRs Shipped"). Messages come in oldest→newest within the recent
+ * window, so the tail is the most recent thing the user asked for.
+ */
+function recentUserText(messages: ChatMessage[]): string {
   const parts: string[] = [];
   for (const m of messages) {
     if (m.kind === "user" && typeof m.text === "string" && m.text.trim()) {
-      parts.push(`User: ${m.text.trim()}`);
-    } else if (m.kind === "assistant" && m.text.trim()) {
-      parts.push(`Assistant: ${m.text.trim()}`);
+      parts.push(m.text.trim());
     }
   }
   return parts.join("\n").slice(0, 2_000);
 }
 
-/** Build the one-shot title prompt from some source context. */
+/** Build the one-shot title prompt from some user-request context. */
 function titlePrompt(source: string): string {
   return [
-    "Generate a concise chat title (3-6 words) summarizing the following.",
+    "Generate a short chat title naming the topic or feature the user is working on,",
+    "based only on the user's requests below.",
+    "Aim for under 35 characters (a few words). A little longer is fine when it's",
+    "genuinely needed for clarity — but don't pad it, and never write a full sentence.",
     "Rules: Title Case, no surrounding quotes, no trailing punctuation, no preamble.",
     "Respond with ONLY the title.",
     "",
@@ -157,9 +170,11 @@ export class TitleService {
     const chat = await this.store.getChat(chatId).catch(() => null);
     if (!chat) return;
     const messages = await this.store.readMessages(chatId, { limit: 12 }).catch(() => []);
-    const digest = conversationDigest(messages) || firstUserText(messages);
-    if (!digest.trim()) return;
-    await this.generate(chatId, titlePrompt(digest));
+    // Recent user turns only — a regenerate means "the current title is stale,
+    // reflect what I'm doing now", so we weight the latest user requests.
+    const seed = recentUserText(messages) || firstUserText(messages);
+    if (!seed.trim()) return;
+    await this.generate(chatId, titlePrompt(seed));
   }
 
   /** Run the one-shot query, sanitize, and persist + broadcast the new title. */

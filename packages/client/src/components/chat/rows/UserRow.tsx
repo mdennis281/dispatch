@@ -11,6 +11,7 @@ export function UserRow({ chatId, row }: { chatId: string; row: UserMessageRow }
   return (
     <RowShell
       tint="user"
+      align="right"
       who="You"
       ts={row.ts}
       rollback={canRollback}
@@ -22,14 +23,18 @@ export function UserRow({ chatId, row }: { chatId: string; row: UserMessageRow }
         </>
       }
       gutter={
-        <span className="flex size-6 items-center justify-center rounded-md bg-panel-2 text-[10px] font-semibold text-secondary ring-1 ring-line">
+        <span className="flex size-6 items-center justify-center rounded-md bg-white/[0.14] text-[10px] font-semibold text-white ring-1 ring-white/20">
           M
         </span>
       }
     >
-      {row.text && <p className="whitespace-pre-wrap text-[13px] leading-[1.6] text-primary/95">{row.text}</p>}
+      {row.text && (
+        <div className="inline-block max-w-full rounded-2xl rounded-tr-sm border border-white/10 bg-white/[0.09] px-3 py-1.5 text-left align-top text-[13px] leading-[1.6] text-white whitespace-pre-wrap">
+          {row.text}
+        </div>
+      )}
       {row.images && row.images.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-2">
+        <div className="mt-2 flex flex-wrap justify-end gap-2">
           {row.images.map((img) => (
             <ImageThumb key={img.id} chatId={chatId} img={img} />
           ))}

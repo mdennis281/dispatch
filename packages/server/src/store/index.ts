@@ -60,6 +60,18 @@ export const AppSettingsSchema = z.object({
       enabled: z.boolean().default(false),
     })
     .optional(),
+  /**
+   * Native SDK auto-compaction: when the context window fills, the session
+   * summarizes itself and continues (rather than erroring). Enabled by default;
+   * `window` optionally overrides the SDK's compaction reserve (tokens). Applied
+   * per session via `Options.settings` (see SessionBroker.buildOptions).
+   */
+  autoCompact: z
+    .object({
+      enabled: z.boolean().default(true),
+      window: z.number().int().positive().optional(),
+    })
+    .optional(),
 });
 export type AppSettings = z.infer<typeof AppSettingsSchema>;
 

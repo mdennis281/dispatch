@@ -5,6 +5,8 @@ import {
   GitMerge,
   FileDiff,
   CornerDownRight,
+  ChevronDown,
+  ChevronRight,
   Dot,
   Plus,
   FolderOpen,
@@ -146,6 +148,16 @@ function WorktreeCard({
 }) {
   const [copied, setCopied] = useState(false);
   const base = wt.base ?? "main";
+  const merged = pr?.state === "merged";
+  const fileCount = diff?.files.length ?? 0;
+  // Diff file list is collapsible; it auto-collapses once the branch is merged
+  // (the changes are landed — no need to keep the list open), but the user can
+  // still re-expand. `userToggled` stops the merge effect from fighting a manual open.
+  const [open, setOpen] = useState(!merged);
+  const userToggled = useRef(false);
+  useEffect(() => {
+    if (merged && !userToggled.current) setOpen(false);
+  }, [merged]);
 
   const reveal = async () => {
     if (await copyToClipboard(wt.path)) {
@@ -178,12 +190,35 @@ function WorktreeCard({
         )}
       </div>
 
-      <div className="flex items-center justify-between border-t border-line-soft px-3 py-2 text-[11px]">
-        <span className="text-faint">vs {base}</span>
+      <button
+        type="button"
+        onClick={() => {
+          userToggled.current = true;
+          setOpen((o) => !o);
+        }}
+        disabled={fileCount === 0}
+        className={cn(
+          "flex w-full items-center justify-between border-t border-line-soft px-3 py-2 text-[11px] text-left",
+          fileCount > 0 && "transition-colors hover:bg-white/[0.03]",
+        )}
+      >
+        <span className="flex items-center gap-1.5 text-faint">
+          {fileCount > 0 ? (
+            open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />
+          ) : (
+            <span className="inline-block size-3" />
+          )}
+          vs {base}
+          {fileCount > 0 && (
+            <span className="text-muted">
+              · {fileCount} file{fileCount > 1 ? "s" : ""}
+            </span>
+          )}
+        </span>
         {diff ? <DiffStat add={diff.additions} del={diff.deletions} /> : <span className="text-muted">—</span>}
-      </div>
+      </button>
 
-      {diff && diff.files.length > 0 && (
+      {open && diff && diff.files.length > 0 && (
         <div className="border-t border-line-soft px-1.5 py-1.5">
           {diff.files.map((f) => (
             <button
@@ -306,15 +341,19 @@ export function WorktreesPanel({ chat }: { chat: Chat }) {
   const prFor = (branch: string): PRInfo | undefined =>
     prs.find((p) => p.branch === branch && p.state === "open") ?? prs.find((p) => p.branch === branch);
 
-  // Lazily fetch each worktree's diff-vs-base summary once (guarded to avoid loops).
+  // Fetch each worktree's diff-vs-base summary, re-fetching when the worktree
+  // actually changes. The guard is keyed by the worktree's identity (head + dirty
+  // + ahead), so a turn-end refresh that brings new commits/edits re-pulls the
+  // diff, while a steady-state re-render doesn't loop.
   const attempted = useRef(new Set<string>());
   useEffect(() => {
     for (const wt of mine) {
-      if (diffs[wt.path] || attempted.current.has(wt.path)) continue;
-      attempted.current.add(wt.path);
+      const key = `${wt.path}@${wt.head ?? ""}@${wt.isDirty ? "d" : ""}@${wt.ahead ?? 0}`;
+      if (attempted.current.has(key)) continue;
+      attempted.current.add(key);
       void loadWorktreeDiff(wt.path, wt.base ?? "main");
     }
-  }, [mine, diffs]);
+  }, [mine]);
 
   if (total === 0) {
     return (

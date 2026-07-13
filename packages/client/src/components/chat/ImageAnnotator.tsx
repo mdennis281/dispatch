@@ -294,12 +294,20 @@ export default function ImageAnnotator({
           </div>
         )}
 
-        {/* editor host — the engines take over this box imperatively */}
+        {/* editor host — the engines take over this box imperatively.
+            marker.js2 / CROPRO float their toolbar ABOVE the image (at
+            `image.offsetTop - toolbarHeight`) and their toolbox BELOW it. When
+            the image is flush to the top of its box (a tall image centered in
+            this host → offsetTop ≈ 0) they clamp the toolbar onto the image and
+            it overlaps the top. Reserving vertical padding (> the ~40px toolbar
+            above, > the toolbox below) keeps `offsetTop` large enough that both
+            engines lay their chrome out in the gaps instead of over the image. */}
         <div
           ref={hostRef}
           className={cn(
             "relative flex items-center justify-center overflow-hidden bg-inset",
             "h-[64vh] min-h-[380px] w-full",
+            "px-2 pt-12 pb-16",
           )}
         />
       </div>

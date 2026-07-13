@@ -78,6 +78,7 @@ export interface QuestionCardProps {
 /** An AskUserQuestion card — options + free-text, answered via actions.answerQuestion. */
 export function QuestionCard({ row }: QuestionCardProps) {
   const pending = row.decision === "pending";
+  const declined = row.decision === "deny";
   const questions = parseQuestions(row.input);
   const multi = questions.length > 1;
 
@@ -110,6 +111,13 @@ export function QuestionCard({ row }: QuestionCardProps) {
     } else {
       actions.answerQuestion(row.chatId, row.requestId, { answers });
     }
+  };
+
+  /** Decline without answering — the model sees the question as declined. */
+  const decline = () => {
+    if (!pending || answered) return;
+    setAnswered(true);
+    actions.declineQuestion(row.chatId, row.requestId);
   };
 
   const toggle = (qi: number, id: string, single: boolean) =>
@@ -196,8 +204,8 @@ export function QuestionCard({ row }: QuestionCardProps) {
               {busy ? "sending…" : "needs answer"}
             </Chip>
           ) : (
-            <Chip tone="success" className="ml-auto">
-              answered
+            <Chip tone={declined ? "muted" : "success"} className="ml-auto">
+              {declined ? "declined" : "answered"}
             </Chip>
           )}
         </div>
@@ -309,29 +317,43 @@ export function QuestionCard({ row }: QuestionCardProps) {
           );
         })}
 
-        {/* Multi-question asks submit every answer together. */}
-        {pending && multi && (
+        {/* Pending footer: multi-question submit (when applicable) + a decline
+            escape hatch. Declining resolves the question without answering. */}
+        {pending && (
           <div className="flex items-center gap-2 border-t border-line-soft bg-inset/60 px-3 py-2.5">
-            <Button
-              variant="primary"
-              size="sm"
-              leftIcon={<CornerDownLeft />}
-              disabled={!allAnswered || busy}
-              onClick={submitAll}
-            >
-              Submit answers
-            </Button>
-            {!allAnswered && (
-              <span className="text-[11px] text-muted">
-                Answer all {questions.length} to continue
-              </span>
+            {multi && (
+              <>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  leftIcon={<CornerDownLeft />}
+                  disabled={!allAnswered || busy}
+                  onClick={submitAll}
+                >
+                  Submit answers
+                </Button>
+                {!allAnswered && (
+                  <span className="text-[11px] text-muted">
+                    Answer all {questions.length} to continue
+                  </span>
+                )}
+              </>
             )}
+            <button
+              disabled={busy}
+              onClick={decline}
+              className="ml-auto text-[11px] text-muted transition-colors hover:text-primary disabled:opacity-50"
+            >
+              Decline
+            </button>
           </div>
         )}
 
-        {!pending && row.message && (
+        {!pending && (declined || row.message) && (
           <div className="border-t border-line-soft px-3 py-2">
-            <p className="text-[11.5px] text-muted">You answered: {row.message}</p>
+            <p className="text-[11.5px] text-muted">
+              {declined ? "You declined this question." : `You answered: ${row.message}`}
+            </p>
           </div>
         )}
       </div>

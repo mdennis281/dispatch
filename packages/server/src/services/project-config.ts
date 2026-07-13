@@ -479,6 +479,7 @@ export class ProjectConfigService {
       build: s.build,
       test: s.test,
       ports: s.ports,
+      env: s.env,
       url: s.url,
       dockerCompose: s.docker,
     }));

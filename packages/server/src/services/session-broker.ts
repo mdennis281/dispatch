@@ -50,14 +50,107 @@ import type {
   ModeConfig,
   McpServerConfig,
   SkillConfig,
+  ContextUsage,
 } from "@cm/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import type { TerminalService } from "./terminal.js";
 import type { MemoryService } from "./memory.js";
 import type { GitHubService } from "./github.js";
-import { createManagerMcpServer } from "./mcp/manager-mcp.js";
+import type { RunnerService } from "./runner.js";
+import type { WorktreeService } from "./worktree.js";
+import { createManagerMcpServer, type ManagerMcpGitHub } from "./mcp/manager-mcp.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
+
+/**
+ * The always-injected "prefer the manager tools" directive. Lists only the
+ * `mcp__manager__*` tools THIS session actually has (gated the same way the MCP
+ * server offers them) and tells the agent to reach for them instead of
+ * hand-rolling shell equivalents — the recurring failure mode where an agent
+ * re-implements `watch_pr` as a `gh` sleep loop or a background Monitor task.
+ */
+export function buildManagerToolsDirective(caps: {
+  github: boolean;
+  terminals: boolean;
+  memory: boolean;
+  runner: boolean;
+}): string {
+  const lines = [
+    "# Manager tools — prefer these over improvising",
+    "",
+    "You run inside Claude Manager, which gives you first-class `mcp__manager__*` " +
+      "tools. Prefer them over hand-rolled shell equivalents: they are cheaper, they " +
+      "cancel cleanly when the chat is stopped, and they surface live status in the UI.",
+    "",
+    "- `mcp__manager__wait` — pause yourself for a set time (e.g. let a build settle) " +
+      "instead of a `sleep` loop.",
+    "- `mcp__manager__wait_for_chat` — block until another chat is at rest, instead of polling it.",
+    "- `mcp__manager__context_usage` — check how full your own context window is " +
+      "(tokens, window size, percent, per-category breakdown) instead of guessing.",
+    "- `mcp__manager__compact_context` — compact your own context in place when it's " +
+      "filling up (past ~80%) and you have more work to do; the session continues " +
+      "from a summarized, smaller window.",
+  ];
+  if (caps.github) {
+    lines.push(
+      "- `mcp__manager__watch_pr` — wait on AND react to a GitHub PR. It returns the " +
+        "instant a CI check fails, a new review comment/thread appears, or the PR " +
+        "merges/closes. Call it in a loop: fix what it reports, then call it again, " +
+        "until it returns `done:true`. **Never** hand-roll `gh pr view` / `gh pr checks` " +
+        "polling loops or a background Bash/Monitor task to watch a PR — `watch_pr` is " +
+        "the supported way and, unlike a one-shot loop, keeps surfacing each NEW round " +
+        "of review comments so you don't stop watching after the first fix.",
+    );
+  }
+  if (caps.terminals) {
+    lines.push(
+      "- `mcp__manager__terminal` — a NAMED, persistent shell (cwd + env survive between " +
+        "calls) for multi-step command sequences, instead of re-`cd`-ing in Bash each time.",
+    );
+  }
+  if (caps.memory) {
+    lines.push(
+      "- `mcp__manager__remember` / `recall` / `forget` — durable project memory that " +
+        "carries facts across chats; record anything a future session would need re-told.",
+    );
+  }
+  if (caps.runner) {
+    lines.push(
+      "- `mcp__manager__run_subapp` — launch this project's app and get a live localhost " +
+        "URL to actually SEE your change, instead of asking the user to run it.",
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Adapt a {@link GitHubService} into the narrow {@link ManagerMcpGitHub} surface
+ * the manager MCP's `watch_pr` tool needs, bound to one session's `cwd`.
+ * `prMergeState` lets `gh` auto-detect the repo from cwd; `prChecks` and
+ * `reviewThreads` require an explicit `owner/name`, so we resolve it from cwd
+ * lazily and cache the promise (a per-session one-shot). Any resolve/gh failure
+ * on checks/threads degrades to `null` — the watcher treats that as "nothing new
+ * this poll" rather than aborting. An explicit `repo` override always wins.
+ */
+function makeGithubBinding(github: GitHubService, cwd: string | undefined): ManagerMcpGitHub {
+  let repoP: Promise<string | null> | undefined;
+  const repoFor = async (override?: string): Promise<string | null> => {
+    if (override) return override;
+    if (!cwd) return null; // no launch dir → can't auto-resolve the repo
+    return (repoP ??= github.resolveRepo(cwd).catch(() => null));
+  };
+  return {
+    prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd }),
+    prChecks: async (n, repo) => {
+      const r = await repoFor(repo);
+      return r ? github.prChecks(r, n).catch(() => null) : null;
+    },
+    reviewThreads: async (n, repo) => {
+      const r = await repoFor(repo);
+      return r ? github.reviewThreads(r, n).catch(() => null) : null;
+    },
+  };
+}
 
 /* ------------------------------------------------------------------ deps */
 
@@ -107,8 +200,12 @@ export interface SessionBrokerOptions {
   terminals?: TerminalService;
   /** Per-project agent memory: injected at start + exposed as `mcp__manager__remember|recall|forget`. */
   memory?: MemoryService;
-  /** GitHub control plane: backs `mcp__manager__wait_for_pr`'s PR merge-state poll. */
+  /** GitHub control plane: backs `mcp__manager__watch_pr`'s checks/threads/merge polls. */
   github?: GitHubService;
+  /** SubApp runner: backs `mcp__manager__run_subapp` (launch apps + get a URL). */
+  runner?: RunnerService;
+  /** Worktrees: resolve/create a launch dir for run_subapp + list branches. */
+  worktrees?: WorktreeService;
   /** Self-contained `.claude-manager/` config: source of truth for authored
    *  agents/modes/instructions (config wins over `.data` on id collision). */
   projectConfig?: BrokerProjectConfig;
@@ -189,6 +286,28 @@ function parseMcpServer(name: string): string | undefined {
   const rest = name.slice("mcp__".length);
   const i = rest.indexOf("__");
   return i >= 0 ? rest.slice(0, i) : rest;
+}
+
+/**
+ * Tokens a single request occupies in the context window: its whole input side
+ * (fresh + cache-read + cache-creation) plus the generated output. Reads one
+ * assistant message's OWN `usage` (per-request, not the session-cumulative usage
+ * on the result). Returns null when usage is absent/empty.
+ */
+function contextTokensOf(usage: unknown): number | null {
+  if (!usage || typeof usage !== "object") return null;
+  const u = usage as {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+  const sum =
+    (u.input_tokens ?? 0) +
+    (u.cache_read_input_tokens ?? 0) +
+    (u.cache_creation_input_tokens ?? 0) +
+    (u.output_tokens ?? 0);
+  return sum > 0 ? sum : null;
 }
 
 /** Pick a file extension for a stored asset from its media type (inverse of
@@ -456,6 +575,12 @@ interface LiveSession {
   /** Model explicitly chosen by the user (pins new/resumed queries via options.model). */
   modelOverride?: string;
   status: ChatStatus;
+  /**
+   * A `watch_pr` this turn reached a terminal PR state (merged/closed). Sticky
+   * until the next user message resets it, so the chat's dot can read green
+   * ("PR done") once the agent settles back to idle. Purely a display signal.
+   */
+  prWatchSettled?: boolean;
   started: boolean;
   input?: InputChannel;
   query?: Query;
@@ -464,13 +589,35 @@ interface LiveSession {
   outbox: OutboxItem[];
   pendingPermissions: Map<string, PendingPermission>;
   /**
-   * Id shared by the in-flight assistant message's token chunks AND its
-   * finalized transcript row. Allocated when the message's stream begins
+   * Id shared by the in-flight MAIN-LOOP assistant message's token chunks AND
+   * its finalized transcript row. Allocated when the message's stream begins
    * (`message_start` / first delta), consumed + cleared when its finalized
    * `assistant` row is emitted, so the client swaps the streaming buffer for
    * the persisted row in place (no duplicate).
+   *
+   * Deliberately main-loop-only: subagents run CONCURRENTLY (with the main loop
+   * and each other) and their partials interleave, so sharing this single slot
+   * with them would let a subagent `message_start` clobber the main loop's id
+   * and orphan its buffer as a stuck ●●● StreamingRow. The stream_event handler
+   * skips subagent partials, and subagent finalize never touches this slot.
    */
   streamAssistantId?: string;
+  /**
+   * Context-window occupancy (tokens) of the most recent MAIN-LOOP request this
+   * turn — the last top-level assistant message's own `usage` (input + cache +
+   * output), NOT the cumulative session usage on the result. Stamped onto the
+   * `result` row so the composer's context meter reflects "how full is the
+   * window right now", which is what auto-compaction watches.
+   */
+  lastContextTokens?: number;
+  /**
+   * The model's context-window size (tokens) for this session, learned from the
+   * SDK's `getContextUsage()` control (`maxTokens`) at init and after a model
+   * switch. Stamped onto each `result` row so the composer meter divides by the
+   * correct window — the 1M variant reports 1M here, a 200k model reports 200k —
+   * instead of a hardcoded constant. Undefined until the first refresh lands.
+   */
+  contextWindow?: number;
   /** Per-session serialized transcript write chain. */
   writeChain: Promise<void>;
   turn: number;
@@ -500,6 +647,8 @@ export class SessionBroker {
   private readonly terminals?: TerminalService;
   private readonly memory?: MemoryService;
   private readonly github?: GitHubService;
+  private readonly runner?: RunnerService;
+  private readonly worktrees?: WorktreeService;
   private readonly projectConfig?: BrokerProjectConfig;
   private readonly query: QueryFn;
   private readonly genId: () => string;
@@ -516,6 +665,8 @@ export class SessionBroker {
     this.terminals = opts.terminals;
     this.memory = opts.memory;
     this.github = opts.github;
+    this.runner = opts.runner;
+    this.worktrees = opts.worktrees;
     this.projectConfig = opts.projectConfig;
     this.query = opts.deps?.query ?? (sdkQuery as unknown as QueryFn);
     this.genId = opts.deps?.genId ?? (() => nanoid());
@@ -574,6 +725,18 @@ export class SessionBroker {
     const session = this.mustGet(chatId);
     const o: SendOptions = typeof opts === "string" ? { priority: opts } : opts;
     if (o.effort) this.applyEffort(session, o.effort);
+
+    // A fresh user message supersedes any completed PR watch: the green "PR done"
+    // dot resets so the chat reads as active again (the imminent turn flips it to
+    // the pulsing running state).
+    session.prWatchSettled = false;
+
+    // A message sent while a question is pending is an implicit decline: unblock
+    // the AskUserQuestion(s) so this message can be consumed as the real reply.
+    this.declinePendingQuestions(
+      session,
+      "The user dismissed this question and replied with a message instead.",
+    );
 
     const steering = this.isActive(session);
     const id = this.genId();
@@ -752,6 +915,36 @@ export class SessionBroker {
     return false;
   }
 
+  /**
+   * Decline an AskUserQuestion without answering. Resolves the pending request
+   * as a DENY so the CLI tool reports it declined and the model continues on its
+   * own judgement, rather than acting on a fabricated selection. Returns false if
+   * no pending request matches `requestId`.
+   */
+  declineQuestion(requestId: string, message?: string): boolean {
+    for (const session of this.sessions.values()) {
+      if (!session.pendingPermissions.has(requestId)) continue;
+      return this.resolvePermission(requestId, {
+        decision: "deny",
+        message: message ?? "The user declined to answer this question.",
+      });
+    }
+    return false;
+  }
+
+  /**
+   * Implicitly decline every pending AskUserQuestion on this session. A new user
+   * message is itself a form of declining: the blocked question(s) must resolve
+   * for the turn to consume the message, and answering-by-message would be a lie.
+   * Non-question permission gates are left untouched.
+   */
+  private declinePendingQuestions(session: LiveSession, message: string): void {
+    for (const [requestId, p] of session.pendingPermissions) {
+      if (p.toolName !== "AskUserQuestion") continue;
+      this.resolvePermission(requestId, { decision: "deny", message });
+    }
+  }
+
   /** Interrupt the running turn (streaming-input only). */
   async interrupt(chatId: string): Promise<boolean> {
     const session = this.sessions.get(chatId);
@@ -833,6 +1026,106 @@ export class SessionBroker {
       }
     }
     void this.patchChat(chatId, { model: next });
+    // A model switch can change the context window (e.g. 200k ↔ 1M variant);
+    // relearn it so the meter's denominator follows the new model.
+    if (session.query) void this.refreshContextWindow(session);
+  }
+
+  /**
+   * The live context-window breakdown for a chat — the SDK's `getContextUsage()`
+   * control: total/max tokens, percentage, model, and per-category token counts
+   * (system prompt, tools, MCP tools, memory files, messages…). Powers the meter
+   * dropup's detail view. Returns null when the session isn't live (never started
+   * this process, or torn down) or the SDK build predates the control.
+   */
+  async getContextUsage(chatId: string): Promise<ContextUsage | null> {
+    const session = this.sessions.get(chatId);
+    const q = session?.query;
+    if (!q?.getContextUsage) return null;
+    try {
+      const u = await q.getContextUsage();
+      // Cache the window off this fresh read so idle meters stay correct too.
+      if (session && typeof u.maxTokens === "number") session.contextWindow = u.maxTokens;
+      return u as ContextUsage;
+    } catch (err) {
+      this.bus.publish({
+        type: "error",
+        chatId,
+        message: "context usage query failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Compact the session's context in place via the SDK's native `/compact`
+   * command (summarize-and-continue, keeping the session id). Runs as a turn on
+   * the existing subprocess; a notice marks it in the transcript. No-op guard is
+   * unnecessary — an empty context compacts to nothing harmlessly.
+   */
+  compact(chatId: string): void {
+    const session = this.mustGet(chatId);
+    void this.emit(session, {
+      kind: "notice",
+      id: this.genId(),
+      chatId,
+      ts: this.now(),
+      sessionId: session.sessionId,
+      level: "info",
+      text: "Compacting context…",
+    });
+    session.outbox.push({ id: this.genId(), text: "/compact", priority: "next" });
+    this.schedule(session);
+  }
+
+  /**
+   * Record that a `watch_pr` on this chat reached a terminal PR state. Sets the
+   * sticky display flag so the chat's dot turns green ("PR done") the moment the
+   * agent settles back to idle; a new user message (or fork/clear) clears it.
+   */
+  markPrWatched(chatId: string): void {
+    const session = this.sessions.get(chatId);
+    if (session) session.prWatchSettled = true;
+  }
+
+  /**
+   * Clear the model's context via the SDK's native `/clear` command — starts the
+   * next turn fresh. The persisted transcript (messages.jsonl) is intentionally
+   * left intact; only the model's working context is reset. A notice records it.
+   */
+  clearContext(chatId: string): void {
+    const session = this.mustGet(chatId);
+    void this.emit(session, {
+      kind: "notice",
+      id: this.genId(),
+      chatId,
+      ts: this.now(),
+      sessionId: session.sessionId,
+      level: "info",
+      text: "Cleared the model's context (transcript kept).",
+    });
+    session.outbox.push({ id: this.genId(), text: "/clear", priority: "next" });
+    this.schedule(session);
+  }
+
+  /**
+   * Learn the model's context-window size from the SDK and cache it on the
+   * session so subsequent `result` rows carry the right denominator. Fire-and-
+   * forget: any failure (no live query, older SDK, transport hiccup) leaves the
+   * last known window in place and never disrupts a turn.
+   */
+  private async refreshContextWindow(session: LiveSession): Promise<void> {
+    const q = session.query;
+    if (!q?.getContextUsage) return;
+    try {
+      const u = await q.getContextUsage();
+      if (typeof u.maxTokens === "number" && u.maxTokens > 0) {
+        session.contextWindow = u.maxTokens;
+      }
+    } catch {
+      /* best-effort — keep whatever window we already had */
+    }
   }
 
   /** Stop the live subprocess (tree-kill via abort) but keep the chat record. */
@@ -992,6 +1285,9 @@ export class SessionBroker {
     // A turn is already active → inject the buffered message(s) as steering.
     if (session.started && this.isActive(session)) {
       this.flushOutbox(session);
+      // Re-publish the current status so the client's "N queued" chip reflects the
+      // just-injected message immediately (it decrements again as the SDK consumes).
+      this.setStatus(session, session.status);
       return;
     }
     // Otherwise this message must START a turn → needs a free active slot.
@@ -1103,6 +1399,9 @@ export class SessionBroker {
               mcpServers: (m as { mcp_servers?: unknown }).mcp_servers,
             },
           });
+          // Learn this model's context window now that the subprocess is live, so
+          // the very next result row carries the correct meter denominator.
+          void this.refreshContextWindow(session);
         }
         return;
       }
@@ -1113,6 +1412,12 @@ export class SessionBroker {
         const parentToolUseId =
           (m as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null;
         const subagentType = (m as { subagent_type?: string }).subagent_type;
+        // Track the main-loop context occupancy from this request's OWN usage
+        // (subagent messages have their own separate context, so ignore them).
+        if (parentToolUseId === null) {
+          const ctx = contextTokensOf((m as { message?: { usage?: unknown } }).message?.usage);
+          if (ctx !== null) session.lastContextTokens = ctx;
+        }
         const blocks = this.contentBlocks(m);
         let text = "";
         let thinking = "";
@@ -1123,11 +1428,22 @@ export class SessionBroker {
           else if (t === "thinking") thinking += String(b.thinking ?? "");
           else if (t === "tool_use") toolBlocks.push(b);
         }
-        // The finalized row reuses the id its streamed chunks carried (allocated
-        // at `message_start`); a tool-only message still consumes + clears it so
-        // the id never leaks into the next assistant message.
-        const assistantId = session.streamAssistantId ?? this.genId();
-        session.streamAssistantId = undefined;
+        // Correlate this finalized row with the buffer its chunks streamed into.
+        // Only the MAIN loop streams (subagent partials are skipped — see the
+        // stream_event handler), so a main-loop row reuses the exact id its chunks
+        // published under (`streamAssistantId`) — that's what lets the client swap
+        // the live buffer for the persisted row in place. A subagent row NEVER
+        // reads or clears that slot: doing so would let it adopt the main loop's
+        // live buffer id and orphan it (a stuck ●●● StreamingRow + duplicate text).
+        const apiMessageId = (m as { message?: { id?: string } }).message?.id;
+        const isMainLoop = parentToolUseId === null;
+        const assistantId = isMainLoop
+          ? session.streamAssistantId ?? apiMessageId ?? this.genId()
+          : apiMessageId ?? this.genId();
+        // The main loop is sequential — at most one message streams at a time — so
+        // consuming its slot on finalize is unconditional (no-op when nothing
+        // streamed, e.g. a tool-only message).
+        if (isMainLoop) session.streamAssistantId = undefined;
         if (text || thinking) {
           this.setStatus(session, "running", { state: "responding", label: "responding" });
           await this.emit(session, {
@@ -1214,13 +1530,25 @@ export class SessionBroker {
         // Token-level partials (only with includePartialMessages). Forward text /
         // thinking deltas as `message-chunk` so the client types out the reply,
         // then supersedes the buffer with the finalized `assistant` row (same id).
+        //
+        // Only the MAIN loop streams live. Subagents run concurrently (with the
+        // main loop and each other) and their partials interleave; honoring them
+        // would let a subagent `message_start` clobber the single streamAssistantId
+        // slot and orphan the main loop's buffer as a stuck ●●● StreamingRow. A
+        // subagent's text still renders from its finalized (nested) `assistant` row.
+        const parentToolUseId =
+          (m as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null;
+        if (parentToolUseId !== null) return;
         const event = (m as { event?: Record<string, unknown> }).event;
         if (!event || typeof event !== "object") return;
         const et = String((event as { type?: unknown }).type ?? "");
         if (et === "message_start") {
-          // A new assistant message begins its token stream → allocate the id its
-          // chunks and its finalized row will share.
-          session.streamAssistantId = this.genId();
+          // A new assistant message begins its token stream → adopt the SDK message
+          // id its chunks and finalized row will share (so the two correlate even
+          // when a subagent message finalizes in between). Fall back to a fresh id
+          // only if the SDK omits it.
+          const startId = (event as { message?: { id?: string } }).message?.id;
+          session.streamAssistantId = startId ?? this.genId();
           return;
         }
         if (et !== "content_block_delta") return;
@@ -1265,9 +1593,14 @@ export class SessionBroker {
               ? ((m as { result?: unknown }).result as string)
               : undefined,
           usage: (m as { usage?: unknown }).usage,
+          contextTokens: session.lastContextTokens,
+          contextWindow: session.contextWindow,
           costUsd: (m as { total_cost_usd?: number }).total_cost_usd,
         });
         session.turn += 1;
+        // Relearn the window off-loop for the next turn's row (cheap; the model
+        // — hence window — can shift mid-session on a switch or fallback).
+        void this.refreshContextWindow(session);
         // Chained turn buffered? Stay running; otherwise the turn is complete.
         if (session.input && session.input.pending() > 0) {
           this.setStatus(session, "running", { state: "thinking" });
@@ -1410,7 +1743,19 @@ export class SessionBroker {
 
   private setStatus(session: LiveSession, status: ChatStatus, activity?: AgentActivity): void {
     session.status = status;
-    this.bus.publish({ type: "chat-status", chatId: session.chatId, status, activity });
+    this.bus.publish({
+      type: "chat-status",
+      chatId: session.chatId,
+      status,
+      activity,
+      queued: this.queuedCount(session),
+      prSettled: session.prWatchSettled || undefined,
+    });
+  }
+
+  /** Steering messages submitted but not yet consumed by the SDK (outbox + input). */
+  private queuedCount(session: LiveSession): number {
+    return session.outbox.length + (session.input?.pending() ?? 0);
   }
 
   private onTurnEnd(session: LiveSession): void {
@@ -1579,6 +1924,13 @@ export class SessionBroker {
     );
   }
 
+  /** The project owning a chat (for the run_subapp MCP binding). Null on any miss. */
+  private async projectForChat(chatId: string): Promise<Project | null> {
+    const chat = await this.store.getChat(chatId).catch(() => null);
+    if (!chat) return null;
+    return this.store.getProject(chat.projectId).catch(() => null);
+  }
+
   private async buildOptions(session: LiveSession): Promise<Options> {
     const permissionMode = await this.resolvePermissionMode(session.modeId);
     const project =
@@ -1608,12 +1960,34 @@ export class SessionBroker {
     // *reports* at init and would otherwise feed the "[1m]" display id back in.)
     if (session.modelOverride) options.model = session.modelOverride;
 
+    // Native auto-compaction (SDK `Settings` layer): keep it ON by default so a
+    // session summarizes itself and continues when the window fills, instead of
+    // erroring — this is the "auto-clean at the limit" behavior. A global setting
+    // can disable it or override the compaction reserve window.
+    const appSettings = await this.store.getSettings().catch(() => undefined);
+    const ac = appSettings?.autoCompact;
+    options.settings = {
+      autoCompactEnabled: ac?.enabled ?? true,
+      ...(ac?.window ? { autoCompactWindow: ac.window } : {}),
+    };
+
     // Config-sourced agents/modes (the `.claude-manager/` source of truth) win
     // over `.data`-defined ones on id collision.
     const mode = await this.resolveMode(session.modeId);
     const agent = session.agentId ? await this.resolveAgent(session.agentId) : null;
 
     const appends: string[] = [];
+    // Lead with the manager-tools directive so EVERY session (any project)
+    // discovers the `mcp__manager__*` tools it has and is steered to prefer them
+    // over hand-rolled shell equivalents (the #1 way agents waste effort here).
+    appends.push(
+      buildManagerToolsDirective({
+        github: Boolean(this.github),
+        terminals: Boolean(this.terminals),
+        memory: Boolean(this.memory && session.projectId),
+        runner: Boolean(this.runner && this.worktrees),
+      }),
+    );
     if (mode?.instructions) appends.push(mode.instructions);
 
     // Inject the project's authored custom instructions from its
@@ -1666,6 +2040,8 @@ export class SessionBroker {
     const terminals = this.terminals;
     const memory = this.memory;
     const github = this.github;
+    const runner = this.runner;
+    const worktrees = this.worktrees;
     const projectId = session.projectId;
     // The managed repo's `.claude-manager/` config is the SOURCE OF TRUTH for
     // external MCP servers: layer the config-sourced servers OVER the `.data`
@@ -1701,12 +2077,81 @@ export class SessionBroker {
                 forget: (name) => memory.delete(projectId, name),
               }
             : undefined,
-        // Bind the PR poller to this session's default cwd so `gh` auto-detects
-        // the repo (the chat's worktree, else the project root); the agent may
-        // still pass an explicit owner/name override.
-        github: github
-          ? { prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd }) }
-          : undefined,
+        // Bind the PR watcher to this session's default cwd. `prMergeState` lets
+        // `gh` auto-detect the repo from cwd; `prChecks`/`reviewThreads` need an
+        // explicit owner/name, so resolve it from cwd ONCE (cached) and reuse it.
+        // The agent may still pass an explicit repo override on any call.
+        github: github ? makeGithubBinding(github, cwd) : undefined,
+        // Bind the subApp launcher to this session's project so `run_subapp` can
+        // list/start/stop apps and resolve (or create) a worktree per branch.
+        runner:
+          runner && worktrees
+            ? {
+                overview: async (chatId) => {
+                  const proj = await this.projectForChat(chatId);
+                  if (!proj) return { subApps: [], running: [], branches: [] };
+                  const all = await runner.list();
+                  const running = all
+                    .filter((r) => r.projectId === proj.id)
+                    .map((r) => ({
+                      subAppId: r.subAppId,
+                      status: r.status,
+                      url: r.url,
+                      branch: r.branch,
+                      port: r.port,
+                    }));
+                  const branches = (await worktrees.listBranches(proj)).map((b) => ({
+                    name: b.name,
+                    current: !!b.isCurrent,
+                    hasWorktree: !!b.worktreePath,
+                  }));
+                  return {
+                    subApps: (proj.subApps ?? []).map((s) => ({
+                      id: s.id,
+                      name: s.name,
+                      ports: s.ports,
+                    })),
+                    running,
+                    branches,
+                  };
+                },
+                launch: async ({ chatId, subAppId, branch }) => {
+                  const proj = await this.projectForChat(chatId);
+                  if (!proj) throw new Error("no project for this chat");
+                  const subApp = (proj.subApps ?? []).find((s) => s.id === subAppId);
+                  if (!subApp) throw new Error(`subApp "${subAppId}" not found`);
+                  const b = branch || proj.defaultBranch || "main";
+                  const path = await worktrees.resolveLaunchPath(proj, b);
+                  const inst = await runner.start(path, subApp, {
+                    projectId: proj.id,
+                    chatId,
+                    branch: b,
+                  });
+                  return {
+                    subAppId: inst.subAppId,
+                    status: inst.status,
+                    url: inst.url,
+                    branch: inst.branch,
+                    port: inst.port,
+                  };
+                },
+                stop: async ({ chatId, subAppId, branch }) => {
+                  const proj = await this.projectForChat(chatId);
+                  if (!proj) return false;
+                  const all = await runner.list();
+                  const match = all.find(
+                    (r) =>
+                      r.projectId === proj.id &&
+                      r.subAppId === subAppId &&
+                      (!branch || r.branch === branch) &&
+                      (r.status === "starting" || r.status === "running"),
+                  );
+                  if (!match) return false;
+                  await runner.stop(match.id);
+                  return true;
+                },
+              }
+            : undefined,
         signal: session.abortController?.signal,
         now: this.now,
       }),

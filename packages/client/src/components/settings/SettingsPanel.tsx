@@ -7,7 +7,7 @@
  * change is reflected immediately (and re-reflected whenever the modal loads).
  */
 import { useCallback, useEffect, useState } from "react";
-import { SlidersHorizontal, Moon, Sun, Bell } from "lucide-react";
+import { SlidersHorizontal, Moon, Sun, Bell, Layers } from "lucide-react";
 import { Modal, Field, TextInput, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
@@ -89,6 +89,10 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
             url: s.webhook?.url ?? "",
             enabled: s.webhook?.enabled ?? false,
           },
+          autoCompact: {
+            enabled: s.autoCompact?.enabled ?? true,
+            window: s.autoCompact?.window,
+          },
         };
         setDraft(next);
         applyTheme(next.theme);
@@ -110,6 +114,11 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
       setDraft((d) => ({ ...d, webhook: { ...d.webhook, ...p } })),
     [],
   );
+  const patchAutoCompact = useCallback(
+    (p: Partial<NonNullable<AppSettings["autoCompact"]>>) =>
+      setDraft((d) => ({ ...d, autoCompact: { ...d.autoCompact, ...p } })),
+    [],
+  );
 
   async function save() {
     if (busy) return;
@@ -122,6 +131,10 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
         kind: draft.webhook?.kind ?? "ntfy",
         url: draft.webhook?.url?.trim() || undefined,
         enabled: draft.webhook?.enabled ?? false,
+      },
+      autoCompact: {
+        enabled: draft.autoCompact?.enabled ?? true,
+        window: draft.autoCompact?.window || undefined,
       },
     };
     try {
@@ -142,6 +155,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
   ];
 
   const wh = draft.webhook ?? {};
+  const ac = draft.autoCompact ?? {};
 
   return (
     <Modal
@@ -235,6 +249,45 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
                 value={wh.url ?? ""}
                 onChange={(e) => patchWebhook({ url: e.target.value })}
                 placeholder="https://ntfy.sh/your-topic"
+              />
+            </Field>
+          </div>
+        </div>
+
+        {/* context / auto-compaction */}
+        <div>
+          <div className="mb-1.5 flex items-center justify-between">
+            <SectionLabel className="px-0">
+              <span className="inline-flex items-center gap-1.5 [&_svg]:size-3">
+                <Layers /> Context
+              </span>
+            </SectionLabel>
+            <Switch
+              checked={ac.enabled ?? true}
+              onChange={(v) => patchAutoCompact({ enabled: v })}
+              label={(ac.enabled ?? true) ? "Auto-compact on" : "Auto-compact off"}
+            />
+          </div>
+          <p className="mb-2 text-[11px] text-faint">
+            When a session's context window fills, summarize the conversation and continue
+            automatically instead of erroring. Applies to new turns.
+          </p>
+          <div
+            className={cn(
+              "transition-opacity",
+              !(ac.enabled ?? true) && "pointer-events-none opacity-45",
+            )}
+          >
+            <Field label="Reserve window" hint="tokens; blank = SDK default">
+              <TextInput
+                mono
+                inputMode="numeric"
+                value={ac.window != null ? String(ac.window) : ""}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value.replace(/[^\d]/g, ""), 10);
+                  patchAutoCompact({ window: Number.isFinite(n) ? n : undefined });
+                }}
+                placeholder="e.g. 20000"
               />
             </Field>
           </div>

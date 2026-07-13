@@ -7,13 +7,14 @@
  *   DELETE /api/projects/:id        → 204
  *   GET    /api/projects/:id/worktrees → WorktreeInfo[] (live `git worktree list`)
  */
+import { existsSync } from "node:fs";
 import type { FastifyInstance } from "fastify";
 import { nanoid } from "nanoid";
 import { ProjectSchema, type Project } from "@cm/shared";
 
 export function registerProjectRoutes(app: FastifyInstance): void {
   const { store, bus } = app.cm;
-  const { worktrees } = app.services;
+  const { worktrees, projectConfigArchive } = app.services;
 
   app.get("/api/projects", async () => store.listProjects());
 
@@ -31,6 +32,15 @@ export function registerProjectRoutes(app: FastifyInstance): void {
     }
     const saved = await store.saveProject(parsed.data);
     bus.publish({ type: "project-update", project: saved });
+    // Auto-scaffold a committable `.claude-manager/` for the new project from its
+    // `.data` record, so a UI-created project gets its source-of-truth folder
+    // without a separate step. Best-effort (never fails the create) and only into
+    // a repo that already exists on disk — a mistyped path shouldn't materialize
+    // stray directories. Scaffold is a no-op when a `.claude-manager/` is present,
+    // and its reload re-syncs + emits the merged project-update.
+    if (existsSync(saved.repoPath)) {
+      await projectConfigArchive.scaffold(saved.id).catch(() => {});
+    }
     return reply.code(201).send(saved);
   });
 

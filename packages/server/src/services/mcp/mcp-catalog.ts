@@ -259,7 +259,7 @@ async function buildExternalEntry(
 /** Options for {@link buildProjectMcpCatalog}. */
 export interface BuildCatalogOptions {
   /** Which backing services the session has (gates manager tool availability). */
-  bindings?: { github?: boolean; terminals?: boolean; memory?: boolean };
+  bindings?: { github?: boolean; terminals?: boolean; memory?: boolean; runner?: boolean };
   /** Override the external probe (tests inject a scripted one). */
   probe?: McpProbe;
   /** Per-server probe timeout. */

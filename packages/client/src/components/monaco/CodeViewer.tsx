@@ -18,12 +18,18 @@ import {
   AlertTriangle,
   FileWarning,
   FileX2,
+  Save,
 } from "lucide-react";
-import { readWorktreeFile, type WorktreeFileContent } from "../../lib/actions.js";
+import {
+  readWorktreeFile,
+  writeWorktreeFile,
+  type WorktreeFileContent,
+} from "../../lib/actions.js";
 import { useCodeViewer, type CodeViewerMode, type CodeViewerRequest } from "./store.js";
 import { languageForPath, isImagePath, imageMimeForPath } from "./lang.js";
 import { Spinner } from "../ui/Spinner.js";
 import { IconButton } from "../ui/IconButton.js";
+import { Button } from "../ui/Button.js";
 import { SegmentedControl, type Segment } from "../ui/SegmentedControl.js";
 import { Chip } from "../ui/Chip.js";
 import { cn } from "../../lib/cn.js";
@@ -54,6 +60,7 @@ function baseName(p: string): string {
 export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   const close = useCodeViewer((s) => s.close);
   const { worktreePath, relPath, base, branch } = request;
+  const editable = !!request.editable;
 
   const [mode, setMode] = useState<CodeViewerMode>(request.mode);
   const [splitDiff, setSplitDiff] = useState(true);
@@ -63,6 +70,15 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   const [error, setError] = useState<string | null>(null);
   const [working, setWorking] = useState<WorktreeFileContent | null>(null);
   const [original, setOriginal] = useState<WorktreeFileContent | null>(null);
+
+  // Editable-mode state: the live draft, the last-persisted baseline (for the
+  // dirty check), and save status.
+  const [draft, setDraft] = useState("");
+  const [baseline, setBaseline] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null);
+  const [savedTick, setSavedTick] = useState(false);
+  const dirty = editable && draft !== baseline;
 
   // Reset view mode whenever a new file is requested.
   useEffect(() => setMode(request.mode), [request.mode, worktreePath, relPath]);
@@ -86,6 +102,10 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
         if (!live) return;
         setWorking(w);
         setOriginal(o);
+        const seed = w.encoding === "utf8" ? w.content : "";
+        setDraft(seed);
+        setBaseline(seed);
+        setSaveErr(null);
         setLoading(false);
       })
       .catch((e: unknown) => {
@@ -110,7 +130,8 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   const language = useMemo(() => languageForPath(relPath), [relPath]);
   const isImage = isImagePath(relPath);
   const workingBinary = !!working?.binary;
-  const canDiff = !workingBinary && !error;
+  // No editable diff — the config editor is always a single-file edit.
+  const canDiff = !workingBinary && !error && !editable;
   const effectiveMode: CodeViewerMode = canDiff ? mode : "file";
 
   const modifiedText = working?.encoding === "utf8" ? working.content : "";
@@ -122,6 +143,22 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     });
+  };
+
+  const save = async () => {
+    if (!editable || saving || !dirty) return;
+    setSaving(true);
+    setSaveErr(null);
+    try {
+      await writeWorktreeFile(worktreePath, relPath, draft);
+      setBaseline(draft);
+      setSavedTick(true);
+      setTimeout(() => setSavedTick(false), 1400);
+    } catch (e) {
+      setSaveErr(e instanceof Error ? e.message : "Failed to save file.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const segments = useMemo<Segment<CodeViewerMode>[]>(
@@ -163,6 +200,19 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
           </IconButton>
 
           <div className="ml-auto flex items-center gap-2">
+            {editable && (
+              <Button
+                size="xs"
+                variant={dirty ? "primary" : "subtle"}
+                leftIcon={
+                  saving ? <Spinner size={12} /> : savedTick ? <Check /> : <Save />
+                }
+                disabled={!dirty || saving}
+                onClick={() => void save()}
+              >
+                {saving ? "Saving…" : dirty ? "Save" : "Saved"}
+              </Button>
+            )}
             {branch && (
               <Chip tone="muted" mono>
                 <GitBranch className="mr-1 inline size-3" />
@@ -213,9 +263,10 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
               title="Binary file"
               detail={`${fmtBytes(working?.size ?? 0)} — not shown as text.`}
             />
-          ) : !working?.exists && !modifiedText && (effectiveMode !== "diff" || !originalText) ? (
+          ) : !editable && !working?.exists && !modifiedText && (effectiveMode !== "diff" || !originalText) ? (
             // …but in diff mode with content at base, this is a DELETION — fall
             // through to Monaco so the removal renders instead of "missing file".
+            // (Editable mode always opens the editor — a new file starts empty.)
             <StateNote
               icon={<FileX2 className="text-muted" />}
               title="Empty or missing file"
@@ -232,10 +283,13 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
               <MonacoPane
                 mode={effectiveMode}
                 language={language}
-                value={modifiedText}
+                value={editable ? draft : modifiedText}
                 original={originalText}
                 splitDiff={splitDiff}
                 selection={request.selection}
+                editable={editable}
+                onChange={setDraft}
+                onSave={save}
               />
             </Suspense>
           )}
@@ -250,6 +304,17 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
           {effectiveMode === "diff" && (
             <span className="text-muted">
               vs <span className="cm-mono !text-[10px] text-secondary">{base}</span>
+            </span>
+          )}
+          {editable && (
+            <span className={cn("cm-mono !text-[10px]", dirty ? "text-warn" : "text-faint")}>
+              {dirty ? "unsaved changes" : "saved"}
+            </span>
+          )}
+          {saveErr && (
+            <span className="inline-flex items-center gap-1 text-danger" title={saveErr}>
+              <AlertTriangle className="size-3" />
+              {midTruncate(saveErr, 48)}
             </span>
           )}
           {truncated && (

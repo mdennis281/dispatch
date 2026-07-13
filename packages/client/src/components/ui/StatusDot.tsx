@@ -37,12 +37,25 @@ export function StatusDot({ tone, pulse, size = 7, className }: StatusDotProps) 
   );
 }
 
-/** Map a chat status to a dot tone + whether it pulses + a label. */
-export function statusMeta(status: ChatStatus | undefined): {
+/**
+ * Map a chat status to a dot tone + whether it pulses + a label.
+ *
+ * `prSettled` = a `watch_pr` on this chat ran to a terminal PR state and hasn't
+ * been superseded by a new message; on an otherwise-idle chat it flips the dot
+ * from neutral gray to green ("PR done"). It's ignored for any active status
+ * (running still pulses purple), so the green only shows once the agent is quiet.
+ */
+export function statusMeta(
+  status: ChatStatus | undefined,
+  prSettled = false,
+): {
   tone: DotTone;
   pulse: boolean;
   label: string;
 } {
+  if (status === "idle" && prSettled) {
+    return { tone: "success", pulse: false, label: "PR done" };
+  }
   switch (status) {
     case "running":
       return { tone: "working", pulse: true, label: "Running" };

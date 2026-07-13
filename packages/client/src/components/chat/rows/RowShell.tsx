@@ -15,6 +15,8 @@ export interface RowShellProps {
   children: ReactNode;
   className?: string;
   tint?: "user" | "assistant" | "plain";
+  /** Row orientation: "left" (default) or "right" (avatar + content hug the right). */
+  align?: "left" | "right";
 }
 
 /**
@@ -31,13 +33,21 @@ export function RowShell({
   children,
   className,
   tint = "plain",
+  align = "left",
 }: RowShellProps) {
+  const right = align === "right";
   return (
-    <div className={cn("group/row relative flex gap-3 px-4 py-2", className)}>
+    <div
+      className={cn(
+        "group/row relative flex gap-3 px-4 py-2",
+        right && "flex-row-reverse",
+        className,
+      )}
+    >
       <div className="flex w-7 shrink-0 flex-col items-center pt-0.5">{gutter}</div>
       <div className="min-w-0 flex-1">
         {(who || meta) && (
-          <div className="mb-1 flex items-center gap-2">
+          <div className={cn("mb-1 flex items-center gap-2", right && "flex-row-reverse")}>
             {who && (
               <span
                 className={cn(
@@ -53,7 +63,12 @@ export function RowShell({
               <span className="cm-mono !text-[10px] text-faint">{clock(ts)}</span>
             )}
             {rollback && (
-              <span className="ml-auto opacity-0 transition-opacity group-hover/row:opacity-100">
+              <span
+                className={cn(
+                  "opacity-0 transition-opacity group-hover/row:opacity-100",
+                  right ? "mr-auto" : "ml-auto",
+                )}
+              >
                 <Tooltip label="Roll back here — restores code + thread">
                   <button
                     onClick={onRollback}
@@ -67,7 +82,7 @@ export function RowShell({
             )}
           </div>
         )}
-        <div className="min-w-0">{children}</div>
+        <div className={cn("min-w-0", right && "text-right")}>{children}</div>
       </div>
     </div>
   );

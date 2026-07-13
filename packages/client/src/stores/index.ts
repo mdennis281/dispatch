@@ -24,6 +24,7 @@ import { useMcp } from "./mcp.js";
 import { useConfig } from "./config.js";
 import { useCheckpoints } from "./checkpoints.js";
 import { useNotices } from "./notices.js";
+import { useUsage } from "./usage.js";
 
 import {
   MOCK_PROJECTS,
@@ -53,6 +54,7 @@ export { useMemory, useProjectMemories } from "./memory.js";
 export { useCheckpoints, useHasCheckpoint } from "./checkpoints.js";
 export { useNotices } from "./notices.js";
 export type { Toast, NoticeLevel } from "./notices.js";
+export { useUsage } from "./usage.js";
 
 /** Seed all stores from the offline fixture (call once at boot). */
 export function hydrateFromMock(): void {
@@ -88,20 +90,32 @@ export function applyServerEvent(evt: WsServerEvent): void {
 
     case "chat-message":
       useMessages.getState().append(evt.chatId, evt.message);
+      useChats.getState().bumpActivity(evt.chatId, evt.message.ts);
       return;
 
     case "message-chunk":
       useMessages.getState().chunk(evt.chatId, evt.messageId, evt.delta, evt.channel);
+      useChats.getState().bumpActivity(evt.chatId);
       return;
 
     case "chat-status":
-      useChats.getState().setStatus(evt.chatId, evt.status, evt.activity);
-      // A turn that leaves the running/awaiting state (idle turn-end, session
-      // done, or error) has no in-flight assistant stream: clear any lingering
-      // streaming buffers so an interrupted/aborted message's partial text can't
-      // leave a stuck StreamingRow (perpetual ●●●) that resurfaces next turn.
-      if (evt.status === "idle" || evt.status === "done" || evt.status === "error") {
+      useChats
+        .getState()
+        .setStatus(evt.chatId, evt.status, evt.activity, evt.queued, evt.prSettled);
+      useChats.getState().bumpActivity(evt.chatId);
+      // Only a `running` turn has an in-flight assistant stream. Any other state
+      // — blocked on input, queued, or finished (idle/done/error) — means no live
+      // stream, so clear lingering streaming buffers: a partial/aborted message's
+      // text can't strand a stuck StreamingRow (perpetual ●●●) under a finished
+      // section, whether the turn blocked on a prompt or ended outright.
+      if (evt.status !== "running") {
         useMessages.getState().clearStreaming(evt.chatId);
+      }
+      // True turn-end (not merely blocked on input): the agent likely just touched
+      // the repo (edits, commits, a PR). Re-pull the active project's worktrees /
+      // diffs / PRs so those panels reflect reality without a manual page refresh.
+      if (evt.status === "idle" || evt.status === "done" || evt.status === "error") {
+        scheduleTurnEndRefresh(evt.chatId);
       }
       return;
 
@@ -218,6 +232,11 @@ export function applyServerEvent(evt: WsServerEvent): void {
       useMemory.getState().remove(evt.projectId, evt.name);
       return;
 
+    case "usage-update":
+      // Server polled subscription usage (5h + weekly) — refresh the header meter.
+      useUsage.getState().set(evt.usage);
+      return;
+
     case "notice":
       useNotices.getState().push({
         level: evt.level,
@@ -247,6 +266,26 @@ export function applyServerEvent(evt: WsServerEvent): void {
 
 /** Chats whose transcript we've already fetched this session (reset on hydrate). */
 const loadedChats = new Set<string>();
+
+// Coalesced turn-end refresh of the ACTIVE project's panels (worktrees/diffs/PRs).
+// Multiple chats finishing close together collapse into one refetch.
+let turnEndRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let turnEndRefreshProject: string | null = null;
+
+/** Refresh the active project's panels shortly after one of its chats' turns ends. */
+function scheduleTurnEndRefresh(chatId: string): void {
+  const projectId = useChats.getState().byId[chatId]?.projectId ?? null;
+  // Only refresh what the user is actually looking at; a switch re-hydrates the rest.
+  if (!projectId || projectId !== useProjects.getState().activeProjectId) return;
+  turnEndRefreshProject = projectId;
+  if (turnEndRefreshTimer) return;
+  turnEndRefreshTimer = setTimeout(() => {
+    turnEndRefreshTimer = null;
+    const pid = turnEndRefreshProject;
+    turnEndRefreshProject = null;
+    if (pid) void loadProjectPanels(pid);
+  }, 400);
+}
 
 /**
  * REST-hydrate the authoritative snapshot into every store. Config lists always

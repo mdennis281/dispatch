@@ -14,11 +14,13 @@
  *     ANOTHER chat's broker state reaches a terminal state (idle/done/error),
  *     or the timeout fires. Returns the final state. An unknown chatId yields an
  *     informative (error-flagged) result rather than throwing.
- *   - `mcp__manager__wait_for_pr({ number, repo?, timeoutSeconds? })` — poll a
- *     GitHub PR (via {@link ManagerMcpGitHub}, reusing GitHubService's `gh`) until
- *     it is merged/closed or the timeout fires, so an agent told to "wait for PR
- *     #N to merge" never hand-rolls an expensive `gh pr view` sleep loop. Returns
- *     the final state as JSON; an unknown PR / gh error is an informative error.
+ *   - `mcp__manager__watch_pr({ number, repo?, timeoutSeconds? })` — watch a
+ *     GitHub PR (via {@link ManagerMcpGitHub}, reusing GitHubService's `gh`) and
+ *     RETURN THE INSTANT it needs attention: a CI check fails, a new review
+ *     thread/comment appears, or it merges/closes. Per-session dedup state means
+ *     each new signal is reported exactly once, so an agent calling it in a loop
+ *     (fix → watch again) never misses a later round of review comments and never
+ *     hand-rolls a `gh pr view` / `gh pr checks` sleep loop or a background watcher.
  *
  * Every handler awaits a REAL promise (a `setTimeout`, a poll `setInterval`,
  * and/or a `chat-status` bus subscription) and unwinds cleanly the instant the
@@ -31,18 +33,42 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod";
-import { MemoryTypeSchema, type ChatStatus, type ProjectMemory } from "@cm/shared";
+import {
+  MemoryTypeSchema,
+  type ChatStatus,
+  type CheckRun,
+  type ContextUsage,
+  type ProjectMemory,
+  type ReviewThread,
+} from "@cm/shared";
 import type { EventBus } from "../../bus.js";
 import { clampBody } from "../memory.js";
 
 /** Hard ceiling on a single `wait` (also the default `wait_for_chat` timeout). */
 export const WAIT_CAP_SECONDS = 3600;
 
-/** How often `wait_for_pr` re-polls a PR's merge/close state. */
+/** How often `watch_pr` re-polls a PR's checks / review threads / merge state. */
 export const PR_POLL_INTERVAL_MS = 20_000;
 
-/** Default `wait_for_pr` timeout (30 min); still capped at {@link WAIT_CAP_SECONDS}. */
-export const WAIT_FOR_PR_DEFAULT_TIMEOUT_SECONDS = 1800;
+/**
+ * Default per-call `watch_pr` timeout (30 min); still capped at
+ * {@link WAIT_CAP_SECONDS}. The agent re-calls after each returned batch, so the
+ * effective watch is unbounded — this only bounds a single quiet poll window.
+ */
+export const WATCH_PR_DEFAULT_TIMEOUT_SECONDS = 1800;
+
+/**
+ * Check conclusions that count as a FAILING check for `watch_pr` — the ones an
+ * agent must react to (a red build, a required check it must satisfy). `neutral`,
+ * `skipped`, and `success` are not actionable.
+ */
+const FAILING_CONCLUSIONS: ReadonlySet<string> = new Set([
+  "failure",
+  "timed_out",
+  "action_required",
+  "cancelled",
+  "stale",
+]);
 
 /** Broker states that end `wait_for_chat` (the target turn/session is at rest). */
 const TERMINAL_STATES: ReadonlySet<ChatStatus> = new Set<ChatStatus>([
@@ -57,6 +83,12 @@ export interface ManagerMcpBroker {
   has(chatId: string): boolean;
   /** Current broker state of a chat's session, if any. */
   getStatus(chatId: string): ChatStatus | undefined;
+  /** Live context-window breakdown for a chat (null when not live / unsupported). */
+  getContextUsage(chatId: string): Promise<ContextUsage | null>;
+  /** Compact a chat's context in place (native SDK `/compact`). */
+  compact(chatId: string): void;
+  /** Flag that a `watch_pr` on this chat hit a terminal PR state (drives the green "PR done" dot). */
+  markPrWatched(chatId: string): void;
 }
 
 /**
@@ -99,7 +131,7 @@ export interface ManagerMcpMemory {
   forget(name: string): Promise<boolean>;
 }
 
-/** Terminal-state view of a PR the `wait_for_pr` tool polls on. */
+/** Merge/close-state view of a PR the `watch_pr` tool polls on. */
 export interface PrPollResult {
   number: number;
   state: "open" | "closed" | "merged";
@@ -108,14 +140,48 @@ export interface PrPollResult {
 }
 
 /**
- * The narrow GitHub surface the manager MCP needs — a single PR merge/close-state
- * poll, already bound to this session's default repo (its worktree cwd, else the
- * project root) by the broker. `repo` is an optional `owner/name` override. A null
- * result means the PR/repo couldn't be resolved (unknown PR / gh error). Omitted
- * from the ctx → the `wait_for_pr` tool isn't offered.
+ * The narrow GitHub surface the manager MCP needs to watch a PR — its merge/close
+ * state, its CI checks, and its review threads — already bound to this session's
+ * default repo (its worktree cwd, else the project root) by the broker. `repo` is
+ * an optional `owner/name` override.
+ *
+ * `prMergeState` null = the PR/repo couldn't be resolved (unknown PR / gh error)
+ * and ENDS the watch as an error. `prChecks`/`reviewThreads` null = that signal
+ * couldn't be read THIS poll (a transient gh hiccup); the watch treats it as "no
+ * new activity of that kind" and keeps going rather than aborting. Omitted from
+ * the ctx → the `watch_pr` tool isn't offered.
  */
 export interface ManagerMcpGitHub {
   prMergeState(prNumber: number, repo?: string): Promise<PrPollResult | null>;
+  prChecks(prNumber: number, repo?: string): Promise<CheckRun[] | null>;
+  reviewThreads(prNumber: number, repo?: string): Promise<ReviewThread[] | null>;
+}
+
+/** A launched subApp runner, as surfaced to the agent. */
+export interface ManagerMcpRunnerState {
+  subAppId: string;
+  status: string;
+  url?: string;
+  branch?: string;
+  port?: number;
+}
+
+/** SubApp launcher for this session's project (omitted → no `run_subapp` tool). */
+export interface ManagerMcpRunner {
+  /** SubApps, live runners, and branches for this session's project. */
+  overview(chatId: string): Promise<{
+    subApps: { id: string; name: string; ports?: number[] }[];
+    running: ManagerMcpRunnerState[];
+    branches: { name: string; current: boolean; hasWorktree: boolean }[];
+  }>;
+  /** Launch a subApp on a branch (default: the project's current branch). */
+  launch(input: {
+    chatId: string;
+    subAppId: string;
+    branch?: string;
+  }): Promise<ManagerMcpRunnerState>;
+  /** Stop a subApp's running instance (optionally scoped to a branch). */
+  stop(input: { chatId: string; subAppId: string; branch?: string }): Promise<boolean>;
 }
 
 /** Per-session context the factory closes over. */
@@ -128,8 +194,10 @@ export interface ManagerMcpContext {
   terminals?: ManagerMcpTerminals;
   /** Project-memory runner for this session (omitted → no memory tools). */
   memory?: ManagerMcpMemory;
-  /** GitHub PR poller for this session (omitted → no `wait_for_pr` tool). */
+  /** GitHub PR watcher for this session (omitted → no `watch_pr` tool). */
   github?: ManagerMcpGitHub;
+  /** SubApp launcher for this session (omitted → no `run_subapp` tool). */
+  runner?: ManagerMcpRunner;
   /** The session's abort signal — cancels in-flight waits on stop/fork. */
   signal?: AbortSignal;
   now?: () => number;
@@ -249,104 +317,139 @@ function waitForChatState(
   });
 }
 
-interface WaitForPrOutcome {
-  kind: "terminal" | "timeout" | "aborted" | "error";
-  /** The terminal state (kind==="terminal") or the last non-terminal read seen. */
-  state?: PrPollResult;
-  /** Set only when kind==="error". */
-  error?: string;
-}
+/** One reportable change `watch_pr` surfaces to the agent. */
+export type WatchPrEvent =
+  | { type: "ci-failed"; name: string; conclusion?: string; url?: string }
+  | {
+      type: "review-comment";
+      threadId: string;
+      path?: string;
+      line?: number | null;
+      author?: string;
+      body?: string;
+    };
 
 /**
- * Poll `poll()` every `intervalMs` until the PR reaches a terminal state (merged
- * or closed), a signal aborts, or `timeoutMs` elapses. Polls IMMEDIATELY first,
- * so an already-terminal PR resolves with zero waiting. A null poll (unknown PR /
- * unresolvable repo) or a thrown gh error settles as `error`. Mirrors the
- * `sleep`/`waitForChatState` cancel-on-abort discipline: the interval, the
- * timeout timer, and every abort listener are torn down on the FIRST settle, so a
- * stopped/forked session never strands a poll loop.
+ * Per-(session, PR) dedup memory so each failing check and each review thread is
+ * reported to the agent exactly ONCE. `checks` maps a check name → the last
+ * conclusion/status we reported for it (so a red build fires once, and a
+ * pass→fail flip re-fires); `threads` holds the ids of review threads already
+ * surfaced. Held in the session-scoped factory closure, it survives across the
+ * agent's repeated `watch_pr` calls — which is exactly what stops the "fixed the
+ * comments, then went silent on the next round" failure mode.
  */
-function waitForPrState(
-  poll: () => Promise<PrPollResult | null>,
+export interface WatchPrState {
+  checks: Map<string, string>;
+  threads: Set<string>;
+}
+
+type WatchPrOutcome =
+  | { kind: "activity"; state: PrPollResult; events: WatchPrEvent[] }
+  | { kind: "terminal"; state: PrPollResult }
+  | { kind: "timeout"; state: PrPollResult }
+  | { kind: "aborted" }
+  | { kind: "error"; error: string };
+
+/**
+ * Poll a PR every `intervalMs` and RESOLVE the instant it needs the agent: a new
+ * failing check, a new unresolved review thread, or a merge/close. Polls
+ * immediately first (so a PR already carrying unaddressed activity returns with
+ * zero wait), dedups against `st` so nothing already-handled re-fires, and quits
+ * on abort or `timeoutMs`. A null merge-state read ends the watch as an error; a
+ * transient null checks/threads read is treated as "nothing new this poll" so one
+ * flaky `gh` call never aborts a long watch.
+ */
+async function watchForPrActivity(
+  gh: ManagerMcpGitHub,
+  number: number,
+  repo: string | undefined,
+  st: WatchPrState,
   opts: {
     intervalMs: number;
     timeoutMs: number;
     signals: (AbortSignal | undefined)[];
+    now: () => number;
   },
-): Promise<WaitForPrOutcome> {
-  return new Promise((resolve) => {
-    let settled = false;
-    let inFlight = false;
-    let lastState: PrPollResult | undefined;
-    const cleanups: (() => void)[] = [];
-    const finish = (r: WaitForPrOutcome): void => {
-      if (settled) return;
-      settled = true;
-      for (const c of cleanups) c();
-      resolve(r);
-    };
+): Promise<WatchPrOutcome> {
+  const deadline = opts.now() + opts.timeoutMs;
+  const aborted = (): boolean => opts.signals.some((s) => s?.aborted);
 
-    const doPoll = async (): Promise<void> => {
-      // Guard against overlapping polls (a slow gh) and post-settle stragglers.
-      if (settled || inFlight) return;
-      inFlight = true;
-      let result: PrPollResult | null;
-      try {
-        result = await poll();
-      } catch (err) {
-        finish({
-          kind: "error",
-          error: err instanceof Error ? err.message : String(err),
-          state: lastState,
-        });
-        return;
-      } finally {
-        inFlight = false;
-      }
-      if (settled) return;
-      if (result === null) {
-        finish({
-          kind: "error",
-          error: "PR not found (unknown number or the repo could not be resolved)",
-          state: lastState,
-        });
-        return;
-      }
-      lastState = result;
-      if (result.state === "merged" || result.state === "closed") {
-        finish({ kind: "terminal", state: result });
-      }
-    };
+  for (;;) {
+    if (aborted()) return { kind: "aborted" };
 
-    const timer = setTimeout(
-      () => finish({ kind: "timeout", state: lastState }),
-      opts.timeoutMs,
-    );
-    cleanups.push(() => clearTimeout(timer));
-
-    for (const sig of opts.signals) {
-      if (!sig) continue;
-      if (sig.aborted) {
-        finish({ kind: "aborted", state: lastState });
-        return;
-      }
-      const onAbort = (): void => finish({ kind: "aborted", state: lastState });
-      sig.addEventListener("abort", onAbort);
-      cleanups.push(() => sig.removeEventListener("abort", onAbort));
+    let merge: PrPollResult | null;
+    try {
+      merge = await gh.prMergeState(number, repo);
+    } catch (err) {
+      return { kind: "error", error: err instanceof Error ? err.message : String(err) };
+    }
+    if (aborted()) return { kind: "aborted" };
+    if (merge === null) {
+      return {
+        kind: "error",
+        error: "PR not found (unknown number or the repo could not be resolved)",
+      };
+    }
+    if (merge.state === "merged" || merge.state === "closed") {
+      return { kind: "terminal", state: merge };
     }
 
-    const interval = setInterval(() => void doPoll(), opts.intervalMs);
-    cleanups.push(() => clearInterval(interval));
+    // Checks + threads are best-effort: a transient gh failure on either yields
+    // null, which we treat as "no new activity of that kind" (not fatal).
+    const [checks, threads] = await Promise.all([
+      gh.prChecks(number, repo).catch(() => null),
+      gh.reviewThreads(number, repo).catch(() => null),
+    ]);
 
-    // Poll now so an already-terminal PR resolves without a first-interval wait.
-    void doPoll();
-  });
+    const events: WatchPrEvent[] = [];
+    for (const c of checks ?? []) {
+      const conclusion = c.conclusion ?? undefined;
+      const fingerprint = conclusion ?? c.status;
+      const failing = conclusion !== undefined && FAILING_CONCLUSIONS.has(conclusion);
+      if (failing && st.checks.get(c.name) !== fingerprint) {
+        events.push({ type: "ci-failed", name: c.name, conclusion, url: c.url });
+      }
+      st.checks.set(c.name, fingerprint);
+    }
+    for (const t of threads ?? []) {
+      if (!t.isResolved && !st.threads.has(t.id)) {
+        events.push({
+          type: "review-comment",
+          threadId: t.id,
+          path: t.path,
+          line: t.line ?? null,
+          author: t.author,
+          body: t.body,
+        });
+        st.threads.add(t.id);
+      }
+    }
+    if (events.length) return { kind: "activity", state: merge, events };
+
+    const remaining = deadline - opts.now();
+    if (remaining <= 0) return { kind: "timeout", state: merge };
+    if ((await sleep(Math.min(opts.intervalMs, remaining), opts.signals)) === "aborted") {
+      return { kind: "aborted" };
+    }
+  }
+}
+
+/** One-line, length-bounded rendering of a review comment body for the summary. */
+function firstLine(body: string | undefined, max = 200): string {
+  const line = (body ?? "").split("\n").find((l) => l.trim()) ?? "";
+  const trimmed = line.trim();
+  return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
 }
 
 /* -------------------------------------------------------------------- tools */
 
 /** The manager tool definitions, closed over one session's context. */
 export function createManagerTools(ctx: ManagerMcpContext) {
+  // Per-session dedup memory for watch_pr, keyed `${repo}#${number}`. Lives for
+  // the life of this session's MCP server, so it survives the agent's repeated
+  // watch_pr calls and never re-reports a check/comment it already handed over.
+  const watchState = new Map<string, WatchPrState>();
+
   const wait = tool(
     "wait",
     "Pause yourself for a fixed duration before continuing. Use to self-pace " +
@@ -448,14 +551,74 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
-  const waitForPr = tool(
-    "wait_for_pr",
-    "Block until a GitHub pull request reaches a TERMINAL state (merged or " +
-      "closed), or until a timeout. Use this the moment you're told to 'wait for " +
-      "PR #N to merge' — do NOT hand-roll a `gh pr view` / sleep polling loop. " +
-      "Returns the PR's final state as JSON.",
+  const contextUsage = tool(
+    "context_usage",
+    "Report how full YOUR OWN context window is — total tokens used, the model's " +
+      "window size, percent filled, and a per-category breakdown (system prompt, " +
+      "tools, MCP tools, memory files, messages). Use it to decide whether to " +
+      "compact before you run low. Prefer this over guessing from message counts.",
+    {},
+    async (): Promise<CallToolResult> => {
+      const usage = await ctx.broker.getContextUsage(ctx.chatId);
+      if (!usage) {
+        return textResult(
+          "Context usage is unavailable for this session right now (the " +
+            "subprocess must be live to report it). Try again after a turn runs.",
+          true,
+        );
+      }
+      const pct = Math.round(usage.percentage);
+      const cats = usage.categories
+        .filter((c) => c.tokens > 0)
+        .sort((a, b) => b.tokens - a.tokens)
+        .map((c) => `  ${c.name}: ${c.tokens.toLocaleString()}`)
+        .join("\n");
+      const summary =
+        `Context: ${usage.totalTokens.toLocaleString()} / ` +
+        `${usage.maxTokens.toLocaleString()} tokens (${pct}% full)` +
+        (usage.model ? ` — ${usage.model}` : "");
+      return textResult(
+        `${summary}\n${cats ? `${cats}\n` : ""}${JSON.stringify({
+          totalTokens: usage.totalTokens,
+          maxTokens: usage.maxTokens,
+          percentage: usage.percentage,
+          model: usage.model,
+        })}`,
+      );
+    },
+  );
+
+  const compactContext = tool(
+    "compact_context",
+    "Compact YOUR OWN context in place — summarize the conversation so far and " +
+      "continue with a much smaller window, keeping the session. Use when " +
+      "`context_usage` shows the window filling up (e.g. past ~80%) and you have " +
+      "more work to do. Compaction runs right after the current turn ends.",
+    {},
+    async (): Promise<CallToolResult> => {
+      ctx.broker.compact(ctx.chatId);
+      return textResult(
+        "Compaction requested — it will run after this turn ends. Your next turn " +
+          "starts from a summarized, much smaller context.",
+      );
+    },
+  );
+
+  const watchPr = tool(
+    "watch_pr",
+    "Watch a GitHub pull request and RETURN THE INSTANT it needs you — a CI check " +
+      "fails, a new review comment/thread appears, or the PR is merged/closed. This " +
+      "is the ONE correct way to wait on or react to a PR: do NOT hand-roll a `gh " +
+      "pr view` / `gh pr checks` sleep loop, and do NOT launch a background Bash or " +
+      "Monitor task to watch it. Call it in a LOOP — it blocks until something is " +
+      "actionable, then returns the failing checks and new comments to address " +
+      "(done:false); fix them and call watch_pr AGAIN. Each check/comment is " +
+      "reported only once, so repeated calls surface each NEW round of review " +
+      "comments instead of going silent. It returns done:true only when the PR " +
+      "merges or closes — keep calling until then and you'll never miss a late " +
+      "review round.",
     {
-      number: z.number().describe("The PR number to wait on."),
+      number: z.number().describe("The PR number to watch."),
       repo: z
         .string()
         .optional()
@@ -464,78 +627,108 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .number()
         .optional()
         .describe(
-          `Give up after this long (default ${WAIT_FOR_PR_DEFAULT_TIMEOUT_SECONDS}s, ` +
-            `cap ${WAIT_CAP_SECONDS}s). On timeout you get the last-known state with timedOut:true.`,
+          `Max quiet window before returning with no new activity (default ` +
+            `${WATCH_PR_DEFAULT_TIMEOUT_SECONDS}s, cap ${WAIT_CAP_SECONDS}s). On a quiet ` +
+            `timeout you get done:false/timedOut:true — just call watch_pr again to resume.`,
         ),
     },
     async (args, extra): Promise<CallToolResult> => {
       if (!ctx.github) {
-        return textResult("The wait_for_pr tool is not available in this session.", true);
+        return textResult("The watch_pr tool is not available in this session.", true);
       }
       const number =
         typeof args.number === "number" && Number.isInteger(args.number) ? args.number : NaN;
       if (!Number.isFinite(number) || number <= 0) {
-        return textResult("wait_for_pr requires a positive integer PR number.", true);
+        return textResult("watch_pr requires a positive integer PR number.", true);
       }
       const repo =
         typeof args.repo === "string" && args.repo.trim() ? args.repo.trim() : undefined;
-      const timeoutMs =
-        clampSeconds(
-          args.timeoutSeconds ?? WAIT_FOR_PR_DEFAULT_TIMEOUT_SECONDS,
-          WAIT_CAP_SECONDS,
-        ) * 1000;
+      const timeoutSeconds = clampSeconds(
+        args.timeoutSeconds ?? WATCH_PR_DEFAULT_TIMEOUT_SECONDS,
+        WAIT_CAP_SECONDS,
+      );
 
-      // Advertise the wait in the UI header (reuses the working-status surface).
+      const key = `${repo ?? ""}#${number}`;
+      let st = watchState.get(key);
+      if (!st) {
+        st = { checks: new Map(), threads: new Set() };
+        watchState.set(key, st);
+      }
+
+      // Advertise the watch in the UI header (reuses the working-status surface).
       ctx.bus.publish({
         type: "chat-status",
         chatId: ctx.chatId,
         status: "running",
         activity: {
           state: "tool",
-          label: `waiting on PR #${number}${repo ? ` (${repo})` : ""}`,
-          toolName: "wait_for_pr",
+          label: `watching PR #${number}${repo ? ` (${repo})` : ""}`,
+          toolName: "watch_pr",
         },
       });
 
-      const github = ctx.github;
-      const outcome = await waitForPrState(() => github.prMergeState(number, repo), {
+      const outcome = await watchForPrActivity(ctx.github, number, repo, st, {
         intervalMs: PR_POLL_INTERVAL_MS,
-        timeoutMs,
+        timeoutMs: timeoutSeconds * 1000,
         signals: [ctx.signal, extraSignal(extra)],
+        now: ctx.now ?? (() => Date.now()),
       });
 
       if (outcome.kind === "aborted") {
-        return textResult(`Wait for PR #${number} was cancelled after being interrupted.`);
+        return textResult(`Watch on PR #${number} was cancelled after being interrupted.`);
       }
       if (outcome.kind === "error") {
         return textResult(
-          `Could not wait on PR #${number}: ${outcome.error}. Check the number and, ` +
+          `Could not watch PR #${number}: ${outcome.error}. Check the number and, ` +
             "if the repo can't be auto-detected here, pass `repo` as 'owner/name'.",
           true,
         );
       }
-      if (outcome.kind === "timeout") {
-        const last = outcome.state;
+      if (outcome.kind === "terminal") {
+        const s = outcome.state;
+        // The PR settled (merged/closed) — mark the chat so its dot reads green
+        // ("PR done") once the agent finishes and returns to idle.
+        ctx.broker.markPrWatched(ctx.chatId);
         return textResult(
-          `Timed out waiting for PR #${number} to merge/close (last state: ` +
-            `${last?.state ?? "unknown"}).\n${JSON.stringify({
-              number,
-              state: last?.state ?? "unknown",
-              merged: last?.merged ?? false,
-              timedOut: true,
-            })}`,
+          `PR #${s.number} reached terminal state "${s.state}"${s.merged ? " (merged)" : ""}. ` +
+            `Watch complete — no need to call watch_pr again.\n` +
+            JSON.stringify({
+              number: s.number,
+              state: s.state,
+              merged: s.merged,
+              done: true,
+              ...(s.mergedAt ? { mergedAt: s.mergedAt } : {}),
+            }),
         );
       }
-      // terminal
-      const s = outcome.state!;
+      if (outcome.kind === "timeout") {
+        const s = outcome.state;
+        return textResult(
+          `No new activity on PR #${number} in the last ${timeoutSeconds}s (still ` +
+            `${s.state}). Call watch_pr again to keep watching until it merges.\n` +
+            JSON.stringify({ number, state: s.state, done: false, timedOut: true, events: [] }),
+        );
+      }
+
+      // activity — one or more new checks/comments to act on, then re-watch.
+      const { state: s, events } = outcome;
+      const failing = events.filter((e) => e.type === "ci-failed");
+      const comments = events.filter((e) => e.type === "review-comment");
+      const parts: string[] = [];
+      if (failing.length) parts.push(`${failing.length} failing check(s)`);
+      if (comments.length) parts.push(`${comments.length} new review comment(s)`);
+      const lines = events.map((e) =>
+        e.type === "ci-failed"
+          ? `  ✗ check "${e.name}" ${e.conclusion ?? "failing"}${e.url ? ` — ${e.url}` : ""}`
+          : `  💬 ${e.author ?? "reviewer"} on ${e.path ?? "the PR"}${
+              e.line ? `:${e.line}` : ""
+            } — ${firstLine(e.body) || "(see thread)"}`,
+      );
       return textResult(
-        `PR #${s.number} reached terminal state "${s.state}"${s.merged ? " (merged)" : ""}.\n` +
-          JSON.stringify({
-            number: s.number,
-            state: s.state,
-            merged: s.merged,
-            ...(s.mergedAt ? { mergedAt: s.mergedAt } : {}),
-          }),
+        `PR #${number} needs attention: ${parts.join(" and ")}.\n${lines.join("\n")}\n\n` +
+          `Address these, then call watch_pr again — it keeps watching (reporting only ` +
+          `NEW activity) until the PR merges.\n` +
+          JSON.stringify({ number, state: s.state, done: false, events }),
       );
     },
   );
@@ -726,7 +919,105 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
-  return { wait, waitForChat, waitForPr, terminal, remember, recall, forget };
+  const runSubapp = tool(
+    "run_subapp",
+    "Launch one of THIS project's apps and get back a live localhost URL so you can " +
+      "actually SEE your change running — preview a UI tweak, verify a fix end-to-end, " +
+      "or hand the user a working link. STRONGLY prefer this over telling the user to " +
+      "start the app themselves; running the real thing is the fastest way to confirm " +
+      "your work. Call with NO args to list the apps, their run state, and the branches " +
+      "available. Pass `subApp` (and optionally `branch`) to start it — each branch runs " +
+      "isolated in its own worktree, created automatically if needed. Pass `stop: true` " +
+      "to stop it.",
+    {
+      subApp: z
+        .string()
+        .optional()
+        .describe("SubApp id to start/stop (e.g. 'game'). Omit to just list."),
+      branch: z
+        .string()
+        .optional()
+        .describe("Branch to run on. Defaults to the project's current branch."),
+      stop: z.boolean().optional().describe("Stop the running instance instead of starting."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.runner) {
+        return textResult("The run_subapp tool is not available in this session.", true);
+      }
+      const subApp = typeof args.subApp === "string" ? args.subApp.trim() : "";
+      const branch = typeof args.branch === "string" ? args.branch.trim() : undefined;
+
+      // No subApp → list what's available + what's running.
+      if (!subApp) {
+        try {
+          const ov = await ctx.runner.overview(ctx.chatId);
+          const apps = ov.subApps.length
+            ? ov.subApps.map((a) => `  • ${a.id} (${a.name})`).join("\n")
+            : "  (none configured)";
+          const running = ov.running.length
+            ? ov.running
+                .map(
+                  (r) =>
+                    `  • ${r.subAppId} — ${r.status}${r.branch ? ` on ${r.branch}` : ""}${
+                      r.url ? ` → ${r.url}` : ""
+                    }`,
+                )
+                .join("\n")
+            : "  (nothing running)";
+          const branches = ov.branches
+            .slice(0, 12)
+            .map(
+              (b) =>
+                `  • ${b.name}${b.current ? " (current)" : ""}${b.hasWorktree ? " [worktree]" : ""}`,
+            )
+            .join("\n");
+          return textResult(
+            `Apps:\n${apps}\n\nRunning:\n${running}\n\nBranches:\n${branches}\n\n` +
+              `Start one with run_subapp({ subApp: "<id>", branch?: "<branch>" }).`,
+          );
+        } catch (err) {
+          return textResult(
+            `Could not read subApps: ${err instanceof Error ? err.message : String(err)}`,
+            true,
+          );
+        }
+      }
+
+      try {
+        if (args.stop) {
+          const stopped = await ctx.runner.stop({ chatId: ctx.chatId, subAppId: subApp, branch });
+          return stopped
+            ? textResult(`Stopped ${subApp}${branch ? ` on ${branch}` : ""}.`)
+            : textResult(`No running ${subApp}${branch ? ` on ${branch}` : ""} to stop.`, true);
+        }
+        const r = await ctx.runner.launch({ chatId: ctx.chatId, subAppId: subApp, branch });
+        const where = r.branch ? ` on ${r.branch}` : "";
+        return textResult(
+          r.url
+            ? `Started ${r.subAppId}${where} — ${r.status}. Open it at ${r.url}`
+            : `Started ${r.subAppId}${where} — ${r.status} (no URL yet; give it a moment and list again).`,
+        );
+      } catch (err) {
+        return textResult(
+          `Could not launch ${subApp}: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  return {
+    wait,
+    waitForChat,
+    contextUsage,
+    compactContext,
+    watchPr,
+    terminal,
+    remember,
+    recall,
+    forget,
+    runSubapp,
+  };
 }
 
 /* ------------------------------------------------------------- catalog */
@@ -736,14 +1027,20 @@ export function createManagerTools(ctx: ManagerMcpContext) {
  * `createManagerMcpServer` tools array). `null` = always offered. The catalog
  * view reads this to mark each tool `available` for a given session's bindings.
  */
-const MANAGER_TOOL_GATE: Record<string, "github" | "terminals" | "memory" | null> = {
+const MANAGER_TOOL_GATE: Record<
+  string,
+  "github" | "terminals" | "memory" | "runner" | null
+> = {
   wait: null,
   wait_for_chat: null,
-  wait_for_pr: "github",
+  context_usage: null,
+  compact_context: null,
+  watch_pr: "github",
   terminal: "terminals",
   remember: "memory",
   recall: "memory",
   forget: "memory",
+  run_subapp: "runner",
 };
 
 /** A catalog descriptor for one manager tool (no live session needed). */
@@ -763,7 +1060,13 @@ export interface ManagerToolDescriptor {
 const NOOP_DESCRIPTOR_CTX = {
   chatId: "",
   bus: { publish() {}, subscribe: () => () => {}, on: () => () => {} } as unknown as EventBus,
-  broker: { has: () => false, getStatus: () => undefined } as ManagerMcpBroker,
+  broker: {
+    has: () => false,
+    getStatus: () => undefined,
+    getContextUsage: async () => null,
+    compact: () => {},
+    markPrWatched: () => {},
+  } as ManagerMcpBroker,
 } satisfies ManagerMcpContext;
 
 /**
@@ -771,13 +1074,13 @@ const NOOP_DESCRIPTOR_CTX = {
  * MCP catalog endpoint consumes, derived from the very same {@link createManagerTools}
  * definitions the SDK registration uses (name/description/`inputSchema` come off
  * each `tool(...)` result, so the two can never drift). `createManagerTools`
- * always builds all seven definitions regardless of ctx — the ctx bindings only
+ * always builds every definition regardless of ctx — the ctx bindings only
  * decide which are REGISTERED — so a no-op ctx yields every tool's static shape.
  * `bindings` reflects which backing services the session has, so gated tools
- * (wait_for_pr/terminal/remember/recall/forget) report the right `available`.
+ * (watch_pr/terminal/remember/recall/forget/run_subapp) report the right `available`.
  */
 export function managerToolDescriptors(
-  bindings: { github?: boolean; terminals?: boolean; memory?: boolean } = {},
+  bindings: { github?: boolean; terminals?: boolean; memory?: boolean; runner?: boolean } = {},
 ): ManagerToolDescriptor[] {
   const tools = createManagerTools(NOOP_DESCRIPTOR_CTX);
   return Object.values(tools).map((t) => {
@@ -803,16 +1106,29 @@ export function managerToolDescriptors(
 export function createManagerMcpServer(
   ctx: ManagerMcpContext,
 ): McpSdkServerConfigWithInstance {
-  const { wait, waitForChat, waitForPr, terminal, remember, recall, forget } =
-    createManagerTools(ctx);
+  const {
+    wait,
+    waitForChat,
+    contextUsage,
+    compactContext,
+    watchPr,
+    terminal,
+    remember,
+    recall,
+    forget,
+    runSubapp,
+  } = createManagerTools(ctx);
   // Each tool is only meaningful when its backing service is wired in; omit the
   // dead ones so the agent isn't offered a tool it can't use.
   const tools = [
     wait,
     waitForChat,
-    ...(ctx.github ? [waitForPr] : []),
+    contextUsage,
+    compactContext,
+    ...(ctx.github ? [watchPr] : []),
     ...(ctx.terminals ? [terminal] : []),
     ...(ctx.memory ? [remember, recall, forget] : []),
+    ...(ctx.runner ? [runSubapp] : []),
   ];
   return createSdkMcpServer({
     name: "manager",

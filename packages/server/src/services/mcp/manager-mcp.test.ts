@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { ChatStatus, WsServerEvent, ProjectMemory } from "@cm/shared";
+import type {
+  ChatStatus,
+  CheckRun,
+  ReviewThread,
+  WsServerEvent,
+  ProjectMemory,
+} from "@cm/shared";
 import { EventBus } from "../../bus.js";
 import {
   createManagerTools,
@@ -29,6 +35,9 @@ function fakeBroker(states: Record<string, ChatStatus>): ManagerMcpBroker {
   return {
     has: (id) => id in states,
     getStatus: (id) => states[id],
+    getContextUsage: async () => null,
+    compact: () => {},
+    markPrWatched: () => {},
   };
 }
 
@@ -189,126 +198,209 @@ describe("manager-mcp — wait_for_chat", () => {
   });
 });
 
-/* ------------------------------------------------------------- wait_for_pr */
+/* --------------------------------------------------------------- watch_pr */
 
-/** A scriptable ManagerMcpGitHub whose per-poll result the test controls. */
+/** One poll's worth of PR state the fake serves; advances on each merge-poll. */
+interface PollSnap {
+  merge: PrPollResult | null;
+  /** `undefined` → []; `null` → a transient read failure the watcher tolerates. */
+  checks?: CheckRun[] | null;
+  threads?: ReviewThread[] | null;
+}
+
+/**
+ * A scriptable ManagerMcpGitHub. `prMergeState` advances to the next snapshot on
+ * each call (the watcher polls it first every iteration); `prChecks`/
+ * `reviewThreads` read the CURRENT snapshot, so one snapshot = one poll cycle.
+ */
 function fakeGitHub(
-  poll: (n: number, repo?: string) => Promise<PrPollResult | null>,
+  snaps: PollSnap[],
 ): ManagerMcpGitHub & { calls: { number: number; repo?: string }[] } {
   const calls: { number: number; repo?: string }[] = [];
+  let idx = -1;
+  const cur = (): PollSnap => snaps[Math.min(Math.max(idx, 0), snaps.length - 1)]!;
   return {
     calls,
     prMergeState: async (n, repo) => {
       calls.push({ number: n, repo });
-      return poll(n, repo);
+      idx = Math.min(idx + 1, snaps.length - 1);
+      return cur().merge;
     },
+    prChecks: async () => (cur().checks === undefined ? [] : cur().checks!),
+    reviewThreads: async () => (cur().threads === undefined ? [] : cur().threads!),
   };
 }
 
-describe("manager-mcp — wait_for_pr", () => {
+const OPEN: PrPollResult = { number: 83, state: "open", merged: false };
+const FAIL_BUILD: CheckRun = {
+  name: "build",
+  status: "completed",
+  conclusion: "failure",
+  url: "https://ci/build",
+};
+const THREAD_A: ReviewThread = {
+  id: "T_A",
+  isResolved: false,
+  path: "src/a.ts",
+  line: 10,
+  author: "Copilot",
+  body: "nit: rename this",
+};
+const THREAD_B: ReviewThread = {
+  id: "T_B",
+  isResolved: false,
+  path: "src/b.ts",
+  line: 3,
+  author: "Copilot",
+  body: "possible bug",
+};
+
+describe("manager-mcp — watch_pr", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("polls until the PR merges, then resolves merged:true and clears every timer", async () => {
-    const seq: (PrPollResult | null)[] = [
-      { number: 77, state: "open", merged: false },
-      { number: 77, state: "open", merged: false },
-      { number: 77, state: "merged", merged: true, mergedAt: "2026-07-05T21:00:00Z" },
-    ];
-    let i = 0;
-    const gh = fakeGitHub(async () => seq[Math.min(i++, seq.length - 1)]!);
-    const { waitForPr } = createManagerTools({
-      chatId: "c1",
-      bus,
-      broker: fakeBroker({}),
-      github: gh,
-    });
+  it("returns the instant a check fails (done:false) and shows a watching status", async () => {
+    const gh = fakeGitHub([{ merge: OPEN, checks: [FAIL_BUILD], threads: [] }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
-    const p = waitForPr.handler({ number: 77, repo: undefined, timeoutSeconds: undefined }, {});
-    await vi.advanceTimersByTimeAsync(0); // flush the immediate poll #1 (open)
-    expect(gh.calls.length).toBe(1);
-    await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS); // poll #2 (open)
-    expect(gh.calls.length).toBe(2);
-    await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS); // poll #3 (merged) → settle
+    const res = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: undefined }, {});
+
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("needs attention");
+    expect(resultText(res)).toContain('check "build"');
+    expect(resultText(res)).toContain('"done":false');
+    expect(resultText(res)).toContain('"type":"ci-failed"');
+    expect(vi.getTimerCount()).toBe(0);
+    expect(statusLabels().some((l) => l === "watching PR #83")).toBe(true);
+  });
+
+  it("returns on a new unresolved review comment and ignores resolved threads", async () => {
+    const resolved: ReviewThread = { id: "T_done", isResolved: true, path: "z.ts", line: 1 };
+    const gh = fakeGitHub([{ merge: OPEN, checks: [], threads: [resolved, THREAD_A] }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const res = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: undefined }, {});
+
+    expect(resultText(res)).toContain('"type":"review-comment"');
+    expect(resultText(res)).toContain('"threadId":"T_A"');
+    expect(resultText(res)).not.toContain("T_done"); // resolved thread is not actionable
+  });
+
+  it("dedups handled activity and surfaces only NEW items on the next call", async () => {
+    const gh = fakeGitHub([
+      { merge: OPEN, checks: [FAIL_BUILD], threads: [THREAD_A] }, // call 1 → build + T_A
+      { merge: OPEN, checks: [FAIL_BUILD], threads: [THREAD_A, THREAD_B] }, // call 2 → only T_B
+    ]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const first = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+    expect(resultText(first)).toContain('"threadId":"T_A"');
+    expect(resultText(first)).toContain('check "build"');
+
+    const second = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+    expect(resultText(second)).toContain('"threadId":"T_B"');
+    // The already-reported check + thread must NOT fire again.
+    expect(resultText(second)).not.toContain('"threadId":"T_A"');
+    expect(resultText(second)).not.toContain("ci-failed");
+  });
+
+  it("resolves done:true when the PR merges", async () => {
+    const gh = fakeGitHub([
+      { merge: OPEN, checks: [], threads: [] },
+      { merge: OPEN, checks: [], threads: [] },
+      {
+        merge: { number: 83, state: "merged", merged: true, mergedAt: "2026-07-05T21:00:00Z" },
+      },
+    ]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: undefined }, {});
+    await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS); // poll 1 → sleep → poll 2
+    await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS); // → poll 3 (merged) → settle
     const res = await p;
 
-    expect(gh.calls.length).toBe(3);
     expect(res.isError).toBeFalsy();
     expect(resultText(res)).toContain('reached terminal state "merged"');
-    expect(resultText(res)).toContain('"merged":true');
+    expect(resultText(res)).toContain('"done":true');
     expect(resultText(res)).toContain('"mergedAt":"2026-07-05T21:00:00Z"');
-    // The poll interval + the timeout timer are both torn down on settle.
-    expect(vi.getTimerCount()).toBe(0);
-    // The self-imposed wait surfaces via the working/typing status header.
-    expect(statusLabels().some((l) => l === "waiting on PR #77")).toBe(true);
+    expect(gh.calls.length).toBe(3);
+    expect(vi.getTimerCount()).toBe(0); // no strays — deadline is checked, not timed
   });
 
-  it("returns immediately when the PR is already merged (no waiting)", async () => {
-    const gh = fakeGitHub(async () => ({
-      number: 80,
-      state: "merged",
-      merged: true,
-      mergedAt: "2026-07-05T21:53:02Z",
-    }));
-    const { waitForPr } = createManagerTools({
-      chatId: "c1",
-      bus,
-      broker: fakeBroker({}),
-      github: gh,
-    });
+  it("resolves done:true (unmerged) when the PR is closed", async () => {
+    const gh = fakeGitHub([{ merge: { number: 5, state: "closed", merged: false } }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
-    const p = waitForPr.handler({ number: 80, repo: undefined, timeoutSeconds: 1800 }, {});
-    await vi.advanceTimersByTimeAsync(0); // flush the immediate poll only
-    const res = await p;
+    const res = await watchPr.handler({ number: 5, repo: undefined, timeoutSeconds: 1800 }, {});
 
-    expect(gh.calls.length).toBe(1); // polled exactly once — no interval wait
-    expect(resultText(res)).toContain('"merged":true');
-    expect(vi.getTimerCount()).toBe(0); // nothing left ticking
-  });
-
-  it("resolves on a closed (unmerged) PR", async () => {
-    const gh = fakeGitHub(async () => ({ number: 5, state: "closed", merged: false }));
-    const { waitForPr } = createManagerTools({
-      chatId: "c1",
-      bus,
-      broker: fakeBroker({}),
-      github: gh,
-    });
-
-    const p = waitForPr.handler({ number: 5, repo: undefined, timeoutSeconds: 1800 }, {});
-    await vi.advanceTimersByTimeAsync(0);
-    const res = await p;
-
-    expect(res.isError).toBeFalsy();
     expect(resultText(res)).toContain('reached terminal state "closed"');
-    expect(resultText(res)).toContain('"merged":false');
+    expect(resultText(res)).toContain('"done":true');
     expect(resultText(res)).not.toContain("mergedAt");
   });
 
-  it("times out with the last-known state and timedOut:true, clearing timers", async () => {
-    const gh = fakeGitHub(async () => ({ number: 77, state: "open", merged: false }));
-    const { waitForPr } = createManagerTools({
+  it("marks the chat PR-watched on a terminal outcome, but not on a timeout", async () => {
+    const watched: string[] = [];
+    const spyBroker: ManagerMcpBroker = { ...fakeBroker({}), markPrWatched: (id) => watched.push(id) };
+
+    // Terminal (merged) → flag the chat so its dot can go green once idle.
+    const merged = fakeGitHub([{ merge: { number: 7, state: "merged", merged: true } }]);
+    const { watchPr: watchMerged } = createManagerTools({
       chatId: "c1",
       bus,
-      broker: fakeBroker({}),
-      github: gh,
+      broker: spyBroker,
+      github: merged,
     });
+    await watchMerged.handler({ number: 7, repo: undefined, timeoutSeconds: 1800 }, {});
+    expect(watched).toEqual(["c1"]);
 
-    const p = waitForPr.handler({ number: 77, repo: undefined, timeoutSeconds: 50 }, {});
-    await vi.advanceTimersByTimeAsync(50_000); // polls at 0/20/40s, then the 50s timeout
+    // Timeout (still open, no activity) → NOT settled; the agent is told to re-watch.
+    const openGh = fakeGitHub([{ merge: OPEN, checks: [], threads: [] }]);
+    const { watchPr: watchOpen } = createManagerTools({
+      chatId: "c2",
+      bus,
+      broker: spyBroker,
+      github: openGh,
+    });
+    const p = watchOpen.handler({ number: 8, repo: undefined, timeoutSeconds: 50 }, {});
+    await vi.advanceTimersByTimeAsync(50_000);
+    await p;
+    expect(watched).toEqual(["c1"]); // unchanged — no c2
+  });
+
+  it("quietly times out with done:false/timedOut:true when nothing happens", async () => {
+    const gh = fakeGitHub([{ merge: OPEN, checks: [], threads: [] }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 50 }, {});
+    await vi.advanceTimersByTimeAsync(50_000); // polls at 0/20/40s, then the deadline
     const res = await p;
 
-    expect(res.isError).toBeFalsy(); // a timeout is informative, not an error
-    expect(resultText(res)).toContain("Timed out waiting for PR #77");
-    expect(resultText(res)).toContain('"state":"open"');
+    expect(res.isError).toBeFalsy(); // a quiet window is not an error
+    expect(resultText(res)).toContain("No new activity on PR #83");
     expect(resultText(res)).toContain('"timedOut":true');
+    expect(resultText(res)).toContain('"done":false');
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("cancels promptly on session abort and clears timers/listeners", async () => {
+  it("tolerates a transient null checks/threads read and keeps watching", async () => {
+    const gh = fakeGitHub([
+      { merge: OPEN, checks: null, threads: null }, // transient gh hiccup — not fatal
+      { merge: { number: 83, state: "merged", merged: true } },
+    ]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: undefined }, {});
+    await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS); // poll 1 (null) → sleep → poll 2 (merged)
+    const res = await p;
+
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain('"done":true');
+  });
+
+  it("cancels promptly on session abort", async () => {
     const ac = new AbortController();
-    const gh = fakeGitHub(async () => ({ number: 77, state: "open", merged: false }));
-    const { waitForPr } = createManagerTools({
+    const gh = fakeGitHub([{ merge: OPEN, checks: [], threads: [] }]);
+    const { watchPr } = createManagerTools({
       chatId: "c1",
       bus,
       broker: fakeBroker({}),
@@ -316,25 +408,20 @@ describe("manager-mcp — wait_for_pr", () => {
       signal: ac.signal,
     });
 
-    const p = waitForPr.handler({ number: 77, repo: undefined, timeoutSeconds: undefined }, {});
-    ac.abort(); // dispatched synchronously → finish() clears its timers now
-    expect(vi.getTimerCount()).toBe(0);
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: undefined }, {});
+    ac.abort();
     const res = await p;
     expect(resultText(res)).toContain("cancelled");
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("also cancels via the MCP request's extra.signal", async () => {
     const ac = new AbortController();
-    const gh = fakeGitHub(async () => ({ number: 77, state: "open", merged: false }));
-    const { waitForPr } = createManagerTools({
-      chatId: "c1",
-      bus,
-      broker: fakeBroker({}),
-      github: gh,
-    });
+    const gh = fakeGitHub([{ merge: OPEN, checks: [], threads: [] }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
-    const p = waitForPr.handler(
-      { number: 77, repo: undefined, timeoutSeconds: undefined },
+    const p = watchPr.handler(
+      { number: 83, repo: undefined, timeoutSeconds: undefined },
       { signal: ac.signal },
     );
     ac.abort();
@@ -342,79 +429,58 @@ describe("manager-mcp — wait_for_pr", () => {
     expect(resultText(res)).toContain("cancelled");
   });
 
-  it("returns an informative error when the poll throws (gh error)", async () => {
-    const gh = fakeGitHub(async () => {
-      throw new Error("gh: not authenticated");
-    });
-    const { waitForPr } = createManagerTools({
-      chatId: "c1",
-      bus,
-      broker: fakeBroker({}),
-      github: gh,
-    });
+  it("returns an informative error when the merge poll throws (gh error)", async () => {
+    const gh: ManagerMcpGitHub = {
+      prMergeState: async () => {
+        throw new Error("gh: not authenticated");
+      },
+      prChecks: async () => [],
+      reviewThreads: async () => [],
+    };
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
-    const p = waitForPr.handler({ number: 77, repo: undefined, timeoutSeconds: undefined }, {});
-    await vi.advanceTimersByTimeAsync(0);
-    const res = await p;
+    const res = await watchPr.handler({ number: 77, repo: undefined, timeoutSeconds: undefined }, {});
 
     expect(res.isError).toBe(true);
-    expect(resultText(res)).toContain("Could not wait on PR #77");
+    expect(resultText(res)).toContain("Could not watch PR #77");
     expect(resultText(res)).toContain("not authenticated");
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("returns an informative error for an unknown PR (null poll)", async () => {
-    const gh = fakeGitHub(async () => null);
-    const { waitForPr } = createManagerTools({
-      chatId: "c1",
-      bus,
-      broker: fakeBroker({}),
-      github: gh,
-    });
+  it("returns an informative error for an unknown PR (null merge state)", async () => {
+    const gh = fakeGitHub([{ merge: null }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
-    const p = waitForPr.handler({ number: 999, repo: undefined, timeoutSeconds: undefined }, {});
-    await vi.advanceTimersByTimeAsync(0);
-    const res = await p;
+    const res = await watchPr.handler({ number: 999, repo: undefined, timeoutSeconds: undefined }, {});
 
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("PR not found");
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("passes an explicit owner/name override through to the poller", async () => {
-    const gh = fakeGitHub(async () => ({ number: 42, state: "merged", merged: true }));
-    const { waitForPr } = createManagerTools({
-      chatId: "c1",
-      bus,
-      broker: fakeBroker({}),
-      github: gh,
-    });
+  it("passes an explicit owner/name override through and labels it", async () => {
+    const gh = fakeGitHub([{ merge: { number: 42, state: "merged", merged: true } }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
-    const p = waitForPr.handler({ number: 42, repo: "octo/repo", timeoutSeconds: undefined }, {});
-    await vi.advanceTimersByTimeAsync(0);
-    await p;
+    await watchPr.handler({ number: 42, repo: "octo/repo", timeoutSeconds: undefined }, {});
+
     expect(gh.calls[0]).toEqual({ number: 42, repo: "octo/repo" });
-    expect(statusLabels().some((l) => l === "waiting on PR #42 (octo/repo)")).toBe(true);
+    expect(statusLabels().some((l) => l === "watching PR #42 (octo/repo)")).toBe(true);
   });
 
   it("validates a positive integer PR number", async () => {
-    const gh = fakeGitHub(async () => null);
-    const { waitForPr } = createManagerTools({
-      chatId: "c1",
-      bus,
-      broker: fakeBroker({}),
-      github: gh,
-    });
+    const gh = fakeGitHub([{ merge: null }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
-    const res = await waitForPr.handler({ number: 0, repo: undefined, timeoutSeconds: undefined }, {});
+    const res = await watchPr.handler({ number: 0, repo: undefined, timeoutSeconds: undefined }, {});
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("positive integer");
     expect(gh.calls.length).toBe(0); // never polled
   });
 
   it("reports unavailable when no GitHubService is wired", async () => {
-    const { waitForPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}) });
-    const res = await waitForPr.handler({ number: 1, repo: undefined, timeoutSeconds: undefined }, {});
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}) });
+    const res = await watchPr.handler({ number: 1, repo: undefined, timeoutSeconds: undefined }, {});
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("not available");
   });

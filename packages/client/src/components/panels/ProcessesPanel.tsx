@@ -1,0 +1,187 @@
+import { useCallback, useEffect, useState } from "react";
+import {
+  Activity,
+  RefreshCw,
+  Skull,
+  X,
+  ChevronRight,
+  ChevronDown,
+  AlertTriangle,
+} from "lucide-react";
+import { api, type ProjectProcess } from "../../lib/api.js";
+import { Button } from "../ui/Button.js";
+import { Chip } from "../ui/Chip.js";
+import { IconButton } from "../ui/IconButton.js";
+import { SectionLabel } from "../ui/Panel.js";
+import { cn } from "../../lib/cn.js";
+
+/**
+ * OS-level process inspector for a project: what's ACTUALLY listening on its
+ * sub-apps' ports, cross-referenced with claude-manager's live runners. Untracked
+ * listeners (orphans a server restart or half-killed tree left behind) are flagged
+ * so you can reap them — individually or in bulk — even though the runner records
+ * lost track of them. This is the escape hatch for "port already in use" when the
+ * UI shows nothing running.
+ */
+export function ProcessesPanel({ projectId }: { projectId: string }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<ProjectProcess[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setRows(await api.processes.list(projectId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  // Load once when the section is first expanded (and whenever the project changes
+  // while open) — this is an on-demand OS scan, not something to poll continuously.
+  useEffect(() => {
+    if (open) void refresh();
+  }, [open, refresh]);
+
+  const kill = useCallback(
+    async (pids: number[]) => {
+      if (pids.length === 0) return;
+      setBusy(true);
+      setError(null);
+      try {
+        const results = await api.processes.kill(projectId, pids);
+        const failed = results.filter((r) => !r.ok);
+        if (failed.length) {
+          setError(
+            `Failed to kill ${failed.length} process(es): ${failed
+              .map((f) => `${f.pid} (${f.error ?? "unknown"})`)
+              .join(", ")}`,
+          );
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setBusy(false);
+        await refresh();
+      }
+    },
+    [projectId, refresh],
+  );
+
+  const orphans = rows.filter((r) => !r.tracked);
+  const Caret = open ? ChevronDown : ChevronRight;
+
+  return (
+    <div className="rounded-md border border-line bg-panel-2/40">
+      <div className="flex items-center gap-1.5 px-3 py-2">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+        >
+          <Caret className="size-3.5 text-faint" />
+          <Activity className="size-3.5 text-muted" />
+          <SectionLabel className="px-0">Ports &amp; processes</SectionLabel>
+          {open && rows.length > 0 && (
+            <Chip tone="muted" mono>
+              {rows.length}
+            </Chip>
+          )}
+          {orphans.length > 0 && (
+            <Chip tone="warn" mono>
+              {orphans.length} orphan{orphans.length === 1 ? "" : "s"}
+            </Chip>
+          )}
+        </button>
+        {open && (
+          <IconButton size="sm" tip="Rescan ports" onClick={() => void refresh()}>
+            <RefreshCw className={cn(loading && "animate-spin")} />
+          </IconButton>
+        )}
+      </div>
+
+      {open && (
+        <div className="border-t border-line-soft">
+          {error && (
+            <div className="flex items-start gap-1.5 px-3 py-2 text-[11px] text-danger [&_svg]:size-3 [&_svg]:mt-px">
+              <AlertTriangle />
+              <span className="min-w-0 flex-1 break-words">{error}</span>
+            </div>
+          )}
+
+          {rows.length === 0 ? (
+            <div className="px-3 py-4 text-center text-[11px] text-faint">
+              {loading ? "Scanning ports…" : "Nothing listening on this project's ports."}
+            </div>
+          ) : (
+            <div className="p-1">
+              {rows.map((p) => (
+                <div
+                  key={`${p.port}:${p.pid}`}
+                  className="flex items-center gap-2 rounded-md px-2 py-1.5"
+                >
+                  <Chip tone={p.tracked ? "success" : "warn"} mono>
+                    :{p.port}
+                  </Chip>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[11.5px] text-secondary">
+                      {p.name ?? "unknown"}
+                      {p.subAppId && (
+                        <span className="text-faint"> · {p.subAppId}</span>
+                      )}
+                    </span>
+                    <span className="flex items-center gap-1.5 cm-mono !text-[10px] text-faint">
+                      pid {p.pid}
+                      {p.branch && <span className="truncate">· {p.branch}</span>}
+                    </span>
+                  </span>
+                  <Chip tone={p.tracked ? "muted" : "warn"}>
+                    {p.tracked ? "tracked" : "orphan"}
+                  </Chip>
+                  <IconButton
+                    size="sm"
+                    tip={`Kill pid ${p.pid} (tree)`}
+                    disabled={busy}
+                    onClick={() => void kill([p.pid])}
+                  >
+                    <X />
+                  </IconButton>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {rows.length > 0 && (
+            <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-2">
+              {orphans.length > 0 && (
+                <Button
+                  size="xs"
+                  variant="subtle"
+                  leftIcon={<Skull />}
+                  disabled={busy}
+                  onClick={() => void kill(orphans.map((o) => o.pid))}
+                >
+                  Kill orphans ({orphans.length})
+                </Button>
+              )}
+              <Button
+                size="xs"
+                variant="danger"
+                leftIcon={<Skull />}
+                disabled={busy}
+                className="ml-auto"
+                onClick={() => void kill(rows.map((r) => r.pid))}
+              >
+                Kill all ({rows.length})
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

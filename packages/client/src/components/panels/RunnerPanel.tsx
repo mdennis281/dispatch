@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Gamepad2,
   Database,
@@ -8,12 +8,16 @@ import {
   ExternalLink,
   Circle,
   Rocket,
+  Terminal,
+  GitBranch,
+  SquarePen,
   type LucideIcon,
 } from "lucide-react";
 import type { Chat, RunnerInstance, SubApp } from "@cm/shared";
 import { useRunners } from "../../stores/runners.js";
 import { useProjects } from "../../stores/projects.js";
 import { actions } from "../../lib/actions.js";
+import { openCodeViewer } from "../monaco/store.js";
 import { StatusDot } from "../ui/StatusDot.js";
 import { Chip } from "../ui/Chip.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -21,7 +25,16 @@ import { Button } from "../ui/Button.js";
 import { SectionLabel } from "../ui/Panel.js";
 import { cn } from "../../lib/cn.js";
 import { clock } from "../../lib/format.js";
-import { samePath } from "./panelBus.js";
+import { openRunnerLogWindow } from "./RunnerLogWindow.js";
+import { ProcessesPanel } from "./ProcessesPanel.js";
+import { BranchWorktreePicker } from "./BranchWorktreePicker.js";
+import {
+  useLaunchTargets,
+  defaultBranch,
+  launchSubApp,
+  findRunner,
+  type LaunchTarget,
+} from "./useLauncher.js";
 
 const SUBAPP_ICON: Record<string, LucideIcon> = {
   game: Gamepad2,
@@ -48,6 +61,7 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
   const open = () => {
     if (runner.url) window.open(runner.url, "_blank", "noopener,noreferrer");
   };
+  const popOut = () => openRunnerLogWindow(runner.id, runner.subAppId);
 
   return (
     <div className="overflow-hidden rounded-md border border-line bg-panel-2/50">
@@ -69,12 +83,31 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
           </span>
         </span>
         {runner.usedDocker && <Chip tone="accent">docker</Chip>}
-        {runner.port && (
-          <Chip tone="success" mono>
-            :{runner.port}
-          </Chip>
-        )}
+        {runner.port &&
+          (runner.url ? (
+            <button
+              onClick={open}
+              title={`Open ${runner.url}`}
+              className="rounded-full outline-none transition-transform hover:-translate-y-px focus-visible:ring-1 focus-visible:ring-accent-line"
+            >
+              <Chip tone="success" mono>
+                :{runner.port}
+              </Chip>
+            </button>
+          ) : (
+            <Chip tone="success" mono>
+              :{runner.port}
+            </Chip>
+          ))}
       </div>
+
+      {/* branch this runner is on */}
+      {runner.branch && (
+        <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-1 text-[10.5px] text-faint [&_svg]:size-3">
+          <GitBranch className="text-accent-hi/70" />
+          <span className="truncate cm-mono !text-[10px] text-muted">{runner.branch}</span>
+        </div>
+      )}
 
       {runner.url && (
         <button
@@ -87,15 +120,28 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
       )}
 
       {logs.length > 0 && (
-        <div ref={logRef} className="cm-scroll max-h-48 overflow-y-auto border-t border-line-soft bg-inset px-3 py-2">
-          {logs.map((l, i) => (
-            <div key={i} className="flex gap-2 py-px cm-mono !text-[10.5px] leading-relaxed">
-              <span className="shrink-0 text-faint">{clock(l.ts)}</span>
-              <span className={cn("min-w-0 flex-1 break-all", l.stream === "stderr" ? "text-warn" : "text-secondary")}>
-                {l.line}
-              </span>
-            </div>
-          ))}
+        <div className="border-t border-line-soft">
+          <div className="flex items-center gap-1.5 px-3 pt-1.5">
+            <span className="text-[9.5px] font-semibold uppercase tracking-[0.09em] text-faint">Output</span>
+            <button
+              onClick={popOut}
+              title="Pop out logs into a separate window"
+              className="ml-auto flex items-center gap-1 text-[10px] text-muted transition-colors hover:text-accent-hi [&_svg]:size-3"
+            >
+              <Terminal />
+              pop out
+            </button>
+          </div>
+          <div ref={logRef} className="cm-scroll max-h-48 overflow-y-auto bg-inset px-3 py-2">
+            {logs.map((l, i) => (
+              <div key={i} className="flex gap-2 py-px cm-mono !text-[10.5px] leading-relaxed">
+                <span className="shrink-0 text-faint">{clock(l.ts)}</span>
+                <span className={cn("min-w-0 flex-1 break-all", l.stream === "stderr" ? "text-warn" : "text-secondary")}>
+                  {l.line}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -112,6 +158,7 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
             onClick={() =>
               actions.startRunner({
                 worktreePath: runner.worktreePath,
+                branch: runner.branch,
                 subAppId: runner.subAppId,
                 projectId: runner.projectId,
                 chatId: runner.chatId,
@@ -121,7 +168,10 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
             Restart
           </Button>
         )}
-        <IconButton size="sm" tip="Open URL" className="ml-auto" disabled={!runner.url} onClick={open}>
+        <IconButton size="sm" tip="Pop out logs" className="ml-auto" onClick={popOut}>
+          <Terminal />
+        </IconButton>
+        <IconButton size="sm" tip="Open URL" disabled={!runner.url} onClick={open}>
           <ExternalLink />
         </IconButton>
       </div>
@@ -129,23 +179,23 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
   );
 }
 
-/** Row in the launcher: start a subApp in this chat's worktree. */
+/** Row in the launcher: start a subApp on the selected target. */
 function LaunchRow({
   subApp,
-  worktreePath,
+  target,
   projectId,
   chatId,
   runningRunner,
 }: {
   subApp: SubApp;
-  worktreePath: string | undefined;
+  target: LaunchTarget | undefined;
   projectId: string;
   chatId: string;
   runningRunner: RunnerInstance | undefined;
 }) {
   const Icon = SUBAPP_ICON[subApp.id] ?? Circle;
   const isActive = !!runningRunner && ACTIVE.has(runningRunner.status);
-  const canStart = !!worktreePath && !isActive;
+  const canStart = !!target && !isActive;
 
   return (
     <div className="flex items-center gap-2 rounded-md px-2 py-1.5">
@@ -167,9 +217,7 @@ function LaunchRow({
           variant="subtle"
           leftIcon={<Play />}
           disabled={!canStart}
-          onClick={() =>
-            worktreePath && actions.startRunner({ worktreePath, subAppId: subApp.id, projectId, chatId })
-          }
+          onClick={() => launchSubApp(target, subApp.id, projectId, chatId)}
         >
           Start
         </Button>
@@ -185,11 +233,36 @@ export function RunnerPanel({ chat }: { chat: Chat }) {
   const mine = order.map((id) => byId[id]!).filter((r) => r && r.chatId === chat.id);
 
   const subApps = project?.subApps ?? [];
-  const worktreePath = chat.worktrees[0];
+  const { targets } = useLaunchTargets(project?.id);
 
-  // Which subApp already has a live runner in this chat's worktree.
+  // Selected launch branch — defaults to the chat's own worktree branch (keeping
+  // the prior behaviour), self-healing if the selection disappears.
+  const [selectedBranch, setSelectedBranch] = useState<string | undefined>();
+  useEffect(() => {
+    if (!targets.some((t) => t.branch === selectedBranch)) {
+      setSelectedBranch(defaultBranch(targets, chat.worktrees[0]));
+    }
+  }, [targets, selectedBranch, chat.worktrees]);
+  const selectedTarget = targets.find((t) => t.branch === selectedBranch);
+
   const activeFor = (subAppId: string) =>
-    mine.find((r) => r.subAppId === subAppId && worktreePath && samePath(r.worktreePath, worktreePath) && ACTIVE.has(r.status));
+    findRunner(byId, {
+      subAppId,
+      chatId: chat.id,
+      branch: selectedTarget?.branch,
+      worktreePath: selectedTarget?.worktreePath,
+    });
+
+  const editDefinitions = () => {
+    if (!project?.repoPath) return;
+    openCodeViewer({
+      worktreePath: project.repoPath,
+      relPath: ".claude-manager/project.yaml",
+      mode: "file",
+      base: project.defaultBranch || "main",
+      editable: true,
+    });
+  };
 
   if (mine.length === 0 && subApps.length === 0) {
     return (
@@ -197,6 +270,13 @@ export function RunnerPanel({ chat }: { chat: Chat }) {
         <Gamepad2 className="mx-auto mb-2 size-5 text-faint" />
         <p className="text-[12px] text-muted">No subApps configured.</p>
         <p className="mt-0.5 text-[11px] text-faint">Add subApps to this project to run them here.</p>
+        {project?.repoPath && (
+          <div className="mt-3 flex justify-center">
+            <Button size="xs" variant="subtle" leftIcon={<SquarePen />} onClick={editDefinitions}>
+              Edit definitions
+            </Button>
+          </div>
+        )}
       </div>
     );
   }
@@ -208,16 +288,24 @@ export function RunnerPanel({ chat }: { chat: Chat }) {
           <div className="flex items-center gap-1.5 border-b border-line-soft px-3 py-2">
             <Rocket className="size-3.5 text-muted" />
             <SectionLabel className="px-0">Launch</SectionLabel>
+            <div className="ml-auto">
+              <BranchWorktreePicker targets={targets} value={selectedBranch} onChange={setSelectedBranch} />
+            </div>
+            <IconButton
+              size="sm"
+              tip="Edit subApp definitions (.claude-manager/project.yaml)"
+              disabled={!project?.repoPath}
+              onClick={editDefinitions}
+            >
+              <SquarePen />
+            </IconButton>
           </div>
           <div className="p-1">
-            {!worktreePath && (
-              <p className="px-2 py-1.5 text-[10.5px] text-faint">Create a worktree to run subApps in isolation.</p>
-            )}
             {subApps.map((s) => (
               <LaunchRow
                 key={s.id}
                 subApp={s}
-                worktreePath={worktreePath}
+                target={selectedTarget}
                 projectId={chat.projectId}
                 chatId={chat.id}
                 runningRunner={activeFor(s.id)}
@@ -234,6 +322,8 @@ export function RunnerPanel({ chat }: { chat: Chat }) {
           ))}
         </div>
       )}
+
+      {project && <ProcessesPanel projectId={project.id} />}
     </div>
   );
 }

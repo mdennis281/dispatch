@@ -28,6 +28,7 @@ import {
   AttentionItemSchema,
 } from "./messages.js";
 import { ProjectConfigSchema, ProjectConfigErrorSchema } from "./project-config.js";
+import { UsageSnapshotSchema } from "./usage.js";
 
 /* =============================================================== server → client */
 
@@ -60,6 +61,19 @@ export const ChatStatusEventSchema = z.object({
   chatId: z.string(),
   status: ChatStatusSchema,
   activity: AgentActivitySchema.optional(),
+  /**
+   * Steering/queued messages submitted while the turn is running that the agent
+   * hasn't consumed yet. Drives the composer's "N queued" chip off server truth,
+   * so it clears the instant the message is injected — not only at turn end.
+   */
+  queued: z.number().int().nonnegative().optional(),
+  /**
+   * A `watch_pr` on this chat has run to a terminal state (the PR merged/closed)
+   * and hasn't been superseded by a new user message. Lets the sidebar render a
+   * settled chat's dot green ("PR done") instead of the neutral idle gray — it
+   * only reads as green once `status` is also back to `idle` (no active agent).
+   */
+  prSettled: z.boolean().optional(),
 });
 
 /** A permission decision is required (from canUseTool). */
@@ -208,6 +222,13 @@ export const MemoryDeletedEventSchema = z.object({
   name: z.string(),
 });
 
+/** Account usage (5h + weekly) refreshed — drives the header usage meter. Global
+ *  (no chatId): the server polls once and fans the snapshot out to every client. */
+export const UsageUpdateEventSchema = z.object({
+  type: z.literal("usage-update"),
+  usage: UsageSnapshotSchema,
+});
+
 /** A transient toast/notice. */
 export const NoticeEventSchema = z.object({
   type: z.literal("notice"),
@@ -248,6 +269,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   ProjectConfigUpdateEventSchema,
   MemoryUpdateEventSchema,
   MemoryDeletedEventSchema,
+  UsageUpdateEventSchema,
   NoticeEventSchema,
   ErrorEventSchema,
 ]);
@@ -328,6 +350,13 @@ export const AnswerQuestionActionSchema = z.object({
   answers: z.array(QuestionAnswerSchema).optional(),
 });
 
+/** Decline an AskUserQuestion prompt without answering it. */
+export const DeclineQuestionActionSchema = z.object({
+  type: z.literal("decline-question"),
+  chatId: z.string(),
+  requestId: z.string(),
+});
+
 /** Switch the chat's mode mid-run. */
 export const SetModeActionSchema = z.object({
   type: z.literal("set-mode"),
@@ -376,6 +405,18 @@ export const InterruptActionSchema = z.object({
   chatId: z.string(),
 });
 
+/** Compact the model's context in place (native SDK `/compact`). */
+export const CompactContextActionSchema = z.object({
+  type: z.literal("compact-context"),
+  chatId: z.string(),
+});
+
+/** Clear the model's context (native SDK `/clear`); the transcript is kept. */
+export const ClearContextActionSchema = z.object({
+  type: z.literal("clear-context"),
+  chatId: z.string(),
+});
+
 /** Roll back the chat (code + conversation) to a given message. */
 export const RollbackActionSchema = z.object({
   type: z.literal("rollback"),
@@ -388,7 +429,10 @@ export const StartRunnerActionSchema = z.object({
   type: z.literal("start-runner"),
   projectId: z.string().optional(),
   chatId: z.string().optional(),
-  worktreePath: z.string(),
+  /** Explicit worktree/dir to run in. Omit to resolve one from `branch`. */
+  worktreePath: z.string().optional(),
+  /** Branch to run on — resolves to (or creates) a worktree when no path given. */
+  branch: z.string().optional(),
   subAppId: z.string(),
 });
 
@@ -459,6 +503,7 @@ export const WsClientActionSchema = z.discriminatedUnion("type", [
   SteerActionSchema,
   AnswerPermissionActionSchema,
   AnswerQuestionActionSchema,
+  DeclineQuestionActionSchema,
   SetModeActionSchema,
   SetAgentActionSchema,
   SetEffortActionSchema,
@@ -466,6 +511,8 @@ export const WsClientActionSchema = z.discriminatedUnion("type", [
   RegenerateTitleActionSchema,
   SetTitleActionSchema,
   InterruptActionSchema,
+  CompactContextActionSchema,
+  ClearContextActionSchema,
   RollbackActionSchema,
   StartRunnerActionSchema,
   StopRunnerActionSchema,

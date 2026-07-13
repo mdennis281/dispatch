@@ -26,6 +26,7 @@ import {
   TriangleAlert,
   Sparkles,
   Wand2,
+  SquarePen,
   type LucideIcon,
 } from "lucide-react";
 import type { ProjectConfig, ProjectConfigError } from "@cm/shared";
@@ -33,6 +34,7 @@ import { Modal, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { Chip } from "../ui/Chip.js";
 import { Spinner } from "../ui/Spinner.js";
+import { openCodeViewer } from "../monaco/store.js";
 import { useProjects } from "../../stores/projects.js";
 import { useConfig, useProjectConfig } from "../../stores/config.js";
 import { useProjectMemories } from "../../stores/memory.js";
@@ -173,6 +175,19 @@ export function ProjectConfigView() {
     if (projectId) void useConfig.getState().reload(projectId);
   }, [projectId]);
 
+  // Open the manifest editable in Monaco. Saving writes it back and the server's
+  // `.claude-manager/` watcher reloads the config (refreshing this view in place).
+  const editYaml = useCallback(() => {
+    if (!project?.repoPath) return;
+    openCodeViewer({
+      worktreePath: project.repoPath,
+      relPath: ".claude-manager/project.yaml",
+      mode: "file",
+      base: project.defaultBranch || "main",
+      editable: true,
+    });
+  }, [project]);
+
   const doExport = useCallback(() => {
     if (!projectId) return;
     // A plain navigation to the export URL triggers the browser download
@@ -271,6 +286,16 @@ export function ProjectConfigView() {
           <Button variant="ghost" leftIcon={<Download />} disabled={!projectId} onClick={doExport}>
             Export .cm
           </Button>
+          {hasDir && (
+            <Button
+              variant="ghost"
+              leftIcon={<SquarePen />}
+              disabled={!project?.repoPath}
+              onClick={editYaml}
+            >
+              Edit project.yaml
+            </Button>
+          )}
           <Button
             variant="default"
             leftIcon={loading ? <Spinner size={12} /> : <RefreshCw />}

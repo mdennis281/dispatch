@@ -36,6 +36,7 @@ import { GitHubService, type ExecResult } from "../github.js";
 import {
   createManagerTools,
   type ManagerMcpBroker,
+  type ManagerMcpGitHub,
 } from "./manager-mcp.js";
 
 /* ------------------------------------------------------------------ fixtures */
@@ -46,7 +47,13 @@ function resultText(res: CallToolResult): string {
 }
 
 /** A never-registered broker for the tool tests that don't exercise the broker. */
-const nullBroker: ManagerMcpBroker = { has: () => false, getStatus: () => undefined };
+const nullBroker: ManagerMcpBroker = {
+  has: () => false,
+  getStatus: () => undefined,
+  getContextUsage: async () => null,
+  compact: () => {},
+  markPrWatched: () => {},
+};
 
 function chatFor(id: string, projectId = "p1"): Chat {
   return {
@@ -316,9 +323,21 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
   });
 });
 
-/* -------------------------------------------------- wait_for_pr: real GitHubService */
+/* -------------------------------------------------- watch_pr: real GitHubService */
 
-describe("manager-mcp integration — wait_for_pr over a real GitHubService", () => {
+/** Wire the manager github surface to a real GitHubService, cwd-bound (mirrors
+ *  SessionBroker.makeGithubBinding). Terminal PRs never reach checks/threads. */
+function realBinding(github: GitHubService, cwd: string): ManagerMcpGitHub {
+  const repoFor = async (override?: string): Promise<string> =>
+    override ?? github.resolveRepo(cwd);
+  return {
+    prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd }),
+    prChecks: async (n, repo) => github.prChecks(await repoFor(repo), n),
+    reviewThreads: async (n, repo) => github.reviewThreads(await repoFor(repo), n),
+  };
+}
+
+describe("manager-mcp integration — watch_pr over a real GitHubService", () => {
   it("reuses GitHubService's gh invocation and resolves an already-merged PR", async () => {
     const bus = new EventBus();
     const calls: { file: string; args: readonly string[]; cwd?: string }[] = [];
@@ -329,10 +348,10 @@ describe("manager-mcp integration — wait_for_pr over a real GitHubService", ()
     ): Promise<ExecResult> => {
       calls.push({ file, args, cwd: options?.cwd });
       return {
+        // gh has no `merged` field — merged-ness is derived from `state`.
         stdout: JSON.stringify({
           number: 79,
           state: "MERGED",
-          merged: true,
           mergedAt: "2026-07-05T21:51:59Z",
         }),
         exitCode: 0,
@@ -342,23 +361,22 @@ describe("manager-mcp integration — wait_for_pr over a real GitHubService", ()
 
     // Bind exactly as SessionBroker.buildOptions does — cwd baked in so `gh`
     // auto-detects the repo; the agent supplies only the number.
-    const { waitForPr } = createManagerTools({
+    const { watchPr } = createManagerTools({
       chatId: "c1",
       bus,
       broker: nullBroker,
-      github: { prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd: "C:\\repo" }) },
+      github: realBinding(github, "C:\\repo"),
     });
 
-    const res = await waitForPr.handler(
-      { number: 79, repo: undefined, timeoutSeconds: 1800 },
-      {},
-    );
+    const res = await watchPr.handler({ number: 79, repo: undefined, timeoutSeconds: 1800 }, {});
 
     expect(res.isError).toBeFalsy();
     expect(resultText(res)).toContain('reached terminal state "merged"');
     expect(resultText(res)).toContain('"merged":true');
+    expect(resultText(res)).toContain('"done":true');
     expect(resultText(res)).toContain('"mergedAt":"2026-07-05T21:51:59Z"');
-    // One `gh pr view` with the minimal merge-state field list, in the bound cwd.
+    // A merged PR short-circuits before checks/threads: exactly one `gh pr view`
+    // with the minimal merge-state field list, in the bound cwd.
     expect(calls).toHaveLength(1);
     expect(calls[0]!.file).toBe("gh");
     expect(calls[0]!.args).toEqual([
@@ -366,7 +384,7 @@ describe("manager-mcp integration — wait_for_pr over a real GitHubService", ()
       "view",
       "79",
       "--json",
-      "number,state,merged,mergedAt",
+      "number,state,mergedAt",
     ]);
     expect(calls[0]!.cwd).toBe("C:\\repo");
   });
@@ -382,19 +400,20 @@ describe("manager-mcp integration — wait_for_pr over a real GitHubService", ()
       };
     };
     const github = new GitHubService({ bus, exec });
-    const { waitForPr } = createManagerTools({
+    const { watchPr } = createManagerTools({
       chatId: "c1",
       bus,
       broker: nullBroker,
-      github: { prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd: "C:\\repo" }) },
+      github: realBinding(github, "C:\\repo"),
     });
 
-    const res = await waitForPr.handler(
+    const res = await watchPr.handler(
       { number: 12, repo: "octo/demo", timeoutSeconds: 1800 },
       {},
     );
 
     expect(resultText(res)).toContain('reached terminal state "closed"');
+    expect(resultText(res)).toContain('"done":true');
     expect(calls[0]!.args).toContain("--repo");
     expect(calls[0]!.args).toContain("octo/demo");
   });

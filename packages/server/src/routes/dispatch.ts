@@ -310,6 +310,21 @@ export async function dispatchClientAction(
         return;
       }
 
+      case "decline-question": {
+        // Decline resolves the AskUserQuestion as a DENY, so the model sees the
+        // user chose not to answer rather than a fabricated selection.
+        const ok = broker.declineQuestion(action.requestId);
+        if (!ok) {
+          emitError(
+            services,
+            "no pending question for that request",
+            action.requestId,
+            action.chatId,
+          );
+        }
+        return;
+      }
+
       case "set-mode":
         await ensureSession(services, action.chatId);
         await broker.setMode(action.chatId, action.modeId);
@@ -351,6 +366,16 @@ export async function dispatchClientAction(
         await broker.interrupt(action.chatId);
         return;
 
+      case "compact-context":
+        await ensureSession(services, action.chatId);
+        broker.compact(action.chatId);
+        return;
+
+      case "clear-context":
+        await ensureSession(services, action.chatId);
+        broker.clearContext(action.chatId);
+        return;
+
       case "rollback": {
         const cp = await store.getCheckpoint(action.chatId, action.messageId);
         if (!cp) {
@@ -386,9 +411,20 @@ export async function dispatchClientAction(
             `subApp "${action.subAppId}" not found on project "${project.id}"`,
           );
         }
-        await runner.start(action.worktreePath, subApp, {
+        // Prefer the explicit path; otherwise resolve (or create) a worktree for
+        // the chosen branch. One of the two must be supplied.
+        const worktreePath =
+          action.worktreePath ??
+          (action.branch
+            ? await services.worktrees.resolveLaunchPath(project, action.branch)
+            : undefined);
+        if (!worktreePath) {
+          throw new Error("start-runner requires worktreePath or branch");
+        }
+        await runner.start(worktreePath, subApp, {
           projectId: project.id,
           chatId: action.chatId,
+          branch: action.branch,
         });
         return;
       }

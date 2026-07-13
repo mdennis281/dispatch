@@ -13,6 +13,44 @@ export function relTime(ts: number, now = Date.now()): string {
   return `${d}d ago`;
 }
 
+/**
+ * Ultra-compact adaptive "age" for tight spots (chat list): `now`, then `5m`,
+ * `1h`, `5h`, `1d`, `1w`, `3mo`, `2y` — one unit, no suffix. Steps up through
+ * seconds → minutes → hours → days → weeks → months → years. Months use `mo`
+ * (not `m`, which is minutes) to stay unambiguous.
+ */
+export function relTimeShort(ts: number, now = Date.now()): string {
+  const s = Math.max(0, (now - ts) / 1000);
+  if (s < 60) return "now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d`;
+  const w = Math.floor(d / 7);
+  if (d < 30) return `${w}w`;
+  const mo = Math.floor(d / 30);
+  if (mo < 12) return `${mo}mo`;
+  return `${Math.floor(d / 365)}y`;
+}
+
+/** "2h 40m", "45m", "<1m", "3d 2h" — compact time remaining until a future ts. */
+export function untilShort(ts: number, now = Date.now()): string {
+  const s = Math.max(0, Math.round((ts - now) / 1000));
+  if (s < 60) return "<1m";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) {
+    const rem = m % 60;
+    return rem ? `${h}h ${rem}m` : `${h}h`;
+  }
+  const d = Math.floor(h / 24);
+  const hr = h % 24;
+  return hr ? `${d}d ${hr}h` : `${d}d`;
+}
+
 /** "HH:MM" 24h clock for transcript timestamps. */
 export function clock(ts: number): string {
   const d = new Date(ts);
@@ -50,6 +88,13 @@ export function midTruncate(s: string, max = 42): string {
   const head = Math.ceil((max - 1) / 2);
   const tail = Math.floor((max - 1) / 2);
   return `${s.slice(0, head)}…${s.slice(s.length - tail)}`;
+}
+
+/** "980", "12.3k", "1.2M" — compact token/count formatting. */
+export function compactTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
 /** JSON pretty-print that never throws. */

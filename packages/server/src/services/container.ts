@@ -27,9 +27,11 @@ import { CheckpointService } from "./checkpoint.js";
 import { WorktreeService } from "./worktree.js";
 import { WorktreeDetector } from "./worktree-detector.js";
 import { RunnerService } from "./runner.js";
+import { ProcessService } from "./processes.js";
 import { GitHubService } from "./github.js";
 import { Notifier } from "./notifier.js";
 import { AttentionQueue } from "./attention.js";
+import { UsageService } from "./usage.js";
 
 /** The shared base every service hangs off. */
 export interface ServiceBase {
@@ -50,9 +52,11 @@ export interface ServiceOverrides {
   worktrees?: WorktreeService;
   worktreeDetector?: WorktreeDetector;
   runner?: RunnerService;
+  processes?: ProcessService;
   github?: GitHubService;
   notifier?: Notifier;
   attention?: AttentionQueue;
+  usage?: UsageService;
 }
 
 /** Everything the routes/WS layer needs, wired to one bus + store. */
@@ -67,9 +71,11 @@ export interface Services extends ServiceBase {
   worktrees: WorktreeService;
   worktreeDetector: WorktreeDetector;
   runner: RunnerService;
+  processes: ProcessService;
   github: GitHubService;
   notifier: Notifier;
   attention: AttentionQueue;
+  usage: UsageService;
   /** Start background wiring (attention, notifier, reconcile, auto-checkpoint). */
   start(): Promise<void>;
   /** Tear everything down (broker sessions, runners, subscriptions). */
@@ -110,8 +116,16 @@ export function createServices(
     overrides.projectConfigArchive ??
     new ProjectConfigArchive({ store, projectConfig });
   // GitHub control plane (PRs + Actions). Constructed before the broker so it can
-  // back the session MCP's `wait_for_pr` PR merge-state poll.
+  // back the session MCP's `watch_pr` checks / review-thread / merge-state polls.
   const github = overrides.github ?? new GitHubService({ bus, store });
+  // Worktrees + subApp runner are constructed BEFORE the broker so the session
+  // MCP's `run_subapp` tool can launch apps (and resolve/create worktrees).
+  const worktrees = overrides.worktrees ?? new WorktreeService({ bus, store });
+  const runner = overrides.runner ?? new RunnerService({ store, bus });
+  // OS-level port/pid inspector + bulk kill: reaps orphaned dev-server
+  // grandchildren the runner records lost track of (server restart, half-killed
+  // tree) and surfaces what's actually squatting a project's ports.
+  const processes = overrides.processes ?? new ProcessService({ store });
   const broker =
     overrides.broker ??
     new SessionBroker({
@@ -121,6 +135,8 @@ export function createServices(
       terminals,
       memory,
       github,
+      runner,
+      worktrees,
       // Self-contained `.claude-manager/` config: authored agents/modes/
       // instructions (source of truth) resolved config-first, `.data` fallback.
       projectConfig,
@@ -136,7 +152,6 @@ export function createServices(
     });
   const checkpoints =
     overrides.checkpoints ?? new CheckpointService({ store, bus });
-  const worktrees = overrides.worktrees ?? new WorktreeService({ bus, store });
   // Detects worktrees the AGENT creates during a turn (`pnpm worktree` / `git
   // worktree add` via Bash) and attaches them to the owning chat — the manager
   // never creates them for the agent, so it has to discover them post-turn.
@@ -147,9 +162,11 @@ export function createServices(
   // detaches the chat record outside the detector, so evict the path from `known`
   // or a worktree recreated at the same path would never be re-attributed.
   worktrees.onWorktreeRemoved = (path) => worktreeDetector.forget(path);
-  const runner = overrides.runner ?? new RunnerService({ store, bus });
   const notifier = overrides.notifier ?? new Notifier({ bus, store });
   const attention = overrides.attention ?? new AttentionQueue({ bus });
+  // Subscription usage (5h + weekly) for the header meter. Polls the account
+  // OAuth usage endpoint once (server-side) and fans snapshots to every client.
+  const usage = overrides.usage ?? new UsageService({ bus });
 
   let offCheckpoint: (() => void) | undefined;
   let offTitle: (() => void) | undefined;
@@ -169,9 +186,11 @@ export function createServices(
     worktrees,
     worktreeDetector,
     runner,
+    processes,
     github,
     notifier,
     attention,
+    usage,
 
     async start(): Promise<void> {
       // One-time transparent memory migration: when a project has (or gains) a
@@ -188,21 +207,37 @@ export function createServices(
       // Best-effort — a bad config surfaces as a structured error, never a block.
       await projectConfig.start().catch(() => {});
 
-      attention.start();
-      notifier.start();
+      // Best-effort background services. A throw in any ONE of these must not
+      // abort boot and silently skip the wiring BELOW it — that ordering once
+      // risked leaving AI titles + auto-checkpoints un-wired with no error at
+      // all. Isolate + LOG each failure so it's visible, never a silent cascade.
+      const safeStart = (label: string, fn: () => void) => {
+        try {
+          fn();
+        } catch (err) {
+          console.error(`[claude-manager] ${label}.start() failed (continuing):`, err);
+        }
+      };
+      safeStart("attention", () => attention.start());
+      safeStart("notifier", () => notifier.start());
+      // Subscription usage polling (a missing token / offline just yields an
+      // "unavailable" snapshot the header meter hides on).
+      safeStart("usage", () => usage.start());
 
       // Agent-created worktree detection: subscribe to turn-complete signals and
       // seed the per-project baseline. Best-effort — a git/seed failure here must
       // never block boot.
       await worktreeDetector.start().catch(() => {});
 
-      // AI title: when a turn completes (a `result` transcript row), generate a
-      // title from the first user message IFF the chat is still on its default
-      // "New chat" title. The service self-gates on the default title, so this
-      // fires effectively once (the first turn) and no-ops thereafter. Purely
-      // best-effort — a failed/absent title just leaves the default.
+      // AI title: generate one from the first user message IFF the chat is still
+      // on its default "New chat" title. We fire as soon as the user's prompt
+      // lands (`user` row) so a new chat is named right after the first send
+      // rather than only once the whole turn finishes; we also retry on `result`
+      // to cover a first prompt that carried no text (image-only). The service
+      // self-gates on the default title + dedupes in-flight runs, so this is
+      // effectively once. Purely best-effort — a failure just leaves the default.
       offTitle = bus.on("chat-message", (evt) => {
-        if (evt.message.kind !== "result") return;
+        if (evt.message.kind !== "user" && evt.message.kind !== "result") return;
         void title.maybeGenerateInitialTitle(evt.chatId);
       });
 
@@ -253,6 +288,7 @@ export function createServices(
       projectConfig.stop();
       notifier.stop();
       attention.stop();
+      usage.stop();
       await runner.stopAll().catch(() => {});
       await broker.dispose().catch(() => {});
       // Kill any lingering persistent shells after the broker unwinds.

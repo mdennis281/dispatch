@@ -16,6 +16,7 @@ import { Chip } from "../../ui/Chip.js";
 import { Markdown } from "../Markdown.js";
 import { cn } from "../../../lib/cn.js";
 import { dur } from "../../../lib/format.js";
+import { useTypewriter } from "../../../lib/useTypewriter.js";
 
 /** The live "agent is working" row shown while a turn streams (no text yet). */
 export function WorkingRow({ label }: { label?: string }) {
@@ -41,6 +42,9 @@ export function WorkingRow({ label }: { label?: string }) {
  * shimmer while only the thinking channel has arrived.
  */
 export function StreamingRow({ text, thinking }: { text: string; thinking?: string }) {
+  // Reveal the live buffer letter-by-letter, adaptive to the arrival speed —
+  // a subtle trail that never gates the actual stream (see useTypewriter).
+  const shown = useTypewriter(text);
   return (
     <RowShell
       tint="assistant"
@@ -53,7 +57,7 @@ export function StreamingRow({ text, thinking }: { text: string; thinking?: stri
     >
       {text ? (
         <div className="min-w-0">
-          <Markdown>{text}</Markdown>
+          <Markdown>{shown}</Markdown>
           <span className="mt-0.5 inline-flex align-middle">
             <TypingPulse />
           </span>

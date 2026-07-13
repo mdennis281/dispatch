@@ -26,6 +26,12 @@ export interface MonacoPaneProps {
   splitDiff?: boolean;
   /** 1-based line range to reveal + highlight on open (from a code pointer). */
   selection?: CodeSelection;
+  /** Editable single-file mode (ignored for diff). Enables typing + Save. */
+  editable?: boolean;
+  /** Fires with the current text on every edit (editable mode only). */
+  onChange?: (value: string) => void;
+  /** Ctrl/Cmd+S inside the editor (editable mode only). */
+  onSave?: () => void;
 }
 
 const COMMON: editor.IEditorOptions = {
@@ -97,10 +103,21 @@ export default function MonacoPane({
   original = "",
   splitDiff = true,
   selection,
+  editable = false,
+  onChange,
+  onSave,
 }: MonacoPaneProps) {
   const fileOptions = useMemo<editor.IStandaloneEditorConstructionOptions>(
-    () => ({ ...COMMON, lineNumbersMinChars: 3 }),
-    [],
+    () => ({
+      ...COMMON,
+      lineNumbersMinChars: 3,
+      readOnly: !editable,
+      domReadOnly: !editable,
+      // The editable config editor wants the usual editing affordances back.
+      contextmenu: editable,
+      quickSuggestions: editable,
+    }),
+    [editable],
   );
   const diffOptions = useMemo<editor.IDiffEditorConstructionOptions>(
     () => ({
@@ -122,6 +139,10 @@ export default function MonacoPane({
   const edRef = useRef<editor.ICodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   const decoRef = useRef<editor.IEditorDecorationsCollection | null>(null);
+
+  // Keep the latest onSave without re-binding the editor command on every render.
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
 
   const bind = (ed: editor.ICodeEditor, monaco: Monaco) => {
     monaco.editor.setTheme(CM_THEME); // belt-and-suspenders if react re-inits
@@ -159,7 +180,16 @@ export default function MonacoPane({
       language={language}
       options={fileOptions}
       loading={<Loading />}
-      onMount={(ed, monaco) => bind(ed, monaco)}
+      onMount={(ed, monaco) => {
+        bind(ed, monaco);
+        if (editable) {
+          // Ctrl/Cmd+S saves without leaving the editor (standalone editor only).
+          ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () =>
+            onSaveRef.current?.(),
+          );
+        }
+      }}
+      onChange={editable ? (v) => onChange?.(v ?? "") : undefined}
     />
   );
 }

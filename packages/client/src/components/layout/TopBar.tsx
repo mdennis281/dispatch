@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Hexagon, Search, Settings, Command, GitPullRequest, Blocks, FileCog } from "lucide-react";
 import { AttentionPopover } from "../attention/AttentionPopover.js";
+import { UsageMeter } from "./UsageMeter.js";
 import { CommandPalette } from "../command/CommandPalette.js";
 import { SettingsPanel } from "../settings/SettingsPanel.js";
 import { requestOpenProjectPrs } from "../prs/projectPrsBus.js";
@@ -57,6 +58,7 @@ export function TopBar() {
       </button>
 
       <div className="ml-auto flex items-center gap-1.5">
+        <UsageMeter />
         <AttentionPopover />
         <IconButton tip="Project config" onClick={requestOpenProjectConfig}>
           <FileCog />

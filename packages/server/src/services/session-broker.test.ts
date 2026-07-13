@@ -198,6 +198,38 @@ function streamTextDelta(text: string) {
     event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
   };
 }
+/** A subagent's partial stream event — tagged with the spawning Task id. The
+ *  broker must NOT forward these as top-level `message-chunk`s (they'd clobber
+ *  the single main-loop stream slot). */
+function subStreamStart(parentToolUseId = "toolu_sub1") {
+  return {
+    type: "stream_event",
+    parent_tool_use_id: parentToolUseId,
+    uuid: "se-sub-start",
+    session_id: "sess-1",
+    event: { type: "message_start", message: { role: "assistant", content: [] } },
+  };
+}
+function subStreamTextDelta(text: string, parentToolUseId = "toolu_sub1") {
+  return {
+    type: "stream_event",
+    parent_tool_use_id: parentToolUseId,
+    uuid: "se-sub-text",
+    session_id: "sess-1",
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+  };
+}
+/** A subagent's finalized assistant message (nested under a Task tool_use). */
+function subAssistantText(text: string, parentToolUseId = "toolu_sub1") {
+  return {
+    type: "assistant",
+    parent_tool_use_id: parentToolUseId,
+    subagent_type: "Explore",
+    uuid: "a-sub-uuid",
+    session_id: "sess-1",
+    message: { role: "assistant", content: [{ type: "text", text }] },
+  };
+}
 function resultMsg(subtype = "success") {
   return {
     type: "result",
@@ -401,6 +433,48 @@ describe("SessionBroker — token streaming", () => {
     const assistant = rows.find((r) => r.kind === "assistant");
     expect(assistant?.id).toBe(streamedId);
     expect(assistant && "text" in assistant ? assistant.text : "").toBe("echo:hi");
+  });
+
+  it("interleaved subagent partials don't clobber the main-loop stream (no orphaned buffer)", async () => {
+    // A subagent's `message_start` lands mid-stream, between the main loop's own
+    // start and its finalize. Regression: honoring it overwrote the single stream
+    // slot, so the main row finalized under a fresh id ≠ its chunk id — stranding
+    // the buffer as a stuck ●●● StreamingRow (a duplicate of the finalized text).
+    const { fn } = makeFakeQuery((text) => [
+      streamStart(),
+      streamTextDelta("Main "),
+      subStreamStart(), // interleaved subagent partial — must be ignored
+      subStreamTextDelta("subagent chatter"),
+      streamTextDelta(text),
+      subAssistantText("subagent done"), // subagent finalizes mid-turn
+      assistantText(`Main ${text}`),
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "reply");
+    await idleP;
+
+    // (a) only the MAIN loop's deltas are forwarded — subagent chatter is not.
+    const chunks = events.filter(
+      (e): e is Extract<WsServerEvent, { type: "message-chunk" }> => e.type === "message-chunk",
+    );
+    expect(chunks.map((c) => c.delta)).toEqual(["Main ", "reply"]);
+    const chunkIds = new Set(chunks.map((c) => c.messageId));
+    expect(chunkIds.size).toBe(1);
+
+    // (b) the finalized MAIN row reuses that same streamed id (client prunes the
+    // buffer in place — no orphaned StreamingRow), and both rows persist distinctly.
+    const rows = await store.readMessages("c1");
+    const asst = rows.filter((r) => r.kind === "assistant");
+    const main = asst.find((r) => "text" in r && r.text === "Main reply");
+    const sub = asst.find((r) => "text" in r && r.text === "subagent done");
+    expect(main?.id).toBe([...chunkIds][0]);
+    expect(sub).toBeDefined();
+    expect(sub?.id).not.toBe(main?.id);
   });
 });
 
@@ -1065,9 +1139,12 @@ describe("SessionBroker — project memory injection", () => {
     await broker.sendMessage("c1", "hi");
     await idleP;
 
-    // No mode instructions + no memories → no systemPrompt append at all.
-    const opts = controllers[0]!.options as { systemPrompt?: unknown };
-    expect(opts.systemPrompt).toBeUndefined();
+    // No mode instructions + no memories → the append is JUST the always-on
+    // manager-tools directive, with no injected memory section.
+    const opts = controllers[0]!.options as { systemPrompt?: { append?: string } };
+    const append = opts.systemPrompt?.append ?? "";
+    expect(append).toContain("# Manager tools");
+    expect(append).not.toContain("Project memory");
   });
 
   it("auto-surfaces a relevant memory body into the SDK message (not the transcript), once per session", async () => {
@@ -1229,8 +1306,12 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     await broker.sendMessage("c2", "hi");
     await idleP;
 
-    const opts = controllers[0]!.options as { systemPrompt?: unknown };
-    expect(opts.systemPrompt).toBeUndefined();
+    // The always-on manager-tools directive is still injected; only the
+    // config-sourced instructions are absent for a project with no config.
+    const opts = controllers[0]!.options as { systemPrompt?: { append?: string } };
+    const append = opts.systemPrompt?.append ?? "";
+    expect(append).toContain("# Manager tools");
+    expect(append).not.toContain("Project instructions");
   });
 
   it("merges the config's external MCP servers into the session alongside 'manager'", async () => {

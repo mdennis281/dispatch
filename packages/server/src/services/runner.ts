@@ -99,6 +99,11 @@ const defaultSpawn: SpawnFn = (command, opts) => {
     env: opts.env,
     buffer: false,
     reject: false,
+    // `ignore`, NOT the execa default `pipe`: a long-running dev server never
+    // reads stdin, but an OPEN (never-closing, never-EOF) stdin pipe makes some
+    // tools block on startup — notably Vite/esbuild, which crawled to a ~13s
+    // "ready" (vs ~0.5s) so the app looked dead. EOF'd stdin fixes it.
+    stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -140,6 +145,36 @@ function defaultIsPidAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Substitute `{port}` / `{portN}` placeholders (1-indexed; `{port}` == `{port1}`)
+ * with the allocated ports. An out-of-range placeholder is left as-is. Used for
+ * both the dev command string and each `subApp.env` value, so a tool that ignores
+ * the injected `PORT` still receives its port under the name it actually reads.
+ */
+export function substitutePorts(input: string, ports: number[]): string {
+  return input.replace(/\{port(\d*)\}/g, (m, n: string) => {
+    const idx = n === "" ? 0 : Number(n) - 1;
+    const p = ports[idx];
+    return p !== undefined ? String(p) : m;
+  });
+}
+
+/**
+ * Detect the port a dev server ACTUALLY bound from a log line it printed — e.g.
+ * Vite's `➜  Local:   http://localhost:5175/`. Returns the port when the line
+ * carries a localhost/loopback URL with an explicit port, else null. This is how
+ * we reconcile the recorded URL to reality when the tool self-increments off the
+ * allocated port (Vite's default `strictPort:false`).
+ */
+const BOUND_URL_RE =
+  /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\[::\]):(\d{2,5})\b/i;
+export function detectBoundPort(line: string): number | null {
+  const m = BOUND_URL_RE.exec(line);
+  if (!m) return null;
+  const port = Number(m[1]);
+  return port >= 1 && port <= 65535 ? port : null;
+}
+
 /** Per-instance live handle (not persisted). */
 interface LiveRunner {
   child?: ChildLike;
@@ -148,6 +183,10 @@ interface LiveRunner {
   composeFile?: string;
   stopping: boolean;
   logs: RunnerLogLine[];
+  /** `subApp.url` template (for rebuilding the URL after port detection). */
+  urlTemplate?: string;
+  /** Port parsed from the child's own output (reconciled once, then latched). */
+  detectedPort?: number;
 }
 
 const TERMINAL: ReadonlySet<RunnerStatus> = new Set<RunnerStatus>([
@@ -216,7 +255,7 @@ export class RunnerService {
   async start(
     worktreePath: string,
     subApp: SubApp,
-    ctx: { projectId?: string; chatId?: string } = {},
+    ctx: { projectId?: string; chatId?: string; branch?: string } = {},
   ): Promise<RunnerInstance> {
     const hasDev = !!subApp.dev;
     const usedDocker = !!subApp.dockerCompose;
@@ -239,7 +278,12 @@ export class RunnerService {
         ? `http://localhost:${primary}`
         : undefined;
 
-    const live: LiveRunner = { usedDocker, stopping: false, logs: [] };
+    const live: LiveRunner = {
+      usedDocker,
+      stopping: false,
+      logs: [],
+      urlTemplate: subApp.url,
+    };
     this.live.set(id, live);
 
     // Resolve + persist the compose location up front so stop()/reconcile() can
@@ -259,6 +303,7 @@ export class RunnerService {
       projectId: ctx.projectId,
       chatId: ctx.chatId,
       worktreePath,
+      branch: ctx.branch,
       subAppId: subApp.id,
       kind: hasDev ? "process" : "docker",
       port: primary,
@@ -272,8 +317,15 @@ export class RunnerService {
     };
     runner = await this.saveAndEmit(runner);
 
+    // `PORT` is injected for tools that honor it; `subApp.env` (with `{port}`
+    // placeholders substituted) is overlaid on top so a tool that reads a
+    // differently-named var — Vite's `CLIENT_PORT`, a server's `SERVER_PORT` —
+    // gets its port too, and can even override `PORT`.
     const portEnv: Record<string, string> =
       primary !== undefined ? { PORT: String(primary) } : {};
+    for (const [key, value] of Object.entries(subApp.env ?? {})) {
+      portEnv[key] = substitutePorts(value, ports);
+    }
 
     // 1) docker compose up -d (in the compose file's directory), if declared.
     if (usedDocker && composeDir && composeFile) {
@@ -305,7 +357,7 @@ export class RunnerService {
 
     // 2) spawn the long-running dev process (if any).
     if (hasDev) {
-      const child = this.spawn(subApp.dev!, {
+      const child = this.spawn(substitutePorts(subApp.dev!, ports), {
         cwd: resolve(worktreePath, subApp.path),
         env: portEnv,
       });
@@ -420,15 +472,55 @@ export class RunnerService {
           const line = buf.slice(0, idx).replace(/\r$/, "");
           buf = buf.slice(idx + 1);
           this.pushLog(id, stream, line);
+          this.maybeDetectPort(id, line);
         }
       },
       flush: () => {
         if (buf.length) {
-          this.pushLog(id, stream, buf.replace(/\r$/, ""));
+          const line = buf.replace(/\r$/, "");
+          this.pushLog(id, stream, line);
+          this.maybeDetectPort(id, line);
           buf = "";
         }
       },
     };
+  }
+
+  /**
+   * Reconcile the recorded port/URL to whatever the child actually bound, parsed
+   * from its own output. Latched to the first detected port so a server that
+   * re-prints its URL (or a proxy line) can't thrash the record. A no-op when the
+   * detected port already matches, when the runner is gone/terminal, or when this
+   * runner has no port to reconcile (a docker-only stack).
+   */
+  private maybeDetectPort(id: string, line: string): void {
+    const live = this.live.get(id);
+    if (!live || live.detectedPort !== undefined) return;
+    const port = detectBoundPort(line);
+    if (port === null) return;
+    live.detectedPort = port; // latch: only reconcile once
+    void this.reconcilePort(id, port, live.urlTemplate);
+  }
+
+  private async reconcilePort(
+    id: string,
+    port: number,
+    urlTemplate: string | undefined,
+  ): Promise<void> {
+    const runner = await this.store.getRunner(id);
+    if (!runner || TERMINAL.has(runner.status)) return;
+    if (runner.port === port) return; // allocation already matched reality
+    const ports = runner.ports ? [...runner.ports] : [];
+    if (ports.length) ports[0] = port;
+    const url = urlTemplate
+      ? urlTemplate.replace("{port}", String(port))
+      : `http://localhost:${port}`;
+    await this.saveAndEmit({
+      ...runner,
+      port,
+      ports: ports.length ? ports : [port],
+      url,
+    });
   }
 
   private async onExit(

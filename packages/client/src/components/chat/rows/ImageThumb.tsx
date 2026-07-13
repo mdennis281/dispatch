@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ImageIcon } from "lucide-react";
 import type { ImageRef } from "@cm/shared";
 import { assetUrl } from "../../../lib/actions.js";
+import { ImageLightbox } from "./ImageLightbox.js";
 
 /**
  * One image thumbnail — a real preview via the chat's asset endpoint with a
@@ -11,8 +12,10 @@ import { assetUrl } from "../../../lib/actions.js";
  */
 export function ImageThumb({ chatId, img }: { chatId: string; img: ImageRef }) {
   const [broken, setBroken] = useState(false);
+  const [zoomed, setZoomed] = useState(false);
   const name = img.path.split(/[\\/]/).pop() ?? img.path;
   const dims = img.width && img.height ? `${img.width}×${img.height}` : undefined;
+  const src = assetUrl(chatId, img);
 
   if (broken) {
     return (
@@ -32,18 +35,30 @@ export function ImageThumb({ chatId, img }: { chatId: string; img: ImageRef }) {
   }
 
   return (
-    <figure className="overflow-hidden rounded-md border border-line bg-inset">
-      <img
-        src={assetUrl(chatId, img)}
-        alt={img.alt ?? name}
-        loading="lazy"
-        onError={() => setBroken(true)}
-        className="block max-h-52 max-w-[240px] object-contain"
-      />
-      <figcaption className="flex items-center gap-1.5 border-t border-line-soft px-2 py-1">
-        <span className="truncate text-[10.5px] text-secondary">{name}</span>
-        {dims && <span className="cm-mono !text-[10px] text-faint">{dims}</span>}
-      </figcaption>
-    </figure>
+    <>
+      <figure className="overflow-hidden rounded-md border border-line bg-inset">
+        <button
+          type="button"
+          onClick={() => setZoomed(true)}
+          className="block w-full cursor-zoom-in outline-none focus-visible:ring-1 focus-visible:ring-accent-line"
+          title="Click to enlarge"
+        >
+          <img
+            src={src}
+            alt={img.alt ?? name}
+            loading="lazy"
+            onError={() => setBroken(true)}
+            className="block max-h-52 max-w-[240px] object-contain"
+          />
+        </button>
+        <figcaption className="flex items-center gap-1.5 border-t border-line-soft px-2 py-1">
+          <span className="truncate text-[10.5px] text-secondary">{name}</span>
+          {dims && <span className="cm-mono !text-[10px] text-faint">{dims}</span>}
+        </figcaption>
+      </figure>
+      {zoomed && (
+        <ImageLightbox src={src} name={name} dims={dims} onClose={() => setZoomed(false)} />
+      )}
+    </>
   );
 }

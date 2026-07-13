@@ -10,8 +10,8 @@
  */
 import type { FastifyInstance } from "fastify";
 import middie from "@fastify/middie";
-import { createServer } from "vite";
-import { fileURLToPath } from "node:url";
+import { createServer, type InlineConfig } from "vite";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 
@@ -20,12 +20,44 @@ const here = dirname(fileURLToPath(import.meta.url));
 const clientRoot = resolve(here, "../../client");
 const indexHtmlPath = resolve(clientRoot, "index.html");
 
+/**
+ * Load the client's vite config OURSELVES and return it as an inline config so
+ * `createServer` can be called with `configFile: false`.
+ *
+ * WHY (Windows dev loop): if we hand Vite the config PATH, it bundles the config
+ * into a temp file under the client's `node_modules/.vite-temp/` dir on every
+ * start, imports it, then unlinks it. Under `tsx watch` that temp file enters the
+ * watched module graph, and its unlink kicks a server RESTART — which re-bundles a
+ * new temp file, which unlinks… an endless restart loop. The tsx client-dir ignore
+ * glob can't stop it: on Windows the event path is a backslash relative path
+ * (`..\client\…`) that no forward-slash glob matches. Importing the config
+ * directly keeps every watched file stable, so there is no loop.
+ */
+async function loadClientConfig(): Promise<InlineConfig> {
+  const url = pathToFileURL(resolve(clientRoot, "vite.config.ts")).href;
+  const mod = (await import(url)) as { default?: unknown };
+  const raw = mod.default;
+  const resolved =
+    typeof raw === "function"
+      ? await (raw as (env: { command: "serve"; mode: string }) => unknown)({
+          command: "serve",
+          mode: "development",
+        })
+      : raw;
+  return (resolved ?? {}) as InlineConfig;
+}
+
 export async function attachViteDev(app: FastifyInstance): Promise<void> {
+  const clientConfig = await loadClientConfig();
   const vite = await createServer({
+    ...clientConfig,
+    // Config is provided INLINE above — never let Vite load/bundle the file (see
+    // loadClientConfig for the tsx-watch restart loop this avoids).
+    configFile: false,
     root: clientRoot,
-    configFile: resolve(clientRoot, "vite.config.ts"),
     appType: "custom", // we serve index.html ourselves via the SPA fallback below
     server: {
+      ...(clientConfig.server ?? {}),
       middlewareMode: true,
       // HMR gets its own websocket port so it never collides with
       // @fastify/websocket's /ws upgrade handling. Invisible to the user.

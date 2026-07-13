@@ -9,6 +9,8 @@ import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import {
   RunnerService,
+  substitutePorts,
+  detectBoundPort,
   type ChildLike,
   type RunOnceFn,
   type SpawnFn,
@@ -210,6 +212,88 @@ describe("RunnerService — docker path (mocked)", () => {
     expect(runner.status).toBe("crashed");
     expect(runner.exitCode).toBe(1);
     expect((await store.getRunner(runner.id))?.status).toBe("crashed");
+  });
+});
+
+/* --------------------------------------------- port placeholders + detection */
+
+describe("substitutePorts", () => {
+  it("replaces {port}/{portN}, leaving out-of-range placeholders", () => {
+    expect(substitutePorts("vite --port {port}", [5173])).toBe("vite --port 5173");
+    expect(substitutePorts("{port} {port1} {port2}", [10, 20])).toBe("10 10 20");
+    expect(substitutePorts("srv {port3}", [10, 20])).toBe("srv {port3}");
+    expect(substitutePorts("no placeholders", [10])).toBe("no placeholders");
+  });
+});
+
+describe("detectBoundPort", () => {
+  it("extracts the port from a localhost/loopback URL line", () => {
+    expect(detectBoundPort("  ➜  Local:   http://localhost:5175/")).toBe(5175);
+    expect(detectBoundPort("Listening on http://127.0.0.1:2568")).toBe(2568);
+    expect(detectBoundPort("http://[::1]:3000/")).toBe(3000);
+  });
+  it("returns null when there's no bound URL with a port", () => {
+    expect(detectBoundPort("building for production…")).toBeNull();
+    expect(detectBoundPort("open http://example.com/foo")).toBeNull();
+    expect(detectBoundPort("http://localhost/")).toBeNull();
+  });
+});
+
+describe("RunnerService — port injection + reconciliation (mocked)", () => {
+  it("substitutes {port} in the command and overlays subApp.env", async () => {
+    let seen: { command: string; env: Record<string, string> } | undefined;
+    const spawn: SpawnFn = (command, opts) => {
+      seen = { command, env: opts.env };
+      return new MockChild();
+    };
+    service = new RunnerService({
+      store,
+      bus,
+      spawn,
+      // primary 5173 (base), second 2567 (base) — return the base unchanged.
+      getPort: async (p) => p ?? 0,
+    });
+    const subApp: SubApp = {
+      id: "game",
+      name: "game",
+      path: ".",
+      dev: "pnpm dev --port {port}",
+      ports: [5173, 2567],
+      env: { CLIENT_PORT: "{port}", SERVER_PORT: "{port2}" },
+    };
+    await service.start("C:/wt", subApp);
+    expect(seen?.command).toBe("pnpm dev --port 5173");
+    expect(seen?.env.PORT).toBe("5173");
+    expect(seen?.env.CLIENT_PORT).toBe("5173");
+    expect(seen?.env.SERVER_PORT).toBe("2567");
+  });
+
+  it("reconciles the recorded port/url to the port the child prints", async () => {
+    let child: MockChild | undefined;
+    const spawn: SpawnFn = () => (child = new MockChild());
+    service = new RunnerService({
+      store,
+      bus,
+      spawn,
+      getPort: async (p) => p ?? 0,
+    });
+    const subApp: SubApp = {
+      id: "game",
+      name: "game",
+      path: ".",
+      dev: "vite",
+      ports: [5173],
+      url: "http://localhost:{port}",
+    };
+    const runner = await service.start("C:/wt", subApp);
+    expect(runner.port).toBe(5173);
+
+    // Vite hopped to 5175 (base busy) and printed its real URL.
+    child!.stdout.write("  ➜  Local:   http://localhost:5175/\n");
+    await waitFor(async () => (await store.getRunner(runner.id))?.port === 5175);
+    const after = await store.getRunner(runner.id);
+    expect(after?.url).toBe("http://localhost:5175");
+    expect(after?.ports).toEqual([5175]);
   });
 });
 

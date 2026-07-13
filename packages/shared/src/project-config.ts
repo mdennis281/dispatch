@@ -61,6 +61,9 @@ export const ManifestSubAppSchema = z.object({
   build: z.string().optional(),
   test: z.string().optional(),
   ports: z.array(z.number().int()).optional(),
+  /** Extra env for the dev process; `{port}`/`{portN}` placeholders are
+   *  substituted from the allocated ports (maps to SubApp.env). */
+  env: z.record(z.string(), z.string()).optional(),
   url: z.string().optional(),
   /** docker-compose file (maps to SubApp.dockerCompose). */
   docker: z.string().optional(),

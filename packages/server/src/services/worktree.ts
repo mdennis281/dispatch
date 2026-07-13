@@ -22,9 +22,15 @@
  */
 import { execa } from "execa";
 import { existsSync } from "node:fs";
-import { mkdir, readFile as fsReadFile } from "node:fs/promises";
-import { join, resolve, relative, isAbsolute } from "node:path";
-import { WorktreeInfoSchema, type Project, type WorktreeInfo } from "@cm/shared";
+import { mkdir, readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
+import { join, resolve, relative, isAbsolute, dirname } from "node:path";
+import {
+  WorktreeInfoSchema,
+  BranchInfoSchema,
+  type Project,
+  type WorktreeInfo,
+  type BranchInfo,
+} from "@cm/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 
@@ -278,6 +284,70 @@ export class WorktreeService {
     );
   }
 
+  /**
+   * List local branches, most-recently-committed first, each tagged with whether
+   * it's the primary checkout's current branch and the worktree path (if any) that
+   * sits on it. Backs the launch branch/worktree picker. Best-effort: a git failure
+   * yields `[]` rather than throwing (the picker still works off worktrees).
+   */
+  async listBranches(project: Project): Promise<BranchInfo[]> {
+    const [refsOut, worktrees] = await Promise.all([
+      this.git(
+        [
+          "for-each-ref",
+          "--sort=-committerdate",
+          // <short name>\t<committer unix ts>\t<'*' for HEAD>
+          "--format=%(refname:short)%09%(committerdate:unix)%09%(HEAD)",
+          "refs/heads",
+        ],
+        project.repoPath,
+      ).catch(() => ""),
+      this.list(project).catch(() => [] as WorktreeInfo[]),
+    ]);
+    const worktreeByBranch = new Map(worktrees.map((w) => [w.branch, w.path]));
+    const out: BranchInfo[] = [];
+    for (const line of refsOut.split("\n")) {
+      if (!line.trim()) continue;
+      const [name, unix, head] = line.split("\t");
+      if (!name) continue;
+      const secs = Number(unix);
+      out.push(
+        BranchInfoSchema.parse({
+          name,
+          lastCommitAt: Number.isFinite(secs) && secs > 0 ? secs * 1000 : undefined,
+          isCurrent: head?.trim() === "*",
+          worktreePath: worktreeByBranch.get(name),
+        }),
+      );
+    }
+    return out;
+  }
+
+  /**
+   * Resolve the directory to launch a subApp for `branch`:
+   *   1. an existing worktree already on that branch, else
+   *   2. the primary checkout when IT is on that branch (run in place), else
+   *   3. a freshly-added worktree checking out the (existing) branch.
+   * Backs branch-based launch from the picker + the `run_subapp` MCP tool.
+   */
+  async resolveLaunchPath(project: Project, branch: string): Promise<string> {
+    const worktrees = await this.list(project);
+    const existing = worktrees.find((w) => w.branch === branch);
+    if (existing) return existing.path;
+    // The primary checkout is the porcelain's first record; match by path.
+    const primary = worktrees.find((w) => samePath(w.path, project.repoPath));
+    if (primary && primary.branch === branch) return project.repoPath;
+    // Add an isolated worktree that checks out the EXISTING branch (no `-b`).
+    const path = this.worktreePath(project, branch);
+    await this.git(["worktree", "add", path, branch], project.repoPath);
+    this.bus?.publish({
+      type: "notice",
+      level: "info",
+      text: `Added worktree for ${branch} at ${path}`,
+    });
+    return path;
+  }
+
   /** Remove a worktree. Runs from the primary checkout so the target can go away. */
   async remove(
     worktreePath: string,
@@ -523,6 +593,38 @@ export class WorktreeService {
     return packFileContent(rel, await fsReadFile(abs));
   }
 
+  /**
+   * Write UTF-8 text to a working-tree file. `relPath` is normalized + guarded to
+   * stay inside the worktree (same checks as {@link readFile} — no `..`/absolute
+   * escapes), so the unauthenticated PUT can't be turned into an arbitrary-path
+   * write. Creates parent dirs as needed; refuses content over the size cap.
+   * Backs the editable Monaco config editor (`PUT /api/worktrees/file`).
+   */
+  async writeFile(
+    worktreePath: string,
+    relPath: string,
+    content: string,
+  ): Promise<{ path: string; size: number }> {
+    const rel = normalizeRelPath(relPath);
+    if (rel === null) throw new Error(`invalid relPath: ${relPath}`);
+
+    const abs = resolve(worktreePath, rel);
+    const relToRoot = relative(resolve(worktreePath), abs);
+    if (!relToRoot || relToRoot.startsWith("..") || isAbsolute(relToRoot)) {
+      throw new Error(`relPath escapes the worktree: ${relPath}`);
+    }
+
+    const buf = Buffer.from(content, "utf8");
+    if (buf.length > MAX_FILE_BYTES) {
+      throw new Error(
+        `file too large (${buf.length} bytes; max ${MAX_FILE_BYTES})`,
+      );
+    }
+    await mkdir(dirname(abs), { recursive: true });
+    await fsWriteFile(abs, buf);
+    return { path: rel, size: buf.length };
+  }
+
   /* --------------------------------------------------------- internals */
 
   /** Run git with an arg array; throw a descriptive error on non-zero exit. */
@@ -640,6 +742,12 @@ export class WorktreeService {
 
 /** Cap file reads so a huge/binary file can't blow up memory or the wire. */
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+/** Two filesystem paths point at the same location (case-insensitive on Windows). */
+function samePath(a: string, b: string): boolean {
+  const n = (p: string) => resolve(p).replace(/[\\/]+$/, "").toLowerCase();
+  return n(a) === n(b);
+}
 
 /** Normalize a request relPath → forward-slashed, no leading `/`, no `..` segs. */
 export function normalizeRelPath(p: string): string | null {

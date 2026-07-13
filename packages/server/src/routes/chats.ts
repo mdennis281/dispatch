@@ -112,4 +112,13 @@ export function registerChatRoutes(app: FastifyInstance): void {
     "/api/chats/:id/checkpoints",
     async (req) => store.getCheckpoints(req.params.id),
   );
+
+  // Live context-window breakdown (tokens by category + authoritative window),
+  // for the composer meter's dropup. `usage` is null when the chat's subprocess
+  // isn't live this process — the client falls back to the last result row's
+  // stamped tokens/window in that case.
+  app.get<{ Params: { id: string } }>(
+    "/api/chats/:id/context-usage",
+    async (req) => ({ usage: await broker.getContextUsage(req.params.id) }),
+  );
 }

@@ -1,10 +1,12 @@
 /**
  * REST for git worktrees.
  *   GET    /api/worktrees?projectId=              → WorktreeInfo[]
+ *   GET    /api/branches?projectId=               → BranchInfo[] (launch picker)
  *   POST   /api/worktrees {projectId,branch,chatId?} → create
  *   DELETE /api/worktrees {worktreePath,chatId?,force?} → remove
  *   GET    /api/worktrees/diff?worktreePath=&base= → WorktreeDiff
  *   GET    /api/worktrees/file?worktreePath=&relPath=&ref= → WorktreeFile (Monaco)
+ *   PUT    /api/worktrees/file {worktreePath,relPath,content} → write (Monaco save)
  *   GET    /api/worktrees/refresh?projectId=      → force a detection pass
  * Mutations run through the same service the WS `create-worktree`/`remove-worktree`
  * actions use (publishing `worktree-update` / `chat-update` / `notice`).
@@ -25,6 +27,24 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
       if (!project) return reply.code(404).send({ error: "project not found" });
       try {
         return await worktrees.list(project);
+      } catch (err) {
+        return reply
+          .code(502)
+          .send({ error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
+
+  app.get<{ Querystring: { projectId?: string } }>(
+    "/api/branches",
+    async (req, reply) => {
+      if (!req.query.projectId) {
+        return reply.code(400).send({ error: "projectId required" });
+      }
+      const project = await store.getProject(req.query.projectId);
+      if (!project) return reply.code(404).send({ error: "project not found" });
+      try {
+        return await worktrees.listBranches(project);
       } catch (err) {
         return reply
           .code(502)
@@ -95,6 +115,34 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
       });
     } catch (err) {
       // relPath/ref guard failures are client errors; surface as 400.
+      return reply
+        .code(400)
+        .send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // Save edited file content back to the working tree (editable Monaco config
+  // editor). Path-guarded inside the service; the fs watcher on `.claude-manager/`
+  // picks up a project.yaml edit and re-syncs the project without a manual reload.
+  app.put("/api/worktrees/file", async (req, reply) => {
+    const body = (req.body ?? {}) as {
+      worktreePath?: string;
+      relPath?: string;
+      content?: string;
+    };
+    if (!body.worktreePath || !body.relPath || typeof body.content !== "string") {
+      return reply
+        .code(400)
+        .send({ error: "worktreePath, relPath and content required" });
+    }
+    try {
+      return await worktrees.writeFile(
+        body.worktreePath,
+        body.relPath,
+        body.content,
+      );
+    } catch (err) {
+      // relPath guard / size-cap failures are client errors.
       return reply
         .code(400)
         .send({ error: err instanceof Error ? err.message : String(err) });

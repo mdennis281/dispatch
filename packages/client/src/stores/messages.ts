@@ -187,3 +187,42 @@ const EMPTY: ChatMessage[] = [];
 export function useChatMessages(chatId: string | null): ChatMessage[] {
   return useMessages((s) => (chatId ? (s.byChat[chatId] ?? EMPTY) : EMPTY));
 }
+
+/**
+ * Selector: current context-window occupancy (tokens) for a chat, read from the
+ * most recent `result` row's `contextTokens` (the last main-loop request's own
+ * usage — NOT the session-cumulative total). Null until the first turn reports
+ * it. Returns a scalar, so the subscriber only re-renders when the number
+ * changes — not on every streamed chunk.
+ */
+export function useContextTokens(chatId: string | null): number | null {
+  return useMessages((s) => {
+    if (!chatId) return null;
+    const rows = s.byChat[chatId];
+    if (!rows) return null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i]!;
+      if (r.kind === "result") return r.contextTokens ?? null;
+    }
+    return null;
+  });
+}
+
+/**
+ * Selector: the model's context-window size (tokens) for a chat, read from the
+ * most recent `result` row's `contextWindow` (the SDK's authoritative `maxTokens`
+ * for the session's model — 1M for the Opus 1M variant, 200k otherwise). Null
+ * until a turn reports it, so the meter can fall back to a sensible default.
+ */
+export function useContextWindow(chatId: string | null): number | null {
+  return useMessages((s) => {
+    if (!chatId) return null;
+    const rows = s.byChat[chatId];
+    if (!rows) return null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i]!;
+      if (r.kind === "result") return r.contextWindow ?? null;
+    }
+    return null;
+  });
+}

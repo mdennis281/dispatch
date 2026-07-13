@@ -126,7 +126,7 @@ export interface PRComment {
 }
 
 /**
- * The minimal terminal-state view of a PR the `wait_for_pr` MCP tool polls on —
+ * The minimal terminal-state view of a PR the `watch_pr` MCP tool polls on —
  * just enough to decide "still open" vs "merged / closed" without a full detail
  * fetch. `mergedAt` is present only when the PR actually merged.
  */
@@ -585,7 +585,7 @@ export class GitHubService {
 
   /**
    * Poll a single PR's merge/close state — the minimal `{ number, state, merged,
-   * mergedAt }` the `wait_for_pr` MCP tool loops on. Runs `gh pr view <n> --json
+   * mergedAt }` the `watch_pr` MCP tool loops on. Runs `gh pr view <n> --json
    * number,state,merged,mergedAt`, auto-detecting the repo from `opts.cwd` (the
    * chat's worktree, else the project repo root) UNLESS an explicit `owner/name`
    * `opts.repo` override is given. Returns null when the PR can't be resolved
@@ -596,19 +596,21 @@ export class GitHubService {
     prNumber: number,
     opts: { repo?: string; cwd?: string } = {},
   ): Promise<PRMergeState | null> {
-    const args = ["pr", "view", String(prNumber), "--json", "number,state,merged,mergedAt"];
+    // NB: `gh pr view` has no `merged` boolean field — merged-ness is derived
+    // from `state` below. Requesting it makes gh exit non-zero ("Unknown JSON
+    // field"), which allowFail turns into a null → a spurious "PR not found".
+    const args = ["pr", "view", String(prNumber), "--json", "number,state,mergedAt"];
     // Explicit override → validate + scope to it; otherwise let gh auto-detect
     // the repo from the working directory.
     if (opts.repo) args.push("--repo", this.assertRepo(opts.repo));
     const raw = await this.ghJson<{
       number?: number;
       state?: string;
-      merged?: boolean;
       mergedAt?: string | null;
     }>(args, { cwd: opts.cwd, allowFail: true });
     if (!raw || typeof raw.number !== "number") return null;
     const state = String(raw.state ?? "").toLowerCase();
-    const merged = state === "merged" || !!raw.merged;
+    const merged = state === "merged";
     return {
       number: raw.number,
       state: state === "merged" ? "merged" : state === "closed" ? "closed" : "open",

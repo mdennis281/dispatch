@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronsUpDown,
   Plus,
@@ -11,8 +11,10 @@ import {
   Bot,
   Circle,
   Trash2,
+  Pencil,
   Check,
   X,
+  Brain,
   type LucideIcon,
 } from "lucide-react";
 import type { Chat, SubApp, RunnerInstance, Project } from "@cm/shared";
@@ -25,13 +27,25 @@ import { Spinner } from "../ui/Spinner.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { useProjects, useActiveProject } from "../../stores/projects.js";
 import { useChats, useProjectChats } from "../../stores/chats.js";
+import { useView } from "../../stores/view.js";
+import { useProjectMemories } from "../../stores/memory.js";
 import { useRunners } from "../../stores/runners.js";
 import { useAttention } from "../../stores/attention.js";
 import { actions, deleteChat } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
-import { midTruncate } from "../../lib/format.js";
+import { midTruncate, relTimeShort } from "../../lib/format.js";
+import { useFlipReorder } from "../../lib/useFlip.js";
 import { AddProjectDialog } from "../sidebar/AddProjectDialog.js";
 import { ManageConfigDialog } from "../sidebar/ManageConfigDialog.js";
+import { RenameChatDialog } from "../chat/RenameChatDialog.js";
+import { BranchWorktreePicker } from "../panels/BranchWorktreePicker.js";
+import {
+  useLaunchTargets,
+  defaultBranch,
+  launchSubApp,
+  findRunner,
+  type LaunchTarget,
+} from "../panels/useLauncher.js";
 
 const SUBAPP_ICON: Record<string, LucideIcon> = {
   game: Gamepad2,
@@ -134,10 +148,12 @@ function ProjectSelector({
 function SubAppRow({
   app,
   project,
+  target,
   runner,
 }: {
   app: SubApp;
   project: Project;
+  target: LaunchTarget | undefined;
   runner?: RunnerInstance;
 }) {
   const Icon = SUBAPP_ICON[app.id] ?? Circle;
@@ -153,12 +169,9 @@ function SubAppRow({
   const transitioning = busy || runner?.status === "starting" || runner?.status === "stopping";
 
   const start = () => {
+    if (!target) return;
     setBusy(true);
-    actions.startRunner({
-      worktreePath: project.repoPath,
-      subAppId: app.id,
-      projectId: project.id,
-    });
+    launchSubApp(target, app.id, project.id);
   };
   const stop = () => {
     if (!runner) return;
@@ -192,6 +205,7 @@ function SubAppRow({
           size="sm"
           tip="Run"
           onClick={start}
+          disabled={!target}
           className="opacity-0 group-hover:opacity-100"
         >
           <Play />
@@ -207,16 +221,27 @@ function ChatRow({
   chat,
   active,
   needsInput,
+  now,
   onClick,
 }: {
   chat: Chat;
   active: boolean;
   needsInput: boolean;
+  /** Shared "current time" tick so every row ages in lockstep. */
+  now: number;
   onClick: () => void;
 }) {
-  const meta = statusMeta(chat.status);
+  const prSettled = useChats((s) => s.prSettled[chat.id] ?? false);
+  const meta = statusMeta(chat.status, prSettled);
+  // Per-row subscription: re-renders this row (and refreshes its age) the moment
+  // its activity clock advances — the recency ordering itself lives in the selector.
+  const activityAt = useChats(
+    (s) => s.lastActivity[chat.id] ?? chat.updatedAt ?? chat.createdAt,
+  );
+  const age = relTimeShort(activityAt, now);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [renaming, setRenaming] = useState(false);
 
   // Two-click inline confirm (trash → check/✕) so a stray click can't nuke a
   // chat. On confirm: delete server-side, then purge the local stores + reselect
@@ -235,7 +260,7 @@ function ChatRow({
   };
 
   return (
-    <div className="group/row relative">
+    <div className="group/row relative" data-flip-id={chat.id}>
       <button
         data-testid="chat-row"
         onClick={onClick}
@@ -255,7 +280,10 @@ function ChatRow({
           >
             {chat.title}
           </span>
-          <span className="mt-px block truncate text-[10.5px] text-faint">{meta.label}</span>
+          <span className="mt-px block truncate text-[10.5px] text-faint">
+            {meta.label}
+            <span className="text-faint/70"> · {age}</span>
+          </span>
         </span>
       </button>
 
@@ -284,6 +312,14 @@ function ChatRow({
             )}
             <IconButton
               size="sm"
+              tip="Rename chat"
+              onClick={() => setRenaming(true)}
+              className="opacity-0 group-hover/row:opacity-100"
+            >
+              <Pencil />
+            </IconButton>
+            <IconButton
+              size="sm"
               tip="Delete chat"
               onClick={() => setConfirming(true)}
               className="opacity-0 group-hover/row:opacity-100"
@@ -293,6 +329,8 @@ function ChatRow({
           </>
         )}
       </div>
+
+      <RenameChatDialog chatId={chat.id} open={renaming} onClose={() => setRenaming(false)} />
     </div>
   );
 }
@@ -335,17 +373,50 @@ export function Sidebar() {
   const project = useActiveProject();
   const chats = useProjectChats(project?.id ?? null);
   const activeChatId = useChats((s) => s.activeChatId);
-  const setActiveChat = useChats((s) => s.setActiveChat);
+  const setActiveChatRaw = useChats((s) => s.setActiveChat);
   const runners = useRunners((s) => s.byId);
   const attentionItems = useAttention((s) => s.items);
+  const view = useView((s) => s.view);
+  const setView = useView((s) => s.setView);
+  const memCount = useProjectMemories(project?.id ?? null).length;
+
+  // Opening a chat always returns to the chat workspace (out of the Memory view).
+  const setActiveChat = (id: string) => {
+    setView("chat");
+    setActiveChatRaw(id);
+  };
 
   const [addProjectOpen, setAddProjectOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+
+  // Project-level launch target for the Apps section — same picker as the right
+  // panel, defaulting to the project's default (current) branch.
+  const { targets } = useLaunchTargets(project?.id);
+  const [selectedBranch, setSelectedBranch] = useState<string | undefined>();
+  useEffect(() => {
+    if (!targets.some((t) => t.branch === selectedBranch)) {
+      setSelectedBranch(defaultBranch(targets, project?.repoPath));
+    }
+  }, [targets, selectedBranch, project?.repoPath]);
+  const selectedTarget = targets.find((t) => t.branch === selectedBranch);
+
+  // Shared clock so every chat row's "age" label ages together. 30s is plenty
+  // for m/h/d/w granularity and keeps the sidebar idle-cheap.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  // FLIP: animate chat rows sliding to their new slot when activity reorders them.
+  const chatListRef = useRef<HTMLDivElement>(null);
+  useFlipReorder(chatListRef);
 
   // New chat = instant create with defaults + auto-select (no dialog). Gated on a
   // selected project, so the trigger is disabled until there's somewhere to create.
   const startNewChat = () => {
     if (!project) return;
+    setView("chat");
     // Deterministic default: "auto" is always a valid primary segment (both the
     // broker's mode-fallback map and the composer understand it without a stored
     // ModeConfig), so a fresh chat opens on Auto — never on whichever mode file
@@ -361,15 +432,14 @@ export function Sidebar() {
     return set;
   }, [attentionItems]);
 
-  // A project-level subApp runner runs against the repo checkout (repoPath); a
-  // chat's worktree runners live in the right panel, so scope by that path.
-  const runnerFor = (subAppId: string): RunnerInstance | undefined => {
-    if (!project) return undefined;
-    const mine = Object.values(runners).filter(
-      (r) => r.subAppId === subAppId && r.worktreePath === project.repoPath,
-    );
-    return mine.find((r) => isActive(r.status)) ?? mine[0];
-  };
+  // Match a live runner to the SELECTED branch/worktree target (so the row's
+  // Run/Stop reflects the branch the picker is pointed at).
+  const runnerFor = (subAppId: string): RunnerInstance | undefined =>
+    findRunner(runners, {
+      subAppId,
+      branch: selectedTarget?.branch,
+      worktreePath: selectedTarget?.worktreePath,
+    });
 
   return (
     <aside className="flex w-[260px] shrink-0 flex-col border-r border-line bg-surface">
@@ -381,10 +451,39 @@ export function Sidebar() {
       </div>
 
       <ScrollArea className="min-h-0 flex-1 py-2">
+        {/* top-level nav: Memory (chat-independent, project-scoped) */}
+        <div className="px-1.5 pb-1">
+          <button
+            onClick={() => setView(view === "memory" ? "chat" : "memory")}
+            className={cn(
+              "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12px] font-medium transition-colors [&_svg]:size-3.5",
+              view === "memory"
+                ? "bg-accent-ghost text-primary"
+                : "text-secondary hover:bg-panel-2/60 hover:text-primary",
+            )}
+          >
+            <Brain className={view === "memory" ? "text-accent" : "text-muted"} />
+            <span className="flex-1 text-left">Memory</span>
+            <span className="cm-mono !text-[9.5px] text-faint">{memCount}</span>
+          </button>
+        </div>
+
+        <div className="my-2 h-px bg-line-soft" />
+
         {/* subApps */}
-        <div className="mb-1 flex items-center justify-between px-2.5 pb-1">
+        <div className="mb-1 flex items-center gap-1.5 px-2.5 pb-1">
           <SectionLabel className="px-0">Apps</SectionLabel>
           <span className="cm-mono !text-[9.5px] text-faint">{project?.subApps.length ?? 0}</span>
+          {project && project.subApps.length > 0 && (
+            <div className="ml-auto">
+              <BranchWorktreePicker
+                targets={targets}
+                value={selectedBranch}
+                onChange={setSelectedBranch}
+                align="end"
+              />
+            </div>
+          )}
         </div>
         <div className="px-1.5">
           {!project ? (
@@ -393,7 +492,13 @@ export function Sidebar() {
             <p className="px-2 py-1.5 text-[11px] text-faint">No apps configured.</p>
           ) : (
             project.subApps.map((app) => (
-              <SubAppRow key={app.id} app={app} project={project} runner={runnerFor(app.id)} />
+              <SubAppRow
+                key={app.id}
+                app={app}
+                project={project}
+                target={selectedTarget}
+                runner={runnerFor(app.id)}
+              />
             ))
           )}
         </div>
@@ -407,7 +512,7 @@ export function Sidebar() {
             <Plus />
           </IconButton>
         </div>
-        <div className="space-y-0.5 px-1.5">
+        <div ref={chatListRef} className="space-y-0.5 px-1.5">
           {chats.length === 0 ? (
             <p className="px-2 py-1.5 text-[11px] text-faint">
               {project ? "No chats yet." : "Select a project to see its chats."}
@@ -419,6 +524,7 @@ export function Sidebar() {
                 chat={chat}
                 active={chat.id === activeChatId}
                 needsInput={attentionByChat.has(chat.id)}
+                now={now}
                 onClick={() => setActiveChat(chat.id)}
               />
             ))

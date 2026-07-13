@@ -117,6 +117,11 @@ export const actions = {
     });
   },
 
+  /** Decline an AskUserQuestion prompt without answering it. */
+  declineQuestion(chatId: string, requestId: string): void {
+    ws.send({ type: "decline-question", chatId, requestId });
+  },
+
   /* ------------------------------------------------ mode / agent / effort */
 
   setMode(chatId: string, modeId: string): void {
@@ -150,6 +155,14 @@ export const actions = {
   interrupt(chatId: string): void {
     ws.send({ type: "interrupt", chatId });
   },
+  /** Compact the model's context in place (native SDK `/compact`). */
+  compactContext(chatId: string): void {
+    ws.send({ type: "compact-context", chatId });
+  },
+  /** Clear the model's context (native SDK `/clear`); the transcript is kept. */
+  clearContext(chatId: string): void {
+    ws.send({ type: "clear-context", chatId });
+  },
   rollback(chatId: string, messageId: string): void {
     ws.send({ type: "rollback", chatId, messageId });
   },
@@ -157,8 +170,11 @@ export const actions = {
   /* ---------------------------------------------------------- runners */
 
   startRunner(input: {
-    worktreePath: string;
     subAppId: string;
+    /** Explicit dir to run in, or omit and pass `branch` to resolve one. */
+    worktreePath?: string;
+    /** Branch to run on (resolves to / creates a worktree server-side). */
+    branch?: string;
     projectId?: string;
     chatId?: string;
   }): void {
@@ -277,6 +293,13 @@ export const readWorktreeFile = (
   relPath: string,
   ref?: string,
 ) => api.worktrees.file(worktreePath, relPath, ref);
+
+/** Save edited working-tree file content (editable Monaco config editor). */
+export const writeWorktreeFile = (
+  worktreePath: string,
+  relPath: string,
+  content: string,
+) => api.worktrees.writeFile(worktreePath, relPath, content);
 
 /** Structured worktree-vs-base diff (per-file patch + counts) for the diff view. */
 export const readWorktreeDiff = (worktreePath: string, base = "main") =>

@@ -2,7 +2,7 @@
  * Tests for the MCP catalog: the pure builder (`buildProjectMcpCatalog`) and the
  * live `GET /api/projects/:projectId/mcp` route.
  *
- * The custom "manager" server must enumerate its full tool set (incl `wait_for_pr`)
+ * The custom "manager" server must enumerate its full tool set (incl `watch_pr`)
  * with non-empty input schemas + flattened params, and an external server that
  * fails to connect must surface as `status:"error"` WITHOUT failing the endpoint
  * (the external probe is injected here, so nothing is ever spawned).
@@ -42,7 +42,7 @@ function makeProject(mcpServers?: Project["mcpServers"]): Project {
 describe("mcp-catalog — builder", () => {
   it("enumerates the manager server with the full tool set + schemas/params", async () => {
     const catalog = await buildProjectMcpCatalog(makeProject(), {
-      bindings: { github: true, terminals: true, memory: true },
+      bindings: { github: true, terminals: true, memory: true, runner: true },
     });
 
     expect(catalog.servers).toHaveLength(1);
@@ -57,31 +57,36 @@ describe("mcp-catalog — builder", () => {
       expect.arrayContaining([
         "wait",
         "wait_for_chat",
-        "wait_for_pr",
+        "watch_pr",
         "terminal",
         "remember",
         "recall",
         "forget",
+        "run_subapp",
       ]),
     );
 
-    // Every manager tool carries a non-empty input schema + flattened params.
+    // Tools that legitimately take no arguments (they act on the calling chat's
+    // own state) carry an empty schema; every other tool has flattened params.
+    const NO_ARG_TOOLS = new Set(["context_usage", "compact_context"]);
     for (const tool of manager.tools) {
       expect(tool.qualifiedName).toBe(`mcp__manager__${tool.name}`);
       expect(tool.description.length).toBeGreaterThan(0);
-      const props = (tool.inputSchema as { properties?: Record<string, unknown> }).properties;
-      expect(props && Object.keys(props).length).toBeGreaterThan(0);
-      expect(tool.params.length).toBeGreaterThan(0);
+      if (!NO_ARG_TOOLS.has(tool.name)) {
+        const props = (tool.inputSchema as { properties?: Record<string, unknown> }).properties;
+        expect(props && Object.keys(props).length).toBeGreaterThan(0);
+        expect(tool.params.length).toBeGreaterThan(0);
+      }
       // All bindings present → all tools available.
       expect(tool.available).toBe(true);
     }
 
-    // Spot-check wait_for_pr's derived params (number required, repo optional).
-    const waitForPr = manager.tools.find((t) => t.name === "wait_for_pr")!;
-    const number = waitForPr.params.find((p) => p.name === "number")!;
+    // Spot-check watch_pr's derived params (number required, repo optional).
+    const watchPr = manager.tools.find((t) => t.name === "watch_pr")!;
+    const number = watchPr.params.find((p) => p.name === "number")!;
     expect(number.required).toBe(true);
     expect(number.type).toBe("number");
-    expect(waitForPr.params.find((p) => p.name === "repo")!.required).toBe(false);
+    expect(watchPr.params.find((p) => p.name === "repo")!.required).toBe(false);
   });
 
   it("marks a manager tool unavailable when its backing service is unbound", async () => {
@@ -89,8 +94,8 @@ describe("mcp-catalog — builder", () => {
       bindings: { github: false, terminals: true, memory: true },
     });
     const manager = catalog.servers[0]!;
-    // wait_for_pr is gated on the github binding → unavailable when unbound…
-    expect(manager.tools.find((t) => t.name === "wait_for_pr")!.available).toBe(false);
+    // watch_pr is gated on the github binding → unavailable when unbound…
+    expect(manager.tools.find((t) => t.name === "watch_pr")!.available).toBe(false);
     // …while ungated tools stay available.
     expect(manager.tools.find((t) => t.name === "wait")!.available).toBe(true);
   });
@@ -232,8 +237,14 @@ describe("GET /api/projects/:projectId/mcp", () => {
     const catalog = res.json() as McpCatalog;
     const manager = catalog.servers.find((s) => s.name === "manager")!;
     expect(manager.kind).toBe("custom");
-    expect(manager.tools.map((t) => t.name)).toContain("wait_for_pr");
-    expect(manager.tools.every((t) => t.params.length > 0)).toBe(true);
+    expect(manager.tools.map((t) => t.name)).toContain("watch_pr");
+    // No-arg tools (context_usage/compact_context) carry an empty param list.
+    expect(
+      manager.tools.every(
+        (t) =>
+          t.params.length > 0 || ["context_usage", "compact_context"].includes(t.name),
+      ),
+    ).toBe(true);
 
     const missing = await app.inject({ method: "GET", url: "/api/projects/nope/mcp" });
     expect(missing.statusCode).toBe(404);

@@ -19,6 +19,7 @@ import { registerTerminalRoutes } from "./terminals.js";
 import { registerGithubRoutes } from "./github.js";
 import { registerAttentionRoutes } from "./attention.js";
 import { registerSettingsRoutes } from "./settings.js";
+import { registerUsageRoutes } from "./usage.js";
 
 export function registerRoutes(app: FastifyInstance): void {
   registerWsRoutes(app);
@@ -36,4 +37,5 @@ export function registerRoutes(app: FastifyInstance): void {
   registerGithubRoutes(app);
   registerAttentionRoutes(app);
   registerSettingsRoutes(app);
+  registerUsageRoutes(app);
 }

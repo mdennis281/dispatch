@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   GitBranch,
   GitPullRequest,
+  GitMerge,
   Square,
   MoreHorizontal,
   Hash,
@@ -11,7 +12,7 @@ import {
   Pencil,
   Trash2,
 } from "lucide-react";
-import type { AgentActivity, Chat } from "@cm/shared";
+import type { AgentActivity, Chat, WorktreeInfo } from "@cm/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
@@ -26,6 +27,8 @@ import { useChatMessages, useMessages } from "../../stores/messages.js";
 import { useChats } from "../../stores/chats.js";
 import { useAttention } from "../../stores/attention.js";
 import { useProjects } from "../../stores/projects.js";
+import { usePanels } from "../../stores/panels.js";
+import { worktreeMatchesChat, samePath } from "../panels/panelBus.js";
 import { actions, deleteChat } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
 
@@ -33,6 +36,18 @@ function branchName(path: string | undefined): string | null {
   if (!path) return null;
   const leaf = path.split(/[\\/]/).pop() ?? path;
   return leaf.replace(/^[a-z]+-/, (m) => `${m.slice(0, -1)}/`);
+}
+
+/**
+ * The "primary" worktree for the header: the first whose branch isn't merged, so
+ * a merged primary auto-promotes the next live worktree to the front. Falls back
+ * to the first when every worktree is merged (nothing live left to show).
+ */
+function pickPrimary(
+  wts: WorktreeInfo[],
+  isMerged: (branch: string) => boolean,
+): WorktreeInfo | undefined {
+  return wts.find((w) => !isMerged(w.branch)) ?? wts[0];
 }
 
 /** A human "what is the agent doing" label from the live activity state. */
@@ -66,9 +81,12 @@ function EmptyTranscript() {
 export function ChatView({ chat }: { chat: Chat }) {
   const messages = useChatMessages(chat.id);
   const activity = useChats((s) => s.activity[chat.id]);
+  const prSettled = useChats((s) => s.prSettled[chat.id] ?? false);
   const streamingBuffers = useMessages((s) => s.streaming);
   const agents = useProjects((s) => s.agents);
   const modes = useProjects((s) => s.modes);
+  const worktrees = usePanels((s) => s.worktrees);
+  const prs = usePanels((s) => s.prs);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
@@ -113,15 +131,30 @@ export function ChatView({ chat }: { chat: Chat }) {
     }
   };
 
-  const meta = statusMeta(chat.status);
+  const meta = statusMeta(chat.status, prSettled);
   const running = chat.status === "running";
-  const branch = branchName(chat.worktrees[0]);
   const pr = chat.prs[0];
+
+  // Header worktree chip: primary branch + a "+N" for the rest, promoting the next
+  // live worktree when the current primary's PR merges.
+  const mineWts = worktrees.filter((w) => worktreeMatchesChat(w, chat));
+  const isMerged = (b: string) => prs.some((p) => p.branch === b && p.state === "merged");
+  const primaryWt = pickPrimary(mineWts, isMerged);
+  const pendingWtPaths = chat.worktrees.filter((p) => !mineWts.some((w) => samePath(w.path, p)));
+  const primaryBranch = primaryWt?.branch ?? branchName(chat.worktrees[0]);
+  const primaryMerged = primaryWt ? isMerged(primaryWt.branch) : false;
+  const extraBranches = [
+    ...mineWts.filter((w) => w.path !== primaryWt?.path).map((w) => w.branch),
+    ...pendingWtPaths.map((p) => branchName(p) ?? p),
+  ];
 
   // Live streaming rows: `message-chunk` deltas for this chat not yet finalized
   // as a persisted `chat-message` row (deduped by id once the full row lands).
   const streamRows = useMemo<StreamRow[]>(() => {
-    // Only in-flight while the turn runs; a stale buffer never outlives its turn.
+    // Only in-flight while the turn actually runs. A blocked turn (awaiting-input)
+    // has no live stream — its text already landed as a finalized `assistant` row
+    // before the prompt fired — so showing buffers there only resurfaces stale
+    // StreamingRows (a stuck ●●● pulse under finished sections).
     if (!running) return [];
     const prefix = `${chat.id}:`;
     const finalized = new Set(messages.map((m) => m.id));
@@ -178,7 +211,7 @@ export function ChatView({ chat }: { chat: Chat }) {
   const isEmpty = messages.length === 0 && streamRows.length === 0 && !running;
 
   return (
-    <div className="flex h-full min-w-0 flex-col bg-app">
+    <div className="flex h-full min-w-0 flex-1 flex-col bg-app">
       {/* header */}
       <div className="relative shrink-0">
         <div className="flex h-12 items-center gap-3 px-4 cm-hairline-b">
@@ -226,10 +259,21 @@ export function ChatView({ chat }: { chat: Chat }) {
           </div>
 
           <div className="ml-auto flex items-center gap-1.5">
-            {branch && (
-              <Chip tone="neutral" icon={<GitBranch />} mono>
-                {branch}
+            {primaryBranch && (
+              <Chip
+                tone={primaryMerged ? "accent" : "neutral"}
+                icon={primaryMerged ? <GitMerge /> : <GitBranch />}
+                mono
+              >
+                {primaryBranch}
               </Chip>
+            )}
+            {extraBranches.length > 0 && (
+              <span title={extraBranches.join(", ")}>
+                <Chip tone="muted" mono>
+                  +{extraBranches.length}
+                </Chip>
+              </span>
             )}
             {pr && (
               <Chip tone="accent" icon={<GitPullRequest />}>
@@ -333,9 +377,7 @@ export function ChatView({ chat }: { chat: Chat }) {
       </div>
 
       {/* composer */}
-      <div className="mx-auto w-full max-w-[860px]">
-        <Composer chat={chat} agents={agents} modes={modes} />
-      </div>
+      <Composer chat={chat} agents={agents} modes={modes} />
 
       <Modal
         open={confirmDelete}

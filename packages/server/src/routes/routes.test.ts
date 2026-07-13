@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -244,6 +245,34 @@ describe("routes — REST CRUD", () => {
 
     const att = await app.inject({ method: "GET", url: "/api/attention" });
     expect(att.json()).toEqual([]);
+  });
+
+  it("POST /api/projects auto-scaffolds a .claude-manager/ into an existing repo", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "cm-repo-"));
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Widget", repoPath: repo, worktreeRoot: "wt" },
+      });
+      expect(res.statusCode).toBe(201);
+      const manifest = join(repo, ".claude-manager", "project.yaml");
+      expect(existsSync(manifest)).toBe(true);
+      expect(readFileSync(manifest, "utf8")).toContain("name: Widget");
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("POST /api/projects with a non-existent repoPath creates no stray dirs", async () => {
+    const missing = join(dir, "does-not-exist-repo");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { name: "Ghost", repoPath: missing, worktreeRoot: "wt" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(existsSync(missing)).toBe(false);
   });
 
   it("rejects a chat with no projectId and a project with no name", async () => {

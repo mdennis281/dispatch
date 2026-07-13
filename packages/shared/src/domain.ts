@@ -25,6 +25,14 @@ export const SubAppSchema = z.object({
   test: z.string().optional(),
   /** Ports the app binds; used for per-worktree offset allocation. */
   ports: z.array(z.number().int()).optional(),
+  /**
+   * Extra env for the dev process, with `{port}` / `{portN}` placeholders
+   * substituted from the allocated ports (`{port}` = primary, `{port2}` =
+   * second, …). This is how a tool that ignores the injected `PORT` gets its
+   * port — e.g. Vite reads `CLIENT_PORT`, so `env: { CLIENT_PORT: "{port}" }`.
+   * The `dev`/`build`/`test` command strings accept the same placeholders.
+   */
+  env: z.record(z.string(), z.string()).optional(),
   /** One-click URL template, e.g. "http://localhost:{port}". */
   url: z.string().optional(),
   /** Path to a docker-compose file to `docker compose up` instead of a process. */
@@ -281,6 +289,18 @@ export const WorktreeInfoSchema = z.object({
 });
 export type WorktreeInfo = z.infer<typeof WorktreeInfoSchema>;
 
+/** A local git branch, for the launch branch/worktree picker. */
+export const BranchInfoSchema = z.object({
+  name: z.string(),
+  /** Last commit (committer) date, epoch ms — drives the recency sort. */
+  lastCommitAt: z.number().int().optional(),
+  /** True for the branch checked out in the primary repo (project.repoPath). */
+  isCurrent: z.boolean().optional(),
+  /** Absolute path of the worktree on this branch, if one exists. */
+  worktreePath: z.string().optional(),
+});
+export type BranchInfo = z.infer<typeof BranchInfoSchema>;
+
 /* ----------------------------------------------------------------- runners */
 
 export const RunnerStatusSchema = z.enum([
@@ -299,6 +319,8 @@ export const RunnerInstanceSchema = z.object({
   projectId: z.string().optional(),
   chatId: z.string().optional(),
   worktreePath: z.string(),
+  /** Branch the worktree is on (for display + branch-scoped tracking). */
+  branch: z.string().optional(),
   subAppId: z.string(),
   kind: z.enum(["process", "docker"]).default("process"),
   pid: z.number().int().optional(),
