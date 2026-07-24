@@ -5,6 +5,7 @@
  * `memory-deleted` bus event so open UIs live-update.
  *
  *   GET    /api/projects/:projectId/memory         → ProjectMemory[]
+ *   GET    /api/projects/:projectId/memory/stats   → { entries, pruneCandidates }
  *   GET    /api/projects/:projectId/memory/:name   → ProjectMemory | 404
  *   POST   /api/projects/:projectId/memory         → create/update (dedupe by name)
  *   PUT    /api/projects/:projectId/memory/:name   → update (name from the path)
@@ -38,6 +39,26 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
         return reply.code(404).send({ error: "project not found" });
       }
       return memory.list(req.params.projectId);
+    },
+  );
+
+  /**
+   * Access telemetry for a project's memories — usefulness counts (how often each
+   * was recalled/surfaced) plus the current prune candidates. Read-only curation
+   * data for the Memory panel. Registered before `/memory/:name` so "stats" isn't
+   * swallowed as a memory name.
+   */
+  app.get<{ Params: { projectId: string } }>(
+    "/api/projects/:projectId/memory/stats",
+    async (req, reply) => {
+      if (!(await ensureProject(req.params.projectId))) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+      const [entries, prunable] = await Promise.all([
+        memory.accessStats(req.params.projectId),
+        memory.pruneCandidates(req.params.projectId),
+      ]);
+      return { entries, pruneCandidates: prunable.map((m) => m.name) };
     },
   );
 

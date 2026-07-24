@@ -37,9 +37,49 @@ import {
 import { KeyedMutex } from "../store/fsq.js";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
+import {
+  MemoryStatsStore,
+  usefulness,
+  type MemoryStat,
+  type MemoryAccessKind,
+} from "./memory-stats.js";
 
 /** The generated index filename (excluded from the memory listing). */
 const INDEX_FILE = "MEMORY.md";
+
+/* -------------------------------------------------- start-of-session injection */
+
+/** Per-rule body clamp (chars) in the injected "Standing rules" section. */
+const RULE_BODY_MAX = 700;
+/** Total budget (chars) for rule BODIES before later rules degrade to one-liners. */
+const RULES_BODY_BUDGET = 4000;
+/** How many lookup facts to show as a visible sample (most-used, then recent). */
+const FACTS_SAMPLE = 6;
+/** Topic-map areas shown before collapsing the tail into "+N more". */
+const AREA_LIMIT = 12;
+
+/**
+ * Cluster memories into topic areas by the first token of their kebab-case name
+ * (`steam-*` → "steam") and render "area (count)" sorted by count desc. Bounded
+ * to {@link AREA_LIMIT} areas with a "+N more" tail so the map stays compact even
+ * when a project has hundreds of facts. Empty string when there's nothing to map.
+ */
+export function clusterAreas(memories: readonly { name: string }[]): string {
+  const counts = new Map<string, number>();
+  for (const m of memories) {
+    const area = (m.name.split("-")[0] || m.name).trim();
+    if (!area) continue;
+    counts.set(area, (counts.get(area) ?? 0) + 1);
+  }
+  const sorted = [...counts.entries()].sort(
+    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+  );
+  const shown = sorted.slice(0, AREA_LIMIT);
+  const parts = shown.map(([area, n]) => `${area} (${n})`);
+  const rest = sorted.length - shown.length;
+  if (rest > 0) parts.push(`+${rest} more`);
+  return parts.join(", ");
+}
 
 /**
  * The slice of {@link ProjectConfigService} MemoryService needs to relocate a
@@ -62,6 +102,12 @@ export interface MemoryServiceOptions {
    * truth) instead of the `.data` store. Omitted → always the `.data` store.
    */
   projectConfig?: MemoryConfigResolver;
+  /**
+   * Access-telemetry store backing usefulness ranking + the injection's
+   * "most-used" sample. Defaults to a {@link MemoryStatsStore} over the same
+   * `.data` store (so production needs no wiring); tests may inject their own.
+   */
+  stats?: MemoryStatsStore;
 }
 
 /** Input for creating/updating a memory (the write surface). */
@@ -234,6 +280,54 @@ function coerceType(value: string | undefined): MemoryType {
   return parsed.success ? parsed.data : "project";
 }
 
+/** Jaccard overlap of two token sets — |A∩B| / |A∪B|, in [0,1]. */
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter++;
+  const union = a.size + b.size - inter;
+  return union ? inter / union : 0;
+}
+
+/** The text fields that define a memory's identity, for similarity comparison. */
+interface MemoryText {
+  name: string;
+  description: string;
+  body: string;
+}
+
+/**
+ * Blended similarity of two memories in [0,1] — the "are these the same fact?"
+ * signal behind the remember dedup nudge. Name and description carry the intent
+ * (a duplicate usually shares the feature word + a reworded one-liner), so they
+ * dominate; the body is noisy at length and only lightly weighted.
+ */
+export function memorySimilarity(a: MemoryText, b: MemoryText): number {
+  const nameSim = jaccard(new Set(tokenize(a.name)), new Set(tokenize(b.name)));
+  const descSim = jaccard(new Set(tokenize(a.description)), new Set(tokenize(b.description)));
+  const bodySim = jaccard(new Set(tokenize(a.body)), new Set(tokenize(b.body)));
+  return 0.45 * nameSim + 0.4 * descSim + 0.15 * bodySim;
+}
+
+/** A pre-existing memory that closely resembles a remember candidate. */
+export interface SimilarMemory {
+  name: string;
+  description: string;
+  type: MemoryType;
+  /** Blended similarity in [0,1] (rounded to 2 dp). */
+  similarity: number;
+}
+
+/**
+ * Default "these are probably the same fact" bar for the dedup nudge. Calibrated
+ * against a real ~140-memory store where genuinely DISTINCT same-domain facts
+ * (e.g. `debug-menu-system` vs `turret-menu-system`) top out around 0.31; sitting
+ * just above that noise floor means the nudge fires on true reworded duplicates
+ * without crying wolf on every same-area write. It's a soft, non-blocking hint,
+ * so a rare miss or false positive costs little.
+ */
+const SIMILARITY_THRESHOLD = 0.35;
+
 /* ------------------------------------------------------------ MemoryService */
 
 export class MemoryService {
@@ -241,6 +335,7 @@ export class MemoryService {
   private readonly bus: EventBus;
   private readonly now: () => number;
   private readonly projectConfig?: MemoryConfigResolver;
+  private readonly stats: MemoryStatsStore;
   private readonly mutex = new KeyedMutex();
 
   constructor(opts: MemoryServiceOptions) {
@@ -248,6 +343,25 @@ export class MemoryService {
     this.bus = opts.bus;
     this.now = opts.now ?? (() => Date.now());
     this.projectConfig = opts.projectConfig;
+    this.stats = opts.stats ?? new MemoryStatsStore(this.store);
+  }
+
+  /**
+   * Record an access event against a set of memory names — best-effort, so a
+   * telemetry write never breaks the recall/surface it's counting. Names are
+   * assumed already resolved to real memories.
+   */
+  private async recordAccess(
+    projectId: string,
+    names: readonly string[],
+    kind: MemoryAccessKind,
+  ): Promise<void> {
+    if (!names.length) return;
+    try {
+      await this.stats.record(projectId, names, kind, this.now());
+    } catch {
+      /* telemetry is best-effort */
+    }
   }
 
   /** Guard a projectId so it can't escape the data dir (no separators/traversal). */
@@ -375,7 +489,16 @@ export class MemoryService {
       removed = true;
       await this.regenerateIndex(pid, dir);
     });
-    if (removed) this.bus.publish({ type: "memory-deleted", projectId: pid, name: slug });
+    if (removed) {
+      this.bus.publish({ type: "memory-deleted", projectId: pid, name: slug });
+      // Drop the removed memory's access stats so a later slug reuse starts clean.
+      try {
+        const live = new Set((await this.list(pid)).map((m) => m.name));
+        await this.stats.prune(pid, live);
+      } catch {
+        /* best-effort telemetry cleanup */
+      }
+    }
     return removed;
   }
 
@@ -431,6 +554,42 @@ export class MemoryService {
   }
 
   /**
+   * Find pre-existing memories that closely resemble a candidate (by name +
+   * description + body), so `remember` can nudge the agent to CONSOLIDATE a
+   * near-duplicate instead of accumulating a second copy of the same fact. The
+   * candidate's own slug is excluded (reusing a name is a legitimate update, not
+   * a duplicate). Returns matches at/above `threshold`, most-similar first,
+   * capped to `limit`. Never throws on an empty/whitespace name → no matches.
+   */
+  async findSimilar(
+    projectId: string,
+    candidate: { name: string; description?: string; body?: string },
+    opts: { threshold?: number; limit?: number } = {},
+  ): Promise<SimilarMemory[]> {
+    const slug = slugifyMemoryName(candidate.name);
+    if (!slug) return [];
+    const threshold = opts.threshold ?? SIMILARITY_THRESHOLD;
+    const cand: MemoryText = {
+      name: slug,
+      description: candidate.description ?? "",
+      body: candidate.body ?? "",
+    };
+    const all = await this.list(projectId);
+    return all
+      .filter((m) => m.name !== slug)
+      .map((m) => ({ m, similarity: memorySimilarity(cand, m) }))
+      .filter((s) => s.similarity >= threshold)
+      .sort((a, b) => b.similarity - a.similarity || a.m.name.localeCompare(b.m.name))
+      .slice(0, Math.max(1, opts.limit ?? 3))
+      .map((s) => ({
+        name: s.m.name,
+        description: s.m.description,
+        type: s.m.type,
+        similarity: Math.round(s.similarity * 100) / 100,
+      }));
+  }
+
+  /**
    * Rank a project's memories against free text (the shared relevance core used
    * by {@link recall}, the auto-surface injection, and the UI search box). A
    * weighted token+substring scorer favours name over description over body and
@@ -449,6 +608,8 @@ export class MemoryService {
     const all = await this.list(projectId);
     const pool = opts.type ? all.filter((m) => m.type === opts.type) : all;
     const tokens = [...new Set(tokenize(raw))];
+    // Access telemetry breaks score ties toward facts that keep proving useful.
+    const stats = await this.stats.get(projectId).catch(() => ({}) as Record<string, MemoryStat>);
 
     const scored = pool
       .map((m) => ({ m, score: scoreMemory(m, tokens, raw) }))
@@ -456,6 +617,7 @@ export class MemoryService {
       .sort(
         (a, b) =>
           b.score - a.score ||
+          usefulness(stats[b.m.name]) - usefulness(stats[a.m.name]) ||
           (b.m.updatedAt ?? 0) - (a.m.updatedAt ?? 0) ||
           a.m.name.localeCompare(b.m.name),
       );
@@ -502,6 +664,8 @@ export class MemoryService {
       type: opts.type,
       expandLinks: true,
     });
+    // An explicit recall is the strongest "this fact was needed" signal.
+    await this.recordAccess(this.safeProjectId(projectId), matches.map((m) => m.name), "recalled");
     return { index, matches };
   }
 
@@ -531,6 +695,10 @@ export class MemoryService {
       .slice(0, limit);
     if (!picked.length) return null;
 
+    const names = picked.map((m) => m.name);
+    // Count the proactive push so a fact that keeps being relevant ranks up.
+    await this.recordAccess(this.safeProjectId(projectId), names, "surfaced");
+
     const sections = picked
       .map(
         (m) =>
@@ -547,7 +715,7 @@ export class MemoryService {
       "with `mcp__manager__remember` (same name overwrites) or `mcp__manager__forget`.\n\n" +
       sections +
       "\n</system-reminder>";
-    return { block, names: picked.map((m) => m.name) };
+    return { block, names };
   }
 
   /** The `MEMORY.md` index content for a project (regenerated, not cached). */
@@ -557,48 +725,137 @@ export class MemoryService {
   }
 
   /**
-   * The bounded system-prompt injection for a project (the memory catalogue as
-   * one-line, grouped descriptions — never full bodies). Directive framing so
-   * the agent actually consults + grows the memory rather than ignoring it. Null
-   * when the project has no memories so an empty project injects nothing.
+   * The bounded start-of-session injection for a project. Two tiers, so the
+   * catalogue can grow to hundreds of facts without flooding every session:
+   *
+   *  - **Standing rules** (`user` + `feedback`) — behavioural guidance that
+   *    can't wait to be keyword-matched, so it's ALWAYS present, with its body
+   *    (clamped + budget-bounded). These are "how this team works".
+   *  - **Recorded facts** (`project` + `reference`) — a lookup catalogue, so
+   *    rather than dump every one-liner it injects a topic map (areas + counts)
+   *    plus a small most-used sample. The relevant facts arrive in full via
+   *    auto-surface, and the agent pulls the rest on demand with `recall`.
+   *
+   * Null when the project has no memories (an empty project injects nothing).
    */
   async buildInjection(projectId: string): Promise<string | null> {
     const memories = await this.list(projectId);
     if (!memories.length) return null;
 
-    const order: MemoryType[] = ["user", "feedback", "project", "reference"];
-    const labels: Record<MemoryType, string> = {
-      user: "Preferences",
-      feedback: "Feedback & lessons",
-      project: "Project facts",
-      reference: "Reference pointers",
-    };
-    const lines: string[] = [];
-    for (const type of order) {
-      const group = memories.filter((m) => m.type === type);
-      if (!group.length) continue;
-      lines.push(`**${labels[type]}**`);
-      for (const m of group) {
-        lines.push(`- \`${m.name}\` — ${m.description || "(no description)"}`);
-      }
-      lines.push("");
-    }
+    const rules = memories.filter((m) => m.type === "user" || m.type === "feedback");
+    const facts = memories.filter((m) => m.type === "project" || m.type === "reference");
+    const stats = await this.stats
+      .get(projectId)
+      .catch(() => ({}) as Record<string, MemoryStat>);
 
-    return [
+    const out: string[] = [
       "## Project memory",
       "",
-      "Durable facts your team recorded for THIS project. The most relevant ones are " +
-        "surfaced in full automatically as you work — but this is the full catalogue. " +
-        "Consult it before asking the user something they may have already answered, " +
-        "and treat these as the team's standing context.",
+      "Durable facts your team recorded for THIS project. The standing rules below " +
+        "ALWAYS apply. Everything else is a lookup catalogue — the facts most relevant " +
+        "to what you're doing surface in full automatically, and you can pull any other " +
+        "by topic with `mcp__manager__recall({ query })`. Consult it before asking the " +
+        "user something they may have already answered.",
       "",
-      ...lines,
-      "When something here is relevant, call `mcp__manager__recall({ query })` to read the " +
-        "full body. When you learn a durable fact — a preference, a correction, an " +
-        "architecture decision, a reference — record it with " +
+    ];
+
+    // --- Tier 1: standing rules & preferences (always in full, budget-bounded).
+    if (rules.length) {
+      out.push("### Standing rules & preferences", "");
+      const rank: MemoryType[] = ["user", "feedback"];
+      const sorted = [...rules].sort(
+        (a, b) => rank.indexOf(a.type) - rank.indexOf(b.type) || a.name.localeCompare(b.name),
+      );
+      let budget = RULES_BODY_BUDGET;
+      for (const m of sorted) {
+        out.push(`- **${m.name}** — ${m.description || "(no description)"}`);
+        const body = m.body.trim();
+        if (body && budget > 0) {
+          const clamped = clampBody(body, Math.min(RULE_BODY_MAX, budget));
+          budget -= clamped.length;
+          out.push(clamped.split("\n").map((l) => `  ${l}`).join("\n"));
+        }
+      }
+      out.push("");
+    }
+
+    // --- Tier 2: recorded facts as a topic map + a most-used sample (never the
+    //     full one-line dump — that's what floods a large project's every turn).
+    if (facts.length) {
+      out.push("### Recorded facts — retrieved on demand", "");
+      out.push(
+        `${facts.length} recorded ${facts.length === 1 ? "fact" : "facts"} (project + ` +
+          "reference). The relevant ones auto-surface as you work; call " +
+          "`mcp__manager__recall({ query })` to pull any by topic.",
+        "",
+      );
+      const areas = clusterAreas(facts);
+      if (areas) out.push(`By area: ${areas}`, "");
+
+      const sample = [...facts]
+        .sort(
+          (a, b) =>
+            usefulness(stats[b.name]) - usefulness(stats[a.name]) ||
+            (b.updatedAt ?? 0) - (a.updatedAt ?? 0) ||
+            a.name.localeCompare(b.name),
+        )
+        .slice(0, FACTS_SAMPLE);
+      const anyUsed = sample.some((m) => usefulness(stats[m.name]) > 0);
+      out.push(anyUsed ? "Most-used lately:" : "Recently recorded:");
+      for (const m of sample) {
+        out.push(`- \`${m.name}\` — ${m.description || "(no description)"}`);
+      }
+      out.push("");
+    }
+
+    out.push(
+      "When you learn a durable fact — a preference, a correction, an architecture " +
+        "decision, a reference — record it with " +
         "`mcp__manager__remember({ name, description, type, body })` so it outlives this " +
-        "chat; reuse a name to update, and `mcp__manager__forget({ name })` when one goes stale.",
-    ].join("\n");
+        "chat; reuse a name to update an existing one instead of adding a near-duplicate, " +
+        "and `mcp__manager__forget({ name })` when one goes stale.",
+    );
+
+    return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+  }
+
+  /**
+   * A project's memory access telemetry (name → surfaced/recalled counts +
+   * last-access time). Powers the Memory panel's usefulness view; empty when
+   * nothing's been accessed yet.
+   */
+  async accessStats(projectId: string): Promise<Record<string, MemoryStat>> {
+    return this.stats.get(this.safeProjectId(projectId));
+  }
+
+  /**
+   * Memories that look prunable — a curation aid (for the Memory panel or a
+   * future `/memory-review`), never an auto-delete. A memory is a candidate when
+   * it was NEVER recalled AND either never accessed at all or only surfaced and
+   * not since `staleBefore`. Ordered least-useful first. `staleBefore` defaults
+   * to 0 → only the never-accessed ones qualify.
+   */
+  async pruneCandidates(
+    projectId: string,
+    opts: { staleBefore?: number } = {},
+  ): Promise<ProjectMemory[]> {
+    const pid = this.safeProjectId(projectId);
+    const memories = await this.list(pid);
+    const stats = await this.stats.get(pid).catch(() => ({}) as Record<string, MemoryStat>);
+    const staleBefore = opts.staleBefore ?? 0;
+    return memories
+      .filter((m) => {
+        const s = stats[m.name];
+        if (!s) return true; // never accessed at all
+        if (s.recalled > 0) return false; // an explicit recall proved it useful
+        return s.lastAccessedAt < staleBefore; // only surfaced, and not lately
+      })
+      .sort(
+        (a, b) =>
+          usefulness(stats[a.name]) - usefulness(stats[b.name]) ||
+          (a.updatedAt ?? 0) - (b.updatedAt ?? 0) ||
+          a.name.localeCompare(b.name),
+      );
   }
 
   /* --------------------------------------------------------------- internal */

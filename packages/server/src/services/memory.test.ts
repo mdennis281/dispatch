@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import type { WsServerEvent } from "@cm/shared";
-import { MemoryService } from "./memory.js";
+import { MemoryService, clusterAreas } from "./memory.js";
 
 let dir: string;
 let store: Store;
@@ -207,6 +207,165 @@ describe("MemoryService — injection + recall", () => {
     expect(written.updatedAt).toBeTypeOf("number");
     const reread = await memory.read("p1", "stamped");
     expect(reread?.updatedAt).toBe(written.updatedAt);
+  });
+});
+
+describe("MemoryService — tiered injection (rules vs facts)", () => {
+  it("injects standing rules in full (user before feedback) and never a fact body", async () => {
+    await memory.write("p1", { name: "always-watch-prs", description: "watch PRs to merge", type: "feedback", body: "FEEDBACK BODY: after shipping, watch it through." });
+    await memory.write("p1", { name: "michael-iterates", description: "iterates and reverts", type: "user", body: "USER BODY: expect churn." });
+    await memory.write("p1", { name: "steam-login", description: "how steam login works", type: "project", body: "FACT BODY should never inject" });
+
+    const inj = (await memory.buildInjection("p1"))!;
+    expect(inj).toContain("### Standing rules & preferences");
+    // Rules carry their (clamped) bodies…
+    expect(inj).toContain("**michael-iterates** — iterates and reverts");
+    expect(inj).toContain("USER BODY: expect churn.");
+    expect(inj).toContain("FEEDBACK BODY: after shipping");
+    // …ordered user before feedback.
+    expect(inj.indexOf("michael-iterates")).toBeLessThan(inj.indexOf("always-watch-prs"));
+    // A lookup fact's BODY is never injected (only its name/description in the sample).
+    expect(inj).not.toContain("FACT BODY should never inject");
+  });
+
+  it("caps the facts sample so a large catalogue can't flood; the topic map still counts all", async () => {
+    // 8 facts written oldest→newest across 3 areas; sample caps at 6.
+    for (const n of ["a-1", "a-2", "a-3", "b-1", "b-2", "c-1", "c-2", "c-3"]) {
+      await memory.write("p1", { name: n, description: `d ${n}`, type: "project", body: "x" });
+    }
+    const inj = (await memory.buildInjection("p1"))!;
+    expect(inj).toContain("8 recorded facts");
+    expect(inj).toContain("Recently recorded:"); // nothing accessed yet
+    // Newest 6 shown as one-liners; the two OLDEST are omitted from the sample…
+    expect(inj).toContain("`c-3` — d c-3");
+    expect(inj).not.toContain("`a-1` — d a-1");
+    expect(inj).not.toContain("`a-2` — d a-2");
+    // …but the area map counts every fact.
+    expect(inj).toContain("a (3)");
+    expect(inj).toContain("c (3)");
+  });
+
+  it("omits the rules section when there are none and the facts section when there are none", async () => {
+    await memory.write("p1", { name: "only-fact", description: "a fact", type: "project", body: "b" });
+    let inj = (await memory.buildInjection("p1"))!;
+    expect(inj).not.toContain("Standing rules");
+    expect(inj).toContain("Recorded facts");
+
+    await memory.delete("p1", "only-fact");
+    await memory.write("p1", { name: "only-rule", description: "a rule", type: "feedback", body: "b" });
+    inj = (await memory.buildInjection("p1"))!;
+    expect(inj).toContain("Standing rules");
+    expect(inj).not.toContain("Recorded facts");
+  });
+});
+
+describe("MemoryService — access telemetry (usefulness ranking)", () => {
+  it("recall records a 'recalled' hit that flips the sample label + ordering", async () => {
+    // 'often' written FIRST (older) so recency alone would rank 'seldom' ahead.
+    await memory.write("p1", { name: "often", description: "always needed", type: "project", body: "often UNIQUEQ body" });
+    await memory.write("p1", { name: "seldom", description: "rarely needed", type: "project", body: "seldom body" });
+
+    const before = (await memory.buildInjection("p1"))!;
+    expect(before).toContain("Recently recorded:");
+    expect(before.indexOf("`seldom`")).toBeLessThan(before.indexOf("`often`"));
+
+    const hit = await memory.recall("p1", "UNIQUEQ");
+    expect(hit.matches.map((m) => m.name)).toEqual(["often"]);
+
+    const after = (await memory.buildInjection("p1"))!;
+    expect(after).toContain("Most-used lately:");
+    expect(after.indexOf("`often`")).toBeLessThan(after.indexOf("`seldom`"));
+
+    const stats = await memory.accessStats("p1");
+    expect(stats["often"]?.recalled).toBe(1);
+    expect(stats["seldom"]).toBeUndefined();
+  });
+
+  it("surfaceFor records a 'surfaced' hit", async () => {
+    await memory.write("p1", { name: "deploy-runbook", description: "how we ship to prod", type: "project", body: "run the pipeline" });
+    expect(await memory.surfaceFor("p1", "how do we deploy to prod?")).not.toBeNull();
+    const stats = await memory.accessStats("p1");
+    expect(stats["deploy-runbook"]?.surfaced).toBe(1);
+  });
+
+  it("usefulness breaks a score tie toward the recalled memory", async () => {
+    // Identical-scoring bodies; one gets recalled and should then rank first.
+    await memory.write("p1", { name: "tie-a", description: "shared word deploy", type: "project", body: "b" });
+    await memory.write("p1", { name: "tie-b", description: "shared word deploy", type: "project", body: "b" });
+    // Recall tie-b by name so only it earns a hit.
+    await memory.recall("p1", "tie-b");
+    const ranked = await memory.search("p1", "deploy");
+    expect(ranked[0]?.name).toBe("tie-b");
+  });
+
+  it("pruneCandidates flags never-recalled memories; delete clears stats", async () => {
+    await memory.write("p1", { name: "used", description: "d", type: "project", body: "UNIQ body" });
+    await memory.write("p1", { name: "unused", description: "d", type: "project", body: "other" });
+    await memory.recall("p1", "UNIQ");
+
+    const cands = (await memory.pruneCandidates("p1")).map((m) => m.name);
+    expect(cands).toContain("unused");
+    expect(cands).not.toContain("used");
+
+    await memory.delete("p1", "used");
+    expect((await memory.accessStats("p1"))["used"]).toBeUndefined();
+  });
+});
+
+describe("MemoryService — findSimilar (dedup nudge)", () => {
+  it("flags a near-duplicate under a different name, excludes the same slug + distinct facts", async () => {
+    await memory.write("p1", {
+      name: "consumable-wheel-ui",
+      description: "consumable wheel controls grenade heal tap hold scroll",
+      type: "project",
+      body: "wheel ctrl space",
+    });
+    await memory.write("p1", {
+      name: "deploy-runbook",
+      description: "how we ship to prod",
+      type: "project",
+      body: "pipeline",
+    });
+
+    // A reworded copy of the wheel fact under a new name → surfaced as similar.
+    const hits = await memory.findSimilar("p1", {
+      name: "consumable-wheel-controls",
+      description: "consumable wheel controls grenade heal tap hold scroll",
+      body: "wheel ctrl space",
+    });
+    expect(hits.map((h) => h.name)).toContain("consumable-wheel-ui");
+    expect(hits.map((h) => h.name)).not.toContain("deploy-runbook"); // distinct fact
+    expect(hits[0]?.similarity).toBeGreaterThanOrEqual(0.35);
+
+    // Reusing the SAME name is a legitimate update, never "similar to itself".
+    const self = await memory.findSimilar("p1", {
+      name: "consumable-wheel-ui",
+      description: "consumable wheel controls grenade heal tap hold scroll",
+      body: "wheel ctrl space",
+    });
+    expect(self.map((h) => h.name)).not.toContain("consumable-wheel-ui");
+  });
+
+  it("returns nothing for the first memory of its kind (nothing to duplicate)", async () => {
+    await memory.write("p1", { name: "lonely-fact", description: "a unique thing", type: "project", body: "x" });
+    expect(await memory.findSimilar("p1", { name: "another-fact", description: "wholly unrelated", body: "y" })).toEqual([]);
+  });
+});
+
+describe("clusterAreas", () => {
+  it("maps by kebab name prefix, sorts by count desc", () => {
+    const areas = clusterAreas(
+      ["steam-a", "steam-b", "steam-c", "boss-a", "boss-b", "solo"].map((name) => ({ name })),
+    );
+    expect(areas).toContain("steam (3)");
+    expect(areas).toContain("boss (2)");
+    expect(areas).toContain("solo (1)");
+    expect(areas.indexOf("steam")).toBeLessThan(areas.indexOf("boss"));
+  });
+
+  it("caps at the area limit with a +N more tail", () => {
+    const many = Array.from({ length: 14 }, (_, i) => ({ name: `area${i}-x` }));
+    expect(clusterAreas(many)).toContain("+2 more");
   });
 });
 

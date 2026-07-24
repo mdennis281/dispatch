@@ -8,6 +8,7 @@ import type {
   ProjectMemory,
 } from "@cm/shared";
 import { EventBus } from "../../bus.js";
+import { memorySimilarity } from "../memory.js";
 import {
   createManagerTools,
   createManagerMcpServer,
@@ -592,6 +593,24 @@ function fakeMemory(): ManagerMcpMemory & { data: Map<string, ProjectMemory> } {
       };
     },
     forget: async (name) => data.delete(slug(name)),
+    findSimilar: async (candidate) => {
+      const slugName = slug(candidate.name);
+      const cand = {
+        name: slugName,
+        description: candidate.description ?? "",
+        body: candidate.body ?? "",
+      };
+      return [...data.values()]
+        .filter((m) => m.name !== slugName)
+        .map((m) => ({ m, similarity: memorySimilarity(cand, m) }))
+        .filter((s) => s.similarity >= 0.35)
+        .sort((a, b) => b.similarity - a.similarity)
+        .map((s) => ({
+          name: s.m.name,
+          description: s.m.description,
+          similarity: Math.round(s.similarity * 100) / 100,
+        }));
+    },
   };
 }
 
@@ -677,6 +696,55 @@ describe("manager-mcp — memory tools", () => {
     const res = await remember.handler({ name: "   ", description: "", type: "project", body: "b" }, {});
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("non-empty name");
+  });
+
+  it("remember nudges to consolidate when the new fact duplicates an existing one", async () => {
+    const mem = fakeMemory();
+    const { remember } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), memory: mem });
+    await remember.handler(
+      {
+        name: "consumable-wheel-ui",
+        description: "consumable wheel controls grenade heal tap hold scroll",
+        type: "project",
+        body: "wheel ctrl space",
+      },
+      {},
+    );
+    // A near-identical fact under a different name → still saved, but nudged.
+    const res = await remember.handler(
+      {
+        name: "consumable-wheel-controls",
+        description: "consumable wheel controls grenade heal tap hold scroll",
+        type: "project",
+        body: "wheel ctrl space",
+      },
+      {},
+    );
+    const text = resultText(res);
+    expect(res.isError).toBeFalsy();
+    expect(text).toContain('Remembered "consumable-wheel-controls"'); // the save still happened
+    expect(text).toContain("may duplicate");
+    expect(text).toContain("consumable-wheel-ui");
+    expect(mem.data.has("consumable-wheel-controls")).toBe(true);
+  });
+
+  it("remember does not nudge for a genuinely distinct fact", async () => {
+    const mem = fakeMemory();
+    const { remember } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), memory: mem });
+    await remember.handler(
+      { name: "deploy-runbook", description: "how we ship to prod", type: "project", body: "pipeline" },
+      {},
+    );
+    const res = await remember.handler(
+      {
+        name: "boss-animation-system",
+        description: "spritesheet boss idle attack teleport timings",
+        type: "project",
+        body: "sheets",
+      },
+      {},
+    );
+    expect(resultText(res)).not.toContain("may duplicate");
   });
 
   it("reports unavailable when no MemoryService is wired", async () => {

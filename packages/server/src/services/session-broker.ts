@@ -2075,6 +2075,7 @@ export class SessionBroker {
                 remember: (input) => memory.write(projectId, input),
                 recall: (query, opts) => memory.recall(projectId, query, opts),
                 forget: (name) => memory.delete(projectId, name),
+                findSimilar: (candidate) => memory.findSimilar(projectId, candidate),
               }
             : undefined,
         // Bind the PR watcher to this session's default cwd. `prMergeState` lets

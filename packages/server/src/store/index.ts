@@ -99,6 +99,15 @@ export class Store {
   projectMemoryDir(projectId: string) {
     return join(this.projectsDir(), projectId, "memory");
   }
+  /**
+   * Sidecar ACCESS-telemetry file for a project's memories (how often each is
+   * recalled/surfaced). Deliberately in the `.data` store — NEVER the committable
+   * `.claude-manager/memory/` dir — so it's per-machine runtime signal that can't
+   * churn the repo. Owned by {@link MemoryStatsStore}; created on demand.
+   */
+  projectMemoryStatsFile(projectId: string) {
+    return join(this.projectsDir(), projectId, "memory-stats.json");
+  }
   private agentsDir() {
     return join(this.dataDir, "agents");
   }

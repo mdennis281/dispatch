@@ -129,6 +129,17 @@ export interface ManagerMcpMemory {
     opts?: { type?: "user" | "feedback" | "project" | "reference" },
   ): Promise<{ index: string; matches: ProjectMemory[] }>;
   forget(name: string): Promise<boolean>;
+  /**
+   * Pre-existing memories that closely resemble a `remember` candidate — powers
+   * the dedup nudge (consolidate instead of accumulating a second copy). Bound to
+   * the session's project by the broker. Best-effort; may be omitted on older
+   * wiring, so callers must treat it as optional.
+   */
+  findSimilar?(candidate: {
+    name: string;
+    description?: string;
+    body?: string;
+  }): Promise<Array<{ name: string; description: string; similarity: number }>>;
 }
 
 /** Merge/close-state view of a PR the `watch_pr` tool polls on. */
@@ -810,15 +821,36 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       const name = typeof args.name === "string" ? args.name.trim() : "";
       if (!name) return textResult("remember requires a non-empty name.", true);
       try {
-        const memory = await ctx.memory.remember({
-          name,
-          description: typeof args.description === "string" ? args.description : "",
-          type: args.type,
-          body: typeof args.body === "string" ? args.body : "",
-        });
+        const description = typeof args.description === "string" ? args.description : "";
+        const body = typeof args.body === "string" ? args.body : "";
+        const memory = await ctx.memory.remember({ name, description, type: args.type, body });
+
+        // Dedup nudge: if this closely resembles an existing (differently-named)
+        // memory, the fact was likely already recorded — steer toward consolidating
+        // rather than accumulating a near-duplicate. Best-effort; never blocks the
+        // save that already succeeded.
+        let nudge = "";
+        try {
+          const similar =
+            (await ctx.memory.findSimilar?.({ name: memory.name, description, body })) ?? [];
+          if (similar.length) {
+            const list = similar
+              .map((s) => `\`${s.name}\` (${Math.round(s.similarity * 100)}% similar)`)
+              .join(", ");
+            nudge =
+              `\n\n⚠️ This looks like it may duplicate existing memory: ${list}. ` +
+              "If it's the SAME fact, consolidate to keep memory lean — fold the detail " +
+              `into one and \`forget\` the other (reuse a name to overwrite). If "${memory.name}" ` +
+              "is genuinely distinct, ignore this.";
+          }
+        } catch {
+          /* dedup hint is best-effort — a lookup failure never fails the remember */
+        }
+
         return textResult(
           `Remembered "${memory.name}" (${memory.type}). It's saved to project memory ` +
-            "and will be injected into future sessions. Use recall to read it back.",
+            "and will be injected into future sessions. Use recall to read it back." +
+            nudge,
         );
       } catch (err) {
         return textResult(
