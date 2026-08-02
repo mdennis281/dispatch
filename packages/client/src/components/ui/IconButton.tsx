@@ -21,6 +21,10 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(
     const btn = (
       <button
         ref={ref}
+        // An icon-only button's only label is its tooltip, and that lives in a
+        // portal the button isn't associated with — so without this it has no
+        // accessible name at all. An explicit aria-label in `rest` still wins.
+        aria-label={tip}
         className={cn(
           "inline-flex items-center justify-center rounded-sm border border-transparent " +
             "text-secondary transition-colors duration-150 ease-[var(--ease-out)] " +

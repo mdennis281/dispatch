@@ -78,6 +78,18 @@ function resultMsg() {
   };
 }
 
+/** A turn killed by a subscription limit — how the SDK actually reports it. */
+function limitResultMsg(text: string) {
+  return {
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    num_turns: 1,
+    result: text,
+    duration_ms: 5,
+  };
+}
+
 function makeFakeQuery(perTurn: PerTurn, sessionId = "sess-1"): QueryFn {
   return ({ prompt, options }) => {
     const ctl: FakeCtl = {
@@ -247,6 +259,82 @@ describe("routes — REST CRUD", () => {
     expect(att.json()).toEqual([]);
   });
 
+  it("GET /messages serves a LEAN window, and /messages/full rehydrates it", async () => {
+    const projectId = await makeProject();
+    const chatRes = await app.inject({
+      method: "POST",
+      url: "/api/chats",
+      payload: { projectId, title: "Long" },
+    });
+    const chatId = chatRes.json().id as string;
+
+    const big = "z".repeat(20_000);
+    for (let i = 0; i < 12; i++) {
+      await store.appendMessage({
+        kind: "tool_use",
+        id: `u${i}`,
+        chatId,
+        ts: i * 2,
+        toolUseId: `t${i}`,
+        name: "Bash",
+        input: { command: `run ${i}`, script: big },
+      });
+      await store.appendMessage({
+        kind: "tool_result",
+        id: `r${i}`,
+        chatId,
+        ts: i * 2 + 1,
+        toolUseId: `t${i}`,
+        ok: true,
+        content: big,
+      });
+    }
+
+    // Default: a bounded window of CLIPPED rows — the collapsed cards' data only.
+    const lean = await app.inject({ method: "GET", url: `/api/chats/${chatId}/messages?limit=6` });
+    const leanRows = lean.json() as Array<Record<string, unknown>>;
+    expect(leanRows).toHaveLength(6);
+    expect(leanRows.map((r) => r.id)).toEqual(["u9", "r9", "u10", "r10", "u11", "r11"]);
+    expect(lean.body.length).toBeLessThan(6_000); // vs ~120 KB unclipped
+    const leanUse = leanRows.find((r) => r.id === "u11")!;
+    expect(leanUse.inputOmitted).toBe(true);
+    expect((leanUse.input as Record<string, unknown>).command).toBe("run 11");
+    expect((leanUse.input as Record<string, unknown>).script).toBeUndefined();
+
+    // Paging upward from the oldest row we hold.
+    const older = await app.inject({
+      method: "GET",
+      url: `/api/chats/${chatId}/messages?limit=4&beforeId=u9`,
+    });
+    expect((older.json() as Array<{ id: string }>).map((r) => r.id)).toEqual([
+      "u7",
+      "r7",
+      "u8",
+      "r8",
+    ]);
+
+    // Hydrate-on-expand: the verbatim rows behind two clipped ones.
+    const full = await app.inject({
+      method: "GET",
+      url: `/api/chats/${chatId}/messages/full?ids=u11,r11`,
+    });
+    const fullRows = full.json() as Array<Record<string, unknown>>;
+    expect(fullRows.map((r) => r.id)).toEqual(["u11", "r11"]);
+    expect((fullRows[0]!.input as Record<string, unknown>).script).toBe(big);
+    expect(fullRows[1]!.content).toBe(big);
+    expect(fullRows[0]!.inputOmitted).toBeUndefined();
+
+    // `full=1` opts the window itself out of the projection.
+    const rawWindow = await app.inject({
+      method: "GET",
+      url: `/api/chats/${chatId}/messages?limit=2&full=1`,
+    });
+    expect((rawWindow.json() as Array<{ content?: string }>)[1]!.content).toBe(big);
+
+    const noIds = await app.inject({ method: "GET", url: `/api/chats/${chatId}/messages/full` });
+    expect(noIds.statusCode).toBe(400);
+  });
+
   it("POST /api/projects auto-scaffolds a .claude-manager/ into an existing repo", async () => {
     const repo = await mkdtemp(join(tmpdir(), "cm-repo-"));
     try {
@@ -348,6 +436,93 @@ describe("routes — REST CRUD", () => {
     // Server queue is empty too (no phantom lingers server-side).
     const att = await app.inject({ method: "GET", url: "/api/attention" });
     expect(att.json()).toEqual([]);
+  });
+});
+
+describe("routes — usage-limit auto-resume", () => {
+  const LIMIT = "You've hit your session limit · resets 4:50pm (America/Chicago)";
+
+  /** Drive a chat into the limit state and hand back its id. */
+  async function hitLimit(): Promise<string> {
+    const projectId = await makeProject();
+    const chatId = (
+      await app.inject({
+        method: "POST",
+        url: "/api/chats",
+        payload: { projectId, title: "Long job" },
+      })
+    ).json().id as string;
+    const done = new Promise<void>((resolve) => {
+      const off = bus.on("chat-status", (e) => {
+        if (e.chatId === chatId && e.status === "idle") {
+          off();
+          resolve();
+        }
+      });
+    });
+    const ws = await connect(port);
+    ws.send({ type: "send-message", chatId, text: "do the long thing" });
+    await done;
+    ws.close();
+    return chatId;
+  }
+
+  it("schedules a resume off the limit result, and cancels it on request", async () => {
+    await boot(makeFakeQuery(() => [assistantText(LIMIT), limitResultMsg(LIMIT)]));
+    // The plan is persisted just AFTER the turn goes idle (the scheduler reads
+    // and rewrites the chat), so wait for the broadcast that carries it.
+    const planned$ = new Promise<void>((resolve) => {
+      const off = bus.on("chat-update", (e) => {
+        if (e.chat.resume) {
+          off();
+          resolve();
+        }
+      });
+    });
+    const chatId = await hitLimit();
+    await planned$;
+
+    // The chat now carries a plan pointing at the next 4:50pm America/Chicago.
+    const planned = (await app.inject({ method: "GET", url: `/api/chats/${chatId}` })).json();
+    expect(planned.resume).toMatchObject({ reason: LIMIT });
+    expect(planned.resume.at).toBeGreaterThan(Date.now());
+    expect(planned.resume.cancelledAt).toBeUndefined();
+
+    // Cancelling records it and returns the updated chat…
+    const cancel = await app.inject({
+      method: "POST",
+      url: `/api/chats/${chatId}/resume/cancel`,
+    });
+    expect(cancel.statusCode).toBe(200);
+    expect(cancel.json().resume.cancelledAt).toBeGreaterThan(0);
+
+    // …and a second cancel is a 409, not a silent success.
+    const again = await app.inject({
+      method: "POST",
+      url: `/api/chats/${chatId}/resume/cancel`,
+    });
+    expect(again.statusCode).toBe(409);
+
+    const missing = await app.inject({
+      method: "POST",
+      url: "/api/chats/nope/resume/cancel",
+    });
+    expect(missing.statusCode).toBe(404);
+  });
+
+  it("leaves an ordinary turn error alone — nothing is scheduled to cancel", async () => {
+    await boot(
+      makeFakeQuery(() => [assistantText("boom"), limitResultMsg("Error: ECONNRESET")]),
+    );
+    const chatId = await hitLimit();
+
+    const chat = (await app.inject({ method: "GET", url: `/api/chats/${chatId}` })).json();
+    expect(chat.resume).toBeUndefined();
+    const cancel = await app.inject({
+      method: "POST",
+      url: `/api/chats/${chatId}/resume/cancel`,
+    });
+    expect(cancel.statusCode).toBe(409);
   });
 });
 

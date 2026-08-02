@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { Brain, ChevronRight, Sparkles } from "lucide-react";
 import type { AssistantMessageRow } from "@cm/shared";
 import { RowShell } from "./RowShell.js";
@@ -12,8 +12,21 @@ import { useChats } from "../../../stores/chats.js";
 import { usePanels } from "../../../stores/panels.js";
 import { useProjects } from "../../../stores/projects.js";
 
-/** An assistant turn: optional collapsed reasoning + rendered markdown body. */
-export function AssistantRow({ chatId, row }: { chatId: string; row: AssistantMessageRow }) {
+/**
+ * An assistant turn: optional collapsed reasoning + rendered markdown body.
+ *
+ * Memoized because this is the expensive row — every render re-parses markdown
+ * (react-markdown + remark-gfm) and re-runs Prism over each code fence. A long
+ * transcript holds hundreds of these, so they must re-render only when their own
+ * row changes, never because something elsewhere in the chat moved.
+ */
+export const AssistantRow = memo(function AssistantRow({
+  chatId,
+  row,
+}: {
+  chatId: string;
+  row: AssistantMessageRow;
+}) {
   const [showThinking, setShowThinking] = useState(false);
   const canRollback = useHasCheckpoint(chatId, row.id);
 
@@ -22,9 +35,13 @@ export function AssistantRow({ chatId, row }: { chatId: string; row: AssistantMe
   const chat = useChats((s) => s.byId[chatId]);
   const worktrees = usePanels((s) => s.worktrees);
   const projects = useProjects((s) => s.projects);
+  // Keyed on the FIELDS the resolver reads, not the chat object: `setStatus`
+  // rebuilds that object on every status change, which would otherwise
+  // invalidate this memo and re-render the markdown for no reason.
   const resolveRef = useMemo(
     () => makeCodeRefResolver(chat, worktrees, projects),
-    [chat, worktrees, projects],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see note above
+    [chat?.id, chat?.projectId, chat?.worktrees, worktrees, projects],
   );
   return (
     <RowShell
@@ -65,4 +82,4 @@ export function AssistantRow({ chatId, row }: { chatId: string; row: AssistantMe
       <Markdown resolve={resolveRef}>{row.text}</Markdown>
     </RowShell>
   );
-}
+});

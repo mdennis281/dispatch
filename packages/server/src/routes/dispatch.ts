@@ -85,7 +85,7 @@ export async function createChat(
 }
 
 /** Ensure the broker holds a live session for a chat (resume/create lazily). */
-async function ensureSession(services: Services, chatId: string): Promise<Chat> {
+export async function ensureSession(services: Services, chatId: string): Promise<Chat> {
   const { store, broker } = services;
   const chat = await store.getChat(chatId);
   if (!chat) throw new Error(`chat "${chatId}" not found`);

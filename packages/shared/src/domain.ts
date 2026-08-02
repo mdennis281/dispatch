@@ -10,6 +10,7 @@ import {
   PermissionModeSchema,
   ChatStatusSchema,
 } from "./common.js";
+import { ResumePlanSchema } from "./limits.js";
 
 /* ------------------------------------------------------------------ subApps */
 
@@ -264,6 +265,11 @@ export const ChatSchema = z.object({
   /** Last-known live status (authoritative source is the SessionBroker). */
   status: ChatStatusSchema.optional(),
   archived: z.boolean().optional(),
+  /**
+   * A pending (or just-settled) auto-resume after a usage limit. Persisted so a
+   * server restart re-arms the timer instead of silently dropping the chat.
+   */
+  resume: ResumePlanSchema.optional(),
   createdAt: z.number().int(),
   updatedAt: z.number().int().optional(),
 });

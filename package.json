@@ -11,9 +11,10 @@
     "build": "pnpm -r build",
     "start": "pnpm --filter @cm/server start",
     "dev": "pnpm --filter @cm/server dev",
-    "test": "pnpm --filter @cm/server exec vitest run",
+    "test": "pnpm --filter @cm/shared exec vitest run && pnpm --filter @cm/cli exec vitest run && pnpm --filter @cm/server exec vitest run",
     "spike": "pnpm --filter @cm/server spike",
-    "verify": "node tools/verify/shot.mjs"
+    "verify": "node tools/verify/shot.mjs",
+    "cm": "node packages/cli/dist/index.js"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

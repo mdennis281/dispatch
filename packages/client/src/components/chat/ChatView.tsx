@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   GitBranch,
   GitPullRequest,
@@ -19,11 +19,14 @@ import { Popover, MenuItem } from "../ui/Popover.js";
 import { Chip } from "../ui/Chip.js";
 import { StatusDot, statusMeta } from "../ui/StatusDot.js";
 import { Button } from "../ui/Button.js";
+import { Spinner } from "../ui/Spinner.js";
 import { Modal, InlineError } from "../sidebar/Modal.js";
-import { MessageList, type StreamRow } from "./MessageList.js";
+import { MessageList } from "./MessageList.js";
+import { StreamingTail } from "./StreamingTail.js";
 import { TodosStrip } from "./TodosStrip.js";
 import { Composer } from "./Composer.js";
-import { useChatMessages, useMessages } from "../../stores/messages.js";
+import { useChatMessages, useChatPage, useMessages } from "../../stores/messages.js";
+import { loadOlderMessages } from "../../stores/index.js";
 import { useChats } from "../../stores/chats.js";
 import { useAttention } from "../../stores/attention.js";
 import { useProjects } from "../../stores/projects.js";
@@ -65,6 +68,21 @@ function workingLabelFor(a: AgentActivity | undefined): string {
   }
 }
 
+/**
+ * How close to the top of the transcript the reader must get before the next
+ * older page is fetched. Generous enough that the page usually lands before
+ * they actually arrive at the top.
+ */
+const OLDER_PAGE_TRIGGER_PX = 400;
+
+/**
+ * Cap on pages fetched back-to-back while the reader sits at the top without
+ * moving. Chaining is needed (a page can land without freeing any scroll room),
+ * but it must not be able to walk the whole history on its own. Resets as soon
+ * as they scroll clear of the top.
+ */
+const MAX_CHAINED_PAGES = 8;
+
 /** Quiet empty state for a chat with no transcript yet. */
 function EmptyTranscript() {
   return (
@@ -80,9 +98,9 @@ function EmptyTranscript() {
 
 export function ChatView({ chat }: { chat: Chat }) {
   const messages = useChatMessages(chat.id);
+  const { hasMore, loadingOlder } = useChatPage(chat.id);
   const activity = useChats((s) => s.activity[chat.id]);
   const prSettled = useChats((s) => s.prSettled[chat.id] ?? false);
-  const streamingBuffers = useMessages((s) => s.streaming);
   const agents = useProjects((s) => s.agents);
   const modes = useProjects((s) => s.modes);
   const worktrees = usePanels((s) => s.worktrees);
@@ -148,28 +166,6 @@ export function ChatView({ chat }: { chat: Chat }) {
     ...pendingWtPaths.map((p) => branchName(p) ?? p),
   ];
 
-  // Live streaming rows: `message-chunk` deltas for this chat not yet finalized
-  // as a persisted `chat-message` row (deduped by id once the full row lands).
-  const streamRows = useMemo<StreamRow[]>(() => {
-    // Only in-flight while the turn actually runs. A blocked turn (awaiting-input)
-    // has no live stream — its text already landed as a finalized `assistant` row
-    // before the prompt fired — so showing buffers there only resurfaces stale
-    // StreamingRows (a stuck ●●● pulse under finished sections).
-    if (!running) return [];
-    const prefix = `${chat.id}:`;
-    const finalized = new Set(messages.map((m) => m.id));
-    const rows: StreamRow[] = [];
-    for (const [key, buf] of Object.entries(streamingBuffers)) {
-      if (!key.startsWith(prefix)) continue;
-      const messageId = key.slice(prefix.length);
-      if (finalized.has(messageId)) continue;
-      if (!buf.text && !buf.thinking) continue;
-      rows.push({ messageId, text: buf.text, thinking: buf.thinking });
-    }
-    return rows;
-  }, [streamingBuffers, messages, chat.id, running]);
-
-  const streamChars = streamRows.reduce((n, r) => n + r.text.length + r.thinking.length, 0);
   const workingLabel = workingLabelFor(activity);
 
   const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
@@ -187,7 +183,18 @@ export function ChatView({ chat }: { chat: Chat }) {
     const b = dist < 80;
     atBottomRef.current = b;
     setAtBottom(b);
+    // Clear of the top again → the reader is driving, so allow a fresh chain.
+    if (el.scrollTop > OLDER_PAGE_TRIGGER_PX * 2) autoChainRef.current = 0;
+    maybeLoadOlder(el);
   };
+
+  // Follow the live stream — stable identity so StreamingTail's effect doesn't
+  // re-fire on unrelated parent renders.
+  const followBottom = useCallback(() => {
+    if (!atBottomRef.current) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, []);
 
   // Switching chats: snap to the latest and reset the follow + header-edit state.
   useEffect(() => {
@@ -202,13 +209,126 @@ export function ChatView({ chat }: { chat: Chat }) {
 
   // New content: only auto-follow if the reader is already pinned to the bottom.
   useEffect(() => {
-    if (atBottomRef.current) {
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    }
-  }, [messages.length, streamChars, running]);
+    followBottom();
+  }, [messages.length, running, followBottom]);
 
-  const isEmpty = messages.length === 0 && streamRows.length === 0 && !running;
+  /**
+   * Keep the LIVE window bounded.
+   *
+   * Opening a chat pulls a bounded page, but rows streamed in afterwards just
+   * append — so a chat left open while an agent works grows all session until
+   * the "windowed" transcript holds the entire history again. Trimming the head
+   * hands those rows back to the pager.
+   *
+   * Gated on the reader being pinned to the bottom (the ref, not the state — a
+   * burst of appends can land before React re-renders): dropping rows off the
+   * top shifts everything below them, which is invisible when the newest rows
+   * are what's on screen and a yank backwards when it isn't. Someone scrolled up
+   * reading history — or paging older rows IN — is left alone entirely.
+   */
+  useEffect(() => {
+    if (!atBottomRef.current) return;
+    useMessages.getState().trimWindow(chat.id);
+  }, [chat.id, messages]);
+
+  /* ------------------------------------------------ backward paging (older rows) */
+
+  // The transcript is a WINDOW (newest N rows). Scrolling to the top pages the
+  // previous chunk in — so an old chat opens at a bounded size and grows only as
+  // far back as the reader actually goes.
+  // Scroll metrics captured the instant we ASK for an older page, so the restore
+  // below can pin the viewport to the row the reader was looking at.
+  const anchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const firstRowIdRef = useRef<string | undefined>(messages[0]?.id);
+  /** Pages auto-loaded without the reader moving clear of the top (runaway guard). */
+  const autoChainRef = useRef(0);
+
+  /**
+   * Page older rows in when the reader gets near the top.
+   *
+   * Driven by the SCROLL POSITION, deliberately not by an IntersectionObserver.
+   * An observer only fires on an intersection CHANGE, and paging can leave the
+   * sentinel continuously in view — most sharply when a page makes the
+   * transcript SHORTER (an incoming `Task` row folds its already-loaded child
+   * rows into one subagent card), which pins the reader at scrollTop 0 with the
+   * sentinel permanently visible. No change means no callback, so paging wedged
+   * with no way to recover. A threshold check re-evaluates on every scroll
+   * event, so the next flick of the wheel always makes progress.
+   *
+   * State is read from the store rather than from render-time props: several
+   * scroll events can fire before React re-renders, and the live `loadingOlder`
+   * flag is what keeps those from stacking duplicate requests.
+   */
+  const maybeLoadOlder = (el: HTMLDivElement) => {
+    if (el.scrollTop > OLDER_PAGE_TRIGGER_PX) return;
+    if (autoChainRef.current >= MAX_CHAINED_PAGES) return;
+    const page = useMessages.getState().pages[chat.id];
+    if (!page?.hasMore || page.loadingOlder) return;
+    autoChainRef.current += 1;
+    // Captured only when a load will really happen, so the restore below can't
+    // act on metrics from a scroll that fetched nothing.
+    anchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+    void loadOlderMessages(chat.id);
+  };
+
+  /** Explicit "load earlier" — a user action, so it ignores (and clears) the cap. */
+  const loadOlderNow = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    autoChainRef.current = 0;
+    const page = useMessages.getState().pages[chat.id];
+    if (!page?.hasMore || page.loadingOlder) return;
+    anchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+    void loadOlderMessages(chat.id);
+  };
+
+  /**
+   * Re-check after every window change — a scroll event alone is not enough to
+   * keep paging.
+   *
+   * Landing a page can leave the reader pinned at scrollTop 0: either the
+   * transcript ends up SHORTER than before (an incoming `Task` row folds its
+   * already-loaded child rows into one subagent card) or it still doesn't fill
+   * the viewport. At scrollTop 0 the browser emits no scroll event no matter how
+   * hard you scroll up, so without this the reader is stranded at the top with
+   * history remaining and no way to ask for it. Chaining is capped, and the cap
+   * resets once they've moved clear of the top (see onScroll).
+   */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !hasMore || loadingOlder) return;
+    maybeLoadOlder(el);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-check per loaded window
+  }, [chat.id, hasMore, loadingOlder, messages]);
+
+  // Prepending rows above the viewport shifts everything down by the new
+  // content's height; without this the reader gets yanked back to the top on
+  // every page. The delta can be NEGATIVE — a page carrying a `Task` row folds
+  // its already-loaded child rows into a single subagent card, so the transcript
+  // can end up shorter than before — hence the clamp: keep the reader off the
+  // very top so the next scroll still has somewhere to go.
+  useLayoutEffect(() => {
+    const firstId = messages[0]?.id;
+    const prevFirstId = firstRowIdRef.current;
+    firstRowIdRef.current = firstId;
+    if (!prevFirstId || firstId === prevFirstId) return;
+    const el = scrollRef.current;
+    const anchor = anchorRef.current;
+    anchorRef.current = null;
+    if (!el || !anchor) return;
+    const target = el.scrollHeight - anchor.scrollHeight + anchor.scrollTop;
+    const maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    el.scrollTop = Math.min(Math.max(target, 0), maxTop);
+  }, [messages]);
+
+  // A chat switch re-anchors: the new transcript's first row isn't a "prepend".
+  useEffect(() => {
+    firstRowIdRef.current = undefined;
+    anchorRef.current = null;
+    autoChainRef.current = 0;
+  }, [chat.id]);
+
+  const isEmpty = messages.length === 0 && !running;
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-app">
@@ -350,13 +470,40 @@ export function ChatView({ chat }: { chat: Chat }) {
             {isEmpty ? (
               <EmptyTranscript />
             ) : (
-              <MessageList
-                chatId={chat.id}
-                messages={messages}
-                streamRows={streamRows}
-                working={running}
-                workingLabel={workingLabel}
-              />
+              <>
+                {/* Older-rows sentinel: pages the previous chunk in on approach. */}
+                {/* Paging is automatic, but this stays clickable on purpose: at
+                    scrollTop 0 the browser emits no scroll event however hard you
+                    scroll up, so an explicit control is the one affordance that
+                    can never leave the reader stranded at the top. */}
+                {hasMore && (
+                  <div className="flex justify-center py-3">
+                    <button
+                      onClick={loadOlderNow}
+                      disabled={loadingOlder}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-[11px] text-faint transition-colors hover:border-line-strong hover:text-secondary disabled:cursor-default disabled:hover:border-line disabled:hover:text-faint"
+                    >
+                      {loadingOlder ? (
+                        <>
+                          <Spinner size={10} />
+                          Loading earlier messages…
+                        </>
+                      ) : (
+                        "Load earlier messages"
+                      )}
+                    </button>
+                  </div>
+                )}
+                <div className="flex flex-col divide-y divide-line-soft/70">
+                  <MessageList chatId={chat.id} messages={messages} />
+                  <StreamingTail
+                    chatId={chat.id}
+                    running={running}
+                    workingLabel={workingLabel}
+                    onGrow={followBottom}
+                  />
+                </div>
+              </>
             )}
           </div>
         </ScrollArea>

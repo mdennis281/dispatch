@@ -3,6 +3,7 @@ import { ShieldQuestion, Check, X, ShieldCheck, Pencil } from "lucide-react";
 import type { PermissionRow } from "@cm/shared";
 import { RowShell } from "./RowShell.js";
 import { QuestionCard } from "./QuestionCard.js";
+import { PlanCard } from "./PlanCard.js";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
 import { cn } from "../../../lib/cn.js";
@@ -42,8 +43,10 @@ export function PermissionCard({ row }: PermissionCardProps) {
   // error toast). "Gate by disabling", never allow-then-error.
   const [answered, setAnswered] = useState(false);
 
-  // AskUserQuestion rides the same permission channel; render it as a question.
+  // AskUserQuestion and ExitPlanMode ride the same permission channel, but a raw
+  // JSON dump of their payload is unreadable — each gets a purpose-built card.
   if (row.toolName === "AskUserQuestion") return <QuestionCard row={row} />;
+  if (row.toolName === "ExitPlanMode") return <PlanCard row={row} />;
 
   const pending = row.decision === "pending";
   const busy = pending && answered;
@@ -114,7 +117,7 @@ export function PermissionCard({ row }: PermissionCardProps) {
         </div>
 
         {target && !refine && (
-          <div className="border-t border-line-soft px-3 py-2">
+          <div className="cm-scroll max-h-48 overflow-auto border-t border-line-soft px-3 py-2">
             <pre className="whitespace-pre-wrap break-words cm-mono text-secondary">{target}</pre>
             {typeof row.input.content === "string" && (
               <pre className="mt-1.5 line-clamp-3 whitespace-pre-wrap break-words cm-mono !text-[10.5px] text-faint">
@@ -124,7 +127,7 @@ export function PermissionCard({ row }: PermissionCardProps) {
           </div>
         )}
         {!target && !refine && (
-          <div className="border-t border-line-soft px-3 py-2">
+          <div className="cm-scroll max-h-48 overflow-auto border-t border-line-soft px-3 py-2">
             <pre className="whitespace-pre-wrap break-words cm-mono text-secondary">
               {safeJson(row.input)}
             </pre>

@@ -60,7 +60,9 @@ import type { GitHubService } from "./github.js";
 import type { RunnerService } from "./runner.js";
 import type { WorktreeService } from "./worktree.js";
 import { createManagerMcpServer, type ManagerMcpGitHub } from "./mcp/manager-mcp.js";
+import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
+import { bundledSkills } from "./bundled-skills.js";
 
 /**
  * The always-injected "prefer the manager tools" directive. Lists only the
@@ -74,6 +76,7 @@ export function buildManagerToolsDirective(caps: {
   terminals: boolean;
   memory: boolean;
   runner: boolean;
+  mcpConfig?: boolean;
 }): string {
   const lines = [
     "# Manager tools — prefer these over improvising",
@@ -118,6 +121,32 @@ export function buildManagerToolsDirective(caps: {
     lines.push(
       "- `mcp__manager__run_subapp` — launch this project's app and get a live localhost " +
         "URL to actually SEE your change, instead of asking the user to run it.",
+    );
+  }
+  if (caps.mcpConfig) {
+    lines.push(
+      "- `mcp__manager__mcp_list` / `mcp_add` / `mcp_remove` — read and edit the MCP servers " +
+        "configured for this project.",
+    );
+    // The routing hint. An agent asked to "install the Linear MCP" will otherwise
+    // reach for `.mcp.json` or `claude mcp add` from memory — neither of which
+    // this harness reads. Naming the trigger conditions explicitly is what makes
+    // the skill fire before the wrong file gets written, not after.
+    lines.push(
+      "",
+      "## Setting up MCP servers",
+      "",
+      "The moment the conversation turns to MCP — installing or adding a server, connecting a " +
+        "tool integration, a server that won't connect or whose tools aren't appearing, or " +
+        "writing a new MCP server — **load the `mcp-setup` skill first**. It has this harness's " +
+        "actual procedure, and the defaults you'd reach for otherwise are wrong here.",
+      "",
+      "The short version, so you don't get it wrong before the skill loads: this project's MCP " +
+        "servers live in `.claude-manager/project.yaml`, edited via `mcp__manager__mcp_add` or " +
+        "the `cm mcp add` CLI. **Never** hand-edit `project.yaml`, and never write `.mcp.json`, " +
+        "`~/.claude.json`, or `.claude/settings.json` to configure a server — the manager does " +
+        "not read those. Secrets go in as `${VAR}` placeholders, never literal keys: the file " +
+        "is committed.",
     );
   }
   return lines.join("\n");
@@ -209,6 +238,12 @@ export interface SessionBrokerOptions {
   /** Self-contained `.claude-manager/` config: source of truth for authored
    *  agents/modes/instructions (config wins over `.data` on id collision). */
   projectConfig?: BrokerProjectConfig;
+  /**
+   * Called when a turn ends in ERROR, with the SDK's message. The broker doesn't
+   * interpret it — the ResumeScheduler decides whether it was a usage limit and
+   * schedules the chat to continue itself (see services/resume-scheduler.ts).
+   */
+  onTurnError?: (chatId: string, reason: string | undefined) => void;
   deps?: SessionBrokerDeps;
 }
 
@@ -650,6 +685,8 @@ export class SessionBroker {
   private readonly runner?: RunnerService;
   private readonly worktrees?: WorktreeService;
   private readonly projectConfig?: BrokerProjectConfig;
+  /** Settable after construction — the scheduler is built after the broker. */
+  onTurnError?: (chatId: string, reason: string | undefined) => void;
   private readonly query: QueryFn;
   private readonly genId: () => string;
   private readonly now: () => number;
@@ -668,6 +705,7 @@ export class SessionBroker {
     this.runner = opts.runner;
     this.worktrees = opts.worktrees;
     this.projectConfig = opts.projectConfig;
+    this.onTurnError = opts.onTurnError;
     this.query = opts.deps?.query ?? (sdkQuery as unknown as QueryFn);
     this.genId = opts.deps?.genId ?? (() => nanoid());
     this.now = opts.deps?.now ?? (() => Date.now());
@@ -1403,6 +1441,39 @@ export class SessionBroker {
           // the very next result row carries the correct meter denominator.
           void this.refreshContextWindow(session);
         }
+        // A backgrounded task (async `Agent` spawn, backgrounded `Bash`) settled.
+        // This is the ONLY per-task completion signal in the stream — the task's
+        // tool call answered with a launch ack long ago — so persist it as a row
+        // keyed to the launching tool_use. Without it the client can only ask
+        // "is the parent turn still running", which gives every background task
+        // the same status (see shared TaskStatusRowSchema).
+        if (subtype === "task_notification") {
+          const usage = (m as { usage?: Record<string, unknown> }).usage;
+          const raw = String((m as { status?: unknown }).status ?? "completed");
+          const num = (v: unknown): number | undefined =>
+            typeof v === "number" && Number.isFinite(v) ? Math.round(v) : undefined;
+          await this.emit(session, {
+            kind: "task_status",
+            id: this.genId(),
+            chatId: session.chatId,
+            ts: this.now(),
+            turn: session.turn,
+            sessionId: session.sessionId,
+            taskId: String((m as { task_id?: unknown }).task_id ?? ""),
+            toolUseId:
+              typeof (m as { tool_use_id?: unknown }).tool_use_id === "string"
+                ? ((m as { tool_use_id?: string }).tool_use_id as string)
+                : undefined,
+            status: raw === "failed" || raw === "stopped" ? raw : "completed",
+            summary:
+              typeof (m as { summary?: unknown }).summary === "string"
+                ? ((m as { summary?: string }).summary as string)
+                : undefined,
+            totalTokens: num(usage?.total_tokens),
+            toolUses: num(usage?.tool_uses),
+            durationMs: num(usage?.duration_ms),
+          });
+        }
         return;
       }
       case "assistant": {
@@ -1577,6 +1648,11 @@ export class SessionBroker {
         return;
       }
       case "result": {
+        const isError = Boolean((m as { is_error?: unknown }).is_error);
+        const resultText =
+          typeof (m as { result?: unknown }).result === "string"
+            ? ((m as { result?: string }).result as string)
+            : undefined;
         await this.emit(session, {
           kind: "result",
           id: this.genId(),
@@ -1585,19 +1661,19 @@ export class SessionBroker {
           turn: session.turn,
           sessionId: session.sessionId,
           subtype: String((m as { subtype?: unknown }).subtype ?? "success"),
-          isError: Boolean((m as { is_error?: unknown }).is_error),
+          isError,
           numTurns: (m as { num_turns?: number }).num_turns,
           durationMs: (m as { duration_ms?: number }).duration_ms,
-          result:
-            typeof (m as { result?: unknown }).result === "string"
-              ? ((m as { result?: unknown }).result as string)
-              : undefined,
+          result: resultText,
           usage: (m as { usage?: unknown }).usage,
           contextTokens: session.lastContextTokens,
           contextWindow: session.contextWindow,
           costUsd: (m as { total_cost_usd?: number }).total_cost_usd,
         });
         session.turn += 1;
+        // A turn that ended in error may have hit a usage limit — hand the
+        // message off so the chat can schedule itself to continue.
+        if (isError) this.onTurnError?.(session.chatId, resultText);
         // Relearn the window off-loop for the next turn's row (cheap; the model
         // — hence window — can shift mid-session on a switch or fallback).
         void this.refreshContextWindow(session);
@@ -1986,6 +2062,7 @@ export class SessionBroker {
         terminals: Boolean(this.terminals),
         memory: Boolean(this.memory && session.projectId),
         runner: Boolean(this.runner && this.worktrees),
+        mcpConfig: Boolean(session.projectId),
       }),
     );
     if (mode?.instructions) appends.push(mode.instructions);
@@ -2153,6 +2230,11 @@ export class SessionBroker {
                 },
               }
             : undefined,
+        // Bind the MCP-config editor to the project's MAIN repo path, NOT this
+        // session's cwd: `.claude-manager/` is committed config, so a server the
+        // agent adds while working in a throwaway worktree has to land in the
+        // real working copy or it vanishes with the worktree.
+        mcpConfig: project?.repoPath ? createMcpConfigEditor(project.repoPath) : undefined,
         signal: session.abortController?.signal,
         now: this.now,
       }),
@@ -2163,10 +2245,17 @@ export class SessionBroker {
     // `.claude/skills/` — a MERGE that never clobbers a skill the repo already
     // ships — then flip `skills: 'all'` so every discovered skill (the repo's own
     // AND the config-authored ones) is enabled. Tracked dirs are removed on
-    // teardown. Only touched when the project actually authors skills, so a repo
-    // without `.claude-manager/skills/` keeps the CLI's default skill behavior.
-    if (this.projectConfig && projectId && cwd) {
-      const skills = this.projectConfig.getSkills(projectId);
+    // teardown.
+    //
+    // Two sources are merged, PROJECT FIRST so it wins: the project's authored
+    // skills, then the manager's own bundled skills (how MCP config works here,
+    // etc. — see `bundled-skills.ts`). Because materialization skips any target
+    // dir that already exists, a project or repo skill of the same name silently
+    // overrides the bundled one rather than fighting it.
+    if (cwd) {
+      const projectSkills =
+        this.projectConfig && projectId ? this.projectConfig.getSkills(projectId) : [];
+      const skills = [...projectSkills, ...bundledSkills()];
       if (skills.length) {
         try {
           session.materializedSkillDirs = await materializeSkills(cwd, skills);

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import type { Chat, ChatStatus, AgentActivity } from "@cm/shared";
+import { clearDraft } from "../lib/composerDrafts.js";
 
 interface ChatsStore {
   /** chatId → Chat */
@@ -89,7 +90,11 @@ export const useChats = create<ChatsStore>((set) => ({
       return { lastActivity: { ...s.lastActivity, [chatId]: Math.max(prev, now) } };
     }),
 
-  removeChat: (chatId) =>
+  removeChat: (chatId) => {
+    // The chat's assets are gone with it, so its saved composer draft (which
+    // references them) has to go too — otherwise it lingers in localStorage
+    // until the age sweep.
+    clearDraft(chatId);
     set((s) => {
       if (!s.byId[chatId]) return {};
       const removed = s.byId[chatId];
@@ -113,7 +118,8 @@ export const useChats = create<ChatsStore>((set) => ({
              null)
           : s.activeChatId;
       return { byId, order, activity, queued, prSettled, lastActivity, activeChatId };
-    }),
+    });
+  },
 
   setStatus: (chatId, status, activity, queued, prSettled) =>
     set((s) => ({

@@ -1,15 +1,75 @@
 import { create } from "zustand";
+import { useStoreWithEqualityFn } from "zustand/traditional";
 import type { ChatMessage, PermissionRequest, PermissionRow } from "@cm/shared";
 
+/** Per-chat backward-paging state for the windowed transcript. */
+export interface ChatPage {
+  /**
+   * There may be older rows above what we hold. Set when a page came back FULL
+   * (exactly `limit` rows), cleared once a short/empty page proves we hit the top.
+   */
+  hasMore: boolean;
+  /** An older page is in flight (drives the top spinner + dedupes concurrent loads). */
+  loadingOlder: boolean;
+}
+
+const DEFAULT_PAGE: ChatPage = { hasMore: false, loadingOlder: false };
+
+/**
+ * Ceiling on how many rows a chat's window keeps once live rows start arriving.
+ *
+ * Opening a chat pulls a bounded page and paging up is capped, but `append` had
+ * no ceiling at all: a chat left open while an agent works streams rows in all
+ * session, so the window grew without bound and the "lazy" transcript ended up
+ * holding the whole history anyway — hundreds of rows in the DOM and a scrollbar
+ * to match. Trimming from the head puts the dropped rows back where every other
+ * old row lives: on the server, one "load earlier" away.
+ */
+export const MAX_WINDOW_ROWS = 400;
+
+/**
+ * How far above the ceiling the window may drift before a trim runs. Without
+ * the slack every single append would re-slice the array (and re-render the
+ * whole list); with it a trim happens once per `TRIM_SLACK` rows.
+ */
+export const TRIM_SLACK = 100;
+
 interface MessagesStore {
-  /** chatId → ordered transcript rows */
+  /** chatId → ordered transcript rows (a WINDOW: the newest N, paged upward) */
   byChat: Record<string, ChatMessage[]>;
+  /** chatId → backward-paging state for that window */
+  pages: Record<string, ChatPage>;
   /** in-flight streaming buffers: `${chatId}:${messageId}` → partial text */
   streaming: Record<string, { text: string; thinking: string }>;
 
   hydrate: (byChat: Record<string, ChatMessage[]>) => void;
   /** Replace one chat's transcript (REST snapshot on open) without touching others. */
-  setForChat: (chatId: string, messages: ChatMessage[]) => void;
+  setForChat: (chatId: string, messages: ChatMessage[], page?: Partial<ChatPage>) => void;
+  /** Prepend an older page above the current window (backward paging). */
+  prependForChat: (chatId: string, older: ChatMessage[], page?: Partial<ChatPage>) => void;
+  /** Patch a chat's paging state (loading flags, top-reached). */
+  setPage: (chatId: string, page: Partial<ChatPage>) => void;
+  /**
+   * Swap lean rows for their verbatim selves (hydrate-on-expand). Replaces by id,
+   * in place, so an expanded card keeps its position and scroll offset.
+   */
+  replaceRows: (chatId: string, rows: ChatMessage[]) => void;
+  /**
+   * Drop cached transcripts for every chat except `keep`. Called on chat switch:
+   * without it, a session that visits many chats accumulates every window it ever
+   * loaded (79 chats × a page each) and never gives the memory back.
+   */
+  evictExcept: (keep: string[]) => void;
+  /**
+   * Drop the oldest rows of a chat's window back to {@link MAX_WINDOW_ROWS} and
+   * flag `hasMore` (the dropped rows are still on the server). No-op until the
+   * window has drifted a full `TRIM_SLACK` past the ceiling.
+   *
+   * The CALLER owns the "is this safe right now" question: trimming the head
+   * moves everything below it, so it must only run when the reader is pinned to
+   * the bottom (or isn't looking at this chat at all).
+   */
+  trimWindow: (chatId: string) => void;
   append: (chatId: string, message: ChatMessage) => void;
   /**
    * Synthesize (idempotently) a pending permission card from a live
@@ -59,13 +119,14 @@ function dropChatStreaming(streaming: StreamMap, chatId: string): StreamMap {
 
 export const useMessages = create<MessagesStore>((set) => ({
   byChat: {},
+  pages: {},
   streaming: {},
 
   // Wholesale reset (boot / reconnect): also drop every stale streaming buffer —
   // they key off transcripts that no longer exist and would otherwise leak.
-  hydrate: (byChat) => set({ byChat, streaming: {} }),
+  hydrate: (byChat) => set({ byChat, pages: {}, streaming: {} }),
 
-  setForChat: (chatId, messages) =>
+  setForChat: (chatId, messages, page) =>
     set((s) => {
       // The REST snapshot is authoritative, but a live `chat-message` /
       // `permission-request` can land during the in-flight GET. Merge instead of
@@ -87,7 +148,92 @@ export const useMessages = create<MessagesStore>((set) => ({
       );
       return {
         byChat: { ...s.byChat, [chatId]: [...messages, ...extra] },
+        pages: {
+          ...s.pages,
+          [chatId]: { ...DEFAULT_PAGE, ...(page ?? {}) },
+        },
         streaming: dropChatStreaming(s.streaming, chatId),
+      };
+    }),
+
+  prependForChat: (chatId, older, page) =>
+    set((s) => {
+      const prev = s.byChat[chatId] ?? [];
+      // Guard against a double-fired page (two sentinel hits racing): only rows we
+      // don't already hold go in, so a repeat request can't duplicate the window.
+      const have = new Set(prev.map((m) => m.id));
+      const fresh = older.filter((m) => !have.has(m.id));
+      return {
+        byChat: fresh.length
+          ? { ...s.byChat, [chatId]: [...fresh, ...prev] }
+          : s.byChat,
+        pages: {
+          ...s.pages,
+          [chatId]: {
+            ...(s.pages[chatId] ?? DEFAULT_PAGE),
+            ...(page ?? {}),
+          },
+        },
+      };
+    }),
+
+  setPage: (chatId, page) =>
+    set((s) => ({
+      pages: {
+        ...s.pages,
+        [chatId]: { ...(s.pages[chatId] ?? DEFAULT_PAGE), ...page },
+      },
+    })),
+
+  replaceRows: (chatId, rows) =>
+    set((s) => {
+      const prev = s.byChat[chatId];
+      if (!prev || rows.length === 0) return {};
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      let changed = false;
+      const next = prev.map((m) => {
+        const full = byId.get(m.id);
+        if (!full) return m;
+        changed = true;
+        return full;
+      });
+      return changed ? { byChat: { ...s.byChat, [chatId]: next } } : {};
+    }),
+
+  evictExcept: (keep) =>
+    set((s) => {
+      const keepSet = new Set(keep);
+      const stale = Object.keys(s.byChat).filter((id) => !keepSet.has(id));
+      if (stale.length === 0) return {};
+      const byChat = { ...s.byChat };
+      const pages = { ...s.pages };
+      let streaming = s.streaming;
+      for (const id of stale) {
+        delete byChat[id];
+        delete pages[id];
+        // A dropped transcript's in-flight buffers key off rows that no longer
+        // exist — they'd never be reconciled and would leak for the session.
+        streaming = dropChatStreaming(streaming, id);
+      }
+      return { byChat, pages, streaming };
+    }),
+
+  trimWindow: (chatId) =>
+    set((s) => {
+      const rows = s.byChat[chatId];
+      if (!rows || rows.length <= MAX_WINDOW_ROWS + TRIM_SLACK) return {};
+      return {
+        byChat: {
+          ...s.byChat,
+          [chatId]: rows.slice(rows.length - MAX_WINDOW_ROWS),
+        },
+        // The rows just dropped are older history the server still holds, so the
+        // "load earlier" affordance has to come back on — otherwise a trim would
+        // silently make the transcript unpageable at the top.
+        pages: {
+          ...s.pages,
+          [chatId]: { ...(s.pages[chatId] ?? DEFAULT_PAGE), hasMore: true },
+        },
       };
     }),
 
@@ -186,6 +332,74 @@ const EMPTY: ChatMessage[] = [];
 /** Selector: transcript for a chat (stable empty ref when absent). */
 export function useChatMessages(chatId: string | null): ChatMessage[] {
   return useMessages((s) => (chatId ? (s.byChat[chatId] ?? EMPTY) : EMPTY));
+}
+
+/** Selector: backward-paging state for a chat's window (stable default ref). */
+export function useChatPage(chatId: string | null): ChatPage {
+  return useMessages((s) => (chatId ? (s.pages[chatId] ?? DEFAULT_PAGE) : DEFAULT_PAGE));
+}
+
+/** An in-flight assistant turn assembled from `message-chunk` deltas. */
+export interface StreamRow {
+  messageId: string;
+  text: string;
+  thinking: string;
+}
+
+const NO_STREAMS: StreamRow[] = [];
+
+/**
+ * Selector: the live streaming rows for ONE chat.
+ *
+ * Subscribing to the whole `streaming` map is a trap — `chunk()` returns a new map
+ * object per token FROM ANY CHAT, so a component reading it re-renders on every
+ * token streamed anywhere in the app. This narrows to the chat's own buffers and
+ * compares by content, so a background chat's stream can't touch this transcript.
+ *
+ * Rows already finalized as a persisted `chat-message` are filtered out (the real
+ * row supersedes its buffer), as is everything when the turn isn't `running` — a
+ * blocked turn's text already landed as an `assistant` row, and re-showing its
+ * buffer strands a stuck ●●● pulse under a finished section.
+ */
+export function useStreamRows(chatId: string, running: boolean): StreamRow[] {
+  return useStoreWithEqualityFn(
+    useMessages,
+    (s) => {
+      if (!running) return NO_STREAMS;
+      const prefix = `${chatId}:`;
+      const rows: StreamRow[] = [];
+      let finalized: Set<string> | null = null;
+      for (const [key, buf] of Object.entries(s.streaming)) {
+        if (!key.startsWith(prefix)) continue;
+        if (!buf.text && !buf.thinking) continue;
+        const messageId = key.slice(prefix.length);
+        // Built lazily: most chats have no live buffers, so the transcript scan
+        // shouldn't run at all on the common path.
+        finalized ??= new Set((s.byChat[chatId] ?? EMPTY).map((m) => m.id));
+        if (finalized.has(messageId)) continue;
+        rows.push({ messageId, text: buf.text, thinking: buf.thinking });
+      }
+      return rows.length === 0 ? NO_STREAMS : rows;
+    },
+    // The selector rebuilds its array every call, so a content compare (not
+    // Object.is) is what actually keeps an unrelated chat's tokens from
+    // re-rendering this one.
+    sameStreamRows,
+  );
+}
+
+/** Content compare for stream rows (same ids, same buffered text). */
+function sameStreamRows(a: StreamRow[], b: StreamRow[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (x.messageId !== y.messageId || x.text !== y.text || x.thinking !== y.thinking) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**

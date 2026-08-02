@@ -28,8 +28,20 @@ import {
   Cpu,
   ChevronsUpDown,
   Square,
+  Image as ImageIcon,
+  File as FileIcon,
 } from "lucide-react";
 import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef } from "@cm/shared";
+import { DEFAULT_MODEL } from "@cm/shared";
+import { api, type IndexedFile } from "../../lib/api.js";
+import { pathsFromDataTransfer, basenameOf } from "../../lib/dropPaths.js";
+import {
+  loadDraft,
+  saveDraft,
+  clearDraft,
+  appendDraftImage,
+} from "../../lib/composerDrafts.js";
+import { FilePathPicker } from "./FilePathPicker.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Button } from "../ui/Button.js";
 import { Select, type SelectOption } from "../ui/Select.js";
@@ -40,6 +52,7 @@ import { Spinner } from "../ui/Spinner.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { cn } from "../../lib/cn.js";
 import { useChats } from "../../stores/chats.js";
+import { useModels } from "../../stores/models.js";
 import { actions, uploadChatImage, assetUrl } from "../../lib/actions.js";
 import { ContextMeter } from "./ContextMeter.js";
 
@@ -55,28 +68,12 @@ const EFFORTS: SelectOption<Effort>[] = [
   { value: "max", label: "Max", hint: "deepest" },
 ];
 
-/** Selectable session models (label → SDK model id). Opus is the default. */
-const MODELS: { value: string; label: string; hint?: string }[] = [
-  { value: "claude-opus-4-8", label: "Opus 4.8", hint: "deepest" },
-  { value: "claude-sonnet-4-6", label: "Sonnet 4.6", hint: "balanced" },
-  { value: "claude-haiku-4-5", label: "Haiku 4.5", hint: "fast" },
-];
-const DEFAULT_MODEL = "claude-opus-4-8";
-const modelLabelOf = (m: string) => MODELS.find((x) => x.value === m)?.label ?? m;
 /**
  * Remembers the model picked per chat for this browser session — a fast optimistic
  * layer over the persisted `chat.model`, so the selector reflects the user's choice
  * instantly across chat switches (local state only re-seeds on a `chat.id` change).
  */
 const modelByChat = new Map<string, string>();
-
-/**
- * Remembers the unsent composer draft per chat for this browser session, so
- * switching chat tabs (which keeps the Composer mounted and only swaps `chat.id`)
- * no longer discards whatever the user had typed. Keyed by chat id, holds the
- * editor's HTML; entries are dropped the moment a chat's draft goes empty or sends.
- */
-const draftByChat = new Map<string, string>();
 
 /** The three canonical modes surfaced as a segmented control. */
 const PRIMARY_MODE_IDS = ["plan", "auto", "edit"];
@@ -126,6 +123,14 @@ function dtHasFiles(dt: DataTransfer | null | undefined): boolean {
   return !!dt.files?.length;
 }
 
+/** Non-image files from a drop — these become PATHS, not uploads. */
+function nonImageNamesFrom(dt: DataTransfer | null | undefined): string[] {
+  if (!dt?.files?.length) return [];
+  return Array.from(dt.files)
+    .filter((f) => !f.type.startsWith("image/"))
+    .map((f) => f.name);
+}
+
 /**
  * Turn pasted rich HTML into literal text for this plain-text composer. Hyperlinks
  * become markdown `[label](url)` — but only when the label differs from the bare URL,
@@ -158,7 +163,9 @@ const filenameOf = (img: ImageRef) => img.path.split(/[\\/]/).pop() ?? "image";
 export function Composer({ chat, agents, modes }: ComposerProps) {
   const upsertChat = useChats((s) => s.upsertChat);
 
-  const [attachments, setAttachments] = useState<ImageRef[]>([]);
+  // Attachments come back from the saved draft (see lib/composerDrafts), so a
+  // reload or a chat switch keeps them exactly as the text does.
+  const [attachments, setAttachments] = useState<ImageRef[]>(() => loadDraft(chat.id).images);
   const [editing, setEditing] = useState<ImageRef | null>(null);
   const [uploading, setUploading] = useState(0);
   // Queued/steering count is server truth (chat-status.queued): it clears the
@@ -166,10 +173,18 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const queued = useChats((s) => s.queued[chat.id] ?? 0);
   const [isEmpty, setIsEmpty] = useState(true);
   const [dragOver, setDragOver] = useState(false);
+  // The file-path picker, and the query it opens with (a dropped file's basename
+  // when a drop was ambiguous, "" for a cold open from the paperclip).
+  const [picker, setPicker] = useState<{ query: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [model, setModelState] = useState<string>(
     () => modelByChat.get(chat.id) ?? chat.model ?? DEFAULT_MODEL,
   );
+  // Selectable models come from the server (live Anthropic Models API, or a
+  // static fallback), seeded so the picker is never empty. A pinned model whose
+  // id isn't in the list still labels via its raw id (see modelLabelOf).
+  const models = useModels((s) => s.models);
+  const modelLabelOf = (m: string) => models.find((x) => x.value === m)?.label ?? m;
   // Compact toolbar: icon-only controls with tooltips. Chosen automatically —
   // the row collapses to icons the moment its full-label layout would overflow
   // the composer width, and re-expands once there's room again (see below).
@@ -184,6 +199,9 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // handlers always call through to fresh state.
   const submitRef = useRef<() => void>(() => {});
   const addFilesRef = useRef<(files: File[]) => void>(() => {});
+  // Drop handling (images → upload, everything else → a path), reached through a
+  // ref for the same reason: TipTap's handler is configured once.
+  const handleDropRef = useRef<(dt: DataTransfer | null) => boolean>(() => false);
   // Insert already-converted rich-paste text (markdown links + newlines) as literal
   // text — no HTML re-parsing, so `[label](url)` and `&`/`<` stay verbatim.
   const insertRichRef = useRef<(text: string) => void>(() => {});
@@ -191,6 +209,10 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // reads it through this ref (kept in sync every render) to key the saved draft.
   const chatIdRef = useRef(chat.id);
   chatIdRef.current = chat.id;
+  // Mirror of `attachments` for the same reason, and so an in-flight upload can
+  // append to the list it actually observed rather than a stale render's copy.
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
 
   const running = chat.status === "running";
 
@@ -198,7 +220,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     extensions: [
       StarterKit.configure({ heading: false }),
       Placeholder.configure({
-        placeholder: "Message Claude — ⌘↵ to send, ⇧↵ for newline. Paste an image to attach.",
+        placeholder:
+          "Message Claude — ⌘↵ to send, ⇧↵ for newline. Paste an image to attach, drop a file for its path.",
       }),
     ],
     content: "",
@@ -211,10 +234,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     enablePasteRules: false,
     onUpdate: ({ editor }) => {
       setIsEmpty(editor.isEmpty);
-      // Persist the live draft so it survives a chat switch (and unmount).
-      const id = chatIdRef.current;
-      if (editor.isEmpty) draftByChat.delete(id);
-      else draftByChat.set(id, editor.getHTML());
+      // Persist the live draft so it survives a chat switch, an unmount, and a
+      // reload. Attachments ride along: a text-only edit must not drop them.
+      saveDraft(chatIdRef.current, {
+        html: editor.isEmpty ? "" : editor.getHTML(),
+        images: attachmentsRef.current,
+      });
     },
     editorProps: {
       attributes: { class: "cm-scroll max-h-52 overflow-y-auto" },
@@ -247,24 +272,27 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         return false;
       },
       handleDrop: (_view, event) => {
-        const files = imageFilesFrom((event as DragEvent).dataTransfer);
-        if (files.length) {
-          event.preventDefault();
-          addFilesRef.current(files);
-          return true;
-        }
-        return false;
+        const e = event as DragEvent;
+        if (!handleDropRef.current(e.dataTransfer)) return false;
+        e.preventDefault();
+        // The composer shell is also a drop target (it covers the toolbar and
+        // padding, which the editor doesn't). Stop here so a drop that lands on
+        // the text area isn't then handled a second time on the way up.
+        e.stopPropagation();
+        return true;
       },
     },
   });
 
-  // Reset the composer when switching chats — but rehydrate any unsent draft for
-  // the incoming chat instead of clearing, so a half-typed message isn't lost.
+  // Reset the composer when switching chats — but rehydrate the incoming chat's
+  // unsent draft (text AND attachments) instead of clearing, so neither a
+  // half-typed message nor a pasted screenshot is lost.
   useEffect(() => {
     if (!editor) return;
-    const saved = draftByChat.get(chat.id);
-    editor.commands.setContent(saved ?? "");
-    setAttachments([]);
+    const saved = loadDraft(chat.id);
+    editor.commands.setContent(saved.html);
+    attachmentsRef.current = saved.images;
+    setAttachments(saved.images);
     setEditing(null);
     setUploading(0);
     setError(null);
@@ -272,25 +300,42 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     setModelState(modelByChat.get(chat.id) ?? chat.model ?? DEFAULT_MODEL);
   }, [chat.id, editor]);
 
+  /** Replace the attachment list and persist it alongside the current text. */
+  const putAttachments = (next: ImageRef[]) => {
+    attachmentsRef.current = next;
+    setAttachments(next);
+    saveDraft(chatIdRef.current, {
+      html: !editor || editor.isEmpty ? "" : editor.getHTML(),
+      images: next,
+    });
+  };
+
   const addFiles = async (files: File[]) => {
     const imgs = files.filter((f) => f.type.startsWith("image/"));
     if (!imgs.length) return;
+    // Uploads outlive a chat switch. Bind everything to the chat that owns them
+    // so a slow upload can't land its image — or its spinner — in whichever chat
+    // the user happens to be looking at when it finishes.
+    const forChat = chat.id;
     setError(null);
     setUploading((n) => n + imgs.length);
     for (const f of imgs) {
+      const stillHere = () => chatIdRef.current === forChat;
       try {
-        const ref = await uploadChatImage(chat.id, f);
-        setAttachments((a) => [...a, ref]);
+        const ref = await uploadChatImage(forChat, f);
+        if (stillHere()) putAttachments([...attachmentsRef.current, ref]);
+        else appendDraftImage(forChat, ref); // waiting when they switch back
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Image upload failed");
+        if (stillHere()) setError(e instanceof Error ? e.message : "Image upload failed");
       } finally {
-        setUploading((n) => n - 1);
+        if (stillHere()) setUploading((n) => n - 1);
       }
     }
   };
   addFilesRef.current = addFiles;
 
-  insertRichRef.current = (text: string) => {
+  /** Insert literal text at the cursor, newlines becoming hard breaks. */
+  const insertText = (text: string) => {
     const content: JSONContent[] = [];
     text.split("\n").forEach((part, i) => {
       if (i > 0) content.push({ type: "hardBreak" });
@@ -298,16 +343,86 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     });
     if (content.length) editor?.commands.insertContent(content);
   };
+  insertRichRef.current = insertText;
+
+  /**
+   * Drop file paths into the message as text. One per line, with a trailing
+   * space so the cursor lands ready for the sentence that follows — the path is
+   * almost never the last thing someone types.
+   */
+  const insertPaths = (paths: string[]) => {
+    if (!paths.length) return;
+    insertText(`${paths.join("\n")} `);
+    editor?.commands.focus();
+  };
+
+  /**
+   * The drop gave us basenames only (a file-manager drag, which discloses no
+   * path) — ask the server which project files could be meant.
+   */
+  const resolveDroppedNames = async (names: string[]) => {
+    const resolved: string[] = [];
+    for (const name of names) {
+      let matches: IndexedFile[] = [];
+      try {
+        const res = await api.files.search(chat.id, name, 20);
+        matches = res.files.filter(
+          (f) => basenameOf(f.rel).toLowerCase() === name.toLowerCase(),
+        );
+      } catch {
+        /* no index (not a checkout, server down) → fall back to the bare name */
+      }
+      if (matches.length === 1) {
+        resolved.push(matches[0]!.abs);
+        continue;
+      }
+      // Ambiguous, and it's the only thing dropped → let them choose instead of
+      // guessing. With several files in flight, a modal per file would be worse
+      // than the ranked best guess, which is right there in the box to correct.
+      if (matches.length > 1 && names.length === 1) {
+        setPicker({ query: name });
+        return;
+      }
+      resolved.push(matches[0]?.abs ?? name);
+    }
+    insertPaths(resolved);
+  };
+
+  /**
+   * One drop, three outcomes, in descending order of what we actually know:
+   * images upload as attachments; a drag that discloses real paths inserts them
+   * verbatim; anything else falls back to resolving basenames against the
+   * project index. Returns whether the drop was consumed.
+   */
+  const handleDrop = (dt: DataTransfer | null): boolean => {
+    const images = imageFilesFrom(dt);
+    if (images.length) {
+      void addFiles(images);
+      return true;
+    }
+    const paths = pathsFromDataTransfer(dt);
+    if (paths.length) {
+      insertPaths(paths);
+      return true;
+    }
+    const names = nonImageNamesFrom(dt);
+    if (names.length) {
+      void resolveDroppedNames(names);
+      return true;
+    }
+    return false;
+  };
+  handleDropRef.current = handleDrop;
 
   const removeAttachment = (id: string) => {
-    setAttachments((a) => a.filter((x) => x.id !== id));
+    putAttachments(attachmentsRef.current.filter((x) => x.id !== id));
     setEditing((e) => (e?.id === id ? null : e));
   };
 
   // The markup editor returns a freshly-uploaded ImageRef; swap it in place of
   // the original attachment so the edited version is what actually sends.
   const applyEdit = (original: ImageRef, next: ImageRef) => {
-    setAttachments((a) => a.map((x) => (x.id === original.id ? next : x)));
+    putAttachments(attachmentsRef.current.map((x) => (x.id === original.id ? next : x)));
     setEditing(null);
   };
 
@@ -342,7 +457,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     }
 
     editor?.commands.clearContent();
-    draftByChat.delete(chat.id);
+    clearDraft(chat.id);
+    attachmentsRef.current = [];
     setAttachments([]);
     setEditing(null);
     setIsEmpty(true);
@@ -482,11 +598,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false);
         }}
         onDrop={(e) => {
-          const files = imageFilesFrom(e.dataTransfer);
-          if (files.length) {
-            e.preventDefault();
-            addFiles(files);
-          }
+          if (handleDrop(e.dataTransfer)) e.preventDefault();
           setDragOver(false);
         }}
       >
@@ -576,9 +688,45 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               e.target.value = "";
             }}
           />
-          <IconButton tip="Attach image" onClick={() => fileInputRef.current?.click()}>
-            <Paperclip />
-          </IconButton>
+          {/* Attach: an image (uploaded, sent with the message) or a file PATH
+              (inserted as text). They're split because the OS dialog can only
+              ever return an image's CONTENT — never a path — so a path has to
+              come from the server-backed picker instead. */}
+          <Popover
+            align="start"
+            width={210}
+            className="p-1"
+            trigger={({ open, toggle }) => (
+              <IconButton tip="Attach" active={open} onClick={toggle}>
+                <Paperclip />
+              </IconButton>
+            )}
+          >
+            {(close) => (
+              <div className="flex flex-col">
+                <MenuItem
+                  icon={<ImageIcon />}
+                  hint="upload"
+                  onClick={() => {
+                    fileInputRef.current?.click();
+                    close();
+                  }}
+                >
+                  Attach image
+                </MenuItem>
+                <MenuItem
+                  icon={<FileIcon />}
+                  hint="as text"
+                  onClick={() => {
+                    setPicker({ query: "" });
+                    close();
+                  }}
+                >
+                  Insert file path…
+                </MenuItem>
+              </div>
+            )}
+          </Popover>
 
           <SegmentedControl
             segments={modeSegments}
@@ -722,7 +870,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                 <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-faint">
                   Model
                 </div>
-                {MODELS.map((m) => (
+                {models.map((m) => (
                   <MenuItem
                     key={m.value}
                     icon={<Cpu />}
@@ -807,6 +955,18 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
       </div>
 
       </div>
+
+      {picker && (
+        <FilePathPicker
+          chatId={chat.id}
+          initialQuery={picker.query}
+          onPick={(f) => {
+            setPicker(null);
+            insertPaths([f.abs]);
+          }}
+          onClose={() => setPicker(null)}
+        />
+      )}
 
       {editing && (
         <Suspense fallback={null}>

@@ -775,8 +775,12 @@ function looksBinary(buf: Buffer): boolean {
   return false;
 }
 
-/** Pack a file buffer into a WorktreeFile (utf8 text or base64 for binary). */
-function packFileContent(rel: string, buf: Buffer, ref?: string): WorktreeFile {
+/**
+ * Pack a file buffer into a WorktreeFile (utf8 text or base64 for binary).
+ * EXPORTED so GitService packs working-tree/index/rev reads identically — the
+ * Monaco viewer consumes one shape no matter which service fetched it.
+ */
+export function packFileContent(rel: string, buf: Buffer, ref?: string): WorktreeFile {
   const truncated = buf.length > MAX_FILE_BYTES;
   const slice = truncated ? buf.subarray(0, MAX_FILE_BYTES) : buf;
   const binary = looksBinary(slice);

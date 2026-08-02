@@ -68,6 +68,12 @@ export const McpServerConfigSchema = z.looseObject({
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  /**
+   * Working directory for a stdio server. Defaults to the project's repo path,
+   * so relative `args` (e.g. `./tools/sim-mcp/index.mjs`) resolve against the
+   * repo — not against wherever the manager itself happens to be running.
+   */
+  cwd: z.string().optional(),
   url: z.string().optional(),
   headers: z.record(z.string(), z.string()).optional(),
 });
@@ -76,3 +82,29 @@ export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
 /** A permission decision returned from an attention/permission card. */
 export const PermissionDecisionSchema = z.enum(["allow", "deny"]);
 export type PermissionDecision = z.infer<typeof PermissionDecisionSchema>;
+
+/** A selectable session model for the composer picker: SDK model id + label. */
+export const ModelOptionSchema = z.object({
+  /** SDK model id, e.g. "claude-opus-4-8". */
+  value: z.string(),
+  /** Display label, e.g. "Opus 4.8". */
+  label: z.string(),
+  /** Optional tier hint, e.g. "deepest" / "balanced" / "fast". */
+  hint: z.string().optional(),
+});
+export type ModelOption = z.infer<typeof ModelOptionSchema>;
+
+/** The app's default session model when a chat hasn't pinned one. */
+export const DEFAULT_MODEL = "claude-opus-4-8";
+
+/**
+ * Static model list used when the live Anthropic Models API is unavailable
+ * (no ANTHROPIC_API_KEY — e.g. subscription/OAuth auth) and as the client's
+ * pre-fetch seed so the picker never renders empty. Ordered most→least capable.
+ */
+export const FALLBACK_MODELS: ModelOption[] = [
+  { value: "claude-fable-5", label: "Fable 5", hint: "most capable" },
+  { value: "claude-opus-4-8", label: "Opus 4.8", hint: "deepest" },
+  { value: "claude-sonnet-5", label: "Sonnet 5", hint: "balanced" },
+  { value: "claude-haiku-4-5", label: "Haiku 4.5", hint: "fast" },
+];

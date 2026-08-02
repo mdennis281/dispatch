@@ -52,6 +52,9 @@ export function registerMcpRoutes(app: FastifyInstance): void {
           terminals: !!services.terminals,
           memory: !!services.memory,
           runner: !!services.runner,
+          // The MCP-config tools only need the project's repo path, which every
+          // project has — so they're offered wherever the catalog is viewable.
+          mcpConfig: !!project.repoPath,
         },
         mcpServers,
       });

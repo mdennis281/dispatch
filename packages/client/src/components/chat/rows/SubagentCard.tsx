@@ -1,136 +1,95 @@
-import { useMemo, useState, type ReactNode } from "react";
-import { Bot, ChevronRight, Check, X } from "lucide-react";
-import type { ChatMessage, ToolUseRow, ToolResultRow } from "@cm/shared";
+import { memo } from "react";
+import { Clock, Wrench, ArrowUpRight } from "lucide-react";
 import { RowShell } from "./RowShell.js";
+import type { SubagentRun } from "../../../lib/subagentRuns.js";
+import { runDuration } from "../../../lib/subagentRuns.js";
+import { openAgentRun, useRunElapsed } from "../../../stores/agentRun.js";
+import {
+  AgentGlyph,
+  RunProgressRail,
+  RunStatusChip,
+} from "../../agents/runVisuals.js";
 import { Chip } from "../../ui/Chip.js";
-import { Spinner } from "../../ui/Spinner.js";
 import { cn } from "../../../lib/cn.js";
 
-/** Best-effort subagent type: the Task input, else a child row's tag, else generic. */
-function subagentTypeOf(use: ToolUseRow, children: ChatMessage[]): string {
-  const fromInput = use.input.subagent_type;
-  if (typeof fromInput === "string" && fromInput.trim()) return fromInput.trim();
-  for (const c of children) {
-    if ("subagentType" in c && c.subagentType) return c.subagentType;
-  }
-  return "subagent";
-}
-
-/** Short one-line task description from the Task tool input, if present. */
-function descriptionOf(use: ToolUseRow): string | undefined {
-  const d = use.input.description ?? use.input.prompt;
-  if (typeof d !== "string" || !d.trim()) return undefined;
-  const s = d.trim();
-  return s.length > 140 ? `${s.slice(0, 140)}…` : s;
-}
-
 export interface SubagentCardProps {
-  /** The `Task` (or other spawner) tool_use row that started the subagent. */
-  use: ToolUseRow;
-  /** The spawner's own result (present once the subagent finished). */
-  result?: ToolResultRow;
-  /** The subagent's own transcript rows (share `parentToolUseId === use.toolUseId`). */
-  childRows: ChatMessage[];
-  /** Recursively render nested rows (reuses MessageList's grouping + pairing). */
-  renderRows: (rows: ChatMessage[]) => ReactNode;
-  defaultOpen?: boolean;
+  run: SubagentRun;
 }
 
 /**
- * A NESTED, collapsible sub-transcript for a subagent/workflow the in-chat agent
- * spawned via the `Task` tool. Collapsed, it still summarizes the subagent (type,
- * running/done, turn + tool counts); expanded, it renders the subagent's own
- * messages/tools indented under a left rail so parallel subagents read as distinct
- * stacked groups rather than a flat interleave in the main transcript.
+ * A subagent's anchor in the transcript: a LIVE STATUS CARD, not an expander.
+ *
+ * The old card nested the subagent's entire sub-transcript inline, which buried
+ * a 40-step run inside the parent's scroll and made the two threads hard to tell
+ * apart. Now the run gets its own surface (the inspector) and this card is what
+ * the chat shows in its place: who is running, on what, how far along, and what
+ * it's doing right now — one click from the full run.
  */
-export function SubagentCard({
-  use,
-  result,
-  childRows,
-  renderRows,
-  defaultOpen = false,
-}: SubagentCardProps) {
-  const [open, setOpen] = useState(defaultOpen);
-
-  const { type, description, turns, tools, running, errored } = useMemo(() => {
-    let turns = 0;
-    let tools = 0;
-    for (const c of childRows) {
-      if (c.kind === "result") turns += 1;
-      else if (c.kind === "tool_use") tools += 1;
-    }
-    return {
-      type: subagentTypeOf(use, childRows),
-      description: descriptionOf(use),
-      turns,
-      tools,
-      running: !result,
-      errored: result?.isError || result?.ok === false,
-    };
-  }, [use, result, childRows]);
-
-  const status = running ? (
-    <Chip tone="accent" icon={<Spinner size={9} />}>running</Chip>
-  ) : errored ? (
-    <Chip tone="danger" icon={<X />}>failed</Chip>
-  ) : (
-    <Chip tone="success" icon={<Check />}>done</Chip>
-  );
-
-  const counts: string[] = [];
-  if (tools > 0) counts.push(`${tools} tool${tools === 1 ? "" : "s"}`);
-  if (turns > 0) counts.push(`${turns} turn${turns === 1 ? "" : "s"}`);
+export const SubagentCard = memo(function SubagentCard({ run }: SubagentCardProps) {
+  const live = run.status === "running";
+  const elapsed = useRunElapsed(run.startedAt, run.durationMs, live);
 
   return (
-    <RowShell
-      gutter={
-        <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent-hi ring-1 ring-accent-line [&_svg]:size-3.5">
-          <Bot />
-        </span>
-      }
-    >
-      <div className="overflow-hidden rounded-md border border-accent-line/60 bg-accent-ghost/20">
-        <button
-          onClick={() => setOpen((v) => !v)}
-          className="flex w-full min-w-0 items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-white/[0.03]"
-        >
-          <ChevronRight
-            className={cn("size-3 shrink-0 text-faint transition-transform", open && "rotate-90")}
-          />
+    <RowShell gutter={<AgentGlyph status={run.status} />}>
+      <button
+        onClick={() => openAgentRun(run.chatId, run.id)}
+        className={cn(
+          "group/run block w-full overflow-hidden rounded-md border text-left transition-colors",
+          live
+            ? "border-accent-line/70 bg-accent-ghost/25 hover:bg-accent-ghost/40"
+            : run.status === "failed"
+              ? "border-danger-ghost bg-danger-ghost/20 hover:bg-danger-ghost/30"
+              : "border-line bg-panel-2/60 hover:bg-panel-2",
+        )}
+      >
+        <div className="flex min-w-0 items-center gap-2 px-2.5 pt-2">
           <span className="shrink-0 text-[12px] font-semibold text-accent-hi">subagent</span>
-          <Chip tone="accent" className="shrink-0">{type}</Chip>
-          {description && !open && (
-            <span className="min-w-0 truncate text-[11px] text-muted">{description}</span>
+          <Chip tone="accent" className="shrink-0">
+            {run.agentType}
+          </Chip>
+          {run.description && (
+            <span className="min-w-0 truncate text-[11.5px] text-muted">
+              {run.description}
+            </span>
           )}
-          <span className="ml-auto flex shrink-0 items-center gap-2 pl-2">
-            {counts.length > 0 && (
-              <span className="cm-mono !text-[10px] text-faint">{counts.join(" · ")}</span>
-            )}
-            {status}
+          <span className="ml-auto flex shrink-0 items-center gap-2">
+            <RunStatusChip status={run.status} />
           </span>
-        </button>
+        </div>
 
-        {open && (
-          <div className="cm-anim-rise border-t border-accent-line/40">
-            {description && (
-              <div className="border-b border-line-soft/60 px-3 py-2 text-[11.5px] leading-relaxed text-muted">
-                {description}
-              </div>
-            )}
-            {childRows.length > 0 ? (
-              <div className="ml-3 border-l border-accent-line/40">
-                <div className="flex flex-col divide-y divide-line-soft/70">
-                  {renderRows(childRows)}
-                </div>
-              </div>
-            ) : (
-              <div className="px-3 py-2 text-[11.5px] text-faint">
-                {running ? "Subagent is starting…" : "No activity recorded."}
-              </div>
-            )}
+        {/* live activity — what it is doing right now */}
+        {live && run.latest && (
+          <div className="mt-1.5 flex min-w-0 items-center gap-1.5 px-2.5">
+            <span className="size-1 shrink-0 rounded-full bg-accent cm-anim-pulse" />
+            <span className="min-w-0 truncate cm-mono !text-[10.5px] text-accent-hi/90">
+              {run.latest}
+            </span>
           </div>
         )}
-      </div>
+
+        <div className="mt-2 flex items-center gap-3 px-2.5 pb-2">
+          <span className="inline-flex items-center gap-1 text-[10.5px] text-faint [&_svg]:size-3">
+            <Clock />
+            <span className={cn("cm-mono !text-[10px] tabular-nums", live && "text-accent-hi")}>
+              {runDuration(elapsed)}
+            </span>
+          </span>
+          <span className="inline-flex items-center gap-1 text-[10.5px] text-faint [&_svg]:size-3">
+            <Wrench />
+            {run.toolCount}
+          </span>
+          {run.childRunIds.length > 0 && (
+            <span className="text-[10.5px] text-faint">
+              +{run.childRunIds.length} nested
+            </span>
+          )}
+          <RunProgressRail run={run} className="ml-1 min-w-0 flex-1 justify-start" />
+          <span className="inline-flex shrink-0 items-center gap-0.5 text-[10.5px] text-faint transition-colors group-hover/run:text-accent-hi [&_svg]:size-3">
+            Open run
+            <ArrowUpRight />
+          </span>
+        </div>
+      </button>
     </RowShell>
   );
-}
+});

@@ -11,15 +11,18 @@ import { registerChatRoutes } from "./chats.js";
 import { registerAssetRoutes } from "./assets.js";
 import { registerAgentRoutes } from "./agents.js";
 import { registerModeRoutes } from "./modes.js";
+import { registerModelRoutes } from "./models.js";
 import { registerMemoryRoutes } from "./memory.js";
 import { registerMcpRoutes } from "./mcp.js";
 import { registerWorktreeRoutes } from "./worktrees.js";
+import { registerGitRoutes } from "./git.js";
 import { registerRunnerRoutes } from "./runner.js";
 import { registerTerminalRoutes } from "./terminals.js";
 import { registerGithubRoutes } from "./github.js";
 import { registerAttentionRoutes } from "./attention.js";
 import { registerSettingsRoutes } from "./settings.js";
 import { registerUsageRoutes } from "./usage.js";
+import { registerFileRoutes } from "./files.js";
 
 export function registerRoutes(app: FastifyInstance): void {
   registerWsRoutes(app);
@@ -29,13 +32,16 @@ export function registerRoutes(app: FastifyInstance): void {
   registerAssetRoutes(app);
   registerAgentRoutes(app);
   registerModeRoutes(app);
+  registerModelRoutes(app);
   registerMemoryRoutes(app);
   registerMcpRoutes(app);
   registerWorktreeRoutes(app);
+  registerGitRoutes(app);
   registerRunnerRoutes(app);
   registerTerminalRoutes(app);
   registerGithubRoutes(app);
   registerAttentionRoutes(app);
   registerSettingsRoutes(app);
   registerUsageRoutes(app);
+  registerFileRoutes(app);
 }

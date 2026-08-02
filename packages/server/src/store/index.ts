@@ -20,6 +20,7 @@ import {
   readdir,
   mkdir,
   rm,
+  stat,
   readFile as fsReadFile,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
@@ -46,7 +47,7 @@ import {
   readJson,
   writeJsonAtomic,
   appendJsonl,
-  readJsonl,
+  readJsonlLines,
 } from "./fsq.js";
 
 /** Global app settings (config.json). Kept permissive by design. */
@@ -78,6 +79,44 @@ export type AppSettings = z.infer<typeof AppSettingsSchema>;
 const DEFAULT_SETTINGS: AppSettings = { theme: "dark" };
 
 type CheckpointMap = Record<string, Record<string, Checkpoint>>;
+
+/**
+ * Row id off a raw JSONL line WITHOUT parsing it. `id` is the first key of every
+ * persisted row (MessageBase is spread first in every message schema, and
+ * JSON.stringify preserves insertion order), so the anchored match hits on the
+ * fast path; anything else falls back to a real parse rather than guessing.
+ */
+function rowIdOf(line: string): string | null {
+  const fast = /^\{"id":"([^"\\]+)"/.exec(line);
+  if (fast) return fast[1]!;
+  try {
+    const obj = JSON.parse(line) as { id?: unknown };
+    return typeof obj.id === "string" ? obj.id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a raw JSONL line is the row with this id. */
+function lineHasId(line: string, id: string): boolean {
+  return rowIdOf(line) === id;
+}
+
+/** Parse + validate a window of raw JSONL lines, tolerating a torn last line. */
+function parseMessageLines(lines: string[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    try {
+      out.push(ChatMessageSchema.parse(JSON.parse(lines[i]!)));
+    } catch (err) {
+      // A malformed FINAL line can be a torn append (a write in flight); anything
+      // earlier is real corruption and should surface.
+      if (i === lines.length - 1) break;
+      throw err;
+    }
+  }
+  return out;
+}
 
 export class Store {
   private readonly mutex = new KeyedMutex();
@@ -263,8 +302,30 @@ export class Store {
     const chats = all.filter((c): c is Chat => c !== null);
     return projectId ? chats.filter((c) => c.projectId === projectId) : chats;
   }
-  getChat(id: string): Promise<Chat | null> {
-    return this.readEntity(this.chatFile(id), ChatSchema);
+  async getChat(id: string): Promise<Chat | null> {
+    const chat = await this.readEntity(this.chatFile(id), ChatSchema);
+    return chat && { ...chat, updatedAt: await this.lastActivityAt(chat) };
+  }
+
+  /**
+   * When this chat was last ACTIVE, which is what "updatedAt" has to mean for a
+   * recency-sorted sidebar.
+   *
+   * `chat.json` is only rewritten when the chat RECORD changes (title, mode,
+   * model, a new session id) — appending a transcript row doesn't touch it. So a
+   * chat that talked for an hour inside one session kept the `updatedAt` it was
+   * given at session start, and after a reload the sidebar sorted a whole
+   * history by near-creation timestamps. The transcript's own mtime is the
+   * truthful clock, costs one stat, and repairs existing chats with no
+   * migration. Live events still advance the client's order between reloads.
+   */
+  private async lastActivityAt(chat: Chat): Promise<number> {
+    try {
+      const { mtimeMs } = await stat(this.messagesFile(chat.id));
+      return Math.max(chat.updatedAt ?? 0, Math.round(mtimeMs));
+    } catch {
+      return chat.updatedAt ?? chat.createdAt; // no transcript yet
+    }
   }
   async saveChat(chat: Chat): Promise<Chat> {
     const validated = ChatSchema.parse(chat);
@@ -292,20 +353,54 @@ export class Store {
     return validated;
   }
 
+  /**
+   * Read a WINDOW of a chat's transcript, newest-biased.
+   *
+   * The window is sliced over RAW lines and only the surviving page is
+   * JSON.parse'd + zod-validated: a long transcript is multi-megabyte with
+   * thousands of rows, and validating all of them just to return the newest 200
+   * was the dominant cost of opening a big chat. Row ids are matched with a cheap
+   * scan over the raw line (see {@link lineHasId}) so cursor resolution doesn't
+   * force a full parse either.
+   *
+   *   limit    — keep at most N rows (the NEWEST N of whatever the cursors left).
+   *   afterId  — only rows strictly after this id (forward tail read).
+   *   beforeId — only rows strictly before this id (backward paging: pass the
+   *              oldest row you already hold to get the page above it).
+   */
   async readMessages(
     chatId: string,
-    opts: { limit?: number; afterId?: string } = {},
+    opts: { limit?: number; afterId?: string; beforeId?: string } = {},
   ): Promise<ChatMessage[]> {
-    const rows = await readJsonl(this.messagesFile(chatId));
-    let msgs = rows.map((r) => ChatMessageSchema.parse(r));
+    let lines = await readJsonlLines(this.messagesFile(chatId));
     if (opts.afterId) {
-      const idx = msgs.findIndex((m) => m.id === opts.afterId);
-      if (idx >= 0) msgs = msgs.slice(idx + 1);
+      const idx = lines.findIndex((l) => lineHasId(l, opts.afterId!));
+      if (idx >= 0) lines = lines.slice(idx + 1);
+    }
+    if (opts.beforeId) {
+      const idx = lines.findIndex((l) => lineHasId(l, opts.beforeId!));
+      if (idx >= 0) lines = lines.slice(0, idx);
     }
     if (opts.limit !== undefined && opts.limit >= 0) {
-      msgs = msgs.slice(Math.max(0, msgs.length - opts.limit));
+      lines = lines.slice(Math.max(0, lines.length - opts.limit));
     }
-    return msgs;
+    return parseMessageLines(lines);
+  }
+
+  /**
+   * Read specific rows by id (order follows the file, not the `ids` argument).
+   * Backs hydrate-on-expand: the transcript ships lean rows, and expanding a card
+   * pulls back the real `tool_use.input` / `tool_result.content` for just it.
+   */
+  async readMessagesByIds(chatId: string, ids: string[]): Promise<ChatMessage[]> {
+    if (ids.length === 0) return [];
+    const wanted = new Set(ids);
+    const lines = await readJsonlLines(this.messagesFile(chatId));
+    const hits = lines.filter((l) => {
+      for (const id of wanted) if (lineHasId(l, id)) return true;
+      return false;
+    });
+    return parseMessageLines(hits);
   }
 
   /* ------------------------------------------------ chat assets (images) */

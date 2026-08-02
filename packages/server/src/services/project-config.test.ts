@@ -78,6 +78,19 @@ function captureWatch(): {
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Poll until `predicate` holds, or fail after `timeoutMs`. Debounced work is
+ * "done after at least N ms", not "done at exactly N ms" — a fixed sleep sized to
+ * the debounce window turns every slow CI tick into a false failure.
+ */
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`condition not met within ${timeoutMs}ms`);
+    await delay(5);
+  }
+}
+
 /* ------------------------------------------------------------------ helpers */
 
 describe("project-config helpers", () => {
@@ -643,10 +656,11 @@ describe("ProjectConfigService — watch + debounced reload", () => {
     watch.trigger();
     // Not yet — still within the debounce window.
     expect(svc.getConfig("p1")?.name).toBe("V1");
-    await delay(60);
+    // Wait on the EVENT, which the service publishes after swapping the config in
+    // — waiting on the config alone can win the race and see no event yet.
+    await waitFor(() => events.some((e) => e.type === "project-config-update"));
 
     expect(svc.getConfig("p1")?.name).toBe("V2");
-    expect(events.some((e) => e.type === "project-config-update")).toBe(true);
 
     svc.stop();
     expect(watch.closed()).toBe(true);
@@ -661,5 +675,104 @@ describe("ProjectConfigService — watch + debounced reload", () => {
     watch.trigger();
     svc.stop();
     expect(watch.closed()).toBe(false);
+  });
+});
+
+/* ------------------------------------------------- mcpServers env expansion */
+
+describe("ProjectConfigService — MCP server ${VAR} expansion", () => {
+  /** Set env vars for one test and restore them afterwards. */
+  function withEnv(vars: Record<string, string | undefined>): () => void {
+    const prev = new Map(Object.keys(vars).map((k) => [k, process.env[k]]));
+    for (const [k, v] of Object.entries(vars)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    return () => {
+      for (const [k, v] of prev) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    };
+  }
+
+  it("expands placeholders in headers, env, args and url at load time", async () => {
+    const restore = withEnv({ CM_TEST_KEY: "s3cret", CM_TEST_HOST: "mcp.example.com" });
+    try {
+      const project = await seedProject();
+      await writeConfig(
+        "project.yaml",
+        [
+          "name: Configured",
+          "mcpServers:",
+          "  - name: remote",
+          "    transport:",
+          "      type: http",
+          "      url: https://${CM_TEST_HOST}/mcp",
+          "      headers:",
+          "        Authorization: Bearer ${CM_TEST_KEY}",
+          "  - name: local",
+          "    transport:",
+          "      type: stdio",
+          "      command: npx",
+          "      args: ['--region', '${CM_TEST_REGION:-us-east-1}']",
+          "      env:",
+          "        API_KEY: ${CM_TEST_KEY}",
+          "",
+        ].join("\n"),
+      );
+
+      const svc = new ProjectConfigService({ store, bus });
+      const result = await svc.load(project);
+      const servers = result.config!.mcpServers;
+
+      expect(servers.remote).toMatchObject({
+        url: "https://mcp.example.com/mcp",
+        headers: { Authorization: "Bearer s3cret" },
+      });
+      expect(servers.local).toMatchObject({
+        // The `:-` default fills in for the unset CM_TEST_REGION.
+        args: ["--region", "us-east-1"],
+        env: { API_KEY: "s3cret" },
+      });
+      expect(result.errors).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("reports an unset variable as a config error without failing the load", async () => {
+    const restore = withEnv({ CM_TEST_ABSENT: undefined });
+    try {
+      const project = await seedProject();
+      await writeConfig(
+        "project.yaml",
+        [
+          "name: Configured",
+          "mcpServers:",
+          "  - name: remote",
+          "    transport:",
+          "      type: http",
+          "      url: https://example.com/mcp",
+          "      headers:",
+          "        Authorization: Bearer ${CM_TEST_ABSENT}",
+          "",
+        ].join("\n"),
+      );
+
+      const svc = new ProjectConfigService({ store, bus });
+      const result = await svc.load(project);
+
+      // The server is still built (one missing key must not break the project)…
+      expect(result.config!.mcpServers.remote).toMatchObject({
+        headers: { Authorization: "Bearer " },
+      });
+      // …but the gap is surfaced, naming the variable.
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]!.message).toContain("CM_TEST_ABSENT");
+      expect(result.errors[0]!.message).toContain("remote");
+    } finally {
+      restore();
+    }
   });
 });

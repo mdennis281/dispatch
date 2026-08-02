@@ -15,6 +15,7 @@ import {
   Check,
   X,
   Brain,
+  GitBranch,
   type LucideIcon,
 } from "lucide-react";
 import type { Chat, SubApp, RunnerInstance, Project } from "@cm/shared";
@@ -29,6 +30,7 @@ import { useProjects, useActiveProject } from "../../stores/projects.js";
 import { useChats, useProjectChats } from "../../stores/chats.js";
 import { useView } from "../../stores/view.js";
 import { useProjectMemories } from "../../stores/memory.js";
+import { useGit, useGitChangeCount } from "../../stores/git.js";
 import { useRunners } from "../../stores/runners.js";
 import { useAttention } from "../../stores/attention.js";
 import { actions, deleteChat } from "../../lib/actions.js";
@@ -335,6 +337,42 @@ function ChatRow({
   );
 }
 
+/* -------------------------------------------------------------- top-level nav */
+
+/** A chat-independent, project-scoped surface toggle (Memory, Source Control). */
+function NavButton({
+  icon: Icon,
+  label,
+  count,
+  active,
+  onClick,
+}: {
+  icon: LucideIcon;
+  label: string;
+  /** Right-aligned tally; hidden when undefined (never rendered as "0"). */
+  count?: number;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12px] font-medium transition-colors [&_svg]:size-3.5",
+        active
+          ? "bg-accent-ghost text-primary"
+          : "text-secondary hover:bg-panel-2/60 hover:text-primary",
+      )}
+    >
+      <Icon className={active ? "text-accent" : "text-muted"} />
+      <span className="flex-1 text-left">{label}</span>
+      {count !== undefined && (
+        <span className="cm-mono !text-[9.5px] text-faint">{count}</span>
+      )}
+    </button>
+  );
+}
+
 /* ----------------------------------------------------------------- sidebar */
 
 /**
@@ -379,6 +417,21 @@ export function Sidebar() {
   const view = useView((s) => s.view);
   const setView = useView((s) => s.setView);
   const memCount = useProjectMemories(project?.id ?? null).length;
+  const changeCount = useGitChangeCount();
+
+  // Keep the Source Control tally live without opening the view. One `git
+  // status` a minute is nothing, and it means the badge is already right when
+  // you go looking — the open view polls far faster on its own.
+  const setGitRepo = useGit((s) => s.setRepoPath);
+  const refreshGit = useGit((s) => s.refresh);
+  useEffect(() => {
+    setGitRepo(project?.repoPath ?? null);
+  }, [project?.repoPath, setGitRepo]);
+  useEffect(() => {
+    if (!project?.repoPath) return;
+    const t = setInterval(() => void refreshGit(), 60_000);
+    return () => clearInterval(t);
+  }, [project?.repoPath, refreshGit]);
 
   // Opening a chat always returns to the chat workspace (out of the Memory view).
   const setActiveChat = (id: string) => {
@@ -451,21 +504,24 @@ export function Sidebar() {
       </div>
 
       <ScrollArea className="min-h-0 flex-1 py-2">
-        {/* top-level nav: Memory (chat-independent, project-scoped) */}
-        <div className="px-1.5 pb-1">
-          <button
+        {/* top-level nav: chat-independent, project-scoped surfaces */}
+        <div className="space-y-0.5 px-1.5 pb-1">
+          <NavButton
+            icon={Brain}
+            label="Memory"
+            count={memCount}
+            active={view === "memory"}
             onClick={() => setView(view === "memory" ? "chat" : "memory")}
-            className={cn(
-              "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12px] font-medium transition-colors [&_svg]:size-3.5",
-              view === "memory"
-                ? "bg-accent-ghost text-primary"
-                : "text-secondary hover:bg-panel-2/60 hover:text-primary",
-            )}
-          >
-            <Brain className={view === "memory" ? "text-accent" : "text-muted"} />
-            <span className="flex-1 text-left">Memory</span>
-            <span className="cm-mono !text-[9.5px] text-faint">{memCount}</span>
-          </button>
+          />
+          <NavButton
+            icon={GitBranch}
+            label="Source Control"
+            // Only a non-zero tally is worth the pixels — a clean tree says so
+            // by showing nothing at all.
+            count={changeCount || undefined}
+            active={view === "git"}
+            onClick={() => setView(view === "git" ? "chat" : "git")}
+          />
         </div>
 
         <div className="my-2 h-px bg-line-soft" />

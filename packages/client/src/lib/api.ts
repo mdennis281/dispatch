@@ -26,9 +26,15 @@ import type {
   ProjectMemory,
   MemoryType,
   McpCatalog,
+  GitStatus,
+  GitBranch,
+  GitCommit,
+  GitCommitFile,
+  GitStash,
   ProjectConfigResult,
   UsageSnapshot,
   ContextUsage,
+  ModelOption,
 } from "@cm/shared";
 
 /**
@@ -90,6 +96,21 @@ export interface ServerWorktreeDiff {
   additions: number;
   deletions: number;
   files: ServerFileDiff[];
+}
+
+/** One candidate from the file-path picker (mirrors the server IndexedFile). */
+export interface IndexedFile {
+  /** Repo-relative, forward-slashed — what the picker SHOWS. */
+  rel: string;
+  /** Absolute, server-native separators — what gets inserted. */
+  abs: string;
+}
+
+/** Response of the file-path search (mirrors the server /api/files payload). */
+export interface FileSearchResult {
+  /** The chat's working directory the paths are rooted at. */
+  root: string;
+  files: IndexedFile[];
 }
 
 /** A single file's content for the Monaco viewer/diff (mirrors WorktreeFile). */
@@ -206,11 +227,30 @@ export const api = {
     update: (id: string, body: Partial<Chat>) =>
       put<Chat>(`/api/chats/${id}`, body),
     remove: (id: string) => del<void>(`/api/chats/${id}`),
-    messages: (id: string, opts?: { limit?: number; afterId?: string }) =>
+    /**
+     * A WINDOW of a chat's transcript, newest-first-biased and LEAN: bulky tool
+     * payloads the collapsed cards don't render arrive clipped + flagged (see
+     * `messagesFull` for hydrate-on-expand). Page backwards with `beforeId`.
+     */
+    messages: (
+      id: string,
+      opts?: { limit?: number; afterId?: string; beforeId?: string },
+    ) =>
       get<ChatMessage[]>(
-        `/api/chats/${id}/messages${qs({ limit: opts?.limit, afterId: opts?.afterId })}`,
+        `/api/chats/${id}/messages${qs({
+          limit: opts?.limit,
+          afterId: opts?.afterId,
+          beforeId: opts?.beforeId,
+        })}`,
+      ),
+    /** Verbatim rows by id — the full payload behind a clipped (lean) row. */
+    messagesFull: (id: string, ids: string[]) =>
+      get<ChatMessage[]>(
+        `/api/chats/${id}/messages/full${qs({ ids: ids.join(",") })}`,
       ),
     checkpoints: (id: string) => get<Checkpoint[]>(`/api/chats/${id}/checkpoints`),
+    /** Cancel the auto-resume scheduled after a usage limit (409 if none). */
+    cancelResume: (id: string) => post<Chat>(`/api/chats/${id}/resume/cancel`),
     /** Live context-window breakdown (null when the subprocess isn't live). */
     contextUsage: (id: string) =>
       get<{ usage: ContextUsage | null }>(`/api/chats/${id}/context-usage`),
@@ -233,6 +273,11 @@ export const api = {
     update: (id: string, body: Partial<ModeConfig>) =>
       put<ModeConfig>(`/api/modes/${id}`, body),
     remove: (id: string) => del<void>(`/api/modes/${id}`),
+  },
+
+  /* available session models (live Anthropic Models API, or static fallback) */
+  models: {
+    list: () => get<ModelOption[]>("/api/models"),
   },
 
   /* self-contained `.claude-manager/` project config */
@@ -332,6 +377,16 @@ export const api = {
       ),
   },
 
+  /* file-path picker (the browser can't see the filesystem; the server can) */
+  files: {
+    /**
+     * Files in the chat's working directory matching `q`, ranked. `root` is that
+     * directory, echoed back so a caller can tell repo-relative from absolute.
+     */
+    search: (chatId: string, q = "", limit?: number) =>
+      get<FileSearchResult>(`/api/files${qs({ chatId, q, limit })}`),
+  },
+
   /* worktrees */
   worktrees: {
     list: (projectId: string) =>
@@ -356,6 +411,85 @@ export const api = {
         worktreePath,
         relPath,
         content,
+      }),
+  },
+
+  /**
+   * Working-copy git for the Source Control view. Every call is scoped to ONE
+   * repo directory (`repoPath`) — the project checkout or any of its worktrees.
+   * Mutations return the FRESH status so the UI never has to guess what a stage
+   * or commit did; a couple also return the list they changed (branches/stashes).
+   */
+  git: {
+    status: (repoPath: string) => get<GitStatus>(`/api/git/status${qs({ repoPath })}`),
+    branches: (repoPath: string) =>
+      get<GitBranch[]>(`/api/git/branches${qs({ repoPath })}`),
+    log: (repoPath: string, opts?: { limit?: number; ref?: string }) =>
+      get<GitCommit[]>(
+        `/api/git/log${qs({ repoPath, limit: opts?.limit, ref: opts?.ref })}`,
+      ),
+    commitFiles: (repoPath: string, rev: string) =>
+      get<GitCommitFile[]>(`/api/git/commit-files${qs({ repoPath, rev })}`),
+    stashes: (repoPath: string) => get<GitStash[]>(`/api/git/stashes${qs({ repoPath })}`),
+    /** One file at a snapshot: `WORKTREE`, `INDEX`, or any git rev. */
+    file: (repoPath: string, relPath: string, rev?: string) =>
+      get<WorktreeFileContent>(`/api/git/file${qs({ repoPath, relPath, rev })}`),
+
+    stage: (repoPath: string, paths: string[]) =>
+      post<GitStatus>("/api/git/stage", { repoPath, paths }),
+    stageAll: (repoPath: string) => post<GitStatus>("/api/git/stage", { repoPath, all: true }),
+    unstage: (repoPath: string, paths: string[]) =>
+      post<GitStatus>("/api/git/unstage", { repoPath, paths }),
+    unstageAll: (repoPath: string) =>
+      post<GitStatus>("/api/git/unstage", { repoPath, all: true }),
+    /** DESTRUCTIVE — deletes untracked files, reverts tracked ones. Confirm first. */
+    discard: (repoPath: string, paths: string[]) =>
+      post<GitStatus>("/api/git/discard", { repoPath, paths }),
+
+    commit: (repoPath: string, message: string, opts?: { amend?: boolean }) =>
+      post<{ commit: GitCommit; status: GitStatus }>("/api/git/commit", {
+        repoPath,
+        message,
+        amend: opts?.amend,
+      }),
+    /** One-shot AI draft from the staged diff (throws when nothing is staged). */
+    commitMessage: (repoPath: string, hint?: string) =>
+      post<{ message: string }>("/api/git/commit-message", { repoPath, hint }),
+
+    checkout: (repoPath: string, branch: string, opts?: { create?: boolean; from?: string }) =>
+      post<GitStatus>("/api/git/checkout", {
+        repoPath,
+        branch,
+        create: opts?.create,
+        from: opts?.from,
+      }),
+    deleteBranch: (repoPath: string, branch: string, force?: boolean) =>
+      del<GitBranch[]>("/api/git/branch", { repoPath, branch, force }),
+
+    stash: (repoPath: string, opts?: { message?: string; includeUntracked?: boolean }) =>
+      post<{ message: string; stashes: GitStash[]; status: GitStatus }>("/api/git/stash", {
+        repoPath,
+        message: opts?.message,
+        includeUntracked: opts?.includeUntracked,
+      }),
+    stashApply: (repoPath: string, index: number, pop?: boolean) =>
+      post<{ message: string; stashes: GitStash[]; status: GitStatus }>(
+        "/api/git/stash/apply",
+        { repoPath, index, pop },
+      ),
+    stashDrop: (repoPath: string, index: number) =>
+      del<{ message: string; stashes: GitStash[] }>("/api/git/stash", { repoPath, index }),
+
+    sync: (
+      repoPath: string,
+      op: "fetch" | "pull" | "push",
+      opts?: { setUpstream?: boolean; branch?: string },
+    ) =>
+      post<{ message: string; status: GitStatus }>("/api/git/sync", {
+        repoPath,
+        op,
+        setUpstream: opts?.setUpstream,
+        branch: opts?.branch,
       }),
   },
 

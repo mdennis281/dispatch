@@ -97,6 +97,13 @@ export function compactTokens(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
+/** Compact byte size for payload labels ("48 KB", "2.1 MB"). */
+export function kb(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** JSON pretty-print that never throws. */
 export function safeJson(v: unknown, space = 2): string {
   try {

@@ -9,6 +9,7 @@
     "build": "vite build",
     "preview": "vite preview --port 4321 --strictPort",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "shot": "node scripts/shot.mjs",
     "e2e": "playwright test",
     "e2e:smoke": "playwright test verify-smoke"
@@ -41,6 +42,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "tailwindcss": "^4.1.13",
     "typescript": "^5.7.2",
-    "vite": "^6.0.7"
+    "vite": "^6.0.7",
+    "vitest": "^4.1.9"
   }
 }

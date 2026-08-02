@@ -25,6 +25,7 @@ import { useConfig } from "./config.js";
 import { useCheckpoints } from "./checkpoints.js";
 import { useNotices } from "./notices.js";
 import { useUsage } from "./usage.js";
+import { useModels } from "./models.js";
 
 import {
   MOCK_PROJECTS,
@@ -45,16 +46,20 @@ export { useConnection } from "./connection.js";
 export type { ConnState } from "./connection.js";
 export { useProjects, useActiveProject } from "./projects.js";
 export { useChats, useProjectChats } from "./chats.js";
-export { useMessages, useChatMessages } from "./messages.js";
+export { useMessages, useChatMessages, useChatPage, useStreamRows } from "./messages.js";
+export type { StreamRow, ChatPage } from "./messages.js";
 export { useAttention, useAttentionCount } from "./attention.js";
 export { useRunners, useChatRunners } from "./runners.js";
 export { useTerminals, useChatTerminals } from "./terminals.js";
 export { usePanels } from "./panels.js";
 export { useMemory, useProjectMemories } from "./memory.js";
+export { useGit, useGitChangeCount, changeCount } from "./git.js";
+export type { GitSelection, GitTab } from "./git.js";
 export { useCheckpoints, useHasCheckpoint } from "./checkpoints.js";
 export { useNotices } from "./notices.js";
 export type { Toast, NoticeLevel } from "./notices.js";
 export { useUsage } from "./usage.js";
+export { useModels } from "./models.js";
 
 /** Seed all stores from the offline fixture (call once at boot). */
 export function hydrateFromMock(): void {
@@ -90,6 +95,14 @@ export function applyServerEvent(evt: WsServerEvent): void {
 
     case "chat-message":
       useMessages.getState().append(evt.chatId, evt.message);
+      // A chat streaming in the BACKGROUND has no viewport to disturb, so its
+      // window can be capped right here — otherwise every chat that ran this
+      // session keeps every row it ever emitted, and `evictExcept` (chat switch
+      // only) may not run for hours. The ACTIVE chat is trimmed by ChatView
+      // instead, which knows whether the reader is pinned to the bottom.
+      if (evt.chatId !== useChats.getState().activeChatId) {
+        useMessages.getState().trimWindow(evt.chatId);
+      }
       useChats.getState().bumpActivity(evt.chatId, evt.message.ts);
       return;
 
@@ -314,7 +327,16 @@ export async function hydrateFromServer(): Promise<boolean> {
   const prevChat = useChats.getState().activeChatId;
 
   loadedChats.clear();
+  recentChats = [];
   useProjects.getState().hydrate({ projects, agents, modes });
+  // Best-effort: refresh the composer's model picker from the server (live
+  // Anthropic Models API when a key is set, else the static fallback). Kept out
+  // of the gating fetch above so a slow/failed Models API never blocks the app —
+  // the store keeps its fallback seed on failure.
+  void api.models
+    .list()
+    .then((m) => useModels.getState().setModels(m))
+    .catch(() => {});
   useChats.getState().hydrate(chats);
   useAttention.getState().hydrate(attention);
   useRunners.getState().hydrate(runners, {});
@@ -357,17 +379,94 @@ export async function hydrateFromServer(): Promise<boolean> {
   return true;
 }
 
-/** Lazily fetch a chat's transcript + rollback anchors (once per session). */
+/**
+ * How many rows an initial transcript open pulls. The transcript is a WINDOW, not
+ * the whole history: a long chat runs to thousands of rows / megabytes, and both
+ * the fetch and the resulting DOM scale with it. Older rows page in on scroll.
+ */
+export const TRANSCRIPT_PAGE_SIZE = 150;
+
+/** How many chats' transcripts stay resident (LRU) before older ones are evicted. */
+const TRANSCRIPT_CACHE_SIZE = 3;
+
+/** Most-recently-opened chat ids, newest first (drives transcript eviction). */
+let recentChats: string[] = [];
+
+/** Record a chat open and drop transcripts beyond the LRU window. */
+function touchChat(chatId: string): void {
+  recentChats = [chatId, ...recentChats.filter((id) => id !== chatId)].slice(
+    0,
+    TRANSCRIPT_CACHE_SIZE,
+  );
+  const keep = new Set(recentChats);
+  // A chat that's been evicted must re-fetch on its next open, so drop its
+  // "already loaded" mark in lockstep with the store eviction.
+  for (const id of loadedChats) if (!keep.has(id)) loadedChats.delete(id);
+  useMessages.getState().evictExcept(recentChats);
+}
+
+/**
+ * Lazily fetch the NEWEST page of a chat's transcript + its rollback anchors
+ * (once per session, until evicted). Older rows load on demand via
+ * {@link loadOlderMessages}.
+ */
 export async function ensureChatMessages(chatId: string): Promise<void> {
+  touchChat(chatId);
   if (loadedChats.has(chatId)) return;
   loadedChats.add(chatId);
   try {
-    const messages = await api.chats.messages(chatId);
-    useMessages.getState().setForChat(chatId, messages);
+    const messages = await api.chats.messages(chatId, { limit: TRANSCRIPT_PAGE_SIZE });
+    // A FULL page means the window is capped, so assume there's more above; a
+    // short page proves we already hold the whole transcript.
+    useMessages
+      .getState()
+      .setForChat(chatId, messages, { hasMore: messages.length >= TRANSCRIPT_PAGE_SIZE });
     const checkpoints = await api.chats.checkpoints(chatId).catch(() => []);
     useCheckpoints.getState().hydrate(chatId, checkpoints.map((c) => c.messageId));
   } catch {
     loadedChats.delete(chatId); // allow a retry on the next open
+  }
+}
+
+/**
+ * Page in the rows ABOVE the current window (the user scrolled to the top of the
+ * transcript). No-op when there's nothing older or a page is already in flight.
+ */
+export async function loadOlderMessages(chatId: string): Promise<void> {
+  const store = useMessages.getState();
+  const page = store.pages[chatId];
+  if (!page?.hasMore || page.loadingOlder) return;
+  const oldest = store.byChat[chatId]?.[0];
+  if (!oldest) return;
+
+  store.setPage(chatId, { loadingOlder: true });
+  try {
+    const older = await api.chats.messages(chatId, {
+      limit: TRANSCRIPT_PAGE_SIZE,
+      beforeId: oldest.id,
+    });
+    useMessages.getState().prependForChat(chatId, older, {
+      hasMore: older.length >= TRANSCRIPT_PAGE_SIZE,
+      loadingOlder: false,
+    });
+  } catch {
+    // Keep `hasMore` so the sentinel can retry on the next scroll.
+    useMessages.getState().setPage(chatId, { loadingOlder: false });
+  }
+}
+
+/**
+ * Fetch the verbatim rows behind lean (clipped) ones — the transcript ships tool
+ * payloads as previews, and expanding a card needs the real thing. Best-effort:
+ * on failure the card keeps showing its preview.
+ */
+export async function hydrateFullRows(chatId: string, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  try {
+    const rows = await api.chats.messagesFull(chatId, ids);
+    useMessages.getState().replaceRows(chatId, rows);
+  } catch {
+    /* the preview stays; expanding again retries */
   }
 }
 

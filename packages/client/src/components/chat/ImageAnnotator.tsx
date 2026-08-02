@@ -39,6 +39,42 @@ const DANGER = "#ec5f6a";
 
 type Mode = "annotate" | "crop";
 
+/** Fallbacks for the chrome reserve, used only if the engine's DOM moves. */
+const TOOLBAR_H = 40;
+const TOOLBOX_H = 96;
+const CHROME_GAP = 8;
+
+/**
+ * marker.js floats its toolbar above the image and its colour/width toolbox
+ * below it, positioning both from the image's own box. When the image fills the
+ * host there's nowhere to put them, so they land ON the picture — that's the
+ * colour swatches covering the bottom of the shot.
+ *
+ * Reserve exactly as much padding as the real chrome measures. The engine
+ * observes the target <img> with a ResizeObserver, so shrinking the image
+ * re-runs its layout and the chrome drops into the gap we just opened.
+ *
+ * Returns a teardown for the observer.
+ */
+function reserveChrome(host: HTMLElement, ma: InstanceType<typeof markerjs2.MarkerArea>) {
+  const p = ma.styles.classNamePrefix;
+  const bar = host.querySelector<HTMLElement>(`.${p}toolbar`);
+  const box = host.querySelector<HTMLElement>(`.${p}toolbox`);
+  const apply = () => {
+    const top = `${(bar?.offsetHeight || TOOLBAR_H) + CHROME_GAP}px`;
+    const bottom = `${(box?.offsetHeight || TOOLBOX_H) + CHROME_GAP}px`;
+    // Guarded writes — the observer below must not feed itself.
+    if (host.style.paddingTop !== top) host.style.paddingTop = top;
+    if (host.style.paddingBottom !== bottom) host.style.paddingBottom = bottom;
+  };
+  apply();
+  // The toolbox height follows the active tool's panel (a text marker's font row
+  // is taller than the pen's width row) — keep the reserve in step with it.
+  const ro = new ResizeObserver(apply);
+  if (box) ro.observe(box);
+  return () => ro.disconnect();
+}
+
 export interface ImageAnnotatorProps {
   chatId: string;
   /** Resolved URL of the attachment to edit (same-origin asset endpoint). */
@@ -101,6 +137,7 @@ export default function ImageAnnotator({
     let disposed = false;
     let ma: InstanceType<typeof markerjs2.MarkerArea> | null = null;
     let ca: InstanceType<typeof cropro.CropArea> | null = null;
+    let releaseChrome: (() => void) | null = null;
 
     void (async () => {
       const img = document.createElement("img");
@@ -124,6 +161,9 @@ export default function ImageAnnotator({
         ma = new markerjs2.MarkerArea(img);
         ma.targetRoot = host;
         ma.settings.displayMode = "inline";
+        // One marker per stroke, so undo peels off the last stroke instead of
+        // wiping everything drawn since the pen was picked up.
+        ma.settings.newFreehandMarkerOnPointerUp = true;
         ma.availableMarkerTypes = [
           markerjs2.FreehandMarker,
           markerjs2.HighlightMarker,
@@ -151,6 +191,11 @@ export default function ImageAnnotator({
         s.logoPosition = "right";
         ma.show();
         maRef.current = ma;
+        // Open on the pen. Without this the editor starts in select mode with
+        // nothing selectable — every first drag on the image did nothing until
+        // you found the pen button.
+        ma.createNewMarker(markerjs2.FreehandMarker);
+        releaseChrome = reserveChrome(host, ma);
       } else {
         ca = new cropro.CropArea(img);
         ca.targetRoot = host;
@@ -177,6 +222,10 @@ export default function ImageAnnotator({
 
     return () => {
       disposed = true;
+      releaseChrome?.();
+      // Drop the measured reserve so the next mode starts from the CSS defaults.
+      host.style.paddingTop = "";
+      host.style.paddingBottom = "";
       try {
         ma?.close();
       } catch {
@@ -253,7 +302,7 @@ export default function ImageAnnotator({
             <p className="mt-px truncate text-[11px] text-muted">
               {mode === "crop"
                 ? "Drag to crop, rotate/flip, then confirm with ✓"
-                : "Pen · highlighter · arrow · shapes · text — colour & width in the toolbar"}
+                : "Pen is ready — just drag. Other tools above, colour & width below."}
             </p>
           </div>
 
@@ -307,7 +356,9 @@ export default function ImageAnnotator({
           className={cn(
             "relative flex items-center justify-center overflow-hidden bg-inset",
             "h-[64vh] min-h-[380px] w-full",
-            "px-2 pt-12 pb-16",
+            // First-paint estimate; reserveChrome() replaces these with the
+            // measured toolbar/toolbox heights as soon as the engine is up.
+            "px-2 pt-12 pb-28",
           )}
         />
       </div>

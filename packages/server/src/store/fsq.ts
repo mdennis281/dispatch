@@ -70,20 +70,36 @@ export async function appendJsonl(path: string, obj: unknown): Promise<void> {
  * line. Throws on a malformed interior line (surfaces real corruption).
  */
 export async function readJsonl(path: string): Promise<unknown[]> {
-  if (!existsSync(path)) return [];
-  const raw = await readFile(path, "utf8");
-  const lines = raw.split("\n");
+  const lines = await readJsonlLines(path);
   const out: unknown[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]?.trim();
-    if (!line) continue;
+    const line = lines[i]!;
     try {
       out.push(JSON.parse(line));
     } catch (err) {
       // A malformed final line can be a torn append; tolerate only the last one.
       if (i === lines.length - 1) break;
-      throw new Error(`Malformed JSONL at ${path}:${i + 1}: ${(err as Error).message}`);
+      throw new Error(`Malformed JSONL at ${path}: ${(err as Error).message}`);
     }
+  }
+  return out;
+}
+
+/**
+ * Read a JSONL file into its RAW non-empty lines, unparsed.
+ *
+ * The windowed transcript reads (see Store.readMessages) slice a page out of a
+ * multi-megabyte transcript and only then JSON.parse + zod-validate it — parsing
+ * every one of thousands of rows to return the last 200 was the dominant cost of
+ * opening a long chat. Callers that want whole rows use {@link readJsonl}.
+ */
+export async function readJsonlLines(path: string): Promise<string[]> {
+  if (!existsSync(path)) return [];
+  const raw = await readFile(path, "utf8");
+  const out: string[] = [];
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed) out.push(trimmed);
   }
   return out;
 }

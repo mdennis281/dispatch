@@ -4,10 +4,12 @@ import { Sidebar } from "./components/layout/Sidebar.js";
 import { RightPanel } from "./components/layout/RightPanel.js";
 import { ChatView } from "./components/chat/ChatView.js";
 import { CodeViewerHost } from "./components/monaco/index.js";
+import { AgentRunHost } from "./components/agents/AgentRunHost.js";
 import { ProjectPRsView } from "./components/prs/ProjectPRsView.js";
 import { McpCatalogView } from "./components/mcp/McpCatalogView.js";
 import { ProjectConfigView } from "./components/config/ProjectConfigView.js";
 import { MemoryView } from "./components/memory/MemoryView.js";
+import { GitView } from "./components/git/GitView.js";
 import { Toasts } from "./components/Toasts.js";
 import { useChats } from "./stores/chats.js";
 import { useView } from "./stores/view.js";
@@ -38,6 +40,8 @@ export default function App() {
         <main className="flex min-w-0 flex-1">
           {view === "memory" ? (
             <MemoryView />
+          ) : view === "git" ? (
+            <GitView />
           ) : chat ? (
             <>
               <ChatView chat={chat} />
@@ -49,6 +53,7 @@ export default function App() {
         </main>
       </div>
       <CodeViewerHost />
+      <AgentRunHost />
       <ProjectPRsView />
       <McpCatalogView />
       <ProjectConfigView />

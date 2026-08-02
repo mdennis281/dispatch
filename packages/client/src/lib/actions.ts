@@ -19,6 +19,7 @@ import type {
 } from "@cm/shared";
 import { ws } from "./ws.js";
 import { api } from "./api.js";
+import { useChats } from "../stores/chats.js";
 
 type Priority = "now" | "next" | "later";
 
@@ -200,6 +201,16 @@ export const actions = {
    *  worktree wrongly shown under this chat. */
   detachWorktree(input: { chatId: string; worktreePath: string }): void {
     ws.send({ type: "detach-worktree", ...input });
+  },
+
+  /**
+   * Cancel the auto-resume scheduled after a usage limit. REST (not the socket)
+   * because the caller awaits the outcome to un-busy its button; the resulting
+   * `chat-update` is what actually re-renders every tab.
+   */
+  async cancelResume(chatId: string): Promise<void> {
+    const chat = await api.chats.cancelResume(chatId);
+    useChats.getState().upsertChat(chat);
   },
 
   /* ---------------------------------------------- github control plane */

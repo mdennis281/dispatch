@@ -68,6 +68,13 @@ export const ToolUseRowSchema = z.object({
   /** Subagent type that produced this tool_use (when it runs inside one). */
   subagentType: z.string().optional(),
   uuid: z.string().optional(),
+  /**
+   * LEAN-TRANSCRIPT MARKER (never persisted — set only on the wire). True when
+   * `input` was projected down to a display preview because the real payload is
+   * large. The card fetches the full row on expand (see {@link ChatMessage} and
+   * the `/messages/full` route). Absent ⇒ `input` is verbatim.
+   */
+  inputOmitted: z.boolean().optional(),
 });
 export type ToolUseRow = z.infer<typeof ToolUseRowSchema>;
 
@@ -91,6 +98,14 @@ export const ToolResultRowSchema = z.object({
   parentToolUseId: z.string().nullable().optional(),
   /** Subagent type that produced this result (when it runs inside one). */
   subagentType: z.string().optional(),
+  /**
+   * LEAN-TRANSCRIPT MARKER (never persisted — set only on the wire). True when
+   * `content` was clipped to a head preview; `contentBytes` is the real size.
+   * The card fetches the full row on expand. Absent ⇒ `content` is verbatim.
+   */
+  contentOmitted: z.boolean().optional(),
+  /** Byte size of the un-clipped `content` (only set alongside `contentOmitted`). */
+  contentBytes: z.number().int().optional(),
 });
 export type ToolResultRow = z.infer<typeof ToolResultRowSchema>;
 
@@ -128,6 +143,11 @@ export const SystemMessageRowSchema = z.object({
   subtype: z.string(),
   text: z.string().optional(),
   data: z.unknown().optional(),
+  /**
+   * LEAN-TRANSCRIPT MARKER (never persisted — set only on the wire). True when
+   * `data` was projected to just the fields the transcript renders (`model`).
+   */
+  dataOmitted: z.boolean().optional(),
 });
 export type SystemMessageRow = z.infer<typeof SystemMessageRowSchema>;
 
@@ -146,6 +166,38 @@ export const PermissionRowSchema = z.object({
   message: z.string().optional(),
 });
 export type PermissionRow = z.infer<typeof PermissionRowSchema>;
+
+/**
+ * A BACKGROUND TASK'S OWN LIFECYCLE BEAT — the only per-task completion signal
+ * the SDK gives us (`system/task_notification`).
+ *
+ * Background work (an async `Agent` spawn, a backgrounded `Bash`) answers its
+ * tool call in milliseconds with a LAUNCH ACK and then keeps running. Nothing in
+ * the row stream says when one of them stopped, so the UI could only fall back
+ * to "is the parent turn still running" — which makes five parallel subagents
+ * share one status and flip to done together. This row carries the SDK's own
+ * verdict for exactly one task.
+ *
+ * `toolUseId` is the correlation key: the `Task`/`Agent`/`Bash` tool_use that
+ * started it. `taskId` is the SDK's id for the same task and is the fallback
+ * when the notification omits the tool_use (it appears in the launch ack text).
+ */
+export const TaskStatusRowSchema = z.object({
+  ...MessageBase,
+  kind: z.literal("task_status"),
+  /** SDK task id — stable for the life of one background task. */
+  taskId: z.string(),
+  /** The tool_use that launched it (absent on some notifications). */
+  toolUseId: z.string().optional(),
+  status: z.enum(["completed", "failed", "stopped"]),
+  /** The SDK's one-line recap of how it went. */
+  summary: z.string().optional(),
+  /** Rollups the SDK reports at settle time. */
+  totalTokens: z.number().int().optional(),
+  toolUses: z.number().int().optional(),
+  durationMs: z.number().int().optional(),
+});
+export type TaskStatusRow = z.infer<typeof TaskStatusRowSchema>;
 
 /** A local (non-agent) notice injected into the transcript (rollback, errors…). */
 export const NoticeRowSchema = z.object({
@@ -166,6 +218,7 @@ export const ChatMessageSchema = z.discriminatedUnion("kind", [
   SystemMessageRowSchema,
   PermissionRowSchema,
   NoticeRowSchema,
+  TaskStatusRowSchema,
 ]);
 export type ChatMessage = z.infer<typeof ChatMessageSchema>;
 export type ChatMessageKind = ChatMessage["kind"];

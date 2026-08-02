@@ -136,6 +136,24 @@
     background: transparent;
   }
 
+  /*
+   * Transcript row virtualization, done by the browser.
+   *
+   * A long chat keeps hundreds of rows in the DOM (markdown bodies, tool cards,
+   * code blocks). `content-visibility: auto` lets the engine skip layout, style
+   * and paint for rows scrolled out of view, so scroll cost tracks what's ON
+   * SCREEN rather than how long the chat is — without a windowing library, and
+   * keeping native scroll anchoring, Ctrl+F and text selection intact.
+   *
+   * `contain-intrinsic-size: auto <fallback>` is what makes the scrollbar honest:
+   * `auto` remembers each row's real height once it has been rendered, and the
+   * fallback is only the first-paint guess for a row never yet shown.
+   */
+  .cm-row-cv {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 90px;
+  }
+
   .cm-panel {
     background: var(--color-panel);
     border: 1px solid var(--color-line);

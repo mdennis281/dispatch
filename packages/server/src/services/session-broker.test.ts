@@ -1084,6 +1084,75 @@ describe("SessionBroker — subagent nesting", () => {
     const res = rows.find((r) => r.kind === "tool_result");
     expect(res && "subagentType" in res ? res.subagentType : undefined).toBeUndefined();
   });
+
+  it("persists a background task's settle notification as a task_status row", async () => {
+    const { fn } = makeFakeQuery((_t) => [
+      toolUseMsg("Agent", { subagent_type: "Explore", description: "look around" }, "task-1"),
+      // The async spawn answers immediately with a launch ack…
+      toolResultMsg("task-1", "Async agent launched. agentId: a730258b58505d274"),
+      // …and the only word on how it actually went arrives later, out of band.
+      {
+        type: "system",
+        subtype: "task_notification",
+        task_id: "a730258b58505d274",
+        tool_use_id: "task-1",
+        status: "completed",
+        output_file: "/tmp/out.jsonl",
+        summary: "Mapped the zone system.",
+        usage: { total_tokens: 4200, tool_uses: 7, duration_ms: 91000 },
+        session_id: "sess-1",
+      },
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "explore");
+    await idleP;
+
+    const rows = await store.readMessages("c1");
+    const row = rows.find((r) => r.kind === "task_status");
+    expect(row).toMatchObject({
+      kind: "task_status",
+      taskId: "a730258b58505d274",
+      toolUseId: "task-1",
+      status: "completed",
+      summary: "Mapped the zone system.",
+      totalTokens: 4200,
+      toolUses: 7,
+      durationMs: 91000,
+    });
+  });
+
+  it("keeps a failed/stopped verdict as itself and tolerates a missing tool_use_id", async () => {
+    const { fn } = makeFakeQuery((_t) => [
+      toolUseMsg("Agent", { subagent_type: "Explore" }, "task-1"),
+      toolResultMsg("task-1", "Async agent launched. agentId: zzz999888"),
+      {
+        type: "system",
+        subtype: "task_notification",
+        task_id: "zzz999888",
+        status: "stopped",
+        output_file: "/tmp/out.jsonl",
+        summary: "Stopped by the user.",
+        session_id: "sess-1",
+      },
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "explore");
+    await idleP;
+
+    const row = (await store.readMessages("c1")).find((r) => r.kind === "task_status");
+    expect(row).toMatchObject({ taskId: "zzz999888", status: "stopped" });
+    expect(row && "toolUseId" in row ? row.toolUseId : undefined).toBeUndefined();
+  });
 });
 
 describe("SessionBroker — project memory injection", () => {
@@ -1403,7 +1472,7 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     expect(await readFile(materialized, "utf8")).toContain("Do the sprites.");
   });
 
-  it("does not clobber an existing `.claude/skills/<name>` and leaves skills default when none authored", async () => {
+  it("materializes the manager's bundled skills even when the project authors none", async () => {
     const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
     const repoDir = await mkdtemp(join(tmpdir(), "cm-broker-skill2-"));
     tempDirs.push(repoDir);
@@ -1428,9 +1497,46 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     await broker.sendMessage("c1", "hi");
     await idleP;
 
-    // No authored skills → the SDK skill option is left untouched (CLI default).
+    // The manager ships its own skills (how MCP config works here, etc.), so a
+    // project with no authored skills still gets them — and still enables skills.
     const opts = controllers[0]!.options as { skills?: unknown };
-    expect(opts.skills).toBeUndefined();
+    expect(opts.skills).toBe("all");
+    expect(existsSync(join(repoDir, ".claude", "skills", "mcp-setup", "SKILL.md"))).toBe(true);
+  });
+
+  it("never clobbers a repo's own `.claude/skills/<name>` with a bundled skill", async () => {
+    const { fn } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const repoDir = await mkdtemp(join(tmpdir(), "cm-broker-skill3-"));
+    tempDirs.push(repoDir);
+    const project: Project = {
+      id: "po",
+      name: "Override",
+      repoPath: repoDir,
+      worktreeRoot: join(repoDir, "..", "wt"),
+      subApps: [],
+      createdAt: 1,
+    };
+    await store.saveProject(project);
+    await writeConfig(repoDir, "project.yaml", "name: Configured");
+
+    // The repo ships its OWN mcp-setup skill — it must win over the bundled one,
+    // and must survive session teardown (only dirs WE created are cleaned up).
+    const own = join(repoDir, ".claude", "skills", "mcp-setup");
+    await mkdir(own, { recursive: true });
+    await writeFile(join(own, "SKILL.md"), "# our own house rules", "utf8");
+
+    const svc = new ProjectConfigService({ store, bus });
+    await svc.reload("po");
+    const broker = makeConfigBroker(fn, svc);
+
+    await store.saveChat(chatFor("c1", "po"));
+    broker.create(chatFor("c1", "po"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    expect(await readFile(join(own, "SKILL.md"), "utf8")).toBe("# our own house rules");
   });
 });
 

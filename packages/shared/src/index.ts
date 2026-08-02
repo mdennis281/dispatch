@@ -5,8 +5,11 @@
  */
 export * from "./common.js";
 export * from "./domain.js";
+export * from "./git.js";
 export * from "./project-config.js";
+export * from "./env-expand.js";
 export * from "./usage.js";
+export * from "./limits.js";
 export * from "./mcp.js";
 export * from "./messages.js";
 export * from "./wire.js";

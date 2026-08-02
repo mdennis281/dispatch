@@ -1,8 +1,9 @@
 import { create } from "zustand";
 
 /** The app's primary surface. "chat" = the transcript workspace; "memory" = the
- *  top-level, chat-independent memory browser (list+search + viewer). */
-export type AppView = "chat" | "memory";
+ *  top-level, chat-independent memory browser (list+search + viewer); "git" =
+ *  the project's Source Control cockpit (changes, history, branches, stashes). */
+export type AppView = "chat" | "memory" | "git";
 
 interface ViewStore {
   view: AppView;

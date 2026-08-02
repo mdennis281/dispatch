@@ -357,9 +357,23 @@ export function McpCatalogView() {
               onSelect={setSelected}
             />
             {external.length === 0 && (
-              <p className="px-1 pt-1 text-[10px] leading-snug text-faint">
-                No external MCP servers configured for this project.
-              </p>
+              // The catalog is where you come to check whether a server is wired
+              // up, so it's also where you find out how to wire one up. Both
+              // supported paths write the same `.claude-manager/project.yaml`.
+              <div className="space-y-1 px-1 pt-1">
+                <p className="text-[10px] leading-snug text-faint">
+                  No external MCP servers configured for this project.
+                </p>
+                <p className="text-[10px] leading-snug text-faint">
+                  Add one from a terminal at the repo root:
+                </p>
+                <code className="block break-all rounded-md border border-line-soft bg-inset px-1.5 py-1 cm-mono !text-[10px] leading-snug text-secondary">
+                  cm mcp add &lt;name&gt; -- &lt;command&gt;
+                </code>
+                <p className="text-[10px] leading-snug text-faint">
+                  …or just ask an agent in this project to add it.
+                </p>
+              </div>
             )}
           </div>
 

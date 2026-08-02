@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import {
   Sparkles,
   Info,
@@ -105,7 +105,7 @@ function CenterNote({
 }
 
 /** The turn-done result marker — turns / duration / cost, or an error line. */
-export function ResultRowView({ row }: { row: ResultRow }) {
+export const ResultRowView = memo(function ResultRowView({ row }: { row: ResultRow }) {
   if (row.isError) {
     return (
       <CenterNote tone="danger" icon={<XCircle />}>
@@ -126,10 +126,10 @@ export function ResultRowView({ row }: { row: ResultRow }) {
       {parts.length > 0 && <span className="cm-mono !text-[10px] text-faint"> · {parts.join(" · ")}</span>}
     </CenterNote>
   );
-}
+});
 
 /** A system/init message — a quiet "session started" marker with a model chip. */
-export function SystemRowView({ row }: { row: SystemMessageRow }) {
+export const SystemRowView = memo(function SystemRowView({ row }: { row: SystemMessageRow }) {
   if (row.subtype === "init") {
     const data = row.data as { model?: string } | undefined;
     return (
@@ -149,10 +149,10 @@ export function SystemRowView({ row }: { row: SystemMessageRow }) {
       {row.text && <span className="text-faint"> · {row.text}</span>}
     </CenterNote>
   );
-}
+});
 
 /** A local, non-agent notice (rollback, info, error) woven into the transcript. */
-export function NoticeRowView({ row }: { row: NoticeRow }) {
+export const NoticeRowView = memo(function NoticeRowView({ row }: { row: NoticeRow }) {
   const Icon = row.level === "error" ? AlertTriangle : row.text.startsWith("Rolled back") ? RotateCcw : Info;
   const tone =
     row.level === "error" ? "text-danger" : row.level === "warn" ? "text-warn" : "text-muted";
@@ -164,4 +164,4 @@ export function NoticeRowView({ row }: { row: NoticeRow }) {
       </div>
     </div>
   );
-}
+});

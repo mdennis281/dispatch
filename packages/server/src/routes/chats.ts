@@ -6,12 +6,23 @@
  *   PUT    /api/chats/:id           → merge metadata (title/mode/agent/effort…)
  *   DELETE /api/chats/:id           → stop + drop session, clear attention, delete
  *                                     record, broadcast chat-deleted
- *   GET    /api/chats/:id/messages?limit=&afterId= → ChatMessage[]
+ *   GET    /api/chats/:id/messages?limit=&afterId=&beforeId=&full=
+ *                                   → ChatMessage[] (a window; lean unless full=1)
+ *   GET    /api/chats/:id/messages/full?ids=a,b → ChatMessage[] (verbatim rows)
  *   GET    /api/chats/:id/checkpoints → Checkpoint[] (rollback anchors)
  */
 import type { FastifyInstance } from "fastify";
 import { ChatSchema } from "@cm/shared";
 import { createChat } from "./dispatch.js";
+import { leanRows } from "../services/transcript-lean.js";
+
+/** Cap on one hydrate request (a card needs 2 — its tool_use + tool_result). */
+const MAX_HYDRATE_IDS = 50;
+
+/** Query-flag truthiness: `?full`, `?full=1`, `?full=true` all count. */
+function isTruthyFlag(v: string | undefined): boolean {
+  return v !== undefined && v !== "0" && v !== "false";
+}
 
 export function registerChatRoutes(app: FastifyInstance): void {
   const { store, bus } = app.cm;
@@ -96,21 +107,69 @@ export function registerChatRoutes(app: FastifyInstance): void {
     },
   );
 
+  /**
+   * A WINDOW of the transcript, LEAN by default (see services/transcript-lean.ts):
+   * bulky `tool_use.input` / `tool_result.content` payloads the collapsed cards
+   * never show are clipped to a preview and flagged, so opening a long chat ships
+   * ~200 KB instead of ~10 MB. Pass `full=1` for verbatim rows.
+   *
+   *   limit    — newest N rows (client pages backwards from there)
+   *   beforeId — rows strictly older than this id (the previous page)
+   *   afterId  — rows strictly newer than this id (forward tail)
+   */
   app.get<{
     Params: { id: string };
-    Querystring: { limit?: string; afterId?: string };
+    Querystring: { limit?: string; afterId?: string; beforeId?: string; full?: string };
   }>("/api/chats/:id/messages", async (req) => {
     const limit =
       req.query.limit !== undefined ? Number(req.query.limit) : undefined;
-    return store.readMessages(req.params.id, {
+    const rows = await store.readMessages(req.params.id, {
       limit: Number.isFinite(limit) ? limit : undefined,
       afterId: req.query.afterId,
+      beforeId: req.query.beforeId,
     });
+    return isTruthyFlag(req.query.full) ? rows : leanRows(rows);
+  });
+
+  /**
+   * Full (un-clipped) rows by id — hydrate-on-expand for the lean transcript. A
+   * ToolCallCard built from a clipped row fetches its `tool_use` + `tool_result`
+   * here the first time the user opens it.
+   */
+  app.get<{
+    Params: { id: string };
+    Querystring: { ids?: string };
+  }>("/api/chats/:id/messages/full", async (req, reply) => {
+    const ids = (req.query.ids ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (ids.length === 0) return reply.code(400).send({ error: "ids required" });
+    if (ids.length > MAX_HYDRATE_IDS) {
+      return reply.code(400).send({ error: `at most ${MAX_HYDRATE_IDS} ids` });
+    }
+    return store.readMessagesByIds(req.params.id, ids);
   });
 
   app.get<{ Params: { id: string } }>(
     "/api/chats/:id/checkpoints",
     async (req) => store.getCheckpoints(req.params.id),
+  );
+
+  /**
+   * Cancel a scheduled auto-resume (the chat stays paused until you send).
+   * 404 when the chat is gone; 409 when there is nothing pending to cancel —
+   * an already-fired or already-cancelled plan must not read as success.
+   */
+  app.post<{ Params: { id: string } }>(
+    "/api/chats/:id/resume/cancel",
+    async (req, reply) => {
+      const chat = await store.getChat(req.params.id);
+      if (!chat) return reply.code(404).send({ error: "not found" });
+      const saved = await app.services.resume.cancel(req.params.id);
+      if (!saved) return reply.code(409).send({ error: "no pending auto-resume" });
+      return saved;
+    },
   );
 
   // Live context-window breakdown (tokens by category + authoritative window),

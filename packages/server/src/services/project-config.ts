@@ -40,6 +40,9 @@ import {
   PermissionModeSchema,
   CONFIG_DIR_NAME,
   MANIFEST_FILE,
+  expandEnvVars,
+  expandEnvList,
+  expandEnvRecord,
   DEFAULT_INSTRUCTIONS_DIR,
   DEFAULT_AGENTS_DIR,
   DEFAULT_MODES_DIR,
@@ -185,27 +188,45 @@ export function parseFrontmatter(raw: string): Frontmatter {
   return { data, body };
 }
 
-/** Normalize a manifest MCP transport into the flat store {@link McpServerConfig}. */
-function transportToMcpConfig(transport: {
-  type: string;
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  url?: string;
-  headers?: Record<string, string>;
-}): McpServerConfig {
+/**
+ * Normalize a manifest MCP transport into the flat store {@link McpServerConfig},
+ * expanding `${VAR}` / `${VAR:-default}` placeholders from the manager's own
+ * environment on the way through.
+ *
+ * `project.yaml` is COMMITTED, so an MCP server that needs an API key writes a
+ * placeholder rather than the key; the substitution happens here, at load, so the
+ * secret only ever exists in memory. A placeholder with no matching variable
+ * expands to "" and is collected in `missing` — the server still gets built (one
+ * unset key must not stop a project's sessions from starting) and the caller
+ * turns the gap into a visible config warning.
+ */
+function transportToMcpConfig(
+  transport: {
+    type: string;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    url?: string;
+    headers?: Record<string, string>;
+  },
+  missing?: Set<string>,
+): McpServerConfig {
+  const opts = { onMissing: (name: string) => missing?.add(name) };
+  const str = (v: string | undefined): string | undefined =>
+    v === undefined ? undefined : expandEnvVars(v, opts);
+
   if (transport.type === "stdio") {
     return {
       type: "stdio",
-      command: transport.command,
-      args: transport.args,
-      env: transport.env,
+      command: str(transport.command),
+      args: expandEnvList(transport.args, opts),
+      env: expandEnvRecord(transport.env, opts),
     };
   }
   return {
     type: transport.type,
-    url: transport.url,
-    headers: transport.headers,
+    url: str(transport.url),
+    headers: expandEnvRecord(transport.headers, opts),
   };
 }
 
@@ -484,10 +505,24 @@ export class ProjectConfigService {
       dockerCompose: s.docker,
     }));
 
-    // --- mcpServers (array → keyed record; transport flattened) ---
+    // --- mcpServers (array → keyed record; transport flattened + env-expanded) ---
     const mcpServers: Record<string, McpServerConfig> = {};
     for (const server of manifest.mcpServers ?? []) {
-      mcpServers[server.name] = transportToMcpConfig(server.transport);
+      // A `${VAR}` the manager's environment doesn't define is a config problem
+      // worth SHOWING (the server will just fail to authenticate otherwise), but
+      // not worth failing the load over — so it lands in `errors`, not a throw.
+      const missing = new Set<string>();
+      mcpServers[server.name] = transportToMcpConfig(server.transport, missing);
+      if (missing.size) {
+        errors.push({
+          scope: "manifest",
+          file: MANIFEST_FILE,
+          message:
+            `MCP server "${server.name}" references unset environment ` +
+            `variable(s): ${[...missing].join(", ")}. They expand to an empty ` +
+            `string — set them where claude-manager runs.`,
+        });
+      }
     }
 
     const config: ProjectConfig = ProjectConfigSchema.parse({

@@ -34,6 +34,34 @@ process. No separate client server, no second port to open.
 4. **Right panel:** worktree diff-vs-main, subApp **Runner** (see below), **Ports & processes**,
    and **PRs + GitHub Actions** (ship / merge / label / rerun / dispatch).
 5. **Roll back** any message (hover it) to restore code + conversation to that point.
+6. **Source Control** (left sidebar, under Memory) — the working copy for the project
+   checkout **or any of its worktrees** (pick with the repo selector). See [Source
+   control](#source-control) below.
+
+## Source control
+
+The **Source Control** view is a full git client over one repo directory at a time. Pick
+the project checkout or any worktree from the repo selector — everything below re-scopes
+to it, so you can review what an agent did in its worktree without leaving the app.
+
+| Tab | What it does |
+|---|---|
+| **Changes** | Staged / Changes / Untracked groups. Stage, unstage or discard per file (or all); click any row for a Monaco diff of that side of the index. Conflicts get their own group. |
+| **History** | Commits newest-first; expand one for its files (+/− counts), click a file to diff it against the commit's parent. |
+| **Stashes** | The stash stack with Apply / Pop / Drop, and per-entry file lists you can diff before restoring. |
+
+Also in the toolbar: **branch switcher** (search, switch, create — a branch checked out in
+another worktree is disabled, since git refuses a second checkout), **Stash**, and
+**Fetch / Pull / Push** with the ahead/behind counts. Pushing a branch with no upstream
+publishes it (`--set-upstream`).
+
+**Commit message (AI)** — the ✨ button on the message box drafts one from the *staged*
+diff via a one-shot `claude-haiku-4-5` call, matching the style of your recent commits.
+It lands in the box for you to edit; ⌘/Ctrl+Enter commits. **Amend** rewrites the tip.
+
+Two actions are irreversible and take a second click to confirm: **discard** (reverts
+tracked files, deletes untracked ones) and **drop stash**. Git never prompts for
+credentials here — a push that needs auth fails fast with the reason instead of hanging.
 
 ## Dev-mode processes (subApps)
 
@@ -86,6 +114,57 @@ launch. The **Ports & processes** panel is the escape hatch:
 - Each row is flagged **tracked** (a live runner owns it) or **orphan** (nothing does).
 - **Kill orphans** / **Kill all** tree-kills by pid — use this whenever you hit
   "port already in use" but the UI shows nothing running.
+
+## MCP servers (`cm mcp`)
+
+A managed repo's MCP servers live in its committable `.claude-manager/project.yaml`.
+The manager watches that file, so an edit applies to the next turn — no restart.
+
+Three ways to add one, all writing the same file:
+
+- **Ask an agent.** Sessions get `mcp__manager__mcp_add` / `mcp_list` / `mcp_remove`,
+  plus a bundled `mcp-setup` skill that fires whenever the conversation turns to
+  installing or debugging an MCP server.
+- **The `cm` CLI**, from anywhere inside the repo.
+- **By hand**, if you prefer — the CLI just validates for you.
+
+```bash
+cm mcp add ripgrep -- npx -y mcp-ripgrep@latest      # stdio (local subprocess)
+cm mcp add linear --transport http --url https://mcp.linear.app/mcp
+cm mcp add-json foo '{"command":"npx","args":["-y","foo-mcp"]}'
+cm mcp import ./.mcp.json                            # bulk import
+cm mcp list | get <name> | remove <name>
+```
+
+`cm` needs `pnpm build` once, then to reach it from a managed repo put it on your
+PATH:
+
+```bash
+npm i -g ./packages/cli        # from the claude-manager checkout
+```
+
+Without installing, run it from the claude-manager checkout with an explicit
+target directory:
+
+```bash
+pnpm cm mcp list -C /path/to/your/repo
+```
+
+**Secrets stay out of the committed file.** Values may use `${VAR}` or
+`${VAR:-default}`, expanded from the manager process's environment when a session
+starts:
+
+```bash
+cm mcp add linear --transport http --url https://mcp.linear.app/mcp \
+  -H "Authorization: Bearer ${LINEAR_API_KEY}"
+```
+
+An unset variable expands to an empty string and shows up as a project-config
+warning rather than breaking the project.
+
+Open the **MCP catalog** in the UI (top bar / command palette) to see every
+configured server's live connection status and its tools, command by command,
+grouped by server.
 
 ## Config (env)
 | Var | Default | Meaning |

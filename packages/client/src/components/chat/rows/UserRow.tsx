@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { UserMessageRow } from "@cm/shared";
 import { RowShell } from "./RowShell.js";
 import { Chip } from "../../ui/Chip.js";
@@ -6,7 +7,13 @@ import { actions } from "../../../lib/actions.js";
 import { useHasCheckpoint } from "../../../stores/checkpoints.js";
 
 /** A user turn: avatar initial, text, attached image thumbnails, effort chip. */
-export function UserRow({ chatId, row }: { chatId: string; row: UserMessageRow }) {
+export const UserRow = memo(function UserRow({
+  chatId,
+  row,
+}: {
+  chatId: string;
+  row: UserMessageRow;
+}) {
   const canRollback = useHasCheckpoint(chatId, row.id);
   return (
     <RowShell
@@ -42,4 +49,4 @@ export function UserRow({ chatId, row }: { chatId: string; row: UserMessageRow }
       )}
     </RowShell>
   );
-}
+});

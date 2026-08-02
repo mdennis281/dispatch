@@ -42,7 +42,7 @@ function makeProject(mcpServers?: Project["mcpServers"]): Project {
 describe("mcp-catalog — builder", () => {
   it("enumerates the manager server with the full tool set + schemas/params", async () => {
     const catalog = await buildProjectMcpCatalog(makeProject(), {
-      bindings: { github: true, terminals: true, memory: true, runner: true },
+      bindings: { github: true, terminals: true, memory: true, runner: true, mcpConfig: true },
     });
 
     expect(catalog.servers).toHaveLength(1);
@@ -63,12 +63,16 @@ describe("mcp-catalog — builder", () => {
         "recall",
         "forget",
         "run_subapp",
+        "mcp_list",
+        "mcp_add",
+        "mcp_remove",
       ]),
     );
 
     // Tools that legitimately take no arguments (they act on the calling chat's
-    // own state) carry an empty schema; every other tool has flattened params.
-    const NO_ARG_TOOLS = new Set(["context_usage", "compact_context"]);
+    // own state, or on the project's config as a whole) carry an empty schema;
+    // every other tool has flattened params.
+    const NO_ARG_TOOLS = new Set(["context_usage", "compact_context", "mcp_list"]);
     for (const tool of manager.tools) {
       expect(tool.qualifiedName).toBe(`mcp__manager__${tool.name}`);
       expect(tool.description.length).toBeGreaterThan(0);
@@ -184,6 +188,34 @@ describe("mcp-catalog — builder", () => {
     expect(empty.status).toBe("unconfigured");
     expect(probed).toBe(false);
   });
+
+  it("probes a stdio server in the project repo, so relative args resolve", async () => {
+    // Regression: without a cwd the child inherits the MANAGER's cwd, and a
+    // config like `node ./tools/sim-mcp/index.mjs` dies with "Connection closed".
+    const seen: Array<string | undefined> = [];
+    const probe: McpProbe = async (_n, _c, _t, cwd) => {
+      seen.push(cwd);
+      return { status: "ok", tools: [] };
+    };
+    await buildProjectMcpCatalog(
+      makeProject({ sim: { command: "node", args: ["./tools/sim-mcp/index.mjs"] } }),
+      { probe },
+    );
+    expect(seen).toEqual(["/tmp/widget"]);
+  });
+
+  it("lets a server override the spawn cwd", async () => {
+    let seen: string | undefined;
+    const probe: McpProbe = async (_n, config, _t, cwd) => {
+      seen = config.cwd ?? cwd;
+      return { status: "ok", tools: [] };
+    };
+    await buildProjectMcpCatalog(
+      makeProject({ sim: { command: "node", args: ["x.mjs"], cwd: "/tmp/elsewhere" } }),
+      { probe },
+    );
+    expect(seen).toBe("/tmp/elsewhere");
+  });
 });
 
 describe("mcp-catalog — paramsFromJsonSchema", () => {
@@ -238,11 +270,12 @@ describe("GET /api/projects/:projectId/mcp", () => {
     const manager = catalog.servers.find((s) => s.name === "manager")!;
     expect(manager.kind).toBe("custom");
     expect(manager.tools.map((t) => t.name)).toContain("watch_pr");
-    // No-arg tools (context_usage/compact_context) carry an empty param list.
+    // No-arg tools (context_usage/compact_context/mcp_list) carry an empty param list.
     expect(
       manager.tools.every(
         (t) =>
-          t.params.length > 0 || ["context_usage", "compact_context"].includes(t.name),
+          t.params.length > 0 ||
+          ["context_usage", "compact_context", "mcp_list"].includes(t.name),
       ),
     ).toBe(true);
 

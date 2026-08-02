@@ -16,6 +16,7 @@
 import type { ServerConfig } from "../config.js";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
+import { ensureSession } from "../routes/dispatch.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
 import { MemoryService } from "./memory.js";
@@ -26,12 +27,16 @@ import { TitleService, makeFakeTitleQuery } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
 import { WorktreeService } from "./worktree.js";
 import { WorktreeDetector } from "./worktree-detector.js";
+import { GitService } from "./git.js";
+import { CommitMessageService } from "./commit-message.js";
 import { RunnerService } from "./runner.js";
 import { ProcessService } from "./processes.js";
 import { GitHubService } from "./github.js";
 import { Notifier } from "./notifier.js";
 import { AttentionQueue } from "./attention.js";
 import { UsageService } from "./usage.js";
+import { ResumeScheduler } from "./resume-scheduler.js";
+import { FileIndexService } from "./file-index.js";
 
 /** The shared base every service hangs off. */
 export interface ServiceBase {
@@ -51,12 +56,16 @@ export interface ServiceOverrides {
   checkpoints?: CheckpointService;
   worktrees?: WorktreeService;
   worktreeDetector?: WorktreeDetector;
+  git?: GitService;
+  commitMessage?: CommitMessageService;
   runner?: RunnerService;
   processes?: ProcessService;
   github?: GitHubService;
   notifier?: Notifier;
   attention?: AttentionQueue;
   usage?: UsageService;
+  resume?: ResumeScheduler;
+  fileIndex?: FileIndexService;
 }
 
 /** Everything the routes/WS layer needs, wired to one bus + store. */
@@ -70,12 +79,19 @@ export interface Services extends ServiceBase {
   checkpoints: CheckpointService;
   worktrees: WorktreeService;
   worktreeDetector: WorktreeDetector;
+  /** Working-copy git (status/stage/commit/branch/stash) for the Source Control UI. */
+  git: GitService;
+  /** One-shot AI commit messages drafted from the staged diff. */
+  commitMessage: CommitMessageService;
   runner: RunnerService;
   processes: ProcessService;
   github: GitHubService;
   notifier: Notifier;
   attention: AttentionQueue;
   usage: UsageService;
+  /** Schedules a chat to continue itself once a usage limit lifts. */
+  resume: ResumeScheduler;
+  fileIndex: FileIndexService;
   /** Start background wiring (attention, notifier, reconcile, auto-checkpoint). */
   start(): Promise<void>;
   /** Tear everything down (broker sessions, runners, subscriptions). */
@@ -121,6 +137,11 @@ export function createServices(
   // Worktrees + subApp runner are constructed BEFORE the broker so the session
   // MCP's `run_subapp` tool can launch apps (and resolve/create worktrees).
   const worktrees = overrides.worktrees ?? new WorktreeService({ bus, store });
+  // Working-copy git for the Source Control view. Stateless (every call is
+  // scoped to a `repoPath` the route passes), so it needs no bus/store wiring.
+  const git = overrides.git ?? new GitService();
+  const commitMessage =
+    overrides.commitMessage ?? new CommitMessageService({ git });
   const runner = overrides.runner ?? new RunnerService({ store, bus });
   // OS-level port/pid inspector + bulk kill: reaps orphaned dev-server
   // grandchildren the runner records lost track of (server restart, half-killed
@@ -167,6 +188,26 @@ export function createServices(
   // Subscription usage (5h + weekly) for the header meter. Polls the account
   // OAuth usage endpoint once (server-side) and fans snapshots to every client.
   const usage = overrides.usage ?? new UsageService({ bus });
+  // Backs the composer's file-path picker: the browser can't see the filesystem,
+  // so real paths have to be listed server-side.
+  const fileIndex = overrides.fileIndex ?? new FileIndexService();
+  // Usage-limit auto-resume. Constructed AFTER the broker (it sends through it)
+  // and hooked back in below, since a limit is only visible on the broker's
+  // errored turn-end. `send` goes through the same lazy session path the routes
+  // use — by the time a limit lifts the subprocess is long gone.
+  const resume =
+    overrides.resume ??
+    new ResumeScheduler({
+      store,
+      bus,
+      send: async (chatId, text) => {
+        await ensureSession(services, chatId);
+        await broker.sendMessage(chatId, text);
+      },
+    });
+  broker.onTurnError = (chatId, reason) => {
+    void resume.onTurnError(chatId, reason).catch(() => {});
+  };
 
   let offCheckpoint: (() => void) | undefined;
   let offTitle: (() => void) | undefined;
@@ -185,12 +226,16 @@ export function createServices(
     checkpoints,
     worktrees,
     worktreeDetector,
+    git,
+    commitMessage,
     runner,
     processes,
     github,
     notifier,
     attention,
     usage,
+    resume,
+    fileIndex,
 
     async start(): Promise<void> {
       // One-time transparent memory migration: when a project has (or gains) a
@@ -265,6 +310,10 @@ export function createServices(
         })();
       });
 
+      // Re-arm auto-resumes persisted before the last shutdown, so a restart
+      // never strands a chat waiting on a limit that has since lifted.
+      await resume.restore().catch(() => {});
+
       // Boot reconciliation of persisted runners (best-effort).
       try {
         await runner.reconcile();
@@ -289,6 +338,10 @@ export function createServices(
       notifier.stop();
       attention.stop();
       usage.stop();
+      // Disarm first so nothing new fires, then let an in-flight resume land
+      // before the broker goes away under it.
+      resume.dispose();
+      await resume.drain().catch(() => {});
       await runner.stopAll().catch(() => {});
       await broker.dispose().catch(() => {});
       // Kill any lingering persistent shells after the broker unwinds.

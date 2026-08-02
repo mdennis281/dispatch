@@ -61,6 +61,31 @@ describe("Store projects/chats CRUD", () => {
     expect(await store.listChats()).toHaveLength(1);
   });
 
+  it("reports updatedAt as last TRANSCRIPT activity, not last chat-record write", async () => {
+    // A chat record written long ago; appending rows never rewrites chat.json,
+    // so without the mtime fold the sidebar would sort this by its stale stamp.
+    await store.saveChat({ ...chat("c1", "p1"), createdAt: 1000, updatedAt: 1000 });
+    expect((await store.getChat("c1"))?.updatedAt).toBe(1000);
+
+    await store.appendMessage({
+      kind: "notice",
+      id: "n1",
+      chatId: "c1",
+      ts: 2000,
+      level: "info",
+      text: "hi",
+    });
+    const after = (await store.getChat("c1"))!.updatedAt!;
+    expect(after).toBeGreaterThan(1000);
+    // listChats sees the same clock (it is what the sidebar sorts on).
+    expect((await store.listChats("p1"))[0]!.updatedAt).toBe(after);
+  });
+
+  it("keeps the record's own updatedAt when a chat has no transcript yet", async () => {
+    await store.saveChat({ ...chat("c9", "p1"), createdAt: 500, updatedAt: 900 });
+    expect((await store.getChat("c9"))?.updatedAt).toBe(900);
+  });
+
   it("rejects invalid data on write (zod)", async () => {
     // Missing required fields -> schema throws.
     await expect(store.saveProject({ id: "bad" } as unknown as Project)).rejects.toBeTruthy();
@@ -95,6 +120,58 @@ describe("Store JSONL transcript", () => {
     expect((await store.readMessages("c2", { afterId: "n2" })).map((m) => m.id)).toEqual(["n3", "n4", "n5"]);
     expect((await store.readMessages("c2", { limit: 2 })).map((m) => m.id)).toEqual(["n4", "n5"]);
     expect(await store.readMessages("nope")).toEqual([]);
+  });
+
+  it("pages backwards with beforeId (the window above what the client holds)", async () => {
+    for (let i = 1; i <= 10; i++) {
+      await store.appendMessage({ kind: "notice", id: `b${i}`, chatId: "c4", ts: i, level: "info", text: String(i) });
+    }
+    // The newest page, then the page above it — how the client walks upward.
+    const newest = await store.readMessages("c4", { limit: 3 });
+    expect(newest.map((m) => m.id)).toEqual(["b8", "b9", "b10"]);
+    const older = await store.readMessages("c4", { limit: 3, beforeId: newest[0]!.id });
+    expect(older.map((m) => m.id)).toEqual(["b5", "b6", "b7"]);
+    // Walking off the top returns a SHORT page — that's how the client learns it
+    // has reached the beginning and stops asking.
+    const top = await store.readMessages("c4", { limit: 10, beforeId: "b3" });
+    expect(top.map((m) => m.id)).toEqual(["b1", "b2"]);
+    expect(await store.readMessages("c4", { limit: 5, beforeId: "b1" })).toEqual([]);
+  });
+
+  it("beforeId + afterId bound the window from both ends", async () => {
+    for (let i = 1; i <= 6; i++) {
+      await store.appendMessage({ kind: "notice", id: `w${i}`, chatId: "c5", ts: i, level: "info", text: String(i) });
+    }
+    const mid = await store.readMessages("c5", { afterId: "w1", beforeId: "w6" });
+    expect(mid.map((m) => m.id)).toEqual(["w2", "w3", "w4", "w5"]);
+    // An unknown cursor is ignored rather than emptying the window.
+    expect((await store.readMessages("c5", { beforeId: "nope" })).map((m) => m.id)).toHaveLength(6);
+  });
+
+  it("reads specific rows by id (hydrate-on-expand)", async () => {
+    for (let i = 1; i <= 5; i++) {
+      await store.appendMessage({ kind: "notice", id: `h${i}`, chatId: "c6", ts: i, level: "info", text: String(i) });
+    }
+    // File order, not argument order; unknown ids are simply absent.
+    const rows = await store.readMessagesByIds("c6", ["h4", "h2", "missing"]);
+    expect(rows.map((m) => m.id)).toEqual(["h2", "h4"]);
+    expect(await store.readMessagesByIds("c6", [])).toEqual([]);
+  });
+
+  it("does not confuse a row id with the same string inside another row's payload", async () => {
+    await store.appendMessage({
+      kind: "tool_result",
+      id: "r1",
+      chatId: "c7",
+      ts: 1,
+      toolUseId: "t1",
+      ok: true,
+      // A decoy: the NEXT row's id appears verbatim inside this row's content.
+      content: 'grep output: {"id":"r2"}',
+    });
+    await store.appendMessage({ kind: "notice", id: "r2", chatId: "c7", ts: 2, level: "info", text: "real" });
+    expect((await store.readMessagesByIds("c7", ["r2"])).map((m) => m.id)).toEqual(["r2"]);
+    expect((await store.readMessages("c7", { afterId: "r1" })).map((m) => m.id)).toEqual(["r2"]);
   });
 
   it("serializes concurrent appends without loss", async () => {

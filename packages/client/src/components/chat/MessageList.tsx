@@ -1,44 +1,45 @@
-import { useMemo, type ReactNode } from "react";
-import type { ChatMessage, ToolResultRow } from "@cm/shared";
+import { memo, useCallback, useMemo, type ReactNode } from "react";
+import { parseSessionLimit, type ChatMessage, type ToolResultRow } from "@cm/shared";
+import type { SubagentRun } from "../../lib/subagentRuns.js";
+import { findTaskStatus, indexTaskStatus } from "../../lib/subagentRuns.js";
+import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
 import { UserRow } from "./rows/UserRow.js";
 import { AssistantRow } from "./rows/AssistantRow.js";
 import { ToolCallCard } from "./rows/ToolCallCard.js";
 import { SubagentCard } from "./rows/SubagentCard.js";
 import { PermissionCard } from "./rows/PermissionCard.js";
-import {
-  WorkingRow,
-  NoticeRowView,
-  ResultRowView,
-  SystemRowView,
-  StreamingRow,
-} from "./rows/MiscRows.js";
+import { NoticeRowView, ResultRowView, SystemRowView } from "./rows/MiscRows.js";
+import { LimitPausedCard } from "./rows/LimitPausedCard.js";
 import { actions } from "../../lib/actions.js";
 
-/** An in-flight assistant turn assembled from `message-chunk` deltas. */
-export interface StreamRow {
-  messageId: string;
-  text: string;
-  thinking: string;
+export type { StreamRow } from "../../stores/messages.js";
+
+/**
+ * Is this text nothing but a usage-limit notice? Single-line, so a real answer
+ * that merely mentions hitting a limit is never swallowed.
+ */
+function isLimitSentence(text: string | undefined): boolean {
+  const t = text?.trim();
+  if (!t || t.includes("\n")) return false;
+  return parseSessionLimit(t, Date.now()) !== null;
 }
 
 export interface MessageListProps {
   chatId: string;
   messages: ChatMessage[];
-  /** Live streaming buffers not yet finalized as a `chat-message` row. */
-  streamRows?: StreamRow[];
-  /** Show the live "working…" row after the last message. */
-  working?: boolean;
-  workingLabel?: string;
 }
 
-/** Renders a transcript: pairs tool_use↔tool_result, folds cards, streams live. */
-export function MessageList({
-  chatId,
-  messages,
-  streamRows = [],
-  working,
-  workingLabel,
-}: MessageListProps) {
+/**
+ * Renders a transcript: pairs tool_use↔tool_result, folds cards, nests subagents.
+ *
+ * Deliberately holds NO live-stream state. The streaming tail is a sibling
+ * component (see chat/StreamingTail.tsx) so a token delta re-renders one small
+ * row instead of the entire history — with a long transcript that difference is
+ * the whole ballgame, since each assistant row re-parses markdown and re-runs
+ * Prism. For the same reason this component and every row it renders are
+ * memoized: an append rebuilds the element tree, but untouched rows bail out.
+ */
+export const MessageList = memo(function MessageList({ chatId, messages }: MessageListProps) {
   const resultsByUse = useMemo(() => {
     const m = new Map<string, ToolResultRow>();
     for (const row of messages) {
@@ -47,85 +48,114 @@ export function MessageList({
     return m;
   }, [messages]);
 
-  // Subagent nesting: rows a subagent produced tag themselves with the spawning
-  // Task tool_use id (`parentToolUseId`). Group those under their parent so each
-  // subagent renders as ONE nested sub-transcript (not flat-interleaved), and the
-  // top level shows only genuine roots. Parent-missing rows fall back to root so a
-  // stray subagent row never vanishes. Grouping by immediate parent means a
-  // subagent that itself spawns a subagent nests recursively.
-  const { roots, childrenByParent } = useMemo(() => {
+  // Settle verdicts for BACKGROUNDED tool calls (a `Bash` sent to the background
+  // answers its tool call with a launch ack in milliseconds and keeps running).
+  // Without this the card would read "ok" while the command is still going.
+  const taskStatus = useMemo(() => indexTaskStatus(messages), [messages]);
+
+  // Subagent runs: rows a subagent produced tag themselves with the spawning Task
+  // tool_use id (`parentToolUseId`). Those rows are lifted OUT of the transcript
+  // entirely — the run gets its own surface (the inspector), and the chat shows
+  // only the spawning card. Rows whose parent Task isn't in the window fall back
+  // to root so a stray subagent row never vanishes.
+  //
+  // NOTE: with a WINDOWED transcript the parent Task row can be above the loaded
+  // window — `toolUseIds` then won't contain it and the child renders at root,
+  // which is the intended fallback (visible, just not grouped yet). Paging the
+  // parent in folds them into its run.
+  const runs = useSubagentRuns(chatId);
+  const { roots, runsById } = useMemo(() => {
+    const runsById = new Map<string, SubagentRun>();
+    for (const run of runs) runsById.set(run.id, run);
     const toolUseIds = new Set<string>();
     for (const r of messages) if (r.kind === "tool_use") toolUseIds.add(r.toolUseId);
-    const childrenByParent = new Map<string, ChatMessage[]>();
     const roots: ChatMessage[] = [];
     for (const r of messages) {
       const pid = "parentToolUseId" in r ? r.parentToolUseId : undefined;
-      if (pid && toolUseIds.has(pid)) {
-        const arr = childrenByParent.get(pid);
-        if (arr) arr.push(r);
-        else childrenByParent.set(pid, [r]);
-      } else {
-        roots.push(r);
-      }
+      if (pid && toolUseIds.has(pid)) continue; // belongs to a run, not the chat
+      roots.push(r);
     }
-    return { roots, childrenByParent };
-  }, [messages]);
+    return { roots, runsById };
+  }, [messages, runs]);
 
-  const decide = (requestId: string) => (decision: "allow" | "deny", remember?: boolean) => {
-    actions.answerPermission(chatId, requestId, decision, { remember });
-  };
-
-  const renderRow = (row: ChatMessage): ReactNode => {
-    switch (row.kind) {
-      case "user":
-        return <UserRow key={row.id} chatId={chatId} row={row} />;
-      case "assistant":
-        return <AssistantRow key={row.id} chatId={chatId} row={row} />;
-      case "tool_use": {
-        const children = childrenByParent.get(row.toolUseId);
-        if (children && children.length > 0) {
+  // Stable across renders (deps only change when the transcript does) so the
+  // memoized row components actually get to bail out.
+  const renderRow = useCallback(
+    (row: ChatMessage): ReactNode => {
+      switch (row.kind) {
+        case "user":
+          return <UserRow key={row.id} chatId={chatId} row={row} />;
+        case "assistant":
+          // A usage limit is announced TWICE — as this message and as the
+          // errored result that follows. The result becomes the pause card
+          // (with the schedule + cancel), so the bare echo is dropped. Only a
+          // message that is nothing BUT the sentence qualifies.
+          if (isLimitSentence(row.text)) return null;
+          return <AssistantRow key={row.id} chatId={chatId} row={row} />;
+        case "tool_use": {
+          // A Task spawn renders as its run's card, whether or not the subagent
+          // has produced any rows yet — so a just-launched run is visible
+          // immediately rather than appearing once its first row lands.
+          const run = runsById.get(row.toolUseId);
+          if (run) return <SubagentCard key={row.id} run={run} />;
+          const result = resultsByUse.get(row.toolUseId);
           return (
-            <SubagentCard
+            <ToolCallCard
               key={row.id}
               use={row}
-              result={resultsByUse.get(row.toolUseId)}
-              childRows={children}
-              renderRows={renderRows}
+              result={result}
+              task={findTaskStatus(taskStatus, row.toolUseId, result)}
             />
           );
         }
-        return (
-          <ToolCallCard key={row.id} use={row} result={resultsByUse.get(row.toolUseId)} />
-        );
+        case "tool_result":
+          return null; // folded into its ToolCallCard
+        case "permission":
+          return (
+            <PermissionCard
+              key={row.id}
+              row={row}
+              onDecide={(decision, remember) =>
+                actions.answerPermission(chatId, row.requestId, decision, { remember })
+              }
+            />
+          );
+        case "result":
+          // A turn killed by a usage limit isn't a failure, it's a pause — and
+          // the chat has already scheduled itself to continue.
+          if (row.isError && isLimitSentence(row.result)) {
+            return <LimitPausedCard key={row.id} row={row} reason={row.result!} />;
+          }
+          return <ResultRowView key={row.id} row={row} />;
+        case "system":
+          return <SystemRowView key={row.id} row={row} />;
+        case "notice":
+          return <NoticeRowView key={row.id} row={row} />;
+        default:
+          return null;
       }
-      case "tool_result":
-        return null; // folded into its ToolCallCard
-      case "permission":
-        return <PermissionCard key={row.id} row={row} onDecide={decide(row.requestId)} />;
-      case "result":
-        return <ResultRowView key={row.id} row={row} />;
-      case "system":
-        return <SystemRowView key={row.id} row={row} />;
-      case "notice":
-        return <NoticeRowView key={row.id} row={row} />;
-      default:
-        return null;
-    }
-  };
-
-  const renderRows = (rows: ChatMessage[]): ReactNode => rows.map(renderRow);
-
-  // A live streaming bubble supersedes the plain "working…" indicator.
-  const liveStreams = streamRows.filter((s) => s.text || s.thinking);
-  const showWorking = working && liveStreams.length === 0;
+    },
+    [chatId, resultsByUse, runsById, taskStatus],
+  );
 
   return (
-    <div className="flex flex-col divide-y divide-line-soft/70">
-      {renderRows(roots)}
-      {liveStreams.map((s) => (
-        <StreamingRow key={`stream-${s.messageId}`} text={s.text} thinking={s.thinking} />
-      ))}
-      {showWorking && <WorkingRow label={workingLabel} />}
-    </div>
+    <>
+      {roots.map((row) => {
+        const node = renderRow(row);
+        // Rows that render nothing (a tool_result folded into its card) must emit
+        // NO element — the parent's `divide-y` would draw a hairline for an empty
+        // wrapper, and there are more folded results than visible rows.
+        if (!node) return null;
+        // `cm-row-cv` (content-visibility) lets the browser skip layout + paint
+        // for off-screen rows. A long transcript keeps hundreds of rows in the
+        // DOM; without this, scroll cost grows with history rather than with
+        // what's on screen. Native scroll/anchoring/find-in-page all still work.
+        return (
+          <div key={row.id} data-row-id={row.id} className="cm-row-cv">
+            {node}
+          </div>
+        );
+      })}
+    </>
   );
-}
+});

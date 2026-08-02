@@ -1,15 +1,17 @@
-import { useEffect, useState } from "react";
-import { GitBranch, AppWindow, SquareTerminal, GitPullRequest } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { GitBranch, Bot, AppWindow, SquareTerminal, GitPullRequest } from "lucide-react";
 import type { Chat } from "@cm/shared";
 import { Tabs, type TabDef } from "../ui/Tabs.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { WorktreesPanel } from "../panels/WorktreesPanel.js";
+import { AgentsPanel } from "../panels/AgentsPanel.js";
 import { RunnerPanel } from "../panels/RunnerPanel.js";
 import { TerminalsPanel } from "../panels/TerminalsPanel.js";
 import { PRsPanel } from "../panels/PRsPanel.js";
 import { usePanels } from "../../stores/panels.js";
 import { useRunners } from "../../stores/runners.js";
 import { useTerminals } from "../../stores/terminals.js";
+import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
 import {
   worktreeMatchesChat,
   FOCUS_PANEL_EVENT,
@@ -27,6 +29,7 @@ export function RightPanel({ chat }: { chat: Chat }) {
       const next = (e as CustomEvent<FocusPanelTab>).detail;
       if (
         next === "worktrees" ||
+        next === "agents" ||
         next === "apps" ||
         next === "terminals" ||
         next === "prs"
@@ -48,8 +51,17 @@ export function RightPanel({ chat }: { chat: Chat }) {
   const chatPrNumbers = new Set(chat.prs.map((p) => p.number));
   const prOpen = usePanels((s) => s.prs.filter((p) => p.state === "open" && chatPrNumbers.has(p.number)).length);
 
+  // Badge the LIVE runs only — a finished run isn't something to act on, and a
+  // long chat would otherwise wear a permanent "31" that means nothing.
+  const runs = useSubagentRuns(chat.id);
+  const agentsLive = useMemo(
+    () => runs.filter((r) => r.status === "running").length,
+    [runs],
+  );
+
   const tabs: TabDef[] = [
     { id: "worktrees", label: "Worktrees", icon: <GitBranch />, count: wtCount },
+    { id: "agents", label: "Agents", icon: <Bot />, count: agentsLive },
     { id: "apps", label: "Apps", icon: <AppWindow />, count: runnerCount },
     { id: "terminals", label: "Terminals", icon: <SquareTerminal />, count: termCount },
     { id: "prs", label: "PRs", icon: <GitPullRequest />, count: prOpen },
@@ -62,6 +74,7 @@ export function RightPanel({ chat }: { chat: Chat }) {
       </div>
       <ScrollArea className="min-h-0 flex-1">
         {tab === "worktrees" && <WorktreesPanel chat={chat} />}
+        {tab === "agents" && <AgentsPanel chat={chat} />}
         {tab === "apps" && <RunnerPanel chat={chat} />}
         {tab === "terminals" && <TerminalsPanel chat={chat} />}
         {tab === "prs" && <PRsPanel chat={chat} />}

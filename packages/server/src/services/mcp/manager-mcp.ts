@@ -35,9 +35,11 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod";
 import {
   MemoryTypeSchema,
+  ManifestMcpTransportSchema,
   type ChatStatus,
   type CheckRun,
   type ContextUsage,
+  type ManifestMcpServer,
   type ProjectMemory,
   type ReviewThread,
 } from "@cm/shared";
@@ -177,6 +179,25 @@ export interface ManagerMcpRunnerState {
   port?: number;
 }
 
+/**
+ * MCP-config editor for this session's project (omitted → no `mcp_*` tools).
+ *
+ * Backed by the SAME `@cm/cli/core` functions the `cm mcp` CLI uses, so an agent
+ * adding a server in-session and a human adding one at the terminal produce
+ * byte-identical config and share every validation rule.
+ */
+export interface ManagerMcpConfig {
+  /** Every server configured in the project's `.claude-manager/project.yaml`. */
+  list(): Promise<ManifestMcpServer[]>;
+  /** Add (or, with `force`, replace) one server. Rejects on a duplicate name. */
+  add(
+    server: ManifestMcpServer,
+    opts: { force?: boolean },
+  ): Promise<{ outcome: "added" | "replaced"; manifestPath: string }>;
+  /** Remove a server by name; false when there was nothing to remove. */
+  remove(name: string): Promise<boolean>;
+}
+
 /** SubApp launcher for this session's project (omitted → no `run_subapp` tool). */
 export interface ManagerMcpRunner {
   /** SubApps, live runners, and branches for this session's project. */
@@ -209,6 +230,8 @@ export interface ManagerMcpContext {
   github?: ManagerMcpGitHub;
   /** SubApp launcher for this session (omitted → no `run_subapp` tool). */
   runner?: ManagerMcpRunner;
+  /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
+  mcpConfig?: ManagerMcpConfig;
   /** The session's abort signal — cancels in-flight waits on stop/fork. */
   signal?: AbortSignal;
   now?: () => number;
@@ -1038,6 +1061,170 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
+  /* ------------------------------------------------------- MCP config */
+
+  const mcpList = tool(
+    "mcp_list",
+    "List the MCP servers configured for THIS project in `.claude-manager/project.yaml`. " +
+      "Call this before adding one so you don't duplicate a server the project already has, " +
+      "and to see the exact names the project's tools are addressed under (`mcp__<name>__<tool>`). " +
+      "Note this lists CONFIGURED servers; the manager UI's MCP catalog shows each one's live " +
+      "connection status and full tool list.",
+    {},
+    async (): Promise<CallToolResult> => {
+      if (!ctx.mcpConfig) {
+        return textResult("MCP config editing is not available in this session.", true);
+      }
+      try {
+        const servers = await ctx.mcpConfig.list();
+        if (!servers.length) {
+          return textResult(
+            "This project has no MCP servers configured yet.\n" +
+              "Add one with mcp_add (or `cm mcp add` in a terminal).",
+          );
+        }
+        const lines = servers.map((s) => {
+          const t = s.transport;
+          const detail =
+            t.type === "stdio"
+              ? `stdio: ${[t.command, ...(t.args ?? [])].join(" ")}${
+                  t.env ? ` (env: ${Object.keys(t.env).join(", ")})` : ""
+                }`
+              : `${t.type}: ${t.url}${
+                  t.headers ? ` (headers: ${Object.keys(t.headers).join(", ")})` : ""
+                }`;
+          return `  • ${s.name} — ${detail}`;
+        });
+        return textResult(`${servers.length} configured MCP server(s):\n${lines.join("\n")}`);
+      } catch (err) {
+        return textResult(
+          `Could not read the MCP config: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const mcpAdd = tool(
+    "mcp_add",
+    "Add an MCP server to THIS project's `.claude-manager/project.yaml` — the committable " +
+      "config every session in the project loads. Use this whenever the user wants to install, " +
+      "add, or connect an MCP server; it is the supported path. Do NOT hand-edit project.yaml, " +
+      "`.mcp.json`, or `~/.claude.json` to do this. " +
+      "For a local subprocess server pass `command` (+ `args`/`env`); for a remote one pass " +
+      "`url` (+ `headers`) and set `transport` to http or sse. " +
+      "NEVER put a real API key in a value — write a `${VAR}` placeholder instead (e.g. " +
+      '`"Bearer ${LINEAR_API_KEY}"`), which the manager expands from its environment at ' +
+      "session launch so the file stays safe to commit. The change takes effect in NEW turns " +
+      "without a restart; the tools appear as `mcp__<name>__<tool>`.",
+    {
+      name: z
+        .string()
+        .describe("Server name — letters/digits/-/_ only. Becomes the `mcp__<name>__` prefix."),
+      transport: z
+        .enum(["stdio", "http", "sse"])
+        .optional()
+        .describe("Defaults to stdio when `command` is given, http when `url` is given."),
+      command: z.string().optional().describe("Executable for a stdio server, e.g. 'npx'."),
+      args: z.array(z.string()).optional().describe("Args for a stdio server, e.g. ['-y','pkg']."),
+      env: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe("Env vars for a stdio server. Use ${VAR} placeholders for secrets."),
+      url: z.string().optional().describe("Endpoint for an http/sse server."),
+      headers: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe("Headers for an http/sse server. Use ${VAR} placeholders for secrets."),
+      force: z
+        .boolean()
+        .optional()
+        .describe("Replace an existing server with this name instead of failing."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.mcpConfig) {
+        return textResult("MCP config editing is not available in this session.", true);
+      }
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      if (!name) return textResult("mcp_add requires a name.", true);
+
+      // Infer the transport exactly the way the CLI does, so both entry points
+      // accept the same loosely-specified input.
+      const kind = args.transport ?? (args.url ? "http" : "stdio");
+      let transport;
+      try {
+        transport =
+          kind === "stdio"
+            ? ManifestMcpTransportSchema.parse({
+                type: "stdio",
+                command: args.command,
+                ...(args.args?.length ? { args: args.args } : {}),
+                ...(args.env && Object.keys(args.env).length ? { env: args.env } : {}),
+              })
+            : ManifestMcpTransportSchema.parse({
+                type: kind,
+                url: args.url,
+                ...(args.headers && Object.keys(args.headers).length
+                  ? { headers: args.headers }
+                  : {}),
+              });
+      } catch {
+        return textResult(
+          kind === "stdio"
+            ? "A stdio server needs a `command` (e.g. 'npx' with args ['-y','some-mcp'])."
+            : `A ${kind} server needs a \`url\`.`,
+          true,
+        );
+      }
+
+      try {
+        const { outcome, manifestPath } = await ctx.mcpConfig.add(
+          { name, transport },
+          { force: args.force === true },
+        );
+        const verb = outcome === "replaced" ? "Replaced" : "Added";
+        return textResult(
+          `${verb} MCP server "${name}" in ${manifestPath}.\n` +
+            `Its tools are available to new turns as \`mcp__${name}__<tool>\` — no restart needed. ` +
+            `Open the manager's MCP catalog to see the tools it actually exposes and whether it connected.`,
+        );
+      } catch (err) {
+        return textResult(
+          `Could not add "${name}": ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const mcpRemove = tool(
+    "mcp_remove",
+    "Remove an MCP server from THIS project's `.claude-manager/project.yaml`. Use when a server " +
+      "is obsolete, broken, or was added by mistake. This edits committed project config that " +
+      "affects every teammate — only do it when the user asked for it.",
+    {
+      name: z.string().describe("The server's name, as shown by mcp_list."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.mcpConfig) {
+        return textResult("MCP config editing is not available in this session.", true);
+      }
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      if (!name) return textResult("mcp_remove requires a name.", true);
+      try {
+        const removed = await ctx.mcpConfig.remove(name);
+        return removed
+          ? textResult(`Removed MCP server "${name}" from this project's config.`)
+          : textResult(`No MCP server named "${name}" is configured.`, true);
+      } catch (err) {
+        return textResult(
+          `Could not remove "${name}": ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
   return {
     wait,
     waitForChat,
@@ -1049,6 +1236,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     recall,
     forget,
     runSubapp,
+    mcpList,
+    mcpAdd,
+    mcpRemove,
   };
 }
 
@@ -1059,10 +1249,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
  * `createManagerMcpServer` tools array). `null` = always offered. The catalog
  * view reads this to mark each tool `available` for a given session's bindings.
  */
-const MANAGER_TOOL_GATE: Record<
-  string,
-  "github" | "terminals" | "memory" | "runner" | null
-> = {
+const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   wait: null,
   wait_for_chat: null,
   context_usage: null,
@@ -1073,7 +1260,16 @@ const MANAGER_TOOL_GATE: Record<
   recall: "memory",
   forget: "memory",
   run_subapp: "runner",
+  mcp_list: "mcpConfig",
+  mcp_add: "mcpConfig",
+  mcp_remove: "mcpConfig",
 };
+
+/** The session bindings that gate manager tools. */
+export type ManagerToolBinding = "github" | "terminals" | "memory" | "runner" | "mcpConfig";
+
+/** Which bindings a session has — decides which tools are offered/available. */
+export type ManagerToolBindings = Partial<Record<ManagerToolBinding, boolean>>;
 
 /** A catalog descriptor for one manager tool (no live session needed). */
 export interface ManagerToolDescriptor {
@@ -1112,7 +1308,7 @@ const NOOP_DESCRIPTOR_CTX = {
  * (watch_pr/terminal/remember/recall/forget/run_subapp) report the right `available`.
  */
 export function managerToolDescriptors(
-  bindings: { github?: boolean; terminals?: boolean; memory?: boolean; runner?: boolean } = {},
+  bindings: ManagerToolBindings = {},
 ): ManagerToolDescriptor[] {
   const tools = createManagerTools(NOOP_DESCRIPTOR_CTX);
   return Object.values(tools).map((t) => {
@@ -1149,6 +1345,9 @@ export function createManagerMcpServer(
     recall,
     forget,
     runSubapp,
+    mcpList,
+    mcpAdd,
+    mcpRemove,
   } = createManagerTools(ctx);
   // Each tool is only meaningful when its backing service is wired in; omit the
   // dead ones so the agent isn't offered a tool it can't use.
@@ -1161,6 +1360,7 @@ export function createManagerMcpServer(
     ...(ctx.terminals ? [terminal] : []),
     ...(ctx.memory ? [remember, recall, forget] : []),
     ...(ctx.runner ? [runSubapp] : []),
+    ...(ctx.mcpConfig ? [mcpList, mcpAdd, mcpRemove] : []),
   ];
   return createSdkMcpServer({
     name: "manager",

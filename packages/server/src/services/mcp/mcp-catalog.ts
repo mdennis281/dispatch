@@ -30,7 +30,7 @@ import type {
   McpToolParam,
   Project,
 } from "@cm/shared";
-import { managerToolDescriptors } from "./manager-mcp.js";
+import { managerToolDescriptors, type ManagerToolBindings } from "./manager-mcp.js";
 
 /** Default per-server probe budget — bounds a hanging/slow external server. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 4_000;
@@ -105,11 +105,15 @@ export interface McpProbeResult {
   tools: RawMcpTool[];
 }
 
-/** The injectable external-server probe seam. */
+/**
+ * The injectable external-server probe seam. `cwd` is the directory a stdio
+ * server is spawned in (the project repo, unless the server overrides it).
+ */
 export type McpProbe = (
   name: string,
   config: McpServerConfig,
   timeoutMs: number,
+  cwd?: string,
 ) => Promise<McpProbeResult>;
 
 /** Reject if `fn` hasn't settled within `ms`. */
@@ -143,7 +147,7 @@ function withTimeout<T>(ms: number, fn: () => Promise<T>): Promise<T> {
  * Prefers stdio (a `command`), else an HTTP/SSE `url`. Any failure resolves as
  * `{ status: "error", ... }` — it never throws.
  */
-export const probeExternalMcpServer: McpProbe = async (_name, config, timeoutMs) => {
+export const probeExternalMcpServer: McpProbe = async (_name, config, timeoutMs, cwd) => {
   let transport: Transport | undefined;
   let client: Client | undefined;
   try {
@@ -152,6 +156,10 @@ export const probeExternalMcpServer: McpProbe = async (_name, config, timeoutMs)
         command: config.command,
         args: config.args,
         env: config.env,
+        // Spawn in the project repo (or the server's own override) — a config's
+        // relative command/args are written relative to the repo, and without
+        // this the child would inherit the MANAGER's cwd and die on startup.
+        cwd: config.cwd ?? cwd,
         // Never let a child's stderr bleed into the manager's own logs.
         stderr: "ignore",
       });
@@ -224,13 +232,14 @@ async function buildExternalEntry(
   config: McpServerConfig,
   probe: McpProbe,
   timeoutMs: number,
+  cwd: string | undefined,
 ): Promise<McpServerCatalogEntry> {
   const transport = describeTransport(config);
   // No transport to connect on → unconfigured (don't spawn/probe).
   if (!config.command && !config.url) {
     return { name, kind: "external", transport, status: "unconfigured", tools: [] };
   }
-  const result: McpProbeResult = await probe(name, config, timeoutMs).catch((err) => ({
+  const result: McpProbeResult = await probe(name, config, timeoutMs, cwd).catch((err) => ({
     status: "error" as const,
     error: err instanceof Error ? err.message : String(err),
     tools: [],
@@ -259,7 +268,7 @@ async function buildExternalEntry(
 /** Options for {@link buildProjectMcpCatalog}. */
 export interface BuildCatalogOptions {
   /** Which backing services the session has (gates manager tool availability). */
-  bindings?: { github?: boolean; terminals?: boolean; memory?: boolean; runner?: boolean };
+  bindings?: ManagerToolBindings;
   /** Override the external probe (tests inject a scripted one). */
   probe?: McpProbe;
   /** Per-server probe timeout. */
@@ -271,6 +280,12 @@ export interface BuildCatalogOptions {
    * so the catalog reflects EXACTLY what a session gets in `buildOptions`.
    */
   mcpServers?: Record<string, McpServerConfig>;
+  /**
+   * Directory stdio servers are spawned in. Defaults to `project.repoPath` —
+   * the same cwd a real session runs in — so a server configured with relative
+   * paths probes exactly as it will launch.
+   */
+  cwd?: string;
 }
 
 /**
@@ -304,9 +319,10 @@ export async function buildProjectMcpCatalog(
   const external = (opts.mcpServers ??
     project.mcpServers ??
     {}) as Record<string, McpServerConfig>;
+  const cwd = opts.cwd ?? project.repoPath;
   const externalEntries = await Promise.all(
     Object.entries(external).map(([name, config]) =>
-      buildExternalEntry(name, config, probe, timeoutMs),
+      buildExternalEntry(name, config, probe, timeoutMs, cwd),
     ),
   );
 
