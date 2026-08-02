@@ -7,6 +7,7 @@
 import { buildApp } from "./app.js";
 import { config } from "./config.js";
 import { seedDefaultsIfEmpty } from "./seed.js";
+import { installShutdown } from "./shutdown.js";
 
 export async function start({ dev = false }: { dev?: boolean } = {}): Promise<void> {
   const app = await buildApp({ config, dev });
@@ -16,11 +17,22 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
     // eslint-disable-next-line no-console
     console.warn("[claude-manager] seed skipped:", err);
   });
+  // Wire teardown BEFORE listening, so a signal arriving during boot still runs
+  // `services.dispose()` instead of orphaning whatever already started.
+  installShutdown(app);
+
   await app.listen({ port: config.port, host: config.host });
   const url = `http://${config.host}:${config.port}`;
   // eslint-disable-next-line no-console
   console.log(
-    `[claude-manager] listening on ${url}  (data: ${config.dataDir})` +
+    `[claude-manager] listening on ${url}  (data: ${config.dataDir}` +
+      (config.configDir ? `, config: ${config.configDir}` : "") +
+      `)` +
       (dev ? "  — SPA + HMR served here" : ""),
   );
+  // The desktop shell waits for this exact line before showing its window.
+  if (process.env.CM_IPC === "1") {
+    // eslint-disable-next-line no-console
+    console.log(`[claude-manager] ready ${url}`);
+  }
 }

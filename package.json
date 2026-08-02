@@ -14,7 +14,13 @@
     "test": "pnpm --filter @cm/shared exec vitest run && pnpm --filter @cm/cli exec vitest run && pnpm --filter @cm/server exec vitest run",
     "spike": "pnpm --filter @cm/server spike",
     "verify": "node tools/verify/shot.mjs",
-    "cm": "node packages/cli/dist/index.js"
+    "cm": "node packages/cli/dist/index.js",
+    "desktop": "pnpm --filter @cm/desktop start",
+    "desktop:dev": "node tools/desktop/dev.mjs",
+    "desktop:publish": "node tools/desktop/publish.mjs",
+    "desktop:install-shell": "node tools/desktop/install-shell.mjs",
+    "desktop:migrate": "node tools/desktop/migrate-data.mjs",
+    "desktop:shortcut": "node tools/desktop/create-shortcut.mjs"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

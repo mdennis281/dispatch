@@ -12,8 +12,22 @@ export interface ServerConfig {
   port: number;
   /** Bind host. */
   host: string;
-  /** Absolute path to the on-disk data dir (JSON + JSONL, no DB). */
+  /**
+   * Absolute path to the STATE dir — chats, checkpoints, runners (JSON + JSONL,
+   * no DB). Per-instance: two processes must never share this (see Store).
+   */
   dataDir: string;
+  /**
+   * Absolute path to the CONFIG dir — settings, projects, agents, modes. Safe to
+   * point two instances (stable + dev) at one shared location.
+   *
+   * UNDEFINED unless `CM_CONFIG_DIR` is set, and deliberately so: the Store then
+   * falls back to `dataDir` (the original single-root layout). Leaving it unset
+   * rather than eagerly resolving it is what keeps `{ ...loadConfig(), dataDir:
+   * tmp }` — the shape every test uses — from silently pointing config reads at
+   * the developer's REAL `.data` while state goes to a temp dir.
+   */
+  configDir?: string;
   /** Max concurrently-active SDK sessions (idle chats don't count). */
   maxActiveSessions: number;
 }
@@ -54,10 +68,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const dataDir = env.CM_DATA_DIR
     ? resolve(env.CM_DATA_DIR)
     : DEFAULT_DATA_DIR;
+  // Left undefined when unset => single-root layout, byte-identical to the
+  // pre-split behaviour. Only the desktop/stable deployment sets it.
+  const configDir = env.CM_CONFIG_DIR ? resolve(env.CM_CONFIG_DIR) : undefined;
   return {
     port: intFromEnv("CM_PORT", DEFAULT_PORT),
     host: env.CM_HOST?.trim() || DEFAULT_HOST,
     dataDir,
+    ...(configDir ? { configDir } : {}),
     maxActiveSessions: intFromEnv("CM_MAX_ACTIVE_SESSIONS", DEFAULT_MAX_ACTIVE),
   };
 }

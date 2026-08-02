@@ -4,16 +4,29 @@
  * atomic and serialized per-file via a KeyedMutex, and every value is
  * zod-validated on the way in AND out so corrupt/legacy data surfaces loudly.
  *
- * On-disk layout (dataDir):
+ * The tree is split across TWO roots so a stable and a dev instance can share
+ * what's safe to share and keep apart what isn't (see {@link Store} ctor):
+ *
+ * CONFIG root (`configDir`) — low-write, safe to share between instances:
  *   config.json                  — global app settings
  *   projects/<id>.json           — Project
+ *   projects/<id>/memory/        — project agent-memory (+ memory-stats.json)
  *   agents/<id>.json             — AgentConfig
  *   modes/<id>.json              — ModeConfig
+ *
+ * STATE root (`dataDir`) — high-write, MUST stay per-instance:
  *   chats/<id>/chat.json         — Chat
  *   chats/<id>/messages.jsonl    — ChatMessage rows
  *   chats/<id>/assets/           — pasted/received images
  *   runners.json                 — RunnerInstance[]
  *   checkpoints.json             — { [chatId]: { [messageId]: Checkpoint } }
+ *
+ * `runners.json` and `checkpoints.json` are whole-file read-modify-write maps
+ * guarded only by this process's {@link KeyedMutex}, so two processes sharing
+ * them would silently lose each other's entries — that's the reason for the
+ * split, and the reason chats stay per-instance even though sharing them would
+ * be convenient. `configDir` defaults to `dataDir`, so a single-root deployment
+ * (and every test) behaves exactly as before.
  */
 import { join, resolve, relative, isAbsolute, basename } from "node:path";
 import {
@@ -120,13 +133,25 @@ function parseMessageLines(lines: string[]): ChatMessage[] {
 
 export class Store {
   private readonly mutex = new KeyedMutex();
+  private readonly configDir: string;
 
-  constructor(private readonly dataDir: string) {}
+  /**
+   * @param dataDir   STATE root (chats, checkpoints, runners) — per-instance.
+   * @param configDir CONFIG root (settings, projects, agents, modes) — shareable
+   *                  between instances. Defaults to `dataDir` for a single-root
+   *                  layout, which is what every existing caller and test uses.
+   */
+  constructor(
+    private readonly dataDir: string,
+    configDir?: string,
+  ) {
+    this.configDir = configDir ?? dataDir;
+  }
 
   /* ------------------------------------------------------------ paths */
 
   private projectsDir() {
-    return join(this.dataDir, "projects");
+    return join(this.configDir, "projects");
   }
   /**
    * Absolute path to a project's agent-memory dir — one markdown file per memory
@@ -140,18 +165,18 @@ export class Store {
   }
   /**
    * Sidecar ACCESS-telemetry file for a project's memories (how often each is
-   * recalled/surfaced). Deliberately in the `.data` store — NEVER the committable
-   * `.claude-manager/memory/` dir — so it's per-machine runtime signal that can't
+   * recalled/surfaced). Deliberately in the manager's own store — NEVER the
+   * committable `.claude-manager/memory/` dir — so it's runtime signal that can't
    * churn the repo. Owned by {@link MemoryStatsStore}; created on demand.
    */
   projectMemoryStatsFile(projectId: string) {
     return join(this.projectsDir(), projectId, "memory-stats.json");
   }
   private agentsDir() {
-    return join(this.dataDir, "agents");
+    return join(this.configDir, "agents");
   }
   private modesDir() {
-    return join(this.dataDir, "modes");
+    return join(this.configDir, "modes");
   }
   private chatsDir() {
     return join(this.dataDir, "chats");
@@ -176,12 +201,13 @@ export class Store {
     return join(this.dataDir, "checkpoints.json");
   }
   private settingsFile() {
-    return join(this.dataDir, "config.json");
+    return join(this.configDir, "config.json");
   }
 
-  /** Create the dataDir tree. Idempotent; call once at boot. */
+  /** Create both roots' trees. Idempotent; call once at boot. */
   async init(): Promise<void> {
     await mkdir(this.dataDir, { recursive: true });
+    await mkdir(this.configDir, { recursive: true });
     await Promise.all([
       mkdir(this.projectsDir(), { recursive: true }),
       mkdir(this.agentsDir(), { recursive: true }),

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./index.js";
@@ -215,5 +216,76 @@ describe("Store runners + checkpoints + settings", () => {
     expect(await store.getSettings()).toMatchObject({ theme: "dark" });
     await store.saveSettings({ theme: "light", defaultModeId: "plan" });
     expect(await store.getSettings()).toMatchObject({ theme: "light", defaultModeId: "plan" });
+  });
+});
+
+describe("Store config/state split", () => {
+  let stateDir: string;
+  let configDir: string;
+  let split: Store;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "cm-state-"));
+    configDir = await mkdtemp(join(tmpdir(), "cm-config-"));
+    split = new Store(stateDir, configDir);
+    await split.init();
+  });
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(configDir, { recursive: true, force: true });
+  });
+
+  it("writes config entities under configDir and state under dataDir", async () => {
+    await split.saveProject(project("p1"));
+    await split.saveMode({ id: "auto", name: "Auto", permissionMode: "acceptEdits", scope: "global" });
+    await split.saveSettings({ theme: "light" });
+    await split.saveChat(chat("c1", "p1"));
+    await split.saveCheckpoint({
+      messageId: "m1", chatId: "c1", ref: "refs/cm/x", createdAt: Date.now(),
+    });
+
+    // Config root holds the shareable entities...
+    expect(existsSync(join(configDir, "projects", "p1.json"))).toBe(true);
+    expect(existsSync(join(configDir, "modes", "auto.json"))).toBe(true);
+    expect(existsSync(join(configDir, "config.json"))).toBe(true);
+    // ...and NONE of the per-instance state.
+    expect(existsSync(join(configDir, "chats"))).toBe(false);
+    expect(existsSync(join(configDir, "checkpoints.json"))).toBe(false);
+
+    // State root holds only the per-instance state.
+    expect(existsSync(join(stateDir, "chats", "c1", "chat.json"))).toBe(true);
+    expect(existsSync(join(stateDir, "checkpoints.json"))).toBe(true);
+    expect(existsSync(join(stateDir, "projects", "p1.json"))).toBe(false);
+  });
+
+  it("lets a second instance share config while keeping its own chats", async () => {
+    await split.saveProject(project("shared"));
+    await split.saveChat(chat("mine", "shared"));
+
+    const otherState = await mkdtemp(join(tmpdir(), "cm-state2-"));
+    try {
+      const other = new Store(otherState, configDir);
+      await other.init();
+      // Sees the shared project...
+      expect(await other.listProjects()).toHaveLength(1);
+      // ...but not the first instance's chats.
+      expect(await other.listChats()).toHaveLength(0);
+    } finally {
+      await rm(otherState, { recursive: true, force: true });
+    }
+  });
+
+  it("defaults configDir to dataDir (single-root layout unchanged)", async () => {
+    const only = await mkdtemp(join(tmpdir(), "cm-single-"));
+    try {
+      const s = new Store(only);
+      await s.init();
+      await s.saveProject(project("p"));
+      await s.saveChat(chat("c", "p"));
+      expect(existsSync(join(only, "projects", "p.json"))).toBe(true);
+      expect(existsSync(join(only, "chats", "c", "chat.json"))).toBe(true);
+    } finally {
+      await rm(only, { recursive: true, force: true });
+    }
   });
 });

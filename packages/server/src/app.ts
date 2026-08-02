@@ -57,7 +57,7 @@ export async function buildApp(
   opts: BuildAppOptions = {},
 ): Promise<FastifyInstance> {
   const config = opts.config ?? defaultConfig;
-  const store = opts.store ?? new Store(config.dataDir);
+  const store = opts.store ?? new Store(config.dataDir, config.configDir);
   const bus = opts.bus ?? defaultBus;
 
   await store.init();

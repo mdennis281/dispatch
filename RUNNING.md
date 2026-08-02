@@ -166,12 +166,95 @@ Open the **MCP catalog** in the UI (top bar / command palette) to see every
 configured server's live connection status and its tools, command by command,
 grouped by server.
 
+## Desktop app (stable) vs `pnpm dev` (unstable)
+
+Two instances, on purpose: an **installed Electron app** you can trust with long-running
+agents, and the **hot-reload dev server** you break things in. They run side by side.
+
+| | Stable | Dev |
+|---|---|---|
+| Launch | Start-menu shortcut / `pnpm desktop` | `pnpm dev` |
+| Port | **4318** (scans up if taken) | **4319** |
+| Code | published payload in `%LOCALAPPDATA%` | this checkout, hot-reloaded |
+| Updated by | the *Publish to stable* VS Code task | saving a file |
+
+### Layout
+```
+%LOCALAPPDATA%\claude-manager\
+  app\            the payload — a git clone of this repo, built in place
+  shell\          branded Electron runtime: claude-manager.exe + resources
+  data\           CM_DATA_DIR   chats, checkpoints, runners   (per-instance)
+  config\         CM_CONFIG_DIR settings, projects, agents, modes (SHARED)
+  current.json    published sha + timestamp (shown in the tray tooltip)
+  runtime.json    present only while the app is running
+```
+
+### Why there's a `shell\` with its own .exe
+Windows identifies a pinned taskbar item by the **target executable**, not by the
+shortcut's icon. Launch `node_modules/electron/dist/electron.exe` and Windows pins
+*Electron* — so the icon "reverts" the instant you pin it, and nothing you set on the
+`.lnk` can override it. `install-shell.mjs` copies Electron's `dist/` to `shell\`,
+renames the binary to `claude-manager.exe`, and stamps the icon and version strings in
+with rcedit. It copies rather than renaming in place because `node_modules/electron`
+lives in pnpm's content-addressed store, shared with every other project on the machine.
+
+Re-run it only when Electron itself is upgraded (`pnpm desktop:install-shell`; it's a
+no-op otherwise). The icon is generated — PNG for the window/tray, multi-size `.ico` for
+the shortcut and the exe resource — by `pnpm --filter @cm/desktop icon`, which the
+desktop build runs automatically.
+
+**`config/` is shared, `data/` is not** — and that split is deliberate. Projects, agents
+and modes are written rarely and are miserable to maintain twice, so both instances read
+one copy. Chats are the opposite: `checkpoints.json` and `runners.json` are whole-file
+read-modify-write maps guarded by an *in-process* mutex, so two processes sharing them
+would silently drop each other's entries. Losing rollback points on the instance you
+trust with long work isn't a tradeoff worth making, so each instance keeps its own chats.
+Want to see stable's chats while working in dev? Open both tabs.
+
+### Install
+```
+node tools/desktop/migrate-data.mjs --dry-run   # preview; then drop --dry-run
+pnpm desktop:install-shell                      # branded claude-manager.exe (~270 MB, once)
+pnpm desktop:publish                            # build + install the payload
+pnpm desktop:shortcut                           # Start-menu entry (add -- --desktop)
+```
+The shortcut resolves the real Start-menu / Desktop folders from Windows rather than
+assuming `%USERPROFILE%\Desktop`, which OneDrive redirects.
+The migration **copies** — it verifies every file by SHA-256 and never deletes or
+modifies the source `.data`. Re-running it refuses a non-empty destination unless
+`--force`.
+
+### Updating
+Run the **claude-manager: Publish to stable** VS Code task (or `pnpm desktop:publish`).
+It publishes the **committed** `HEAD` — a dirty working tree is reported loudly and
+*not* included, because a "stable" build you can't reproduce from git isn't stable. If
+the build fails it rolls the payload back to the previous sha and rebuilds it.
+
+It **refuses to run while the app is open.** Quit from the tray first — *Quit (stops all
+agents & subApps)* — which tears down cleanly; killing the window does not.
+
+### Process ownership
+Everything is a descendant of the Electron shell: it spawns the server under a real
+`node` (not Electron's own binary, which would confuse anything resolving
+`process.execPath`), and the server owns every SDK session and subApp. Quitting asks the
+server to shut down over **stdin** — Windows can't deliver `SIGTERM` — waits for
+`runner.stopAll()`, then tree-kills whatever is left. If the shell dies abruptly, the
+server notices its stdin close and tears itself down rather than orphaning subApps.
+
+Closing the window **hides to tray**; only the tray's Quit stops anything. A reflex
+Alt-F4 must not kill a three-hour run.
+
 ## Config (env)
 | Var | Default | Meaning |
 |---|---|---|
-| `CM_PORT` | `4319` | HTTP + WebSocket port |
-| `CM_DATA_DIR` | `./.data` | on-disk state dir |
+| `CM_PORT` | `4319` (desktop: `4318`) | HTTP + WebSocket port |
+| `CM_DATA_DIR` | `./.data` | state dir — chats, checkpoints, runners |
+| `CM_CONFIG_DIR` | = `CM_DATA_DIR` | config dir — settings, projects, agents, modes |
 | `CM_MAX_ACTIVE_SESSIONS` | `6` | max concurrently-active chats |
+| `CM_APP_DIR` | installed payload | run the shell against a different checkout |
+| `CM_HOME` | `%LOCALAPPDATA%\claude-manager` | root for the whole installed layout |
+
+Leaving `CM_CONFIG_DIR` unset gives the original single-root layout, byte for byte.
 
 Projects, agents, modes, and settings are plain files under `.data/` and editable in the UI.
 SubApp definitions live on the project (or its `.claude-manager/project.yaml`) — adjust the run
