@@ -4,3 +4,8 @@ dist/
 *.log
 .turbo/
 .verify-shots/*.tsbuildinfo
+
+# Vendored offline dictation assets (~114MB) — fetched by
+# packages/client/scripts/fetch-whisper.mjs at build time, never committed.
+packages/client/public/models/
+packages/client/public/ort/

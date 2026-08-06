@@ -30,11 +30,16 @@ import {
   Square,
   Image as ImageIcon,
   File as FileIcon,
+  FileSearch,
+  FileCode2,
+  Mic,
 } from "lucide-react";
-import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef } from "@cm/shared";
-import { DEFAULT_MODEL } from "@cm/shared";
+import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef } from "@dispatch/shared";
+import { DEFAULT_MODEL, findModel } from "@dispatch/shared";
 import { api, type IndexedFile } from "../../lib/api.js";
-import { pathsFromDataTransfer, basenameOf } from "../../lib/dropPaths.js";
+import { pathsFromDrop, basenameOf, dropIntent, type DropIntent } from "../../lib/dropPaths.js";
+import { useFileDrag } from "../../lib/useFileDrag.js";
+import { useDictation, PTT_LABEL } from "../../lib/useDictation.js";
 import {
   loadDraft,
   saveDraft,
@@ -54,6 +59,8 @@ import { cn } from "../../lib/cn.js";
 import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
 import { actions, uploadChatImage, assetUrl } from "../../lib/actions.js";
+import { useEffectiveEffort } from "../../lib/effectiveEffort.js";
+import { EffortChip } from "../agents/runVisuals.js";
 import { ContextMeter } from "./ContextMeter.js";
 
 /** The markup editor pulls in two annotation engines — lazy so they stay out of
@@ -117,10 +124,60 @@ function imageFilesFrom(dt: DataTransfer | null | undefined): File[] {
   return out;
 }
 
-function dtHasFiles(dt: DataTransfer | null | undefined): boolean {
-  if (!dt) return false;
-  if (dt.types && Array.from(dt.types).includes("Files")) return true;
-  return !!dt.files?.length;
+/**
+ * What the drop overlay promises, per outcome. Phrased as the result the user
+ * gets, not the mechanism: "insert its path" is checkable against what lands in
+ * the box a moment later, "read via webUtils" is not.
+ */
+const DROP_COPY: Record<Exclude<DropIntent, null>, { icon: ReactNode; title: string; hint: string }> =
+  {
+    image: {
+      icon: <ImageIcon />,
+      title: "Drop to attach",
+      hint: "the image is uploaded and sent with your message",
+    },
+    path: {
+      icon: <FileCode2 />,
+      title: "Drop to insert the file path",
+      hint: "Claude reads the file itself — nothing is uploaded",
+    },
+    lookup: {
+      icon: <FileSearch />,
+      title: "Drop to find this file in the project",
+      hint: "the browser hides the real path, so we match on filename",
+    },
+  };
+
+/**
+ * The mid-drag overlay. Covers the composer so the promise is unmissable, and
+ * is `pointer-events-none` so it can't eat the drop it's advertising or bounce
+ * the dragleave/dragenter pair underneath it.
+ */
+function DropOverlay({ intent, armed }: { intent: Exclude<DropIntent, null>; armed: boolean }) {
+  const copy = DROP_COPY[intent];
+  return (
+    <div
+      className={cn(
+        "pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center gap-1 rounded-lg",
+        "border-2 border-dashed transition-colors duration-150",
+        armed
+          ? "border-accent bg-panel-2/95"
+          : "border-accent-line bg-panel-2/80",
+      )}
+    >
+      <div
+        className={cn(
+          "flex items-center gap-2 text-[12.5px] font-medium transition-colors",
+          armed ? "text-accent-hi" : "text-secondary",
+          "[&_svg]:size-4",
+        )}
+      >
+        {copy.icon}
+        {copy.title}
+      </div>
+      <div className="px-4 text-center text-[11px] text-faint">{copy.hint}</div>
+    </div>
+  );
 }
 
 /** Non-image files from a drop — these become PATHS, not uploads. */
@@ -159,6 +216,22 @@ function richPasteToText(html: string): string {
 
 const filenameOf = (img: ImageRef) => img.path.split(/[\\/]/).pop() ?? "image";
 
+/**
+ * True when the caret already sits in some other text field — a rename box, a
+ * dialog, the command palette. Opening a chat auto-focuses the composer, and
+ * that must never yank the cursor out from under someone mid-typing.
+ */
+function typingElsewhere(editorDom: Element): boolean {
+  const el = document.activeElement;
+  if (!el || el === document.body || editorDom.contains(el)) return false;
+  return (
+    (el as HTMLElement).isContentEditable ||
+    el.tagName === "INPUT" ||
+    el.tagName === "TEXTAREA" ||
+    el.tagName === "SELECT"
+  );
+}
+
 /** The chat composer: TipTap input + attachments + effort/mode/agent + send/steer. */
 export function Composer({ chat, agents, modes }: ComposerProps) {
   const upsertChat = useChats((s) => s.upsertChat);
@@ -172,7 +245,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // instant the agent consumes the message, not only when the whole turn ends.
   const queued = useChats((s) => s.queued[chat.id] ?? 0);
   const [isEmpty, setIsEmpty] = useState(true);
-  const [dragOver, setDragOver] = useState(false);
+  // Two scopes of drag state. `fileDrag` is the whole window — it lights the
+  // composer up the moment a file crosses the app, so the user sees where to
+  // aim. `over` is this box specifically, which upgrades the same affordance to
+  // "release now".
+  const fileDrag = useFileDrag();
+  const [over, setOver] = useState<DropIntent>(null);
   // The file-path picker, and the query it opens with (a dropped file's basename
   // when a drop was ambiguous, "" for a cold open from the paperclip).
   const [picker, setPicker] = useState<{ query: string } | null>(null);
@@ -180,11 +258,19 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const [model, setModelState] = useState<string>(
     () => modelByChat.get(chat.id) ?? chat.model ?? DEFAULT_MODEL,
   );
-  // Selectable models come from the server (live Anthropic Models API, or a
-  // static fallback), seeded so the picker is never empty. A pinned model whose
-  // id isn't in the list still labels via its raw id (see modelLabelOf).
+  // Selectable models come from the server (the live Claude Code runtime list,
+  // or a static fallback), seeded so the picker is never empty. `findModel`
+  // resolves a pinned id through aliases — a chat saved as "claude-opus-4-8"
+  // still selects the runtime's "opus[1m]" row — and a genuinely unknown id
+  // falls back to labelling with its raw string.
   const models = useModels((s) => s.models);
-  const modelLabelOf = (m: string) => models.find((x) => x.value === m)?.label ?? m;
+  const modelLabelOf = (m: string) => findModel(models, m)?.label ?? m;
+  // The row the picker should mark as selected: matched by identity, since
+  // several rows can resolve to the same underlying model.
+  const selectedModel = chat.agentId ? undefined : findModel(models, model);
+  // What the main loop is REALLY thinking at, off the transcript's newest
+  // main-loop row (the picker below only knows what was asked for).
+  const effectiveEffort = useEffectiveEffort(chat.id);
   // Compact toolbar: icon-only controls with tooltips. Chosen automatically —
   // the row collapses to icons the moment its full-label layout would overflow
   // the composer width, and re-expands once there's room again (see below).
@@ -205,6 +291,9 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // Insert already-converted rich-paste text (markdown links + newlines) as literal
   // text — no HTML re-parsing, so `[label](url)` and `&`/`<` stay verbatim.
   const insertRichRef = useRef<(text: string) => void>(() => {});
+  // Dictated text, reached through a ref because the mic is wired up before the
+  // editor exists — see the `useDictation` call just below.
+  const insertSpokenRef = useRef<(text: string) => void>(() => {});
   // The once-configured `onUpdate` closure can't see the current `chat.id`, so it
   // reads it through this ref (kept in sync every render) to key the saved draft.
   const chatIdRef = useRef(chat.id);
@@ -213,6 +302,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // append to the list it actually observed rather than a stale render's copy.
   const attachmentsRef = useRef(attachments);
   attachmentsRef.current = attachments;
+
+  // Declared up here, ahead of the editor, so the chat-switch effect below can
+  // close the mic. The insertion callback goes through a ref for the same reason.
+  const dictation = useDictation(
+    useCallback((text: string) => insertSpokenRef.current(text), []),
+  );
 
   const running = chat.status === "running";
 
@@ -289,6 +384,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // half-typed message nor a pasted screenshot is lost.
   useEffect(() => {
     if (!editor) return;
+    // A mic left open across a switch would type into the chat you just left.
+    dictation.stop();
     const saved = loadDraft(chat.id);
     editor.commands.setContent(saved.html);
     attachmentsRef.current = saved.images;
@@ -298,7 +395,19 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     setError(null);
     setIsEmpty(editor.isEmpty);
     setModelState(modelByChat.get(chat.id) ?? chat.model ?? DEFAULT_MODEL);
-  }, [chat.id, editor]);
+
+    // Land the caret in the composer so an opened chat — brand new, picked from
+    // the sidebar, or jumped to from the palette — is typeable immediately. Every
+    // open path ends at a `chat.id` change here (or a remount coming back from the
+    // git/memory views), so this one effect covers them all. Deferred a frame so
+    // the focus lands after the click that opened the chat has settled, and after
+    // `setContent` above, which is what makes "end" the end of the restored draft.
+    const raf = requestAnimationFrame(() => {
+      if (editor.isDestroyed || typingElsewhere(editor.view.dom)) return;
+      editor.commands.focus("end");
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [chat.id, editor, dictation.stop]);
 
   /** Replace the attachment list and persist it alongside the current text. */
   const putAttachments = (next: ImageRef[]) => {
@@ -344,6 +453,19 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     if (content.length) editor?.commands.insertContent(content);
   };
   insertRichRef.current = insertText;
+
+  /**
+   * Insert a dictated phrase at the cursor. Speech arrives as bare phrases with
+   * no spacing of its own, so we supply the join: a space before it unless the
+   * draft is empty or already ends in whitespace, and a trailing space so the
+   * next phrase — spoken or typed — doesn't run into this one.
+   */
+  const insertSpoken = (text: string) => {
+    if (!editor) return;
+    const before = editor.state.doc.textBetween(0, editor.state.selection.from, "\n", " ");
+    insertText(before && !/\s$/.test(before) ? ` ${text} ` : `${text} `);
+  };
+  insertSpokenRef.current = insertSpoken;
 
   /**
    * Drop file paths into the message as text. One per line, with a trailing
@@ -393,14 +515,22 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
    * images upload as attachments; a drag that discloses real paths inserts them
    * verbatim; anything else falls back to resolving basenames against the
    * project index. Returns whether the drop was consumed.
+   *
+   * Under the desktop shell the middle branch takes every file drag, index
+   * fallback included — see pathsFromDrop. `dropIntent` predicts which branch
+   * runs so the overlay can say so mid-drag; change one and change the other.
    */
   const handleDrop = (dt: DataTransfer | null): boolean => {
+    // Cleared here, not only in the shell's onDrop: a drop landing on the text
+    // area is consumed by ProseMirror, which stops propagation before the
+    // shell's handler ever runs. Without this the overlay outlives the drop.
+    setOver(null);
     const images = imageFilesFrom(dt);
     if (images.length) {
       void addFiles(images);
       return true;
     }
-    const paths = pathsFromDataTransfer(dt);
+    const paths = pathsFromDrop(dt);
     if (paths.length) {
       insertPaths(paths);
       return true;
@@ -456,6 +586,9 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
       });
     }
 
+    // Sending ends the dictation that composed it — otherwise the tail of the
+    // sentence you just sent lands at the top of the next message.
+    dictation.stop();
     editor?.commands.clearContent();
     clearDraft(chat.id);
     attachmentsRef.current = [];
@@ -585,23 +718,31 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
 
       <div
         className={cn(
-          "rounded-lg border border-line bg-panel-2 focus-within:border-line-strong",
-          dragOver && "border-accent-line ring-1 ring-accent-line",
+          "relative rounded-lg border border-line bg-panel-2 focus-within:border-line-strong",
+          // Lit from the moment a file enters the WINDOW, not just this box:
+          // the target has to be findable before you're on top of it.
+          fileDrag.active && "border-accent-line ring-1 ring-accent-line",
+          over && "border-accent ring-2 ring-accent-line",
         )}
         onDragOver={(e) => {
-          if (dtHasFiles(e.dataTransfer)) {
-            e.preventDefault();
-            setDragOver(true);
-          }
+          const intent = dropIntent(e.dataTransfer);
+          if (!intent) return;
+          e.preventDefault();
+          setOver((prev) => (prev === intent ? prev : intent));
         }}
         onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false);
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setOver(null);
         }}
         onDrop={(e) => {
           if (handleDrop(e.dataTransfer)) e.preventDefault();
-          setDragOver(false);
+          setOver(null);
         }}
       >
+        {/* The promise, made before the user commits. `over` wins so the copy
+            reflects the box actually under the pointer. */}
+        {(over ?? (fileDrag.active ? fileDrag.intent : null)) && (
+          <DropOverlay intent={(over ?? fileDrag.intent)!} armed={over !== null} />
+        )}
         {/* attachment strip */}
         {(attachments.length > 0 || uploading > 0) && (
           <div className="flex flex-wrap items-center gap-2 px-3 pt-2.5">
@@ -663,10 +804,54 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           </div>
         )}
 
+        {/* A failed mic is reported separately from `error` (send/upload
+            failures): the two are unrelated, and one must not clear the other. */}
+        {dictation.error && (
+          <div
+            className="flex items-start gap-2 px-3 pt-2 text-[11px] text-danger"
+            role="alert"
+          >
+            <span className="min-w-0 flex-1">{dictation.error}</span>
+            <button
+              onClick={dictation.dismissError}
+              aria-label="Dismiss"
+              className="shrink-0 text-faint hover:text-danger [&_svg]:size-3"
+            >
+              <X />
+            </button>
+          </div>
+        )}
+
         {/* editor */}
         <div className="cm-prose px-3 py-2.5">
           <EditorContent editor={editor} />
+          {/* Live transcript. Only the interim guess lives here — finalized
+              phrases have already been inserted into the editor above — so this
+              strip shows the words still in flight and nothing else. It sits
+              outside the editor because TipTap owns that DOM; rendering into it
+              would fight ProseMirror for the same nodes. */}
+          {(dictation.listening || dictation.status) && (
+            <div className="mt-1.5 flex items-center gap-2 text-[11.5px] text-muted">
+              <span
+                aria-hidden
+                className={cn(
+                  "size-1.5 shrink-0 animate-pulse rounded-full",
+                  dictation.listening ? "bg-[var(--color-danger)]" : "bg-[var(--color-accent)]",
+                )}
+              />
+              <span className="min-w-0 flex-1 truncate italic">
+                {dictation.listening
+                  ? dictation.interim || "Listening…"
+                  : dictation.status}
+              </span>
+            </div>
+          )}
         </div>
+        {/* Screen readers get the transcript as it settles, not on every keystroke
+            of interim churn. */}
+        <span className="sr-only" role="status" aria-live="polite">
+          {dictation.listening ? "Dictating" : ""}
+        </span>
 
         {/* toolbar — flex-nowrap + non-shrinking children so an over-wide full
             layout genuinely overflows (which `measure` detects and collapses to
@@ -727,6 +912,37 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               </div>
             )}
           </Popover>
+
+          {/* Dictation. One control, two gestures: tap to latch the mic on, or
+              press and hold to talk only while held (as does holding the
+              push-to-talk key anywhere). `onPointerDown` rather than `onClick`
+              is what makes the
+              hold gesture possible at all — and it starts capturing on the way
+              down, so holding doesn't clip the first word. */}
+          <IconButton
+            tip={
+              dictation.unavailable
+                ? "Dictation unavailable"
+                : dictation.listening
+                  ? "Stop dictating (or release)"
+                  : `Dictate — tap to toggle, hold to talk (${PTT_LABEL})`
+            }
+            aria-pressed={dictation.listening}
+            disabled={!!dictation.unavailable}
+            active={dictation.listening}
+            onPointerDown={(e) => {
+              // Keep the caret in the message box; a focus jump to the button
+              // would land the dictated text nowhere.
+              e.preventDefault();
+              dictation.pressStart();
+            }}
+            onPointerUp={dictation.pressEnd}
+            onPointerCancel={dictation.pressEnd}
+            onPointerLeave={dictation.pressEnd}
+            className={cn(dictation.listening && "text-danger")}
+          >
+            <Mic className={cn(dictation.listening && "animate-pulse")} />
+          </IconButton>
 
           <SegmentedControl
             segments={modeSegments}
@@ -814,6 +1030,13 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             compact={compact}
           />
 
+          {/* Only shown when the level that RAN differs from the one picked — an
+              agent pinning its own, or a model silently downgrading it. Silent
+              otherwise, so the row stays quiet in the normal case. */}
+          {effectiveEffort && effectiveEffort !== chat.effort && (
+            <EffortChip effort={effectiveEffort} label="running at" />
+          )}
+
           {/* model / agent — the session "brain": a custom agent's name when one
               is picked (secondary state), otherwise the active model label so it
               never misleadingly reads "No agent" while a model is running. */}
@@ -875,7 +1098,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                     key={m.value}
                     icon={<Cpu />}
                     hint={m.hint}
-                    active={!chat.agentId && m.value === model}
+                    title={m.description}
+                    active={m === selectedModel}
                     onClick={() => {
                       chooseModel(m.value);
                       close();
@@ -883,9 +1107,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                   >
                     <span className="flex items-center gap-2">
                       {m.label}
-                      {!chat.agentId && m.value === model && (
-                        <Check className="size-3 text-accent" />
-                      )}
+                      {m === selectedModel && <Check className="size-3 text-accent" />}
                     </span>
                   </MenuItem>
                 ))}
