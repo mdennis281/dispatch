@@ -1,0 +1,368 @@
+/**
+ * Workflow profiles — the per-project "how does change ship here" contract.
+ *
+ * A managed repo is a multi-agent repo, but not every repo is at the same stage.
+ * An adolescent project wants an agent that just edits files; a mature one wants
+ * every task isolated in a worktree and landed through a reviewed PR. Encoding
+ * that as a PROFILE (rather than "this repo happens to have a ship script and a
+ * CLAUDE.md") is what lets Dispatch actually hold the line: the profile
+ * drives the injected workflow rules, the permission guard, the memory commit
+ * policy, and the post-merge main sync.
+ *
+ * Three rungs, in increasing ceremony:
+ *
+ *   - `none`   — work in the primary checkout. No branch, no PR, no commit
+ *                obligation. The agent edits; the human batches commits. This is
+ *                the right posture while a codebase is still forming.
+ *   - `commit` — still the primary checkout, but work lands as small, coherent,
+ *                conventional commits before a task is done. No branches, no
+ *                GitHub. The rung a project graduates to once losing work starts
+ *                to hurt.
+ *   - `review` — one task → one worktree → one PR. Commit, ship, let CI and the
+ *                reviewer run, respond to review, and let the merge land the
+ *                branch; local `main` is fast-forwarded afterwards. Direct
+ *                commits/pushes to the trunk are refused.
+ *
+ * Everything a profile implies is also individually overridable in the manifest,
+ * so a repo can sit on `review` but (say) keep its own sync policy.
+ */
+import * as z from "zod";
+
+/* ------------------------------------------------------------------ profile */
+
+/** The three workflow rungs. See the module docblock. */
+export const WorkflowProfileSchema = z.enum(["none", "commit", "review"]);
+export type WorkflowProfile = z.infer<typeof WorkflowProfileSchema>;
+
+/**
+ * How hard the permission guard pushes back on a trunk-violating command
+ * (`git commit`/`push` on the default branch, a manual `gh pr merge`):
+ *   - `off`  — never intervene,
+ *   - `warn` — let it through but surface a notice,
+ *   - `deny` — refuse the tool call before it runs (the agent sees the reason).
+ */
+export const WorkflowGuardSchema = z.enum(["off", "warn", "deny"]);
+export type WorkflowGuard = z.infer<typeof WorkflowGuardSchema>;
+
+/**
+ * What happens to `.dispatch/memory/` after an agent writes a memory.
+ * Memories are always written to the PRIMARY checkout (they're project-scoped,
+ * not branch-scoped — see MemoryService), so without a policy they accumulate
+ * as permanently-uncommitted changes there.
+ *   - `ignore` — leave them dirty; the human commits them with everything else,
+ *   - `commit` — commit them on the primary checkout in their own `chore(memory)`
+ *                commit, and push when the trunk has an upstream.
+ */
+export const WorkflowMemoryPolicySchema = z.enum(["ignore", "commit"]);
+export type WorkflowMemoryPolicy = z.infer<typeof WorkflowMemoryPolicySchema>;
+
+/** When to fast-forward the primary checkout's trunk to its remote. */
+export const WorkflowSyncMainSchema = z.enum(["never", "ship", "merge"]);
+export type WorkflowSyncMain = z.infer<typeof WorkflowSyncMainSchema>;
+
+/**
+ * Whether the agent may LAND its own PR, and how far that permission goes. A
+ * `review`-only sub-setting: the other rungs have no PR to land.
+ *
+ *   - `off`      — the agent ships and waits; a human (or the repo's auto-merge
+ *                  job) merges. The default, and what `review` has always meant.
+ *   - `on-green` — once CI is green, review is clean, and nothing is parked, the
+ *                  agent approves and merges its own PR without asking. "All
+ *                  changes get pushed forward" — the whole point of the flag.
+ *
+ * `on-green` never means "merge regardless": {@link MERGE_HOLD_LABEL}, a failing
+ * or pending check, an unresolved review thread, a draft, or a conflict each stop
+ * it, and the agent is told to stand down whenever the human said to.
+ */
+export const WorkflowAutoMergeSchema = z.enum(["off", "on-green"]);
+export type WorkflowAutoMerge = z.infer<typeof WorkflowAutoMergeSchema>;
+
+/** How an auto-merged PR is landed (maps onto `gh pr merge`'s flags). */
+export const WorkflowMergeMethodSchema = z.enum(["squash", "merge", "rebase"]);
+export type WorkflowMergeMethod = z.infer<typeof WorkflowMergeMethodSchema>;
+
+/**
+ * The label that parks a PR. Pre-existing (the repo's auto-merge job honours it);
+ * auto-merge honours it too, so a human can stop a specific PR from being landed
+ * without turning the feature off project-wide.
+ */
+export const MERGE_HOLD_LABEL = "hold";
+
+/* ------------------------------------------------------- authored + resolved */
+
+/**
+ * The workflow block as authored in `.dispatch/project.yaml` (and stored
+ * on the project record). Only `profile` is required; every other field is an
+ * override of that profile's default.
+ */
+export const WorkflowConfigSchema = z.object({
+  profile: WorkflowProfileSchema,
+  /** Custom worktree command (e.g. `pnpm worktree`); `review` only. */
+  worktree: z.string().optional(),
+  /** Custom ship command (e.g. `pnpm ship`); `review` only. */
+  ship: z.string().optional(),
+  syncMainAfter: WorkflowSyncMainSchema.optional(),
+  memory: WorkflowMemoryPolicySchema.optional(),
+  guard: WorkflowGuardSchema.optional(),
+  /** Whether the agent lands its own PRs (see {@link WorkflowAutoMergeSchema}); `review` only. */
+  autoMerge: WorkflowAutoMergeSchema.optional(),
+  /** Strategy used when auto-merge lands a PR (default `squash`). */
+  mergeMethod: WorkflowMergeMethodSchema.optional(),
+});
+export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
+
+/**
+ * A profile with every implication made explicit. This is what the session
+ * broker, guard, memory service and PR watcher actually read — none of them
+ * branch on the profile name directly, so adding a rung stays a one-place change.
+ */
+export const ResolvedWorkflowSchema = z.object({
+  profile: WorkflowProfileSchema,
+  /** Each task gets its own worktree + branch (never the primary checkout). */
+  isolate: z.boolean(),
+  /** Work must land as commits before the task is done. */
+  requireCommit: z.boolean(),
+  /** Change reaches the trunk through a PR, not a direct push. */
+  requirePr: z.boolean(),
+  /** Ship, then work the CI + review loop until the PR lands. */
+  reviewLoop: z.boolean(),
+  worktreeCmd: z.string().optional(),
+  shipCmd: z.string().optional(),
+  syncMainAfter: WorkflowSyncMainSchema,
+  memory: WorkflowMemoryPolicySchema,
+  guard: WorkflowGuardSchema,
+  /** Whether the agent may land its own PR, and how far that goes. */
+  autoMerge: WorkflowAutoMergeSchema,
+  /** Strategy auto-merge lands with. */
+  mergeMethod: WorkflowMergeMethodSchema,
+});
+export type ResolvedWorkflow = z.infer<typeof ResolvedWorkflowSchema>;
+
+/** The per-profile defaults every override is applied on top of. */
+const PROFILE_DEFAULTS: Record<WorkflowProfile, Omit<ResolvedWorkflow, "worktreeCmd" | "shipCmd">> =
+  {
+    none: {
+      profile: "none",
+      isolate: false,
+      requireCommit: false,
+      requirePr: false,
+      reviewLoop: false,
+      syncMainAfter: "never",
+      memory: "ignore",
+      guard: "off",
+      autoMerge: "off",
+      mergeMethod: "squash",
+    },
+    commit: {
+      profile: "commit",
+      isolate: false,
+      requireCommit: true,
+      requirePr: false,
+      reviewLoop: false,
+      syncMainAfter: "never",
+      // Working ON the trunk is the whole point of this rung — never guard it.
+      memory: "commit",
+      guard: "off",
+      autoMerge: "off",
+      mergeMethod: "squash",
+    },
+    review: {
+      profile: "review",
+      isolate: true,
+      requireCommit: true,
+      requirePr: true,
+      reviewLoop: true,
+      syncMainAfter: "merge",
+      memory: "commit",
+      guard: "deny",
+      // Opt-in: landing your own work is a real delegation, so it's a toggle the
+      // human flips, not something a profile choice hands over silently.
+      autoMerge: "off",
+      mergeMethod: "squash",
+    },
+  };
+
+/** The minimal project shape {@link resolveWorkflow} needs (avoids a cycle). */
+export interface WorkflowSource {
+  workflow?: WorkflowConfig;
+  worktreeCmd?: string;
+  shipCmd?: string;
+}
+
+/**
+ * Resolve a project's effective workflow.
+ *
+ * Back-compat: a project with no authored `workflow` block infers its rung from
+ * what it already had — a `shipCmd` meant it was running the full PR loop, so it
+ * resolves to `review`; anything else resolves to `none`. That keeps every
+ * pre-existing project behaving exactly as it did before profiles existed.
+ *
+ * `autoMerge` is clamped to `off` outside the `review` rung — the lower rungs
+ * don't open PRs, so an authored `autoMerge` there is a mistake, and resolving it
+ * away here means no consumer has to re-check the profile before trusting it.
+ */
+export function resolveWorkflow(source: WorkflowSource | null | undefined): ResolvedWorkflow {
+  const wf = source?.workflow;
+  const profile: WorkflowProfile = wf?.profile ?? (source?.shipCmd ? "review" : "none");
+  const base = PROFILE_DEFAULTS[profile];
+  return ResolvedWorkflowSchema.parse({
+    ...base,
+    // Command overrides fall back to the legacy top-level project fields.
+    worktreeCmd: wf?.worktree ?? source?.worktreeCmd,
+    shipCmd: wf?.ship ?? source?.shipCmd,
+    syncMainAfter: wf?.syncMainAfter ?? base.syncMainAfter,
+    memory: wf?.memory ?? base.memory,
+    guard: wf?.guard ?? base.guard,
+    autoMerge: profile === "review" ? (wf?.autoMerge ?? base.autoMerge) : "off",
+    mergeMethod: wf?.mergeMethod ?? base.mergeMethod,
+  });
+}
+
+/* -------------------------------------------------------------------- guard */
+
+/** What kind of trunk violation a command represents. */
+export const WorkflowViolationKindSchema = z.enum([
+  /** A commit made directly on the protected trunk branch. */
+  "commit-on-trunk",
+  /** A push whose destination is the protected trunk branch. */
+  "push-to-trunk",
+  /** A merge the review loop is supposed to perform, done by hand. */
+  "manual-merge",
+]);
+export type WorkflowViolationKind = z.infer<typeof WorkflowViolationKindSchema>;
+
+/** A detected violation: what it was, and the sentence to show the agent. */
+export interface WorkflowViolation {
+  kind: WorkflowViolationKind;
+  reason: string;
+}
+
+/** Context the classifier needs about where a command is about to run. */
+export interface WorkflowCommandContext {
+  /** The protected trunk (project `defaultBranch`, typically `main`). */
+  defaultBranch: string;
+  /** The branch the session's cwd is on, when known. */
+  currentBranch?: string | null;
+  /** True when the session is running inside a task worktree. */
+  inWorktree?: boolean;
+  /**
+   * True when this session may land its own PR (`autoMerge: "on-green"`). A raw
+   * `gh pr merge` stays REFUSED either way — auto-merge goes through
+   * `mcp__manager__approve_pr`, which runs the readiness checks, honours the
+   * `hold` label, and tells the manager the trunk moved. This flag only changes
+   * the sentence the agent reads, pointing it at the sanctioned path instead of
+   * telling it to wait for a human who isn't coming.
+   */
+  autoMerge?: boolean;
+}
+
+/** Split a shell string on `&&`, `||`, `;` and `|` into its component commands. */
+function splitCommands(command: string): string[] {
+  return command
+    .split(/\|\||&&|[;\n|]/)
+    .map((c) => c.trim())
+    .filter(Boolean);
+}
+
+/** Tokenize one command, dropping surrounding quotes from each argument. */
+function tokenize(command: string): string[] {
+  const tokens = command.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+  return tokens.map((t) =>
+    (t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))
+      ? t.slice(1, -1)
+      : t,
+  );
+}
+
+/**
+ * Decide whether a shell command violates the trunk contract.
+ *
+ * Deliberately narrow: it only fires on the three things the `review` loop
+ * actually forbids, and it only fires when it can TELL. A `git commit` whose
+ * branch we don't know is allowed through — a guard that blocks legitimate work
+ * on a false positive gets turned off, which is worse than one that misses.
+ *
+ * Returns null when the command is fine (which is almost always).
+ */
+export function classifyWorkflowViolation(
+  command: string,
+  ctx: WorkflowCommandContext,
+): WorkflowViolation | null {
+  const trunk = ctx.defaultBranch || "main";
+  for (const raw of splitCommands(command)) {
+    const tokens = tokenize(raw);
+    if (!tokens.length) continue;
+    const [bin, ...rest] = tokens;
+    const exe = (bin ?? "").replace(/\.exe$/i, "").split(/[\\/]/).pop() ?? "";
+    // Skip global git flags (`git -C dir push`) to find the subcommand.
+    const args = [...rest];
+    if (exe === "git") {
+      let i = 0;
+      while (i < args.length && args[i]?.startsWith("-")) {
+        // `-C <dir>` and `-c <cfg>` consume a value; bare flags don't.
+        i += args[i] === "-C" || args[i] === "-c" ? 2 : 1;
+      }
+      const sub = args[i];
+      const subArgs = args.slice(i + 1);
+
+      if (sub === "commit") {
+        // Only a KNOWN trunk checkout is a violation — see the docblock.
+        if (ctx.currentBranch === trunk) {
+          return {
+            kind: "commit-on-trunk",
+            reason: `\`${trunk}\` is the protected trunk — commit on a task branch in a worktree instead.`,
+          };
+        }
+        continue;
+      }
+
+      if (sub === "push") {
+        const positional = subArgs.filter((a) => !a.startsWith("-"));
+        // `git push origin main`, `git push origin HEAD:main`, `git push origin +main`
+        const targets = positional.slice(1).map((r) => {
+          const dst = r.includes(":") ? (r.split(":").pop() ?? "") : r;
+          return dst.replace(/^\+/, "").replace(/^refs\/heads\//, "");
+        });
+        if (targets.includes(trunk)) {
+          return {
+            kind: "push-to-trunk",
+            reason: `Refusing to push to \`${trunk}\` — open a PR from a task worktree instead.`,
+          };
+        }
+        // A bare `git push` from a trunk checkout pushes the trunk.
+        if (!targets.length && ctx.currentBranch === trunk) {
+          return {
+            kind: "push-to-trunk",
+            reason: `A bare \`git push\` from \`${trunk}\` pushes the trunk — open a PR from a task worktree instead.`,
+          };
+        }
+        continue;
+      }
+
+      // A local `git merge` INTO the trunk checkout bypasses the PR entirely.
+      if (sub === "merge" && ctx.currentBranch === trunk && !ctx.inWorktree) {
+        return {
+          kind: "manual-merge",
+          reason: `Merging into \`${trunk}\` by hand bypasses the PR — ship the branch and let the merge land it.`,
+        };
+      }
+      continue;
+    }
+
+    if (exe === "gh") {
+      const positional = args.filter((a) => !a.startsWith("-"));
+      if (positional[0] === "pr" && positional[1] === "merge") {
+        return {
+          kind: "manual-merge",
+          reason: ctx.autoMerge
+            ? "Use `mcp__manager__approve_pr` to land this PR — it verifies CI, review threads " +
+              "and the `hold` label first, and syncs the trunk afterwards. A raw `gh pr merge` " +
+              "skips all of that."
+            : "Merging the PR by hand skips the review loop — ship it and let the merge land once review is green.",
+        };
+      }
+      continue;
+    }
+  }
+  return null;
+}

@@ -12,7 +12,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
-import type { McpCatalog, Project } from "@cm/shared";
+import type { McpCatalog, Project } from "@dispatch/shared";
 import { buildApp } from "../app.js";
 import { loadConfig } from "../config.js";
 import { EventBus } from "../bus.js";
@@ -42,7 +42,14 @@ function makeProject(mcpServers?: Project["mcpServers"]): Project {
 describe("mcp-catalog — builder", () => {
   it("enumerates the manager server with the full tool set + schemas/params", async () => {
     const catalog = await buildProjectMcpCatalog(makeProject(), {
-      bindings: { github: true, terminals: true, memory: true, runner: true, mcpConfig: true },
+      bindings: {
+        github: true,
+        prApproval: true,
+        terminals: true,
+        memory: true,
+        runner: true,
+        mcpConfig: true,
+      },
     });
 
     expect(catalog.servers).toHaveLength(1);
@@ -58,6 +65,7 @@ describe("mcp-catalog — builder", () => {
         "wait",
         "wait_for_chat",
         "watch_pr",
+        "approve_pr",
         "terminal",
         "remember",
         "recall",
@@ -100,8 +108,24 @@ describe("mcp-catalog — builder", () => {
     const manager = catalog.servers[0]!;
     // watch_pr is gated on the github binding → unavailable when unbound…
     expect(manager.tools.find((t) => t.name === "watch_pr")!.available).toBe(false);
+    // …as is approve_pr on its own (auto-merge) binding, which this project
+    // hasn't opted into…
+    expect(manager.tools.find((t) => t.name === "approve_pr")!.available).toBe(false);
     // …while ungated tools stay available.
     expect(manager.tools.find((t) => t.name === "wait")!.available).toBe(true);
+  });
+
+  it("offers approve_pr only when the project opted into auto-merge", async () => {
+    // The catalog mirrors what a session gets: the tool is bound off the
+    // project's resolved workflow, not off GitHub being wired up.
+    const off = await buildProjectMcpCatalog(makeProject(), {
+      bindings: { github: true, prApproval: false },
+    });
+    expect(off.servers[0]!.tools.find((t) => t.name === "approve_pr")!.available).toBe(false);
+    const on = await buildProjectMcpCatalog(makeProject(), {
+      bindings: { github: true, prApproval: true },
+    });
+    expect(on.servers[0]!.tools.find((t) => t.name === "approve_pr")!.available).toBe(true);
   });
 
   it("reports an external server that fails to connect as status:error (endpoint intact)", async () => {

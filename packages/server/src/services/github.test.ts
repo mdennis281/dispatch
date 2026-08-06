@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { join } from "node:path";
 import { EventBus } from "../bus.js";
-import type { WsServerEvent } from "@cm/shared";
-import type { Project, Chat } from "@cm/shared";
+import type { WsServerEvent } from "@dispatch/shared";
+import type { Project, Chat } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import { GitHubService, COPILOT_LOGIN, type ExecResult, type ExecaLike } from "./github.js";
 
@@ -354,6 +354,36 @@ describe("ACT methods — argv + bus events", () => {
     const gh = new GitHubService({ bus, exec });
     await gh.addComment(REPO, 42, "looks good");
     expect(calls[0].args).toEqual(["pr", "comment", "42", "--repo", REPO, "--body", "looks good"]);
+  });
+
+  it("approve submits an approving review with the body", async () => {
+    const { exec, calls } = makeExec();
+    const events = collect(bus);
+    const gh = new GitHubService({ bus, exec });
+
+    const res = await gh.approve(REPO, 42, "checks green", { chatId: "c9" });
+
+    expect(res).toEqual({ approved: true });
+    expect(calls[0].args).toEqual([
+      "pr", "review", "42", "--repo", REPO, "--approve", "--body", "checks green",
+    ]);
+    expect(events.some((e) => e.type === "notice")).toBe(true);
+  });
+
+  it("approve reports a refusal instead of throwing (you can't approve your own PR)", async () => {
+    // The usual case here — the PR is ours. It must NOT abort the merge.
+    const gh = new GitHubService({
+      bus,
+      exec: async () => ({
+        stdout: "",
+        stderr: "GraphQL: Can not approve your own pull request",
+        exitCode: 1,
+      }),
+    });
+
+    const res = await gh.approve(REPO, 42, "body");
+    expect(res.approved).toBe(false);
+    expect(res.error).toMatch(/approve your own/);
   });
 
   it("merge defaults to squash + delete-branch and emits the merged PR", async () => {

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
-import type { WsServerEvent, Chat, Project } from "@cm/shared";
+import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
 import {
   SessionBroker,
   EFFORT_THINKING_TOKENS,
@@ -21,7 +21,7 @@ let store: Store;
 let bus: EventBus;
 let events: WsServerEvent[];
 let brokers: SessionBroker[];
-/** Extra temp dirs (e.g. managed-repo `.claude-manager/` roots) to clean up. */
+/** Extra temp dirs (e.g. managed-repo `.dispatch/` roots) to clean up. */
 let tempDirs: string[];
 
 beforeEach(async () => {
@@ -88,6 +88,7 @@ interface FakeCtl {
     setPermissionMode: string[];
     setModel: unknown[];
     setMaxThinkingTokens: unknown[];
+    applyFlagSettings: Record<string, unknown>[];
   };
 }
 
@@ -245,14 +246,24 @@ function resultMsg(subtype = "success") {
   };
 }
 
-function makeFakeQuery(perTurn: PerTurn, sessionId = "sess-1") {
+function makeFakeQuery(
+  perTurn: PerTurn,
+  sessionId = "sess-1",
+  opts: { noFlagSettings?: boolean } = {},
+) {
   const controllers: FakeCtl[] = [];
   const fn: QueryFn = ({ prompt, options }) => {
     const ctl: FakeCtl = {
       canUseTool: (options as { canUseTool?: FakeCtl["canUseTool"] } | undefined)?.canUseTool,
       options: options as unknown as Record<string, unknown>,
       pushed: [],
-      calls: { interrupt: 0, setPermissionMode: [], setModel: [], setMaxThinkingTokens: [] },
+      calls: {
+        interrupt: 0,
+        setPermissionMode: [],
+        setModel: [],
+        setMaxThinkingTokens: [],
+        applyFlagSettings: [],
+      },
     };
     controllers.push(ctl);
     async function* gen(): AsyncGenerator<unknown, void> {
@@ -277,6 +288,12 @@ function makeFakeQuery(perTurn: PerTurn, sessionId = "sess-1") {
     g.setMaxThinkingTokens = async (n: unknown) => {
       ctl.calls.setMaxThinkingTokens.push(n);
     };
+    // Omitted on request, to stand in for a runtime that predates the control.
+    if (!opts.noFlagSettings) {
+      g.applyFlagSettings = async (settings: Record<string, unknown>) => {
+        ctl.calls.applyFlagSettings.push(settings);
+      };
+    }
     g.setMcpPermissionModeOverride = async () => ({});
     return g as unknown as ReturnType<QueryFn>;
   };
@@ -721,6 +738,114 @@ describe("SessionBroker — permissions", () => {
     expect(perm && "message" in perm ? perm.message : "").toBe("Language: TypeScript · Region: US");
   });
 
+  it("folds per-question notes INTO the answer string (the only channel the CLI reads)", async () => {
+    // The CLI tool reads `updatedInput.answers` and nothing else, so notes that
+    // rode their own field would be silently dropped — the user would watch the
+    // model ignore instructions it never received.
+    const input = {
+      questions: [
+        {
+          question: "Which language do you prefer?",
+          header: "Language",
+          options: [{ label: "TypeScript" }, { label: "JavaScript" }],
+          multiSelect: false,
+        },
+        {
+          question: "Which region should I deploy to?",
+          header: "Region",
+          options: [{ label: "US" }, { label: "EU" }],
+          multiSelect: false,
+        },
+      ],
+    };
+    let permResult: unknown;
+    const { fn } = makeFakeQuery(async (_text, ctl) => {
+      permResult = await ctl.canUseTool!("AskUserQuestion", input, {});
+      return [assistantText("ok"), resultMsg()];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const reqP = nextPermissionId();
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "ask");
+    const reqId = await reqP;
+
+    broker.answerQuestion(reqId, {
+      answers: [
+        {
+          questionIndex: 0,
+          optionId: "TypeScript",
+          answer: "TypeScript",
+          notes: "strict mode, no any",
+        },
+        // A question with no notes keeps its bare value.
+        { questionIndex: 1, optionId: "US", answer: "US" },
+      ],
+    });
+    await idleP;
+
+    expect(permResult).toEqual({
+      behavior: "allow",
+      updatedInput: {
+        ...input,
+        answers: {
+          "Which language do you prefer?":
+            "TypeScript — additional instructions: strict mode, no any",
+          "Which region should I deploy to?": "US",
+        },
+      },
+    });
+  });
+
+  it("carries notes on the single-question shape too", async () => {
+    const input = {
+      questions: [
+        {
+          question: "Ship it?",
+          options: [{ label: "Yes" }, { label: "No" }],
+          multiSelect: false,
+        },
+      ],
+    };
+    let permResult: unknown;
+    const { fn } = makeFakeQuery(async (_text, ctl) => {
+      permResult = await ctl.canUseTool!("AskUserQuestion", input, {});
+      return [assistantText("ok"), resultMsg()];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const reqP = nextPermissionId();
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "ask");
+    const reqId = await reqP;
+
+    broker.answerQuestion(reqId, {
+      optionId: "Yes",
+      answer: "Yes",
+      notes: "but tag it first",
+    });
+    await idleP;
+
+    expect(permResult).toEqual({
+      behavior: "allow",
+      updatedInput: {
+        ...input,
+        answers: { "Ship it?": "Yes — additional instructions: but tag it first" },
+      },
+    });
+    // The persisted row's summary shows the note too, so the card doesn't lie
+    // about what was sent.
+    const rows = await store.readMessages("c1");
+    const perm = rows.find((r) => r.kind === "permission");
+    expect(perm && "message" in perm ? perm.message : "").toBe(
+      "Yes — additional instructions: but tag it first",
+    );
+  });
+
   it("pendingPermissionSnapshot exposes open requests for reconnect re-materialization", async () => {
     const { fn } = makeFakeQuery(async (_text, ctl) => {
       await ctl.canUseTool!("Write", { file_path: "a.txt" }, { title: "Write a.txt" });
@@ -817,12 +942,61 @@ describe("SessionBroker — live controls", () => {
 
     const ctl = controllers[0]!;
     expect(ctl.calls.setPermissionMode).toContain("plan");
-    expect(ctl.calls.setMaxThinkingTokens).toContain(EFFORT_THINKING_TOKENS.max);
+    // The live effort lever is the flag-settings layer, NOT a thinking budget.
+    expect(ctl.calls.applyFlagSettings).toContainEqual({ effortLevel: "max" });
+    expect(ctl.calls.setMaxThinkingTokens).toHaveLength(0);
     expect(ctl.calls.interrupt).toBe(1);
 
     gate.resolve();
     await broker.waitFor("c1", "idle");
     expect(broker.getSession("c1")?.effort).toBe("max");
+  });
+
+  it("starts the query at the chat's effort as a level, not a thinking budget", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("x"), resultMsg()];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers.length === 1);
+
+    const ctl = controllers[0]!;
+    expect(ctl.options?.effort).toBe("medium");
+    expect(ctl.options?.thinking).toBeUndefined();
+
+    gate.resolve();
+    await broker.waitFor("c1", "idle");
+  });
+
+  it("falls back to the thinking budget when the runtime has no flag-settings control", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(
+      async () => {
+        await gate.promise;
+        return [assistantText("x"), resultMsg()];
+      },
+      "sess-1",
+      { noFlagSettings: true },
+    );
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers.length === 1);
+
+    await broker.setEffort("c1", "max");
+    const ctl = controllers[0]!;
+    await until(() => ctl.calls.setMaxThinkingTokens.length > 0);
+    expect(ctl.calls.setMaxThinkingTokens).toContain(EFFORT_THINKING_TOKENS.max);
+
+    gate.resolve();
+    await broker.waitFor("c1", "idle");
   });
 });
 
@@ -1257,9 +1431,9 @@ describe("SessionBroker — project memory injection", () => {
 });
 
 describe("SessionBroker — config-sourced instructions / agents / modes", () => {
-  /** Write a file under a repo's `.claude-manager/` dir (creating parents). */
+  /** Write a file under a repo's `.dispatch/` dir (creating parents). */
   async function writeConfig(repoDir: string, rel: string, body: string): Promise<void> {
-    const abs = join(repoDir, ".claude-manager", rel);
+    const abs = join(repoDir, ".dispatch", rel);
     await mkdir(join(abs, ".."), { recursive: true });
     await writeFile(abs, body, "utf8");
   }
@@ -1290,6 +1464,13 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
       repoDir,
       "agents/builder.md",
       ["---", "name: Builder", "permissionMode: plan", "---", "You are the CONFIG builder."].join("\n"),
+    );
+    // A second agent that pins its OWN reasoning effort — the frontmatter form
+    // of `AgentDefinition.effort`.
+    await writeConfig(
+      repoDir,
+      "agents/deep.md",
+      ["---", "name: Deep", "effort: xhigh", "---", "Think hard."].join("\n"),
     );
     await writeConfig(repoDir, "modes/careful.yaml", ["name: Careful", "permissionMode: plan"].join("\n"));
     const svc = new ProjectConfigService({ store, bus });
@@ -1337,6 +1518,7 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
       name: "Store Builder",
       instructions: "You are the STORE builder.",
       permissionMode: "default",
+      effort: undefined,
       scope: "global",
     });
     await store.saveMode({ id: "careful", name: "Store Careful", permissionMode: "acceptEdits", scope: "global" });
@@ -1363,7 +1545,50 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     expect(opts.agents?.builder?.permissionMode).toBe("plan");
   });
 
-  it("injects nothing for a project without a .claude-manager/ config", async () => {
+  it("passes an agent's pinned effort to its AgentDefinition and onto its rows", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const svc = await loadedConfig();
+    const broker = makeConfigBroker(fn, svc);
+    const chat = { ...chatFor("c1", "p1"), agentId: "deep" };
+    await store.saveChat(chat);
+    broker.create(chat);
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    const opts = controllers[0]!.options as {
+      effort?: string;
+      agents?: Record<string, { effort?: string }>;
+    };
+    // The SESSION still runs at the chat's level — that is what an un-pinned
+    // subagent inherits — while the agent itself is pinned higher.
+    expect(opts.effort).toBe("medium");
+    expect(opts.agents?.deep?.effort).toBe("xhigh");
+
+    // …and the main loop's rows report the pinned level, not the chat's.
+    const rows = await store.readMessages("c1");
+    const asst = rows.find((r) => r.kind === "assistant");
+    expect(asst && "effort" in asst ? asst.effort : undefined).toBe("xhigh");
+  });
+
+  it("leaves an agent without a pinned effort inheriting the chat's", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const svc = await loadedConfig();
+    const broker = makeConfigBroker(fn, svc);
+    const chat = { ...chatFor("c1", "p1"), agentId: "builder" };
+    await store.saveChat(chat);
+    broker.create(chat);
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    const opts = controllers[0]!.options as { agents?: Record<string, { effort?: string }> };
+    expect(opts.agents?.builder?.effort).toBe("medium");
+  });
+
+  it("injects nothing for a project without a .dispatch/ config", async () => {
     const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
     const svc = await loadedConfig();
     const broker = makeConfigBroker(fn, svc);
@@ -1385,7 +1610,7 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
 
   it("merges the config's external MCP servers into the session alongside 'manager'", async () => {
     const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
-    // A managed repo whose `.claude-manager/` declares an external MCP server.
+    // A managed repo whose `.dispatch/` declares an external MCP server.
     const repoDir = await mkdtemp(join(tmpdir(), "cm-broker-mcp-"));
     tempDirs.push(repoDir);
     const project: Project = {
@@ -1413,7 +1638,7 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
 
     await store.saveChat(chatFor("c1", "pm"));
     // Pass a project record WITHOUT mcpServers so the only source of the external
-    // server is the `.claude-manager/` config (via projectConfig.getMcpServers).
+    // server is the `.dispatch/` config (via projectConfig.getMcpServers).
     broker.create(chatFor("c1", "pm"), { ...project, mcpServers: undefined });
 
     const idleP = broker.waitFor("c1", "idle");
@@ -1430,7 +1655,7 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     });
   });
 
-  it("materializes a `.claude-manager/skills/` skill into the session cwd + enables skills:'all'", async () => {
+  it("materializes a `.dispatch/skills/` skill into the session cwd + enables skills:'all'", async () => {
     const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
     const repoDir = await mkdtemp(join(tmpdir(), "cm-broker-skill-"));
     tempDirs.push(repoDir);
@@ -1444,7 +1669,7 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     };
     await store.saveProject(project);
     await writeConfig(repoDir, "project.yaml", "name: Configured");
-    // A skill authored ONLY in `.claude-manager/skills/` (the repo has no
+    // A skill authored ONLY in `.dispatch/skills/` (the repo has no
     // `.claude/skills/<name>` of its own).
     await writeConfig(
       repoDir,
@@ -1571,5 +1796,122 @@ describe("SessionBroker — MCP passthrough", () => {
     expect(opts.mcpServers!["claude-in-chrome"]).toMatchObject({
       url: "http://127.0.0.1:9999/sse",
     });
+  });
+});
+
+describe("SessionBroker — effort on the transcript", () => {
+  /** The observer hook the broker registers for every tool (no matcher). */
+  function effortHook(ctl: FakeCtl) {
+    const pre = (
+      ctl.options?.hooks as
+        | { PreToolUse?: { matcher?: string; hooks: ((i: unknown) => Promise<unknown>)[] }[] }
+        | undefined
+    )?.PreToolUse;
+    const entry = pre?.find((e) => e.matcher === undefined);
+    return entry!.hooks[0]!;
+  }
+
+  it("stamps the chat's effort on main-loop and subagent rows", async () => {
+    const { fn } = makeFakeQuery((_t) => [
+      assistantText("thinking about it"),
+      toolUseMsg("Bash", { command: "ls" }, "tool-1"),
+      toolResultMsg("tool-1", "ok"),
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "go");
+    await idleP;
+
+    const rows = await store.readMessages("c1");
+    const asst = rows.find((r) => r.kind === "assistant");
+    const tool = rows.find((r) => r.kind === "tool_use");
+    expect(asst && "effort" in asst ? asst.effort : undefined).toBe("medium");
+    expect(tool && "effort" in tool ? tool.effort : undefined).toBe("medium");
+  });
+
+  it("prefers the level a hook observed, per thread", async () => {
+    // Turn 1 establishes the threads (a subagent tool call under Task "task-1");
+    // the hooks then report what each thread REALLY ran at; turn 2's rows must
+    // carry those levels rather than the chat's pick.
+    const { fn, controllers } = makeFakeQuery((text) =>
+      text === "go"
+        ? [
+            toolUseMsg("Task", { subagent_type: "Explore", description: "look" }, "task-1"),
+            {
+              type: "assistant",
+              parent_tool_use_id: "task-1",
+              subagent_type: "Explore",
+              session_id: "sess-1",
+              message: {
+                role: "assistant",
+                content: [
+                  { type: "tool_use", id: "sub-tool-1", name: "Read", input: { file_path: "a" } },
+                ],
+              },
+            },
+            resultMsg(),
+          ]
+        : [
+            assistantText("main again"),
+            {
+              type: "assistant",
+              parent_tool_use_id: "task-1",
+              subagent_type: "Explore",
+              session_id: "sess-1",
+              message: { role: "assistant", content: [{ type: "text", text: "sub again" }] },
+            },
+            resultMsg(),
+          ],
+    );
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    let idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "go");
+    await idleP;
+
+    const hook = effortHook(controllers[0]!);
+    // Main loop: no agent_id. Subagent: agent_id + the tool call it is gating.
+    await hook({ tool_use_id: "tool-x", effort: { level: "xhigh" } });
+    await hook({ agent_id: "a1", tool_use_id: "sub-tool-1", effort: { level: "low" } });
+
+    idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "again");
+    await idleP;
+
+    const rows = await store.readMessages("c1");
+    const main = rows.filter((r) => r.kind === "assistant" && !r.parentToolUseId).pop();
+    const sub = rows.filter((r) => r.kind === "assistant" && r.parentToolUseId === "task-1").pop();
+    expect(main && "effort" in main ? main.effort : undefined).toBe("xhigh");
+    expect(sub && "effort" in sub ? sub.effort : undefined).toBe("low");
+  });
+
+  it("ignores a hook it cannot attribute to a thread", async () => {
+    const { fn, controllers } = makeFakeQuery((_t) => [assistantText("hi"), resultMsg()]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    let idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "go");
+    await idleP;
+
+    // A subagent call whose tool id we never saw: nothing to key it to, so the
+    // main loop must NOT inherit it.
+    const hook = effortHook(controllers[0]!);
+    await hook({ agent_id: "a1", tool_use_id: "unknown-tool", effort: { level: "low" } });
+
+    idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "again");
+    await idleP;
+
+    const rows = await store.readMessages("c1");
+    const main = rows.filter((r) => r.kind === "assistant").pop();
+    expect(main && "effort" in main ? main.effort : undefined).toBe("medium");
   });
 });

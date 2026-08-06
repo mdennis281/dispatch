@@ -1,6 +1,6 @@
 /**
- * Typed REST client for the @cm/server API (everything under /api). Thin
- * wrappers over fetch that speak the @cm/shared domain types. The shell feeds
+ * Typed REST client for the @dispatch/server API (everything under /api). Thin
+ * wrappers over fetch that speak the @dispatch/shared domain types. The shell feeds
  * stores from mock data today; 2b swaps these in for the live backend without
  * changing call sites.
  */
@@ -9,6 +9,7 @@ import type {
   Chat,
   ChatMessage,
   AgentConfig,
+  AgentConfigInput,
   ModeConfig,
   AttentionItem,
   PermissionRequest,
@@ -35,7 +36,9 @@ import type {
   UsageSnapshot,
   ContextUsage,
   ModelOption,
-} from "@cm/shared";
+  WorkflowConfig,
+  AuthorableSection,
+} from "@dispatch/shared";
 
 /**
  * Global app settings — mirrors the server `AppSettingsSchema`
@@ -64,7 +67,7 @@ export interface ProjectProcess {
   port: number;
   pid: number;
   name?: string;
-  /** True when this port belongs to an active claude-manager runner. */
+  /** True when this port belongs to an active Dispatch runner. */
   tracked: boolean;
   runnerId?: string;
   subAppId?: string;
@@ -262,8 +265,8 @@ export const api = {
   /* agents + modes */
   agents: {
     list: () => get<AgentConfig[]>("/api/agents"),
-    create: (body: Partial<AgentConfig>) => post<AgentConfig>("/api/agents", body),
-    update: (id: string, body: Partial<AgentConfig>) =>
+    create: (body: Partial<AgentConfigInput>) => post<AgentConfig>("/api/agents", body),
+    update: (id: string, body: Partial<AgentConfigInput>) =>
       put<AgentConfig>(`/api/agents/${id}`, body),
     remove: (id: string) => del<void>(`/api/agents/${id}`),
   },
@@ -275,28 +278,52 @@ export const api = {
     remove: (id: string) => del<void>(`/api/modes/${id}`),
   },
 
-  /* available session models (live Anthropic Models API, or static fallback) */
+  /* available session models (live from the Claude Code runtime, or static fallback) */
   models: {
     list: () => get<ModelOption[]>("/api/models"),
   },
 
-  /* self-contained `.claude-manager/` project config */
+  /* self-contained `.dispatch/` project config */
   projectConfig: {
     /** The loaded config + errors (cached load, or a fresh one). */
     get: (projectId: string) =>
       get<ProjectConfigResult>(`/api/projects/${projectId}/config`),
-    /** Re-read `.claude-manager/` from disk (sync store + broadcast). */
+    /** Re-read `.dispatch/` from disk (sync store + broadcast). */
     reload: (projectId: string) =>
       post<ProjectConfigResult>(`/api/projects/${projectId}/config/reload`),
-    /** Derive a `.claude-manager/` from the project's `.data` record. */
+    /**
+     * Save the workflow block. The server routes it to `project.yaml` when the
+     * repo has one (else the `.data` record) and reports which, so the UI can
+     * say where the change landed instead of guessing.
+     */
+    saveWorkflow: (projectId: string, workflow: WorkflowConfig) =>
+      put<{ target: "manifest" | "store"; project: Project; manifestPath?: string }>(
+        `/api/projects/${projectId}/config/workflow`,
+        workflow,
+      ),
+    /** Derive a `.dispatch/` from the project's `.data` record. */
     scaffold: (projectId: string, force?: boolean) =>
       post<{ created: boolean; sourceDir: string; files: string[]; result: ProjectConfigResult }>(
         `/api/projects/${projectId}/config/scaffold`,
         { force },
       ),
-    /** A GET URL that downloads the project's `.cm` archive. */
+    /**
+     * Spawn a chat that writes a config item from a description. Returns the
+     * chat (already sent its briefing) so the caller can focus it.
+     */
+    author: (projectId: string, section: AuthorableSection, description: string) =>
+      post<{ chat: Chat; prompt: string }>(`/api/projects/${projectId}/config/author`, {
+        section,
+        description,
+      }),
+    /** Delete one config file/dir (path relative to the config dir), then reload. */
+    deleteItem: (projectId: string, rel: string) =>
+      del<ProjectConfigResult>(
+        `/api/projects/${projectId}/config/item?rel=${encodeURIComponent(rel)}`,
+      ),
+    /** A GET URL that downloads the project's `.dispatch` archive. */
     exportUrl: (projectId: string) => `${BASE}/api/projects/${projectId}/config/export`,
-    /** Import a `.cm` archive (base64) into the repo, then reload. */
+    /** Import an archive (base64) into the repo, then reload. */
     import: (projectId: string, data: string) =>
       post<{ sourceDir: string; files: string[]; result: ProjectConfigResult }>(
         `/api/projects/${projectId}/config/import`,

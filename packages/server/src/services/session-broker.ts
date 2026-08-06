@@ -1,5 +1,5 @@
 /**
- * SessionBroker — the CORE of claude-manager.
+ * SessionBroker — the CORE of Dispatch.
  *
  * Owns `Map<chatId, LiveSession>`. Each LiveSession wraps a single Agent SDK
  * `query()` in STREAMING INPUT mode (the InputChannel push/close pattern proven
@@ -15,7 +15,7 @@
  *    a global AttentionItem, and block the tool until `resolvePermission(...)`.
  *  - Forward stream messages (assistant text/thinking, tool_use, tool_result,
  *    result) as WsServerEvents AND persist them to the Store JSONL transcript.
- *  - Map UI mode/effort → SDK permissionMode / thinking budget.
+ *  - Map UI mode/effort → SDK permissionMode / reasoning effort.
  *  - Enforce a configurable cap on concurrently-ACTIVE sessions (default 6); over
  *    the cap, new turns park in a visible `queued` state and drain in FIFO order.
  *  - Emit AttentionItems when a turn completes (idle) or the session ends (done).
@@ -32,6 +32,9 @@ import type {
   SDKUserMessage,
   PermissionResult,
   AgentDefinition,
+  HookCallback,
+  HookInput,
+  HookJSONOutput,
   McpServerConfig as SdkMcpServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
 import { nanoid } from "nanoid";
@@ -51,7 +54,10 @@ import type {
   McpServerConfig,
   SkillConfig,
   ContextUsage,
-} from "@cm/shared";
+  ResolvedWorkflow,
+  WorkflowMergeMethod,
+} from "@dispatch/shared";
+import { EffortSchema, resolveWorkflow } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import type { TerminalService } from "./terminal.js";
@@ -59,10 +65,16 @@ import type { MemoryService } from "./memory.js";
 import type { GitHubService } from "./github.js";
 import type { RunnerService } from "./runner.js";
 import type { WorktreeService } from "./worktree.js";
-import { createManagerMcpServer, type ManagerMcpGitHub } from "./mcp/manager-mcp.js";
+import {
+  createManagerMcpServer,
+  type ManagerMcpGitHub,
+  type ManagerMcpPrApproval,
+} from "./mcp/manager-mcp.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
 import { bundledSkills } from "./bundled-skills.js";
+import { buildWorkflowDirective, createWorkflowGuardHook, inspectCwd } from "./workflow.js";
+import { claudeExecutableOption } from "./runtime.js";
 
 /**
  * The always-injected "prefer the manager tools" directive. Lists only the
@@ -77,11 +89,13 @@ export function buildManagerToolsDirective(caps: {
   memory: boolean;
   runner: boolean;
   mcpConfig?: boolean;
+  /** The project opted into auto-merge → this session can land its own PRs. */
+  prApproval?: boolean;
 }): string {
   const lines = [
     "# Manager tools — prefer these over improvising",
     "",
-    "You run inside Claude Manager, which gives you first-class `mcp__manager__*` " +
+    "You run inside Dispatch, which gives you first-class `mcp__manager__*` " +
       "tools. Prefer them over hand-rolled shell equivalents: they are cheaper, they " +
       "cancel cleanly when the chat is stopped, and they surface live status in the UI.",
     "",
@@ -103,6 +117,16 @@ export function buildManagerToolsDirective(caps: {
         "polling loops or a background Bash/Monitor task to watch a PR — `watch_pr` is " +
         "the supported way and, unlike a one-shot loop, keeps surfacing each NEW round " +
         "of review comments so you don't stop watching after the first fix.",
+    );
+  }
+  if (caps.prApproval) {
+    lines.push(
+      "- `mcp__manager__approve_pr` — approve and merge a PR once it's ready. This project " +
+        "has auto-merge on: when `watch_pr` reports CI green with no open threads, call " +
+        "`approve_pr` and consider the task finished. It re-verifies state, checks, threads " +
+        "and the `hold` label before merging, and refuses with reasons if anything's off. " +
+        "**Unless the user told you not to merge** — asked to review it first, to leave the " +
+        "PR open, or to just ship it — in which case don't call it; say the PR is ready and stop.",
     );
   }
   if (caps.terminals) {
@@ -142,8 +166,8 @@ export function buildManagerToolsDirective(caps: {
         "actual procedure, and the defaults you'd reach for otherwise are wrong here.",
       "",
       "The short version, so you don't get it wrong before the skill loads: this project's MCP " +
-        "servers live in `.claude-manager/project.yaml`, edited via `mcp__manager__mcp_add` or " +
-        "the `cm mcp add` CLI. **Never** hand-edit `project.yaml`, and never write `.mcp.json`, " +
+        "servers live in `.dispatch/project.yaml`, edited via `mcp__manager__mcp_add` or " +
+        "the `dispatch mcp add` CLI. **Never** hand-edit `project.yaml`, and never write `.mcp.json`, " +
         "`~/.claude.json`, or `.claude/settings.json` to configure a server — the manager does " +
         "not read those. Secrets go in as `${VAR}` placeholders, never literal keys: the file " +
         "is committed.",
@@ -161,7 +185,11 @@ export function buildManagerToolsDirective(caps: {
  * on checks/threads degrades to `null` — the watcher treats that as "nothing new
  * this poll" rather than aborting. An explicit `repo` override always wins.
  */
-function makeGithubBinding(github: GitHubService, cwd: string | undefined): ManagerMcpGitHub {
+function makeGithubBinding(
+  github: GitHubService,
+  cwd: string | undefined,
+  chatId: string,
+): ManagerMcpGitHub {
   let repoP: Promise<string | null> | undefined;
   const repoFor = async (override?: string): Promise<string | null> => {
     if (override) return override;
@@ -177,6 +205,68 @@ function makeGithubBinding(github: GitHubService, cwd: string | undefined): Mana
     reviewThreads: async (n, repo) => {
       const r = await repoFor(repo);
       return r ? github.reviewThreads(r, n).catch(() => null) : null;
+    },
+    notePrMerged: () => github.notePrMerged(chatId),
+  };
+}
+
+/**
+ * Adapt a {@link GitHubService} into the {@link ManagerMcpPrApproval} surface the
+ * `approve_pr` tool needs. Built ONLY for sessions whose project sets
+ * `autoMerge: "on-green"` — the broker passing `undefined` here is what keeps the
+ * tool off every other project.
+ *
+ * `readiness` reads the threads SEPARATELY from `prDetail` even though the detail
+ * fetch also tries them: `prDetail` swallows a thread-read failure into
+ * `undefined`, which is indistinguishable from "no threads", and merging over
+ * review comments we merely failed to fetch is the exact mistake this tool must
+ * not make. Here a failed read stays `null` and blocks.
+ */
+function makePrApprovalBinding(
+  github: GitHubService,
+  cwd: string | undefined,
+  chatId: string,
+  defaultMethod: WorkflowMergeMethod,
+): ManagerMcpPrApproval {
+  let repoP: Promise<string | null> | undefined;
+  const repoFor = async (override?: string): Promise<string | null> => {
+    if (override) return override;
+    if (!cwd) return null;
+    return (repoP ??= github.resolveRepo(cwd).catch(() => null));
+  };
+  const requireRepo = async (override?: string): Promise<string> => {
+    const r = await repoFor(override);
+    if (!r) throw new Error("could not resolve this chat's repo — pass `repo` as 'owner/name'");
+    return r;
+  };
+  return {
+    defaultMethod,
+    readiness: async (n, repo) => {
+      const r = await repoFor(repo);
+      if (!r) return null;
+      const pr = await github.prDetail(r, n);
+      if (!pr) return null;
+      const threads = await github.reviewThreads(r, n).catch(() => null);
+      return {
+        number: pr.number,
+        url: pr.url,
+        title: pr.title,
+        state: pr.state,
+        isDraft: pr.isDraft,
+        mergeable: pr.mergeable ?? null,
+        mergeStateStatus: pr.mergeStateStatus,
+        reviewDecision: pr.reviewDecision ?? null,
+        labels: pr.labels ?? [],
+        checks: pr.checks,
+        threads,
+      };
+    },
+    approve: async (n, repo, body) => github.approve(await requireRepo(repo), n, body, { chatId }),
+    merge: async (n, repo, method) => {
+      // GitHubService.merge already emits the notice, refreshes the PR and fires
+      // notePrMerged → the trunk sync, so a manager merge and an observed one
+      // land the manager in exactly the same state.
+      await github.merge(await requireRepo(repo), n, method, { chatId });
     },
   };
 }
@@ -198,7 +288,7 @@ export interface SessionBrokerDeps {
 
 /**
  * The slice of {@link ProjectConfigService} the broker consumes: a managed
- * repo's self-contained `.claude-manager/` config as the SOURCE OF TRUTH for
+ * repo's self-contained `.dispatch/` config as the SOURCE OF TRUTH for
  * authored agents, modes, and custom instructions. Config-sourced agents/modes
  * take precedence over `.data`-defined ones (resolved config-first, store-
  * fallback), and the authored instructions are injected into the session's
@@ -215,7 +305,7 @@ export interface BrokerProjectConfig {
   /** A project's config-sourced external MCP servers (name → config), or `{}`.
    *  Merged into the session's `Options.mcpServers` alongside `manager`. */
   getMcpServers(projectId: string): Record<string, McpServerConfig>;
-  /** A project's config-sourced skills (from `.claude-manager/skills/`), or `[]`.
+  /** A project's config-sourced skills (from `.dispatch/skills/`), or `[]`.
    *  Materialized into the session cwd's `.claude/skills/` so the SDK finds them. */
   getSkills(projectId: string): SkillConfig[];
 }
@@ -235,7 +325,7 @@ export interface SessionBrokerOptions {
   runner?: RunnerService;
   /** Worktrees: resolve/create a launch dir for run_subapp + list branches. */
   worktrees?: WorktreeService;
-  /** Self-contained `.claude-manager/` config: source of truth for authored
+  /** Self-contained `.dispatch/` config: source of truth for authored
    *  agents/modes/instructions (config wins over `.data` on id collision). */
   projectConfig?: BrokerProjectConfig;
   /**
@@ -296,7 +386,16 @@ export const BUILTIN_MODE_PERMISSION: Record<string, PermissionMode> = {
   dontAsk: "dontAsk",
 };
 
-/** Effort → thinking-token budget (the SDK "effort" lever). */
+/**
+ * LEGACY effort lever — a fixed thinking-token budget per level.
+ *
+ * Superseded by the SDK's first-class `effort` (see {@link buildOptions} and
+ * {@link SessionBroker.pushEffort}): a budget pins one number for every model and
+ * fights adaptive thinking, whereas `effort` is interpreted per model and is what
+ * subagents/agent definitions also speak. Kept ONLY as the fallback for a runtime
+ * whose `applyFlagSettings` control is missing or rejects the level, so a live
+ * effort change still does something rather than silently no-op.
+ */
 export const EFFORT_THINKING_TOKENS: Record<Effort, number> = {
   low: 2_000,
   medium: 8_000,
@@ -305,10 +404,16 @@ export const EFFORT_THINKING_TOKENS: Record<Effort, number> = {
   max: 60_000,
 };
 
-/** Effort → SDK ThinkingConfig for the initial query options. */
+/** Effort → SDK ThinkingConfig (legacy fallback only — see above). */
 export function effortToThinking(effort: Effort): Options["thinking"] {
   return { type: "enabled", budgetTokens: EFFORT_THINKING_TOKENS[effort] };
 }
+
+/** Thread key for the MAIN loop in the per-thread effort maps (subagents key by run id). */
+const MAIN_THREAD = "__main__";
+
+/** Widest thread-effort map we keep per session (FIFO-trimmed; see `noteToolThread`). */
+const THREAD_MAP_CAP = 2_000;
 
 /** Max time `stop()`/`dispose()` waits for a subprocess consume loop to unwind. */
 const STOP_TIMEOUT_MS = 5_000;
@@ -427,6 +532,23 @@ interface QuestionAnswerOpt {
   questionIndex?: number;
   optionId?: string;
   answer?: string;
+  /** Extra instructions typed alongside the choice (see {@link withNotes}). */
+  notes?: string;
+}
+
+/**
+ * Fold the user's notes INTO the chosen answer string.
+ *
+ * The CLI tool reads exactly one thing off `updatedInput` — the `answers` map of
+ * question text → answer string (confirmed live; see spikes/ask-user-question.ts).
+ * Anything else we merge onto the input is ignored, so a separate `notes` field
+ * would be silently dropped and the user would watch the model act as though
+ * they'd never typed it. Appending keeps notes on the one channel that reaches
+ * the model.
+ */
+function withNotes(value: string, notes?: string): string {
+  const n = pickStr(notes);
+  return n ? `${value} — additional instructions: ${n}` : value;
 }
 
 function pickStr(v: unknown): string | undefined {
@@ -487,7 +609,12 @@ function questionTextOf(
  */
 function buildQuestionAnswer(
   input: Record<string, unknown>,
-  opts: { optionId?: string; answer?: string; answers?: QuestionAnswerOpt[] },
+  opts: {
+    optionId?: string;
+    answer?: string;
+    notes?: string;
+    answers?: QuestionAnswerOpt[];
+  },
 ): { updatedInput: Record<string, unknown>; message?: string } {
   const questions = Array.isArray(input.questions)
     ? (input.questions as Record<string, unknown>[])
@@ -498,7 +625,14 @@ function buildQuestionAnswer(
   const list: QuestionAnswerOpt[] =
     opts.answers && opts.answers.length
       ? opts.answers
-      : [{ questionIndex: 0, optionId: opts.optionId, answer: opts.answer }];
+      : [
+          {
+            questionIndex: 0,
+            optionId: opts.optionId,
+            answer: opts.answer,
+            notes: opts.notes,
+          },
+        ];
 
   const answers: Record<string, string> = {};
   const summary: string[] = [];
@@ -507,9 +641,10 @@ function buildQuestionAnswer(
     const key = questionTextOf(q, input);
     const value = resolveAnswerValue(q, input, a);
     if (key && value) {
-      answers[key] = value;
+      const withNote = withNotes(value, a.notes);
+      answers[key] = withNote;
       const header = pickStr(q?.header);
-      summary.push(header && list.length > 1 ? `${header}: ${value}` : value);
+      summary.push(header && list.length > 1 ? `${header}: ${withNote}` : withNote);
     }
   }
 
@@ -604,7 +739,40 @@ interface LiveSession {
   modeId: string;
   agentId?: string;
   effort: Effort;
+  /**
+   * Effort the session's own agent definition pins, when it pins one. The main
+   * loop then runs at THIS level rather than `effort` (which stays the chat's
+   * pick and the level every un-pinned subagent inherits).
+   */
+  agentEffort?: Effort;
+  /**
+   * OBSERVED effort per thread — `MAIN_THREAD` for the main loop, a subagent's
+   * spawning Task tool_use id for a run. Reported by the PreToolUse observer hook
+   * (see `observeEffortHook`), so it is the level the runtime actually applied,
+   * after any silent downgrade for the model and after any effort an agent
+   * definition pinned for itself. Absent until that thread runs its first tool.
+   */
+  effortByThread: Map<string, Effort>;
+  /**
+   * tool_use id → the thread that issued it (`MAIN_THREAD` or the spawning Task's
+   * id). The hook only knows the tool call it is gating, so this is the thread
+   * back from that to the run whose effort it just reported.
+   */
+  threadOfTool: Map<string, string>;
   sessionId?: string;
+  /**
+   * The project's resolved workflow contract, plus what `buildOptions` learned
+   * about where this session's cwd actually IS. Stamped once per turn (in
+   * `buildOptions`) and read by the permission guard, so the rules injected into
+   * the prompt and the rules enforced on tool calls can never disagree.
+   */
+  workflow?: ResolvedWorkflow;
+  /** The protected trunk for this project (`defaultBranch`, default "main"). */
+  trunk?: string;
+  /** Branch at the session cwd, or null when detached / unknown. */
+  branch?: string | null;
+  /** True when the session cwd is a linked worktree rather than the checkout. */
+  inWorktree?: boolean;
   /** Model the SDK reported for the live session (display only). */
   model?: string;
   /** Model explicitly chosen by the user (pins new/resumed queries via options.model). */
@@ -725,6 +893,8 @@ export class SessionBroker {
         modeId: chat.modeId,
         agentId: chat.agentId,
         effort: chat.effort,
+        effortByThread: new Map(),
+        threadOfTool: new Map(),
         sessionId: chat.sessionId,
         model: chat.model,
         modelOverride: chat.model,
@@ -819,9 +989,12 @@ export class SessionBroker {
   /**
    * Rank this project's durable memories against a turn's text and return an
    * invisible `<system-reminder>` block for the SDK message when relevant,
-   * not-yet-surfaced ones clear the bar. Records what it surfaced on the session
-   * so a memory pushes at most once per session. Best-effort: any failure (or no
-   * memory service / no project) yields undefined and the turn proceeds normally.
+   * not-yet-surfaced ones clear the bar. Records only the memories given IN FULL
+   * (`names`) so each body pushes at most once per session; the pointer-tier ones
+   * (`pointed`) stay eligible, so a memory first seen as a one-liner can still
+   * arrive whole on a later turn that matches it strongly. Best-effort: any
+   * failure (or no memory service / no project) yields undefined and the turn
+   * proceeds normally.
    */
   private async surfaceMemory(
     session: LiveSession,
@@ -937,7 +1110,13 @@ export class SessionBroker {
     answer: {
       optionId?: string;
       answer?: string;
-      answers?: { questionIndex: number; optionId?: string; answer?: string }[];
+      notes?: string;
+      answers?: {
+        questionIndex: number;
+        optionId?: string;
+        answer?: string;
+        notes?: string;
+      }[];
     },
   ): boolean {
     for (const session of this.sessions.values()) {
@@ -1026,7 +1205,7 @@ export class SessionBroker {
     return mode;
   }
 
-  /** Set reasoning effort; applies live via `setMaxThinkingTokens` if running. */
+  /** Set reasoning effort; applies live via the flag-settings layer if running. */
   async setEffort(chatId: string, effort: Effort): Promise<void> {
     const session = this.mustGet(chatId);
     this.applyEffort(session, effort);
@@ -1529,6 +1708,7 @@ export class SessionBroker {
             model: session.model,
             uuid: (m as { uuid?: string }).uuid,
             subagentType,
+            effort: this.threadEffort(session, parentToolUseId),
             parentToolUseId,
           });
         }
@@ -1546,6 +1726,10 @@ export class SessionBroker {
             toolName: name,
             target: deriveTarget(input),
           });
+          const toolUseId = String(tb.id ?? this.genId());
+          // Stamped BEFORE the row goes out: the PreToolUse hook for this call is
+          // what reports the thread's effort, and it can only name the call.
+          this.noteToolThread(session, toolUseId, parentToolUseId);
           await this.emit(session, {
             kind: "tool_use",
             id: this.genId(),
@@ -1553,12 +1737,13 @@ export class SessionBroker {
             ts: this.now(),
             turn: session.turn,
             sessionId: session.sessionId,
-            toolUseId: String(tb.id ?? this.genId()),
+            toolUseId,
             name,
             input,
             server: parseMcpServer(name),
             parentToolUseId,
             subagentType,
+            effort: this.threadEffort(session, parentToolUseId),
             uuid: (m as { uuid?: string }).uuid,
           });
         }
@@ -1956,18 +2141,96 @@ export class SessionBroker {
 
   private applyEffort(session: LiveSession, effort: Effort): void {
     session.effort = effort;
-    if (session.query) {
-      void session.query
-        .setMaxThinkingTokens(EFFORT_THINKING_TOKENS[effort])
-        .catch((err: unknown) => {
-          this.bus.publish({
-            type: "error",
-            chatId: session.chatId,
-            message: "setEffort failed",
-            detail: err instanceof Error ? err.message : String(err),
-          });
-        });
+    // Everything observed so far described the OLD level; drop it so the next
+    // hook re-reports (and any downgrade for this level is learned fresh).
+    session.effortByThread.clear();
+    if (!session.query) return;
+    void this.pushEffort(session.query, effort).catch((err: unknown) => {
+      this.bus.publish({
+        type: "error",
+        chatId: session.chatId,
+        message: "setEffort failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
+  /**
+   * Push an effort change into a RUNNING query.
+   *
+   * `effort` is a start-of-query option, so the live twin is the flag-settings
+   * layer: `applyFlagSettings({ effortLevel })` merges over user/project settings
+   * and takes effect on the next request — subagents spawned after it included.
+   * Falls back to the legacy thinking-token budget when the running CLI predates
+   * the control (or rejects the level), so the lever is never a silent no-op.
+   */
+  private async pushEffort(q: Query, effort: Effort): Promise<void> {
+    const apply = (q as Partial<Query>).applyFlagSettings;
+    if (typeof apply === "function") {
+      try {
+        // `Settings.effortLevel` is typed low..xhigh while the query option
+        // accepts "max" too; the CLI takes the same strings for both, so pass it
+        // through rather than silently clamping a chat that asked for max.
+        await apply.call(q, { effortLevel: effort as "low" | "medium" | "high" | "xhigh" });
+        return;
+      } catch {
+        /* fall through to the thinking-budget fallback below */
+      }
     }
+    await q.setMaxThinkingTokens(EFFORT_THINKING_TOKENS[effort]);
+  }
+
+  /**
+   * PreToolUse observer: record the effort the runtime applied to the thread this
+   * tool call came from. Read-only — it always returns an empty verdict, so it can
+   * never block or alter a call (the workflow guard is the hook that decides).
+   *
+   * A subagent's call carries `agent_id`; the run it belongs to is recovered from
+   * the tool_use id, which `noteToolThread` stamped when the call was emitted.
+   * An unattributable call (a hook that beat its own row, an id we trimmed) is
+   * simply skipped — the row then shows the configured level instead.
+   */
+  private observeEffortHook(session: LiveSession): HookCallback {
+    return async (input: HookInput): Promise<HookJSONOutput> => {
+      const i = input as {
+        effort?: { level?: unknown };
+        agent_id?: string;
+        tool_use_id?: string;
+      };
+      const level = EffortSchema.safeParse(i.effort?.level);
+      if (!level.success) return {}; // model without effort support
+      const thread = i.agent_id
+        ? i.tool_use_id
+          ? session.threadOfTool.get(i.tool_use_id)
+          : undefined
+        : MAIN_THREAD;
+      if (thread) session.effortByThread.set(thread, level.data);
+      return {};
+    };
+  }
+
+  /** Remember which thread issued a tool call, FIFO-trimmed for long sessions. */
+  private noteToolThread(
+    session: LiveSession,
+    toolUseId: string,
+    parentToolUseId: string | null,
+  ): void {
+    session.threadOfTool.set(toolUseId, parentToolUseId ?? MAIN_THREAD);
+    if (session.threadOfTool.size > THREAD_MAP_CAP) {
+      const oldest = session.threadOfTool.keys().next();
+      if (!oldest.done) session.threadOfTool.delete(oldest.value);
+    }
+  }
+
+  /**
+   * The effort to stamp on a row from this thread: what a hook observed, else
+   * what we configured for it — the agent's own pin for the main loop, the chat's
+   * level for a subagent (which inherits it unless its definition says otherwise).
+   */
+  private threadEffort(session: LiveSession, parentToolUseId: string | null): Effort {
+    const observed = session.effortByThread.get(parentToolUseId ?? MAIN_THREAD);
+    if (observed) return observed;
+    return parentToolUseId === null ? session.agentEffort ?? session.effort : session.effort;
   }
 
   /* ---------------------------------------------------------- options */
@@ -1979,7 +2242,7 @@ export class SessionBroker {
   }
 
   /**
-   * Resolve a mode by id, config-first: a `.claude-manager/`-authored mode
+   * Resolve a mode by id, config-first: a `.dispatch/`-authored mode
    * (the source of truth) wins over a `.data`-defined one on id collision.
    */
   private async resolveMode(modeId: string): Promise<ModeConfig | null> {
@@ -1990,7 +2253,7 @@ export class SessionBroker {
   }
 
   /**
-   * Resolve an agent by id, config-first: a `.claude-manager/`-authored agent
+   * Resolve an agent by id, config-first: a `.dispatch/`-authored agent
    * (the source of truth) wins over a `.data`-defined one on id collision.
    */
   private async resolveAgent(agentId: string): Promise<AgentConfig | null> {
@@ -2025,10 +2288,21 @@ export class SessionBroker {
       // still gates every other mode.
       allowDangerouslySkipPermissions: true,
       canUseTool: (name, input, o) => this.handlePermission(session, name, input, o),
-      thinking: effortToThinking(session.effort),
+      // The FIRST-CLASS effort lever: one level the runtime interprets per model
+      // (and guides adaptive thinking with), inherited by every subagent this
+      // session spawns unless its own definition pins one. Deliberately NOT a
+      // `thinking` budget — that pins the same token count for every model and
+      // overrides adaptive thinking; it survives only as the fallback in
+      // `pushEffort` for a runtime without the live control.
+      effort: session.effort,
       settingSources: ["user", "project", "local"],
       includePartialMessages: true,
       abortController: session.abortController,
+      // Run on the user's installed Claude Code when it's newer than the one
+      // bundled with the SDK. MUST match what services/models.ts probes for the
+      // picker: the runtime decides which model ids resolve, so a picker fed by
+      // a newer binary than the session would offer models the session can't run.
+      ...claudeExecutableOption(),
     };
     if (cwd) options.cwd = cwd;
     // A user-chosen model pins the query; unset falls back to the SDK default.
@@ -2047,10 +2321,24 @@ export class SessionBroker {
       ...(ac?.window ? { autoCompactWindow: ac.window } : {}),
     };
 
-    // Config-sourced agents/modes (the `.claude-manager/` source of truth) win
+    // Config-sourced agents/modes (the `.dispatch/` source of truth) win
     // over `.data`-defined ones on id collision.
     const mode = await this.resolveMode(session.modeId);
     const agent = session.agentId ? await this.resolveAgent(session.agentId) : null;
+
+    // The workflow contract — how change ships in THIS project. Resolved BEFORE
+    // the tools directive because it decides one of the session's capabilities:
+    // `approve_pr` exists only where the project opted into auto-merge, so the
+    // directive can't be written until we know. Also feeds `session.workflow` for
+    // the permission guard below, so the rules the agent reads and the rules
+    // enforced on it come from one object.
+    const wfCtx = await inspectCwd(cwd);
+    const workflow = resolveWorkflow(project);
+    session.workflow = workflow;
+    session.trunk = project?.defaultBranch ?? "main";
+    session.branch = wfCtx.branch;
+    session.inWorktree = Boolean(session.worktreeCwd) || wfCtx.linked;
+    const canApprovePr = Boolean(this.github) && workflow.autoMerge === "on-green";
 
     const appends: string[] = [];
     // Lead with the manager-tools directive so EVERY session (any project)
@@ -2063,12 +2351,73 @@ export class SessionBroker {
         memory: Boolean(this.memory && session.projectId),
         runner: Boolean(this.runner && this.worktrees),
         mcpConfig: Boolean(session.projectId),
+        prApproval: canApprovePr,
       }),
     );
+    // The rendered contract itself comes next — before the project's own
+    // instructions, so an authored instruction can still refine it.
+    const workflowDirective = buildWorkflowDirective(workflow, {
+      defaultBranch: session.trunk,
+      inWorktree: session.inWorktree,
+      branch: session.branch,
+      github: Boolean(this.github),
+      memory: Boolean(this.memory && session.projectId),
+    });
+    if (workflowDirective) appends.push(workflowDirective);
+
+    // Learn the effort the runtime is REALLY running each thread at. Hook inputs
+    // are the only place that number surfaces (the message stream never carries
+    // it), they fire for subagents too (tagged with `agent_id`), and they report
+    // the level after any silent downgrade for the model — so this is what the
+    // run cards get to show instead of re-stating the chat's pick. No matcher =
+    // every tool; the callback only reads and returns.
+    options.hooks = {
+      ...options.hooks,
+      PreToolUse: [
+        ...(options.hooks?.PreToolUse ?? []),
+        { hooks: [this.observeEffortHook(session)] },
+      ],
+    };
+
+    // …and enforce the same contract. A PreToolUse hook (not `canUseTool`) so it
+    // still fires under `bypassPermissions`, which is exactly when an unattended
+    // agent is most likely to reach for `git push origin main`.
+    if (workflow.guard !== "off") {
+      options.hooks = {
+        ...options.hooks,
+        PreToolUse: [
+          ...(options.hooks?.PreToolUse ?? []),
+          {
+            matcher: "Bash",
+            hooks: [
+              createWorkflowGuardHook({
+                context: () =>
+                  session.workflow
+                    ? {
+                        workflow: session.workflow,
+                        trunk: session.trunk ?? "main",
+                        inWorktree: Boolean(session.inWorktree),
+                      }
+                    : null,
+                onViolation: (violation, blocked) => {
+                  this.bus.publish({
+                    type: "notice",
+                    chatId: session.chatId,
+                    level: blocked ? "warn" : "info",
+                    text: `${blocked ? "Blocked" : "Workflow warning"}: ${violation.reason}`,
+                  });
+                },
+              }),
+            ],
+          },
+        ],
+      };
+    }
+
     if (mode?.instructions) appends.push(mode.instructions);
 
     // Inject the project's authored custom instructions from its
-    // `.claude-manager/` config — a clearly-delimited, bounded section alongside
+    // `.dispatch/` config — a clearly-delimited, bounded section alongside
     // the mode overlay + memory. Empty (no config / no instructions) → nothing,
     // and it never clobbers the existing appends.
     if (this.projectConfig && session.projectId) {
@@ -2089,6 +2438,10 @@ export class SessionBroker {
       }
     }
 
+    // An agent pins model/effort the same way: unset ⇒ inherit the chat's. Held
+    // on the session too, because it is the main loop's DECLARED effort until a
+    // hook reports what the runtime actually applied.
+    session.agentEffort = agent?.effort;
     if (agent) {
       const def: AgentDefinition = {
         description: agent.name || "Custom agent",
@@ -2097,7 +2450,7 @@ export class SessionBroker {
         disallowedTools: agent.disallowedTools,
         model: agent.model,
         permissionMode: agent.permissionMode,
-        effort: session.effort,
+        effort: agent.effort ?? session.effort,
       };
       options.agents = { [agent.id]: def };
       options.agent = agent.id;
@@ -2120,7 +2473,7 @@ export class SessionBroker {
     const runner = this.runner;
     const worktrees = this.worktrees;
     const projectId = session.projectId;
-    // The managed repo's `.claude-manager/` config is the SOURCE OF TRUTH for
+    // The managed repo's `.dispatch/` config is the SOURCE OF TRUTH for
     // external MCP servers: layer the config-sourced servers OVER the `.data`
     // record (config wins per-name, a `.data`-only server survives), then apply
     // `manager` LAST so it's never clobbered (even by a config server named
@@ -2159,7 +2512,14 @@ export class SessionBroker {
         // `gh` auto-detect the repo from cwd; `prChecks`/`reviewThreads` need an
         // explicit owner/name, so resolve it from cwd ONCE (cached) and reuse it.
         // The agent may still pass an explicit repo override on any call.
-        github: github ? makeGithubBinding(github, cwd) : undefined,
+        github: github ? makeGithubBinding(github, cwd, session.chatId) : undefined,
+        // The PR-landing surface — bound ONLY when this project's workflow opted
+        // into auto-merge, which is what makes `approve_pr` absent (not merely
+        // discouraged) everywhere else.
+        prApproval:
+          github && canApprovePr
+            ? makePrApprovalBinding(github, cwd, session.chatId, workflow.mergeMethod)
+            : undefined,
         // Bind the subApp launcher to this session's project so `run_subapp` can
         // list/start/stop apps and resolve (or create) a worktree per branch.
         runner:
@@ -2231,7 +2591,7 @@ export class SessionBroker {
               }
             : undefined,
         // Bind the MCP-config editor to the project's MAIN repo path, NOT this
-        // session's cwd: `.claude-manager/` is committed config, so a server the
+        // session's cwd: `.dispatch/` is committed config, so a server the
         // agent adds while working in a throwaway worktree has to land in the
         // real working copy or it vanishes with the worktree.
         mcpConfig: project?.repoPath ? createMcpConfigEditor(project.repoPath) : undefined,
@@ -2239,7 +2599,7 @@ export class SessionBroker {
         now: this.now,
       }),
     };
-    // Skills: the managed repo's `.claude-manager/skills/` is the SOURCE OF TRUTH,
+    // Skills: the managed repo's `.dispatch/skills/` is the SOURCE OF TRUTH,
     // but the SDK only DISCOVERS `<cwd>/.claude/skills/` (there's no option to
     // point it elsewhere). So materialize the config skills into the session cwd's
     // `.claude/skills/` — a MERGE that never clobbers a skill the repo already

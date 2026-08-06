@@ -14,7 +14,8 @@
  * cache (the UI's Refresh button).
  */
 import type { FastifyInstance } from "fastify";
-import type { McpCatalog } from "@cm/shared";
+import type { McpCatalog } from "@dispatch/shared";
+import { resolveWorkflow } from "@dispatch/shared";
 import { buildProjectMcpCatalog } from "../services/mcp/mcp-catalog.js";
 
 /** How long an assembled catalog is reused before a re-probe. */
@@ -37,7 +38,7 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       if (!fresh && hit && now - hit.at < CACHE_TTL_MS) return hit.catalog;
 
       // The effective set a session gets: the `.data` record layered with the
-      // repo's `.claude-manager/` config-sourced servers (config wins per-name),
+      // repo's `.dispatch/` config-sourced servers (config wins per-name),
       // mirroring the broker's `buildOptions` merge — so a config-declared server
       // shows up here with its live probe status.
       const mcpServers = {
@@ -52,6 +53,10 @@ export function registerMcpRoutes(app: FastifyInstance): void {
           terminals: !!services.terminals,
           memory: !!services.memory,
           runner: !!services.runner,
+          // `approve_pr` exists only where the project opted into auto-merge —
+          // the same condition the broker binds on, so the catalog shows the
+          // tool as unavailable on every project that hasn't turned it on.
+          prApproval: !!services.github && resolveWorkflow(project).autoMerge === "on-green",
           // The MCP-config tools only need the project's repo path, which every
           // project has — so they're offered wherever the catalog is viewable.
           mcpConfig: !!project.repoPath,

@@ -21,6 +21,12 @@
  *     each new signal is reported exactly once, so an agent calling it in a loop
  *     (fix → watch again) never misses a later round of review comments and never
  *     hand-rolls a `gh pr view` / `gh pr checks` sleep loop or a background watcher.
+ *   - `mcp__manager__approve_pr({ number, repo?, method?, note? })` — approve and
+ *     MERGE a PR (via {@link ManagerMcpPrApproval}), but only after re-reading its
+ *     state/checks/threads/labels and finding nothing blocking ({@link prLandingBlockers}).
+ *     Offered ONLY when the project's workflow sets `autoMerge: "on-green"`, which
+ *     is what makes "the agent lands its own work" a per-project decision rather
+ *     than something every session can do. A raw `gh pr merge` stays denied.
  *
  * Every handler awaits a REAL promise (a `setTimeout`, a poll `setInterval`,
  * and/or a `chat-status` bus subscription) and unwinds cleanly the instant the
@@ -36,13 +42,17 @@ import * as z from "zod";
 import {
   MemoryTypeSchema,
   ManifestMcpTransportSchema,
+  MERGE_HOLD_LABEL,
+  WorkflowMergeMethodSchema,
   type ChatStatus,
   type CheckRun,
   type ContextUsage,
   type ManifestMcpServer,
   type ProjectMemory,
+  type ReviewDecision,
   type ReviewThread,
-} from "@cm/shared";
+  type WorkflowMergeMethod,
+} from "@dispatch/shared";
 import type { EventBus } from "../../bus.js";
 import { clampBody } from "../memory.js";
 
@@ -58,6 +68,14 @@ export const PR_POLL_INTERVAL_MS = 20_000;
  * effective watch is unbounded — this only bounds a single quiet poll window.
  */
 export const WATCH_PR_DEFAULT_TIMEOUT_SECONDS = 1800;
+
+/**
+ * How long a watch tolerates a PR with NO checks at all before saying so once.
+ * Checks take a few seconds to register after a push, so an immediate "no CI
+ * here" would be wrong far more often than it was right — but a repo that
+ * genuinely has no CI must not cost the agent a silent 30-minute window either.
+ */
+export const NO_CHECKS_GRACE_MS = 60_000;
 
 /**
  * Check conclusions that count as a FAILING check for `watch_pr` — the ones an
@@ -168,6 +186,178 @@ export interface ManagerMcpGitHub {
   prMergeState(prNumber: number, repo?: string): Promise<PrPollResult | null>;
   prChecks(prNumber: number, repo?: string): Promise<CheckRun[] | null>;
   reviewThreads(prNumber: number, repo?: string): Promise<ReviewThread[] | null>;
+  /**
+   * Report that the watched PR has MERGED. Most merges here are performed by the
+   * repo's auto-merge job rather than by us, so `watch_pr` observing the terminal
+   * state is the only moment the manager learns about them — and it's what lets
+   * the primary checkout follow the trunk afterwards.
+   */
+  notePrMerged?(): void;
+}
+
+/**
+ * Everything `approve_pr` needs to decide whether a PR may LAND — read fresh at
+ * the moment of the call, never from what the session saw earlier. A merge
+ * decision made on a stale snapshot is the one failure mode that actually costs
+ * something here, so nothing in this shape is cached.
+ */
+export interface PrReadiness {
+  number: number;
+  url?: string;
+  title?: string;
+  state: "open" | "closed" | "merged";
+  isDraft: boolean;
+  /** GitHub's mergeability verdict; null/undefined = not computed yet. */
+  mergeable?: boolean | null;
+  /** Raw `mergeStateStatus` (CLEAN/BLOCKED/BEHIND/DIRTY/UNSTABLE), for reporting. */
+  mergeStateStatus?: string;
+  reviewDecision?: ReviewDecision | null;
+  labels: string[];
+  checks: CheckRun[];
+  /** null = the threads couldn't be READ — a blocker, not an empty list. */
+  threads: ReviewThread[] | null;
+}
+
+/**
+ * The PR-landing surface, bound by the broker ONLY when the project's workflow
+ * has `autoMerge: "on-green"`. Omitted from the ctx → the `approve_pr` tool isn't
+ * offered at all, which is the enforcement: a session on a project that hasn't
+ * opted in has no way to merge anything (a raw `gh pr merge` is separately denied
+ * by the trunk guard).
+ */
+export interface ManagerMcpPrApproval {
+  /** Fresh readiness snapshot; null = the PR/repo couldn't be resolved. */
+  readiness(prNumber: number, repo?: string): Promise<PrReadiness | null>;
+  /**
+   * Submit an approving review. Best-effort: GitHub refuses self-approval, and
+   * the PR is usually ours, so `approved:false` is an ordinary outcome that must
+   * NOT stop the merge — it just changes what we tell the agent happened.
+   */
+  approve(
+    prNumber: number,
+    repo: string | undefined,
+    body: string,
+  ): Promise<{ approved: boolean; error?: string }>;
+  /** Land the PR. Throws with gh's message when GitHub refuses. */
+  merge(
+    prNumber: number,
+    repo: string | undefined,
+    method: WorkflowMergeMethod,
+  ): Promise<void>;
+  /** The project's configured merge strategy (the agent may override per call). */
+  defaultMethod: WorkflowMergeMethod;
+}
+
+/** One reason a PR may not be landed, with the sentence shown to the agent. */
+export interface PrLandingBlocker {
+  code:
+    | "not-open"
+    | "draft"
+    | "hold"
+    | "changes-requested"
+    | "checks-failing"
+    | "checks-pending"
+    | "threads-unreadable"
+    | "unresolved-threads"
+    | "conflict";
+  detail: string;
+}
+
+/**
+ * Decide whether a PR may be landed, and say exactly why not.
+ *
+ * Pure and exhaustive on purpose: it returns EVERY blocker rather than the first,
+ * so an agent that calls `approve_pr` too early gets one complete to-do list
+ * instead of discovering the next obstacle per round-trip. The rules are the same
+ * ones a careful human applies before clicking merge — plus {@link MERGE_HOLD_LABEL},
+ * which is how a human parks one specific PR without switching the feature off.
+ *
+ * An unreadable thread list BLOCKS. Everywhere else in this file a failed read
+ * degrades to "nothing new"; here it would mean merging over review comments we
+ * simply couldn't see, so it's the one place that fails closed.
+ */
+export function prLandingBlockers(pr: PrReadiness): PrLandingBlocker[] {
+  const blockers: PrLandingBlocker[] = [];
+
+  if (pr.state !== "open") {
+    blockers.push({
+      code: "not-open",
+      detail: `PR #${pr.number} is already ${pr.state} — there's nothing to land.`,
+    });
+    // Everything below is about an open PR; piling on is just noise.
+    return blockers;
+  }
+  if (pr.isDraft) {
+    blockers.push({
+      code: "draft",
+      detail: "It's still a draft — mark it ready for review before landing it.",
+    });
+  }
+  if (pr.labels.some((l) => l.toLowerCase() === MERGE_HOLD_LABEL)) {
+    blockers.push({
+      code: "hold",
+      detail:
+        `It carries the \`${MERGE_HOLD_LABEL}\` label — someone parked this PR deliberately. ` +
+        "Leave it alone and say so; do not remove the label to get around this.",
+    });
+  }
+  if (pr.reviewDecision === "changes_requested") {
+    blockers.push({
+      code: "changes-requested",
+      detail: "A reviewer requested changes — address them and get a fresh review first.",
+    });
+  }
+
+  const failing = pr.checks.filter(
+    (c) => c.status === "completed" && c.conclusion && FAILING_CONCLUSIONS.has(c.conclusion),
+  );
+  if (failing.length) {
+    blockers.push({
+      code: "checks-failing",
+      detail: `${failing.length} check(s) failing: ${failing
+        .map((c) => `${c.name} (${c.conclusion})`)
+        .join(", ")}.`,
+    });
+  }
+  const pending = pr.checks.filter((c) => c.status !== "completed");
+  if (pending.length) {
+    blockers.push({
+      code: "checks-pending",
+      detail: `${pending.length} check(s) still running: ${pending
+        .map((c) => c.name)
+        .join(", ")}. Call watch_pr until CI settles.`,
+    });
+  }
+
+  if (pr.threads === null) {
+    blockers.push({
+      code: "threads-unreadable",
+      detail:
+        "Couldn't read this PR's review threads, so there's no way to tell whether review " +
+        "is clean. Try again in a moment.",
+    });
+  } else {
+    const open = pr.threads.filter((t) => !t.isResolved && !t.isOutdated);
+    if (open.length) {
+      blockers.push({
+        code: "unresolved-threads",
+        detail: `${open.length} unresolved review thread(s): ${open
+          .map((t) => `${t.path ?? "PR"}${t.line ? `:${t.line}` : ""}`)
+          .join(", ")}. Fix them and resolve the ones you actually fixed.`,
+      });
+    }
+  }
+
+  if (pr.mergeable === false) {
+    blockers.push({
+      code: "conflict",
+      detail: `It doesn't merge cleanly${
+        pr.mergeStateStatus ? ` (${pr.mergeStateStatus})` : ""
+      } — rebase on the trunk and push again.`,
+    });
+  }
+
+  return blockers;
 }
 
 /** A launched subApp runner, as surfaced to the agent. */
@@ -182,12 +372,12 @@ export interface ManagerMcpRunnerState {
 /**
  * MCP-config editor for this session's project (omitted → no `mcp_*` tools).
  *
- * Backed by the SAME `@cm/cli/core` functions the `cm mcp` CLI uses, so an agent
+ * Backed by the SAME `@dispatch/cli/core` functions the `dispatch mcp` CLI uses, so an agent
  * adding a server in-session and a human adding one at the terminal produce
  * byte-identical config and share every validation rule.
  */
 export interface ManagerMcpConfig {
-  /** Every server configured in the project's `.claude-manager/project.yaml`. */
+  /** Every server configured in the project's `.dispatch/project.yaml`. */
   list(): Promise<ManifestMcpServer[]>;
   /** Add (or, with `force`, replace) one server. Rejects on a duplicate name. */
   add(
@@ -228,6 +418,12 @@ export interface ManagerMcpContext {
   memory?: ManagerMcpMemory;
   /** GitHub PR watcher for this session (omitted → no `watch_pr` tool). */
   github?: ManagerMcpGitHub;
+  /**
+   * PR-landing surface for this session (omitted → no `approve_pr` tool). Bound
+   * only when the project's workflow opts into auto-merge, so the tool's mere
+   * PRESENCE is the permission.
+   */
+  prApproval?: ManagerMcpPrApproval;
   /** SubApp launcher for this session (omitted → no `run_subapp` tool). */
   runner?: ManagerMcpRunner;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
@@ -354,6 +550,14 @@ function waitForChatState(
 /** One reportable change `watch_pr` surfaces to the agent. */
 export type WatchPrEvent =
   | { type: "ci-failed"; name: string; conclusion?: string; url?: string }
+  /**
+   * Every check finished and none of them failed. Green is ACTIONABLE — it's the
+   * moment the agent can merge — and reporting it is what stops a watch started
+   * after CI already finished from blocking for the entire quiet window.
+   */
+  | { type: "ci-passed"; names: string[] }
+  /** This PR has no checks at all (see {@link NO_CHECKS_GRACE_MS}). Reported once. */
+  | { type: "no-checks" }
   | {
       type: "review-comment";
       threadId: string;
@@ -375,6 +579,16 @@ export type WatchPrEvent =
 export interface WatchPrState {
   checks: Map<string, string>;
   threads: Set<string>;
+  /**
+   * Fingerprint of the all-green check set already reported. Green has to dedup
+   * like everything else: the tool's contract is "call again until done:true",
+   * so a success that re-fires on every call would turn that loop into a spin.
+   * Keyed on the checks themselves, so a NEW workflow landing green later still
+   * reports.
+   */
+  greenAt?: string;
+  /** The "no checks configured" note has been delivered for this PR. */
+  notedNoChecks?: boolean;
 }
 
 type WatchPrOutcome =
@@ -386,12 +600,18 @@ type WatchPrOutcome =
 
 /**
  * Poll a PR every `intervalMs` and RESOLVE the instant it needs the agent: a new
- * failing check, a new unresolved review thread, or a merge/close. Polls
- * immediately first (so a PR already carrying unaddressed activity returns with
- * zero wait), dedups against `st` so nothing already-handled re-fires, and quits
- * on abort or `timeoutMs`. A null merge-state read ends the watch as an error; a
- * transient null checks/threads read is treated as "nothing new this poll" so one
- * flaky `gh` call never aborts a long watch.
+ * failing check, CI turning green, a new unresolved review thread, or a
+ * merge/close. Polls immediately first (so a PR already carrying unaddressed
+ * activity returns with zero wait), dedups against `st` so nothing
+ * already-handled re-fires, and quits on abort or `timeoutMs`. A null merge-state
+ * read ends the watch as an error; a transient null checks/threads read is
+ * treated as "nothing new this poll" so one flaky `gh` call never aborts a long
+ * watch.
+ *
+ * Green counts as activity on purpose. Watching only for FAILURE means a watch
+ * started after CI has already finished — the common case for a fast run, or for
+ * any watch that begins a moment too late — sits blocked until the quiet-window
+ * timeout with the answer already sitting in front of it.
  */
 async function watchForPrActivity(
   gh: ManagerMcpGitHub,
@@ -405,7 +625,8 @@ async function watchForPrActivity(
     now: () => number;
   },
 ): Promise<WatchPrOutcome> {
-  const deadline = opts.now() + opts.timeoutMs;
+  const started = opts.now();
+  const deadline = started + opts.timeoutMs;
   const aborted = (): boolean => opts.signals.some((s) => s?.aborted);
 
   for (;;) {
@@ -436,14 +657,43 @@ async function watchForPrActivity(
     ]);
 
     const events: WatchPrEvent[] = [];
-    for (const c of checks ?? []) {
+    const runs = checks ?? [];
+    let anyFailing = false;
+    for (const c of runs) {
       const conclusion = c.conclusion ?? undefined;
       const fingerprint = conclusion ?? c.status;
       const failing = conclusion !== undefined && FAILING_CONCLUSIONS.has(conclusion);
+      if (failing) anyFailing = true;
       if (failing && st.checks.get(c.name) !== fingerprint) {
         events.push({ type: "ci-failed", name: c.name, conclusion, url: c.url });
       }
       st.checks.set(c.name, fingerprint);
+    }
+
+    // CI is green: every check has finished and none of them failed. A check
+    // still queued/in_progress means the run isn't over, so keep waiting — the
+    // agent must not be told "passing" while a job could still go red.
+    if (runs.length > 0 && !anyFailing && runs.every((c) => c.status === "completed")) {
+      const green = runs
+        .map((c) => `${c.name}:${c.conclusion ?? "completed"}`)
+        .sort()
+        .join("|");
+      if (st.greenAt !== green) {
+        st.greenAt = green;
+        events.push({ type: "ci-passed", names: runs.map((c) => c.name) });
+      }
+    }
+
+    // `checks === null` is a failed read, NOT an empty check list — only a real
+    // read of zero checks means the PR has no CI to wait for.
+    if (
+      checks !== null &&
+      runs.length === 0 &&
+      !st.notedNoChecks &&
+      opts.now() - started >= NO_CHECKS_GRACE_MS
+    ) {
+      st.notedNoChecks = true;
+      events.push({ type: "no-checks" });
     }
     for (const t of threads ?? []) {
       if (!t.isResolved && !st.threads.has(t.id)) {
@@ -641,15 +891,18 @@ export function createManagerTools(ctx: ManagerMcpContext) {
   const watchPr = tool(
     "watch_pr",
     "Watch a GitHub pull request and RETURN THE INSTANT it needs you — a CI check " +
-      "fails, a new review comment/thread appears, or the PR is merged/closed. This " +
-      "is the ONE correct way to wait on or react to a PR: do NOT hand-roll a `gh " +
-      "pr view` / `gh pr checks` sleep loop, and do NOT launch a background Bash or " +
-      "Monitor task to watch it. Call it in a LOOP — it blocks until something is " +
-      "actionable, then returns the failing checks and new comments to address " +
-      "(done:false); fix them and call watch_pr AGAIN. Each check/comment is " +
-      "reported only once, so repeated calls surface each NEW round of review " +
-      "comments instead of going silent. It returns done:true only when the PR " +
-      "merges or closes — keep calling until then and you'll never miss a late " +
+      "fails, ALL checks finish green, a new review comment/thread appears, or the " +
+      "PR is merged/closed. This is the ONE correct way to wait on or react to a " +
+      "PR: do NOT hand-roll a `gh pr view` / `gh pr checks` sleep loop, and do NOT " +
+      "launch a background Bash or Monitor task to watch it. Safe to call AFTER CI " +
+      "has already finished — it polls immediately and returns the current verdict " +
+      "rather than waiting for the next change. Call it in a LOOP — it blocks until " +
+      "something is actionable, then returns (done:false) with either work to do " +
+      "(failing checks, new comments) or checksPassing:true meaning CI is green and " +
+      "you can merge; act, then call watch_pr AGAIN. Each check result and comment " +
+      "is reported only once, so repeated calls surface each NEW round instead of " +
+      "going silent or re-firing the same news. It returns done:true only when the " +
+      "PR merges or closes — keep calling until then and you'll never miss a late " +
       "review round.",
     {
       number: z.number().describe("The PR number to watch."),
@@ -723,6 +976,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         // The PR settled (merged/closed) — mark the chat so its dot reads green
         // ("PR done") once the agent finishes and returns to idle.
         ctx.broker.markPrWatched(ctx.chatId);
+        // A merge (usually the auto-merge job's, not ours) means the trunk moved;
+        // tell the manager so the primary checkout can fast-forward to it.
+        if (s.merged) ctx.github.notePrMerged?.();
         return textResult(
           `PR #${s.number} reached terminal state "${s.state}"${s.merged ? " (merged)" : ""}. ` +
             `Watch complete — no need to call watch_pr again.\n` +
@@ -744,25 +1000,174 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         );
       }
 
-      // activity — one or more new checks/comments to act on, then re-watch.
+      // activity — new checks/comments to act on, or CI going green, then re-watch.
       const { state: s, events } = outcome;
       const failing = events.filter((e) => e.type === "ci-failed");
       const comments = events.filter((e) => e.type === "review-comment");
+      const passed = events.find((e) => e.type === "ci-passed");
+      const noChecks = events.some((e) => e.type === "no-checks");
       const parts: string[] = [];
       if (failing.length) parts.push(`${failing.length} failing check(s)`);
       if (comments.length) parts.push(`${comments.length} new review comment(s)`);
-      const lines = events.map((e) =>
-        e.type === "ci-failed"
-          ? `  ✗ check "${e.name}" ${e.conclusion ?? "failing"}${e.url ? ` — ${e.url}` : ""}`
-          : `  💬 ${e.author ?? "reviewer"} on ${e.path ?? "the PR"}${
+      if (passed) parts.push(`all ${passed.names.length} check(s) passing`);
+      if (noChecks) parts.push("no CI checks configured");
+      const lines = events.map((e) => {
+        switch (e.type) {
+          case "ci-failed":
+            return `  ✗ check "${e.name}" ${e.conclusion ?? "failing"}${e.url ? ` — ${e.url}` : ""}`;
+          case "ci-passed":
+            return `  ✓ checks passed: ${e.names.join(", ")}`;
+          case "no-checks":
+            return `  · no checks are reporting on this PR`;
+          default:
+            return `  💬 ${e.author ?? "reviewer"} on ${e.path ?? "the PR"}${
               e.line ? `:${e.line}` : ""
-            } — ${firstLine(e.body) || "(see thread)"}`,
-      );
+            } — ${firstLine(e.body) || "(see thread)"}`;
+        }
+      });
+      // Green (or an empty check list) is news, not a to-do list — telling the
+      // agent to "address these" when nothing is wrong is what sends it hunting
+      // for a problem that isn't there.
+      const needsWork = failing.length > 0 || comments.length > 0;
+      const advice = needsWork
+        ? `Address these, then call watch_pr again — it keeps watching (reporting only ` +
+          `NEW activity) until the PR merges.`
+        : `Nothing to fix. Merge it if you're ready, or call watch_pr again to wait ` +
+          `for the merge and any later review round.`;
       return textResult(
-        `PR #${number} needs attention: ${parts.join(" and ")}.\n${lines.join("\n")}\n\n` +
-          `Address these, then call watch_pr again — it keeps watching (reporting only ` +
-          `NEW activity) until the PR merges.\n` +
-          JSON.stringify({ number, state: s.state, done: false, events }),
+        `PR #${number} ${needsWork ? "needs attention" : "update"}: ${parts.join(" and ")}.\n` +
+          `${lines.join("\n")}\n\n${advice}\n` +
+          JSON.stringify({
+            number,
+            state: s.state,
+            done: false,
+            checksPassing: !!passed,
+            events,
+          }),
+      );
+    },
+  );
+
+  const approvePr = tool(
+    "approve_pr",
+    "Approve and MERGE a pull request — the sanctioned way to land your own work " +
+      "on a project whose workflow has auto-merge enabled. It re-reads the PR's " +
+      "state, checks, review threads and labels at the moment you call it, refuses " +
+      "with a complete list of reasons if anything isn't ready, and otherwise " +
+      "approves, merges (squash by default), deletes the branch, and syncs the " +
+      "trunk. Do NOT run `gh pr merge` yourself — that's refused, and it skips " +
+      "every check this does. Default behaviour once watch_pr reports CI green and " +
+      "no open threads is to CALL THIS AND MOVE ON: on this project, finishing a " +
+      "task means the change is merged, not that a link is waiting for someone. " +
+      "The one exception is when the human said otherwise — if they asked you to " +
+      "leave it open, to let them review it, to just ship the PR, or to not merge, " +
+      "then DON'T call this tool; say the PR is ready and stop. A `hold` label " +
+      "means the same thing and is enforced here.",
+    {
+      number: z.number().describe("The PR number to approve and merge."),
+      repo: z
+        .string()
+        .optional()
+        .describe("Optional 'owner/name' override; defaults to the chat's repo."),
+      method: WorkflowMergeMethodSchema.optional().describe(
+        "Merge strategy. Defaults to the project's configured method (usually squash).",
+      ),
+      note: z
+        .string()
+        .optional()
+        .describe("Optional one-line body for the approving review (what you verified)."),
+    },
+    async (args): Promise<CallToolResult> => {
+      const approval = ctx.prApproval;
+      if (!approval) {
+        return textResult(
+          "The approve_pr tool is not available in this session — this project hasn't " +
+            "enabled auto-merge. Ship the PR and leave it for review.",
+          true,
+        );
+      }
+      const number =
+        typeof args.number === "number" && Number.isInteger(args.number) ? args.number : NaN;
+      if (!Number.isFinite(number) || number <= 0) {
+        return textResult("approve_pr requires a positive integer PR number.", true);
+      }
+      const repo =
+        typeof args.repo === "string" && args.repo.trim() ? args.repo.trim() : undefined;
+      const method = args.method ?? approval.defaultMethod;
+
+      let pr: PrReadiness | null;
+      try {
+        pr = await approval.readiness(number, repo);
+      } catch (e) {
+        return textResult(
+          `Could not read PR #${number}: ${e instanceof Error ? e.message : String(e)}`,
+          true,
+        );
+      }
+      if (!pr) {
+        return textResult(
+          `Could not resolve PR #${number}. Check the number and, if the repo can't be ` +
+            "auto-detected here, pass `repo` as 'owner/name'.",
+          true,
+        );
+      }
+
+      const blockers = prLandingBlockers(pr);
+      if (blockers.length) {
+        // Not an error — being told "not yet" is a normal, expected answer.
+        const isDone = blockers.some((b) => b.code === "not-open");
+        return textResult(
+          `${isDone ? "Nothing to do" : `Not landing PR #${number} yet`}:\n` +
+            blockers.map((b) => `  · ${b.detail}`).join("\n") +
+            (isDone ? "" : "\n\nFix these, then call approve_pr again.") +
+            "\n" +
+            JSON.stringify({
+              number,
+              merged: false,
+              blockers: blockers.map((b) => b.code),
+            }),
+        );
+      }
+
+      ctx.bus.publish({
+        type: "chat-status",
+        chatId: ctx.chatId,
+        status: "running",
+        activity: { state: "tool", label: `merging PR #${number}`, toolName: "approve_pr" },
+      });
+
+      const body =
+        typeof args.note === "string" && args.note.trim()
+          ? args.note.trim()
+          : "Checks green and review threads resolved — approved by Dispatch.";
+      // Approval first so the record shows WHY it merged, but never a gate: an
+      // author can't approve their own PR, and that's the usual case here.
+      const approved = await approval
+        .approve(number, repo, body)
+        .catch((e) => ({ approved: false, error: e instanceof Error ? e.message : String(e) }));
+
+      try {
+        await approval.merge(number, repo, method);
+      } catch (e) {
+        return textResult(
+          `PR #${number} passed every readiness check but GitHub refused the merge: ` +
+            `${e instanceof Error ? e.message : String(e)}\n` +
+            "That's usually branch protection (a required approval or check that isn't " +
+            "reporting). Don't work around it — report it and stop.\n" +
+            JSON.stringify({ number, merged: false, blockers: ["merge-refused"] }),
+          true,
+        );
+      }
+
+      // Same bookkeeping a watch_pr-observed merge does: the chat's dot goes
+      // green, and the manager fast-forwards the primary checkout to the trunk.
+      ctx.broker.markPrWatched(ctx.chatId);
+      const noChecks = pr.checks.length === 0 ? " (this PR had no CI checks reporting)" : "";
+      return textResult(
+        `Merged PR #${number} (${method}${approved.approved ? ", approved" : ""})${noChecks}. ` +
+          "The branch is deleted and the trunk will fast-forward — the task is done, so " +
+          "don't watch it or open anything else.\n" +
+          JSON.stringify({ number, merged: true, method, approved: approved.approved }),
       );
     },
   );
@@ -889,8 +1294,10 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     "Look up this project's durable memory. With no query you get the index (one " +
       "line per memory); with a query you get the FULL body of the most RELEVANT " +
       "memories, ranked (plus any they `[[link]]` to) — use it to pull a fact on " +
-      "demand. The most relevant memories are already surfaced automatically as you " +
-      "work; call this to dig deeper or when you need a fact that wasn't surfaced.",
+      "demand. Confidently-relevant memories are already surfaced in full as you " +
+      "work, but weaker matches are offered as just a name + one-line description: " +
+      "pass such a name as the query to read the whole thing. Also call this to dig " +
+      "deeper, or when you need a fact that wasn't surfaced at all.",
     {
       query: z
         .string()
@@ -1065,7 +1472,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
 
   const mcpList = tool(
     "mcp_list",
-    "List the MCP servers configured for THIS project in `.claude-manager/project.yaml`. " +
+    "List the MCP servers configured for THIS project in `.dispatch/project.yaml`. " +
       "Call this before adding one so you don't duplicate a server the project already has, " +
       "and to see the exact names the project's tools are addressed under (`mcp__<name>__<tool>`). " +
       "Note this lists CONFIGURED servers; the manager UI's MCP catalog shows each one's live " +
@@ -1080,7 +1487,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         if (!servers.length) {
           return textResult(
             "This project has no MCP servers configured yet.\n" +
-              "Add one with mcp_add (or `cm mcp add` in a terminal).",
+              "Add one with mcp_add (or `dispatch mcp add` in a terminal).",
           );
         }
         const lines = servers.map((s) => {
@@ -1107,7 +1514,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
 
   const mcpAdd = tool(
     "mcp_add",
-    "Add an MCP server to THIS project's `.claude-manager/project.yaml` — the committable " +
+    "Add an MCP server to THIS project's `.dispatch/project.yaml` — the committable " +
       "config every session in the project loads. Use this whenever the user wants to install, " +
       "add, or connect an MCP server; it is the supported path. Do NOT hand-edit project.yaml, " +
       "`.mcp.json`, or `~/.claude.json` to do this. " +
@@ -1199,7 +1606,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
 
   const mcpRemove = tool(
     "mcp_remove",
-    "Remove an MCP server from THIS project's `.claude-manager/project.yaml`. Use when a server " +
+    "Remove an MCP server from THIS project's `.dispatch/project.yaml`. Use when a server " +
       "is obsolete, broken, or was added by mistake. This edits committed project config that " +
       "affects every teammate — only do it when the user asked for it.",
     {
@@ -1231,6 +1638,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     contextUsage,
     compactContext,
     watchPr,
+    approvePr,
     terminal,
     remember,
     recall,
@@ -1255,6 +1663,7 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   context_usage: null,
   compact_context: null,
   watch_pr: "github",
+  approve_pr: "prApproval",
   terminal: "terminals",
   remember: "memory",
   recall: "memory",
@@ -1266,7 +1675,13 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
 };
 
 /** The session bindings that gate manager tools. */
-export type ManagerToolBinding = "github" | "terminals" | "memory" | "runner" | "mcpConfig";
+export type ManagerToolBinding =
+  | "github"
+  | "prApproval"
+  | "terminals"
+  | "memory"
+  | "runner"
+  | "mcpConfig";
 
 /** Which bindings a session has — decides which tools are offered/available. */
 export type ManagerToolBindings = Partial<Record<ManagerToolBinding, boolean>>;
@@ -1340,6 +1755,7 @@ export function createManagerMcpServer(
     contextUsage,
     compactContext,
     watchPr,
+    approvePr,
     terminal,
     remember,
     recall,
@@ -1357,6 +1773,8 @@ export function createManagerMcpServer(
     contextUsage,
     compactContext,
     ...(ctx.github ? [watchPr] : []),
+    // Only when the project opted into auto-merge — no binding, no way to merge.
+    ...(ctx.prApproval ? [approvePr] : []),
     ...(ctx.terminals ? [terminal] : []),
     ...(ctx.memory ? [remember, recall, forget] : []),
     ...(ctx.runner ? [runSubapp] : []),

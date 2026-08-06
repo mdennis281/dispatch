@@ -11,6 +11,7 @@ import {
   ChatStatusSchema,
 } from "./common.js";
 import { ResumePlanSchema } from "./limits.js";
+import { WorkflowConfigSchema } from "./workflow.js";
 
 /* ------------------------------------------------------------------ subApps */
 
@@ -55,6 +56,12 @@ export const ProjectSchema = z.object({
   worktreeCmd: z.string().optional(),
   /** Custom ship command (Hivebreak → "pnpm ship"). */
   shipCmd: z.string().optional(),
+  /**
+   * How change ships in this repo (see {@link WorkflowConfigSchema}). Absent →
+   * inferred from `shipCmd` for back-compat; resolve it with `resolveWorkflow`
+   * rather than reading this field directly.
+   */
+  workflow: WorkflowConfigSchema.optional(),
   /** MCP servers passed through to every session in this project. */
   mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
   subApps: z.array(SubAppSchema).default([]),
@@ -80,12 +87,36 @@ export const AgentConfigSchema = z.object({
   allowedTools: z.array(z.string()).optional(),
   disallowedTools: z.array(z.string()).optional(),
   model: z.string().optional(),
+  /**
+   * Reasoning effort this agent pins for itself. Unset ⇒ it inherits the chat's
+   * effort, exactly like `model`. Passed straight through as
+   * `AgentDefinition.effort`, so it applies whether the agent runs as the main
+   * thread or is spawned as a subagent.
+   *
+   * Accepts `null` as "inherit" so a PUT can CLEAR a pinned level — an omitted
+   * key means "unchanged" once the route merges over the stored record, which
+   * would otherwise make the pin a one-way door.
+   */
+  effort: EffortSchema.nullish().transform((v) => v ?? undefined),
   scope: ConfigScopeSchema.default("global"),
   /** Set when scope === "project". */
   projectId: z.string().optional(),
+  /**
+   * Source filename within the agents dir, when this agent was loaded from a
+   * repo's `.dispatch/`. The id is a slug of the frontmatter NAME, which need
+   * not match the filename — so anything opening or deleting the file has to be
+   * told which file it was, not derive it.
+   */
+  file: z.string().optional(),
   createdAt: z.number().int().optional(),
 });
 export type AgentConfig = z.infer<typeof AgentConfigSchema>;
+/**
+ * What a CLIENT may send for an agent (pre-parse). Differs from
+ * {@link AgentConfig} on `effort`, where `null` is the wire form of "inherit" —
+ * the only way to clear a pinned level through a merging PUT.
+ */
+export type AgentConfigInput = z.input<typeof AgentConfigSchema>;
 
 /** A mode = a named permission posture + optional instruction overlay. */
 export const ModeConfigSchema = z.object({
@@ -247,6 +278,27 @@ export type WorkflowInput = z.infer<typeof WorkflowInputSchema>;
 
 /* -------------------------------------------------------------------- chats */
 
+/**
+ * Why a chat was created, when something in the app spawned it to do a specific
+ * job rather than a human opening a blank one.
+ *
+ * The point is recognition: a sidebar of a dozen chats all called "New chat"
+ * hides the one that's off writing your agent config. `kind` is a stable slug
+ * the UI maps to an icon + tint (unknown kinds fall back to the default dot, so
+ * a new spawner never has to ship a UI change to be safe), and `label` is the
+ * human sentence — the specific job, not the category.
+ *
+ * Convention for `kind`: `<feature>:<section>`, e.g. `config:agents`. Kept a
+ * free string rather than an enum precisely so features can add purposes without
+ * a schema migration; anything persisted is display metadata only and never
+ * changes how the session runs.
+ */
+export const ChatPurposeSchema = z.object({
+  kind: z.string(),
+  label: z.string().optional(),
+});
+export type ChatPurpose = z.infer<typeof ChatPurposeSchema>;
+
 /** A chat: the crown-jewel session. May own many worktrees/PRs over its life. */
 export const ChatSchema = z.object({
   id: z.string(),
@@ -264,6 +316,8 @@ export const ChatSchema = z.object({
   prs: z.array(PRRefSchema).default([]),
   /** Last-known live status (authoritative source is the SessionBroker). */
   status: ChatStatusSchema.optional(),
+  /** Why this chat exists, when the app spawned it for a job. Display-only. */
+  purpose: ChatPurposeSchema.optional(),
   archived: z.boolean().optional(),
   /**
    * A pending (or just-settled) auto-resume after a usage limit. Persisted so a

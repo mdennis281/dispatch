@@ -1,11 +1,11 @@
 /**
  * ProjectConfigService — loads, syncs, and watches a managed repo's
- * self-contained `.claude-manager/` config.
+ * self-contained `.dispatch/` config.
  *
- * A managed repo may carry a committable `.claude-manager/` directory at its
- * root that is the SOURCE OF TRUTH for its authored claude-manager config. This
+ * A managed repo may carry a committable `.dispatch/` directory at its
+ * root that is the SOURCE OF TRUTH for its authored Dispatch config. This
  * service:
- *   - DISCOVERS `.claude-manager/project.yaml` under a project's `repoPath`,
+ *   - DISCOVERS `.dispatch/project.yaml` under a project's `repoPath`,
  *   - PARSES + VALIDATES the manifest (yaml@2 + zod) and LOADS the `agents/`,
  *     `modes/`, `instructions/` files it references into the normalized
  *     {@link ProjectConfig} — resiliently: a malformed file yields a structured
@@ -13,14 +13,14 @@
  *   - SYNCS the loaded authored config into the existing project store as a
  *     runtime cache (authored fields OVERRIDE the `.data` project record) so
  *     every existing consumer keeps working — precedence:
- *       `.claude-manager/` present → its fields win;
+ *       `.dispatch/` present → its fields win;
  *       absent → the current `.data` store is used as-is (back-compat), and
- *   - WATCHES `.claude-manager/` (debounced) and re-runs the above on change,
+ *   - WATCHES `.dispatch/` (debounced) and re-runs the above on change,
  *     emitting a `project-config-update` bus event.
  *
  * `.data` keeps ONLY runtime state; this service never persists anything but the
  * merged project record (via the normal `store.saveProject`), and only when it
- * actually changed. Projects without a `.claude-manager/` are never mutated.
+ * actually changed. Projects without a `.dispatch/` are never mutated.
  *
  * fs / yaml parsing + the fs watcher are behind small injectable seams so tests
  * can drive load + reload deterministically without a real watcher.
@@ -28,6 +28,7 @@
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { readdir, readFile } from "node:fs/promises";
 import { existsSync, watch as fsWatch, type FSWatcher } from "node:fs";
+import { configDirFor } from "@dispatch/cli/core";
 import { parse as parseYaml } from "yaml";
 import {
   ProjectManifestSchema,
@@ -38,7 +39,7 @@ import {
   ModeConfigSchema,
   SkillConfigSchema,
   PermissionModeSchema,
-  CONFIG_DIR_NAME,
+  EffortSchema,
   MANIFEST_FILE,
   expandEnvVars,
   expandEnvList,
@@ -59,7 +60,7 @@ import {
   type SkillConfig,
   type SubApp,
   type McpServerConfig,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 
@@ -75,7 +76,7 @@ export interface ProjectConfigServiceOptions {
   /** Debounce for watcher-triggered reloads (ms). Default 250. */
   debounceMs?: number;
   /**
-   * Injectable watch factory (tests). Given the `.claude-manager/` dir and a
+   * Injectable watch factory (tests). Given the `.dispatch/` dir and a
    * change listener, returns a closable watcher. Defaults to a recursive
    * `fs.watch`. A factory that returns `null` disables watching.
    */
@@ -107,7 +108,7 @@ export function renderInstructionsInjection(
       : trimmed;
   return [
     "## Project instructions",
-    "_Authored in `.claude-manager/` — project-specific house rules for this repo._",
+    "_Authored in `.dispatch/` — project-specific house rules for this repo._",
     "",
     bounded,
   ].join("\n");
@@ -311,7 +312,7 @@ export class ProjectConfigService {
     return this.cache.get(projectId)?.config ?? null;
   }
 
-  /** True when a project has a valid `.claude-manager/` config loaded. */
+  /** True when a project has a valid `.dispatch/` config loaded. */
   hasConfig(projectId: string): boolean {
     return !!this.cache.get(projectId)?.config;
   }
@@ -366,7 +367,7 @@ export class ProjectConfigService {
 
   /**
    * The bounded, clearly-delimited system-prompt append for a project's authored
-   * custom instructions (from its `.claude-manager/` config), or null when the
+   * custom instructions (from its `.dispatch/` config), or null when the
    * project has no config / no instructions — so nothing is injected.
    */
   buildInstructionsInjection(projectId: string): string | null {
@@ -375,7 +376,7 @@ export class ProjectConfigService {
 
   /**
    * A project's config-sourced external MCP servers (name → config), or `{}` when
-   * it has no `.claude-manager/`. The broker merges these into every session's
+   * it has no `.dispatch/`. The broker merges these into every session's
    * `Options.mcpServers` (config wins over the `.data` record; the in-process
    * `manager` server is always applied last and never clobbered), and the MCP
    * catalog probes them — so a config-declared server appears wherever a session's
@@ -388,7 +389,7 @@ export class ProjectConfigService {
 
   /**
    * A project's config-sourced sub-apps (mapped onto the store {@link SubApp}
-   * shape), or `[]` when it has no `.claude-manager/`. These are merged over the
+   * shape), or `[]` when it has no `.dispatch/`. These are merged over the
    * `.data` record (config wins on id; `.data`-only sub-apps survive) into the
    * project the RunnerService + Apps panel consume.
    */
@@ -397,8 +398,8 @@ export class ProjectConfigService {
   }
 
   /**
-   * A project's config-sourced skills (loaded from `.claude-manager/skills/`),
-   * or `[]` when it has no `.claude-manager/`. The broker MATERIALIZES these into
+   * A project's config-sourced skills (loaded from `.dispatch/skills/`),
+   * or `[]` when it has no `.dispatch/`. The broker MATERIALIZES these into
    * a session's effective `<cwd>/.claude/skills/` at launch (a merge that never
    * clobbers a skill the repo already ships) so the Agent SDK discovers them.
    * Consulted config-first (not the store) so a live watcher edit is reflected.
@@ -408,15 +409,15 @@ export class ProjectConfigService {
   }
 
   /**
-   * Load a project's `.claude-manager/` from disk into a normalized result.
+   * Load a project's `.dispatch/` from disk into a normalized result.
    * Pure read — no store writes, no events. Resilient: any parse/read failure
    * becomes a structured error, never a throw.
    */
   async load(project: Project): Promise<ProjectConfigResult> {
-    const sourceDir = join(project.repoPath, CONFIG_DIR_NAME);
+    const sourceDir = configDirFor(project.repoPath);
     const manifestPath = join(sourceDir, MANIFEST_FILE);
 
-    // No `.claude-manager/` → back-compat: the `.data` store is used as-is.
+    // No config dir → back-compat: the `.data` store is used as-is.
     if (!existsSync(manifestPath)) {
       return ProjectConfigResultSchema.parse({ sourceDir: null, config: null, errors: [] });
     }
@@ -471,7 +472,14 @@ export class ProjectConfigService {
       }
       try {
         const text = await readFile(abs, "utf8");
-        instructions.push({ source: "file", file: rel, text: text.replace(/\r\n/g, "\n").trimEnd() });
+        instructions.push({
+          source: "file",
+          file: rel,
+          // Where it ACTUALLY resolved (see NormalizedInstruction.rel) — the
+          // authored `rel` may be relative to either root.
+          rel: relative(sourceDir, abs).replace(/\\/g, "/"),
+          text: text.replace(/\r\n/g, "\n").trimEnd(),
+        });
       } catch (err) {
         errors.push({ scope: "instruction", file: rel, message: msg(err) });
       }
@@ -520,7 +528,7 @@ export class ProjectConfigService {
           message:
             `MCP server "${server.name}" references unset environment ` +
             `variable(s): ${[...missing].join(", ")}. They expand to an empty ` +
-            `string — set them where claude-manager runs.`,
+            `string — set them where Dispatch runs.`,
         });
       }
     }
@@ -531,6 +539,7 @@ export class ProjectConfigService {
       worktreeRoot: manifest.worktreeRoot,
       worktreeCmd: manifest.worktree,
       shipCmd: manifest.ship,
+      workflow: manifest.workflow,
       defaults: manifest.defaults,
       instructions,
       instructionsText: instructionsText || undefined,
@@ -553,7 +562,7 @@ export class ProjectConfigService {
    * Reload a project by id: load from disk, SYNC into the store (authored fields
    * override the `.data` record — only persisted when actually changed), cache
    * the result, and emit `project-config-update`. Returns the result (an empty
-   * back-compat result when the project has no `.claude-manager/`). Never throws.
+   * back-compat result when the project has no `.dispatch/`). Never throws.
    */
   async reload(projectId: string): Promise<ProjectConfigResult> {
     const project = await this.store.getProject(projectId).catch(() => null);
@@ -569,7 +578,7 @@ export class ProjectConfigService {
     } catch (err) {
       // Defensive: `load` is resilient, but never let reload throw.
       result = ProjectConfigResultSchema.parse({
-        sourceDir: join(project.repoPath, CONFIG_DIR_NAME),
+        sourceDir: configDirFor(project.repoPath),
         config: null,
         errors: [{ scope: "io", message: msg(err) }],
       });
@@ -599,13 +608,13 @@ export class ProjectConfigService {
   }
 
   /**
-   * Watch a project's `.claude-manager/` for changes and debounced-reload. No-op
+   * Watch a project's `.dispatch/` for changes and debounced-reload. No-op
    * when the dir is absent (a back-compat project needs no watcher) or already
    * watched. Idempotent.
    */
   watchProject(project: Project): void {
     if (this.watchers.has(project.id)) return;
-    const dir = join(project.repoPath, CONFIG_DIR_NAME);
+    const dir = configDirFor(project.repoPath);
     if (!existsSync(dir)) return;
     const watcher = this.watchFactory(dir, () => this.onWatchEvent(project.id));
     if (watcher) this.watchers.set(project.id, watcher);
@@ -706,8 +715,14 @@ export class ProjectConfigService {
           allowedTools: toStringArray(data.tools),
           disallowedTools: toStringArray(data.disallowedTools),
           model: typeof data.model === "string" ? data.model : undefined,
+          // `effort:` is optional and free-form in frontmatter; an unknown level
+          // means "inherit the chat's" rather than a load error for the whole agent.
+          effort: EffortSchema.safeParse(data.effort).data,
           scope: "project",
           projectId,
+          // The id is a slug of `name`, which need not match the filename — keep
+          // the real one so the UI can open/delete exactly this file.
+          file,
         });
         seen.add(id);
         out.push(agent);
@@ -774,7 +789,7 @@ export class ProjectConfigService {
   }
 
   /**
-   * Load `.claude-manager/skills/` into {@link SkillConfig}s. Two layouts:
+   * Load `.dispatch/skills/` into {@link SkillConfig}s. Two layouts:
    *   - a skill DIRECTORY `skills/<dir>/SKILL.md` (frontmatter `{ name,
    *     description }` + body; the whole dir is the skill), and
    *   - a FLAT `skills/<name>.md` single-file skill.
@@ -877,7 +892,7 @@ function msg(err: unknown): string {
 }
 
 /**
- * Produce the effective project record: authored `.claude-manager/` fields
+ * Produce the effective project record: authored `.dispatch/` fields
  * OVERRIDE the stored `.data` project. Absent manifest fields keep the stored
  * value (never clobbered). Identity/runtime fields (id, repoPath, createdAt,
  * defaultBranch) are always preserved. subApps AND mcpServers are MERGED
@@ -891,6 +906,7 @@ export function mergeProject(stored: Project, config: ProjectConfig): Project {
     worktreeRoot: config.worktreeRoot ?? stored.worktreeRoot,
     worktreeCmd: config.worktreeCmd ?? stored.worktreeCmd,
     shipCmd: config.shipCmd ?? stored.shipCmd,
+    workflow: config.workflow ?? stored.workflow,
     subApps: mergeById(config.subApps, stored.subApps),
     mcpServers:
       Object.keys(config.mcpServers).length || stored.mcpServers

@@ -6,18 +6,22 @@ import type {
   ReviewThread,
   WsServerEvent,
   ProjectMemory,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import { EventBus } from "../../bus.js";
 import { memorySimilarity } from "../memory.js";
 import {
   createManagerTools,
   createManagerMcpServer,
+  prLandingBlockers,
   WAIT_CAP_SECONDS,
   PR_POLL_INTERVAL_MS,
+  NO_CHECKS_GRACE_MS,
   type ManagerMcpBroker,
   type ManagerMcpMemory,
   type ManagerMcpGitHub,
+  type ManagerMcpPrApproval,
   type PrPollResult,
+  type PrReadiness,
 } from "./manager-mcp.js";
 
 /* ------------------------------------------------------------------ fixtures */
@@ -239,6 +243,9 @@ const FAIL_BUILD: CheckRun = {
   conclusion: "failure",
   url: "https://ci/build",
 };
+const PASS_BUILD: CheckRun = { name: "build", status: "completed", conclusion: "success" };
+const PASS_LINT: CheckRun = { name: "lint", status: "completed", conclusion: "success" };
+const RUNNING_BUILD: CheckRun = { name: "build", status: "in_progress" };
 const THREAD_A: ReviewThread = {
   id: "T_A",
   isResolved: false,
@@ -303,6 +310,114 @@ describe("manager-mcp — watch_pr", () => {
     // The already-reported check + thread must NOT fire again.
     expect(resultText(second)).not.toContain('"threadId":"T_A"');
     expect(resultText(second)).not.toContain("ci-failed");
+  });
+
+  it("returns immediately when CI already finished green (no quiet-window block)", async () => {
+    // The regression: a watch started AFTER a fast run finished used to sit here
+    // until the timeout, because only FAILURE counted as activity.
+    const gh = fakeGitHub([{ merge: OPEN, checks: [PASS_BUILD, PASS_LINT], threads: [] }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const res = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: undefined }, {});
+
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain('"type":"ci-passed"');
+    expect(resultText(res)).toContain('"checksPassing":true');
+    expect(resultText(res)).toContain("all 2 check(s) passing");
+    expect(resultText(res)).toContain('"done":false'); // green ≠ merged
+    expect(resultText(res)).not.toContain("needs attention"); // nothing to fix
+    expect(gh.calls.length).toBe(1); // resolved on the very first poll
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps waiting while a check is still running", async () => {
+    const gh = fakeGitHub([{ merge: OPEN, checks: [PASS_LINT, RUNNING_BUILD], threads: [] }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+    await vi.advanceTimersByTimeAsync(30_000);
+    const res = await p;
+
+    // "Passing" while a job could still go red would be a lie.
+    expect(resultText(res)).not.toContain("ci-passed");
+    expect(resultText(res)).toContain('"timedOut":true');
+  });
+
+  it("reports green once, not on every re-call", async () => {
+    const gh = fakeGitHub([
+      { merge: OPEN, checks: [PASS_BUILD], threads: [] },
+      { merge: OPEN, checks: [PASS_BUILD], threads: [] },
+    ]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const first = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+    expect(resultText(first)).toContain('"type":"ci-passed"');
+
+    // Unchanged green must not re-fire — otherwise the "call until done:true"
+    // loop the tool asks for becomes a spin.
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+    await vi.advanceTimersByTimeAsync(30_000);
+    const second = await p;
+    expect(resultText(second)).not.toContain("ci-passed");
+    expect(resultText(second)).toContain('"timedOut":true');
+  });
+
+  it("re-reports green when a new check joins the set", async () => {
+    const gh = fakeGitHub([
+      { merge: OPEN, checks: [PASS_BUILD], threads: [] },
+      { merge: OPEN, checks: [PASS_BUILD, PASS_LINT], threads: [] },
+    ]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+    const second = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+
+    expect(resultText(second)).toContain('"type":"ci-passed"');
+    expect(resultText(second)).toContain("lint");
+  });
+
+  it("reports the fix: a failing check that later goes green", async () => {
+    const gh = fakeGitHub([
+      { merge: OPEN, checks: [FAIL_BUILD], threads: [] },
+      { merge: OPEN, checks: [PASS_BUILD], threads: [] },
+    ]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const first = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+    expect(resultText(first)).toContain('"type":"ci-failed"');
+
+    const second = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+    expect(resultText(second)).toContain('"type":"ci-passed"');
+    expect(resultText(second)).toContain('"checksPassing":true');
+  });
+
+  it("says so once when a PR has no checks at all, after the grace window", async () => {
+    const gh = fakeGitHub([{ merge: OPEN, checks: [], threads: [] }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+    await vi.advanceTimersByTimeAsync(NO_CHECKS_GRACE_MS);
+    const res = await p;
+
+    expect(resultText(res)).toContain("no CI checks configured");
+    expect(resultText(res)).toContain('"done":false');
+
+    // Told once; the next watch goes back to waiting quietly.
+    const again = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 120 }, {});
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(resultText(await again)).not.toContain("no CI checks configured");
+  });
+
+  it("does not mistake an unreadable checks call for a PR without checks", async () => {
+    const gh = fakeGitHub([{ merge: OPEN, checks: null, threads: null }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 120 }, {});
+    await vi.advanceTimersByTimeAsync(120_000);
+    const res = await p;
+
+    expect(resultText(res)).not.toContain("no CI checks configured");
+    expect(resultText(res)).toContain('"timedOut":true');
   });
 
   it("resolves done:true when the PR merges", async () => {
@@ -484,6 +599,260 @@ describe("manager-mcp — watch_pr", () => {
     const res = await watchPr.handler({ number: 1, repo: undefined, timeoutSeconds: undefined }, {});
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("not available");
+  });
+});
+
+/* ------------------------------------------------------------ approve_pr */
+
+/** A ready-to-land PR; each test overrides just the field it's exercising. */
+function readyPr(over: Partial<PrReadiness> = {}): PrReadiness {
+  return {
+    number: 83,
+    url: "https://github.com/octo/repo/pull/83",
+    title: "feat: thing",
+    state: "open",
+    isDraft: false,
+    mergeable: true,
+    mergeStateStatus: "CLEAN",
+    reviewDecision: null,
+    labels: [],
+    checks: [PASS_BUILD],
+    threads: [],
+    ...over,
+  };
+}
+
+/** A scriptable approval binding that records what it was asked to do. */
+function fakeApproval(
+  pr: PrReadiness | null,
+  opts: { approved?: boolean; mergeError?: string } = {},
+) {
+  const calls: { approve: { n: number; body: string }[]; merge: { n: number; method: string }[] } = {
+    approve: [],
+    merge: [],
+  };
+  const binding: ManagerMcpPrApproval = {
+    defaultMethod: "squash",
+    readiness: async () => pr,
+    approve: async (n, _repo, body) => {
+      calls.approve.push({ n, body });
+      return opts.approved === false
+        ? { approved: false, error: "can not approve your own pull request" }
+        : { approved: true };
+    },
+    merge: async (n, _repo, method) => {
+      calls.merge.push({ n, method });
+      if (opts.mergeError) throw new Error(opts.mergeError);
+    },
+  };
+  return { binding, calls };
+}
+
+const approveArgs = (over: Record<string, unknown> = {}) => ({
+  number: 83,
+  repo: undefined,
+  method: undefined,
+  note: undefined,
+  ...over,
+});
+
+describe("prLandingBlockers", () => {
+  it("clears a green, unblocked, open PR", () => {
+    expect(prLandingBlockers(readyPr())).toEqual([]);
+  });
+
+  it("reports EVERY blocker at once rather than the first", () => {
+    // One complete to-do list beats discovering the next obstacle per round-trip.
+    const codes = prLandingBlockers(
+      readyPr({
+        isDraft: true,
+        checks: [FAIL_BUILD],
+        threads: [THREAD_A],
+        mergeable: false,
+      }),
+    ).map((b) => b.code);
+    expect(codes).toEqual(
+      expect.arrayContaining(["draft", "checks-failing", "unresolved-threads", "conflict"]),
+    );
+  });
+
+  it("honours the `hold` label, case-insensitively", () => {
+    const b = prLandingBlockers(readyPr({ labels: ["Hold"] }));
+    expect(b.map((x) => x.code)).toContain("hold");
+    // …and says not to route around it.
+    expect(b.find((x) => x.code === "hold")!.detail).toMatch(/do not remove the label/i);
+  });
+
+  it("blocks on a pending check — green so far is not green", () => {
+    expect(
+      prLandingBlockers(readyPr({ checks: [PASS_BUILD, { name: "e2e", status: "in_progress" }] }))
+        .map((b) => b.code),
+    ).toEqual(["checks-pending"]);
+  });
+
+  it("fails CLOSED when the review threads can't be read", () => {
+    // Everywhere else a failed read means "nothing new"; merging over comments we
+    // simply couldn't fetch is the one mistake this must not make.
+    expect(prLandingBlockers(readyPr({ threads: null })).map((b) => b.code)).toEqual([
+      "threads-unreadable",
+    ]);
+  });
+
+  it("ignores resolved and outdated threads", () => {
+    const resolved: ReviewThread = { id: "T_done", isResolved: true };
+    const outdated: ReviewThread = { id: "T_old", isResolved: false, isOutdated: true };
+    expect(prLandingBlockers(readyPr({ threads: [resolved, outdated] }))).toEqual([]);
+  });
+
+  it("blocks on changes-requested", () => {
+    expect(
+      prLandingBlockers(readyPr({ reviewDecision: "changes_requested" })).map((b) => b.code),
+    ).toContain("changes-requested");
+  });
+
+  it("says only 'already merged' for a settled PR, without piling on", () => {
+    const b = prLandingBlockers(readyPr({ state: "merged", checks: [FAIL_BUILD], threads: null }));
+    expect(b.map((x) => x.code)).toEqual(["not-open"]);
+  });
+});
+
+describe("manager-mcp — approve_pr", () => {
+  it("approves, merges with the project's default method, and marks the PR watched", async () => {
+    const { binding, calls } = fakeApproval(readyPr());
+    let watched = "";
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: { ...fakeBroker({}), markPrWatched: (id) => (watched = id) },
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs(), {});
+
+    expect(res.isError).toBeFalsy();
+    expect(calls.merge).toEqual([{ n: 83, method: "squash" }]);
+    expect(calls.approve).toHaveLength(1);
+    expect(resultText(res)).toContain('"merged":true');
+    expect(watched).toBe("c1"); // same bookkeeping a watch_pr-observed merge does
+    expect(statusLabels().some((l) => l === "merging PR #83")).toBe(true);
+  });
+
+  it("honours a per-call method override and a custom note", async () => {
+    const { binding, calls } = fakeApproval(readyPr());
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    await approvePr.handler(approveArgs({ method: "rebase", note: "verified locally" }), {});
+
+    expect(calls.merge).toEqual([{ n: 83, method: "rebase" }]);
+    expect(calls.approve[0]!.body).toBe("verified locally");
+  });
+
+  it("merges anyway when GitHub refuses the self-approval", async () => {
+    // The author can't approve their own PR — expected, not a failure.
+    const { binding, calls } = fakeApproval(readyPr(), { approved: false });
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs(), {});
+
+    expect(calls.merge).toHaveLength(1);
+    expect(resultText(res)).toContain('"merged":true');
+    expect(resultText(res)).toContain('"approved":false');
+  });
+
+  it("refuses with reasons — and never merges — when the PR isn't ready", async () => {
+    const { binding, calls } = fakeApproval(readyPr({ checks: [FAIL_BUILD], threads: [THREAD_A] }));
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs(), {});
+
+    expect(calls.merge).toEqual([]);
+    expect(calls.approve).toEqual([]);
+    expect(resultText(res)).toContain("Not landing PR #83 yet");
+    expect(resultText(res)).toContain('"blockers":["checks-failing","unresolved-threads"]');
+  });
+
+  it("refuses a PR someone parked with the hold label", async () => {
+    const { binding, calls } = fakeApproval(readyPr({ labels: ["hold"] }));
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs(), {});
+
+    expect(calls.merge).toEqual([]);
+    expect(resultText(res)).toContain('"blockers":["hold"]');
+  });
+
+  it("reports a GitHub merge refusal (branch protection) as an error, not a retry", async () => {
+    const { binding } = fakeApproval(readyPr(), { mergeError: "Pull request is not mergeable" });
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs(), {});
+
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("GitHub refused the merge");
+    expect(resultText(res)).toContain("not mergeable");
+  });
+
+  it("reports an unresolvable PR without merging", async () => {
+    const { binding, calls } = fakeApproval(null);
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs({ number: 999 }), {});
+
+    expect(res.isError).toBe(true);
+    expect(calls.merge).toEqual([]);
+  });
+
+  it("validates a positive integer PR number", async () => {
+    const { binding, calls } = fakeApproval(readyPr());
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs({ number: -1 }), {});
+    expect(res.isError).toBe(true);
+    expect(calls.merge).toEqual([]);
+  });
+
+  it("reports unavailable when the project hasn't opted into auto-merge", async () => {
+    // No binding is the enforcement: a session on a project without auto-merge
+    // has no way to land anything (a raw `gh pr merge` is denied separately).
+    const { approvePr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}) });
+    const res = await approvePr.handler(approveArgs(), {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("hasn't enabled auto-merge");
   });
 });
 
@@ -776,5 +1145,28 @@ describe("manager-mcp — server factory", () => {
     expect(server.type).toBe("sdk");
     expect(server.name).toBe("manager");
     expect(server.instance).toBeDefined();
+  });
+
+  it("registers approve_pr ONLY when the approval binding is present", () => {
+    const names = (ctx: Parameters<typeof createManagerMcpServer>[0]) =>
+      Object.keys(
+        (createManagerMcpServer(ctx) as unknown as {
+          instance: { _registeredTools?: Record<string, unknown> };
+        }).instance._registeredTools ?? {},
+      );
+
+    // GitHub wired but no auto-merge → the agent is offered no way to merge.
+    expect(names({ chatId: "c1", bus, broker: fakeBroker({}), github: fakeGitHub([]) })).not.toContain(
+      "approve_pr",
+    );
+    expect(
+      names({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({}),
+        github: fakeGitHub([]),
+        prApproval: fakeApproval(readyPr()).binding,
+      }),
+    ).toContain("approve_pr");
   });
 });

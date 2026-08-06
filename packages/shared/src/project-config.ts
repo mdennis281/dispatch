@@ -1,10 +1,10 @@
 /**
- * Self-contained `.claude-manager/` project config — schemas + types.
+ * Self-contained `.dispatch/` project config — schemas + types.
  *
- * A managed repo may carry a committable `.claude-manager/` directory at its
- * root that is the SOURCE OF TRUTH for its authored claude-manager config
+ * A managed repo may carry a committable `.dispatch/` directory at its
+ * root that is the SOURCE OF TRUTH for its authored Dispatch config
  * (custom commands, instructions, sub-apps, MCP servers, agents, modes, memory).
- * claude-manager discovers it, validates it, and normalizes it into the shape
+ * Dispatch discovers it, validates it, and normalizes it into the shape
  * below; `.data` then keeps only runtime state.
  *
  * Two layers live here:
@@ -19,13 +19,34 @@
 import * as z from "zod";
 import { EffortSchema, McpServerConfigSchema, PermissionModeSchema } from "./common.js";
 import { SubAppSchema, AgentConfigSchema } from "./domain.js";
+import { WorkflowConfigSchema } from "./workflow.js";
 
 /* ------------------------------------------------------------ dir defaults */
 
 /** The config directory name at the managed repo root. */
-export const CONFIG_DIR_NAME = ".claude-manager";
+export const CONFIG_DIR_NAME = ".dispatch";
+/**
+ * The pre-rename config directory name. Still honoured when a repo has no
+ * `.dispatch/` yet, so a checkout that predates the rename keeps working
+ * untouched — nothing here ever writes to it. Drop this (and
+ * {@link CONFIG_DIR_NAMES}) once every managed repo has committed a `.dispatch/`.
+ */
+export const LEGACY_CONFIG_DIR_NAME = ".claude-manager";
+/** Config dir names in resolution order — current first, legacy last. */
+export const CONFIG_DIR_NAMES = [CONFIG_DIR_NAME, LEGACY_CONFIG_DIR_NAME] as const;
 /** The manifest filename within {@link CONFIG_DIR_NAME}. */
 export const MANIFEST_FILE = "project.yaml";
+
+/** Extension for an exported config archive (a zip of {@link CONFIG_DIR_NAME}). */
+export const ARCHIVE_EXT = ".dispatch";
+/**
+ * The pre-rename archive extension. Import still accepts it — the format never
+ * changed, only its name, and an archive exported before the rename is a plain
+ * zip that unpacks identically. Only export stopped producing it.
+ */
+export const LEGACY_ARCHIVE_EXT = ".cm";
+/** Archive extensions a file picker should offer, current first. */
+export const ARCHIVE_EXTS = [ARCHIVE_EXT, LEGACY_ARCHIVE_EXT] as const;
 /** Default sub-directory names (overridable via the manifest's dir fields). */
 export const DEFAULT_INSTRUCTIONS_DIR = "instructions";
 export const DEFAULT_AGENTS_DIR = "agents";
@@ -108,7 +129,7 @@ export const ManifestDefaultsSchema = z.object({
 export type ManifestDefaults = z.infer<typeof ManifestDefaultsSchema>;
 
 /**
- * The raw `.claude-manager/project.yaml` manifest. All fields optional except
+ * The raw `.dispatch/project.yaml` manifest. All fields optional except
  * `name`. Unknown keys are rejected (strict) so a typo surfaces as a structured
  * error instead of silently dropping.
  */
@@ -119,6 +140,12 @@ export const ProjectManifestSchema = z.object({
   worktree: z.string().optional(),
   /** Custom ship command (maps to Project.shipCmd). */
   ship: z.string().optional(),
+  /**
+   * How change ships in this repo — the workflow PROFILE plus any per-field
+   * overrides (see {@link WorkflowConfigSchema}). Absent → the rung is inferred
+   * from whether a `ship` command is set, so pre-profile manifests keep working.
+   */
+  workflow: WorkflowConfigSchema.optional(),
   defaults: ManifestDefaultsSchema.optional(),
   instructions: z.array(ManifestInstructionSchema).optional(),
   subApps: z.array(ManifestSubAppSchema).optional(),
@@ -141,8 +168,15 @@ export type ProjectManifest = z.infer<typeof ProjectManifestSchema>;
 /** One resolved instruction (a read file or inline text) in load order. */
 export const NormalizedInstructionSchema = z.object({
   source: z.enum(["file", "text"]),
-  /** Relative file path (within the config dir) when `source === "file"`. */
+  /** The path AS AUTHORED in the manifest (for round-tripping it back). */
   file: z.string().optional(),
+  /**
+   * Where the file actually resolved to, config-dir-relative and
+   * forward-slashed. `file` alone is ambiguous — the loader accepts it relative
+   * to either the instructions dir or the config dir — so anything that opens or
+   * deletes the file (the config UI) needs the resolved answer, not the guess.
+   */
+  rel: z.string().optional(),
   text: z.string(),
 });
 export type NormalizedInstruction = z.infer<typeof NormalizedInstructionSchema>;
@@ -205,13 +239,13 @@ export type SkillConfig = z.infer<typeof SkillConfigSchema>;
 
 /**
  * The normalized, in-memory project config the server loads from a managed
- * repo's `.claude-manager/`. This is the shape the API exposes and phases 2-4
+ * repo's `.dispatch/`. This is the shape the API exposes and phases 2-4
  * consume. Store shapes are reused where they exist ({@link SubAppSchema},
  * {@link McpServerConfigSchema}, {@link AgentConfigSchema}); `modes` is the
  * richer {@link ConfigModeSchema}.
  */
 export const ProjectConfigSchema = z.object({
-  /** Absolute path to the `.claude-manager/` dir this was loaded from. */
+  /** Absolute path to the `.dispatch/` dir this was loaded from. */
   sourceDir: z.string(),
   /** Display name from the manifest. */
   name: z.string(),
@@ -220,6 +254,8 @@ export const ProjectConfigSchema = z.object({
   worktreeCmd: z.string().optional(),
   /** From manifest `ship` (maps to Project.shipCmd). */
   shipCmd: z.string().optional(),
+  /** From manifest `workflow` (maps to Project.workflow). */
+  workflow: WorkflowConfigSchema.optional(),
   defaults: ProjectConfigDefaultsSchema.optional(),
   /** Resolved instructions in load order (files read + inline text). */
   instructions: z.array(NormalizedInstructionSchema).default([]),
@@ -248,6 +284,50 @@ export const ProjectConfigSchema = z.object({
 });
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 
+/* ------------------------------------------------------------ ui sections */
+
+/**
+ * The parts of a project's config the UI presents as separate sections — and the
+ * vocabulary the config-authoring flow speaks. Shared rather than client-local
+ * because the server composes a DIFFERENT briefing per section (where the file
+ * goes, what shape it takes), so both ends have to agree on the names.
+ *
+ * `workflow` and `memory` appear in the UI but are not authorable here: workflow
+ * has its own editor (it's manifest keys, not files), and memory has its own
+ * view and is written by agents through the memory tools.
+ */
+export const ConfigSectionSchema = z.enum([
+  "workflow",
+  "instructions",
+  "agents",
+  "modes",
+  "skills",
+  "mcp",
+  "subApps",
+  "memory",
+]);
+export type ConfigSection = z.infer<typeof ConfigSectionSchema>;
+
+/** Sections the "describe it and let an agent write it" flow can target. */
+export const AUTHORABLE_SECTIONS = [
+  "instructions",
+  "agents",
+  "modes",
+  "skills",
+  "mcp",
+  "subApps",
+] as const satisfies readonly ConfigSection[];
+
+/** Narrowing helper for {@link AUTHORABLE_SECTIONS}. */
+export type AuthorableSection = (typeof AUTHORABLE_SECTIONS)[number];
+
+export const AuthorableSectionSchema = z.enum(AUTHORABLE_SECTIONS);
+
+/** The `ChatPurpose.kind` a config-authoring chat carries, e.g. `config:agents`. */
+export function configPurposeKind(section: ConfigSection): string {
+  return `config:${section}`;
+}
+
 /** Where a load error originated (for surfacing in the UI, never a throw). */
 export const ProjectConfigErrorScopeSchema = z.enum([
   "manifest",
@@ -270,12 +350,12 @@ export type ProjectConfigError = z.infer<typeof ProjectConfigErrorSchema>;
 
 /**
  * The result of loading a project's config: the source dir (null when the
- * project has no `.claude-manager/` → back-compat fallback), the normalized
+ * project has no `.dispatch/` → back-compat fallback), the normalized
  * config (null when there's no dir OR the manifest was unparseable), and any
  * structured errors gathered along the way.
  */
 export const ProjectConfigResultSchema = z.object({
-  /** Absolute `.claude-manager/` path, or null when the project has none. */
+  /** Absolute `.dispatch/` path, or null when the project has none. */
   sourceDir: z.string().nullable(),
   config: ProjectConfigSchema.nullable(),
   errors: z.array(ProjectConfigErrorSchema).default([]),

@@ -32,7 +32,7 @@ import type {
   WorkflowRun,
   WorkflowWithLastRun,
   WorkflowInput,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import {
   PRInfoSchema,
   CheckRunSchema,
@@ -41,7 +41,7 @@ import {
   WorkflowRunSchema,
   WorkflowWithLastRunSchema,
   WorkflowInputSchema,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 
@@ -116,7 +116,7 @@ const RUN_STATUSES = new Set<WorkflowRun["status"]>([
 /** Merge strategies (gh flags). */
 export type MergeMethod = "squash" | "merge" | "rebase";
 
-/** A PR issue-comment (no @cm/shared schema — light shape). */
+/** A PR issue-comment (no @dispatch/shared schema — light shape). */
 export interface PRComment {
   id: string;
   author?: string;
@@ -777,6 +777,32 @@ export class GitHubService {
     this.emitNotice(`Requested review from ${reviewer} on PR #${prNumber}`, "info", opts.chatId);
   }
 
+  /**
+   * Submit an APPROVING review on a PR. Best-effort by design: GitHub refuses to
+   * let an author approve their own pull request, and when Dispatch ships a
+   * PR under the human's own token that's exactly the case — so a rejection here
+   * is expected and NOT an error. Returns whether the approval actually landed,
+   * so the caller can say which happened rather than claiming a review it didn't
+   * get. The merge is the operation that matters; this is the paper trail.
+   */
+  async approve(
+    repo: string,
+    prNumber: number,
+    body?: string,
+    opts: OpCtx = {},
+  ): Promise<{ approved: boolean; error?: string }> {
+    const r = this.assertRepo(repo);
+    const args = ["pr", "review", String(prNumber), "--repo", r, "--approve"];
+    if (body?.trim()) args.push("--body", body.trim());
+    const res = await this.exec("gh", args, { reject: false });
+    if (res.exitCode !== 0) {
+      const error = (res.stderr || res.stdout || "").trim() || `gh exited ${res.exitCode}`;
+      return { approved: false, error };
+    }
+    this.emitNotice(`Approved PR #${prNumber}`, "info", opts.chatId);
+    return { approved: true };
+  }
+
   /** Re-run a single run's failed jobs (default) or the whole run. */
   async rerunRun(
     repo: string,
@@ -862,8 +888,22 @@ export class GitHubService {
     if (opts.deleteBranch !== false) args.push("--delete-branch");
     await this.gh(args);
     this.emitNotice(`Merged PR #${prNumber} (${method})`, "info", opts.chatId);
+    this.notePrMerged(opts.chatId);
     return this.refreshPr(repo, prNumber, { chatId: opts.chatId });
   }
+
+  /**
+   * Announce that a PR has landed. Called both when WE merge it and when
+   * `watch_pr` observes someone else's merge (the auto-merge job, a human) — the
+   * container hooks this up to the trunk sync, so the primary checkout follows
+   * the trunk regardless of who clicked merge.
+   */
+  notePrMerged(chatId?: string): void {
+    this.onMerged?.({ chatId });
+  }
+
+  /** Set by the container; fires whenever a PR is known to have merged. */
+  onMerged?: (evt: { chatId?: string }) => void;
 
   /** Add or remove a label. Emits the refreshed PR. */
   async setLabel(
