@@ -1,10 +1,10 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { ProjectConfigResult } from "@cm/shared";
+import type { ProjectConfigResult } from "@dispatch/shared";
 import { api } from "../lib/api.js";
 
 interface ConfigStore {
-  /** projectId → its last-loaded `.claude-manager/` result (config + errors). */
+  /** projectId → its last-loaded `.dispatch/` result (config + errors). */
   byProject: Record<string, ProjectConfigResult>;
   /** projectId → in-flight fetch flag. */
   loading: Record<string, boolean>;
@@ -21,7 +21,7 @@ interface ConfigStore {
   reset: () => void;
 }
 
-/** The per-project `.claude-manager/` config — the Project config view's spine.
+/** The per-project `.dispatch/` config — the Project config view's spine.
  *  Fetched on open + on Reload; also live-updated by the `project-config-update`
  *  WS event (a watcher edit / a scaffold / an import). */
 export const useConfig = create<ConfigStore>((set, get) => ({

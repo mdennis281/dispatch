@@ -26,7 +26,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { Chat, WsServerEvent } from "@cm/shared";
+import type { Chat, WsServerEvent } from "@dispatch/shared";
 import { EventBus } from "../../bus.js";
 import { Store } from "../../store/index.js";
 import { SessionBroker, type QueryFn } from "../session-broker.js";

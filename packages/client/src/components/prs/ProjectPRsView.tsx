@@ -28,7 +28,7 @@ import {
   Tag,
   type LucideIcon,
 } from "lucide-react";
-import type { PRInfo, CheckRun, ReviewDecision } from "@cm/shared";
+import type { PRInfo, CheckRun, ReviewDecision } from "@dispatch/shared";
 import { Modal, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { Chip, type Tone } from "../ui/Chip.js";

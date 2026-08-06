@@ -1,5 +1,5 @@
 import { memo, useCallback, useMemo, type ReactNode } from "react";
-import { parseSessionLimit, type ChatMessage, type ToolResultRow } from "@cm/shared";
+import { parseSessionLimit, type ChatMessage, type ToolResultRow } from "@dispatch/shared";
 import type { SubagentRun } from "../../lib/subagentRuns.js";
 import { findTaskStatus, indexTaskStatus } from "../../lib/subagentRuns.js";
 import { useSubagentRuns } from "../../lib/useSubagentRuns.js";

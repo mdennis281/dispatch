@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { McpCatalog } from "@cm/shared";
+import type { McpCatalog } from "@dispatch/shared";
 import { api } from "../lib/api.js";
 
 interface McpStore {

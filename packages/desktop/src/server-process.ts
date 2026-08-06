@@ -1,5 +1,5 @@
 /**
- * Supervises the claude-manager server as a child of the Electron shell.
+ * Supervises the Dispatch server as a child of the Electron shell.
  *
  * ── Why a child process and not just `import('./start.js')` in main ─────────
  * The Agent SDK spawns the `claude` CLI, and tooling that resolves a Node binary
@@ -74,7 +74,7 @@ function serverEntry(appDir: string): string {
     throw new Error(
       `server build not found at:\n  ${entry}\n\n` +
         `Build that checkout with \`pnpm build\`, or publish a payload with the\n` +
-        `"claude-manager: Publish to stable" task (\`pnpm desktop:publish\`).`,
+        `"Dispatch: Publish to stable" task (\`pnpm desktop:publish\`).`,
     );
   }
   return entry;
@@ -96,10 +96,10 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       ...process.env,
-      CM_IPC: "1",
-      CM_PORT: String(opts.port),
-      CM_DATA_DIR: opts.dataDir,
-      CM_CONFIG_DIR: opts.configDir,
+      DISPATCH_IPC: "1",
+      DISPATCH_PORT: String(opts.port),
+      DISPATCH_DATA_DIR: opts.dataDir,
+      DISPATCH_CONFIG_DIR: opts.configDir,
       // The shell owns the lifecycle; don't let a stale value leak in.
       ELECTRON_RUN_AS_NODE: undefined as unknown as string,
     },
@@ -122,7 +122,7 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
       for (const line of buf.toString("utf8").split("\n")) {
         if (!line.trim()) continue;
         record(line);
-        const ready = /\[claude-manager\] ready (\S+)/.exec(line);
+        const ready = /\[(?:dispatch|claude-manager)\] ready (\S+)/.exec(line);
         if (ready) {
           clearTimeout(timer);
           resolve(ready[1]!);

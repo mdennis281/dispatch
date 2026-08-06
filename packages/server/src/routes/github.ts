@@ -14,7 +14,7 @@
  *   POST /api/github/action { GhAction body }   → 202 (events stream over WS)
  */
 import type { FastifyInstance } from "fastify";
-import { GhActionSchema } from "@cm/shared";
+import { GhActionSchema } from "@dispatch/shared";
 import { runGhAction } from "./dispatch.js";
 
 async function repoFor(

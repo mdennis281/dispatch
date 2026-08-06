@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { PauseCircle, PlayCircle, X, CalendarClock } from "lucide-react";
-import type { ResultRow, ResumePlan } from "@cm/shared";
+import type { ResultRow, ResumePlan } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";

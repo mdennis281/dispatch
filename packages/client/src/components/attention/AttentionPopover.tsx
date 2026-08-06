@@ -1,5 +1,5 @@
 import { Inbox, ShieldQuestion, MessageCircleQuestion, CheckCircle2, ArrowRight } from "lucide-react";
-import type { AttentionItem } from "@cm/shared";
+import type { AttentionItem } from "@dispatch/shared";
 import { Popover } from "../ui/Popover.js";
 import { Badge, Chip } from "../ui/Chip.js";
 import { StatusDot } from "../ui/StatusDot.js";

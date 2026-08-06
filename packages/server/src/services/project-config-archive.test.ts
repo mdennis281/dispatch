@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
-import type { Project } from "@cm/shared";
+import type { Project } from "@dispatch/shared";
 import { ProjectConfigService } from "./project-config.js";
 import {
   ProjectConfigArchive,
@@ -116,7 +116,7 @@ describe("archive — pure mapping helpers", () => {
   it("renderManifestYaml parses back to the manifest", () => {
     const manifest = { name: "X", worktree: "pnpm worktree" };
     const yaml = renderManifestYaml(manifest);
-    expect(yaml).toContain("# .claude-manager/");
+    expect(yaml).toContain("# .dispatch/");
     expect(parseYaml(yaml)).toMatchObject({ name: "X", worktree: "pnpm worktree" });
   });
 
@@ -153,8 +153,8 @@ describe("ProjectConfigArchive — scaffold", () => {
     expect(out?.files).toContain("project.yaml");
     expect(out?.files).toContain("memory/deploy-runbook.md");
 
-    // On disk under the repo's .claude-manager/.
-    const manifestPath = join(repoDir, ".claude-manager", "project.yaml");
+    // On disk under the repo's .dispatch/.
+    const manifestPath = join(repoDir, ".dispatch", "project.yaml");
     expect(existsSync(manifestPath)).toBe(true);
     const manifest = parseYaml(await readFile(manifestPath, "utf8"));
     expect(manifest.name).toBe("Hivebreak");
@@ -164,12 +164,12 @@ describe("ProjectConfigArchive — scaffold", () => {
     expect(out?.result.config?.name).toBe("Hivebreak");
     expect(svc.getConfig("hivebreak")?.subApps.map((s) => s.id).sort()).toEqual(["game", "metrics"]);
     // memoryDir points at the repo's committable dir.
-    expect(svc.getConfig("hivebreak")?.memoryDir).toContain(".claude-manager");
+    expect(svc.getConfig("hivebreak")?.memoryDir).toContain(".dispatch");
   });
 
-  it("is a no-op (created:false) when a .claude-manager/ already exists (no force)", async () => {
+  it("is a no-op (created:false) when a .dispatch/ already exists (no force)", async () => {
     await seedProject();
-    const cfgDir = join(repoDir, ".claude-manager");
+    const cfgDir = join(repoDir, ".dispatch");
     await mkdir(cfgDir, { recursive: true });
     await writeFile(join(cfgDir, "project.yaml"), "name: Existing\n", "utf8");
 
@@ -191,7 +191,7 @@ describe("ProjectConfigArchive — scaffold", () => {
 describe("ProjectConfigArchive — export/import round-trip", () => {
   it("exports the real dir when present and re-imports it into a fresh repo", async () => {
     await seedProject();
-    const cfgDir = join(repoDir, ".claude-manager");
+    const cfgDir = join(repoDir, ".dispatch");
     await mkdir(join(cfgDir, "instructions"), { recursive: true });
     await writeFile(
       join(cfgDir, "project.yaml"),
@@ -203,7 +203,7 @@ describe("ProjectConfigArchive — export/import round-trip", () => {
     const { archive } = makeArchive();
     const exp = await archive.exportArchive("hivebreak");
     expect(exp?.fromDisk).toBe(true);
-    expect(exp?.filename).toBe("hivebreak.cm");
+    expect(exp?.filename).toBe("hivebreak.dispatch");
     const names = unzipSync(exp!.buffer).map((e) => e.path).sort();
     expect(names).toEqual(["instructions/house.md", "project.yaml"]);
 
@@ -221,7 +221,7 @@ describe("ProjectConfigArchive — export/import round-trip", () => {
       });
       const imp = await archive.importArchive("other", exp!.buffer);
       expect(imp?.files.sort()).toEqual(["instructions/house.md", "project.yaml"]);
-      expect(existsSync(join(otherRepo, ".claude-manager", "instructions", "house.md"))).toBe(true);
+      expect(existsSync(join(otherRepo, ".dispatch", "instructions", "house.md"))).toBe(true);
       // Reloaded: the imported manifest is live.
       expect(imp?.result.config?.name).toBe("Hivebreak");
       expect(imp?.result.config?.instructionsText).toContain("House rules.");
@@ -230,7 +230,7 @@ describe("ProjectConfigArchive — export/import round-trip", () => {
     }
   });
 
-  it("synthesizes a scaffold on export when no .claude-manager/ exists", async () => {
+  it("synthesizes a scaffold on export when no .dispatch/ exists", async () => {
     await seedProject();
     await seedMemory("note.md", "---\nname: note\ndescription: n\ntype: project\n---\nbody");
     const { archive } = makeArchive();

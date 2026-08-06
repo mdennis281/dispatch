@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { ListChecks, Circle, CircleCheck, ChevronDown } from "lucide-react";
-import type { ChatMessage } from "@cm/shared";
+import type { ChatMessage } from "@dispatch/shared";
 import { Spinner } from "../ui/Spinner.js";
 import { cn } from "../../lib/cn.js";
 import { deriveTodos, type Todo } from "./todos.js";

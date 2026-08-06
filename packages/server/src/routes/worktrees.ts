@@ -122,7 +122,7 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
   });
 
   // Save edited file content back to the working tree (editable Monaco config
-  // editor). Path-guarded inside the service; the fs watcher on `.claude-manager/`
+  // editor). Path-guarded inside the service; the fs watcher on `.dispatch/`
   // picks up a project.yaml edit and re-syncs the project without a manual reload.
   app.put("/api/worktrees/file", async (req, reply) => {
     const body = (req.body ?? {}) as {

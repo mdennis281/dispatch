@@ -7,6 +7,6 @@ import { start } from "./start.js";
 
 start({ dev: true }).catch((err) => {
   // eslint-disable-next-line no-console
-  console.error("[claude-manager] failed to start:", err);
+  console.error("[Dispatch] failed to start:", err);
   process.exit(1);
 });

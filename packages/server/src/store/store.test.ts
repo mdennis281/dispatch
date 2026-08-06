@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./index.js";
-import type { Project, Chat, ChatMessage, RunnerInstance, Checkpoint } from "@cm/shared";
+import type { Project, Chat, ChatMessage, RunnerInstance, Checkpoint } from "@dispatch/shared";
 
 let dir: string;
 let store: Store;

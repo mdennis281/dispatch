@@ -1,5 +1,5 @@
 import { memo } from "react";
-import type { UserMessageRow } from "@cm/shared";
+import type { UserMessageRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { Chip } from "../../ui/Chip.js";
 import { ImageThumb } from "./ImageThumb.js";

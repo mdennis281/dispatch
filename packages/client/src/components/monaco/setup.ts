@@ -15,9 +15,9 @@ import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 };
 
 /** Registered theme name — matches the Linear/Zed tokens in index.css. */
-export const CM_THEME = "cm-dark";
+export const DISPATCH_THEME = "dispatch-dark";
 
-monaco.editor.defineTheme(CM_THEME, {
+monaco.editor.defineTheme(DISPATCH_THEME, {
   base: "vs-dark",
   inherit: true,
   rules: [

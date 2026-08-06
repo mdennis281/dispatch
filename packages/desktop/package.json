@@ -1,8 +1,8 @@
 {
-  "name": "@cm/desktop",
+  "name": "@dispatch/desktop",
   "private": true,
   "version": "0.0.0",
-  "description": "Electron shell for claude-manager — owns the server process and every child it spawns.",
+  "description": "Electron shell for Dispatch — owns the server process and every child it spawns.",
   "main": "dist/main.js",
   "scripts": {
     "build": "node scripts/generate-icon.mjs && tsc -p tsconfig.json",

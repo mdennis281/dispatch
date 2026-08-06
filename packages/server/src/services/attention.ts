@@ -10,7 +10,7 @@
  * to remember what is currently outstanding and answer `list()` queries. On
  * `attention-resolve` (or when a chat is deleted) the matching item(s) drop out.
  */
-import type { AttentionItem, WsServerEvent } from "@cm/shared";
+import type { AttentionItem, WsServerEvent } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 
 /** Kind → triage weight (higher = more urgent, sorted first in `list()`). */

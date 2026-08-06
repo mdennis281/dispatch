@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
-import type { Project, WsServerEvent } from "@cm/shared";
+import type { Project, WsServerEvent } from "@dispatch/shared";
 import {
   ProjectConfigService,
   mergeProject,
@@ -51,9 +51,9 @@ async function seedProject(over: Partial<Project> = {}): Promise<Project> {
   return store.saveProject(project);
 }
 
-/** Write a file under the repo's `.claude-manager/` dir (creating parents). */
+/** Write a file under the repo's `.dispatch/` dir (creating parents). */
 async function writeConfig(rel: string, body: string): Promise<void> {
-  const abs = join(repoDir, ".claude-manager", rel);
+  const abs = join(repoDir, ".dispatch", rel);
   await mkdir(join(abs, ".."), { recursive: true });
   await writeFile(abs, body, "utf8");
 }
@@ -117,7 +117,7 @@ describe("project-config helpers", () => {
 
 /* -------------------------------------------------------------------- load */
 
-describe("ProjectConfigService — load a valid .claude-manager/", () => {
+describe("ProjectConfigService — load a valid .dispatch/", () => {
   it("normalizes the manifest + referenced files into a ProjectConfig", async () => {
     const project = await seedProject();
     await writeConfig(
@@ -179,7 +179,7 @@ describe("ProjectConfigService — load a valid .claude-manager/", () => {
     const result = await svc.load(project);
 
     expect(result.errors).toEqual([]);
-    expect(result.sourceDir).toContain(".claude-manager");
+    expect(result.sourceDir).toContain(".dispatch");
     const cfg = result.config!;
     expect(cfg.name).toBe("Hivebreak");
     expect(cfg.worktreeCmd).toBe("pnpm worktree");
@@ -346,7 +346,7 @@ describe("ProjectConfigService — resilience (structured errors, never a throw)
     const svc = new ProjectConfigService({ store, bus });
     const result = await svc.load(project);
     expect(result.config).toBeNull();
-    expect(result.sourceDir).toContain(".claude-manager");
+    expect(result.sourceDir).toContain(".dispatch");
     expect(result.errors.some((e) => e.scope === "manifest")).toBe(true);
   });
 
@@ -382,7 +382,7 @@ describe("ProjectConfigService — resilience (structured errors, never a throw)
 
 /* ------------------------------------------------------- no-dir fallback */
 
-describe("ProjectConfigService — back-compat (no .claude-manager/)", () => {
+describe("ProjectConfigService — back-compat (no .dispatch/)", () => {
   it("no dir → { sourceDir: null, config: null } and the store project is untouched", async () => {
     const project = await seedProject({ name: "Untouched", worktreeCmd: "pnpm worktree" });
     const svc = new ProjectConfigService({ store, bus });
@@ -568,7 +568,7 @@ describe("project-config registry helpers", () => {
   it("renderInstructionsInjection delimits non-empty text and returns null for blank", () => {
     const out = renderInstructionsInjection("House rules here.");
     expect(out).toContain("Project instructions");
-    expect(out).toContain(".claude-manager/");
+    expect(out).toContain(".dispatch/");
     expect(out).toContain("House rules here.");
     expect(renderInstructionsInjection("")).toBeNull();
     expect(renderInstructionsInjection("   \n  ")).toBeNull();
@@ -666,7 +666,7 @@ describe("ProjectConfigService — watch + debounced reload", () => {
     expect(watch.closed()).toBe(true);
   });
 
-  it("watchProject is a no-op when the project has no .claude-manager/ dir", async () => {
+  it("watchProject is a no-op when the project has no .dispatch/ dir", async () => {
     const project = await seedProject();
     const watch = captureWatch();
     const svc = new ProjectConfigService({ store, bus, watch: watch.factory });

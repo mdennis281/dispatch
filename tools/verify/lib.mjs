@@ -1,8 +1,8 @@
 /**
  * Reusable headless-Chromium page factory + a numbered `shot()` helper for the
- * claude-manager verification harness.
+ * Dispatch verification harness.
  *
- * It drives an ALREADY-RUNNING @cm/server (default http://127.0.0.1:4319) and
+ * It drives an ALREADY-RUNNING @dispatch/server (default http://127.0.0.1:4319) and
  * writes labeled PNGs to an output dir. It NEVER spawns or stops the server —
  * unlike packages/client/scripts/shot.mjs (which boots a `vite preview`) this is
  * meant for fast, tab-free verification against the live cockpit.
@@ -19,7 +19,7 @@ export const repoRoot = resolve(here, "../..");
 export const DEFAULT_BASE = "http://127.0.0.1:4319";
 
 /**
- * `@playwright/test` is a devDependency of @cm/client and lives in pnpm's virtual
+ * `@playwright/test` is a devDependency of @dispatch/client and lives in pnpm's virtual
  * store, so it does NOT resolve from the repo root. Resolve it *from the client
  * package* and dynamic-import the file URL — no root-level dependency needed.
  */
@@ -43,7 +43,7 @@ export async function assertServerUp(base) {
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `claude-manager server not reachable at ${base} (${why}). ` +
+      `Dispatch server not reachable at ${base} (${why}). ` +
         `Start it (pnpm start) or pass --base <url>.`,
     );
   }
@@ -95,7 +95,7 @@ export async function createHarness({ base = DEFAULT_BASE, out, scale = 2, viewp
 /** Navigate to the app; wait for the shell, then a SOFT wait for WS "Connected". */
 export async function gotoApp(page, base, timeout = 20_000) {
   await page.goto(`${base}/`, { waitUntil: "networkidle" });
-  await page.getByText("claude-manager").first().waitFor({ timeout });
+  await page.getByText("Dispatch").first().waitFor({ timeout });
   // WS hydrate is best-effort — screenshot even if it stays "Connecting…".
   await page
     .getByText("Connected")

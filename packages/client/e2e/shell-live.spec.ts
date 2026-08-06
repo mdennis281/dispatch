@@ -1,7 +1,7 @@
 /**
- * Live end-to-end smoke of the whole cockpit against a REAL @cm/server.
+ * Live end-to-end smoke of the whole cockpit against a REAL @dispatch/server.
  *
- * Boots the Fastify backend on a temp port + temp CM_DATA_DIR with CM_FAKE_SDK=1
+ * Boots the Fastify backend on a temp port + temp DISPATCH_DATA_DIR with DISPATCH_FAKE_SDK=1
  * (a deterministic in-process echo — no `claude` subprocess, no auth/network),
  * serving the built SPA at same origin, then drives the UI:
  *   WS connects (hello) → seeded config hydrates → create a project via the UI →
@@ -47,15 +47,15 @@ test.beforeAll(async () => {
   expect(existsSync(distIndex), `built SPA missing at ${distIndex} — run vite build first`).toBe(true);
 
   dataDir = mkdtempSync(join(tmpdir(), "cm-e2e-"));
-  server = spawn("pnpm", ["--filter", "@cm/server", "exec", "tsx", "src/index.ts"], {
+  server = spawn("pnpm", ["--filter", "@dispatch/server", "exec", "tsx", "src/index.ts"], {
     cwd: repoRoot,
     shell: true,
     env: {
       ...process.env,
-      CM_PORT: String(PORT),
-      CM_HOST: "127.0.0.1",
-      CM_DATA_DIR: dataDir,
-      CM_FAKE_SDK: "1",
+      DISPATCH_PORT: String(PORT),
+      DISPATCH_HOST: "127.0.0.1",
+      DISPATCH_DATA_DIR: dataDir,
+      DISPATCH_FAKE_SDK: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

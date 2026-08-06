@@ -12,7 +12,7 @@
  */
 import { useMemo, useState } from "react";
 import { Check, GitBranch, Plus, Search, Cloud, FolderGit2, ChevronsUpDown } from "lucide-react";
-import type { GitBranch as GitBranchInfo, GitStatus } from "@cm/shared";
+import type { GitBranch as GitBranchInfo, GitStatus } from "@dispatch/shared";
 import { Popover } from "../ui/Popover.js";
 import { Button } from "../ui/Button.js";
 import { Chip } from "../ui/Chip.js";

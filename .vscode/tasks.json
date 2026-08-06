@@ -2,8 +2,8 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "claude-manager: Publish to stable",
-      "detail": "Build the committed HEAD into the installed app (%LOCALAPPDATA%\\claude-manager\\app). Refuses to run while the app is open.",
+      "label": "Dispatch: Publish to stable",
+      "detail": "Build the committed HEAD into the installed app (%LOCALAPPDATA%\\Dispatch\\app). Refuses to run while the app is open.",
       "type": "shell",
       "command": "pnpm desktop:publish",
       "problemMatcher": [],
@@ -11,7 +11,7 @@
       "group": "build"
     },
     {
-      "label": "claude-manager: Publish to stable (dry run)",
+      "label": "Dispatch: Publish to stable (dry run)",
       "detail": "Show what would be published — which sha, and whether the dev tree is dirty — without writing anything.",
       "type": "shell",
       "command": "pnpm desktop:publish -- --dry-run",
@@ -19,7 +19,7 @@
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
     },
     {
-      "label": "claude-manager: Run stable app",
+      "label": "Dispatch: Run stable app",
       "detail": "Launch the installed Electron app from the published payload.",
       "type": "shell",
       "command": "pnpm desktop",
@@ -28,8 +28,8 @@
       "presentation": { "reveal": "silent", "panel": "dedicated" }
     },
     {
-      "label": "claude-manager: Run shell against this checkout",
-      "detail": "Iterate on the Electron shell itself using this repo's build (CM_APP_DIR). Run 'pnpm build' first after server changes.",
+      "label": "Dispatch: Run shell against this checkout",
+      "detail": "Iterate on the Electron shell itself using this repo's build (DISPATCH_APP_DIR). Run 'pnpm build' first after server changes.",
       "type": "shell",
       "command": "pnpm desktop:dev",
       "problemMatcher": [],
@@ -37,15 +37,15 @@
       "presentation": { "reveal": "always", "panel": "dedicated" }
     },
     {
-      "label": "claude-manager: Install branded runtime (after Electron upgrade)",
-      "detail": "Copy Electron to shell/ as claude-manager.exe with the icon embedded. Needed once per Electron version — this is what makes taskbar pinning keep the icon.",
+      "label": "Dispatch: Install branded runtime (after Electron upgrade)",
+      "detail": "Copy Electron to shell/ as Dispatch.exe with the icon embedded. Needed once per Electron version — this is what makes taskbar pinning keep the icon.",
       "type": "shell",
       "command": "pnpm desktop:install-shell",
       "problemMatcher": [],
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
     },
     {
-      "label": "claude-manager: Create Start-menu shortcut",
+      "label": "Dispatch: Create Start-menu shortcut",
       "detail": "Point a Start-menu (add --desktop for Desktop) shortcut at the installed payload's Electron.",
       "type": "shell",
       "command": "pnpm desktop:shortcut",
@@ -53,7 +53,7 @@
       "presentation": { "reveal": "always", "panel": "dedicated" }
     },
     {
-      "label": "claude-manager: Migrate .data -> AppData (dry run)",
+      "label": "Dispatch: Migrate .data -> AppData (dry run)",
       "detail": "Preview the one-time split of a single-root .data store into data/ + config/. Copies only; never deletes the source.",
       "type": "shell",
       "command": "pnpm desktop:migrate -- --dry-run",
@@ -61,7 +61,7 @@
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
     },
     {
-      "label": "claude-manager: Dev server (pnpm dev)",
+      "label": "Dispatch: Dev server (pnpm dev)",
       "detail": "The hot-reload dev instance on :4319 — unaffected by the stable app on :4318.",
       "type": "shell",
       "command": "pnpm dev",

@@ -13,9 +13,9 @@ export interface DesktopPaths {
   root: string;
   /** Payload the shell runs: a built checkout with `packages/server/dist`. */
   app: string;
-  /** CM_DATA_DIR — chats, checkpoints, runners. Per-instance. */
+  /** DISPATCH_DATA_DIR — chats, checkpoints, runners. Per-instance. */
   dataDir: string;
-  /** CM_CONFIG_DIR — settings, projects, agents, modes. Shareable. */
+  /** DISPATCH_CONFIG_DIR — settings, projects, agents, modes. Shareable. */
   configDir: string;
   /** Build stamp written by the publish script (commit sha + time). */
   stamp: string;
@@ -29,11 +29,13 @@ export interface DesktopPaths {
 
 /**
  * `%LOCALAPPDATA%`, never `%APPDATA%`: the state dir is ~500 MB of transcripts
- * and has no business roaming. `CM_HOME` overrides the whole root.
+ * and has no business roaming. `DISPATCH_HOME` overrides the whole root.
  */
 export function desktopPaths(env: NodeJS.ProcessEnv = process.env): DesktopPaths {
-  const root = env.CM_HOME
-    ? resolve(env.CM_HOME)
+  // `CM_HOME` fallback: a shortcut created before the rename still sets it.
+  const home = env.DISPATCH_HOME ?? env.CM_HOME;
+  const root = home
+    ? resolve(home)
     : join(
         env.LOCALAPPDATA ??
           env.XDG_DATA_HOME ??
@@ -41,6 +43,10 @@ export function desktopPaths(env: NodeJS.ProcessEnv = process.env): DesktopPaths
             homedir(),
             process.platform === "darwin" ? "Library/Application Support" : ".local/share",
           ),
+        // Deliberately still the pre-rename name: renaming this root would
+        // strand every existing chat transcript behind a one-shot migration,
+        // for a directory no user ever opens. Move it with `desktop:migrate`
+        // as its own decision, not as a side effect of the branding change.
         "claude-manager",
       );
   return {

@@ -13,7 +13,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import * as z from "zod";
-import { MemoryTypeSchema } from "@cm/shared";
+import { MemoryTypeSchema } from "@dispatch/shared";
 
 const MemoryBodySchema = z.object({
   name: z.string().optional(),

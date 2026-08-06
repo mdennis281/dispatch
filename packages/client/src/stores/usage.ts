@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { UsageSnapshot } from "@cm/shared";
+import type { UsageSnapshot } from "@dispatch/shared";
 import { api } from "../lib/api.js";
 
 interface UsageStore {

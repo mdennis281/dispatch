@@ -1,17 +1,17 @@
 /**
- * args — a tiny flag parser plus the `cm mcp add` flag→transport mapping.
+ * args — a tiny flag parser plus the `dispatch mcp add` flag→transport mapping.
  *
  * The flag surface deliberately MIRRORS `claude mcp add`, because that's the
  * syntax every published MCP server's README already shows and the syntax users
  * have muscle memory for:
  *
- *   cm mcp add <name> [-e KEY=VAL]... -- <command> [args...]
- *   cm mcp add <name> --transport http --url <url> [-H "Key: Value"]...
+ *   dispatch mcp add <name> [-e KEY=VAL]... -- <command> [args...]
+ *   dispatch mcp add <name> --transport http --url <url> [-H "Key: Value"]...
  *
  * Kept dependency-free on purpose: a CLI that projects run on every machine
  * shouldn't drag in a parser library for ~15 flags.
  */
-import { ManifestMcpTransportSchema, type ManifestMcpTransport } from "@cm/shared";
+import { ManifestMcpTransportSchema, type ManifestMcpTransport } from "@dispatch/shared";
 import { CmError } from "./manifest.js";
 
 /** A parsed argv: ordered positionals, repeatable flags, and post-`--` argv. */
@@ -157,7 +157,7 @@ export function parseHeaderPairs(values: readonly string[]): Record<string, stri
 /* ------------------------------------------------------------- transport */
 
 /**
- * Build a manifest transport from parsed `cm mcp add` flags.
+ * Build a manifest transport from parsed `dispatch mcp add` flags.
  *
  * The transport is inferred the way `claude mcp add` infers it: an explicit
  * `--transport` wins; otherwise a `--url` means http and anything else means
@@ -194,7 +194,7 @@ export function transportFromArgs(args: ParsedArgs, positionalsAfterName: string
   const command = argv[0];
   if (!command) {
     throw new CmError(
-      "No command given. Use `cm mcp add <name> -- <command> [args...]` for a stdio server, " +
+      "No command given. Use `dispatch mcp add <name> -- <command> [args...]` for a stdio server, " +
         "or `--transport http --url <url>` for a remote one.",
     );
   }

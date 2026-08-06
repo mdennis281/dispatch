@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Install the branded Electron runtime — the app's own `claude-manager.exe`.
+ * Install the branded Electron runtime — the app's own `dispatch.exe`.
  *
  * ── Why this exists ─────────────────────────────────────────────────────────
  * Windows identifies a taskbar item by the TARGET EXECUTABLE of its shortcut,
@@ -93,7 +93,7 @@ async function assertNotRunning(paths) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const paths = desktopPaths(args.target ? { ...process.env, CM_HOME: args.target } : process.env);
+  const paths = desktopPaths(args.target ? { ...process.env, DISPATCH_HOME: args.target } : process.env);
   const electronPkg = findElectronDist(paths);
   const version = JSON.parse(await readFile(join(electronPkg, "package.json"), "utf8")).version;
   const marker = join(paths.shell, ".electron-version");
@@ -130,18 +130,18 @@ async function main() {
     }
     const icon = join(repoRoot, "packages", "desktop", "assets", "icon.ico");
     if (!existsSync(icon)) {
-      throw new Error(`icon.ico missing — run \`pnpm --filter @cm/desktop icon\` first.`);
+      throw new Error(`icon.ico missing — run \`pnpm --filter @dispatch/desktop icon\` first.`);
     }
     console.log("stamping icon + version info...");
     await rcedit(paths.exe, {
       icon,
       "version-string": {
-        ProductName: "claude-manager",
-        FileDescription: "claude-manager — local control plane for Claude Code agents",
-        CompanyName: "claude-manager",
+        ProductName: "Dispatch",
+        FileDescription: "Dispatch — local control plane for Claude Code agents",
+        CompanyName: "Dispatch",
         LegalCopyright: "",
-        OriginalFilename: "claude-manager.exe",
-        InternalName: "claude-manager",
+        OriginalFilename: "dispatch.exe",
+        InternalName: "Dispatch",
       },
     });
   }

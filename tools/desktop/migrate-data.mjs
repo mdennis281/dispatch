@@ -91,7 +91,7 @@ function human(bytes) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const source = resolve(args.source ?? join(repoRoot, ".data"));
-  const paths = desktopPaths(args.target ? { ...process.env, CM_HOME: args.target } : process.env);
+  const paths = desktopPaths(args.target ? { ...process.env, DISPATCH_HOME: args.target } : process.env);
 
   console.log(`source : ${source}`);
   console.log(`target : ${paths.root}`);

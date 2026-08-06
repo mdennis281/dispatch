@@ -4,7 +4,7 @@
  *   2. multi-message input works — push a 2nd message after turn 1 completes (mid-run steering primitive)
  *   3. Query.interrupt() is available
  *
- * Run: pnpm --filter @cm/server exec tsx spikes/streaming-input.ts
+ * Run: pnpm --filter @dispatch/server exec tsx spikes/streaming-input.ts
  */
 import { query, type SDKMessage, type SDKUserMessage, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { mkdtempSync } from "node:fs";

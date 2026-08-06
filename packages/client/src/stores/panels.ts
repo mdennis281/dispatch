@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { WorktreeInfo, PRInfo, WorkflowRun } from "@cm/shared";
+import type { WorktreeInfo, PRInfo, WorkflowRun } from "@dispatch/shared";
 
 export interface WorktreeDiff {
   additions: number;

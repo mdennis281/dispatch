@@ -5,7 +5,7 @@
  * explicitly searched and got it back — the strong "was needed" signal) and
  * `surfaced` (auto-pushed into a turn — a weaker, proactive signal), plus when
  * it was last touched. This is runtime signal, NOT source of truth: it lives in
- * the `.data` store (never the committable `.claude-manager/memory/` dir) so it
+ * the `.data` store (never the committable `.dispatch/memory/` dir) so it
  * can't churn the repo, and a missing or corrupt file simply reads back as "no
  * stats yet".
  *

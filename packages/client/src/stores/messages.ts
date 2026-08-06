@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { useStoreWithEqualityFn } from "zustand/traditional";
-import type { ChatMessage, PermissionRequest, PermissionRow } from "@cm/shared";
+import type { ChatMessage, PermissionRequest, PermissionRow } from "@dispatch/shared";
 
 /** Per-chat backward-paging state for the windowed transcript. */
 export interface ChatPage {

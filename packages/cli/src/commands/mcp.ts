@@ -1,5 +1,5 @@
 /**
- * `cm mcp …` — the terminal face of the MCP config core.
+ * `dispatch mcp …` — the terminal face of the MCP config core.
  *
  * Every command here is a thin shell: parse flags, call one `core/mcp.ts`
  * function, print the result. Two output modes are supported throughout —
@@ -12,8 +12,8 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
-import type { ManifestMcpServer } from "@cm/shared";
-import { referencedEnvVars } from "@cm/shared";
+import type { ManifestMcpServer } from "@dispatch/shared";
+import { referencedEnvVars } from "@dispatch/shared";
 import {
   addServer,
   describeTransport,
@@ -63,7 +63,7 @@ function warnUnsetPlaceholders(server: ManifestMcpServer): void {
   if (!missing.length) return;
   process.stderr.write(
     `  note: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not set in this shell — ` +
-      `set ${missing.length === 1 ? "it" : "them"} where claude-manager runs.\n`,
+      `set ${missing.length === 1 ? "it" : "them"} where Dispatch runs.\n`,
   );
 }
 
@@ -71,7 +71,7 @@ function warnUnsetPlaceholders(server: ManifestMcpServer): void {
 
 async function cmdAdd(args: ParsedArgs): Promise<void> {
   const [name, ...rest] = args.positionals;
-  if (!name) throw new CmError("Usage: cm mcp add <name> -- <command> [args...]");
+  if (!name) throw new CmError("Usage: dispatch mcp add <name> -- <command> [args...]");
   const transport = transportFromArgs(args, rest);
   const result = await addServer(targetDir(args), { name, transport }, { force: has(args, "force") });
 
@@ -92,7 +92,7 @@ async function cmdAdd(args: ParsedArgs): Promise<void> {
 async function cmdAddJson(args: ParsedArgs): Promise<void> {
   const [name, json] = args.positionals;
   if (!name || !json) {
-    throw new CmError(`Usage: cm mcp add-json <name> '{"command":"npx","args":["-y","pkg"]}'`);
+    throw new CmError(`Usage: dispatch mcp add-json <name> '{"command":"npx","args":["-y","pkg"]}'`);
   }
   let value: unknown;
   try {
@@ -101,7 +101,7 @@ async function cmdAddJson(args: ParsedArgs): Promise<void> {
     throw new CmError(`Not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Reuse the import converter so `add-json` accepts exactly the same server
-  // shape as `cm mcp import` — one definition of "what a server object is".
+  // shape as `dispatch mcp import` — one definition of "what a server object is".
   const { mcpJsonEntryToTransport } = await import("../core/mcp.js");
   const transport = mcpJsonEntryToTransport(value);
   const result = await addServer(targetDir(args), { name, transport }, { force: has(args, "force") });
@@ -124,7 +124,7 @@ async function cmdList(args: ParsedArgs): Promise<void> {
   if (!servers.length) {
     process.stdout.write(
       `No MCP servers configured in ${displayPath(paths.manifestPath)}\n` +
-        `  Add one:  cm mcp add <name> -- <command> [args...]\n`,
+        `  Add one:  dispatch mcp add <name> -- <command> [args...]\n`,
     );
     return;
   }
@@ -138,7 +138,7 @@ async function cmdList(args: ParsedArgs): Promise<void> {
 
 async function cmdGet(args: ParsedArgs): Promise<void> {
   const [name] = args.positionals;
-  if (!name) throw new CmError("Usage: cm mcp get <name>");
+  if (!name) throw new CmError("Usage: dispatch mcp get <name>");
   const server = await getServer(targetDir(args), name);
   if (!server) throw new CmError(`No MCP server named "${name}" in this project.`);
   if (emitJson(args, server)) return;
@@ -163,7 +163,7 @@ async function cmdGet(args: ParsedArgs): Promise<void> {
 
 async function cmdRemove(args: ParsedArgs): Promise<void> {
   const [name] = args.positionals;
-  if (!name) throw new CmError("Usage: cm mcp remove <name>");
+  if (!name) throw new CmError("Usage: dispatch mcp remove <name>");
   const { removed, paths } = await removeServer(targetDir(args), name);
   if (emitJson(args, { ok: removed, name })) return;
   if (!removed) throw new CmError(`No MCP server named "${name}" to remove.`);
@@ -172,7 +172,7 @@ async function cmdRemove(args: ParsedArgs): Promise<void> {
 
 /* ----------------------------------------------------------------- import */
 
-/** Well-known files to try, in order, when `cm mcp import` is given no path. */
+/** Well-known files to try, in order, when `dispatch mcp import` is given no path. */
 function importCandidates(dir: string): string[] {
   const home = homedir();
   return [
@@ -194,7 +194,7 @@ async function cmdImport(args: ParsedArgs): Promise<void> {
   if (!source) {
     throw new CmError(
       "Nothing to import — pass a file explicitly:\n" +
-        "  cm mcp import ./.mcp.json\n" +
+        "  dispatch mcp import ./.mcp.json\n" +
         "Looked for .mcp.json, .vscode/mcp.json, and the Claude Desktop config.",
     );
   }
@@ -244,23 +244,23 @@ async function cmdInit(args: ParsedArgs): Promise<void> {
   if (emitJson(args, { ok: true, manifest: written })) return;
   process.stdout.write(
     `Created ${displayPath(written)}\n` +
-      `  Next:  cm mcp add <name> -- <command> [args...]\n`,
+      `  Next:  dispatch mcp add <name> -- <command> [args...]\n`,
   );
 }
 
 /* --------------------------------------------------------------- dispatch */
 
-export const MCP_HELP = `cm mcp — manage this project's MCP servers (.claude-manager/project.yaml)
+export const MCP_HELP = `dispatch mcp — manage this project's MCP servers (.dispatch/project.yaml)
 
 Usage:
-  cm mcp add <name> [options] -- <command> [args...]   Add a stdio (subprocess) server
-  cm mcp add <name> --transport http --url <url>       Add a remote HTTP/SSE server
-  cm mcp add-json <name> '<json>'                      Add from a README's JSON snippet
-  cm mcp list                                          List configured servers
-  cm mcp get <name>                                    Show one server in full
-  cm mcp remove <name>                                 Remove a server
-  cm mcp import [file]                                 Import from .mcp.json / Claude Desktop
-  cm mcp init                                          Scaffold .claude-manager/project.yaml
+  dispatch mcp add <name> [options] -- <command> [args...]   Add a stdio (subprocess) server
+  dispatch mcp add <name> --transport http --url <url>       Add a remote HTTP/SSE server
+  dispatch mcp add-json <name> '<json>'                      Add from a README's JSON snippet
+  dispatch mcp list                                          List configured servers
+  dispatch mcp get <name>                                    Show one server in full
+  dispatch mcp remove <name>                                 Remove a server
+  dispatch mcp import [file]                                 Import from .mcp.json / Claude Desktop
+  dispatch mcp init                                          Scaffold .dispatch/project.yaml
 
 Options:
   -t, --transport <stdio|http|sse>  Transport (default: stdio, or http when --url is given)
@@ -273,19 +273,19 @@ Options:
 
 Secrets:
   Values may contain \${VAR} or \${VAR:-default} placeholders, expanded from the
-  environment claude-manager runs in. Keep real keys out of the committed file:
+  environment Dispatch runs in. Keep real keys out of the committed file:
 
-  cm mcp add linear --transport http --url https://mcp.linear.app/mcp \\
+  dispatch mcp add linear --transport http --url https://mcp.linear.app/mcp \\
     -H "Authorization: Bearer \${LINEAR_API_KEY}"
 
 Examples:
-  cm mcp add ripgrep -- npx -y mcp-ripgrep@latest
-  cm mcp add postgres -e DATABASE_URL=\${DATABASE_URL} -- npx -y @modelcontextprotocol/server-postgres
-  cm mcp add sentry --transport sse --url https://mcp.sentry.dev/sse
-  cm mcp import ./.mcp.json
+  dispatch mcp add ripgrep -- npx -y mcp-ripgrep@latest
+  dispatch mcp add postgres -e DATABASE_URL=\${DATABASE_URL} -- npx -y @modelcontextprotocol/server-postgres
+  dispatch mcp add sentry --transport sse --url https://mcp.sentry.dev/sse
+  dispatch mcp import ./.mcp.json
 `;
 
-/** Route a `cm mcp <sub> …` invocation. */
+/** Route a `dispatch mcp <sub> …` invocation. */
 export async function runMcpCommand(argv: readonly string[]): Promise<void> {
   const [sub, ...rest] = argv;
   if (!sub || sub === "help" || sub === "--help" || sub === "-h") {
@@ -318,7 +318,7 @@ export async function runMcpCommand(argv: readonly string[]): Promise<void> {
     case "init":
       return cmdInit(args);
     default:
-      throw new CmError(`Unknown command "cm mcp ${sub}". Run \`cm mcp help\` for usage.`);
+      throw new CmError(`Unknown command "dispatch mcp ${sub}". Run \`dispatch mcp help\` for usage.`);
   }
 }
 

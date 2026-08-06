@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { ChatMessage } from "@cm/shared";
+import type { ChatMessage } from "@dispatch/shared";
 import { useMessages, MAX_WINDOW_ROWS, TRIM_SLACK } from "./messages.js";
 
 const CHAT = "c1";

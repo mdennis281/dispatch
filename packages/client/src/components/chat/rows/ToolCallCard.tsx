@@ -1,6 +1,6 @@
 import { memo, useState } from "react";
 import { ChevronRight, Check, X, FileDiff, FileCode2, Square, Moon } from "lucide-react";
-import type { ToolUseRow, ToolResultRow, TaskStatusRow } from "@cm/shared";
+import type { ToolUseRow, ToolResultRow, TaskStatusRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { toolIcon } from "../toolIcon.js";
 import { ImageThumb } from "./ImageThumb.js";

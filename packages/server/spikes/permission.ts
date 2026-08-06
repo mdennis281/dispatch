@@ -4,7 +4,7 @@
  * genuinely-gated action (Write), that ALLOW and DENY both work, and that the callback
  * hands us pre-rendered prompt text (title/displayName) for the UI cards.
  *
- * Run: pnpm --filter @cm/server exec tsx spikes/permission.ts
+ * Run: pnpm --filter @dispatch/server exec tsx spikes/permission.ts
  */
 import { query, type SDKUserMessage, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { mkdtempSync, existsSync } from "node:fs";

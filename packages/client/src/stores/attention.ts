@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AttentionItem } from "@cm/shared";
+import type { AttentionItem } from "@dispatch/shared";
 
 /** Rank order for the triage list: decisions first, then questions, then FYI. */
 const RANK: Record<AttentionItem["kind"], number> = {

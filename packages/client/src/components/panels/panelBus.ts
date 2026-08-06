@@ -5,7 +5,7 @@
  * enriches it with the worktree branch, and opens the viewer. Plus a few pure
  * utilities shared across the three panels.
  */
-import type { Chat, WorktreeInfo } from "@cm/shared";
+import type { Chat, WorktreeInfo } from "@dispatch/shared";
 
 /** Detail of the `cm:open-file` event the Monaco area consumes. */
 export interface OpenFileRequest {

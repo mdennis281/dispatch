@@ -6,7 +6,7 @@
  *   - domain events flow onto the bus
  *   - the transcript is persisted to the filesystem Store
  *
- * Run (after building): pnpm --filter @cm/server exec tsx spikes/live-session.ts
+ * Run (after building): pnpm --filter @dispatch/server exec tsx spikes/live-session.ts
  */
 import { SessionBroker } from "../dist/services/session-broker.js";
 import { Store } from "../dist/store/index.js";

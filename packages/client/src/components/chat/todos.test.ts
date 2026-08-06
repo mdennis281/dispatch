@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { ChatMessage } from "@cm/shared";
+import type { ChatMessage } from "@dispatch/shared";
 import { deriveTodos } from "./todos.js";
 
 /**

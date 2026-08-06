@@ -1,12 +1,12 @@
 /**
- * skill-materializer — bridge a project's authored `.claude-manager/skills/`
+ * skill-materializer — bridge a project's authored `.dispatch/skills/`
  * into a form the Agent SDK actually discovers.
  *
  * The SDK has NO option to point at an arbitrary skills directory: `Options.skills`
  * is only a *filter* (`'all'` | a name list) over skills it has already DISCOVERED,
  * and discovery comes from the session cwd's `.claude/skills/` (loaded via
  * `settingSources: ['project','local']`), from plugins, or from bundled skills.
- * So to make a `.claude-manager/skills/<name>` skill reach a live session we
+ * So to make a `.dispatch/skills/<name>` skill reach a live session we
  * MATERIALIZE it into the effective `<cwd>/.claude/skills/<name>` at launch, then
  * enable it with `skills: 'all'`.
  *
@@ -20,7 +20,7 @@
 import { join, dirname } from "node:path";
 import { cp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import type { SkillConfig } from "@cm/shared";
+import type { SkillConfig } from "@dispatch/shared";
 
 /** The effective skills directory the SDK discovers under a session cwd. */
 export function skillsTargetDir(cwd: string): string {

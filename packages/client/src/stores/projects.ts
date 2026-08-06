@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Project, AgentConfig, ModeConfig } from "@cm/shared";
+import type { Project, AgentConfig, ModeConfig } from "@dispatch/shared";
 
 interface ProjectsStore {
   projects: Project[];
@@ -13,7 +13,7 @@ interface ProjectsStore {
     modes: ModeConfig[];
   }) => void;
   upsertProject: (p: Project) => void;
-  /** Replace just the agent/mode picker lists (e.g. after a `.claude-manager/`
+  /** Replace just the agent/mode picker lists (e.g. after a `.dispatch/`
    *  config reload) without disturbing projects or the active selection. */
   setConfigLists: (data: { agents: AgentConfig[]; modes: ModeConfig[] }) => void;
 }

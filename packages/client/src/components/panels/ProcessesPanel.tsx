@@ -17,7 +17,7 @@ import { cn } from "../../lib/cn.js";
 
 /**
  * OS-level process inspector for a project: what's ACTUALLY listening on its
- * sub-apps' ports, cross-referenced with claude-manager's live runners. Untracked
+ * sub-apps' ports, cross-referenced with Dispatch's live runners. Untracked
  * listeners (orphans a server restart or half-killed tree left behind) are flagged
  * so you can reap them — individually or in bulk — even though the runner records
  * lost track of them. This is the escape hatch for "port already in use" when the

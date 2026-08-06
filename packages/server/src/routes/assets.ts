@@ -9,7 +9,7 @@
 import type { FastifyInstance } from "fastify";
 import { extname } from "node:path";
 import { nanoid } from "nanoid";
-import { ImageRefSchema } from "@cm/shared";
+import { ImageRefSchema } from "@dispatch/shared";
 
 /** Cap a single upload so a runaway paste can't fill the disk / RAM. */
 const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;

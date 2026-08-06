@@ -93,7 +93,7 @@ async function assertAppStopped(paths) {
   }
   if (rt.port && (await portAlive(rt.port))) {
     throw new Error(
-      `the claude-manager desktop app is running (pid ${rt.pid}, ${rt.url}).\n` +
+      `the Dispatch desktop app is running (pid ${rt.pid}, ${rt.url}).\n` +
         `  Quit it from the tray ("Quit (stops all agents & subApps)") and re-run.\n` +
         `  Quitting there stops agents and subApps cleanly; killing it does not.`,
     );
@@ -103,7 +103,7 @@ async function assertAppStopped(paths) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const paths = desktopPaths(args.target ? { ...process.env, CM_HOME: args.target } : process.env);
+  const paths = desktopPaths(args.target ? { ...process.env, DISPATCH_HOME: args.target } : process.env);
 
   const sha = capture("git", ["rev-parse", args.ref], repoRoot);
   const subject = capture("git", ["log", "-1", "--format=%s", sha], repoRoot);

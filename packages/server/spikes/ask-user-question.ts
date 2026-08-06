@@ -17,7 +17,7 @@
  * With `answers`, the tool_result is "Your questions have been answered: …" and
  * the model continues. This is exactly what SessionBroker.answerQuestion builds.
  *
- * Run: pnpm --filter @cm/server exec tsx spikes/ask-user-question.ts
+ * Run: pnpm --filter @dispatch/server exec tsx spikes/ask-user-question.ts
  */
 import { query, type SDKUserMessage, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { mkdtempSync } from "node:fs";

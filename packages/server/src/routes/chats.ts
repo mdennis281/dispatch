@@ -12,7 +12,7 @@
  *   GET    /api/chats/:id/checkpoints → Checkpoint[] (rollback anchors)
  */
 import type { FastifyInstance } from "fastify";
-import { ChatSchema } from "@cm/shared";
+import { ChatSchema } from "@dispatch/shared";
 import { createChat } from "./dispatch.js";
 import { leanRows } from "../services/transcript-lean.js";
 

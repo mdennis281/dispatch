@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Check, X } from "lucide-react";
-import type { ProjectMemory, MemoryType } from "@cm/shared";
+import type { ProjectMemory, MemoryType } from "@dispatch/shared";
 import { useMemory } from "../../stores/memory.js";
 import { api, ApiError } from "../../lib/api.js";
 import { Button } from "../ui/Button.js";

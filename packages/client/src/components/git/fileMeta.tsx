@@ -3,7 +3,7 @@
  * label. Kept in one place so the changes list, the history detail and the
  * stash detail all speak the same visual language.
  */
-import type { GitChangeStatus } from "@cm/shared";
+import type { GitChangeStatus } from "@dispatch/shared";
 import type { Tone } from "../ui/Chip.js";
 
 export interface StatusMeta {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Layers, Eraser, Loader2, AlertTriangle } from "lucide-react";
-import type { ContextUsage } from "@cm/shared";
+import type { ContextUsage } from "@dispatch/shared";
 import { useContextTokens, useContextWindow } from "../../stores/messages.js";
 import { compactTokens } from "../../lib/format.js";
 import { Tooltip } from "../ui/Tooltip.js";

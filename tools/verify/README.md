@@ -1,6 +1,6 @@
 # Headless verification harness
 
-Fast, **tab-free** UI verification for claude-manager. It drives the
+Fast, **tab-free** UI verification for Dispatch. It drives the
 **already-running** server with headless Chromium and writes labeled PNG
 screenshots to disk — no real Chrome, no stolen tabs, no auth.
 
@@ -38,7 +38,7 @@ success.
 If Chromium isn't installed yet:
 
 ```bash
-pnpm --filter @cm/client exec playwright install chromium   # idempotent; installs a browser BINARY, not an npm dep
+pnpm --filter @dispatch/client exec playwright install chromium   # idempotent; installs a browser BINARY, not an npm dep
 ```
 
 ## Add a flow
@@ -69,7 +69,7 @@ const FLOWS = {
 asserts the shell renders + hydrates against the running server (skips if none):
 
 ```bash
-CM_VERIFY_BASE=http://127.0.0.1:4319 pnpm --filter @cm/client exec playwright test verify-smoke
+DISPATCH_VERIFY_BASE=http://127.0.0.1:4319 pnpm --filter @dispatch/client exec playwright test verify-smoke
 ```
 
 ## Pointing at the user's REAL Chrome (auth-bearing sites)
@@ -113,5 +113,5 @@ const context = await chromium.launchPersistentContext(
 const page = await context.newPage();
 ```
 
-Both are opt-in escape hatches. For verifying claude-manager itself, stay on the
+Both are opt-in escape hatches. For verifying Dispatch itself, stay on the
 default headless path — it's faster and never touches the user's browser.

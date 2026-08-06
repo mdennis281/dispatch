@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { TerminalSquare, FolderClosed } from "lucide-react";
-import type { Chat, TerminalInfo } from "@cm/shared";
+import type { Chat, TerminalInfo } from "@dispatch/shared";
 import { useTerminals, type TerminalLine } from "../../stores/terminals.js";
 import { api } from "../../lib/api.js";
 import { StatusDot } from "../ui/StatusDot.js";

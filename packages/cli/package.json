@@ -1,10 +1,11 @@
 {
-  "name": "@cm/cli",
+  "name": "@dispatch/cli",
   "private": true,
   "type": "module",
   "version": "0.0.0",
-  "description": "cm — the claude-manager project CLI. Manages a repo's committable .claude-manager/ config (MCP servers) from the terminal.",
+  "description": "dispatch — the Dispatch project CLI. Manages a repo's committable .dispatch/ config (MCP servers) from the terminal.",
   "bin": {
+    "dispatch": "./dist/index.js",
     "cm": "./dist/index.js"
   },
   "main": "./dist/core/index.js",
@@ -26,7 +27,7 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "@cm/shared": "workspace:*",
+    "@dispatch/shared": "workspace:*",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },

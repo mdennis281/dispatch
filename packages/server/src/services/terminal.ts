@@ -29,7 +29,7 @@
  */
 import { spawn as nodeSpawn } from "node:child_process";
 import { nanoid } from "nanoid";
-import type { TerminalInfo } from "@cm/shared";
+import type { TerminalInfo } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 
 /* ------------------------------------------------------------------ spawn seam */

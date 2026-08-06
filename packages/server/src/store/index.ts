@@ -54,7 +54,7 @@ import {
   type RunnerInstance,
   CheckpointSchema,
   type Checkpoint,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import {
   KeyedMutex,
   readJson,
@@ -166,7 +166,7 @@ export class Store {
   /**
    * Sidecar ACCESS-telemetry file for a project's memories (how often each is
    * recalled/surfaced). Deliberately in the manager's own store — NEVER the
-   * committable `.claude-manager/memory/` dir — so it's runtime signal that can't
+   * committable `.dispatch/memory/` dir — so it's runtime signal that can't
    * churn the repo. Owned by {@link MemoryStatsStore}; created on demand.
    */
   projectMemoryStatsFile(projectId: string) {

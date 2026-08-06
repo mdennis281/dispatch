@@ -7,7 +7,7 @@
  * so nothing here imports `monaco-editor`.
  */
 import { create } from "zustand";
-import type { Chat, ToolUseRow, WorktreeInfo } from "@cm/shared";
+import type { Chat, ToolUseRow, WorktreeInfo } from "@dispatch/shared";
 
 export type CodeViewerMode = "file" | "diff";
 
@@ -35,7 +35,7 @@ export interface CodeViewerRequest {
   /**
    * When true the file opens editable with a Save action (writes back to the
    * working tree). Forces "file" mode — there is no editable diff. Used by the
-   * "Edit definitions" flow to author `.claude-manager/project.yaml` in place.
+   * "Edit definitions" flow to author `.dispatch/project.yaml` in place.
    */
   editable?: boolean;
 }

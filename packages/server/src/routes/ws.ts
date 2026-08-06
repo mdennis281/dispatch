@@ -9,7 +9,7 @@
  * bus subscription is torn down on close.
  */
 import type { FastifyInstance } from "fastify";
-import { WsClientActionSchema, type WsServerEvent } from "@cm/shared";
+import { WsClientActionSchema, type WsServerEvent } from "@dispatch/shared";
 import { dispatchClientAction } from "./dispatch.js";
 
 /** ws readyState OPEN (avoids importing the `ws` package for a constant). */

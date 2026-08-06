@@ -176,15 +176,15 @@ export function CommandPalette({
         keywords: "mcp tool endpoint schema server manager show visualize catalog",
         run: () => requestOpenMcpCatalog(),
       });
-      // Project config — the loaded `.claude-manager/` (instructions/subApps/
+      // Project config — the loaded `.dispatch/` (instructions/subApps/
       // MCP/agents/modes/memory) + reload / export / import.
       list.push({
         id: "project-config",
         title: "Project config",
-        subtitle: `.claude-manager/ for ${project.name}`,
+        subtitle: `.dispatch/ for ${project.name}`,
         group: "Navigate",
         icon: <FileCog />,
-        keywords: "config claude-manager manifest instructions subapps mcp agents modes memory export import cm scaffold reload",
+        keywords: "config Dispatch manifest instructions subapps mcp agents modes memory export import cm scaffold reload",
         run: () => requestOpenProjectConfig(),
       });
     }

@@ -16,6 +16,7 @@
  * wired for the terminal (`pnpm start`) and POSIX cases.
  */
 import type { FastifyInstance } from "fastify";
+import { envVar } from "./config.js";
 
 /** How long teardown gets before we stop being polite. */
 export const SHUTDOWN_GRACE_MS = 20_000;
@@ -42,14 +43,14 @@ export function installShutdown(
   const close = (reason: string): Promise<void> => {
     if (closing) return closing;
     // eslint-disable-next-line no-console
-    console.log(`[claude-manager] shutting down (${reason})…`);
+    console.log(`[dispatch] shutting down (${reason})…`);
     closing = (async () => {
       // A wedged dispose (a hung `git`, a docker compose that won't stop) must
       // not strand the process forever — the shell would tree-kill us anyway,
       // and exiting on our own terms at least lets the rest of teardown land.
       const timer = setTimeout(() => {
         // eslint-disable-next-line no-console
-        console.error(`[claude-manager] teardown exceeded ${graceMs}ms; exiting anyway`);
+        console.error(`[dispatch] teardown exceeded ${graceMs}ms; exiting anyway`);
         exit(1);
       }, graceMs);
       timer.unref();
@@ -57,11 +58,11 @@ export function installShutdown(
         await app.close();
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.error("[claude-manager] error during teardown:", err);
+        console.error("[dispatch] error during teardown:", err);
       }
       clearTimeout(timer);
       // eslint-disable-next-line no-console
-      console.log("[claude-manager] shutdown complete");
+      console.log("[dispatch] shutdown complete");
       exit(0);
     })();
     return closing;
@@ -72,7 +73,7 @@ export function installShutdown(
 
   // Only when a parent process owns us (the desktop shell sets this). Reading
   // stdin unconditionally would hold the event loop open for a plain terminal run.
-  if (process.env.CM_IPC === "1") {
+  if (envVar(process.env, "IPC") === "1") {
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
       if (String(chunk).includes("shutdown")) void close("desktop request");

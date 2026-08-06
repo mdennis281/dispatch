@@ -14,8 +14,8 @@
  * mid-flight without freezing the whole panel.
  */
 import { create } from "zustand";
-import type { GitBranch, GitCommit, GitCommitFile, GitStash, GitStatus } from "@cm/shared";
-import { GIT_REV_EMPTY, GIT_REV_INDEX, GIT_REV_WORKTREE } from "@cm/shared";
+import type { GitBranch, GitCommit, GitCommitFile, GitStash, GitStatus } from "@dispatch/shared";
+import { GIT_REV_EMPTY, GIT_REV_INDEX, GIT_REV_WORKTREE } from "@dispatch/shared";
 import { api, ApiError } from "../lib/api.js";
 import { useNotices } from "./notices.js";
 

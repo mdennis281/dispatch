@@ -1,5 +1,5 @@
 /**
- * manifest — locate and safely edit a repo's `.claude-manager/project.yaml`.
+ * manifest — locate and safely edit a repo's `.dispatch/project.yaml`.
  *
  * `project.yaml` is a HAND-AUTHORED, committable file: contributors write it,
  * review it in PRs, and comment it. So every edit here goes through the `yaml`
@@ -21,10 +21,11 @@ import { join, dirname, basename, resolve, parse as parsePath } from "node:path"
 import { Document, isSeq, parseDocument, type YAMLSeq } from "yaml";
 import {
   CONFIG_DIR_NAME,
+  CONFIG_DIR_NAMES,
   MANIFEST_FILE,
   ProjectManifestSchema,
   type ProjectManifest,
-} from "@cm/shared";
+} from "@dispatch/shared";
 
 /** Raised for every expected, user-facing failure (bad args, missing server). */
 export class CmError extends Error {
@@ -40,7 +41,7 @@ export class CmError extends Error {
 export interface ProjectPaths {
   /** Absolute repo root (the dir that holds — or would hold — the config dir). */
   root: string;
-  /** Absolute `<root>/.claude-manager`. */
+  /** Absolute `<root>/.dispatch` — or the legacy dir when only that one exists. */
   configDir: string;
   /** Absolute `<configDir>/project.yaml`. */
   manifestPath: string;
@@ -49,12 +50,26 @@ export interface ProjectPaths {
 }
 
 /**
+ * The config dir for a repo root: `.dispatch/` when it exists, else the legacy
+ * `.claude-manager/` when THAT exists, else `.dispatch/` (so anything creating a
+ * config authors the current name). Reads tolerate a pre-rename checkout; writes
+ * only ever land in a dir that already exists, or in `.dispatch/`.
+ */
+export function configDirFor(root: string): string {
+  for (const name of CONFIG_DIR_NAMES) {
+    const dir = join(root, name);
+    if (existsSync(dir)) return dir;
+  }
+  return join(root, CONFIG_DIR_NAME);
+}
+
+/**
  * Resolve the project whose config an invocation targets, by walking UP from
- * `startDir`. An existing `.claude-manager/` always wins; failing that, the
- * nearest `.git` marks the repo root (so `cm mcp add` from a nested package dir
- * still writes to the one config at the top). With neither marker anywhere up the
- * tree, `startDir` itself is the root — `cm mcp add` in a fresh directory just
- * creates the config there.
+ * `startDir`. An existing config dir (either name) always wins; failing that, the
+ * nearest `.git` marks the repo root (so `dispatch mcp add` from a nested package
+ * dir still writes to the one config at the top). With neither marker anywhere up
+ * the tree, `startDir` itself is the root — `dispatch mcp add` in a fresh
+ * directory just creates the config there.
  */
 export function resolveProjectPaths(startDir: string): ProjectPaths {
   const start = resolve(startDir);
@@ -62,7 +77,7 @@ export function resolveProjectPaths(startDir: string): ProjectPaths {
   let gitRoot: string | null = null;
 
   for (let dir = start; ; dir = dirname(dir)) {
-    if (existsSync(join(dir, CONFIG_DIR_NAME))) return pathsFor(dir);
+    if (CONFIG_DIR_NAMES.some((name) => existsSync(join(dir, name)))) return pathsFor(dir);
     if (!gitRoot && existsSync(join(dir, ".git"))) gitRoot = dir;
     if (dir === fsRoot) break;
   }
@@ -70,7 +85,7 @@ export function resolveProjectPaths(startDir: string): ProjectPaths {
 }
 
 function pathsFor(root: string): ProjectPaths {
-  const configDir = join(root, CONFIG_DIR_NAME);
+  const configDir = configDirFor(root);
   const manifestPath = join(configDir, MANIFEST_FILE);
   return { root, configDir, manifestPath, exists: existsSync(manifestPath) };
 }
@@ -89,7 +104,7 @@ export interface LoadedManifest {
 /**
  * Load `project.yaml` as an editable document. When the file doesn't exist a
  * MINIMAL in-memory document is synthesized (`name: <repo dir name>`) so the
- * caller can add to it and save — first `cm mcp add` in a repo scaffolds the
+ * caller can add to it and save — first `dispatch mcp add` in a repo scaffolds the
  * config instead of erroring. Nothing is written until {@link saveManifest}.
  */
 export async function loadManifest(startDir: string): Promise<LoadedManifest> {
@@ -97,8 +112,8 @@ export async function loadManifest(startDir: string): Promise<LoadedManifest> {
   if (!paths.exists) {
     const doc = new Document({ name: basename(paths.root) });
     doc.commentBefore =
-      " claude-manager project config — the committable source of truth for how\n" +
-      " agents run on this repo. Edit MCP servers with `cm mcp`; see ./README.md.";
+      " Dispatch project config — the committable source of truth for how\n" +
+      " agents run on this repo. Edit MCP servers with `dispatch mcp`; see ./README.md.";
     return { paths, doc, existed: false };
   }
 
@@ -125,7 +140,7 @@ export async function loadManifest(startDir: string): Promise<LoadedManifest> {
 /**
  * Validate the edited document and write it atomically. Returns the manifest
  * path. Validation runs against the SAME schema the server's loader uses, so a
- * successful `cm` command guarantees the server can load the result.
+ * successful `dispatch` command guarantees the server can load the result.
  */
 export async function saveManifest(loaded: LoadedManifest): Promise<string> {
   const parsed = ProjectManifestSchema.safeParse(loaded.doc.toJS() ?? {});
@@ -170,7 +185,7 @@ export function mcpServersSeq(doc: Document, create = false): YAMLSeq | null {
   }
   if (!isSeq(node)) {
     throw new CmError(
-      "`mcpServers` in project.yaml is not a list — fix it by hand before using `cm mcp`.",
+      "`mcpServers` in project.yaml is not a list — fix it by hand before using `dispatch mcp`.",
     );
   }
   return node;
@@ -185,11 +200,10 @@ export function manifestJs(doc: Document): ProjectManifest | null {
 /* ------------------------------------------------------------ scaffolding */
 
 /** A short README dropped next to a freshly scaffolded manifest. */
-const CONFIG_README = `# .claude-manager
+const CONFIG_README = `# .dispatch
 
-This directory is the committable source of truth for how claude-manager runs
-agents on this repo. It is read by the manager at startup and re-read live
-whenever a file here changes.
+This directory is the committable source of truth for how Dispatch runs agents on
+this repo. It is read at startup and re-read live whenever a file here changes.
 
 - \`project.yaml\` — the manifest: MCP servers, sub-apps, instructions, defaults.
 - \`instructions/\` — markdown appended to every session's system prompt.
@@ -202,10 +216,10 @@ whenever a file here changes.
 
 Add them with the CLI rather than hand-editing:
 
-    cm mcp add <name> -- <command> [args...]      # stdio
-    cm mcp add <name> --transport http --url <url>
-    cm mcp list
-    cm mcp remove <name>
+    dispatch mcp add <name> -- <command> [args...]      # stdio
+    dispatch mcp add <name> --transport http --url <url>
+    dispatch mcp list
+    dispatch mcp remove <name>
 
 Secrets belong in \`\${VAR}\` placeholders, which are expanded from the manager
 process's environment when a session starts — so this file stays safe to commit.

@@ -26,7 +26,7 @@ import {
   type ReactNode,
 } from "react";
 import { FileCode2 } from "lucide-react";
-import type { Chat, Project, WorktreeInfo } from "@cm/shared";
+import type { Chat, Project, WorktreeInfo } from "@dispatch/shared";
 import {
   openCodeViewer,
   resolveChatFile,

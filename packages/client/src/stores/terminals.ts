@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { TerminalInfo } from "@cm/shared";
+import type { TerminalInfo } from "@dispatch/shared";
 
 /** One line of terminal I/O for the read-only view. */
 export interface TerminalLine {

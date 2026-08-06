@@ -8,14 +8,14 @@
  */
 import type { FastifyInstance } from "fastify";
 import { nanoid } from "nanoid";
-import { ModeConfigSchema } from "@cm/shared";
+import { ModeConfigSchema } from "@dispatch/shared";
 import { mergeById } from "../services/project-config.js";
 
 export function registerModeRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
   const { projectConfig } = app.services;
 
-  // Merge config-sourced modes (from any project's `.claude-manager/modes/`)
+  // Merge config-sourced modes (from any project's `.dispatch/modes/`)
   // OVER the `.data` store — the repo config wins on id collision — so the
   // composer's mode picker (and the broker) see the config-authored postures.
   app.get("/api/modes", async () =>

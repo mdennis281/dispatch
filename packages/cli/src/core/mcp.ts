@@ -1,9 +1,9 @@
 /**
  * mcp core — add / list / get / remove / import MCP servers in a project's
- * `.claude-manager/project.yaml`.
+ * `.dispatch/project.yaml`.
  *
  * This module is the SINGLE implementation of every MCP config mutation in
- * claude-manager. The `cm mcp …` commands are a thin arg-parsing shell over it,
+ * Dispatch. The `dispatch mcp …` commands are a thin arg-parsing shell over it,
  * and the server's `mcp__manager__mcp_add|mcp_list|mcp_remove` tools call the
  * very same functions — so an agent editing config in-session and a human at the
  * terminal can never drift apart or half-implement each other's validation.
@@ -18,7 +18,7 @@ import {
   ManifestMcpTransportSchema,
   type ManifestMcpServer,
   type ManifestMcpTransport,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import {
   CmError,
   ensureConfigReadme,

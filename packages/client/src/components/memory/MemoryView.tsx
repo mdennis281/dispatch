@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Brain, Plus, Pencil, Trash2, Search, X } from "lucide-react";
-import type { ProjectMemory } from "@cm/shared";
+import type { ProjectMemory } from "@dispatch/shared";
 import { useMemory, useProjectMemories } from "../../stores/memory.js";
 import { loadProjectMemory } from "../../stores/index.js";
 import { useActiveProject } from "../../stores/projects.js";

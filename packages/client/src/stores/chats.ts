@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { Chat, ChatStatus, AgentActivity } from "@cm/shared";
+import type { Chat, ChatStatus, AgentActivity } from "@dispatch/shared";
 import { clearDraft } from "../lib/composerDrafts.js";
 
 interface ChatsStore {

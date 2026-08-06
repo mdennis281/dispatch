@@ -7,7 +7,7 @@
  * `openWorktreeFile(...)` (from the Worktrees file list). Mount `<CodeViewerHost/>`
  * once at the app root.
  */
-import type { Chat, ToolUseRow, WorktreeInfo } from "@cm/shared";
+import type { Chat, ToolUseRow, WorktreeInfo } from "@dispatch/shared";
 import {
   openCodeViewer,
   resolveChatFile,

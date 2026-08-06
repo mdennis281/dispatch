@@ -3,7 +3,7 @@ import { execa } from "execa";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Chat, Project, WsServerEvent } from "@cm/shared";
+import type { Chat, Project, WsServerEvent } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { WorktreeService } from "./worktree.js";

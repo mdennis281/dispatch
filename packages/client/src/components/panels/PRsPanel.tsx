@@ -25,7 +25,7 @@ import type {
   CheckRun,
   ReviewThread,
   ReviewDecision,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import { usePanels } from "../../stores/panels.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";

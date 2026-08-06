@@ -12,7 +12,7 @@
  * ones that get lost. Every storage access is guarded: localStorage throws when
  * cookies are blocked, and doesn't exist at all in the node test environment.
  */
-import type { ImageRef } from "@cm/shared";
+import type { ImageRef } from "@dispatch/shared";
 
 export interface ComposerDraft {
   /** The editor's HTML — TipTap round-trips it verbatim via `setContent`. */

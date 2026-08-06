@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ShieldQuestion, Check, X, ShieldCheck, Pencil } from "lucide-react";
-import type { PermissionRow } from "@cm/shared";
+import type { PermissionRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { QuestionCard } from "./QuestionCard.js";
 import { PlanCard } from "./PlanCard.js";

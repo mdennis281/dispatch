@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { Chat, ChatMessage, WsServerEvent } from "@cm/shared";
+import type { Chat, ChatMessage, WsServerEvent } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 import {

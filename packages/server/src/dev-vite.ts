@@ -16,7 +16,7 @@ import { dirname, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 
 const here = dirname(fileURLToPath(import.meta.url));
-/** The @cm/client package root (…/packages/client), relative to …/packages/server/src. */
+/** The @dispatch/client package root (…/packages/client), relative to …/packages/server/src. */
 const clientRoot = resolve(here, "../../client");
 const indexHtmlPath = resolve(clientRoot, "index.html");
 
@@ -82,7 +82,7 @@ export async function attachViteDev(app: FastifyInstance): Promise<void> {
     } catch (err) {
       vite.ssrFixStacktrace(err as Error);
       // eslint-disable-next-line no-console
-      console.error("[claude-manager] vite index transform failed:", err);
+      console.error("[Dispatch] vite index transform failed:", err);
       reply.code(500).send((err as Error).message);
     }
   });

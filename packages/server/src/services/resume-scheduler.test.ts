@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSessionLimit, type Chat } from "@cm/shared";
+import { parseSessionLimit, type Chat } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { ResumeScheduler, RESUME_PROMPT } from "./resume-scheduler.js";

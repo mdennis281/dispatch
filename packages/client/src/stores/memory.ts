@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { ProjectMemory } from "@cm/shared";
+import type { ProjectMemory } from "@dispatch/shared";
 
 interface MemoryStore {
   /** projectId → its memories (kept sorted by name). */

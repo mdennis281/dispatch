@@ -1,7 +1,7 @@
 /**
- * `@cm/cli/core` — the library face of the `cm` CLI.
+ * `@dispatch/cli/core` — the library face of the `dispatch` CLI.
  *
- * Everything the `cm mcp …` commands do is exported here so OTHER callers can do
+ * Everything the `dispatch mcp …` commands do is exported here so OTHER callers can do
  * exactly the same thing without shelling out. In particular the manager server
  * imports this module to back its `mcp__manager__mcp_add|mcp_list|mcp_remove`
  * tools, which is why the core is fs-only and free of any console/`process.exit`
@@ -11,6 +11,7 @@ export {
   CmError,
   loadManifest,
   saveManifest,
+  configDirFor,
   resolveProjectPaths,
   manifestJs,
   ensureConfigReadme,

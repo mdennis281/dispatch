@@ -4,7 +4,7 @@
  *   2. canUseTool fires on a gated tool (Bash) and we can allow it
  *   3. 3 concurrent sessions run independently with distinct session ids
  *
- * Run: pnpm --filter @cm/server spike   (from claude-manager/)
+ * Run: pnpm --filter @dispatch/server spike   (from Dispatch/)
  */
 import { query, type SDKMessage, type PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { mkdtempSync } from "node:fs";

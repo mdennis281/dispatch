@@ -3,12 +3,12 @@
  * Run the Electron shell against THIS checkout instead of the installed payload.
  *
  * Use it to iterate on the shell itself (tray, window, teardown) without
- * publishing. It points `CM_APP_DIR` at the repo root, so the server it spawns is
+ * publishing. It points `DISPATCH_APP_DIR` at the repo root, so the server it spawns is
  * this checkout's `packages/server/dist` — remember that's the BUILT output, so
  * run `pnpm build` after changing server code.
  *
- * Data still comes from the real `%LOCALAPPDATA%\claude-manager` unless you
- * override CM_DATA_DIR / CM_CONFIG_DIR, so treat it as the live store.
+ * Data still comes from the real `%LOCALAPPDATA%\Dispatch` unless you
+ * override DISPATCH_DATA_DIR / DISPATCH_CONFIG_DIR, so treat it as the live store.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -20,7 +20,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const desktopPkg = join(repoRoot, "packages", "desktop");
 
 /**
- * Prefer the branded `claude-manager.exe` when it's installed. Windows derives a
+ * Prefer the branded `Dispatch.exe` when it's installed. Windows derives a
  * window's taskbar identity from the running executable, so launching the raw
  * `electron.exe` here would show (and pin) Electron's icon even though the
  * shortcut is correct — confusing while testing exactly that.
@@ -37,6 +37,6 @@ if (!existsSync(join(repoRoot, "packages", "server", "dist", "index.js"))) {
 const child = spawn(electron, [desktopPkg], {
   cwd: desktopPkg,
   stdio: "inherit",
-  env: { ...process.env, CM_APP_DIR: repoRoot },
+  env: { ...process.env, DISPATCH_APP_DIR: repoRoot },
 });
 child.on("exit", (code) => process.exit(code ?? 0));

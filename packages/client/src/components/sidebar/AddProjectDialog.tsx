@@ -6,7 +6,7 @@
  */
 import { useState } from "react";
 import { FolderGit2, Plus, Trash2 } from "lucide-react";
-import type { Project, SubApp } from "@cm/shared";
+import type { Project, SubApp } from "@dispatch/shared";
 import { Modal, Field, TextInput, InlineError } from "./Modal.js";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";

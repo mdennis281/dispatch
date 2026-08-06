@@ -1,6 +1,6 @@
 /**
  * Route test for the subApp runner: `POST /api/runners` must resolve the subApp
- * from the repo's `.claude-manager/` config (the SOURCE OF TRUTH), so a
+ * from the repo's `.dispatch/` config (the SOURCE OF TRUTH), so a
  * config-declared app — with its config-sourced dev/ports/docker — is runnable
  * even when the `.data` project record never listed it. The RunnerService is a
  * capturing fake here, so nothing is actually spawned.
@@ -10,7 +10,7 @@ import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
-import type { RunnerInstance, SubApp } from "@cm/shared";
+import type { RunnerInstance, SubApp } from "@dispatch/shared";
 import { buildApp } from "../app.js";
 import { loadConfig } from "../config.js";
 import { EventBus } from "../bus.js";
@@ -55,13 +55,13 @@ function captureRunner(): {
 }
 
 describe("POST /api/runners — config-sourced subApps", () => {
-  it("resolves + starts a subApp declared only in the repo's .claude-manager/ config", async () => {
+  it("resolves + starts a subApp declared only in the repo's .dispatch/ config", async () => {
     dataDir = await mkdtemp(join(tmpdir(), "cm-runner-route-"));
     repoDir = await mkdtemp(join(tmpdir(), "cm-runner-repo-"));
     // A managed repo whose config declares a `game` sub-app (dev/ports/docker).
-    await mkdir(join(repoDir, ".claude-manager"), { recursive: true });
+    await mkdir(join(repoDir, ".dispatch"), { recursive: true });
     await writeFile(
-      join(repoDir, ".claude-manager", "project.yaml"),
+      join(repoDir, ".dispatch", "project.yaml"),
       [
         "name: Configured",
         "subApps:",

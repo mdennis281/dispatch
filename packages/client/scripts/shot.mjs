@@ -1,6 +1,6 @@
 /**
  * Screenshot harness — serves the built SPA with `vite preview` and captures the
- * shell at 1440×900 (2× for crispness) into claude-manager/.artifacts/shell.png.
+ * shell at 1440×900 (2× for crispness) into Dispatch/.artifacts/shell.png.
  *
  *   node scripts/shot.mjs
  *
@@ -21,7 +21,7 @@ const PORT = 4321;
 
 async function main() {
   if (!existsSync(resolve(clientRoot, "dist/index.html"))) {
-    throw new Error("dist/ not found — run `pnpm --filter @cm/client build` first.");
+    throw new Error("dist/ not found — run `pnpm --filter @dispatch/client build` first.");
   }
   mkdirSync(artifactsDir, { recursive: true });
 
@@ -41,7 +41,7 @@ async function main() {
     });
     await page.goto(url, { waitUntil: "networkidle" });
     // Let fonts settle + syntax highlighter + reveal animations finish.
-    await page.waitForSelector("text=claude-manager", { timeout: 15_000 });
+    await page.waitForSelector("text=Dispatch", { timeout: 15_000 });
     await page.waitForTimeout(700);
     // Frame the crown-jewel content: put the first code block ~130px below the
     // transcript top so the assistant markdown + highlighted code + tool cards +

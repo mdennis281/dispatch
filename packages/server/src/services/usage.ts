@@ -21,7 +21,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { UsageSnapshot, UsageWindow } from "@cm/shared";
+import type { UsageSnapshot, UsageWindow } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -61,12 +61,12 @@ export interface UsageServiceDeps {
   readToken?: () => Promise<string | null>;
   /** Injectable clock (tests). */
   now?: () => number;
-  /** Poll interval override (tests / CM_USAGE_POLL_MS). */
+  /** Poll interval override (tests / DISPATCH_USAGE_POLL_MS). */
   pollMs?: number;
 }
 
 function pollIntervalFromEnv(): number {
-  const raw = process.env.CM_USAGE_POLL_MS;
+  const raw = process.env.DISPATCH_USAGE_POLL_MS;
   if (!raw || raw.trim() === "") return DEFAULT_POLL_MS;
   const n = Number.parseInt(raw, 10);
   // Guard the floor: never let an env typo drop us into 429 territory.

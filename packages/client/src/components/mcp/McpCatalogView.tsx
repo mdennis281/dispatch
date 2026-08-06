@@ -28,7 +28,7 @@ import type {
   McpServerCatalogEntry,
   McpServerStatus,
   McpToolInfo,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import { Modal, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { Chip } from "../ui/Chip.js";
@@ -359,7 +359,7 @@ export function McpCatalogView() {
             {external.length === 0 && (
               // The catalog is where you come to check whether a server is wired
               // up, so it's also where you find out how to wire one up. Both
-              // supported paths write the same `.claude-manager/project.yaml`.
+              // supported paths write the same `.dispatch/project.yaml`.
               <div className="space-y-1 px-1 pt-1">
                 <p className="text-[10px] leading-snug text-faint">
                   No external MCP servers configured for this project.

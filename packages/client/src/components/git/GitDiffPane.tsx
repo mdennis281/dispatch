@@ -21,7 +21,7 @@ import {
   FileWarning,
   Rows2,
 } from "lucide-react";
-import { GIT_REV_EMPTY } from "@cm/shared";
+import { GIT_REV_EMPTY } from "@dispatch/shared";
 import { api, type WorktreeFileContent } from "../../lib/api.js";
 import { languageForPath } from "../monaco/lang.js";
 import { Spinner } from "../ui/Spinner.js";

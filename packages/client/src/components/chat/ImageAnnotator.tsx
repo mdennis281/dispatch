@@ -19,7 +19,7 @@ import { createPortal } from "react-dom";
 import { Crop as CropIcon, Check, X, ImageOff, Pencil, RotateCcw } from "lucide-react";
 import * as markerjs2 from "markerjs2";
 import * as cropro from "cropro";
-import type { ImageRef } from "@cm/shared";
+import type { ImageRef } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Spinner } from "../ui/Spinner.js";

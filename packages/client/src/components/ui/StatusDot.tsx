@@ -1,5 +1,5 @@
 import { cn } from "../../lib/cn.js";
-import type { ChatStatus } from "@cm/shared";
+import type { ChatStatus } from "@dispatch/shared";
 
 export type DotTone = "success" | "accent" | "warn" | "danger" | "muted" | "working";
 

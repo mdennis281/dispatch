@@ -8,7 +8,7 @@
  * behaviour (and branch tracking) stays identical.
  */
 import { useCallback, useEffect, useState } from "react";
-import type { BranchInfo, RunnerInstance } from "@cm/shared";
+import type { BranchInfo, RunnerInstance } from "@dispatch/shared";
 import { api } from "../../lib/api.js";
 import { actions } from "../../lib/actions.js";
 import { usePanels } from "../../stores/panels.js";

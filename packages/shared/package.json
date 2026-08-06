@@ -1,9 +1,9 @@
 {
-  "name": "@cm/shared",
+  "name": "@dispatch/shared",
   "private": true,
   "type": "module",
   "version": "0.0.0",
-  "description": "Shared domain + wire types and zod schemas for claude-manager.",
+  "description": "Shared domain + wire types and zod schemas for Dispatch.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

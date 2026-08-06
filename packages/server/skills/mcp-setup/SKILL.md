@@ -1,13 +1,13 @@
 ---
 name: mcp-setup
-description: Add, configure, debug, or build an MCP server for this project. Use whenever the conversation turns to installing/adding/connecting an MCP server, wiring up a tool integration (Linear, Sentry, Postgres, Figma, Playwright, a company API…), editing mcpServers config, troubleshooting a server that won't connect or whose tools aren't showing up, or writing a new MCP server from scratch. Covers claude-manager's `.claude-manager/project.yaml` config, the `cm mcp` CLI, the `mcp__manager__mcp_*` tools, and secret handling.
+description: Add, configure, debug, or build an MCP server for this project. Use whenever the conversation turns to installing/adding/connecting an MCP server, wiring up a tool integration (Linear, Sentry, Postgres, Figma, Playwright, a company API…), editing mcpServers config, troubleshooting a server that won't connect or whose tools aren't showing up, or writing a new MCP server from scratch. Covers Dispatch's `.dispatch/project.yaml` config, the `cm mcp` CLI, the `mcp__manager__mcp_*` tools, and secret handling.
 ---
 
-# MCP setup in claude-manager
+# MCP setup in Dispatch
 
 ## The one rule
 
-**`.claude-manager/project.yaml` at the repo root is the source of truth.** It is
+**`.dispatch/project.yaml` at the repo root is the source of truth.** It is
 committed, reviewed, and shared by everyone on the project. Every session in the
 project loads it, and the manager watches it — an edit takes effect on the next
 turn with no restart.

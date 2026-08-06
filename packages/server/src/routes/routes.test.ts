@@ -19,7 +19,7 @@ import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { SessionBroker, type QueryFn } from "../services/session-broker.js";
 import { GitHubService, type ExecaLike } from "../services/github.js";
-import type { WsServerEvent } from "@cm/shared";
+import type { WsServerEvent } from "@dispatch/shared";
 
 /* --------------------------------------------------------------- scripted SDK */
 
@@ -335,7 +335,7 @@ describe("routes — REST CRUD", () => {
     expect(noIds.statusCode).toBe(400);
   });
 
-  it("POST /api/projects auto-scaffolds a .claude-manager/ into an existing repo", async () => {
+  it("POST /api/projects auto-scaffolds a .dispatch/ into an existing repo", async () => {
     const repo = await mkdtemp(join(tmpdir(), "cm-repo-"));
     try {
       const res = await app.inject({
@@ -344,7 +344,7 @@ describe("routes — REST CRUD", () => {
         payload: { name: "Widget", repoPath: repo, worktreeRoot: "wt" },
       });
       expect(res.statusCode).toBe(201);
-      const manifest = join(repo, ".claude-manager", "project.yaml");
+      const manifest = join(repo, ".dispatch", "project.yaml");
       expect(existsSync(manifest)).toBe(true);
       expect(readFileSync(manifest, "utf8")).toContain("name: Widget");
     } finally {

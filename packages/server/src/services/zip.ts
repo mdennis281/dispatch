@@ -1,6 +1,6 @@
 /**
  * Minimal, dependency-free ZIP reader/writer — just enough to round-trip a
- * project's `.claude-manager/` directory as a portable `.cm` archive.
+ * project's `.dispatch/` directory as a portable `.dispatch` archive.
  *
  * We deliberately avoid pulling a zip dependency (the whole repo ships zero new
  * deps): `zipSync` / `unzipSync` produce and parse a standard ZIP using only

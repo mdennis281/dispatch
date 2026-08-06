@@ -1,4 +1,4 @@
-# claude-manager
+# Dispatch
 
 A local control plane for Claude Code agents: rich, concurrent multi-chat sessions,
 git-worktree orchestration, a per-worktree subApp runner, and GitHub PR/Actions

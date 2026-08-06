@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { RunnerInstance } from "@cm/shared";
+import type { RunnerInstance } from "@dispatch/shared";
 
 export interface RunnerLogLine {
   stream: "stdout" | "stderr";

@@ -28,16 +28,16 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-/** Write a `.claude-manager/project.yaml` with the given body. */
+/** Write a `.dispatch/project.yaml` with the given body. */
 async function seedManifest(body: string, root = dir): Promise<string> {
-  const configDir = join(root, ".claude-manager");
+  const configDir = join(root, ".dispatch");
   await mkdir(configDir, { recursive: true });
   const path = join(configDir, "project.yaml");
   await writeFile(path, body, "utf8");
   return path;
 }
 
-const manifestPath = (root = dir): string => join(root, ".claude-manager", "project.yaml");
+const manifestPath = (root = dir): string => join(root, ".dispatch", "project.yaml");
 
 describe("addServer", () => {
   it("scaffolds project.yaml when the project has no config yet", async () => {
@@ -172,7 +172,7 @@ describe("listServers", () => {
 });
 
 describe("resolveProjectPaths", () => {
-  it("walks up to an existing .claude-manager from a nested directory", async () => {
+  it("walks up to an existing .dispatch from a nested directory", async () => {
     await seedManifest("name: root\n");
     const nested = join(dir, "packages", "web", "src");
     await mkdir(nested, { recursive: true });

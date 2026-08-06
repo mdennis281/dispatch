@@ -1,5 +1,5 @@
 /**
- * WebSocket client — the single multiplexed event stream to @cm/server.
+ * WebSocket client — the single multiplexed event stream to @dispatch/server.
  *
  * - Connects to /ws (Vite proxies to ws://127.0.0.1:4319 in dev; same-origin in
  *   prod), validates every inbound frame with `WsServerEventSchema`, and hands
@@ -15,7 +15,7 @@ import {
   WsServerEventSchema,
   WsClientActionSchema,
   type WsClientAction,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import { applyServerEvent, useConnection } from "../stores/index.js";
 
 function wsUrl(): string {

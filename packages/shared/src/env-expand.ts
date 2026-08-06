@@ -1,7 +1,7 @@
 /**
  * env-expand — `${VAR}` substitution for values authored in a COMMITTABLE config.
  *
- * `.claude-manager/project.yaml` is checked into the repo, so an MCP server that
+ * `.dispatch/project.yaml` is checked into the repo, so an MCP server that
  * needs an API key must not carry the key itself. Instead it carries a
  * placeholder, and the manager substitutes the real value from its own process
  * environment when it launches a session:
@@ -31,7 +31,7 @@ export interface ExpandOptions {
 }
 
 /**
- * The ambient environment, read defensively. `@cm/shared` is bundled into the
+ * The ambient environment, read defensively. `@dispatch/shared` is bundled into the
  * BROWSER client as well as the server, and a bare `process.env` reference would
  * either fail to type-check without `@types/node` or blow up at runtime in a
  * bundle that doesn't shim it. On the client there are no vars to expand anyway,

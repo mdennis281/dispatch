@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { ImageRef } from "@cm/shared";
+import type { ImageRef } from "@dispatch/shared";
 import {
   loadDraft,
   saveDraft,

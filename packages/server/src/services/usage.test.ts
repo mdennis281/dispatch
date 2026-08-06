@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { WsServerEvent, UsageSnapshot } from "@cm/shared";
+import type { WsServerEvent, UsageSnapshot } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { UsageService } from "./usage.js";
 

@@ -1,28 +1,28 @@
 #!/usr/bin/env node
 /**
- * `cm` — the claude-manager project CLI.
+ * `dispatch` — the Dispatch project CLI.
  *
  * Runs from inside any managed repo and edits that repo's committable
- * `.claude-manager/` config. Today it manages MCP servers; the command surface is
+ * `.dispatch/` config. Today it manages MCP servers; the command surface is
  * shaped so other config kinds (agents, modes, sub-apps) can slot in as sibling
  * top-level commands later.
  *
- * The manager server watches `.claude-manager/` and reloads on change, so an edit
+ * The manager server watches `.dispatch/` and reloads on change, so an edit
  * made here takes effect in already-open chats without a restart.
  */
 import { CmError } from "./core/manifest.js";
 import { runMcpCommand } from "./commands/mcp.js";
 
-const HELP = `cm — claude-manager project CLI
+const HELP = `cm — Dispatch project CLI
 
 Usage:
-  cm mcp <command> [options]    Manage this project's MCP servers
+  dispatch mcp <command> [options]    Manage this project's MCP servers
   cm help                       Show this help
 
-Run \`cm mcp help\` for the MCP command surface.
+Run \`dispatch mcp help\` for the MCP command surface.
 
-Config lives in .claude-manager/project.yaml at the repo root — committable,
-reviewable, and re-read live by claude-manager whenever it changes.
+Config lives in .dispatch/project.yaml at the repo root — committable,
+reviewable, and re-read live by Dispatch whenever it changes.
 `;
 
 async function main(argv: string[]): Promise<number> {

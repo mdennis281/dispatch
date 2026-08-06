@@ -30,7 +30,7 @@ import {
   type Project,
   type WorktreeInfo,
   type BranchInfo,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 

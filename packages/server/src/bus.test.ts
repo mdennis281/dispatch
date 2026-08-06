@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { EventBus } from "./bus.js";
-import type { WsServerEvent } from "@cm/shared";
+import type { WsServerEvent } from "@dispatch/shared";
 
 describe("EventBus", () => {
   it("delivers published events to all-subscribers and unsubscribes", () => {

@@ -12,7 +12,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { Editor, DiffEditor, type Monaco } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import { Spinner } from "../ui/Spinner.js";
-import { CM_THEME } from "./setup.js";
+import { DISPATCH_THEME } from "./setup.js";
 import type { CodeSelection } from "./store.js";
 
 export interface MonacoPaneProps {
@@ -145,7 +145,7 @@ export default function MonacoPane({
   onSaveRef.current = onSave;
 
   const bind = (ed: editor.ICodeEditor, monaco: Monaco) => {
-    monaco.editor.setTheme(CM_THEME); // belt-and-suspenders if react re-inits
+    monaco.editor.setTheme(DISPATCH_THEME); // belt-and-suspenders if react re-inits
     edRef.current = ed;
     monacoRef.current = monaco;
     decoRef.current = ed.createDecorationsCollection();
@@ -161,7 +161,7 @@ export default function MonacoPane({
     return (
       <DiffEditor
         className="h-full"
-        theme={CM_THEME}
+        theme={DISPATCH_THEME}
         original={original}
         modified={value}
         language={language}
@@ -175,7 +175,7 @@ export default function MonacoPane({
   return (
     <Editor
       className="h-full"
-      theme={CM_THEME}
+      theme={DISPATCH_THEME}
       value={value}
       language={language}
       options={fileOptions}

@@ -1,10 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * E2E config for the claude-manager SPA driven against a LIVE @cm/server.
+ * E2E config for the Dispatch SPA driven against a LIVE @dispatch/server.
  *
- * The spec spawns the real Fastify backend itself (temp port + temp CM_DATA_DIR
- * + CM_FAKE_SDK) so the whole run is hermetic — no shared dev server, no real
+ * The spec spawns the real Fastify backend itself (temp port + temp DISPATCH_DATA_DIR
+ * + DISPATCH_FAKE_SDK) so the whole run is hermetic — no shared dev server, no real
  * `claude` subprocess. There is no `webServer` block: the test owns the process
  * lifecycle so it can inject per-run env.
  */

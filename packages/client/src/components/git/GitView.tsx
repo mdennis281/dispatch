@@ -25,7 +25,7 @@ import {
   RefreshCw,
   RotateCw,
 } from "lucide-react";
-import type { GitBranch as GitBranchInfo, GitCommitFile, WorktreeInfo } from "@cm/shared";
+import type { GitBranch as GitBranchInfo, GitCommitFile, WorktreeInfo } from "@dispatch/shared";
 import { useActiveProject } from "../../stores/projects.js";
 import { useGit, type GitTab } from "../../stores/git.js";
 import { useNotices } from "../../stores/notices.js";

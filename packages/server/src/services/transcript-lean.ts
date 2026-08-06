@@ -21,7 +21,7 @@
  *   - Everything the client reads off a collapsed row is whitelisted below. Adding
  *     a new field to a collapsed card means adding its key here.
  */
-import type { ChatMessage } from "@cm/shared";
+import type { ChatMessage } from "@dispatch/shared";
 
 /** Inputs at or under this serialized size ship verbatim (no hydrate needed). */
 const INPUT_INLINE_LIMIT = 4_096;

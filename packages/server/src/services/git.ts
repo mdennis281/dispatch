@@ -35,7 +35,7 @@ import {
   type GitStatus,
   GIT_REV_INDEX,
   GIT_REV_WORKTREE,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import {
   normalizeRelPath,
   packFileContent,

@@ -28,7 +28,7 @@ import { rm, rmdir } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import type { Checkpoint } from "@cm/shared";
+import type { Checkpoint } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import { KeyedMutex } from "../store/fsq.js";
@@ -68,9 +68,9 @@ export interface RollbackResult {
 
 /** Fixed identity so `commit-tree` never fails on a repo with no user config. */
 const GIT_ENV = {
-  GIT_AUTHOR_NAME: "claude-manager",
+  GIT_AUTHOR_NAME: "Dispatch",
   GIT_AUTHOR_EMAIL: "cm@localhost",
-  GIT_COMMITTER_NAME: "claude-manager",
+  GIT_COMMITTER_NAME: "Dispatch",
   GIT_COMMITTER_EMAIL: "cm@localhost",
   GIT_TERMINAL_PROMPT: "0",
   GIT_OPTIONAL_LOCKS: "0",

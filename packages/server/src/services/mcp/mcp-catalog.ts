@@ -29,7 +29,7 @@ import type {
   McpToolInfo,
   McpToolParam,
   Project,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import { managerToolDescriptors, type ManagerToolBindings } from "./manager-mcp.js";
 
 /** Default per-server probe budget — bounds a hanging/slow external server. */
@@ -174,7 +174,7 @@ export const probeExternalMcpServer: McpProbe = async (_name, config, timeoutMs,
     }
 
     client = new Client(
-      { name: "claude-manager-mcp-catalog", version: "0.1.0" },
+      { name: "Dispatch-mcp-catalog", version: "0.1.0" },
       { capabilities: {} },
     );
     const c = client;
@@ -276,7 +276,7 @@ export interface BuildCatalogOptions {
   /**
    * The effective external servers to enumerate, OVERRIDING `project.mcpServers`.
    * The route passes the session's real merged set — the `.data` record layered
-   * with the `.claude-manager/` config-sourced servers (config wins per-name) —
+   * with the `.dispatch/` config-sourced servers (config wins per-name) —
    * so the catalog reflects EXACTLY what a session gets in `buildOptions`.
    */
   mcpServers?: Record<string, McpServerConfig>;

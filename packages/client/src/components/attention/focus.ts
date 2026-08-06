@@ -8,7 +8,7 @@
  * then smooth-scroll + flash it. Items without a request id (idle / done /
  * free-form) simply settle the transcript at its latest message.
  */
-import type { AttentionItem } from "@cm/shared";
+import type { AttentionItem } from "@dispatch/shared";
 import { useChats } from "../../stores/chats.js";
 
 const RETRIES = 12;

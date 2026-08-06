@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { RotateCw, Gauge } from "lucide-react";
-import type { UsageWindow } from "@cm/shared";
+import type { UsageWindow } from "@dispatch/shared";
 import { useUsage } from "../../stores/usage.js";
 import { untilShort, relTime } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";

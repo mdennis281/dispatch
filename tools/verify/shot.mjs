@@ -1,5 +1,5 @@
 /**
- * Headless screenshot runner for claude-manager — drives the ALREADY-RUNNING
+ * Headless screenshot runner for Dispatch — drives the ALREADY-RUNNING
  * server and writes labeled PNGs. It never starts/stops the server.
  *
  *   node tools/verify/shot.mjs --base http://127.0.0.1:4319 --out .verify-shots --flow app
@@ -174,7 +174,7 @@ const FLOWS = {
 function usage() {
   console.log(
     [
-      "Headless screenshot harness for claude-manager (drives the running server).",
+      "Headless screenshot harness for Dispatch (drives the running server).",
       "",
       "  node tools/verify/shot.mjs [--base <url>] [--out <dir>] [--flow <name>] [--scale <n>]",
       "",

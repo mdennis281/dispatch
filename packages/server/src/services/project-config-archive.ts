@@ -1,15 +1,17 @@
 /**
  * ProjectConfigArchive — export/import a project's self-contained
- * `.claude-manager/` directory as a portable `.cm` archive, and SCAFFOLD a fresh
+ * `.dispatch/` directory as a portable `.dispatch` archive, and SCAFFOLD a fresh
  * one from a project's existing `.data` record.
  *
- * The `.cm` format is just a standard ZIP of the `.claude-manager/` tree (see
+ * The archive is just a standard ZIP of the `.dispatch/` tree (see
  * {@link zipSync}) — dependency-free, openable in any unzipper, and a clean
  * template/portable unit:
- *   - EXPORT: zip the repo's real `.claude-manager/` when it exists, else
+ *   - EXPORT: zip the repo's real `.dispatch/` when it exists, else
  *     synthesize the scaffold (so you can export a template even before adopting).
- *   - IMPORT: unzip a `.cm` back into the repo's `.claude-manager/` (path-guarded
- *     against traversal), then reload so every consumer picks it up live.
+ *   - IMPORT: unzip one back into the repo's `.dispatch/` (path-guarded against
+ *     traversal), then reload so every consumer picks it up live. Import reads
+ *     the bytes, never the extension, so archives exported as `.cm` before the
+ *     rename still import unchanged.
  *   - SCAFFOLD: derive a `project.yaml` from the stored Project (the inverse of
  *     the loader's manifest→Project mapping) + copy the `.data` memories into
  *     `memory/`, writing them into the repo (untracked, for the owner to review).
@@ -21,9 +23,10 @@
 import { join, sep } from "node:path";
 import { readdir, readFile, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { configDirFor } from "@dispatch/cli/core";
 import { stringify as stringifyYaml } from "yaml";
 import {
-  CONFIG_DIR_NAME,
+  ARCHIVE_EXT,
   MANIFEST_FILE,
   type Project,
   type ProjectManifest,
@@ -32,7 +35,7 @@ import {
   type ManifestMcpTransport,
   type McpServerConfig,
   type ProjectConfigResult,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import { zipSync, unzipSync, type ZipEntry } from "./zip.js";
 
@@ -75,7 +78,7 @@ function pruneUndefined<T extends Record<string, unknown>>(obj: T): T {
 }
 
 /**
- * Derive a `.claude-manager/` manifest from a stored Project — the inverse of the
+ * Derive a `.dispatch/` manifest from a stored Project — the inverse of the
  * loader's manifest→Project mapping. Identity/runtime fields (id, repoPath,
  * createdAt, defaultBranch) are intentionally omitted: they belong to `.data`,
  * not the committable authored config.
@@ -116,8 +119,8 @@ export function projectToManifest(project: Project): ProjectManifest {
 /** Render a manifest to `project.yaml` text with a self-describing header. */
 export function renderManifestYaml(manifest: ProjectManifest): string {
   const header = [
-    "# .claude-manager/ — self-contained, committable claude-manager config for this repo.",
-    "# Discovered + loaded by claude-manager as the SOURCE OF TRUTH for authored config;",
+    "# .dispatch/ — self-contained, committable Dispatch config for this repo.",
+    "# Discovered + loaded by Dispatch as the SOURCE OF TRUTH for authored config;",
     "# .data keeps only runtime state (chats, sessions, checkpoints). Safe to commit.",
     "",
   ].join("\n");
@@ -199,12 +202,12 @@ async function readDataMemoryFiles(
 export interface ExportResult {
   filename: string;
   buffer: Buffer;
-  /** Whether the zip came from a real on-disk `.claude-manager/` (vs synthesized). */
+  /** Whether the zip came from a real on-disk `.dispatch/` (vs synthesized). */
   fromDisk: boolean;
 }
 
 export interface ScaffoldResult {
-  /** True when files were written; false when a `.claude-manager/` already existed. */
+  /** True when files were written; false when a `.dispatch/` already existed. */
   created: boolean;
   sourceDir: string;
   files: string[];
@@ -227,7 +230,7 @@ export class ProjectConfigArchive {
   }
 
   private configDir(project: Project): string {
-    return join(project.repoPath, CONFIG_DIR_NAME);
+    return configDirFor(project.repoPath);
   }
 
   private filenameFor(project: Project): string {
@@ -236,7 +239,7 @@ export class ProjectConfigArchive {
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-+|-+$/g, "") || project.id;
-    return `${slug}.cm`;
+    return `${slug}${ARCHIVE_EXT}`;
   }
 
   /**
@@ -251,7 +254,7 @@ export class ProjectConfigArchive {
   }
 
   /**
-   * Export a project's `.claude-manager/` as a `.cm` zip. Uses the repo's real
+   * Export a project's `.dispatch/` as a `.dispatch` zip. Uses the repo's real
    * dir when present; otherwise synthesizes the scaffold so a template is always
    * exportable. Returns null when the project doesn't exist.
    */
@@ -271,7 +274,7 @@ export class ProjectConfigArchive {
   }
 
   /**
-   * Write a set of entries into a project's `.claude-manager/` dir (creating
+   * Write a set of entries into a project's `.dispatch/` dir (creating
    * parent dirs), rejecting any traversal/absolute path. Returns the written
    * relative paths (sorted). Shared by scaffold + import.
    */
@@ -289,7 +292,7 @@ export class ProjectConfigArchive {
   }
 
   /**
-   * Scaffold a `.claude-manager/` for a project from its `.data` record. No-op
+   * Scaffold a `.dispatch/` for a project from its `.data` record. No-op
    * (created:false) when one already exists unless `force` is set. Writes the
    * files, (re)watches, reloads, and returns the fresh result.
    */
@@ -313,7 +316,7 @@ export class ProjectConfigArchive {
   }
 
   /**
-   * Import a `.cm` archive into a project's `.claude-manager/` dir (overlaying
+   * Import an archive into a project's `.dispatch/` dir (overlaying
    * existing files), then reload so consumers pick it up. Throws on a corrupt
    * archive or an unsafe entry path.
    */

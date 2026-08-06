@@ -4,7 +4,7 @@
  * right pane shows exactly what THAT commit changed.
  */
 import { GitCommit as GitCommitIcon, ChevronDown, ChevronRight, Tag } from "lucide-react";
-import type { GitCommit, GitCommitFile } from "@cm/shared";
+import type { GitCommit, GitCommitFile } from "@dispatch/shared";
 import { Spinner } from "../ui/Spinner.js";
 import { Chip } from "../ui/Chip.js";
 import { cn } from "../../lib/cn.js";

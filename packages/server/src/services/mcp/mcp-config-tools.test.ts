@@ -3,8 +3,8 @@
  * editor that binds them to a project.
  *
  * The editor half runs against a REAL temp repo rather than a stub, because the
- * point of routing these tools through `@cm/cli/core` is that an agent's edit and
- * a `cm mcp add` produce the same file — a stubbed binding would test nothing
+ * point of routing these tools through `@dispatch/cli/core` is that an agent's edit and
+ * a `dispatch mcp add` produce the same file — a stubbed binding would test nothing
  * about that.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -12,7 +12,7 @@ import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { listServers } from "@cm/cli/core";
+import { listServers } from "@dispatch/cli/core";
 import { EventBus } from "../../bus.js";
 import {
   createManagerTools,
@@ -130,7 +130,7 @@ describe("mcp_add", () => {
       headers: { Authorization: "Bearer ${LINEAR_API_KEY}" },
     });
 
-    const yaml = await readFile(join(repo, ".claude-manager", "project.yaml"), "utf8");
+    const yaml = await readFile(join(repo, ".dispatch", "project.yaml"), "utf8");
     expect(yaml).toContain("type: http");
     // The secret must reach disk as a placeholder, never expanded at write time.
     expect(yaml).toContain("${LINEAR_API_KEY}");
@@ -221,6 +221,6 @@ describe("createMcpConfigEditor", () => {
       {},
     );
     expect(result.outcome).toBe("added");
-    expect(result.manifestPath).toBe(join(repo, ".claude-manager", "project.yaml"));
+    expect(result.manifestPath).toBe(join(repo, ".dispatch", "project.yaml"));
   });
 });

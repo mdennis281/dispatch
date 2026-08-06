@@ -5,7 +5,7 @@
  * fully-typed WsServerEvent.
  */
 import { EventEmitter } from "node:events";
-import type { WsServerEvent, WsServerEventType } from "@cm/shared";
+import type { WsServerEvent, WsServerEventType } from "@dispatch/shared";
 
 /** A subscriber receiving every server event. */
 export type BusListener = (evt: WsServerEvent) => void;

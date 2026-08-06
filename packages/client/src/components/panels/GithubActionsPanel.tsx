@@ -12,7 +12,7 @@ import {
   Send,
   type LucideIcon,
 } from "lucide-react";
-import type { Chat, WorkflowRun, WorkflowWithLastRun, WorkflowInput } from "@cm/shared";
+import type { Chat, WorkflowRun, WorkflowWithLastRun, WorkflowInput } from "@dispatch/shared";
 import { usePanels } from "../../stores/panels.js";
 import { useProjects } from "../../stores/projects.js";
 import { api } from "../../lib/api.js";

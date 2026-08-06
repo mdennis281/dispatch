@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ImageIcon } from "lucide-react";
-import type { ImageRef } from "@cm/shared";
+import type { ImageRef } from "@dispatch/shared";
 import { assetUrl } from "../../../lib/actions.js";
 import { ImageLightbox } from "./ImageLightbox.js";
 

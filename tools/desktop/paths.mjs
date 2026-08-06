@@ -6,20 +6,45 @@
  *
  *   <root>/
  *     app/          payload: the built server + client the desktop shell runs
- *     shell/        branded Electron runtime — `claude-manager.exe` + resources
- *     data/         CM_DATA_DIR  — chats, checkpoints, runners (per-instance)
- *     config/       CM_CONFIG_DIR — settings, projects, agents, modes (shared)
+ *     shell/        branded Electron runtime — `dispatch.exe` + resources
+ *     data/         DISPATCH_DATA_DIR  — chats, checkpoints, runners (per-instance)
+ *     config/       DISPATCH_CONFIG_DIR — settings, projects, agents, modes (shared)
  *     backups/      pre-update / pre-migration copies
  *
  * `%LOCALAPPDATA%`, never `%APPDATA%`: the state dir is already ~500 MB of chat
  * transcripts and has no business in a roaming profile.
+ *
+ * NOTE: `<root>` is still literally `claude-manager`. Renaming it would strand
+ * every existing chat transcript behind a one-shot migration, which is a poor
+ * trade for a directory no user ever looks at. Rename it deliberately later with
+ * `desktop:migrate`, not as a side effect of the branding change.
  */
 import { homedir } from "node:os";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-/** Root of the installed deployment. `CM_HOME` overrides for testing. */
+/** Executable basenames in preference order — current first, pre-rename last. */
+const EXE_NAMES = ["dispatch", "claude-manager"];
+
+/**
+ * The shell executable inside `shellDir`: the branded name, unless only a
+ * pre-rename copy is on disk. Returns the branded path when neither exists, so
+ * a fresh install writes the current name.
+ */
+function exeIn(shellDir) {
+  const ext = process.platform === "win32" ? ".exe" : "";
+  for (const name of EXE_NAMES) {
+    const candidate = join(shellDir, name + ext);
+    if (existsSync(candidate)) return candidate;
+  }
+  return join(shellDir, EXE_NAMES[0] + ext);
+}
+
+/** Root of the installed deployment. `DISPATCH_HOME` overrides for testing. */
 export function desktopRoot(env = process.env) {
-  if (env.CM_HOME) return resolve(env.CM_HOME);
+  // `CM_HOME` fallback: a shortcut created before the rename still sets it.
+  const home = env.DISPATCH_HOME ?? env.CM_HOME;
+  if (home) return resolve(home);
   const local =
     env.LOCALAPPDATA ??
     env.XDG_DATA_HOME ??
@@ -39,8 +64,11 @@ export function desktopPaths(env = process.env) {
      * target exe, so launching the shared `electron.exe` makes Windows pin
      * "Electron" — icon and all — no matter what the shortcut says. A renamed,
      * icon-stamped copy is what gives the app its own identity.
+     *
+     * Falls back to the pre-rename name when only that copy is installed, so an
+     * existing shortcut keeps launching until `desktop:install-shell` re-runs.
      */
-    exe: join(root, "shell", process.platform === "win32" ? "claude-manager.exe" : "claude-manager"),
+    exe: exeIn(join(root, "shell")),
     dataDir: join(root, "data"),
     configDir: join(root, "config"),
     backups: join(root, "backups"),

@@ -7,7 +7,7 @@ import { describe, it, expect } from "vitest";
 import { parseArgs, transportFromArgs, parseEnvPairs, parseHeaderPairs, all, flag } from "./args.js";
 import { CmError } from "./manifest.js";
 
-/** Parse `cm mcp add` argv (everything after the subcommand). */
+/** Parse `dispatch mcp add` argv (everything after the subcommand). */
 function addArgs(line: string) {
   const argv = line.split(" ").filter(Boolean);
   const parsed = parseArgs(argv);

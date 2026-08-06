@@ -9,7 +9,7 @@
  * any trailing incremental edits apply on top. No backend change is needed: the
  * broker already forwards each tool_use with its full `input` as a `ToolUseRow`.
  */
-import type { ChatMessage } from "@cm/shared";
+import type { ChatMessage } from "@dispatch/shared";
 
 export type TodoStatus = "pending" | "in_progress" | "completed";
 

@@ -12,7 +12,7 @@ import {
   Pencil,
   Trash2,
 } from "lucide-react";
-import type { AgentActivity, Chat, WorktreeInfo } from "@cm/shared";
+import type { AgentActivity, Chat, WorktreeInfo } from "@dispatch/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Popover, MenuItem } from "../ui/Popover.js";

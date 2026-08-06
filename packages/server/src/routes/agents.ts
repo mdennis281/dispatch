@@ -8,14 +8,14 @@
  */
 import type { FastifyInstance } from "fastify";
 import { nanoid } from "nanoid";
-import { AgentConfigSchema } from "@cm/shared";
+import { AgentConfigSchema } from "@dispatch/shared";
 import { mergeById } from "../services/project-config.js";
 
 export function registerAgentRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
   const { projectConfig } = app.services;
 
-  // Merge config-sourced agents (from any project's `.claude-manager/agents/`)
+  // Merge config-sourced agents (from any project's `.dispatch/agents/`)
   // OVER the `.data` store — the repo config wins on id collision — so the
   // composer's agent picker (and the broker) see the config-authored ones.
   app.get("/api/agents", async () =>

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ClipboardList, ClipboardCheck, Check, X, ChevronDown, Terminal } from "lucide-react";
-import type { PermissionRow } from "@cm/shared";
+import type { PermissionRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { Markdown } from "../Markdown.js";
 import { Button } from "../../ui/Button.js";

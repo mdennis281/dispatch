@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile, readFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WsServerEvent } from "@cm/shared";
+import type { WsServerEvent } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { CheckpointService, CHECKPOINT_REF_NS } from "./checkpoint.js";

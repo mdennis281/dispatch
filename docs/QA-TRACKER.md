@@ -1,11 +1,11 @@
-# claude-manager — QA & delivery tracker
+# Dispatch — QA & delivery tracker
 
 **GOAL (by morning):** a BUG-FREE UI, then use it to ship the 3 Hivebreak tasks as REAL PRs.
 **Process:** fix batch (workflow/subagents) → PM verifies LIVE in Chrome (never trust "green" claims) → next batch → then drive the 3 tasks. Delegate everything; keep subagent output OUT of PM context; persist state HERE so it survives context compaction.
 
 ## ENV / run
-- Backend: `pnpm -C claude-manager start` → http://127.0.0.1:4319 (default `.data`, Hivebreak seeded, subApps game/metrics-server/studio-director).
-- After each fix batch: `pnpm -C claude-manager build` → kill whatever listens on 4319 → restart → reload the browser → RE-VERIFY every fix live.
+- Backend: `pnpm -C dispatch start` → http://127.0.0.1:4319 (default `.data`, Hivebreak seeded, subApps game/metrics-server/studio-director).
+- After each fix batch: `pnpm -C dispatch build` → kill whatever listens on 4319 → restart → reload the browser → RE-VERIFY every fix live.
 - Data/worktrees are on Michael's machine; clean up test worktrees (`git worktree remove`) between rounds.
 
 ## BATCH 1 — core UI  — DONE, VERIFIED LIVE ✓ (dropdown portal, instant-create, Send, model selector, worktree detection multi+diff, AI auto-title "READY")
@@ -57,7 +57,7 @@
 - [ ] SCHEDULED CHECK-IN MCP (user request): agent can delay itself until a subagent completes or for a set duration (a wait/sleep-until tool).
 
 ## ACCEPTANCE: DONE ✓ — ALL 3 PRs shipped via the manager: #77 settings-modal-cleanup, #78 steam-cloud-save, #79 necromancer-elite. Full pipeline proven end-to-end.
-## REPO: claude-manager is now its OWN git repo (baseline commit cd7a1be; node_modules/dist/.data gitignored). Overnight work is diffable/revertible.
+## REPO: Dispatch is now its OWN git repo (baseline commit cd7a1be; node_modules/dist/.data gitignored). Overnight work is diffable/revertible.
 ## BATCH 5: FULLY VERIFIED LIVE (2026-07-03) ✓ — todos strip, header-button tooltip (no clip), modal-header tooltip "Inline diff" (no clip), diff overview ruler (green right-edge), Monaco diff+File/Diff+vs-main, code pointers (clickable `damage.ts:123-128` chips open preview), AskUserQuestion round-trip (card→Attention badge→answer→resume).
 ## attribution SELF-HEAL: DONE ✓ VERIFIED LIVE (commit 5ebb74c, 137 tests). worktree↔chat + PR↔chat reconstructed from each chat's transcript history, rewritten on every reconcile+restart (durable). VERIFIED: Settings→settings-modal-cleanup+#77 (checks ✓1✗1 flaky guard, 4 unresolved threads), necro chat→necromancer-elite+#79 (✓3, 2 threads, Merge/Hold/Rerun), steam→steam-cloud-save+#78. Each chat's PRs tab shows live status/checks/comments + GH controls, correctly scoped. worktree-detector.ts core rewrite + PRsPanel branch-scoping.
 ## OPEN (user's call): #77 CI red on flaky "Movement lag-regression guard"; #79 has 2 unresolved Copilot threads → auto-merge holding on both.

@@ -16,7 +16,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import type { GitCommitFile, GitStash } from "@cm/shared";
+import type { GitCommitFile, GitStash } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Spinner } from "../ui/Spinner.js";

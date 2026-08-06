@@ -3,7 +3,7 @@ import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SkillConfig } from "@cm/shared";
+import type { SkillConfig } from "@dispatch/shared";
 import {
   materializeSkills,
   cleanupMaterializedSkills,

@@ -9,7 +9,7 @@ import {
   XCircle,
   Cpu,
 } from "lucide-react";
-import type { NoticeRow, ResultRow, SystemMessageRow } from "@cm/shared";
+import type { NoticeRow, ResultRow, SystemMessageRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { TypingPulse } from "../../ui/Spinner.js";
 import { Chip } from "../../ui/Chip.js";

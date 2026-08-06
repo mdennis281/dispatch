@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { ChatMessage, ToolResultRow, ToolUseRow, SystemMessageRow } from "@cm/shared";
+import type { ChatMessage, ToolResultRow, ToolUseRow, SystemMessageRow } from "@dispatch/shared";
 import { leanRow, leanRows } from "./transcript-lean.js";
 
 function toolUse(name: string, input: Record<string, unknown>): ToolUseRow {

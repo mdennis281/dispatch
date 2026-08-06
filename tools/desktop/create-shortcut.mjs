@@ -2,7 +2,7 @@
 /**
  * Create Start-menu (and optionally Desktop) shortcuts for the installed app.
  *
- * Targets `<root>/shell/claude-manager.exe` — the branded runtime from
+ * Targets `<root>/shell/Dispatch.exe` — the branded runtime from
  * `install-shell.mjs` — NOT `node_modules/electron/dist/electron.exe`. Windows
  * resolves a pinned taskbar item to the shortcut's target executable, so
  * pointing at the shared Electron binary makes Windows pin Electron's identity
@@ -37,7 +37,7 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const paths = desktopPaths(args.target ? { ...process.env, CM_HOME: args.target } : process.env);
+const paths = desktopPaths(args.target ? { ...process.env, DISPATCH_HOME: args.target } : process.env);
 
 if (process.platform !== "win32") {
   console.log("not Windows — skipping shortcut creation.");
@@ -93,10 +93,10 @@ const programs = shellFolder("Programs") ?? join(
   process.env.APPDATA ?? join(homedir(), "AppData/Roaming"),
   "Microsoft/Windows/Start Menu/Programs",
 );
-const targets = [join(programs, "claude-manager.lnk")];
+const targets = [join(programs, "Dispatch.lnk")];
 if (args.desktop) {
   const desktop = shellFolder("DesktopDirectory");
-  if (desktop && existsSync(desktop)) targets.push(join(desktop, "claude-manager.lnk"));
+  if (desktop && existsSync(desktop)) targets.push(join(desktop, "Dispatch.lnk"));
   else console.log(`note: no Desktop folder found (${desktop ?? "unresolved"}) — skipping.\n`);
 }
 
@@ -118,7 +118,7 @@ for (const lnk of targets) {
     // Quoted inside the argument string so a path with spaces stays one argv entry.
     `$s.Arguments = ${psq(`"${appPkg}"`)}`,
     `$s.WorkingDirectory = ${psq(appPkg)}`,
-    `$s.Description = ${psq("claude-manager - local control plane for Claude Code agents")}`,
+    `$s.Description = ${psq("Dispatch - local control plane for Claude Code agents")}`,
     // Index 0 = the exe's first embedded icon group, stamped by install-shell.
     `$s.IconLocation = ${psq(`${exe},0`)}`,
     `$s.Save()`,

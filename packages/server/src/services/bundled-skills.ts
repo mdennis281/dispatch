@@ -1,8 +1,8 @@
 /**
  * bundled-skills — skills the MANAGER itself ships to every session.
  *
- * A project's own `.claude-manager/skills/` teaches an agent about that project.
- * These teach it about the manager: workflows that exist because claude-manager
+ * A project's own `.dispatch/skills/` teaches an agent about that project.
+ * These teach it about the manager: workflows that exist because Dispatch
  * is the harness (today, how MCP servers are configured here — a thing an agent
  * has no way to know, and will otherwise get wrong by writing `.mcp.json`).
  *
@@ -20,7 +20,7 @@
 import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SkillConfigSchema, type SkillConfig } from "@cm/shared";
+import { SkillConfigSchema, type SkillConfig } from "@dispatch/shared";
 
 /** Directory name (under the server package root) holding bundled skills. */
 const SKILLS_DIR_NAME = "skills";

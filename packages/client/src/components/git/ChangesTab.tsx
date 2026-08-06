@@ -20,7 +20,7 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import type { GitFileChange, GitStatus } from "@cm/shared";
+import type { GitFileChange, GitStatus } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Spinner } from "../ui/Spinner.js";

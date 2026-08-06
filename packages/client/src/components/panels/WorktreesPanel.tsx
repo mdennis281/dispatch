@@ -14,7 +14,7 @@ import {
   Trash2,
   Unlink,
 } from "lucide-react";
-import type { Chat, WorktreeInfo, PRInfo } from "@cm/shared";
+import type { Chat, WorktreeInfo, PRInfo } from "@dispatch/shared";
 import { usePanels, type WorktreeDiff } from "../../stores/panels.js";
 import { loadWorktreeDiff } from "../../stores/index.js";
 import { actions } from "../../lib/actions.js";

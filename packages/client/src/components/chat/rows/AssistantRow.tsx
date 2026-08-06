@@ -1,6 +1,6 @@
 import { memo, useMemo, useState } from "react";
 import { Brain, ChevronRight, Sparkles } from "lucide-react";
-import type { AssistantMessageRow } from "@cm/shared";
+import type { AssistantMessageRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { Markdown } from "../Markdown.js";
 import { makeCodeRefResolver } from "../codeRefs.js";

@@ -62,7 +62,7 @@ export function registerRunnerRoutes(app: FastifyInstance): void {
     const project = await store.getProject(projectId);
     if (!project) return reply.code(404).send({ error: "project not found" });
     // Resolve against the effective sub-app set a session sees: the repo's
-    // `.claude-manager/` config-sourced sub-apps layered over the `.data` record
+    // `.dispatch/` config-sourced sub-apps layered over the `.data` record
     // (config wins on id; a `.data`-only sub-app survives). The config carries
     // the dev/ports/docker the runner spawns.
     const subApps = mergeById(projectConfig.getSubApps(project.id), project.subApps);

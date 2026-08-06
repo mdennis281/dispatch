@@ -13,7 +13,7 @@ import {
   SquarePen,
   type LucideIcon,
 } from "lucide-react";
-import type { Chat, RunnerInstance, SubApp } from "@cm/shared";
+import type { Chat, RunnerInstance, SubApp } from "@dispatch/shared";
 import { useRunners } from "../../stores/runners.js";
 import { useProjects } from "../../stores/projects.js";
 import { actions } from "../../lib/actions.js";
@@ -257,7 +257,7 @@ export function RunnerPanel({ chat }: { chat: Chat }) {
     if (!project?.repoPath) return;
     openCodeViewer({
       worktreePath: project.repoPath,
-      relPath: ".claude-manager/project.yaml",
+      relPath: ".dispatch/project.yaml",
       mode: "file",
       base: project.defaultBranch || "main",
       editable: true,
@@ -293,7 +293,7 @@ export function RunnerPanel({ chat }: { chat: Chat }) {
             </div>
             <IconButton
               size="sm"
-              tip="Edit subApp definitions (.claude-manager/project.yaml)"
+              tip="Edit subApp definitions (.dispatch/project.yaml)"
               disabled={!project?.repoPath}
               onClick={editDefinitions}
             >

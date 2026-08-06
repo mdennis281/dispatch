@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { win32 as pathWin32 } from "node:path";
-import type { WsServerEvent } from "@cm/shared";
+import type { WsServerEvent } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import {
   TerminalService,

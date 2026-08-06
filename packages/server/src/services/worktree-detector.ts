@@ -62,7 +62,7 @@ import type {
   ChatStatus,
   Project,
   WorktreeInfo,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 import type { WorktreeService } from "./worktree.js";

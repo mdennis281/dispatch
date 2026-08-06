@@ -16,7 +16,7 @@
  * Sending goes through an injected `send` so this service never has to know how
  * a session is (re)built — that stays with the route layer's `ensureSession`.
  */
-import { parseSessionLimit, type Chat, type ResumePlan } from "@cm/shared";
+import { parseSessionLimit, type Chat, type ResumePlan } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 
