@@ -12,12 +12,13 @@
  * failure is surfaced to the caller rather than swallowed: the button should
  * say why nothing came back.
  *
- * The `query` fn is injectable so tests (and `CM_FAKE_SDK=1`) run without a
+ * The `query` fn is injectable so tests (and `DISPATCH_FAKE_SDK=1`) run without a
  * `claude` subprocess or the network.
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { Options, Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { GitService } from "./git.js";
+import { claudeExecutableOption } from "./runtime.js";
 
 /** Cheapest model — a commit message never justifies Opus/Sonnet spend. */
 export const COMMIT_MESSAGE_MODEL = "claude-haiku-4-5";
@@ -47,7 +48,7 @@ export class CommitMessageService {
     this.git = opts.git;
     this.query =
       opts.query ??
-      (process.env.CM_FAKE_SDK === "1"
+      (process.env.DISPATCH_FAKE_SDK === "1"
         ? makeFakeCommitQuery()
         : (sdkQuery as unknown as CommitQueryFn));
   }
@@ -90,6 +91,7 @@ export class CommitMessageService {
           settingSources: [],
           maxTurns: 1,
           abortController: abort,
+          ...claudeExecutableOption(),
         },
       });
       for await (const msg of q) collectText(msg, acc);
@@ -171,7 +173,7 @@ function collectText(msg: SDKMessage, acc: { text: string; result: string }): vo
 }
 
 /**
- * Deterministic in-process stand-in gated by `CM_FAKE_SDK=1` (mirrors
+ * Deterministic in-process stand-in gated by `DISPATCH_FAKE_SDK=1` (mirrors
  * `makeFakeTitleQuery`) so E2E never spawns a `claude` subprocess for a commit
  * message. Derives a subject from the first changed path in the diff.
  */

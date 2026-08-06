@@ -5,7 +5,7 @@
  */
 import * as z from "zod";
 
-/** SDK PermissionMode literal union (mirrors @anthropic-ai/claude-agent-sdk 0.3.199). */
+/** SDK PermissionMode literal union (mirrors @anthropic-ai/claude-agent-sdk 0.3.222). */
 export const PermissionModeSchema = z.enum([
   "default",
   "acceptEdits",
@@ -83,28 +83,67 @@ export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
 export const PermissionDecisionSchema = z.enum(["allow", "deny"]);
 export type PermissionDecision = z.infer<typeof PermissionDecisionSchema>;
 
-/** A selectable session model for the composer picker: SDK model id + label. */
+/**
+ * A selectable session model for the composer picker — a projection of the
+ * runtime's own `ModelInfo` (see server `services/models.ts`), which is why
+ * `value` is whatever the runtime offers rather than always a dated wire id.
+ */
 export const ModelOptionSchema = z.object({
-  /** SDK model id, e.g. "claude-opus-4-8". */
+  /** Id to send as `options.model` — often an alias, e.g. "default" / "opus[1m]" / "sonnet". */
   value: z.string(),
-  /** Display label, e.g. "Opus 4.8". */
+  /** Display label, e.g. "Opus". */
   label: z.string(),
   /** Optional tier hint, e.g. "deepest" / "balanced" / "fast". */
   hint: z.string().optional(),
+  /** Canonical wire id `value` resolves to, e.g. "opus[1m]" → "claude-opus-4-8[1m]". */
+  resolvedModel: z.string().optional(),
+  /** The runtime's one-line blurb, e.g. "Sonnet 5 · Efficient for routine tasks". */
+  description: z.string().optional(),
 });
 export type ModelOption = z.infer<typeof ModelOptionSchema>;
 
-/** The app's default session model when a chat hasn't pinned one. */
-export const DEFAULT_MODEL = "claude-opus-4-8";
+/**
+ * The app's default session model when a chat hasn't pinned one. "default" is a
+ * real runtime alias meaning "whatever Claude Code recommends today", so an
+ * unpinned chat tracks the recommendation instead of freezing on the model that
+ * happened to be best when this line was written.
+ */
+export const DEFAULT_MODEL = "default";
 
 /**
- * Static model list used when the live Anthropic Models API is unavailable
- * (no ANTHROPIC_API_KEY — e.g. subscription/OAuth auth) and as the client's
- * pre-fetch seed so the picker never renders empty. Ordered most→least capable.
+ * Static model list used only when the live list can't be read from the runtime
+ * (see server `services/models.ts`), and as the client's pre-fetch seed so the
+ * picker never renders empty. Deliberately ALIASES, not dated wire ids: aliases
+ * keep resolving to the current model as new ones ship, so a stale fallback
+ * degrades to "slightly wrong labels" instead of "unselectable dead ids".
  */
 export const FALLBACK_MODELS: ModelOption[] = [
-  { value: "claude-fable-5", label: "Fable 5", hint: "most capable" },
-  { value: "claude-opus-4-8", label: "Opus 4.8", hint: "deepest" },
-  { value: "claude-sonnet-5", label: "Sonnet 5", hint: "balanced" },
-  { value: "claude-haiku-4-5", label: "Haiku 4.5", hint: "fast" },
+  { value: "default", label: "Default", hint: "recommended" },
+  { value: "opus", label: "Opus", hint: "deepest" },
+  { value: "sonnet", label: "Sonnet", hint: "balanced" },
+  { value: "haiku", label: "Haiku", hint: "fast" },
 ];
+
+/** Strip a context-window suffix so "claude-opus-4-8[1m]" and "claude-opus-4-8" compare equal. */
+function bareModel(id: string): string {
+  return id.replace(/\[[^\]]*\]$/, "");
+}
+
+/**
+ * Find the picker row that represents model id `id`.
+ *
+ * The same model reaches us under several ids — an alias the runtime offers
+ * ("opus[1m]"), the wire id that alias resolves to ("claude-opus-4-8[1m]"), or a
+ * bare id persisted on a chat before the list went live ("claude-opus-4-8") — so
+ * we widen the match in precedence order and stop at the first hit. Returning a
+ * single row (not a predicate) matters for the picker: several rows can resolve
+ * to the same wire id (both "default" and "opus[1m]" are Opus today), and only
+ * one of them may render as selected.
+ */
+export function findModel(models: ModelOption[], id: string): ModelOption | undefined {
+  return (
+    models.find((m) => m.value === id) ??
+    models.find((m) => bareModel(m.value) === bareModel(id)) ??
+    models.find((m) => m.resolvedModel != null && bareModel(m.resolvedModel) === bareModel(id))
+  );
+}

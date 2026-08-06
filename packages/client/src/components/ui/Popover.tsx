@@ -209,6 +209,7 @@ export function MenuItem({
   onClick,
   active,
   hint,
+  title,
   className,
 }: {
   icon?: ReactNode;
@@ -216,11 +217,14 @@ export function MenuItem({
   onClick?: () => void;
   active?: boolean;
   hint?: ReactNode;
+  /** Native tooltip for detail too long to sit inline (e.g. a model's blurb). */
+  title?: string;
   className?: string;
 }) {
   return (
     <button
       onClick={onClick}
+      title={title}
       className={cn(
         "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[12px] text-secondary " +
           "transition-colors hover:bg-white/[0.06] hover:text-primary",

@@ -1,12 +1,33 @@
-# Claude Agent SDK — pinned API reference (v0.3.199)
+# Claude Agent SDK — pinned API reference (v0.3.222)
 
 Ground truth for the whole build. Verified by reading
-`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts` (0.3.199, claudeCodeVersion 2.1.199).
+`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts` (0.3.222, claudeCodeVersion 2.1.222).
 Package is ESM (`"type": "module"`), entry `sdk.mjs`, types `sdk.d.ts`.
 Peer deps: `@anthropic-ai/sdk >=0.93`, `@modelcontextprotocol/sdk ^1.29`, `zod ^4`.
 The SDK spawns the Claude Code runtime as a **subprocess** (bundled per-platform binary via
 optionalDependencies, e.g. `@anthropic-ai/claude-agent-sdk-win32-x64`). Budget one
 process per live session.
+
+## WHICH runtime we spawn (`services/runtime.ts`)
+
+**The SDK version pins the runtime: `0.3.N` bundles Claude Code `2.1.N`.** That binary decides
+which models exist, which slash commands load, and which agents resolve — so a stale dep
+silently makes the whole app stale. It bit us once already: on 0.3.199 the picker's `default`
+resolved to `claude-opus-4-8[1m]` while the same machine's `claude` CLI was already on Opus 5.
+
+So we do NOT rely on the bundled binary. `claudeExecutableOption()` is spread into EVERY
+`query()` call (session-broker, models, title, commit-message) and resolves once per process:
+
+1. `DISPATCH_CLAUDE_PATH` — explicit override, used verbatim.
+2. The installed CLI (`~/.local/bin/claude[.exe]`, then PATH) **if `claude --version` is >= the
+   bundled `claudeCodeVersion`** — so "prefer installed" can only ever be an upgrade.
+3. Otherwise the bundled binary (pass no `pathToClaudeCodeExecutable`).
+
+Bumping the SDK is still worth doing — it keeps the fallback modern — but the app tracks the
+user's own Claude Code updates without one. The boot log prints which binary won.
+
+**Invariant:** the model picker and live sessions MUST spawn the same runtime. Feed the picker
+from a newer binary than the sessions and it will offer model ids the session can't resolve.
 
 ## Entry point
 
@@ -54,8 +75,14 @@ starting a turn) are the primitives for the per-chat steering queue.
 - **ask/default** → `permissionMode: 'default'` (prompt via `canUseTool`).
 
 ### Effort
-`Query.setMaxThinkingTokens(n)` / thinking-token budget is the "effort" lever — see grep result
-in this commit. Map effort low→max to thinking-token budgets.
+`Options.effort?: 'low'|'medium'|'high'|'xhigh'|'max'` is the lever — one level the runtime
+interprets per model (it guides adaptive thinking), and the level every subagent inherits unless
+its own `AgentDefinition.effort` pins one. **Live change:** no `setEffort` control exists; use
+`Query.applyFlagSettings({ effortLevel })` (the flag-settings layer, above user/project settings).
+`setMaxThinkingTokens(n)` is deprecated and pins one budget for every model — we keep it only as
+the fallback when `applyFlagSettings` is absent. The applied level (after any silent downgrade for
+the model) is readable ONLY from hook input: `BaseHookInput.effort.level`, alongside `agent_id` /
+`agent_type` for subagent threads.
 
 ## Permissions
 
@@ -86,8 +113,9 @@ type AgentDefinition = {
   prompt: string;               // system prompt
   tools?: string[];             // allow-list (omit = inherit all)
   disallowedTools?: string[];
-  model?: string;
-  // + mcpServers, permissionMode, maxTurns, background (per-agent overrides)
+  model?: string;              // alias or full id; omitted/'inherit' = the main model
+  effort?: 'low'|'medium'|'high'|'xhigh'|'max' | number;   // omitted = inherit the session's
+  // + mcpServers, permissionMode, maxTurns, skills, memory, background (per-agent overrides)
 };
 ```
 
@@ -108,8 +136,20 @@ type AgentDefinition = {
   → For UNIVERSAL tool visibility (show every call as a card, even auto-allowed), read `tool_use`
     blocks from the stream and/or a `PreToolUse` hook; only PROMPT on `canUseTool` invocations.
 - **Concurrency: WORKS.** 3 sessions via `Promise.all`, distinct `session_id`s, all succeeded.
-- **Effort lever:** `thinking?: ThinkingConfig` in Options (adaptive/enabled/disabled) supersedes
-  deprecated `maxThinkingTokens`; live `Query.setMaxThinkingTokens(n, display?)`. Map UI effort → this.
+- **Effort lever:** see "Effort" above — `Options.effort` at start, `applyFlagSettings({effortLevel})`
+  live. `thinking?: ThinkingConfig` (adaptive/enabled/disabled) is a separate knob we leave at the
+  SDK default so adaptive thinking stays on for models that support it.
+
+## CONFIRMED — live model list (live spike `spikes/supported-models.ts`)
+`Query.supportedModels(): Promise<ModelInfo[]>` returns the runtime's OWN picker list —
+the same one `/model` shows in the CLI — and **works on subscription auth with no API key**.
+This is the only workable source for us: `GET /v1/models` requires an `ANTHROPIC_API_KEY`,
+which we deliberately never set, so it always failed shut. The runtime list also carries what
+the raw Models API has no concept of: the `default` alias, 1M-context variants (`opus[1m]`),
+`resolvedModel` (alias → wire id), and per-model `supportsEffort` / `supportedEffortLevels`.
+Reading it costs a `claude` subprocess (~3–7s), so `services/models.ts` opens a query whose
+input channel **never yields** (no prompt, no tokens), reads the list, aborts, and caches 5min.
+Same shape applies to `supportedCommands()` / `supportedAgents()`.
 
 ## CONFIRMED — AskUserQuestion (live spike `spikes/ask-user-question.ts`)
 Surfaces BOTH as a `tool_use` block (name `AskUserQuestion`, input `{ questions: [{ question,

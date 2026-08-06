@@ -8,7 +8,7 @@
  *                       frame; 2b keeps the fixture seed OR replaces it with a
  *                       REST snapshot, but this dispatch path is already live.
  */
-import type { WsServerEvent, WorktreeInfo, PRInfo, WorkflowRun } from "@cm/shared";
+import type { WsServerEvent, WorktreeInfo, PRInfo, WorkflowRun } from "@dispatch/shared";
 
 import { api } from "../lib/api.js";
 import { useConnection } from "./connection.js";
@@ -215,11 +215,11 @@ export function applyServerEvent(evt: WsServerEvent): void {
       return;
 
     case "project-config-update":
-      // A managed repo's `.claude-manager/` config was (re)loaded. Phase 1 syncs
+      // A managed repo's `.dispatch/` config was (re)loaded. Phase 1 syncs
       // the store (a `project-update` follows when authored fields change). Feed
       // the Project config view's store so it live-updates on a watcher edit /
       // scaffold / import. Refresh the agent/mode picker lists so config-authored
-      // agents/modes appear/update live after an edit to `.claude-manager/` (no
+      // agents/modes appear/update live after an edit to `.dispatch/` (no
       // restart, next turn picks up).
       useConfig.getState().set(evt.projectId, {
         sourceDir: evt.sourceDir,
@@ -329,10 +329,10 @@ export async function hydrateFromServer(): Promise<boolean> {
   loadedChats.clear();
   recentChats = [];
   useProjects.getState().hydrate({ projects, agents, modes });
-  // Best-effort: refresh the composer's model picker from the server (live
-  // Anthropic Models API when a key is set, else the static fallback). Kept out
-  // of the gating fetch above so a slow/failed Models API never blocks the app —
-  // the store keeps its fallback seed on failure.
+  // Best-effort: refresh the composer's model picker from the server, which
+  // reads the live list off the Claude Code runtime. Kept out of the gating
+  // fetch above because that read spawns a short-lived probe subprocess and must
+  // never block the app — the store keeps its fallback seed on failure.
   void api.models
     .list()
     .then((m) => useModels.getState().setModels(m))

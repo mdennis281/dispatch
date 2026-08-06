@@ -19,9 +19,10 @@
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { Options, Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { Chat, ChatMessage } from "@cm/shared";
+import type { Chat, ChatMessage } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
+import { claudeExecutableOption } from "./runtime.js";
 
 /** The default title a chat is born with — the gate for auto-generation. */
 export const DEFAULT_CHAT_TITLE = "New chat";
@@ -216,6 +217,7 @@ export class TitleService {
           settingSources: [],
           maxTurns: 1,
           abortController: abort,
+          ...claudeExecutableOption(),
         },
       });
       for await (const msg of q) collectText(msg, acc);
@@ -228,7 +230,7 @@ export class TitleService {
 
 /**
  * A deterministic, in-process stand-in for the one-shot title query, gated by
- * `CM_FAKE_SDK=1` (see container.ts) so E2E never spawns a `claude` subprocess
+ * `DISPATCH_FAKE_SDK=1` (see container.ts) so E2E never spawns a `claude` subprocess
  * for titles. Derives a short title from the prompt's seed line.
  */
 export function makeFakeTitleQuery(): TitleQueryFn {
