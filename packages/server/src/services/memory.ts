@@ -10,8 +10,8 @@
  * the Memory panel curates it.
  *
  * Storage location (resolved per-project via {@link dir}):
- *   - a project with a self-contained `.claude-manager/` config → the repo's
- *     `.claude-manager/memory/` dir (from {@link ProjectConfig.memoryDir}). This
+ *   - a project with a self-contained `.dispatch/` config → the repo's
+ *     `.dispatch/memory/` dir (from {@link ProjectConfig.memoryDir}). This
  *     is the COMMITTABLE source of truth; remember/recall/forget + injection all
  *     read/write there.
  *   - a project WITHOUT a config dir → the legacy runtime store dir
@@ -33,7 +33,7 @@ import {
   MemoryTypeSchema,
   type ProjectMemory,
   type MemoryType,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import { KeyedMutex } from "../store/fsq.js";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -57,6 +57,35 @@ const RULES_BODY_BUDGET = 4000;
 const FACTS_SAMPLE = 6;
 /** Topic-map areas shown before collapsing the tail into "+N more". */
 const AREA_LIMIT = 12;
+
+/* ------------------------------------------------- per-turn auto-surface tuning
+ * Calibrated against a real 141-memory project store, using the normalized 0–100
+ * scores from {@link scoreMemory}. Measured there: a squarely on-topic turn
+ * scores its best match ~21–52, while an off-topic turn ("can you bump the
+ * dependencies and commit") tops out around 8 and the worst near-miss seen ("run
+ * the tests and fix whatever is failing" → `ci-runner-pnpm-store-corruption`)
+ * reaches ~19. So FULL sits clear of that noise ceiling and MIN just under it:
+ * a confident match arrives whole, a plausible one arrives as a one-liner it
+ * costs ~15 tokens to offer, and the long tail waits for an explicit `recall`. */
+
+/** Below this normalized score a memory isn't mentioned at all. */
+const SURFACE_MIN_SCORE = 16;
+/** At/above this score a match is confident enough to earn its full body. */
+const SURFACE_FULL_SCORE = 25;
+/** Most full-body memories per turn, however many clear the bar. */
+const FULL_LIMIT = 2;
+/** The runner-up needs this share of the leader's score to also come in full. */
+const FULL_RUNNERUP_RATIO = 0.8;
+/** Per-memory body clamp for a full-body surface (p90 body here is ~5.8KB). */
+const SURFACE_BODY_MAX = 1500;
+/** A full body clipped below this by the budget is demoted to a pointer instead. */
+const SURFACE_BODY_MIN = 400;
+/** Total chars one turn's surfaced block may spend (bodies + pointer lines). */
+const SURFACE_CHAR_BUDGET = 3200;
+/** Most memories referenced in one turn's block, across both tiers. */
+const SURFACE_LIMIT = 6;
+/** Most `[[link]]` neighbours one turn may pull in behind its real matches. */
+const SURFACE_MAX_LINKS = 2;
 
 /**
  * Cluster memories into topic areas by the first token of their kebab-case name
@@ -83,12 +112,12 @@ export function clusterAreas(memories: readonly { name: string }[]): string {
 
 /**
  * The slice of {@link ProjectConfigService} MemoryService needs to relocate a
- * project's memory into its committable `.claude-manager/memory/` source of
+ * project's memory into its committable `.dispatch/memory/` source of
  * truth. A minimal interface (not the concrete service) keeps the dependency
  * one-way and lets tests inject a trivial stub.
  */
 export interface MemoryConfigResolver {
-  /** The loaded config for a project, or null when it has no `.claude-manager/`. */
+  /** The loaded config for a project, or null when it has no `.dispatch/`. */
   getConfig(projectId: string): { memoryDir?: string | null } | null | undefined;
 }
 
@@ -97,7 +126,7 @@ export interface MemoryServiceOptions {
   bus: EventBus;
   now?: () => number;
   /**
-   * Optional project-config resolver. When a project has a `.claude-manager/`
+   * Optional project-config resolver. When a project has a `.dispatch/`
    * config, memory reads/writes target its repo `memory/` dir (the source of
    * truth) instead of the `.data` store. Omitted → always the `.data` store.
    */
@@ -242,36 +271,191 @@ function tokenize(text: string): string[] {
 }
 
 /**
- * Score one memory against a set of query tokens. Field weight mirrors intent:
- * a hit in the name is worth far more than one buried in the body, and an exact
- * whole-token hit beats a mere substring. Returns 0 when nothing matches.
+ * Fold a token to a crude stem so inflections match: a user asks why the client
+ * is "desyncing" while the memory is named `steam-lobby-rejoin-desync`, and a
+ * whole-token comparison misses it entirely — which on a real corpus demoted the
+ * one exactly-right memory below unrelated ones.
+ *
+ * Deliberately conservative and NOT linguistically correct. It's applied to both
+ * sides of every comparison, so all that matters is that it folds consistently;
+ * an over-eager rule would collide unrelated words and invent matches.
  */
-function scoreMemory(m: ProjectMemory, tokens: string[], rawQuery: string): number {
-  if (!tokens.length) return 0;
-  const name = m.name.toLowerCase();
-  const desc = m.description.toLowerCase();
-  const body = m.body.toLowerCase();
-  const nameTokens = new Set(tokenize(m.name));
-  const descTokens = new Set(tokenize(m.description));
-  const bodyTokens = new Set(tokenize(m.body));
+function stem(token: string): string {
+  let t = token;
+  if (t.length > 5 && t.endsWith("ing")) t = t.slice(0, -3);
+  else if (t.length > 4 && t.endsWith("ed")) t = t.slice(0, -2);
+  else if (t.length > 4 && t.endsWith("ies")) t = `${t.slice(0, -3)}y`;
+  else if (t.length > 3 && t.endsWith("s") && !t.endsWith("ss")) t = t.slice(0, -1);
+  // "running" → "runn" → "run"; harmless when the doubling wasn't inflectional.
+  if (t.length > 3 && t[t.length - 1] === t[t.length - 2]) t = t.slice(0, -1);
+  return t;
+}
 
-  let score = 0;
+/** Tokenize into the stem space used for all whole-token comparisons. */
+function stemSet(text: string): Set<string> {
+  return new Set(tokenize(text).map(stem));
+}
+
+/**
+ * Function words that carry no retrieval intent. A user turn is a SENTENCE, not
+ * a search box ("why is the client desyncing after someone leaves the lobby"),
+ * so without this every memory collects a hit for `the`/`is`/`to`/… — on a real
+ * ~140-memory store that alone put a uniform floor under EVERY memory's score,
+ * which is what let unrelated facts outrank the right one. IDF ({@link
+ * tokenWeights}) demotes corpus-specific filler on top of this fixed list.
+ */
+const STOPWORDS = new Set([
+  "about","after","again","all","also","am","an","and","any","are","as","at","be",
+  "because","been","before","being","below","between","both","but","by","can","did",
+  "do","does","doing","don","down","during","each","few","for","from","further","had",
+  "has","have","having","he","her","here","hers","him","his","how","if","in","into",
+  "is","it","its","just","me","more","most","my","no","nor","not","now","of","off",
+  "on","once","only","or","other","our","ours","out","over","own","re","same","she",
+  "should","so","some","such","than","that","the","their","theirs","them","then",
+  "there","these","they","this","those","through","to","too","under","until","up",
+  "ve","very","was","we","were","what","when","where","which","while","who","whom",
+  "why","will","with","would","you","your","yours",
+  // conversational verbs that appear in almost every turn AND every memory body
+  "add","added","fix","fixed","get","give","got","let","look","make","made","need",
+  "please","see","take","try","use","used","want","work","works",
+]);
+
+/**
+ * Query tokens worth scoring: stopwords removed, stemmed, deduped. Falls back to
+ * the raw tokens when a query is ALL stopwords (e.g. the UI search box typed
+ * "how to"), so a deliberate search never silently returns nothing.
+ */
+function queryTokens(query: string): string[] {
+  const all = tokenize(query);
+  const kept = all.filter((t) => !STOPWORDS.has(t));
+  return [...new Set((kept.length ? kept : all).map(stem))];
+}
+
+/** The searchable text of one memory, pre-tokenized once per search call. */
+interface MemoryIndexEntry {
+  memory: ProjectMemory;
+  name: string;
+  desc: string;
+  body: string;
+  nameTokens: Set<string>;
+  descTokens: Set<string>;
+  bodyTokens: Set<string>;
+}
+
+/** Pre-tokenize a memory's fields (built once per search, reused per token). */
+function indexMemory(m: ProjectMemory): MemoryIndexEntry {
+  return {
+    memory: m,
+    name: m.name.toLowerCase(),
+    desc: m.description.toLowerCase(),
+    body: m.body.toLowerCase(),
+    nameTokens: stemSet(m.name),
+    descTokens: stemSet(m.description),
+    bodyTokens: stemSet(m.body),
+  };
+}
+
+/** Best per-token field score: name 10 > description 4 > body 2, summed. */
+const MAX_TOKEN_SCORE = 16;
+
+/**
+ * Inverse-document-frequency weight per query token, in [0.05, 1]. A token that
+ * appears in nearly every memory (`the`, but equally a project's own ubiquitous
+ * jargon like `player` in a game repo) discriminates nothing and is driven to
+ * the floor; a rare token approaches 1. This is what a fixed stopword list can't
+ * do — it adapts to whatever THIS project's memories talk about constantly.
+ */
+function tokenWeights(tokens: string[], index: readonly MemoryIndexEntry[]): Map<string, number> {
+  const n = index.length;
+  const out = new Map<string, number>();
+  const denom = Math.log(n + 1);
   for (const t of tokens) {
-    if (nameTokens.has(t)) score += 10;
-    else if (name.includes(t)) score += 5;
-    if (descTokens.has(t)) score += 4;
-    else if (desc.includes(t)) score += 2;
-    if (bodyTokens.has(t)) score += 2;
-    else if (body.includes(t)) score += 1;
+    if (n === 0 || denom <= 0) {
+      out.set(t, 1);
+      continue;
+    }
+    let df = 0;
+    for (const e of index) {
+      if (e.nameTokens.has(t) || e.descTokens.has(t) || e.bodyTokens.has(t)) df++;
+    }
+    const idf = Math.log((n + 1) / (df + 0.5)) / denom;
+    out.set(t, Math.min(1, Math.max(0.05, idf)));
   }
-  // Whole-phrase hits are strong intent signals — reward them on top.
+  return out;
+}
+
+/**
+ * Score every memory in a corpus against a query, on the calibrated 0–100 scale
+ * (see {@link scoreMemory}). The pure relevance core behind {@link
+ * MemoryService.search}, exported so it can be exercised — and re-calibrated —
+ * against a real memory corpus without a Store or an EventBus. Scores are
+ * returned for EVERY input in input order, including zeros; filtering, ranking
+ * and tie-breaking are the caller's job.
+ *
+ * IDF is always computed over the whole corpus passed in, so a caller's later
+ * filtering (e.g. by type) can't distort how common a token really is.
+ */
+export function scoreCorpus(
+  memories: readonly ProjectMemory[],
+  query: string,
+): { memory: ProjectMemory; score: number }[] {
+  const raw = String(query ?? "").trim();
+  if (!raw) return memories.map((memory) => ({ memory, score: 0 }));
+  const tokens = queryTokens(raw);
+  const index = memories.map(indexMemory);
+  const weights = tokenWeights(tokens, index);
+  return index.map((e) => ({
+    memory: e.memory,
+    score: scoreMemory(e, tokens, weights, raw),
+  }));
+}
+
+/**
+ * Score one memory against the weighted query tokens, on a CALIBRATED 0–100
+ * scale: the IDF-weighted average of per-token field hits, as a percentage of a
+ * perfect hit (every token matching name + description + body). Field weight
+ * mirrors intent — a name hit beats one buried in the body, and a whole-token
+ * hit beats a mere substring.
+ *
+ * Normalizing by the weight total (rather than summing raw points) is what makes
+ * scores COMPARABLE ACROSS TURNS: previously a long sentence accumulated points
+ * from every incidental word, so a 12-word turn scored ~35 on a memory it had
+ * nothing to do with — the same number a genuinely on-topic 5-word turn scored.
+ * A threshold can only mean something against a normalized score.
+ */
+function scoreMemory(
+  e: MemoryIndexEntry,
+  tokens: string[],
+  weights: Map<string, number>,
+  rawQuery: string,
+): number {
+  if (!tokens.length) return 0;
+  let earned = 0;
+  let possible = 0;
+  for (const t of tokens) {
+    const w = weights.get(t) ?? 1;
+    possible += w * MAX_TOKEN_SCORE;
+    let s = 0;
+    if (e.nameTokens.has(t)) s += 10;
+    else if (e.name.includes(t)) s += 5;
+    if (e.descTokens.has(t)) s += 4;
+    else if (e.desc.includes(t)) s += 2;
+    if (e.bodyTokens.has(t)) s += 2;
+    else if (e.body.includes(t)) s += 1;
+    earned += w * s;
+  }
+  if (possible <= 0) return 0;
+  let score = (100 * earned) / possible;
+  // Whole-phrase hits are strong intent signals — reward them on top. These stay
+  // additive (not normalized) because a literal phrase match is evidence in its
+  // own right, independent of how many other tokens the query happened to carry.
   const q = rawQuery.trim().toLowerCase();
   if (q.length >= 3) {
-    if (name.includes(q)) score += 8;
-    if (desc.includes(q)) score += 4;
-    if (body.includes(q)) score += 3;
+    if (e.name.includes(q)) score += 15;
+    if (e.desc.includes(q)) score += 8;
+    if (e.body.includes(q)) score += 5;
   }
-  return score;
+  return Math.min(100, Math.round(score * 10) / 10);
 }
 
 /** Coerce a parsed `type` string to a valid MemoryType (default "project"). */
@@ -374,7 +558,7 @@ export class MemoryService {
   }
 
   /**
-   * The absolute memory dir for a project. A project with a `.claude-manager/`
+   * The absolute memory dir for a project. A project with a `.dispatch/`
    * config → its repo `memory/` dir (the committable source of truth); otherwise
    * the legacy `.data/projects/<id>/memory/` dir (back-compat).
    */
@@ -384,7 +568,7 @@ export class MemoryService {
     return configDir ?? this.store.projectMemoryDir(pid);
   }
 
-  /** The repo `.claude-manager/memory/` dir when the project has a config, else null. */
+  /** The repo `.dispatch/memory/` dir when the project has a config, else null. */
   private configMemoryDir(projectId: string): string | null {
     const memoryDir = this.projectConfig?.getConfig(projectId)?.memoryDir;
     return typeof memoryDir === "string" && memoryDir ? memoryDir : null;
@@ -503,7 +687,7 @@ export class MemoryService {
   }
 
   /**
-   * One-time transparent migration: when a project has a `.claude-manager/`
+   * One-time transparent migration: when a project has a `.dispatch/`
    * config, copy any legacy `.data` memories that aren't already present in the
    * repo `memory/` dir into it, then regenerate `MEMORY.md` there. Idempotent —
    * existing repo files are never clobbered, and the legacy originals are left
@@ -591,29 +775,43 @@ export class MemoryService {
 
   /**
    * Rank a project's memories against free text (the shared relevance core used
-   * by {@link recall}, the auto-surface injection, and the UI search box). A
-   * weighted token+substring scorer favours name over description over body and
-   * whole-token over substring hits; ties break by recency then name. Only
-   * positive-scoring memories are returned, capped to `limit`. With
-   * `expandLinks`, any `[[wikilink]]` neighbours of the top matches are appended
-   * (marked `linked`) so surfacing one fact pulls in the ones it points at.
+   * by {@link recall}, the auto-surface injection, and the UI search box). Query
+   * stopwords are dropped and the rest IDF-weighted against this project's own
+   * memories, then each memory is scored 0–100 by {@link scoreMemory} (name over
+   * description over body, whole-token over substring). Ties break by usefulness,
+   * then recency, then name. Only positive-scoring memories are returned, capped
+   * to `limit`. `minScore` drops weak matches BEFORE link expansion — without it
+   * a turn that matched nothing still drags in the neighbours of its best
+   * near-miss, which is how unrelated facts leaked into an off-topic turn. With
+   * `expandLinks`, the `[[wikilink]]` neighbours of the surviving matches are
+   * appended (marked `linked`) so surfacing one fact pulls in the ones it points
+   * at.
    */
   async search(
     projectId: string,
     query: string,
-    opts: { limit?: number; type?: MemoryType; expandLinks?: boolean } = {},
+    opts: {
+      limit?: number;
+      type?: MemoryType;
+      expandLinks?: boolean;
+      minScore?: number;
+      maxLinks?: number;
+    } = {},
   ): Promise<ScoredMemory[]> {
     const raw = String(query ?? "").trim();
     if (!raw) return [];
     const all = await this.list(projectId);
-    const pool = opts.type ? all.filter((m) => m.type === opts.type) : all;
-    const tokens = [...new Set(tokenize(raw))];
+    // Score against the WHOLE project (IDF must see every memory), then apply any
+    // type filter — a filter must not change how common a token looks.
+    const graded = scoreCorpus(all, raw);
     // Access telemetry breaks score ties toward facts that keep proving useful.
     const stats = await this.stats.get(projectId).catch(() => ({}) as Record<string, MemoryStat>);
 
-    const scored = pool
-      .map((m) => ({ m, score: scoreMemory(m, tokens, raw) }))
-      .filter((s) => s.score > 0)
+    const floor = Math.max(0, opts.minScore ?? 0);
+    const scored = graded
+      .filter((g) => !opts.type || g.memory.type === opts.type)
+      .map((g) => ({ m: g.memory, score: g.score }))
+      .filter((s) => s.score > 0 && s.score >= floor)
       .sort(
         (a, b) =>
           b.score - a.score ||
@@ -627,7 +825,8 @@ export class MemoryService {
     const out: ScoredMemory[] = top.map((s) => ({ ...s.m, score: s.score }));
 
     if (opts.expandLinks) {
-      const MAX_LINKS = 5; // bound the fan-out so a hub memory can't balloon output
+      // Bound the fan-out so a hub memory can't balloon the output.
+      const MAX_LINKS = Math.max(0, opts.maxLinks ?? 5);
       const have = new Set(out.map((m) => m.name));
       const byName = new Map(all.map((m) => [m.name, m]));
       let added = 0;
@@ -673,39 +872,109 @@ export class MemoryService {
    * Auto-surface the memories most relevant to a piece of free text (a user's
    * turn) as a ready-to-inject `<system-reminder>` block — the "push" that puts
    * the right fact in front of the agent WITHOUT it having to call `recall`.
-   * Returns null when nothing clears the relevance bar. `exclude` holds names
-   * already surfaced this session so a memory isn't re-injected turn after turn;
-   * the returned `names` are the ones to add to that set.
+   * Returns null when nothing clears the relevance bar.
+   *
+   * GRADED, because relevance is graded. A confident match earns its full body
+   * (the gotchas and "how to apply" notes are the whole point of a memory, and a
+   * one-liner can't carry them). A plausible-but-unconfident match gets only its
+   * `description` plus its name — enough for the agent to judge and pull it with
+   * `recall` if it matters, at ~3% of the tokens. Everything is spent against a
+   * total char budget, so a broad turn can't dominate the context window.
+   *
+   * `exclude` holds names already given IN FULL this session, so a memory isn't
+   * re-injected turn after turn; the returned `names` are exactly those to add to
+   * that set. Pointer-tier names come back separately as `pointed` — they are
+   * deliberately NOT excluded, so a memory first seen as a pointer can still be
+   * promoted to its full body on a later turn that matches it strongly.
    */
   async surfaceFor(
     projectId: string,
     text: string,
-    opts: { exclude?: ReadonlySet<string>; limit?: number; minScore?: number } = {},
-  ): Promise<{ block: string; names: string[] } | null> {
-    const minScore = opts.minScore ?? 6;
-    const limit = Math.max(1, opts.limit ?? 3);
-    // Over-fetch, then drop already-surfaced + below-threshold before capping, so
-    // filtering never starves the result below what the caller asked for.
-    const ranked = await this.search(projectId, text, { limit: limit * 4, expandLinks: true });
+    opts: {
+      exclude?: ReadonlySet<string>;
+      limit?: number;
+      minScore?: number;
+      fullScore?: number;
+      charBudget?: number;
+    } = {},
+  ): Promise<{ block: string; names: string[]; pointed: string[] } | null> {
+    const minScore = opts.minScore ?? SURFACE_MIN_SCORE;
+    const fullScore = opts.fullScore ?? SURFACE_FULL_SCORE;
+    const limit = Math.max(1, opts.limit ?? SURFACE_LIMIT);
+    let budget = Math.max(200, opts.charBudget ?? SURFACE_CHAR_BUDGET);
+
+    // Threshold INSIDE the search so link expansion only fans out from matches
+    // that actually cleared the bar, then over-fetch so dropping already-surfaced
+    // names can't starve the result below what the caller asked for.
+    const ranked = await this.search(projectId, text, {
+      limit: limit * 3,
+      expandLinks: true,
+      minScore,
+      maxLinks: SURFACE_MAX_LINKS,
+    });
     const exclude = opts.exclude ?? new Set<string>();
-    const picked = ranked
-      .filter((m) => !exclude.has(m.name))
-      // A directly-linked neighbour rides along even below threshold (score 0).
-      .filter((m) => m.linked || m.score >= minScore)
-      .slice(0, limit);
+    // A directly-linked neighbour rides along below threshold (score 0), but only
+    // ever as a pointer — it didn't match the turn, the memory pointing at it did.
+    const picked = ranked.filter((m) => !exclude.has(m.name)).slice(0, limit);
     if (!picked.length) return null;
 
-    const names = picked.map((m) => m.name);
-    // Count the proactive push so a fact that keeps being relevant ranks up.
+    const top = picked[0]?.linked ? 0 : (picked[0]?.score ?? 0);
+    const full: ScoredMemory[] = [];
+    const pointers: ScoredMemory[] = [];
+    const sections: string[] = [];
+    for (const m of picked) {
+      // Full body for a confident, unlinked match — and for the runner-up only
+      // when it's in the same league as the leader (a clear #1 means the rest are
+      // context, not the answer).
+      const confident =
+        !m.linked &&
+        m.score >= fullScore &&
+        (full.length === 0 || m.score >= top * FULL_RUNNERUP_RATIO);
+      if (confident && full.length < FULL_LIMIT) {
+        const head = `### ${m.name} (${m.type})\n${m.description}\n\n`;
+        // Reserve the header before clamping — otherwise a body sized to the whole
+        // remaining budget always overruns it and silently demotes to a pointer.
+        const avail = budget - head.length;
+        if (avail >= SURFACE_BODY_MIN) {
+          const section = head + clampBody(m.body, Math.min(SURFACE_BODY_MAX, avail));
+          full.push(m);
+          sections.push(section);
+          budget -= section.length;
+          continue;
+        }
+      }
+      pointers.push(m);
+    }
+
+    const pointerLines: string[] = [];
+    for (const m of pointers) {
+      const line =
+        `- \`${m.name}\` (${m.type})${m.linked ? " — linked" : ""} — ` +
+        `${m.description || "(no description)"}`;
+      if (line.length > budget) break; // budget spent; the rest wait for `recall`
+      pointerLines.push(line);
+      budget -= line.length;
+    }
+    if (!sections.length && !pointerLines.length) return null;
+
+    if (pointerLines.length) {
+      sections.push(
+        "### Possibly relevant — names only\n" +
+          "Judge from the one-liner; pull the full fact with " +
+          "`mcp__manager__recall({ query: \"<name>\" })` if it bears on this work.\n" +
+          pointerLines.join("\n"),
+      );
+    }
+
+    const names = full.map((m) => m.name);
+    const pointed = pointerLines.length
+      ? pointers.slice(0, pointerLines.length).map((m) => m.name)
+      : [];
+    // Count the proactive push so a fact that keeps being relevant ranks up. Only
+    // full-body pushes count — a pointer the agent never opened is not evidence
+    // that the memory was useful, and counting it would corrupt prune candidates.
     await this.recordAccess(this.safeProjectId(projectId), names, "surfaced");
 
-    const sections = picked
-      .map(
-        (m) =>
-          `### ${m.name} (${m.type})${m.linked ? " — linked" : ""}\n` +
-          `${m.description}\n\n${clampBody(m.body, 4000)}`,
-      )
-      .join("\n\n");
     const block =
       "<system-reminder>\n" +
       "Relevant durable project memories your team recorded (surfaced automatically " +
@@ -713,9 +982,9 @@ export class MemoryService {
       "act on them; they reflect what was true when written, so sanity-check against " +
       "live code before betting on a specific detail. If any is now wrong, fix it " +
       "with `mcp__manager__remember` (same name overwrites) or `mcp__manager__forget`.\n\n" +
-      sections +
+      sections.join("\n\n") +
       "\n</system-reminder>";
-    return { block, names };
+    return { block, names, pointed };
   }
 
   /** The `MEMORY.md` index content for a project (regenerated, not cached). */
@@ -752,10 +1021,12 @@ export class MemoryService {
       "## Project memory",
       "",
       "Durable facts your team recorded for THIS project. The standing rules below " +
-        "ALWAYS apply. Everything else is a lookup catalogue — the facts most relevant " +
-        "to what you're doing surface in full automatically, and you can pull any other " +
-        "by topic with `mcp__manager__recall({ query })`. Consult it before asking the " +
-        "user something they may have already answered.",
+        "ALWAYS apply. Everything else is a lookup catalogue: as you work, the facts " +
+        "that clearly bear on the current turn arrive in full automatically, and " +
+        "near-misses arrive as a name + one-line description — when one of those looks " +
+        "relevant, pull it with `mcp__manager__recall({ query: \"<name>\" })` rather than " +
+        "guessing. You can also search by topic the same way. Consult it before asking " +
+        "the user something they may have already answered.",
       "",
     ];
 

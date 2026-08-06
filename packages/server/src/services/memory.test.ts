@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
-import type { WsServerEvent } from "@cm/shared";
-import { MemoryService, clusterAreas } from "./memory.js";
+import type { WsServerEvent } from "@dispatch/shared";
+import { MemoryService, clusterAreas, scoreCorpus } from "./memory.js";
+import type { ProjectMemory } from "@dispatch/shared";
 
 let dir: string;
 let store: Store;
@@ -352,6 +353,174 @@ describe("MemoryService — findSimilar (dedup nudge)", () => {
   });
 });
 
+describe("scoreCorpus — normalized relevance", () => {
+  const mem = (name: string, description: string, body: string): ProjectMemory => ({
+    projectId: "p1",
+    name,
+    description,
+    type: "project",
+    body,
+    file: `${name}.md`,
+  });
+  const scoreOf = (corpus: ProjectMemory[], query: string, name: string) =>
+    scoreCorpus(corpus, query).find((s) => s.memory.name === name)?.score ?? 0;
+
+  it("ignores stopwords, so a sentence full of filler scores like its keywords", async () => {
+    const corpus = [mem("deploy-runbook", "how we ship", "the pipeline runs")];
+    // Every extra function word used to add points to EVERY memory; padding the
+    // same keywords with filler must now leave the score untouched.
+    const bare = scoreOf(corpus, "deploy pipeline", "deploy-runbook");
+    const padded = scoreOf(corpus, "so how is it that we do the deploy pipeline", "deploy-runbook");
+    expect(padded).toBeCloseTo(bare, 5);
+    expect(bare).toBeGreaterThan(0);
+  });
+
+  it("scores an off-topic sentence at zero rather than a nonzero floor", () => {
+    const corpus = [mem("deploy-runbook", "how we ship to prod", "run the pipeline")];
+    // "the/is/and/of" appear in the body but must contribute nothing.
+    expect(scoreOf(corpus, "what is the colour of the sky and sea", "deploy-runbook")).toBe(0);
+  });
+
+  it("matches across inflections (desyncing → desync)", () => {
+    const corpus = [mem("lobby-rejoin-desync", "roster desync on rejoin", "peers drift")];
+    expect(scoreOf(corpus, "desyncing", "lobby-rejoin-desync")).toBeGreaterThan(0);
+    expect(scoreOf(corpus, "lobbies", "lobby-rejoin-desync")).toBeGreaterThan(0);
+  });
+
+  it("demotes a token that appears in nearly every memory (IDF)", () => {
+    // `player` is ubiquitous here, `turret` is rare — a turn naming both should
+    // be carried by the rare one, so the turret memory must win.
+    const corpus = [
+      ...Array.from({ length: 8 }, (_, i) => mem(`sys-${i}`, "player system", "player logic")),
+      mem("turret-aim", "turret aiming", "turret leads the target"),
+    ];
+    const ranked = scoreCorpus(corpus, "player turret aiming").sort((a, b) => b.score - a.score);
+    expect(ranked[0]?.memory.name).toBe("turret-aim");
+  });
+
+  it("is comparable across queries of different lengths", () => {
+    const corpus = [mem("turret-aim", "turret aiming", "turret leads the target")];
+    // A one-word query and a wordy one about the SAME topic should land in the
+    // same band — that comparability is what makes a fixed threshold meaningful.
+    const short = scoreOf(corpus, "turret", "turret-aim");
+    const long = scoreOf(corpus, "can you look at the turret please", "turret-aim");
+    expect(Math.abs(short - long)).toBeLessThan(25);
+  });
+});
+
+describe("MemoryService — graded auto-surface", () => {
+  const longBody = (word: string) => `${word} detail. `.repeat(300); // ~4KB
+
+  it("gives a confident match its full body, clamped well under the old 4KB", async () => {
+    await memory.write("p1", {
+      name: "turret-aim-and-fire",
+      description: "how turret aiming works",
+      type: "project",
+      body: longBody("turret"),
+    });
+    const out = await memory.surfaceFor("p1", "the turret aiming feels off, can you look at it");
+    expect(out).not.toBeNull();
+    expect(out!.names).toEqual(["turret-aim-and-fire"]);
+    expect(out!.block).toContain("turret detail.");
+    expect(out!.block).toContain("truncated");
+    expect(out!.block.length).toBeLessThan(2200);
+  });
+
+  it("offers a match below the confidence bar as a pointer, not as a body", async () => {
+    await memory.write("p1", {
+      name: "turret-aim-and-fire",
+      description: "how turret aiming works",
+      type: "project",
+      body: longBody("turret"),
+    });
+    // An unreachable confidence bar forces the pointer tier, so this asserts the
+    // tier's RENDERING regardless of how the corpus happens to score.
+    const out = await memory.surfaceFor("p1", "the turret aiming feels off", {
+      fullScore: 1000,
+    });
+    expect(out).not.toBeNull();
+    expect(out!.names).toEqual([]);
+    expect(out!.pointed).toEqual(["turret-aim-and-fire"]);
+    // The DESCRIPTION is offered; the body stays out of context entirely.
+    expect(out!.block).toContain("how turret aiming works");
+    expect(out!.block).not.toContain("turret detail.");
+    expect(out!.block).toContain("mcp__manager__recall");
+    expect(out!.block.length).toBeLessThan(700);
+  });
+
+  it("does not count a pointer as a 'surfaced' access (only full bodies)", async () => {
+    await memory.write("p1", {
+      name: "turret-aim-and-fire",
+      description: "how turret aiming works",
+      type: "project",
+      body: longBody("turret"),
+    });
+    await memory.surfaceFor("p1", "the turret aiming feels off", { fullScore: 1000 });
+    // A one-liner the agent may never have opened is not evidence of usefulness —
+    // counting it would quietly disqualify the memory from prune candidates.
+    expect((await memory.accessStats("p1"))["turret-aim-and-fire"]).toBeUndefined();
+  });
+
+  it("keeps a whole turn's block inside the char budget", async () => {
+    for (let i = 0; i < 8; i++) {
+      await memory.write("p1", {
+        name: `turret-subsystem-${i}`,
+        description: `turret subsystem ${i} aiming and firing`,
+        type: "project",
+        body: longBody("turret"),
+      });
+    }
+    const out = await memory.surfaceFor("p1", "turret aiming and firing subsystem");
+    expect(out).not.toBeNull();
+    expect(out!.block.length).toBeLessThanOrEqual(4000);
+    expect(out!.names.length).toBeLessThanOrEqual(2);
+  });
+
+  it("only excludes full-body pushes, so a pointer can be promoted later", async () => {
+    await memory.write("p1", {
+      name: "turret-aim-and-fire",
+      description: "how turret aiming works",
+      type: "project",
+      body: longBody("turret"),
+    });
+    await memory.write("p1", {
+      name: "menu-hex-backdrop",
+      description: "the animated hex backdrop behind the turret menu",
+      type: "project",
+      body: longBody("backdrop"),
+    });
+    const first = await memory.surfaceFor("p1", "the turret aiming feels off");
+    expect(first!.names).toEqual(["turret-aim-and-fire"]);
+    // The broker excludes `names` only — a memory merely pointed at is not in it.
+    expect(first!.names).not.toContain("menu-hex-backdrop");
+
+    // So a later turn squarely about the backdrop can still deliver it in full:
+    // it was only ever named, never actually put into context.
+    const second = await memory.surfaceFor("p1", "the animated hex backdrop behind the menu", {
+      exclude: new Set(first!.names),
+    });
+    expect(second!.names).toContain("menu-hex-backdrop");
+    expect(second!.block).toContain("backdrop detail.");
+  });
+
+  it("stays silent on an off-topic turn instead of dragging in link neighbours", async () => {
+    await memory.write("p1", {
+      name: "turret-aim-and-fire",
+      description: "how turret aiming works",
+      type: "project",
+      body: `turret leads the target. see [[menu-hex-backdrop]]`,
+    });
+    await memory.write("p1", {
+      name: "menu-hex-backdrop",
+      description: "the animated hex backdrop",
+      type: "project",
+      body: longBody("backdrop"),
+    });
+    // Nothing here matches; the linked neighbour must NOT ride in on a non-match.
+    expect(await memory.surfaceFor("p1", "can you bump the dependencies and commit")).toBeNull();
+  });
+});
+
 describe("clusterAreas", () => {
   it("maps by kebab name prefix, sorts by count desc", () => {
     const areas = clusterAreas(
@@ -369,14 +538,14 @@ describe("clusterAreas", () => {
   });
 });
 
-describe("MemoryService — .claude-manager/ config dir source of truth", () => {
+describe("MemoryService — .dispatch/ config dir source of truth", () => {
   // Project "cfg" has a config dir → memory lives in the repo memory dir;
   // project "plain" has none → back-compat `.data` store.
   let repoMemoryDir: string;
   let cfgMemory: MemoryService;
 
   beforeEach(() => {
-    repoMemoryDir = join(dir, "repo", ".claude-manager", "memory");
+    repoMemoryDir = join(dir, "repo", ".dispatch", "memory");
     const resolver = {
       getConfig: (projectId: string) =>
         projectId === "cfg" ? { memoryDir: repoMemoryDir } : null,
