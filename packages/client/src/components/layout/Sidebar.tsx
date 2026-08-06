@@ -18,11 +18,12 @@ import {
   GitBranch,
   type LucideIcon,
 } from "lucide-react";
-import type { Chat, SubApp, RunnerInstance, Project } from "@cm/shared";
+import type { Chat, SubApp, RunnerInstance, Project } from "@dispatch/shared";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { IconButton } from "../ui/IconButton.js";
 import { SectionLabel } from "../ui/Panel.js";
 import { StatusDot, statusMeta } from "../ui/StatusDot.js";
+import { purposeIcon } from "../config/sections.js";
 import { Chip } from "../ui/Chip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
@@ -241,6 +242,7 @@ function ChatRow({
     (s) => s.lastActivity[chat.id] ?? chat.updatedAt ?? chat.createdAt,
   );
   const age = relTimeShort(activityAt, now);
+  const PurposeIcon = purposeIcon(chat.purpose?.kind);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -272,7 +274,24 @@ function ChatRow({
         )}
       >
         {active && <span className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-accent" />}
-        <StatusDot tone={meta.tone} pulse={meta.pulse} size={7} />
+        {/* A chat the app spawned for a job wears that job's icon instead of the
+            status dot — in a sidebar of a dozen rows it's the only way to spot
+            the one that's off editing your config. Status still reads from the
+            row's subtitle, and an unknown purpose kind falls back to the dot. */}
+        {PurposeIcon ? (
+          <span
+            title={chat.purpose?.label ?? chat.purpose?.kind}
+            className={cn(
+              "flex size-[15px] shrink-0 items-center justify-center rounded-[4px]",
+              "bg-accent-ghost text-accent ring-1 ring-accent-line [&_svg]:size-2.5",
+              meta.pulse && "animate-pulse",
+            )}
+          >
+            <PurposeIcon />
+          </span>
+        ) : (
+          <StatusDot tone={meta.tone} pulse={meta.pulse} size={7} />
+        )}
         <span className="min-w-0 flex-1">
           <span
             className={cn(

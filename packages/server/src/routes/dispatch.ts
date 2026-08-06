@@ -16,11 +16,12 @@ import { resolve as resolvePath } from "node:path";
 import type {
   WsClientAction,
   Chat,
+  ChatPurpose,
   Project,
   Effort,
   ImageRef,
   WorktreeInfo,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import { COPILOT_LOGIN } from "../services/github.js";
 import type { Services } from "../services/container.js";
 
@@ -46,6 +47,8 @@ export interface CreateChatInput {
   modeId?: string;
   agentId?: string;
   effort?: Effort;
+  /** Why the app spawned this chat (drives its sidebar icon/tint). */
+  purpose?: ChatPurpose;
 }
 
 /**
@@ -72,6 +75,7 @@ export async function createChat(
     worktrees: [],
     prs: [],
     status: "idle",
+    ...(input.purpose ? { purpose: input.purpose } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -297,6 +301,7 @@ export async function dispatchClientAction(
         const ok = broker.answerQuestion(action.requestId, {
           optionId: action.optionId,
           answer: action.answer,
+          notes: action.notes,
           answers: action.answers,
         });
         if (!ok) {
