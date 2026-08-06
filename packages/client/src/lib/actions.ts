@@ -16,7 +16,7 @@ import type {
   Effort,
   ImageRef,
   PermissionDecision,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import { ws } from "./ws.js";
 import { api } from "./api.js";
 import { useChats } from "../stores/chats.js";
@@ -104,8 +104,15 @@ export const actions = {
     opts: {
       optionId?: string;
       answer?: string;
+      /** Extra instructions carried alongside the chosen option. */
+      notes?: string;
       /** Per-question answers for a multi-question ask (supersedes optionId/answer). */
-      answers?: { questionIndex: number; optionId?: string; answer?: string }[];
+      answers?: {
+        questionIndex: number;
+        optionId?: string;
+        answer?: string;
+        notes?: string;
+      }[];
     } = {},
   ): void {
     ws.send({
@@ -114,6 +121,7 @@ export const actions = {
       requestId,
       optionId: opts.optionId,
       answer: opts.answer,
+      notes: opts.notes,
       answers: opts.answers,
     });
   },

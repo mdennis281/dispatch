@@ -195,9 +195,9 @@ export const ProjectUpdateEventSchema = z.object({
 });
 
 /**
- * A project's authored `.claude-manager/` config was (re)loaded — on discovery,
+ * A project's authored `.dispatch/` config was (re)loaded — on discovery,
  * a watcher-triggered reload, or an explicit reload request. Carries the source
- * dir (null when the project has no `.claude-manager/`), the normalized config
+ * dir (null when the project has no `.dispatch/`), the normalized config
  * (null on none / an unparseable manifest), and any structured load errors.
  */
 export const ProjectConfigUpdateEventSchema = z.object({
@@ -335,6 +335,13 @@ export const QuestionAnswerSchema = z.object({
   questionIndex: z.number().int(),
   optionId: z.string().optional(),
   answer: z.string().optional(),
+  /**
+   * Extra instructions typed alongside the chosen option. Unlike `answer` (which
+   * REPLACES the selection when the user types a custom answer), notes travel
+   * WITH the choice — "this option, but also…". Folded into the answer string
+   * server-side; see buildQuestionAnswer for why it can't ride its own field.
+   */
+  notes: z.string().optional(),
 });
 export type QuestionAnswer = z.infer<typeof QuestionAnswerSchema>;
 
@@ -346,6 +353,8 @@ export const AnswerQuestionActionSchema = z.object({
   /** Single-question shape (kept for the common case). */
   optionId: z.string().optional(),
   answer: z.string().optional(),
+  /** Extra instructions accompanying the single-question choice. */
+  notes: z.string().optional(),
   /** Multi-question shape — one entry per question; supersedes optionId/answer. */
   answers: z.array(QuestionAnswerSchema).optional(),
 });
