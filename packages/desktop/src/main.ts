@@ -1,5 +1,5 @@
 /**
- * Electron main process for claude-manager.
+ * Electron main process for Dispatch.
  *
  * Owns exactly one server child (see server-process.ts) and every descendant it
  * spawns, so quitting the app really does stop everything.
@@ -43,7 +43,7 @@ const paths = desktopPaths();
  */
 function resolveAppDir(): string {
   const built = (dir: string) => existsSync(join(dir, "packages", "server", "dist", "index.js"));
-  if (process.env.CM_APP_DIR) return process.env.CM_APP_DIR;
+  if (process.env.DISPATCH_APP_DIR) return process.env.DISPATCH_APP_DIR;
   const containing = resolve(app.getAppPath(), "..", "..");
   if (built(containing)) return containing;
   if (built(paths.app)) return paths.app;
@@ -68,7 +68,7 @@ function buildStamp(): string {
     };
     return raw.sha ? `${raw.sha.slice(0, 7)} · ${raw.publishedAt ?? "?"}` : "unknown build";
   } catch {
-    return process.env.CM_APP_DIR ? "dev checkout" : "unknown build";
+    return process.env.DISPATCH_APP_DIR ? "dev checkout" : "unknown build";
   }
 }
 
@@ -110,12 +110,16 @@ function createWindow(url: string) {
     height: 1000,
     show: false,
     backgroundColor: "#111111",
-    title: "claude-manager",
+    title: "Dispatch",
     icon: icon(),
     webPreferences: {
       // The renderer is a plain web app talking to loopback; it needs no Node.
       nodeIntegration: false,
       contextIsolation: true,
+      // One narrow bridge: the path of a dropped file, which no browser will
+      // disclose. See preload.ts. Sandboxed preloads can require `webUtils`,
+      // so this costs none of the isolation above.
+      preload: join(__dirname, "preload.js"),
     },
   });
 
@@ -138,6 +142,18 @@ function createWindow(url: string) {
     void shell.openExternal(target);
     return { action: "deny" };
   });
+
+  // Backstop for the classic Electron footgun: a file dropped on any part of the
+  // page that doesn't handle the drop navigates the window to `file:///...`,
+  // replacing the whole app with a file viewer and no way back. The renderer
+  // cancels those drops itself (useFileDrag), but a single gap there would cost
+  // the user a running session, so refuse the navigation here too. Anything
+  // genuinely external goes to the real browser instead of nowhere.
+  win.webContents.on("will-navigate", (e, target) => {
+    if (target.startsWith(url)) return;
+    e.preventDefault();
+    if (/^https?:/i.test(target)) void shell.openExternal(target);
+  });
 }
 
 function showWindow(url: string) {
@@ -149,10 +165,10 @@ function showWindow(url: string) {
 
 function createTray(url: string) {
   tray = new Tray(icon());
-  tray.setToolTip(`claude-manager\n${url}\n${buildStamp()}`);
+  tray.setToolTip(`Dispatch\n${url}\n${buildStamp()}`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: `claude-manager — ${buildStamp()}`, enabled: false },
+      { label: `Dispatch — ${buildStamp()}`, enabled: false },
       { type: "separator" },
       { label: "Open", click: () => showWindow(url) },
       { label: "Open in browser", click: () => void shell.openExternal(url) },
@@ -172,17 +188,17 @@ function createTray(url: string) {
 async function boot() {
   let port = 0;
   try {
-    port = process.env.CM_PORT ? Number(process.env.CM_PORT) : await findFreePort(DEFAULT_PORT);
+    port = process.env.DISPATCH_PORT ? Number(process.env.DISPATCH_PORT) : await findFreePort(DEFAULT_PORT);
     server = await startServer({
       appDir,
-      dataDir: process.env.CM_DATA_DIR ?? paths.dataDir,
-      configDir: process.env.CM_CONFIG_DIR ?? paths.configDir,
+      dataDir: process.env.DISPATCH_DATA_DIR ?? paths.dataDir,
+      configDir: process.env.DISPATCH_CONFIG_DIR ?? paths.configDir,
       port,
       onLog: (line) => process.stdout.write(`${line}\n`),
     });
   } catch (err) {
     dialog.showErrorBox(
-      "claude-manager failed to start",
+      "Dispatch failed to start",
       `${(err as Error).message}\n\n${server?.recentLogs() ?? ""}`,
     );
     quitting = true;
@@ -194,7 +210,7 @@ async function boot() {
   server.onExit((code) => {
     if (quitting) return;
     dialog.showErrorBox(
-      "claude-manager server stopped",
+      "Dispatch server stopped",
       `The server exited (code ${code}).\n\n${server?.recentLogs() ?? ""}`,
     );
     quitting = true;
