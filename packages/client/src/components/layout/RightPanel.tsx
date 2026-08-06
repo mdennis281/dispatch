@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { GitBranch, Bot, AppWindow, SquareTerminal, GitPullRequest } from "lucide-react";
-import type { Chat } from "@cm/shared";
+import type { Chat } from "@dispatch/shared";
 import { Tabs, type TabDef } from "../ui/Tabs.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { WorktreesPanel } from "../panels/WorktreesPanel.js";
@@ -70,7 +70,9 @@ export function RightPanel({ chat }: { chat: Chat }) {
   return (
     <aside className="flex w-[360px] shrink-0 flex-col border-l border-line bg-surface">
       <div className="flex h-12 shrink-0 items-center cm-hairline-b">
-        <Tabs tabs={tabs} value={tab} onChange={(id) => setTab(id as PanelTab)} />
+        {/* Icon-only: five labelled tabs overflowed the 360px column, so the
+            later ones were unreachable. Labels live in the tooltips. */}
+        <Tabs iconOnly tabs={tabs} value={tab} onChange={(id) => setTab(id as PanelTab)} />
       </div>
       <ScrollArea className="min-h-0 flex-1">
         {tab === "worktrees" && <WorktreesPanel chat={chat} />}
