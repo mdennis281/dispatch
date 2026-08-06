@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import type { SubApp, WsServerEvent } from "@cm/shared";
+import type { SubApp, WsServerEvent } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import {
@@ -300,7 +300,7 @@ describe("RunnerService — port injection + reconciliation (mocked)", () => {
 /* ---------------------------------------------------------------- reconcile */
 
 describe("RunnerService — reconcile", () => {
-  it("marks runners with dead pids stopped and leaves live/terminal ones", async () => {
+  it("stops dead runners, REAPS live orphans, and leaves terminal ones", async () => {
     await store.saveRunner({
       id: "dead",
       worktreePath: "C:/wt",
@@ -326,18 +326,29 @@ describe("RunnerService — reconcile", () => {
       status: "exited",
     });
 
+    const killed: number[] = [];
     service = new RunnerService({
       store,
       bus,
       isPidAlive: (pid) => pid === 222,
+      killTree: async (pid) => {
+        killed.push(pid);
+      },
     });
     await service.reconcile();
 
     expect((await store.getRunner("dead"))?.status).toBe("stopped");
-    expect((await store.getRunner("alive"))?.status).toBe("running");
     expect((await store.getRunner("done"))?.status).toBe("exited");
     expect(
       events.some((e) => e.type === "runner-update" && e.runner.id === "dead"),
     ).toBe(true);
+
+    // The live pid belongs to the previous server process: unmanageable from
+    // here (no child handle, no streams, no exit event), so it is tree-killed
+    // rather than left holding its port and pushing the next launch upward.
+    expect(killed).toEqual([222]);
+    expect((await store.getRunner("alive"))?.status).toBe("stopped");
+    // A pid that was already gone must not be signalled.
+    expect(killed).not.toContain(111);
   });
 });

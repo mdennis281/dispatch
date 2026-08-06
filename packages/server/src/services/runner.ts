@@ -12,8 +12,9 @@
  *      bounded in-memory ring for `logs(id)`.
  *
  * stop() tree-kills the process (Windows-safe via tree-kill) and, if docker was
- * used, runs `docker compose down`. reconcile() runs at boot to mark runners whose
- * pid no longer exists as stopped (the server that owned them died).
+ * used, runs `docker compose down`. reconcile() runs at boot and terminates every
+ * runner left over from a previous server process — reaping the ones whose pid is
+ * somehow still alive, since this process can no longer manage them.
  *
  * All process/port/kill/docker primitives are injectable so tests never touch a
  * real docker daemon; the default wiring uses execa + get-port + tree-kill.
@@ -28,7 +29,7 @@ import type {
   RunnerStatus,
   SubApp,
   WsServerEvent,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 
@@ -124,10 +125,20 @@ const defaultRunOnce: RunOnceFn = async (file, args, opts) => {
   return { exitCode: res.exitCode };
 };
 
+/**
+ * How far above a declared base port the allocator will look for a free one.
+ * `ProcessService` scans the same distance when hunting orphans — a narrower
+ * scan there would blind the reaper to exactly the runaway ladders it exists to
+ * clean up, so both sides read this constant.
+ */
+export const PORT_SCAN_RANGE = 100;
+
 const defaultGetPort: GetPortFn = (preferred) => {
   if (preferred === undefined) return getPort();
   if (preferred >= 1024 && preferred < 65535) {
-    return getPort({ port: portNumbers(preferred, Math.min(preferred + 100, 65535)) });
+    return getPort({
+      port: portNumbers(preferred, Math.min(preferred + PORT_SCAN_RANGE, 65535)),
+    });
   }
   return getPort({ port: preferred });
 };
@@ -227,20 +238,31 @@ export class RunnerService {
   /* --------------------------------------------------------------- lifecycle */
 
   /**
-   * Boot reconciliation: any persisted runner that was still "live" but whose pid
-   * is gone (the owning server died) is flipped to `stopped`. We can no longer
-   * manage those processes/streams, so they're treated as terminated.
+   * Boot reconciliation: every persisted runner that was still "live" is
+   * terminated, because none of them belong to THIS process.
+   *
+   * `this.live` is empty at boot, so a non-terminal runner is one of two things:
+   * its pid is gone (the owning server died and took the tree with it), or its
+   * pid is still alive — a process from the PREVIOUS server instance, with no
+   * child handle, no stdout/stderr wiring and no exit event on this side. That
+   * second kind can never be logged, stopped by `stopAll()` (which only walks
+   * `this.live`), or attributed again; leaving it `running` strands it forever
+   * while the port allocator quietly hands the next launch a port one higher.
+   * Since we can't re-adopt a child's streams, reaping is the honest option:
+   * tree-kill it, mark it stopped, and let the operator press Start again.
    */
   async reconcile(): Promise<void> {
     const runners = await this.store.listRunners();
     for (const r of runners) {
       if (TERMINAL.has(r.status)) continue;
-      const alive = r.pid !== undefined && this.isPidAlive(r.pid);
-      if (alive) continue;
-      // The owning server died. A docker stack was started detached, so it almost
-      // certainly survived the restart — bring it down (from the PERSISTED compose
-      // paths, since the live map is empty at boot) so containers don't leak and
-      // the UI stops showing a phantom "running".
+      // Orphan from the previous server process — unmanageable, so reap it.
+      if (r.pid !== undefined && this.isPidAlive(r.pid)) {
+        await this.killTree(r.pid).catch(() => {});
+      }
+      // A docker stack was started detached, so it almost certainly survived the
+      // restart — bring it down (from the PERSISTED compose paths, since the live
+      // map is empty at boot) so containers don't leak and the UI stops showing a
+      // phantom "running".
       if (r.usedDocker) {
         await this.dockerDown(r.id, r.composeDir, r.composeFile);
       }

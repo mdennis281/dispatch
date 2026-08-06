@@ -17,6 +17,7 @@
 import { execa } from "execa";
 import treeKill from "tree-kill";
 import type { Store } from "../store/index.js";
+import { PORT_SCAN_RANGE } from "./runner.js";
 
 /** A port and the pid LISTENING on it (as reported by the OS). */
 export interface PortListener {
@@ -30,7 +31,7 @@ export interface ProjectProcess {
   pid: number;
   /** Process image name (e.g. `node.exe`), best-effort. */
   name?: string;
-  /** True when this port belongs to an active claude-manager runner. */
+  /** True when this port belongs to an active Dispatch runner. */
   tracked: boolean;
   runnerId?: string;
   subAppId?: string;
@@ -59,7 +60,9 @@ export interface ProcessDeps {
   killTree?: KillTreeFn;
   /**
    * How far above each declared base port to look for a listener a tool may have
-   * hopped to (Vite/Colyseus scan upward off a busy base). Default 20.
+   * hopped to (Vite/Colyseus scan upward off a busy base). Defaults to the
+   * allocator's own scan range (`PORT_SCAN_RANGE`) — anything narrower would hide
+   * the far end of a runaway ladder from the very panel meant to reap it.
    */
   portWindow?: number;
 }
@@ -172,7 +175,7 @@ export class ProcessService {
     this.scan = deps.scan ?? defaultScan;
     this.describe = deps.describe ?? defaultDescribe;
     this.killTree = deps.killTree ?? defaultKillTree;
-    this.portWindow = deps.portWindow ?? 20;
+    this.portWindow = deps.portWindow ?? PORT_SCAN_RANGE;
   }
 
   /**
