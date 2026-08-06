@@ -8,10 +8,12 @@ import { useEffect, useMemo, useState } from "react";
 import { Bot, Blocks, Plus, Trash2 } from "lucide-react";
 import type {
   AgentConfig,
+  AgentConfigInput,
+  Effort,
   ModeConfig,
   PermissionMode,
   ConfigScope,
-} from "@cm/shared";
+} from "@dispatch/shared";
 import { Modal, Field, TextInput, TextArea, InlineError } from "./Modal.js";
 import { Button } from "../ui/Button.js";
 import { Select, type SelectOption } from "../ui/Select.js";
@@ -32,6 +34,16 @@ const PERM_OPTIONS: SelectOption<PermissionMode>[] = [
   { value: "auto", label: "Auto" },
 ];
 
+/** "" = inherit the chat's effort (the default), mirroring an empty Model box. */
+const EFFORT_OPTIONS: SelectOption<Effort | "">[] = [
+  { value: "", label: "Inherit", hint: "chat's effort" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
+  { value: "max", label: "Max" },
+];
+
 const SCOPE_OPTIONS: SelectOption<ConfigScope>[] = [
   { value: "global", label: "Global" },
   { value: "project", label: "Project" },
@@ -45,6 +57,7 @@ interface FormState {
   allowedTools: string;
   disallowedTools: string;
   model: string;
+  effort: Effort | "";
   scope: ConfigScope;
   projectId: string;
 }
@@ -57,6 +70,7 @@ const blankForm = (): FormState => ({
   allowedTools: "",
   disallowedTools: "",
   model: "",
+  effort: "",
   scope: "global",
   projectId: "",
 });
@@ -69,6 +83,7 @@ const fromAgent = (a: AgentConfig): FormState => ({
   allowedTools: (a.allowedTools ?? []).join(", "),
   disallowedTools: (a.disallowedTools ?? []).join(", "),
   model: a.model ?? "",
+  effort: a.effort ?? "",
   scope: a.scope,
   projectId: a.projectId ?? "",
 });
@@ -148,7 +163,7 @@ export function ManageConfigDialog({ open, onClose }: { open: boolean; onClose: 
     setError(null);
     try {
       if (tab === "agents") {
-        const body: Partial<AgentConfig> = {
+        const body: Partial<AgentConfigInput> = {
           name: form.name.trim(),
           permissionMode: form.permissionMode,
           instructions: form.instructions.trim(),
@@ -156,6 +171,9 @@ export function ManageConfigDialog({ open, onClose }: { open: boolean; onClose: 
           allowedTools: toolList(form.allowedTools),
           disallowedTools: toolList(form.disallowedTools),
           model: form.model.trim() || undefined,
+          // `null`, not undefined: JSON drops undefined keys, and the PUT merges
+          // over the stored record — so only an explicit null clears a pin.
+          effort: form.effort || null,
           projectId: form.scope === "project" ? form.projectId : undefined,
         };
         const saved = form.id
@@ -373,14 +391,27 @@ export function ManageConfigDialog({ open, onClose }: { open: boolean; onClose: 
                           />
                         </Field>
                       </div>
-                      <Field label="Model" hint="optional override">
-                        <TextInput
-                          mono
-                          value={form.model}
-                          onChange={(e) => patch({ model: e.target.value })}
-                          placeholder="claude-opus-4-8"
-                        />
-                      </Field>
+                      <div className="grid grid-cols-2 gap-3">
+                        <Field label="Model" hint="optional override">
+                          <TextInput
+                            mono
+                            value={form.model}
+                            onChange={(e) => patch({ model: e.target.value })}
+                            placeholder="claude-opus-4-8"
+                          />
+                        </Field>
+                        {/* Pins the level for this agent whether it runs as the
+                            main thread or is spawned as a subagent; "Inherit"
+                            (the default) follows the chat's picker. */}
+                        <Field label="Effort" hint="optional override">
+                          <Select
+                            options={EFFORT_OPTIONS}
+                            value={form.effort}
+                            onChange={(effort) => patch({ effort })}
+                            width={200}
+                          />
+                        </Field>
+                      </div>
                     </>
                   )}
 

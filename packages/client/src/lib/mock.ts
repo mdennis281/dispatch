@@ -1,5 +1,5 @@
 /**
- * Mock fixture — a realistic offline dataset typed against @cm/shared, used to
+ * Mock fixture — a realistic offline dataset typed against @dispatch/shared, used to
  * seed the stores so the shell renders exactly as it will with a live backend.
  * 2b replaces this seed with REST snapshots + the WS stream; the store shapes
  * and component props do not change.
@@ -15,7 +15,7 @@ import type {
   WorktreeInfo,
   PRInfo,
   WorkflowRun,
-} from "@cm/shared";
+} from "@dispatch/shared";
 
 const now = Date.now();
 const ago = (min: number) => now - min * 60_000;
@@ -77,6 +77,7 @@ export const MOCK_AGENTS: AgentConfig[] = [
     name: "Builder",
     instructions: "Principal engineer. Small, tested, conventional commits.",
     permissionMode: "default",
+    effort: undefined,
     scope: "global",
   },
   {
@@ -85,6 +86,7 @@ export const MOCK_AGENTS: AgentConfig[] = [
     instructions: "Adversarial code reviewer. Roast, then suggest fixes.",
     permissionMode: "plan",
     allowedTools: ["Read", "Grep", "Glob", "Bash"],
+    effort: undefined,
     scope: "global",
   },
   {
@@ -92,6 +94,7 @@ export const MOCK_AGENTS: AgentConfig[] = [
     name: "Sprite Artist",
     instructions: "Generate + iterate top-down sprites via the PIL pipeline.",
     permissionMode: "default",
+    effort: undefined,
     scope: "project",
     projectId: "hivebreak",
   },

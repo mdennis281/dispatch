@@ -46,6 +46,13 @@ export const AssistantMessageRowSchema = z.object({
   uuid: z.string().optional(),
   subagentType: z.string().optional(),
   /**
+   * Reasoning effort THIS row's thread ran at. The observed level once a hook has
+   * reported one for the thread (authoritative — it reflects any silent downgrade
+   * for the model), else the level the broker configured for it. Lets a subagent
+   * card show the effort it actually ran at rather than the chat's current pick.
+   */
+  effort: EffortSchema.optional(),
+  /**
    * When set, this row was produced BY a subagent — it is the tool_use id of the
    * `Task` call that spawned it (SDK `parent_tool_use_id`). The client nests every
    * row sharing a `parentToolUseId` under that Task tool card as a sub-transcript.
@@ -67,6 +74,8 @@ export const ToolUseRowSchema = z.object({
   parentToolUseId: z.string().nullable().optional(),
   /** Subagent type that produced this tool_use (when it runs inside one). */
   subagentType: z.string().optional(),
+  /** Reasoning effort this row's thread ran at (see {@link AssistantMessageRowSchema}). */
+  effort: EffortSchema.optional(),
   uuid: z.string().optional(),
   /**
    * LEAN-TRANSCRIPT MARKER (never persisted — set only on the wire). True when

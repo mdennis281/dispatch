@@ -8,11 +8,16 @@
  */
 import { useMemo } from "react";
 import { Bot, Clock, Wrench, CornerDownRight } from "lucide-react";
-import type { Chat } from "@cm/shared";
+import type { Chat } from "@dispatch/shared";
 import { openAgentRun, useAgentRun, useRunElapsed } from "../../stores/agentRun.js";
 import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
 import { runDuration, sortRunsForRoster, type SubagentRun } from "../../lib/subagentRuns.js";
-import { AgentGlyph, RunProgressRail, RunStatusChip } from "../agents/runVisuals.js";
+import {
+  AgentGlyph,
+  EffortMeter,
+  RunProgressRail,
+  RunStatusChip,
+} from "../agents/runVisuals.js";
 import { cn } from "../../lib/cn.js";
 
 function RunRow({ run, active }: { run: SubagentRun; active: boolean }) {
@@ -42,6 +47,27 @@ function RunRow({ run, active }: { run: SubagentRun; active: boolean }) {
           {runDuration(elapsed)}
         </span>
       </div>
+
+      {/* how this run was configured — differs from the chat's own model/effort
+          whenever an agent definition pins its own or the model downgraded it */}
+      {(run.model || run.effort) && (
+        <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-faint">
+          {run.model && (
+            <span className="min-w-0 truncate cm-mono !text-[10px]" title={run.model}>
+              {run.model}
+            </span>
+          )}
+          {run.effort && (
+            <span
+              className="ml-auto inline-flex shrink-0 items-center gap-1"
+              title={`ran at effort: ${run.effort}`}
+            >
+              <EffortMeter effort={run.effort} />
+              {run.effort}
+            </span>
+          )}
+        </div>
+      )}
 
       {run.description && (
         <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-muted">

@@ -6,10 +6,10 @@ import { runDuration } from "../../../lib/subagentRuns.js";
 import { openAgentRun, useRunElapsed } from "../../../stores/agentRun.js";
 import {
   AgentGlyph,
+  RunIdentity,
   RunProgressRail,
   RunStatusChip,
 } from "../../agents/runVisuals.js";
-import { Chip } from "../../ui/Chip.js";
 import { cn } from "../../../lib/cn.js";
 
 export interface SubagentCardProps {
@@ -44,9 +44,7 @@ export const SubagentCard = memo(function SubagentCard({ run }: SubagentCardProp
       >
         <div className="flex min-w-0 items-center gap-2 px-2.5 pt-2">
           <span className="shrink-0 text-[12px] font-semibold text-accent-hi">subagent</span>
-          <Chip tone="accent" className="shrink-0">
-            {run.agentType}
-          </Chip>
+          <RunIdentity run={run} />
           {run.description && (
             <span className="min-w-0 truncate text-[11.5px] text-muted">
               {run.description}

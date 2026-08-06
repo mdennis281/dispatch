@@ -24,7 +24,7 @@ import {
 import { useAgentRun, useRunElapsed } from "../../stores/agentRun.js";
 import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
 import { findRun, runDuration, type SubagentRun } from "../../lib/subagentRuns.js";
-import { AgentGlyph, RunProgressRail, RunStatusChip } from "./runVisuals.js";
+import { AgentGlyph, EffortChip, RunProgressRail, RunStatusChip } from "./runVisuals.js";
 import { RunTimeline } from "./RunTimeline.js";
 import { RunStream } from "./RunStream.js";
 import { Markdown } from "../chat/Markdown.js";
@@ -168,10 +168,11 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
                       {run.agentType}
                     </h2>
                     {run.model && (
-                      <Chip tone="muted" mono className="hidden sm:inline-flex">
+                      <Chip tone="muted" mono className="hidden sm:inline-flex" title="model">
                         {run.model}
                       </Chip>
                     )}
+                    {run.effort && <EffortChip effort={run.effort} label="ran at effort" />}
                     {run.async && (
                       <Chip
                         tone="muted"

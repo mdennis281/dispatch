@@ -4,6 +4,7 @@
  * glyph, one progress rail.
  */
 import { Bot, Check, X, Square } from "lucide-react";
+import type { Effort } from "@dispatch/shared";
 import type { RunStatus, SubagentRun } from "../../lib/subagentRuns.js";
 import type { DotTone } from "../ui/StatusDot.js";
 import { StatusDot } from "../ui/StatusDot.js";
@@ -134,6 +135,97 @@ export function RunProgressRail({
         );
       })}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ effort */
+
+/** The effort ladder, low → max. Index = how many bars the meter fills. */
+export const EFFORT_LADDER: Effort[] = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * A five-tick meter for a reasoning-effort level.
+ *
+ * Effort is ordinal, so it reads far faster as a filled ladder than as a word —
+ * and next to a run's agent + model it answers "how hard is this thing thinking"
+ * without the eye having to parse text. Accent from `high` up, quiet below, so a
+ * rail of runs shows the expensive ones at a glance.
+ */
+export function EffortMeter({ effort, className }: { effort: Effort; className?: string }) {
+  const filled = EFFORT_LADDER.indexOf(effort) + 1;
+  const loud = filled >= 3;
+  return (
+    <span className={cn("inline-flex items-end gap-px", className)} aria-hidden>
+      {EFFORT_LADDER.map((level, i) => (
+        <span
+          key={level}
+          className={cn(
+            "w-[2px] rounded-[1px]",
+            i < filled ? (loud ? "bg-accent" : "bg-muted") : "bg-line-strong",
+          )}
+          // A ladder, not a bar chart: each tick is taller than the last.
+          style={{ height: `${3 + i * 1.5}px` }}
+        />
+      ))}
+    </span>
+  );
+}
+
+/**
+ * The effort a thread ran at. `source` distinguishes a level the runtime
+ * reported from the chat's own pick, because a subagent CAN differ from its
+ * parent — an agent definition may pin its own, and a model that doesn't support
+ * the requested level is silently downgraded.
+ */
+export function EffortChip({
+  effort,
+  label = "effort",
+  className,
+}: {
+  effort: Effort;
+  label?: string;
+  className?: string;
+}) {
+  return (
+    <Chip
+      tone="muted"
+      icon={<EffortMeter effort={effort} />}
+      className={cn("shrink-0", className)}
+      title={`${label}: ${effort}`}
+    >
+      {effort}
+    </Chip>
+  );
+}
+
+/**
+ * WHO ran and HOW: agent type, model, effort — the three facts that differ
+ * between a run and the chat that spawned it. Shared so the transcript card, the
+ * rail and the inspector never drift apart on what a run "is".
+ */
+export function RunIdentity({
+  run,
+  className,
+  showAgent = true,
+}: {
+  run: SubagentRun;
+  className?: string;
+  showAgent?: boolean;
+}) {
+  return (
+    <span className={cn("inline-flex min-w-0 items-center gap-1.5", className)}>
+      {showAgent && (
+        <Chip tone="accent" className="shrink-0">
+          {run.agentType}
+        </Chip>
+      )}
+      {run.model && (
+        <Chip tone="muted" mono className="hidden shrink-0 sm:inline-flex" title="model">
+          {run.model}
+        </Chip>
+      )}
+      {run.effort && <EffortChip effort={run.effort} label="ran at effort" />}
+    </span>
   );
 }
 

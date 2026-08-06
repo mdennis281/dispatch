@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { ChatMessage } from "@cm/shared";
+import type { ChatMessage } from "@dispatch/shared";
 import {
   deriveSubagentRuns,
   runDuration,
@@ -140,6 +140,23 @@ describe("deriveSubagentRuns — timeline", () => {
     const bash = run.steps[2]!;
     expect(bash.kind === "tool" && bash.pending).toBe(true);
     expect(run.latest).toBe("Bash · npm test");
+  });
+
+  it("reports the effort the run's LATEST row carried", () => {
+    // The first row carries the level the broker configured; once a hook has
+    // observed what the runtime really applied, later rows carry that — so the
+    // newest wins rather than the first (unlike `model`, which never changes).
+    const first = assistant("starting", "t1", 1100);
+    (first as { effort?: string }).effort = "medium";
+    const later = tool("a1", "Read", "t1", 1200);
+    (later as { effort?: string }).effort = "low";
+    expect(deriveSubagentRuns([task("t1"), first, later])[0]!.effort).toBe("low");
+  });
+
+  it("leaves effort undefined for a transcript recorded before rows carried it", () => {
+    expect(
+      deriveSubagentRuns([task("t1"), assistant("hi", "t1", 1100)])[0]!.effort,
+    ).toBeUndefined();
   });
 
   it("skips thinking-only assistant rows (they would render as blanks)", () => {

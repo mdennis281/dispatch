@@ -13,10 +13,11 @@
 import type {
   AssistantMessageRow,
   ChatMessage,
+  Effort,
   TaskStatusRow,
   ToolResultRow,
   ToolUseRow,
-} from "@cm/shared";
+} from "@dispatch/shared";
 
 export type RunStatus = "running" | "done" | "failed" | "stopped";
 
@@ -65,6 +66,13 @@ export interface SubagentRun {
   prompt?: string;
   /** Model the subagent's rows reported (first one wins). */
   model?: string;
+  /**
+   * Reasoning effort this run executed at, off its rows (latest wins — the first
+   * row carries the level the broker configured, later ones the level the runtime
+   * reported once a hook observed it). Undefined for transcripts recorded before
+   * rows carried effort.
+   */
+  effort?: Effort;
   /** Every row this subagent produced, in transcript order. */
   rows: ChatMessage[];
   /** Timeline steps (tool calls, assistant turns, nested runs). */
@@ -316,6 +324,7 @@ export function deriveSubagentRuns(
       switch (row.kind) {
         case "assistant": {
           run.model ??= row.model;
+          if (row.effort) run.effort = row.effort;
           // Thinking-only rows carry no visible text — they'd render as blanks.
           if (row.text.trim()) {
             run.steps.push({ kind: "message", id: row.id, ts: row.ts, row });
@@ -325,6 +334,7 @@ export function deriveSubagentRuns(
         }
         case "tool_use": {
           const result = resultsByUse.get(row.toolUseId);
+          if (row.effort) run.effort = row.effort;
           if (isTaskName(row.name)) {
             // A subagent spawning a subagent: a step here, its own run elsewhere.
             run.childRunIds.push(row.toolUseId);

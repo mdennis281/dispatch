@@ -6,7 +6,7 @@
  * NOT from buildApp, so tests keep booting on a truly empty store.
  */
 import type { Store } from "./store/index.js";
-import type { Project, ModeConfig, AgentConfig } from "@cm/shared";
+import type { Project, ModeConfig, AgentConfig } from "@dispatch/shared";
 
 const DEFAULT_MODES: ModeConfig[] = [
   { id: "plan", name: "Plan", permissionMode: "plan", scope: "global" },
@@ -21,6 +21,7 @@ function defaultAgents(now: number): AgentConfig[] {
       name: "Builder",
       instructions: "Principal engineer. Small, tested, conventional commits.",
       permissionMode: "default",
+      effort: undefined,
       scope: "global",
       createdAt: now,
     },
@@ -30,6 +31,7 @@ function defaultAgents(now: number): AgentConfig[] {
       instructions: "Adversarial code reviewer. Roast, then suggest fixes.",
       permissionMode: "plan",
       allowedTools: ["Read", "Grep", "Glob", "Bash"],
+      effort: undefined,
       scope: "global",
       createdAt: now,
     },
@@ -38,6 +40,7 @@ function defaultAgents(now: number): AgentConfig[] {
       name: "Sprite Artist",
       instructions: "Generate + iterate top-down sprites via the PIL pipeline.",
       permissionMode: "default",
+      effort: undefined,
       scope: "project",
       projectId: "hivebreak",
       createdAt: now,
