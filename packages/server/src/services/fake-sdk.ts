@@ -1,7 +1,7 @@
 /**
  * A deterministic, in-process stand-in for the Agent SDK `query()`.
  *
- * Gated behind `CM_FAKE_SDK=1` (see container.ts) so it NEVER touches production
+ * Gated behind `DISPATCH_FAKE_SDK=1` (see container.ts) so it NEVER touches production
  * — it exists purely so the Playwright E2E can drive the full stream→store→UI
  * pipeline (user row → session init → assistant reply → result) without spawning
  * the real `claude` subprocess or depending on subscription auth / the network.
@@ -81,6 +81,7 @@ export function makeFakeQuery(): QueryFn {
       interrupt: async () => {},
       setPermissionMode: async () => {},
       setMaxThinkingTokens: async () => {},
+      applyFlagSettings: async () => {},
       setModel: async () => {},
       supportedCommands: async () => [],
       supportedModels: async () => [],
