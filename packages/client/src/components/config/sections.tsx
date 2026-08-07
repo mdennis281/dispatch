@@ -7,11 +7,12 @@
  * `explainer` (when you'd reach for it, and how it differs from its neighbours) —
  * the questions people actually have when they open this page.
  *
- * Sections are also the vocabulary of the authoring flow: `authorable` sections
- * accept a plain-English description and hand it to an agent, and their `id`
- * matches the shared `ConfigSection` the server briefs against. `purposeIcon`
- * maps a spawned chat's `purpose.kind` back to the same icon, so a chat that's
- * off writing skills is recognizable in the sidebar.
+ * A section that an agent can WRITE is one with an agent task behind it
+ * (`configTaskId(section.id)`), and the launcher's copy — placeholder, default
+ * effort, button verb — comes from that task's catalog entry rather than being
+ * duplicated here. `purposeIcon` maps a spawned chat's `purpose.kind` (which IS
+ * the task id) back to an icon, so a chat that's off writing skills is
+ * recognizable in the sidebar.
  */
 import {
   Blocks,
@@ -25,7 +26,8 @@ import {
   Wand2,
   type LucideIcon,
 } from "lucide-react";
-import { configPurposeKind, type ConfigSection } from "@dispatch/shared";
+import { configTaskId, isAgentTaskId, AGENT_TASKS, type ConfigSection } from "@dispatch/shared";
+import { taskIconOrNull } from "../../lib/taskIcons.js";
 
 export interface SectionDef {
   id: ConfigSection;
@@ -35,8 +37,6 @@ export interface SectionDef {
   blurb: string;
   /** The "should I want one of these?" paragraph, shown in the detail pane. */
   explainer: string;
-  /** Placeholder for the describe-it box; null when the section isn't authorable. */
-  authorPlaceholder: string | null;
   /** Noun for empty states and buttons ("agent", "skill"). */
   noun: string;
   /**
@@ -61,7 +61,6 @@ export const SECTIONS: SectionDef[] = [
       "loose edits, as commits on the trunk, or as a reviewed PR from its own worktree — and " +
       "it's enforced, not just suggested: the same profile drives the injected rules and the " +
       "guard that refuses a push to the trunk.",
-    authorPlaceholder: null,
     noun: "workflow",
     countable: false,
   },
@@ -75,8 +74,6 @@ export const SECTIONS: SectionDef[] = [
       "an agent keeps getting wrong here — the test command that isn't the obvious one, the " +
       "directory that's generated, the convention a newcomer would violate. Keep it short: " +
       "it competes for attention with everything else in the window, and a long one gets skimmed.",
-    authorPlaceholder:
-      "e.g. always run `pnpm check` before claiming a task is done, and never edit files under packages/*/dist",
     noun: "instruction",
   },
   {
@@ -89,8 +86,6 @@ export const SECTIONS: SectionDef[] = [
       "that can only read, a migrator that only touches one directory. An agent is a WHO " +
       "(this is your task, these are your tools); a mode is a how-much-freedom. If you're " +
       "describing work, you want an agent.",
-    authorPlaceholder:
-      "e.g. a reviewer that audits our SQL migrations for missing indexes and unsafe defaults, read-only",
     noun: "agent",
   },
   {
@@ -103,8 +98,6 @@ export const SECTIONS: SectionDef[] = [
       "release checklist, how to regenerate the API client. Unlike instructions (always " +
       "loaded, so they must stay short) a skill can be long, because it costs nothing until " +
       "it fires. Its description is the trigger, so write it as \"use when…\".",
-    authorPlaceholder:
-      "e.g. how to cut a release: version bump, changelog, tag, and the two manual checks that always get missed",
     noun: "skill",
   },
   {
@@ -117,8 +110,6 @@ export const SECTIONS: SectionDef[] = [
       "bypass — optionally with an instruction overlay. You choose one when you start a chat. " +
       "Most projects never need a custom mode; reach for one when a recurring KIND of session " +
       "wants a different leash than the default.",
-    authorPlaceholder:
-      "e.g. a read-only investigation mode: no writes, no shell, and tell the agent to report findings instead of fixing",
     noun: "mode",
   },
   {
@@ -131,8 +122,6 @@ export const SECTIONS: SectionDef[] = [
       "tracker, a database, a browser. Declared here, they're passed to every session in the " +
       "project and committed with the repo, so a teammate gets the same tools without any " +
       "setup. Secrets belong in as ${VAR} placeholders, never literals.",
-    authorPlaceholder:
-      "e.g. connect our Linear workspace so agents can read and comment on issues",
     noun: "MCP server",
     manifestBacked: true,
   },
@@ -146,8 +135,6 @@ export const SECTIONS: SectionDef[] = [
       "on a worktree branch and hand you a live localhost URL — so a change gets SEEN " +
       "running, not just described. Ports are allocated per worktree, so several branches can " +
       "run side by side.",
-    authorPlaceholder:
-      "e.g. the web app in apps/web — pnpm dev on port 5173, needs API_URL pointing at the api sub-app",
     noun: "sub-app",
     manifestBacked: true,
   },
@@ -161,7 +148,6 @@ export const SECTIONS: SectionDef[] = [
       "kind of fact you'd otherwise re-explain every chat. Agents write it themselves through " +
       "the remember/recall tools as they work; it's project-scoped, lives in the primary " +
       "checkout, and (on the commit and review profiles) gets committed for you.",
-    authorPlaceholder: null,
     noun: "memory",
   },
 ];
@@ -169,14 +155,24 @@ export const SECTIONS: SectionDef[] = [
 export const SECTION_BY_ID = new Map(SECTIONS.map((s) => [s.id, s]));
 
 /**
- * The icon for a spawned chat's `purpose.kind`, or null when the kind is one this
- * build doesn't know. Unknown kinds fall back to the normal status dot rather
- * than rendering a placeholder — a future spawner can ship before its icon does.
+ * The icon for a spawned chat's `purpose.kind` — which is the agent-task id that
+ * spawned it — or null when the kind is one this build doesn't know. Unknown
+ * kinds fall back to the normal status dot rather than rendering a placeholder,
+ * so a future spawner can ship before its icon does.
+ *
+ * The catalog entry is the source of truth (a task declares its own icon by
+ * name), which is what keeps the launcher's header icon and this row icon the
+ * same picture. The SECTIONS lookup below is the fallback for a kind that no
+ * longer has a catalog entry — a purpose persisted by an older build.
  */
 export function purposeIcon(kind: string | undefined): LucideIcon | null {
   if (!kind) return null;
+  if (isAgentTaskId(kind)) {
+    const fromCatalog = taskIconOrNull(AGENT_TASKS[kind].icon);
+    if (fromCatalog) return fromCatalog;
+  }
   for (const s of SECTIONS) {
-    if (configPurposeKind(s.id) === kind) return s.icon;
+    if (configTaskId(s.id) === kind) return s.icon;
   }
   return kind.startsWith("config:") ? FileCog : null;
 }

@@ -16,6 +16,9 @@ import { SectionLabel } from "../ui/Panel.js";
 import { api, type AppSettings } from "../../lib/api.js";
 import { useProjects } from "../../stores/projects.js";
 import { useNotices } from "../../stores/notices.js";
+import { useSettings } from "../../stores/settings.js";
+import { useBrowserNotify, notifyUnavailableReason } from "../../lib/browserNotify.js";
+import { StopDispatch } from "./StopDispatch.js";
 import { cn } from "../../lib/cn.js";
 
 /** Apply the persisted theme to the document (mirrors index.html `class="dark"`). */
@@ -60,6 +63,48 @@ function Switch({
   );
 }
 
+/**
+ * Desktop notifications — the only control in this modal that is NOT saved
+ * server-side, and deliberately so. The browser permission it depends on is
+ * granted per origin per browser, so "on" can only ever mean "on in this
+ * browser"; persisting it centrally would promise every device something one
+ * device granted. Everything here lives in localStorage (see lib/browserNotify).
+ */
+function DesktopNotifications() {
+  const enabled = useBrowserNotify((s) => s.enabled);
+  const permission = useBrowserNotify((s) => s.permission);
+  const setEnabled = useBrowserNotify((s) => s.setEnabled);
+  const request = useBrowserNotify((s) => s.request);
+  const unavailable = notifyUnavailableReason();
+
+  return (
+    <div className="mb-3 rounded-md border border-line bg-inset/40 px-2.5 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[12px] font-medium text-secondary">Desktop notifications</span>
+        {unavailable || permission === "unsupported" ? null : permission === "granted" ? (
+          <Switch
+            checked={enabled}
+            onChange={setEnabled}
+            label={enabled ? "On" : "Muted"}
+          />
+        ) : permission === "denied" ? (
+          <span className="text-[11px] text-warn">Blocked</span>
+        ) : (
+          <Button size="xs" onClick={() => void request()}>
+            Enable
+          </Button>
+        )}
+      </div>
+      <p className="mt-1 text-[11px] leading-snug text-faint">
+        {unavailable ??
+          (permission === "denied"
+            ? "You blocked notifications for this origin — re-allow them in the browser's site settings, then reopen this panel."
+            : "An OS toast when an agent needs a decision, a question answered, or finishes — only while the app isn't focused. Clicking one jumps to the chat.")}
+      </p>
+    </div>
+  );
+}
+
 const DEFAULT_DRAFT: AppSettings = { theme: "dark", webhook: { enabled: false } };
 
 export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -93,6 +138,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
             enabled: s.autoCompact?.enabled ?? true,
             window: s.autoCompact?.window,
           },
+          showInjectedContext: s.showInjectedContext ?? false,
         };
         setDraft(next);
         applyTheme(next.theme);
@@ -136,10 +182,14 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
         enabled: draft.autoCompact?.enabled ?? true,
         window: draft.autoCompact?.window || undefined,
       },
+      showInjectedContext: draft.showInjectedContext ?? false,
     };
     try {
       const saved = await api.settings.update(body);
       applyTheme(saved.theme ?? body.theme);
+      // Push into the live store too: transcripts read this on every render and
+      // would otherwise keep the boot-time value until a reload.
+      useSettings.getState().apply(saved);
       pushToast({ level: "info", text: "Settings saved" });
       onClose();
     } catch (e) {
@@ -210,16 +260,37 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
               options={modeOptions}
             />
           </Field>
+          {/* The bottom of the chat → project → app → off chain. A project's
+              `.dispatch/project.yaml` can override it for everyone working in
+              that repo, and any single chat can override both. */}
+          <div className="mt-3 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[11px] font-medium text-secondary">Show sent context</div>
+              <p className="mt-0.5 text-[10.5px] leading-snug text-faint">
+                Reveal what Dispatch attaches to your turns on your behalf — surfaced
+                memories, repo snapshots. Rendering only; the agent receives it either way.
+              </p>
+            </div>
+            <Switch
+              checked={!!draft.showInjectedContext}
+              onChange={(v) => patch({ showInjectedContext: v })}
+              label={draft.showInjectedContext ? "Shown" : "Hidden"}
+            />
+          </div>
         </div>
 
         {/* notifications */}
         <div>
+          <SectionLabel className="mb-1.5 px-0">
+            <span className="inline-flex items-center gap-1.5 [&_svg]:size-3">
+              <Bell /> Notifications
+            </span>
+          </SectionLabel>
+
+          <DesktopNotifications />
+
           <div className="mb-1.5 flex items-center justify-between">
-            <SectionLabel className="px-0">
-              <span className="inline-flex items-center gap-1.5 [&_svg]:size-3">
-                <Bell /> Notifications
-              </span>
-            </SectionLabel>
+            <SectionLabel className="px-0">Webhook</SectionLabel>
             <Switch
               checked={!!wh.enabled}
               onChange={(v) => patchWebhook({ enabled: v })}
@@ -292,6 +363,9 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
             </Field>
           </div>
         </div>
+
+        {/* stop the app — last, because it's the one control that ends the session */}
+        <StopDispatch />
       </div>
     </Modal>
   );

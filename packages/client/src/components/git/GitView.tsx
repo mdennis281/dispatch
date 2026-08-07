@@ -21,6 +21,7 @@ import {
   ArrowUpFromLine,
   FolderGit2,
   GitBranch,
+  GitCommitVertical,
   GitCompare,
   RefreshCw,
   RotateCw,
@@ -39,6 +40,7 @@ import { SegmentedControl, type Segment } from "../ui/SegmentedControl.js";
 import { Spinner } from "../ui/Spinner.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate } from "../../lib/format.js";
+import { TaskLauncher } from "../tasks/TaskLauncher.js";
 import { ChangesTab } from "./ChangesTab.js";
 import { HistoryTab } from "./HistoryTab.js";
 import { StashesTab } from "./StashesTab.js";
@@ -121,6 +123,70 @@ function StashButton({ disabled }: { disabled: boolean }) {
             </Button>
           </div>
         </div>
+      )}
+    </Popover>
+  );
+}
+
+/* ------------------------------------------------------- commit sweep form */
+
+/**
+ * "Sweep into commits" — hand the whole dirty tree to an agent and get one
+ * commit per coherent change back.
+ *
+ * It lives in the toolbar rather than in the Changes tab's commit box because it
+ * is the alternative to that box, not an accessory to it: you either stage and
+ * write a message yourself, or you let the sweep do the grouping. Putting it
+ * inside the commit box would read as "generate a message for what I staged",
+ * which is the button that's already there.
+ *
+ * The form itself is the shared TaskLauncher, so this is a popover and a repo
+ * path — the instructions box, effort selector and toggles come with it.
+ */
+function SweepButton({
+  projectId,
+  repoPath,
+  dirty,
+  disabled,
+}: {
+  projectId: string | null;
+  repoPath: string | null;
+  dirty: boolean;
+  disabled: boolean;
+}) {
+  return (
+    <Popover
+      align="end"
+      width={520}
+      className="p-0"
+      trigger={({ toggle, open }) => (
+        <Button
+          size="xs"
+          variant="subtle"
+          leftIcon={<GitCommitVertical />}
+          disabled={disabled}
+          onClick={toggle}
+          aria-expanded={open}
+          title="Group the working tree into per-feature commits (AI)"
+        >
+          Sweep
+        </Button>
+      )}
+    >
+      {(close) => (
+        <TaskLauncher
+          taskId="git:commit-sweep"
+          projectId={projectId}
+          dense
+          // The sweep must target the repo the VIEW is pointed at — usually a
+          // worktree, not the project checkout. Sending the wrong one commits
+          // someone else's work.
+          params={repoPath ? { repoPath } : undefined}
+          blockedReason={
+            !dirty ? "Nothing to sweep — the working tree is clean." : undefined
+          }
+          onLaunched={close}
+        />
       )}
     </Popover>
   );
@@ -323,6 +389,9 @@ export function GitView() {
   const behind = status?.behind ?? 0;
   const dirty =
     (status?.unstaged.length ?? 0) + (status?.untracked.length ?? 0) > 0;
+  // A sweep can commit what's already staged too, so it has a wider notion of
+  // "there is work here" than Stash does.
+  const anyChanges = dirty || (status?.staged.length ?? 0) > 0;
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">
@@ -375,6 +444,12 @@ export function GitView() {
         )}
 
         <div className="ml-auto flex items-center gap-1.5">
+          <SweepButton
+            projectId={project.id}
+            repoPath={repoPath}
+            dirty={anyChanges}
+            disabled={!!busy}
+          />
           <StashButton disabled={!dirty || !!busy} />
           <Button
             size="xs"

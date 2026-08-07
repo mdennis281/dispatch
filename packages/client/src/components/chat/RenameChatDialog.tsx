@@ -12,6 +12,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Pencil, Sparkles } from "lucide-react";
+import { stripTitleMarks } from "@dispatch/shared";
 import { Modal, Field, TextInput } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
@@ -41,7 +42,10 @@ export function RenameChatDialog({
   // (Re)seed the draft each time the dialog opens.
   useEffect(() => {
     if (open) {
-      setDraft(chat?.title ?? "");
+      // Marks are stripped for editing: the field is a text box, and `**` in it
+      // reads as a typo rather than as the accent it renders to. Typing them
+      // back is still how you emphasize a hand-written title.
+      setDraft(stripTitleMarks(chat?.title ?? ""));
       setGenerating(false);
       baselineRef.current = null;
     }
@@ -54,7 +58,7 @@ export function RenameChatDialog({
   useEffect(() => {
     if (!generating || baselineRef.current === null) return;
     if (liveTitle && liveTitle !== baselineRef.current) {
-      setDraft(liveTitle);
+      setDraft(stripTitleMarks(liveTitle));
       setGenerating(false);
       baselineRef.current = null;
       if (timerRef.current) clearTimeout(timerRef.current);
@@ -114,7 +118,9 @@ export function RenameChatDialog({
       <div className="space-y-3">
         <Field
           label="Title"
-          hint={over ? `${draft.trim().length} chars — aim for ≤35` : undefined}
+          hint={
+            over ? `${draft.trim().length} chars — aim for ≤35` : "**bold** takes the accent"
+          }
         >
           <TextInput
             autoFocus

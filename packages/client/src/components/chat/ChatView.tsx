@@ -11,13 +11,17 @@ import {
   RefreshCw,
   Pencil,
   Trash2,
+  Eye,
+  EyeOff,
 } from "lucide-react";
+import { stripTitleMarks } from "@dispatch/shared";
 import type { AgentActivity, Chat, WorktreeInfo } from "@dispatch/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { Chip } from "../ui/Chip.js";
 import { StatusDot, statusMeta } from "../ui/StatusDot.js";
+import { TitleText } from "../ui/TitleText.js";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
 import { Modal, InlineError } from "../sidebar/Modal.js";
@@ -33,7 +37,12 @@ import { useProjects } from "../../stores/projects.js";
 import { usePanels } from "../../stores/panels.js";
 import { worktreeMatchesChat, samePath } from "../panels/panelBus.js";
 import { actions, deleteChat } from "../../lib/actions.js";
+import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
+import {
+  useInjectedContext,
+  injectedContextSourceLabel,
+} from "../../lib/injectedContext.js";
 
 function branchName(path: string | undefined): string | null {
   if (!path) return null;
@@ -110,6 +119,17 @@ export function ChatView({ chat }: { chat: Chat }) {
   const atBottomRef = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
 
+  // Whether this chat's transcript admits the context Dispatch attached for you
+  // (chat → project → app → off). Toggling pins an explicit answer on the chat.
+  const injected = useInjectedContext(chat.id);
+  const toggleInjected = useCallback(() => {
+    const next = !injected.show;
+    // Optimistic, then persisted: this is a view preference, so a failed write
+    // shouldn't block the click — the chat-update reconciles either way.
+    useChats.getState().upsertChat({ ...chat, showInjectedContext: next });
+    void api.chats.update(chat.id, { showInjectedContext: next }).catch(() => {});
+  }, [chat, injected.show]);
+
   // Inline title rename (header) + delete confirmation dialog.
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -118,14 +138,16 @@ export function ChatView({ chat }: { chat: Chat }) {
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const startRename = () => {
-    setTitleDraft(chat.title);
+    // Edited as plain text: `**` in an input box reads as a typo, not as the
+    // accent it renders to (see ui/TitleText). Typing them back still works.
+    setTitleDraft(stripTitleMarks(chat.title));
     setEditingTitle(true);
   };
   const commitRename = () => {
     const next = titleDraft.trim();
     setEditingTitle(false);
     // No-op on empty / unchanged — don't churn the title or emit a needless turn.
-    if (!next || next === chat.title) return;
+    if (!next || next === chat.title || next === stripTitleMarks(chat.title)) return;
     actions.setTitle(chat.id, next);
     // Optimistic: reflect the rename immediately; the server's chat-update reconciles.
     useChats.getState().upsertChat({ ...chat, title: next });
@@ -363,7 +385,7 @@ export function ChatView({ chat }: { chat: Chat }) {
                   title="Double-click to rename"
                   className="truncate text-[13.5px] font-semibold tracking-tight text-primary"
                 >
-                  {chat.title}
+                  <TitleText title={chat.title} />
                 </h1>
               )}
             </div>
@@ -439,6 +461,21 @@ export function ChatView({ chat }: { chat: Chat }) {
                     }}
                   >
                     Regenerate title
+                  </MenuItem>
+                  <div className="my-1 h-px bg-line" />
+                  {/* Show what Dispatch attached to a turn on your behalf —
+                      surfaced memories, repo snapshots. Rendering only: the
+                      model got the same context either way. Toggling here
+                      overrides the project/app default for THIS chat. */}
+                  <MenuItem
+                    icon={injected.show ? <Eye className="text-accent" /> : <EyeOff />}
+                    hint={injected.source === "chat" ? "this chat" : injectedContextSourceLabel(injected.source)}
+                    onClick={() => {
+                      toggleInjected();
+                      close();
+                    }}
+                  >
+                    {injected.show ? "Hide sent context" : "Show sent context"}
                   </MenuItem>
                   <div className="my-1 h-px bg-line" />
                   <MenuItem

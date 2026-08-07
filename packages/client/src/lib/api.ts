@@ -37,7 +37,8 @@ import type {
   ContextUsage,
   ModelOption,
   WorkflowConfig,
-  AuthorableSection,
+  LaunchAgentTaskInput,
+  MessagePart,
 } from "@dispatch/shared";
 
 /**
@@ -60,6 +61,12 @@ export interface AppSettings {
     /** Optional compaction reserve window (tokens); omit = SDK default. */
     window?: number;
   };
+  /**
+   * App-wide default for showing the context Dispatch attaches on your behalf
+   * (surfaced memories, repo snapshots) in a transcript. A project manifest or
+   * an individual chat can override it; unset everywhere means off.
+   */
+  showInjectedContext?: boolean;
 }
 
 /** An OS process LISTENING on a project's port (mirrors server ProjectProcess). */
@@ -307,15 +314,6 @@ export const api = {
         `/api/projects/${projectId}/config/scaffold`,
         { force },
       ),
-    /**
-     * Spawn a chat that writes a config item from a description. Returns the
-     * chat (already sent its briefing) so the caller can focus it.
-     */
-    author: (projectId: string, section: AuthorableSection, description: string) =>
-      post<{ chat: Chat; prompt: string }>(`/api/projects/${projectId}/config/author`, {
-        section,
-        description,
-      }),
     /** Delete one config file/dir (path relative to the config dir), then reload. */
     deleteItem: (projectId: string, rel: string) =>
       del<ProjectConfigResult>(
@@ -328,6 +326,20 @@ export const api = {
       post<{ sourceDir: string; files: string[]; result: ProjectConfigResult }>(
         `/api/projects/${projectId}/config/import`,
         { data },
+      ),
+  },
+
+  /* agent tasks — "describe it, an agent does it" (config authoring, commit sweep) */
+  tasks: {
+    /**
+     * Launch a task: spawns a chat, sends it the composed briefing, and returns
+     * it (with the prompt's authorship breakdown) so the caller can focus it.
+     * One call for every task — the id selects the server-side briefing.
+     */
+    launch: (projectId: string, input: LaunchAgentTaskInput) =>
+      post<{ chat: Chat; prompt: string; parts: MessagePart[] }>(
+        `/api/projects/${projectId}/tasks`,
+        input,
       ),
   },
 
@@ -555,6 +567,9 @@ export const api = {
     get: () => get<AppSettings>("/api/settings"),
     update: (body: Partial<AppSettings>) => put<AppSettings>("/api/settings", body),
   },
+
+  /* stop the whole app (see routes/shutdown.ts) */
+  shutdown: () => post<{ ok: boolean; error?: string }>("/api/shutdown"),
 
   /* subscription usage (5h + weekly) for the header meter */
   usage: {

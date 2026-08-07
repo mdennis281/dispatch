@@ -23,6 +23,7 @@ import { Popover, MenuItem } from "../ui/Popover.js";
 import { IconButton } from "../ui/IconButton.js";
 import { SectionLabel } from "../ui/Panel.js";
 import { StatusDot, statusMeta } from "../ui/StatusDot.js";
+import { TitleText } from "../ui/TitleText.js";
 import { purposeIcon } from "../config/sections.js";
 import { Chip } from "../ui/Chip.js";
 import { Spinner } from "../ui/Spinner.js";
@@ -299,7 +300,9 @@ function ChatRow({
               active ? "font-semibold text-primary" : "text-secondary",
             )}
           >
-            {chat.title}
+            {/* `**category**:` in a title takes the accent — the category is
+                what the eye scans a long sidebar FOR. See ui/TitleText. */}
+            <TitleText title={chat.title} />
           </span>
           <span className="mt-px block truncate text-[10.5px] text-faint">
             {meta.label}

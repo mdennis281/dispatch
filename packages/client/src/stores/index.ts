@@ -11,6 +11,7 @@
 import type { WsServerEvent, WorktreeInfo, PRInfo, WorkflowRun } from "@dispatch/shared";
 
 import { api } from "../lib/api.js";
+import { notifyAttention, closeAttentionNotification } from "../lib/browserNotify.js";
 import { useConnection } from "./connection.js";
 import { useProjects } from "./projects.js";
 import { useChats } from "./chats.js";
@@ -26,6 +27,7 @@ import { useCheckpoints } from "./checkpoints.js";
 import { useNotices } from "./notices.js";
 import { useUsage } from "./usage.js";
 import { useModels } from "./models.js";
+import { useSettings } from "./settings.js";
 
 import {
   MOCK_PROJECTS,
@@ -60,6 +62,7 @@ export { useNotices } from "./notices.js";
 export type { Toast, NoticeLevel } from "./notices.js";
 export { useUsage } from "./usage.js";
 export { useModels } from "./models.js";
+export { useSettings } from "./settings.js";
 
 /** Seed all stores from the offline fixture (call once at boot). */
 export function hydrateFromMock(): void {
@@ -144,12 +147,27 @@ export function applyServerEvent(evt: WsServerEvent): void {
       useMessages.getState().resolvePermission(evt.chatId, evt.requestId, evt.decision);
       return;
 
-    case "attention-add":
-      useAttention.getState().add(evt.item);
+    case "server-shutdown":
+      // Deliberate stop, not a dropped link. Recording it is what tells the WS
+      // client to stop reconnecting and the shell to show the stopped screen.
+      useConnection.getState().onServerShutdown(evt.reason);
       return;
+
+    case "attention-add": {
+      useAttention.getState().add(evt.item);
+      // …and, if you're not looking at the app, as an OS notification. Fired
+      // here rather than from a component so it doesn't depend on which view
+      // happens to be mounted. Never awaited: delivery is best-effort.
+      const title = useChats.getState().byId[evt.item.chatId]?.title;
+      void notifyAttention(evt.item, title);
+      return;
+    }
 
     case "attention-resolve":
       useAttention.getState().resolve(evt.id);
+      // Answered elsewhere (or by you, in-app) — withdraw the OS toast so the
+      // notification centre doesn't hold decisions that are already made.
+      void closeAttentionNotification(evt.id);
       return;
 
     case "runner-log":
@@ -206,6 +224,9 @@ export function applyServerEvent(evt: WsServerEvent): void {
       // Authoritative deletion: drop the chat everywhere (sidebar reselects a
       // sibling) + clear any stray attention items. Idempotent, so it's a safe
       // backstop for the initiating tab and the real signal for every other tab.
+      for (const item of useAttention.getState().items) {
+        if (item.chatId === evt.chatId) void closeAttentionNotification(item.id);
+      }
       useAttention.getState().clearChat(evt.chatId);
       useChats.getState().removeChat(evt.chatId);
       return;
@@ -336,6 +357,13 @@ export async function hydrateFromServer(): Promise<boolean> {
   void api.models
     .list()
     .then((m) => useModels.getState().setModels(m))
+    .catch(() => {});
+  // Same treatment for the app settings the transcript consults (the
+  // injected-context default): best-effort, never gating, and it falls back to
+  // "off" — which is also what the setting defaults to server-side.
+  void api.settings
+    .get()
+    .then((s) => useSettings.getState().apply(s))
     .catch(() => {});
   useChats.getState().hydrate(chats);
   useAttention.getState().hydrate(attention);

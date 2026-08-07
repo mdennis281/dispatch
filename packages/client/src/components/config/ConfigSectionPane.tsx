@@ -10,56 +10,60 @@
  * bespoke form per kind that would drift from the format the loader actually
  * accepts. Manifest-backed kinds (MCP servers, sub-apps) point at project.yaml,
  * because that genuinely is where they live.
+ *
+ * The describe-it form is no longer this file's business: it's the shared
+ * launcher, reached through a "Create with AI" button that every authorable
+ * section carries in the same place. All this decides is WHICH task (none, for
+ * `workflow` and `memory`) — the verb, the placeholder, the icon and the run
+ * settings all come from that task's catalog entry.
  */
 import { useState } from "react";
-import { FileCog, Plus, Send, SquarePen, Sparkles, Trash2 } from "lucide-react";
-import type { ProjectConfig, ProjectMemory } from "@dispatch/shared";
+import { FileCog, Plus, SquarePen, Trash2 } from "lucide-react";
+import {
+  AGENT_TASKS,
+  configTaskId,
+  type ProjectConfig,
+  type ProjectMemory,
+} from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { Chip } from "../ui/Chip.js";
-import { Spinner } from "../ui/Spinner.js";
-import { cn } from "../../lib/cn.js";
+import { TaskLauncherDialog } from "../tasks/TaskLauncherDialog.js";
+import { taskIcon } from "../../lib/taskIcons.js";
 import type { SectionDef } from "./sections.js";
 import { deleteTarget, sectionItems } from "./configItems.js";
 
 export function ConfigSectionPane({
   section,
+  projectId,
   config,
   memories,
   busy,
   onOpenFile,
   onDelete,
-  onAuthor,
+  onLaunched,
   children,
 }: {
   section: SectionDef;
+  projectId: string | null;
   config: ProjectConfig | null;
   memories: ProjectMemory[];
   busy: boolean;
   /** Open a config-dir-relative file in the editor. */
   onOpenFile: (rel: string) => void;
   onDelete: (rel: string, label: string) => void;
-  /** Hand a description to an agent; resolves when the chat has been spawned. */
-  onAuthor: (description: string) => Promise<void>;
+  /** A task chat was spawned and focused — the host closes itself here. */
+  onLaunched: () => void;
   /** Section-specific content rendered above the item list (the workflow editor). */
   children?: React.ReactNode;
 }) {
-  const [describe, setDescribe] = useState("");
-  const [sending, setSending] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [launching, setLaunching] = useState(false);
   const items = sectionItems(section.id, config, memories);
+  const task = configTaskId(section.id);
   const Icon = section.icon;
-
-  async function submit() {
-    const text = describe.trim();
-    if (!text || sending) return;
-    setSending(true);
-    try {
-      await onAuthor(text);
-      setDescribe("");
-    } finally {
-      setSending(false);
-    }
-  }
+  // The TASK's icon, not the section's: they agree today, and when they don't
+  // it's the task icon that the spawned chat will wear.
+  const TaskIcon = task ? taskIcon(AGENT_TASKS[task].icon) : Icon;
 
   return (
     <div className="space-y-3">
@@ -72,6 +76,23 @@ export function ConfigSectionPane({
             <Chip tone={items.length ? "accent" : "muted"} mono>
               {items.length}
             </Chip>
+          )}
+          {/* Every authorable section gets the same affordance in the same
+              place, wearing its OWN task icon — the one the spawned chat will
+              carry in the sidebar. Sections with no task (workflow, memory)
+              simply don't have one, and an EMPTY section shows it in the empty
+              state instead: two identical buttons in one pane read as two
+              different actions. */}
+          {task && items.length > 0 && (
+            <Button
+              variant="subtle"
+              className="ml-auto"
+              leftIcon={<TaskIcon />}
+              disabled={busy || !projectId}
+              onClick={() => setLaunching(true)}
+            >
+              Create with AI
+            </Button>
           )}
         </div>
         <p className="mt-1.5 text-[11.5px] leading-relaxed text-muted">{section.explainer}</p>
@@ -146,66 +167,45 @@ export function ConfigSectionPane({
             <p className="text-[11.5px] text-secondary">
               No {section.noun}s in this project yet.
             </p>
+            {/* The empty state is where the affordance matters most — this is
+                the moment someone is looking for "how do I get one". */}
+            {task && (
+              <Button
+                variant="primary"
+                className="mt-2.5"
+                leftIcon={<TaskIcon />}
+                disabled={busy || !projectId}
+                onClick={() => setLaunching(true)}
+              >
+                Create with AI
+              </Button>
+            )}
           </div>
         )
       )}
 
-      {/* Describe-it: the way most of these get created. Deliberately below the
-          list, so the pane reads "here's what you have" before "add more". */}
-      {section.authorPlaceholder && (
-        <div className="rounded-md border border-line bg-panel-2/40">
-          <div className="flex items-center gap-2 px-3 py-2 [&_svg]:size-3.5">
-            <Sparkles className="shrink-0 text-accent" />
-            <span className="text-[11.5px] font-semibold text-primary">
-              Add a {section.noun}
-            </span>
-            <span className="ml-auto truncate text-[10.5px] text-faint">
-              describe it — an agent writes it
-            </span>
-          </div>
-          <div className="space-y-2 border-t border-line-soft p-2.5">
-            <textarea
-              value={describe}
-              onChange={(e) => setDescribe(e.target.value)}
-              onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void submit();
-              }}
-              rows={3}
-              placeholder={section.authorPlaceholder}
-              disabled={sending}
-              className={cn(
-                "w-full resize-y rounded-md border border-line bg-inset px-2.5 py-2",
-                "text-[11.5px] leading-relaxed text-secondary placeholder:text-faint",
-                "focus:border-accent-line focus:outline-none disabled:opacity-60",
-              )}
-            />
-            <div className="flex items-center gap-2">
-              <span className="min-w-0 flex-1 text-[10.5px] leading-snug text-faint">
-                Opens a chat here — it reads the repo first and you can steer it.
-              </span>
-              {/* Only offered where it points somewhere real: these sections live
-                  inside project.yaml, so "by hand" genuinely means editing it.
-                  A file-backed section has no file to open until one exists. */}
-              {config && section.manifestBacked && (
-                <Button
-                  variant="ghost"
-                  leftIcon={<Plus />}
-                  onClick={() => onOpenFile("project.yaml")}
-                >
-                  Edit project.yaml
-                </Button>
-              )}
-              <Button
-                variant="primary"
-                leftIcon={sending ? <Spinner size={12} /> : <Send />}
-                disabled={!describe.trim() || sending || busy}
-                onClick={() => void submit()}
-              >
-                Have Claude do it
+      {/* Describe-it, one dialog away. It used to sit inline under the list and
+          take half the pane whether or not you wanted it; as a dialog it's out
+          of the way until asked for, and gets real room when it isn't. */}
+      {task && (
+        <TaskLauncherDialog
+          taskId={task}
+          projectId={projectId}
+          open={launching}
+          onClose={() => setLaunching(false)}
+          disabled={busy}
+          onLaunched={onLaunched}
+          secondary={
+            // Only offered where it points somewhere real: these sections live
+            // inside project.yaml, so "by hand" genuinely means editing it. A
+            // file-backed section has no file to open until one exists.
+            config && section.manifestBacked ? (
+              <Button variant="ghost" leftIcon={<Plus />} onClick={() => onOpenFile("project.yaml")}>
+                Edit project.yaml
               </Button>
-            </div>
-          </div>
-        </div>
+            ) : undefined
+          }
+        />
       )}
 
       {section.id === "memory" && (

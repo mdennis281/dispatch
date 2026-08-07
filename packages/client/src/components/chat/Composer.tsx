@@ -22,6 +22,8 @@ import {
   Layers,
   X,
   SlidersHorizontal,
+  Settings2,
+  Eye,
   BellOff,
   ShieldOff,
   Check,
@@ -60,20 +62,18 @@ import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
 import { actions, uploadChatImage, assetUrl } from "../../lib/actions.js";
 import { useEffectiveEffort } from "../../lib/effectiveEffort.js";
+import { EFFORT_OPTIONS } from "../../lib/efforts.js";
+import {
+  COMPOSER_CONTROLS,
+  hiddenCount,
+  useComposerPrefs,
+} from "../../lib/composerPrefs.js";
 import { EffortChip } from "../agents/runVisuals.js";
 import { ContextMeter } from "./ContextMeter.js";
 
 /** The markup editor pulls in two annotation engines — lazy so they stay out of
     the initial bundle and only load when a thumbnail is actually opened. */
 const ImageAnnotator = lazy(() => import("./ImageAnnotator.js"));
-
-const EFFORTS: SelectOption<Effort>[] = [
-  { value: "low", label: "Low", hint: "fast" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "xhigh", label: "Extra high" },
-  { value: "max", label: "Max", hint: "deepest" },
-];
 
 /**
  * Remembers the model picked per chat for this browser session — a fast optimistic
@@ -271,6 +271,13 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // What the main loop is REALLY thinking at, off the transcript's newest
   // main-loop row (the picker below only knows what was asked for).
   const effectiveEffort = useEffectiveEffort(chat.id);
+  // Which chat-config controls this browser draws. Hiding one never changes the
+  // chat — the mode/effort/model still apply — it just stops competing for the
+  // toolbar's width (see lib/composerPrefs).
+  const visible = useComposerPrefs((s) => s.visible);
+  const toggleControl = useComposerPrefs((s) => s.toggle);
+  const showAllControls = useComposerPrefs((s) => s.showAll);
+  const hidden = hiddenCount(visible);
   // Compact toolbar: icon-only controls with tooltips. Chosen automatically —
   // the row collapses to icons the moment its full-label layout would overflow
   // the composer width, and re-expands once there's room again (see below).
@@ -699,9 +706,11 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // The control labels (model / agent / posture name) change the natural width
   // without changing the row's box, so ResizeObserver won't fire — re-measure
   // synchronously whenever they (or the compact state itself) change.
+  // Hiding a control changes the row's natural width without changing its box,
+  // so `visible` belongs in here alongside the labels.
   useLayoutEffect(() => {
     measure();
-  }, [measure, compact, model, chat.modeId, chat.agentId, chat.effort, currentAgent?.name, currentPosture?.name]);
+  }, [measure, compact, model, chat.modeId, chat.agentId, chat.effort, currentAgent?.name, currentPosture?.name, visible]);
 
   return (
     <div className="border-t border-line bg-surface/80 px-4 py-3">
@@ -873,6 +882,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               (inserted as text). They're split because the OS dialog can only
               ever return an image's CONTENT — never a path — so a path has to
               come from the server-backed picker instead. */}
+          {visible.attach && (
           <Popover
             align="start"
             width={210}
@@ -908,6 +918,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               </div>
             )}
           </Popover>
+          )}
 
           {/* Dictation. One control, two gestures: tap to latch the mic on, or
               press and hold to talk only while held (as does holding the
@@ -915,6 +926,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               is what makes the
               hold gesture possible at all — and it starts capturing on the way
               down, so holding doesn't clip the first word. */}
+          {visible.dictate && (
           <IconButton
             tip={
               dictation.unavailable
@@ -939,15 +951,19 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           >
             <Mic className={cn(dictation.listening && "animate-pulse")} />
           </IconButton>
+          )}
 
-          <SegmentedControl
-            segments={modeSegments}
-            value={chat.modeId}
-            onChange={setMode}
-            compact={compact}
-          />
+          {visible.mode && (
+            <SegmentedControl
+              segments={modeSegments}
+              value={chat.modeId}
+              onChange={setMode}
+              compact={compact}
+            />
+          )}
 
           {/* overflow: custom modes + dontAsk / bypass postures */}
+          {visible.posture && (
           <Popover
             align="start"
             width={210}
@@ -1015,27 +1031,33 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               </div>
             )}
           </Popover>
+          )}
 
-          <Select
-            options={EFFORTS}
-            value={chat.effort}
-            onChange={setEffort}
-            leftIcon={<Gauge />}
-            label="effort"
-            width={172}
-            compact={compact}
-          />
+          {visible.effort && (
+            <>
+              <Select
+                options={EFFORT_OPTIONS}
+                value={chat.effort}
+                onChange={setEffort}
+                leftIcon={<Gauge />}
+                label="effort"
+                width={172}
+                compact={compact}
+              />
 
-          {/* Only shown when the level that RAN differs from the one picked — an
-              agent pinning its own, or a model silently downgrading it. Silent
-              otherwise, so the row stays quiet in the normal case. */}
-          {effectiveEffort && effectiveEffort !== chat.effort && (
-            <EffortChip effort={effectiveEffort} label="running at" />
+              {/* Only shown when the level that RAN differs from the one picked — an
+                  agent pinning its own, or a model silently downgrading it. Silent
+                  otherwise, so the row stays quiet in the normal case. */}
+              {effectiveEffort && effectiveEffort !== chat.effort && (
+                <EffortChip effort={effectiveEffort} label="running at" />
+              )}
+            </>
           )}
 
           {/* model / agent — the session "brain": a custom agent's name when one
               is picked (secondary state), otherwise the active model label so it
               never misleadingly reads "No agent" while a model is running. */}
+          {visible.brain && (
           <Popover
             align="start"
             width={210}
@@ -1134,9 +1156,58 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               </div>
             )}
           </Popover>
+          )}
 
           <div className="ml-auto flex items-center gap-2">
-            <ContextMeter chatId={chat.id} model={model} iconOnly={compact} />
+            {/* Which of the above to draw. Last in the row and always present —
+                it's the only way back from a toolbar you've emptied. */}
+            <Popover
+              align="end"
+              width={264}
+              className="p-1"
+              trigger={({ open, toggle }) => (
+                <IconButton
+                  tip={hidden ? `Toolbar — ${hidden} hidden` : "Choose toolbar controls"}
+                  active={open}
+                  onClick={toggle}
+                >
+                  <Settings2 />
+                </IconButton>
+              )}
+            >
+              {() => (
+                <div className="flex flex-col">
+                  <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-faint">
+                    Show in composer
+                  </div>
+                  {COMPOSER_CONTROLS.map((c) => (
+                    <MenuItem
+                      key={c.id}
+                      icon={
+                        visible[c.id] ? <Check className="text-accent" /> : <span className="size-3" />
+                      }
+                      hint={c.hint}
+                      onClick={() => toggleControl(c.id)}
+                    >
+                      <span className={visible[c.id] ? "text-primary" : "text-muted"}>
+                        {c.label}
+                      </span>
+                    </MenuItem>
+                  ))}
+                  {hidden > 0 && (
+                    <>
+                      <div className="my-1 h-px bg-line" />
+                      <MenuItem icon={<Eye />} onClick={showAllControls}>
+                        Show all
+                      </MenuItem>
+                    </>
+                  )}
+                </div>
+              )}
+            </Popover>
+            {visible.context && (
+              <ContextMeter chatId={chat.id} model={model} iconOnly={compact} />
+            )}
             {/* Stop the live turn — interrupts the running query server-side.
                 Shown only mid-run, right beside Send so it's where the eye is. */}
             {running && (

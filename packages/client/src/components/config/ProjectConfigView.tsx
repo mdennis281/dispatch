@@ -41,7 +41,6 @@ import {
 } from "lucide-react";
 import { ARCHIVE_EXT, ARCHIVE_EXTS, CONFIG_DIR_NAME, resolveWorkflow } from "@dispatch/shared";
 import type {
-  AuthorableSection,
   ConfigSection,
   Project,
   ProjectConfigError,
@@ -53,7 +52,6 @@ import { Chip } from "../ui/Chip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { openCodeViewer } from "../monaco/store.js";
 import { useProjects } from "../../stores/projects.js";
-import { useChats } from "../../stores/chats.js";
 import { useConfig, useProjectConfig } from "../../stores/config.js";
 import { useProjectMemories } from "../../stores/memory.js";
 import { useNotices } from "../../stores/notices.js";
@@ -237,27 +235,6 @@ export function ProjectConfigView() {
       }
     },
     [projectId, busy, pushToast],
-  );
-
-  // Hand the description to an agent: spawn the chat, focus it, and get out of
-  // the way — the work is visible in the chat, not behind a spinner in here.
-  const authorItem = useCallback(
-    async (description: string) => {
-      if (!projectId) return;
-      try {
-        const out = await api.projectConfig.author(
-          projectId,
-          activeSection.id as AuthorableSection,
-          description,
-        );
-        useChats.getState().setActiveChat(out.chat.id);
-        setOpen(false);
-        pushToast({ level: "info", text: `Started “${out.chat.title}”` });
-      } catch (e) {
-        pushToast({ level: "error", text: e instanceof Error ? e.message : String(e) });
-      }
-    },
-    [projectId, activeSection, pushToast],
   );
 
   const doExport = useCallback(() => {
@@ -496,12 +473,16 @@ export function ProjectConfigView() {
             <div className="min-w-0 flex-1">
               <ConfigSectionPane
                 section={activeSection}
+                projectId={projectId}
                 config={config}
                 memories={memories}
                 busy={busy || saving}
                 onOpenFile={openFile}
                 onDelete={(rel, label) => void deleteItem(rel, label)}
-                onAuthor={authorItem}
+                // The launcher already focused the spawned chat; getting out of
+                // the way is all that's left. A dirty workflow draft would be
+                // lost, so it holds the dialog open with its usual confirmation.
+                onLaunched={() => (dirty ? setConfirmClose(true) : setOpen(false))}
               >
                 {activeSection.id === "workflow" && project && (
                   <WorkflowProfilePicker
