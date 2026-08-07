@@ -33,6 +33,7 @@ import { Button } from "../ui/Button.js";
 import { SegmentedControl, type Segment } from "../ui/SegmentedControl.js";
 import { Chip } from "../ui/Chip.js";
 import { cn } from "../../lib/cn.js";
+import { useDialogLayer } from "../../lib/layers.js";
 import { midTruncate } from "../../lib/format.js";
 
 const MonacoPane = lazy(() => import("./MonacoPane.js"));
@@ -61,6 +62,9 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   const close = useCodeViewer((s) => s.close);
   const { worktreePath, relPath, base, branch } = request;
   const editable = !!request.editable;
+  // Above whatever opened it — this viewer is routinely launched FROM the
+  // project-config dialog, and a file you asked to see must not open behind it.
+  const z = useDialogLayer();
 
   const [mode, setMode] = useState<CodeViewerMode>(request.mode);
   const [splitDiff, setSplitDiff] = useState(true);
@@ -174,7 +178,8 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6"
+      style={{ zIndex: z }}
+      className="fixed inset-0 flex items-center justify-center p-4 sm:p-6"
       role="dialog"
       aria-modal="true"
     >

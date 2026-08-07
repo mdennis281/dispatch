@@ -12,6 +12,7 @@ import {
 import { createPortal } from "react-dom";
 import { X, AlertCircle } from "lucide-react";
 import { cn } from "../../lib/cn.js";
+import { useDialogLayer } from "../../lib/layers.js";
 import { IconButton } from "../ui/IconButton.js";
 
 export interface ModalProps {
@@ -36,6 +37,11 @@ export function Modal({
   footer,
   width = 480,
 }: ModalProps) {
+  // Stacks above whatever is already open — a dialog opened FROM a dialog (the
+  // task run settings inside project config, say) is always on top. See
+  // lib/layers.
+  const z = useDialogLayer(open);
+
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -48,7 +54,10 @@ export function Modal({
   if (!open) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-[100] flex items-start justify-center overflow-y-auto p-6 sm:pt-[9vh]">
+    <div
+      style={{ zIndex: z }}
+      className="fixed inset-0 flex items-start justify-center overflow-y-auto p-6 sm:pt-[9vh]"
+    >
       <div
         className="fixed inset-0 bg-black/55 backdrop-blur-[2px]"
         onClick={onClose}

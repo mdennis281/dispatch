@@ -5,6 +5,7 @@ import type { UsageWindow } from "@dispatch/shared";
 import { useUsage } from "../../stores/usage.js";
 import { untilShort, relTime } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
+import { LAYER } from "../../lib/layers.js";
 
 /** Escalating tone by utilization — accent (fine) → warn → danger. */
 function tone(pct: number): { text: string; bar: string } {
@@ -136,9 +137,9 @@ export function UsageMeter() {
           <div
             onMouseEnter={openNow}
             onMouseLeave={closeSoon}
-            style={{ top: pos.top, right: pos.right }}
+            style={{ zIndex: LAYER.popover, top: pos.top, right: pos.right }}
             className={cn(
-              "fixed z-[120] w-[248px] overflow-hidden rounded-md border border-line-strong",
+              "fixed w-[248px] overflow-hidden rounded-md border border-line-strong",
               "bg-overlay/98 backdrop-blur-md shadow-[var(--shadow-pop)] cm-anim-rise",
             )}
           >

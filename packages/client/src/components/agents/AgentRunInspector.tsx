@@ -31,6 +31,7 @@ import { Markdown } from "../chat/Markdown.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Chip } from "../ui/Chip.js";
 import { cn } from "../../lib/cn.js";
+import { useDialogLayer } from "../../lib/layers.js";
 
 /** A labelled metric in the header strip. */
 function Stat({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
@@ -95,6 +96,7 @@ function RunReport({ run }: { run: SubagentRun }) {
 }
 
 export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: string }) {
+  const z = useDialogLayer();
   const close = useAgentRun((s) => s.close);
   const openRun = useAgentRun((s) => s.openRun);
   const focusStepId = useAgentRun((s) => s.focusStepId);
@@ -121,7 +123,8 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6"
+      style={{ zIndex: z }}
+      className="fixed inset-0 flex items-center justify-center p-4 sm:p-6"
       role="dialog"
       aria-modal="true"
       aria-label="Subagent run"

@@ -18,6 +18,7 @@ import { File as FileIcon, Search, CornerDownLeft } from "lucide-react";
 import { api, type IndexedFile } from "../../lib/api.js";
 import { Spinner } from "../ui/Spinner.js";
 import { cn } from "../../lib/cn.js";
+import { LAYER } from "../../lib/layers.js";
 
 export interface FilePathPickerProps {
   chatId: string;
@@ -116,7 +117,8 @@ export function FilePathPicker({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[140] flex items-start justify-center bg-black/40 pt-[12vh] backdrop-blur-[2px]"
+      style={{ zIndex: LAYER.palette }}
+      className="fixed inset-0 flex items-start justify-center bg-black/40 pt-[12vh] backdrop-blur-[2px]"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}

@@ -8,6 +8,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn.js";
+import { LAYER } from "../../lib/layers.js";
 
 export interface PopoverProps {
   /** Render-prop trigger; receives the current open state + a toggle. */
@@ -171,19 +172,21 @@ export function Popover({
             ref={menuRef}
             role="menu"
             className={cn(
-              "fixed z-[120] cm-scroll overflow-y-auto overflow-x-hidden rounded-md border " +
+              "fixed cm-scroll overflow-y-auto overflow-x-hidden rounded-md border " +
                 "border-line-strong bg-overlay/98 backdrop-blur-md shadow-[var(--shadow-pop)] cm-anim-rise",
               className,
             )}
             style={
               placement
                 ? {
+                    zIndex: LAYER.popover,
                     left: placement.left,
                     top: placement.top,
                     width: placement.width,
                     maxHeight: placement.maxHeight,
                   }
                 : {
+                    zIndex: LAYER.popover,
                     // pre-measure pass: render off-screen-invisible at natural
                     // size so we can read scrollHeight/offsetWidth.
                     left: 0,

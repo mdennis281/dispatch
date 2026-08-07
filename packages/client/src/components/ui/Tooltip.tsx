@@ -8,6 +8,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn.js";
+import { LAYER } from "../../lib/layers.js";
 
 export interface TooltipProps {
   label: ReactNode;
@@ -127,16 +128,16 @@ export function Tooltip({ label, side = "top", children, className }: TooltipPro
             ref={tipRef}
             role="tooltip"
             className={cn(
-              "pointer-events-none fixed z-[130] whitespace-nowrap rounded-sm border border-line-strong " +
+              "pointer-events-none fixed whitespace-nowrap rounded-sm border border-line-strong " +
                 "bg-overlay px-2 py-1 text-[11px] font-medium text-primary shadow-[var(--shadow-pop)] cm-anim-rise",
               className,
             )}
             style={
               pos
-                ? { left: pos.left, top: pos.top }
+                ? { zIndex: LAYER.tooltip, left: pos.left, top: pos.top }
                 : // pre-measure pass: render off-screen-invisible at natural
                   // size so we can read offsetWidth/offsetHeight for placement.
-                  { left: 0, top: 0, visibility: "hidden" }
+                  { zIndex: LAYER.tooltip, left: 0, top: 0, visibility: "hidden" }
             }
           >
             {label}

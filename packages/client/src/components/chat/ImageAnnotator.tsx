@@ -24,6 +24,7 @@ import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Spinner } from "../ui/Spinner.js";
 import { cn } from "../../lib/cn.js";
+import { useDialogLayer } from "../../lib/layers.js";
 import { uploadChatImage } from "../../lib/actions.js";
 
 /* Linear/Zed design tokens (mirrored from index.css) — the imperative engines
@@ -111,6 +112,7 @@ export default function ImageAnnotator({
   onCancel,
   onApply,
 }: ImageAnnotatorProps) {
+  const z = useDialogLayer();
   const hostRef = useRef<HTMLDivElement>(null);
   const maRef = useRef<InstanceType<typeof markerjs2.MarkerArea> | null>(null);
   // `workingSrc` is the current base image: starts as the attachment, becomes a
@@ -275,7 +277,7 @@ export default function ImageAnnotator({
   }, [alt, chatId, onApply]);
 
   return createPortal(
-    <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 sm:p-6">
+    <div style={{ zIndex: z }} className="fixed inset-0 flex items-center justify-center p-4 sm:p-6">
       <div
         className="fixed inset-0 bg-black/60 backdrop-blur-[2px]"
         onClick={() => !busy && onCancel()}

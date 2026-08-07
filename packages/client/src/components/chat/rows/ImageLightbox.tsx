@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { Download, X } from "lucide-react";
 import { IconButton } from "../../ui/IconButton.js";
+import { useDialogLayer } from "../../../lib/layers.js";
 
 /**
  * Full-screen viewer for a single chat image — opened by clicking an
@@ -20,6 +21,7 @@ export function ImageLightbox({
   dims?: string;
   onClose: () => void;
 }) {
+  const z = useDialogLayer();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -30,7 +32,8 @@ export function ImageLightbox({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[120] flex flex-col bg-black/80 backdrop-blur-[2px]"
+      style={{ zIndex: z }}
+      className="fixed inset-0 flex flex-col bg-black/80 backdrop-blur-[2px]"
       onClick={onClose}
     >
       <header
