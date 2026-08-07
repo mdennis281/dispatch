@@ -11,6 +11,7 @@ import { ProjectConfigView } from "./components/config/ProjectConfigView.js";
 import { MemoryView } from "./components/memory/MemoryView.js";
 import { GitView } from "./components/git/GitView.js";
 import { Toasts } from "./components/Toasts.js";
+import { ShutdownScreen } from "./components/ShutdownScreen.js";
 import { useChats } from "./stores/chats.js";
 import { useView } from "./stores/view.js";
 
@@ -58,6 +59,7 @@ export default function App() {
       <McpCatalogView />
       <ProjectConfigView />
       <Toasts />
+      <ShutdownScreen />
     </div>
   );
 }

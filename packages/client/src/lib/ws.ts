@@ -103,6 +103,11 @@ export class WsClient {
 
   private scheduleReconnect(): void {
     if (this.opts.disabled || this.closedByUser) return;
+    // The server said it was stopping. Retrying a port nobody is listening on
+    // achieves nothing except a console full of failed connections, and it makes
+    // the UI claim it's "reconnecting" to something that has to be started by
+    // hand. A reload once it's back up reconnects normally.
+    if (useConnection.getState().stopped) return;
     if (this.reconnectTimer) return;
     const delay = this.backoff;
     this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF);

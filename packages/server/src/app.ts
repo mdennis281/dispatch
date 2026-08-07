@@ -33,6 +33,13 @@ declare module "fastify" {
   interface FastifyInstance {
     cm: CmContext;
     services: Services;
+    /**
+     * Begin a graceful shutdown. Decorated by `installShutdown`, which the
+     * ENTRYPOINT wires — never `buildApp` — so it is genuinely absent in tests
+     * and anywhere the app is built but not run. `POST /api/shutdown` refuses
+     * rather than pretending when it's missing.
+     */
+    requestShutdown?: (reason: string) => Promise<void>;
   }
 }
 

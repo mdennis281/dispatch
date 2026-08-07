@@ -245,6 +245,22 @@ export const ErrorEventSchema = z.object({
   detail: z.string().optional(),
 });
 
+/**
+ * The server is going away ON PURPOSE — someone hit Stop, or a signal arrived.
+ *
+ * Without this a deliberate shutdown is indistinguishable from a crashed server
+ * or a dropped wifi link: every open tab just watches its socket die and starts
+ * reconnecting forever. That's wrong in one window and much worse in host mode,
+ * where the tabs that need telling are on someone else's phone. Sent to every
+ * socket immediately before teardown starts, so clients can stop retrying and
+ * say what actually happened.
+ */
+export const ServerShutdownEventSchema = z.object({
+  type: z.literal("server-shutdown"),
+  /** Where the stop came from — "api request", "SIGINT", "desktop request". */
+  reason: z.string().optional(),
+});
+
 export const WsServerEventSchema = z.discriminatedUnion("type", [
   HelloEventSchema,
   ChatMessageEventSchema,
@@ -272,6 +288,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   UsageUpdateEventSchema,
   NoticeEventSchema,
   ErrorEventSchema,
+  ServerShutdownEventSchema,
 ]);
 export type WsServerEvent = z.infer<typeof WsServerEventSchema>;
 export type WsServerEventType = WsServerEvent["type"];

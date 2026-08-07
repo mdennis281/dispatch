@@ -29,6 +29,7 @@ import {
   CornerDownLeft,
   ArrowUp,
   ArrowDown,
+  Power,
 } from "lucide-react";
 import { actions } from "../../lib/actions.js";
 import { useChats } from "../../stores/chats.js";
@@ -39,6 +40,7 @@ import { requestOpenMcpCatalog } from "../mcp/mcpCatalogBus.js";
 import { requestOpenProjectConfig } from "../config/configViewBus.js";
 import { Kbd } from "../ui/Kbd.js";
 import { cn } from "../../lib/cn.js";
+import { LAYER } from "../../lib/layers.js";
 
 interface Command {
   id: string;
@@ -222,7 +224,20 @@ export function CommandPalette({
       title: "Open Settings",
       group: "Navigate",
       icon: <SlidersHorizontal />,
-      keywords: "preferences theme webhook config gear",
+      keywords: "preferences theme webhook config gear notifications",
+      run: onOpenSettings,
+    });
+
+    // "How do I quit this thing" is a top-level question, so it gets a top-level
+    // answer — but it lands on the confirm rather than firing the stop, because
+    // one keystroke away from killing every running agent is too close.
+    list.push({
+      id: "stop-dispatch",
+      title: "Stop Dispatch",
+      subtitle: "opens Settings → Stop",
+      group: "Actions",
+      icon: <Power />,
+      keywords: "quit exit shutdown kill halt close server stop app",
       run: onOpenSettings,
     });
 
@@ -317,7 +332,10 @@ export function CommandPalette({
   if (!open) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-[130] flex items-start justify-center p-6 sm:pt-[12vh]">
+    <div
+      style={{ zIndex: LAYER.palette }}
+      className="fixed inset-0 flex items-start justify-center p-6 sm:pt-[12vh]"
+    >
       <div className="fixed inset-0 bg-black/55 backdrop-blur-[2px]" onClick={close} aria-hidden />
       <div
         role="dialog"

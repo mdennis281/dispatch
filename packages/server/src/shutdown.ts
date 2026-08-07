@@ -44,6 +44,16 @@ export function installShutdown(
     if (closing) return closing;
     // eslint-disable-next-line no-console
     console.log(`[dispatch] shutting down (${reason})…`);
+    // Tell every connected client FIRST, while the sockets are still up. A tab
+    // that only sees its socket die can't tell a deliberate stop from a crash,
+    // and would reconnect-loop forever — which in host mode means someone's
+    // phone across the house spinning at a server that isn't coming back.
+    // Guarded because `installShutdown` is also called on apps built for tests.
+    try {
+      app.services?.bus?.publish({ type: "server-shutdown", reason });
+    } catch {
+      /* no bus (or a listener threw) — teardown matters more than the notice */
+    }
     closing = (async () => {
       // A wedged dispose (a hung `git`, a docker compose that won't stop) must
       // not strand the process forever — the shell would tree-kill us anyway,
@@ -70,6 +80,17 @@ export function installShutdown(
 
   process.once("SIGINT", () => void close("SIGINT"));
   process.once("SIGTERM", () => void close("SIGTERM"));
+
+  // The in-app Stop button's only route to teardown (see routes/shutdown.ts).
+  // Decorated here rather than in `buildApp` so that a server which was never
+  // wired for shutdown can't be asked to perform one.
+  //
+  // Guarded because this function's real contract is "anything with close()" —
+  // the unit tests hand it a two-line stand-in, and requiring a whole Fastify
+  // instance just to test signal handling would be a worse trade than this `if`.
+  if (typeof app.decorate === "function") {
+    app.decorate("requestShutdown", (reason: string) => close(reason));
+  }
 
   // Only when a parent process owns us (the desktop shell sets this). Reading
   // stdin unconditionally would hold the event loop open for a plain terminal run.
