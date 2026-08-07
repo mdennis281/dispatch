@@ -1,16 +1,16 @@
 /**
  * Dictation engine — speech in, text out.
  *
- * The only implementation today is the browser's built-in Web Speech API, which
- * is free, needs no key, and streams interim results as you talk. It is also the
- * one piece of this feature that is environment-dependent: Chrome/Edge ship
- * Google's speech service, and Electron does NOT (its Chromium is built without
- * the API key), so the desktop app fails with `not-allowed` the instant it
- * starts. `unavailableReason()` and the error mapping below exist to say that
- * out loud instead of leaving a dead mic button.
+ * Built on the browser's Web Speech API: free, no key, and it streams interim
+ * results as you talk. Dispatch runs as an installed PWA in a Chromium browser,
+ * so the API is simply there — which is the whole reason the app is a PWA and
+ * not an Electron shell. Electron's Chromium is built without Chrome's speech
+ * service key, so this died with `network` the instant the mic opened, and the
+ * workaround was 114MB of vendored Whisper weights. Running in the real browser
+ * deletes both the failure and the workaround.
  *
- * Everything above this module talks to `DictationEngine`, so swapping in a
- * local Whisper (record → transcribe on stop) is a matter of adding a second
+ * Everything above this module talks to `DictationEngine`, so a second engine
+ * (a local model, a server-side transcriber) is a matter of adding another
  * factory here — no UI changes.
  */
 
@@ -59,60 +59,17 @@ function ctor(): SpeechRecognitionCtor | undefined {
 }
 
 /**
- * Rough "are we inside the Electron shell" test. Only used to explain a failure
- * in terms the user can act on — never to gate the attempt, because if a future
- * Electron does ship working recognition we want it to just work.
- */
-function looksLikeElectron(): boolean {
-  return /\bElectron\//i.test(navigator.userAgent);
-}
-
-/**
- * Measured in Electron 33 with real microphones present: `start` → `audiostart`
- * → `error: network` → `end`. The mic opens and streams perfectly well; it's the
- * recognition backend that fails, because Electron's Chromium is built without
- * Chrome's Google speech service key, so the audio goes nowhere. Device access is
- * NOT the problem, which is why this reads the way it does.
- */
-export const DESKTOP_HINT =
-  "The desktop app can't reach a speech service — Electron ships without Chrome's " +
-  "speech API key, so dictation dies the moment the mic opens. Open " +
-  "http://127.0.0.1:4319 in Chrome, or switch to a local Whisper engine.";
-
-export type EngineKind = "web-speech" | "whisper";
-
-/**
- * Which engine to use here.
- *
- * Electron always gets local Whisper: Web Speech there is not flaky, it is
- * measurably impossible (mic opens, then `network`), so attempting it first
- * would only ever cost a failed take. Real browsers keep Web Speech, whose live
- * interim text makes for markedly better dictation, and which needs no 114MB of
- * vendored model to have been built in.
- */
-export function engineKind(): EngineKind {
-  if (looksLikeElectron()) return "whisper";
-  return ctor() ? "web-speech" : "whisper";
-}
-
-/**
  * Why dictation can't run at all, or null when it's available to try.
  *
- * With Whisper as the fallback there is no longer a "this browser can't dictate"
- * case for a missing speech API — only for a browser too old to RECORD, which is
- * what the local engine actually needs. Whether the microphone exists, whether
- * permission is granted, and whether the model loads are all runtime questions
- * that can't be answered without starting, so they surface as errors instead.
+ * The only answerable question up front is whether the API exists — Firefox and
+ * Safari still don't ship it. Whether a microphone is present and whether
+ * permission is granted can't be known without starting, so those surface as
+ * errors from `describe()` instead of disabling the control pre-emptively.
  */
 export function unavailableReason(): string | null {
-  if (engineKind() === "web-speech") return null;
-  const canRecord =
-    typeof Worker !== "undefined" &&
-    typeof MediaRecorder !== "undefined" &&
-    typeof AudioContext !== "undefined" &&
-    typeof navigator !== "undefined" &&
-    !!navigator.mediaDevices?.getUserMedia;
-  return canRecord ? null : "This browser can't record audio, so dictation isn't available.";
+  return ctor()
+    ? null
+    : "This browser doesn't support speech recognition. Chrome or Edge does.";
 }
 
 /** Turn a SpeechRecognition error code into something worth showing a human. */
@@ -124,21 +81,14 @@ function describe(code: string): string | null {
     // We called stop()/abort() ourselves.
     case "aborted":
       return null;
-    // A genuine permission denial in either environment — Electron grants media
-    // permissions and enumerates microphones normally, so this is never the
-    // desktop shell's doing and must not be explained away as such.
     case "not-allowed":
     case "service-not-allowed":
       return "Microphone access was blocked. Allow it and try again.";
     case "audio-capture":
       return "No microphone found. Plug one in (or pick one in your sound settings) and try again.";
-    // The desktop shell's actual signature — see DESKTOP_HINT. Telling someone to
-    // check their connection when the real cause is a missing build-time API key
-    // sends them debugging the wrong thing entirely.
+    // Recognition runs against a remote service, so this is the offline case.
     case "network":
-      return looksLikeElectron()
-        ? DESKTOP_HINT
-        : "The speech service is unreachable — check your connection.";
+      return "The speech service is unreachable — check your connection.";
     case "language-not-supported":
       return `Speech recognition doesn't support ${navigator.language}.`;
     default:
@@ -155,13 +105,6 @@ export interface DictationHandlers {
   onError(message: string): void;
   /** Recognition has genuinely stopped — update the UI to "not listening". */
   onStopped(): void;
-  /**
-   * Engine-specific work the user is waiting on ("Loading speech model… 40%",
-   * "Transcribing…"), or null when idle. Local Whisper has a gap between the mic
-   * closing and the text landing; without a word about it that gap reads as the
-   * feature having silently failed.
-   */
-  onStatus?(text: string | null): void;
 }
 
 export interface DictationEngine {

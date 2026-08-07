@@ -33,6 +33,19 @@ if (import.meta.env.DEV && !isLogWindow) {
   }, 1200);
 }
 
+// Register the service worker that makes this installable (see public/sw.js).
+// Production only: in dev it would sit in front of Vite's module graph and serve
+// a stale shell after an HMR-triggered reload. A log window is a child popup of
+// an already-registered client and has nothing to add.
+if (import.meta.env.PROD && !isLogWindow && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch((err) => {
+      // Not fatal — the app runs fine unregistered, it just isn't installable.
+      console.warn("[dispatch] service worker registration failed:", err);
+    });
+  });
+}
+
 const el = document.getElementById("root");
 if (!el) throw new Error("#root not found");
 

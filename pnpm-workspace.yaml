@@ -2,20 +2,6 @@ packages:
   - 'packages/*'
 allowBuilds:
   esbuild: true
-  # Electron's postinstall downloads the platform binary; without this the
-  # desktop shell installs but has nothing to run.
-  electron: true
-  # All three arrive transitively via @huggingface/transformers, and nothing here
-  # imports them: dictation runs in a browser worker against onnxruntime-web's
-  # wasm, which `pnpm vendor:whisper` copies out of node_modules. Their build
-  # scripts only serve the Node-side path — onnxruntime-node's downloads ~200MB
-  # of native runtime, sharp's compiles libvips when no prebuilt matches — so
-  # skipping them costs nothing and keeps the payload install offline-friendly.
-  # An entry left undecided is a HARD install failure under pnpm 11
-  # (ERR_PNPM_IGNORED_BUILDS), which is why these are booleans and not blanks.
-  onnxruntime-node: false
-  protobufjs: false
-  sharp: false
 minimumReleaseAgeExclude:
   - '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.199'
   - '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.199'

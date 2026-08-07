@@ -35,6 +35,8 @@ function parseArgs(argv) {
   const args = { dryRun: false, force: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    // `pnpm run app:migrate -- --dry-run` forwards the separator itself.
+    if (a === "--") continue;
     if (a === "--dry-run") args.dryRun = true;
     else if (a === "--force") args.force = true;
     else if (a === "--source") args.source = argv[++i];

@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+"""
+Start Dispatch and open it in its own PWA window.
+
+── What replaced Electron ──────────────────────────────────────────────────
+Dispatch used to ship a branded Electron shell that did two unrelated jobs:
+it was a browser window, and it was the server's supervisor. An installed PWA
+does the first job better — Chromium gives the app its own window, taskbar
+identity and icon, with no 270MB runtime copied per version and no rcedit
+stamping. This script does the second, in about 200 lines.
+
+Supervising still matters, and this is the part that is easy to get wrong.
+Windows cannot deliver SIGTERM: `os.kill(pid, SIGTERM)` maps to
+TerminateProcess, which kills abruptly and runs no handler. The server would
+then never reach `services.dispose()` → `runner.stopAll()`, and every subApp
+dev server it spawned would be left orphaned holding its port. The server's ONE
+graceful path on Windows is the stdin protocol it already speaks
+(DISPATCH_IPC=1, see packages/server/src/shutdown.ts) — and that needs a living
+parent holding the pipe. So a supervisor process has to exist. It just doesn't
+have to be 270MB.
+
+── Lifecycle ───────────────────────────────────────────────────────────────
+Closing the PWA window does NOT stop the server, deliberately: the old shell
+hid its window on close for exactly this reason, because a reflex Alt-F4 must
+not kill a long-running agent. Agents keep working; run with --stop when you
+actually mean it.
+
+Usage:
+  launch.py                 start if needed, then open the app window
+  launch.py --stop          ask the running server to shut down (stops agents)
+  launch.py --status        report what is running, and exit
+  launch.py --no-window     start the server without opening a window
+  launch.py --app-dir DIR   run a checkout instead of the installed payload
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# ---------------------------------------------------------------- paths
+# MIRROR of tools/app/paths.mjs. Keep the two in sync — they are small on
+# purpose, and publish.mjs reads the same runtime.json this writes.
+
+EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
+IS_WINDOWS = sys.platform == "win32"
+
+#: Default port. 4318, not the server's own 4319: the installed app has to
+#: coexist with a `pnpm dev` instance rather than fight it for a port.
+DEFAULT_PORT = 4318
+#: How far to scan for a free port before giving up.
+PORT_SCAN = 10
+#: How long to wait for the server to answer before calling the start failed.
+START_TIMEOUT_S = 60
+#: How long to give the server to tear down before we stop waiting on it.
+#: Matches SHUTDOWN_GRACE_MS in packages/server/src/shutdown.ts, plus slack.
+STOP_TIMEOUT_S = 25
+
+
+def desktop_root() -> Path:
+    """Root of the installed deployment. DISPATCH_HOME overrides, as in paths.mjs."""
+    home = os.environ.get("DISPATCH_HOME") or os.environ.get("CM_HOME")
+    if home:
+        return Path(home).resolve()
+    if IS_WINDOWS:
+        local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData/Local")
+    elif sys.platform == "darwin":
+        local = str(Path.home() / "Library/Application Support")
+    else:
+        local = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    # Still literally `claude-manager`: renaming it would strand every existing
+    # chat transcript behind a migration. See the note in paths.mjs.
+    return Path(local) / "claude-manager"
+
+
+class Paths:
+    def __init__(self, root: Path):
+        self.root = root
+        self.app = root / "app"
+        self.data_dir = root / "data"
+        self.config_dir = root / "config"
+        self.stamp = root / "current.json"
+        self.runtime = root / "runtime.json"
+        #: How `--stop` reaches a supervisor it has no handle on. A sentinel
+        #: file is crude, but it is the one channel that works across detached
+        #: processes on Windows without opening a control port on localhost.
+        self.stop_request = root / "shutdown.request"
+
+
+# ---------------------------------------------------------------- probes
+
+
+def port_alive(port: int, timeout: float = 1.5) -> bool:
+    """Can we open a TCP connection to this port? (i.e. is something really up)"""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def read_runtime(paths: Paths) -> dict | None:
+    """The live instance's advertisement, or None if absent/unreadable/stale."""
+    try:
+        rt = json.loads(paths.runtime.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    port = rt.get("port")
+    # runtime.json survives a hard crash, so the file alone proves nothing —
+    # only a real connection does.
+    if isinstance(port, int) and port_alive(port):
+        return rt
+    return None
+
+
+def find_free_port(start: int) -> int:
+    for port in range(start, start + PORT_SCAN):
+        if not port_alive(port, timeout=0.4):
+            return port
+    raise SystemExit(f"no free port in {start}..{start + PORT_SCAN - 1}")
+
+
+def resolve_app_dir(paths: Paths, override: str | None) -> Path:
+    if override:
+        app = Path(override).resolve()
+    else:
+        app = paths.app
+    entry = app / "packages" / "server" / "dist" / "index.js"
+    if not entry.exists():
+        raise SystemExit(
+            f"no built server at {entry}\n"
+            f"  Publish the payload first:  pnpm app:publish\n"
+            f"  Or point at a checkout:     launch.py --app-dir <repo>"
+        )
+    return app
+
+
+# ---------------------------------------------------------------- supervise
+
+
+def supervise(paths: Paths, app: Path, port: int) -> int:
+    """
+    Run the server as a child and hold its stdin, so shutdown can be graceful.
+
+    This is the blocking half, re-launched detached by `start()`. It owns
+    runtime.json for its whole lifetime: written once the port answers, removed
+    on the way out, so publish.mjs never sees a live app as stale (or the
+    reverse).
+    """
+    node = shutil.which("node")
+    if not node:
+        raise SystemExit("node is not on PATH - install Node 20+ and retry")
+
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.config_dir.mkdir(parents=True, exist_ok=True)
+    paths.stop_request.unlink(missing_ok=True)
+
+    env = {
+        **os.environ,
+        # Makes the server read stdin for "shutdown" — the only graceful stop
+        # available on Windows. Without it this supervisor has no polite verb.
+        "DISPATCH_IPC": "1",
+        "DISPATCH_PORT": str(port),
+        "DISPATCH_DATA_DIR": str(paths.data_dir),
+        "DISPATCH_CONFIG_DIR": str(paths.config_dir),
+    }
+
+    proc = subprocess.Popen(
+        [node, "dist/index.js"],
+        cwd=str(app / "packages" / "server"),
+        env=env,
+        stdin=subprocess.PIPE,
+        # stdout/stderr are inherited: under pythonw there is no console, so
+        # they go nowhere, and the server's own log files remain the record.
+    )
+
+    url = f"http://127.0.0.1:{port}"
+    deadline = time.monotonic() + START_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return proc.returncode or 1
+        if port_alive(port, timeout=0.5):
+            break
+        time.sleep(0.25)
+    else:
+        proc.kill()
+        raise SystemExit(f"server did not answer on {port} within {START_TIMEOUT_S}s")
+
+    paths.root.mkdir(parents=True, exist_ok=True)
+    paths.runtime.write_text(
+        json.dumps(
+            {
+                "pid": proc.pid,
+                "supervisor": os.getpid(),
+                "url": url,
+                "port": port,
+                "appDir": str(app),
+                "startedAt": int(time.time() * 1000),
+            },
+            indent=2,
+        ),
+        "utf-8",
+    )
+
+    try:
+        while proc.poll() is None:
+            if paths.stop_request.exists():
+                paths.stop_request.unlink(missing_ok=True)
+                _ask_to_stop(proc)
+                break
+            time.sleep(1.0)
+        # Either it exited on its own or we just asked it to; either way give
+        # teardown its grace window before abandoning the wait.
+        try:
+            proc.wait(timeout=STOP_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        return proc.returncode or 0
+    finally:
+        paths.runtime.unlink(missing_ok=True)
+        paths.stop_request.unlink(missing_ok=True)
+
+
+def _ask_to_stop(proc: subprocess.Popen) -> None:
+    """Politely: this is what runs runner.stopAll() and kills every subApp."""
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(b"shutdown\n")
+        proc.stdin.flush()
+    except (OSError, ValueError, AssertionError):
+        # stdin already gone — nothing polite left to try; the caller's
+        # wait/kill below is the backstop.
+        pass
+
+
+# ---------------------------------------------------------------- commands
+
+
+def start(paths: Paths, app: Path, port: int) -> None:
+    """Re-launch this script detached, as the supervisor, and wait for the port."""
+    interpreter = sys.executable
+    if IS_WINDOWS:
+        # pythonw keeps a console window from flashing up when the Start-menu
+        # shortcut fires. Fall back to python.exe if this build lacks it.
+        cand = Path(interpreter).with_name("pythonw.exe")
+        if cand.exists():
+            interpreter = str(cand)
+
+    argv = [interpreter, str(Path(__file__).resolve()), "--supervise", "--port", str(port)]
+    argv += ["--app-dir", str(app)]
+    # The supervisor owns runtime.json, so it must resolve the SAME root we did
+    # — otherwise `--target` would start a server whose advertisement lands
+    # somewhere `--stop` and publish.mjs never look.
+    argv += ["--target", str(paths.root)]
+
+    kwargs: dict = {"cwd": str(app)}
+    if IS_WINDOWS:
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: outlive this shell, and
+        # don't take a stray Ctrl-C aimed at whoever launched us.
+        kwargs["creationflags"] = 0x00000008 | 0x00000200
+    else:
+        kwargs["start_new_session"] = True
+
+    subprocess.Popen(argv, **kwargs)
+
+    deadline = time.monotonic() + START_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if port_alive(port, timeout=0.5):
+            return
+        time.sleep(0.25)
+    raise SystemExit(f"server did not come up on {port} within {START_TIMEOUT_S}s")
+
+
+def open_window(url: str) -> None:
+    try:
+        from pwa_launcher import open_pwa
+    except ImportError:
+        raise SystemExit(
+            "pwa-launcher is not installed - the window can't be opened.\n"
+            "  pip install pwa-launcher\n"
+            f"  (the server is up; you can also just browse to {url})"
+        )
+
+    from pwa_launcher import ChromiumNotFoundError
+
+    try:
+        # A dedicated profile under the app root, NOT auto_profile: the app is
+        # long-lived and its window state, zoom and granted mic permission
+        # should persist across launches rather than land in a fresh temp dir
+        # every time.
+        open_pwa(url, user_data_dir=desktop_root() / "browser-profile")
+    except ChromiumNotFoundError:
+        raise SystemExit(
+            "No Chromium-based browser found (Chrome, Edge, Brave, Vivaldi...).\n"
+            f"  Install one, or browse to {url} yourself."
+        )
+
+
+def stop(paths: Paths) -> int:
+    rt = read_runtime(paths)
+    if not rt:
+        print("Dispatch is not running.")
+        return 0
+
+    paths.root.mkdir(parents=True, exist_ok=True)
+    paths.stop_request.write_text("stop", "utf-8")
+    print(f"asked Dispatch to stop (pid {rt.get('pid')}) - stopping agents and subApps...")
+
+    deadline = time.monotonic() + STOP_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if not port_alive(rt["port"], timeout=0.5):
+            print("stopped.")
+            return 0
+        time.sleep(0.5)
+
+    print(
+        f"still up after {STOP_TIMEOUT_S}s - teardown may be wedged on a hung child.\n"
+        f"  Check the Ports & processes panel, or kill pid {rt.get('pid')} by hand.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def status(paths: Paths) -> int:
+    rt = read_runtime(paths)
+    if not rt:
+        print("Dispatch: not running")
+        if paths.runtime.exists():
+            print("  (a stale runtime.json is on disk - the app is not reachable)")
+        return 1
+    print(f"Dispatch: running at {rt['url']}")
+    print(f"  pid       {rt.get('pid')}")
+    print(f"  payload   {rt.get('appDir')}")
+    if paths.stamp.exists():
+        try:
+            st = json.loads(paths.stamp.read_text("utf-8"))
+            print(f"  published {str(st.get('sha'))[:12]}  \"{st.get('subject')}\"")
+        except (OSError, ValueError):
+            pass
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Start Dispatch and open its PWA window.")
+    ap.add_argument("--stop", action="store_true", help="stop the running server")
+    ap.add_argument("--status", action="store_true", help="report what is running")
+    ap.add_argument("--no-window", action="store_true", help="start without opening a window")
+    ap.add_argument("--app-dir", help="run this checkout instead of the installed payload")
+    ap.add_argument("--port", type=int, help=f"port to serve on (default {DEFAULT_PORT})")
+    ap.add_argument("--target", help="deployment root (overrides DISPATCH_HOME)")
+    # Internal: the detached half. Not in the docstring because you never type it.
+    ap.add_argument("--supervise", action="store_true", help=argparse.SUPPRESS)
+    args = ap.parse_args()
+
+    paths = Paths(Path(args.target).resolve() if args.target else desktop_root())
+
+    if args.status:
+        return status(paths)
+    if args.stop:
+        return stop(paths)
+
+    if args.supervise:
+        app = resolve_app_dir(paths, args.app_dir)
+        return supervise(paths, app, args.port or DEFAULT_PORT)
+
+    running = read_runtime(paths)
+    if running:
+        url = running["url"]
+        print(f"Dispatch already running at {url}")
+    else:
+        app = resolve_app_dir(paths, args.app_dir)
+        port = args.port or find_free_port(DEFAULT_PORT)
+        print(f"starting Dispatch on {port}...")
+        start(paths, app, port)
+        url = f"http://127.0.0.1:{port}"
+        print(f"Dispatch is up at {url}")
+
+    if not args.no_window:
+        open_window(url)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

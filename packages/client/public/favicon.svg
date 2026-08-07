@@ -1,22 +1,21 @@
 <!--
-  The Dispatch mark: a railway turnout — one trunk arriving from the left,
-  splitting at a switch point into a straight road and a diverging one.
+  The Dispatch mark: a trunk splitting into two roads at a switch point.
 
-  MIRROR: packages/desktop/scripts/generate-icon.mjs draws the same geometry with
-  signed-distance fields to produce the window/tray PNG and the Windows .ico.
-  Coordinates here are that script's unit space plus 32 on each axis. Change one,
-  change the other.
+  Geometry mirrors packages/client/scripts/generate-brand.mjs exactly — that file
+  authors in a 64-unit box centred on the origin, this one is the same numbers
+  plus 32 on each axis. Change one, change the other, or the tab icon and every
+  generated PWA icon drift apart.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
   <rect x="1.9" y="1.9" width="60.2" height="60.2" rx="14.1" fill="#14171B" />
-  <g fill="none" stroke="#E5A33C" stroke-width="6" stroke-linecap="round">
-    <path d="M11 39.5 H21" />
-    <path d="M21 39.5 H50" />
-    <path d="M21 39.5 C29 39.5 36 27 50 24.5" />
+  <g fill="none" stroke="#E5A33C" stroke-width="5" stroke-linecap="round">
+    <path d="M12 32 H28" />
+    <path d="M28 32 C37 32 39 24.08 50 21" />
+    <path d="M28 32 C37 32 39 39.92 50 43" />
   </g>
   <g fill="#E5A33C">
-    <circle cx="21" cy="39.5" r="4" />
-    <circle cx="50" cy="39.5" r="4.2" />
-    <circle cx="50" cy="24.5" r="4.2" />
+    <circle cx="28" cy="32" r="2.9" />
+    <circle cx="50" cy="21" r="3.3" />
+    <circle cx="50" cy="43" r="3.3" />
   </g>
 </svg>

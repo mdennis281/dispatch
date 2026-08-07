@@ -5,9 +5,9 @@
   "version": "0.0.0",
   "description": "Dispatch React SPA — the Linear/Zed cockpit (served by @dispatch/server).",
   "scripts": {
-    "dev": "node scripts/fetch-whisper.mjs && vite",
-    "build": "node scripts/fetch-whisper.mjs && vite build",
-    "vendor:whisper": "node scripts/fetch-whisper.mjs",
+    "dev": "vite",
+    "build": "node scripts/generate-brand.mjs && vite build",
+    "brand": "node scripts/generate-brand.mjs",
     "preview": "vite preview --port 4321 --strictPort",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -17,7 +17,6 @@
   },
   "dependencies": {
     "@dispatch/shared": "workspace:*",
-    "@huggingface/transformers": "^4.2.0",
     "@monaco-editor/react": "^4.6.0",
     "@tiptap/extension-placeholder": "^2.10.4",
     "@tiptap/pm": "^2.10.4",

@@ -8,15 +8,14 @@
  * publishes `text/uri-list` / `text/plain` holding the real path, and that we
  * can read.
  *
- * Under the Electron shell there's a third and better source: the preload
- * bridges `webUtils.getPathForFile`, which resolves ANY dropped file — Explorer
- * and Finder included — to its real path. That's the only thing the desktop
- * build can do that the browser build can't, so it's feature-detected rather
- * than assumed, and every caller still works without it.
+ * Order of preference, then: the text flavors (exact, when the drag source
+ * offers them), and failing that the caller resolving a bare basename against
+ * the project index (a guess — see Composer.resolveDroppedNames).
  *
- * Order of preference, then: the desktop bridge (exact), the text flavors
- * (exact when offered), and finally the caller resolving a bare basename
- * against the project index (a guess — see Composer.resolveDroppedNames).
+ * The Electron build had a third and better source — a preload bridging
+ * `webUtils.getPathForFile`, which placed ANY dropped file, Explorer included.
+ * That went with the shell when Dispatch became a PWA, so an Explorer drag now
+ * takes the basename path like every other browser drop.
  */
 
 /**
@@ -105,69 +104,19 @@ export function basenameOf(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
-/* ------------------------------------------------------------------ *
- * Electron shell
- * ------------------------------------------------------------------ */
-
-/** The surface `packages/desktop/src/preload.ts` exposes. Kept in sync by hand. */
-export interface DesktopBridge {
-  getPathForFile(file: File): string;
-}
-
-declare global {
-  interface Window {
-    cmDesktop?: DesktopBridge;
-  }
-}
-
 /**
- * The desktop bridge, or null in a browser tab.
+ * Every real path this drop discloses.
  *
- * Read live rather than cached at module load: the bundle is byte-identical in
- * both shells and a cached `false` from an early import would be wrong forever.
- */
-export function desktopBridge(): DesktopBridge | null {
-  const bridge = typeof window === "undefined" ? undefined : window.cmDesktop;
-  return typeof bridge?.getPathForFile === "function" ? bridge : null;
-}
-
-/** Are we running inside the Electron shell (and so able to resolve any drop)? */
-export function isDesktop(): boolean {
-  return desktopBridge() !== null;
-}
-
-/**
- * Real paths for the dropped files, via the Electron bridge. Empty in a browser,
- * and empty for the files the bridge can't place (a File synthesized by a paste
- * rather than dragged off disk).
- */
-export function pathsFromFiles(dt: DataTransfer | null | undefined): string[] {
-  const bridge = desktopBridge();
-  if (!bridge || !dt?.files?.length) return [];
-  const out: string[] = [];
-  for (const file of Array.from(dt.files)) {
-    let path = "";
-    try {
-      path = bridge.getPathForFile(file);
-    } catch {
-      /* bridge is best-effort; the text flavors and the index are still there */
-    }
-    if (path) out.push(path);
-  }
-  return dedupe(out);
-}
-
-/**
- * Every real path this drop discloses, desktop bridge first.
- *
- * The bridge wins over `text/uri-list` because it describes the actual files
- * being dropped, whereas a drag source composes the text flavors by hand and
- * can disagree with itself (VS Code publishes both, editors publish a tab's
- * path while dragging a selection).
+ * Only the text flavors, now that Dispatch runs as a PWA. The Electron build
+ * had a preload bridging `webUtils.getPathForFile`, which resolved ANY dropped
+ * file — Explorer and Finder included — and took precedence here. Dropping the
+ * shell drops that: an Explorer drag no longer carries its path, and falls
+ * through to the caller's basename lookup (see `Composer.resolveDroppedNames`).
+ * Drags from VS Code, JetBrains and terminals are unaffected — they publish the
+ * path as text, which is what this reads.
  */
 export function pathsFromDrop(dt: DataTransfer | null | undefined): string[] {
-  const fromFiles = pathsFromFiles(dt);
-  return fromFiles.length ? fromFiles : pathsFromDataTransfer(dt);
+  return pathsFromDataTransfer(dt);
 }
 
 /* ------------------------------------------------------------------ *
@@ -202,9 +151,9 @@ export function dropIntent(dt: DataTransfer | null | undefined): DropIntent {
     // drop, so say so — an unannounced "your .ts was ignored" is worse than an
     // unannounced path.
     if (fileItems.some((it) => it.type.startsWith("image/"))) return "image";
-    // In Electron the path is guaranteed; in a browser it depends on whether
-    // the drag source volunteered a URI list.
-    return isDesktop() || types.includes("text/uri-list") ? "path" : "lookup";
+    // Whether we get a real path depends entirely on the drag source having
+    // volunteered a URI list; Explorer does not.
+    return types.includes("text/uri-list") ? "path" : "lookup";
   }
 
   // No files, but a path-shaped drag: a VS Code editor tab, a terminal, a

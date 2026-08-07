@@ -1,12 +1,10 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   fileUrlToPath,
   looksLikePath,
   pathsFromDataTransfer,
-  pathsFromFiles,
   pathsFromDrop,
   dropIntent,
-  isDesktop,
   basenameOf,
 } from "./dropPaths.js";
 
@@ -38,17 +36,6 @@ function drag(opts: {
     getData: (type: string) => data[type] ?? "",
   } as unknown as DataTransfer;
 }
-
-/** Install the preload bridge for one test. */
-function withDesktop(paths: Record<string, string>) {
-  (globalThis as { window?: unknown }).window = {
-    cmDesktop: { getPathForFile: (f: File) => paths[f.name] ?? "" },
-  };
-}
-
-afterEach(() => {
-  delete (globalThis as { window?: unknown }).window;
-});
 
 describe("fileUrlToPath", () => {
   it("decodes a POSIX file URI", () => {
@@ -153,45 +140,20 @@ describe("pathsFromDataTransfer", () => {
   });
 });
 
-describe("the Electron bridge", () => {
-  const files = [{ name: "a.ts" }, { name: "b.ts" }] as unknown as File[];
-
-  it("is absent in a browser, so file drops disclose nothing", () => {
-    expect(isDesktop()).toBe(false);
-    expect(pathsFromFiles(drag({ files }))).toEqual([]);
-  });
-
-  it("resolves every dropped file to its real path", () => {
-    withDesktop({ "a.ts": "C:\\repo\\a.ts", "b.ts": "C:\\repo\\sub\\b.ts" });
-    expect(isDesktop()).toBe(true);
-    expect(pathsFromFiles(drag({ files }))).toEqual(["C:\\repo\\a.ts", "C:\\repo\\sub\\b.ts"]);
-  });
-
-  it("skips files it can't place rather than emitting blanks", () => {
-    // A File the OS never put on disk (synthesized by a paste) resolves to "".
-    withDesktop({ "a.ts": "C:\\repo\\a.ts" });
-    expect(pathsFromFiles(drag({ files }))).toEqual(["C:\\repo\\a.ts"]);
-  });
-
-  it("dedupes the same file dropped twice", () => {
-    withDesktop({ "a.ts": "C:\\repo\\a.ts" });
-    const twice = [{ name: "a.ts" }, { name: "a.ts" }] as unknown as File[];
-    expect(pathsFromFiles(drag({ files: twice }))).toEqual(["C:\\repo\\a.ts"]);
-  });
-
-  it("wins over the text flavors, which the drag source composes by hand", () => {
-    withDesktop({ "a.ts": "C:\\real\\a.ts" });
-    const d = drag({
-      files: [{ name: "a.ts" }],
-      data: { "text/uri-list": "file:///C:/stale/a.ts" },
-    });
-    expect(pathsFromDrop(d)).toEqual(["C:\\real\\a.ts"]);
-  });
-
-  it("falls back to the text flavors when the bridge comes up empty", () => {
-    withDesktop({});
+describe("pathsFromDrop", () => {
+  it("reads the text flavors a path-aware drag source publishes", () => {
     const d = drag({ data: { "text/uri-list": "file:///C:/repo/a.ts" } });
     expect(pathsFromDrop(d)).toEqual(["C:/repo/a.ts"]);
+  });
+
+  /**
+   * The Electron preload used to place these exactly via `webUtils`. Without it
+   * an Explorer drag carries content and a basename and nothing else, so the
+   * caller's project-index lookup is the only remaining route to a path.
+   */
+  it("discloses nothing for a file drag that publishes no text flavor", () => {
+    const files = [{ name: "a.ts" }, { name: "b.ts" }] as unknown as File[];
+    expect(pathsFromDrop(drag({ files }))).toEqual([]);
   });
 });
 
@@ -199,30 +161,24 @@ describe("dropIntent", () => {
   const fileItem = { kind: "file", type: "text/typescript" };
   const imageItem = { kind: "file", type: "image/png" };
 
-  it("promises a path for a plain file drag in the desktop shell", () => {
-    withDesktop({});
-    expect(dropIntent(drag({ types: ["Files"], items: [fileItem] }))).toBe("path");
-  });
-
-  it("promises only a lookup for the same drag in a browser", () => {
-    // The whole point of the bridge: in a browser this drag really can't do
-    // better than guess from the basename, and says so.
+  it("promises only a lookup for a plain file drag", () => {
+    // An Explorer drag publishes no text flavor, so this really can't do better
+    // than guess from the basename — and the overlay says so rather than
+    // promising a path it won't deliver.
     expect(dropIntent(drag({ types: ["Files"], items: [fileItem] }))).toBe("lookup");
   });
 
-  it("promises a path in a browser when the source volunteered a URI list", () => {
+  it("promises a path when the source volunteered a URI list", () => {
     expect(dropIntent(drag({ types: ["Files", "text/uri-list"], items: [fileItem] }))).toBe(
       "path",
     );
   });
 
   it("promises an attachment for images", () => {
-    withDesktop({});
     expect(dropIntent(drag({ types: ["Files"], items: [imageItem] }))).toBe("image");
   });
 
   it("calls a mixed drop an image drop, matching what handleDrop actually does", () => {
-    withDesktop({});
     expect(dropIntent(drag({ types: ["Files"], items: [imageItem, fileItem] }))).toBe("image");
   });
 

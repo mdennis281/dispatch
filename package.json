@@ -16,12 +16,12 @@
     "verify": "node tools/verify/shot.mjs",
     "dispatch": "node packages/cli/dist/index.js",
     "cm": "node packages/cli/dist/index.js",
-    "desktop": "pnpm --filter @dispatch/desktop start",
-    "desktop:dev": "node tools/desktop/dev.mjs",
-    "desktop:publish": "node tools/desktop/publish.mjs",
-    "desktop:install-shell": "node tools/desktop/install-shell.mjs",
-    "desktop:migrate": "node tools/desktop/migrate-data.mjs",
-    "desktop:shortcut": "node tools/desktop/create-shortcut.mjs"
+    "app": "python tools/app/launch.py",
+    "app:stop": "python tools/app/launch.py --stop",
+    "app:status": "python tools/app/launch.py --status",
+    "app:publish": "node tools/app/publish.mjs",
+    "app:shortcut": "node tools/app/create-shortcut.mjs",
+    "app:migrate": "node tools/app/migrate-data.mjs"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

@@ -5,7 +5,6 @@ dist/
 .turbo/
 .verify-shots/*.tsbuildinfo
 
-# Vendored offline dictation assets (~114MB) — fetched by
-# packages/client/scripts/fetch-whisper.mjs at build time, never committed.
-packages/client/public/models/
-packages/client/public/ort/
+# Brand assets are RENDERED at build time by packages/client/scripts/
+# generate-brand.mjs — derived artifacts, so they don't belong in git.
+packages/client/public/icons/

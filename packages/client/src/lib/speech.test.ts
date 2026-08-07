@@ -4,9 +4,7 @@ import {
   createDictation,
   pressOutcome,
   unavailableReason,
-  engineKind,
   HOLD_MS,
-  DESKTOP_HINT,
   type DictationHandlers,
 } from "./speech.js";
 
@@ -85,20 +83,10 @@ function handlers() {
 }
 
 const CHROME_UA = "Mozilla/5.0 Chrome/130.0.0.0 Safari/537.36";
-const ELECTRON_UA = "Mozilla/5.0 Chrome/130.0.0.0 Electron/33.4.11 Safari/537.36";
 
-function stubEnv(opts: { ctor?: unknown; ua?: string; canRecord?: boolean } = {}) {
+function stubEnv(opts: { ctor?: unknown; ua?: string } = {}) {
   vi.stubGlobal("window", opts.ctor === undefined ? {} : { SpeechRecognition: opts.ctor });
-  vi.stubGlobal("navigator", {
-    language: "en-US",
-    userAgent: opts.ua ?? CHROME_UA,
-    ...(opts.canRecord ? { mediaDevices: { getUserMedia: () => {} } } : {}),
-  });
-  // The three APIs the local engine records with — absent in the node test env
-  // unless a test says the browser has them.
-  vi.stubGlobal("Worker", opts.canRecord ? class {} : undefined);
-  vi.stubGlobal("MediaRecorder", opts.canRecord ? class {} : undefined);
-  vi.stubGlobal("AudioContext", opts.canRecord ? class {} : undefined);
+  vi.stubGlobal("navigator", { language: "en-US", userAgent: opts.ua ?? CHROME_UA });
 }
 
 beforeEach(() => {
@@ -135,45 +123,21 @@ describe("appendSpoken", () => {
   });
 });
 
-describe("engineKind", () => {
-  it("uses Web Speech in a browser that has it — live interim text is worth it", () => {
-    stubEnv({ ctor: FakeSR });
-    expect(engineKind()).toBe("web-speech");
-  });
-
-  it("always uses local Whisper in Electron, even though the API is present", () => {
-    // Measured: Electron HAS webkitSpeechRecognition and it always fails with
-    // `network`. Trying it first would only ever cost the user a failed take.
-    stubEnv({ ctor: FakeSR, ua: ELECTRON_UA });
-    expect(engineKind()).toBe("whisper");
-  });
-
-  it("falls back to Whisper in a browser with no speech API", () => {
-    stubEnv({ ua: CHROME_UA });
-    expect(engineKind()).toBe("whisper");
-  });
-});
-
 describe("unavailableReason", () => {
   it("is null when the browser has recognition", () => {
     stubEnv({ ctor: FakeSR });
     expect(unavailableReason()).toBeNull();
   });
 
-  it("is null on the Whisper path when the browser can record", () => {
-    stubEnv({ ctor: FakeSR, ua: ELECTRON_UA, canRecord: true });
-    expect(unavailableReason()).toBeNull();
-  });
-
-  it("rules dictation out only when the browser cannot record at all", () => {
-    stubEnv({ ua: CHROME_UA }); // whisper path, no recording APIs stubbed
-    expect(unavailableReason()).toMatch(/can't record audio/);
+  it("names a browser that will work when this one has no speech API", () => {
+    stubEnv({ ua: CHROME_UA });
+    expect(unavailableReason()).toMatch(/doesn't support speech recognition/);
   });
 });
 
 describe("createDictation", () => {
   it("returns null when the platform has no recognition at all", () => {
-    stubEnv({ ua: ELECTRON_UA });
+    stubEnv();
     expect(createDictation(handlers().h)).toBeNull();
   });
 
@@ -242,40 +206,15 @@ describe("createDictation", () => {
     expect(stopped()).toBe(1);
   });
 
-  it("does not blame the desktop shell for a real permission denial", () => {
-    // Electron enumerates mics and grants media permissions normally (measured),
-    // so `not-allowed` there means what it says.
-    stubEnv({ ctor: FakeSR, ua: ELECTRON_UA });
-    const { h, errors } = handlers();
-    createDictation(h)!.start();
-
-    FakeSR.live().fail("not-allowed");
-
-    expect(errors[0]).toMatch(/Microphone access was blocked/);
-    expect(errors[0]).not.toBe(DESKTOP_HINT);
-  });
-
-  it("explains Electron's missing speech service on the error it actually emits", () => {
-    // Measured signature in Electron 33: audiostart, then `network`.
-    stubEnv({ ctor: FakeSR, ua: ELECTRON_UA });
+  it("treats a network error as a connection problem, and stops", () => {
+    stubEnv({ ctor: FakeSR });
     const { h, errors, stopped } = handlers();
     createDictation(h)!.start();
 
     FakeSR.live().fail("network");
 
-    expect(errors[0]).toBe(DESKTOP_HINT);
-    expect(stopped()).toBe(1);
-  });
-
-  it("treats a network error in a real browser as a connection problem", () => {
-    stubEnv({ ctor: FakeSR, ua: CHROME_UA });
-    const { h, errors } = handlers();
-    createDictation(h)!.start();
-
-    FakeSR.live().fail("network");
-
     expect(errors[0]).toMatch(/unreachable/);
-    expect(errors[0]).not.toBe(DESKTOP_HINT);
+    expect(stopped()).toBe(1);
   });
 
   it("stops cleanly, and stays stopped", () => {

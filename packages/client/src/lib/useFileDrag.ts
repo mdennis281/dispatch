@@ -10,10 +10,10 @@
  *     user has to guess the feature exists to discover it.
  *
  *  2. Cancel every drop the app doesn't handle. A file dropped on an inert part
- *     of the page makes the browser navigate to it; in Electron that replaces
- *     the running app with a file viewer and there is no back button. So the
- *     window swallows the default for any file drag, and only the real drop
- *     targets opt back in.
+ *     of the page makes the browser navigate to it — and in an installed PWA
+ *     window that replaces the running app with a file viewer, with no address
+ *     bar and no back button to undo it. So the window swallows the default for
+ *     any file drag, and only the real drop targets opt back in.
  *
  * Liveness comes from `dragover`, which repeats every few hundred ms for as long
  * as a drag is over the window, rather than from balancing `dragenter` against

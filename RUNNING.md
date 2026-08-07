@@ -284,48 +284,52 @@ Open the **MCP catalog** in the UI (top bar / command palette) to see every
 configured server's live connection status and its tools, command by command,
 grouped by server.
 
-## Desktop app (stable) vs `pnpm dev` (unstable)
+## Installed app (stable) vs `pnpm dev` (unstable)
 
-Two instances, on purpose: an **installed Electron app** you can trust with long-running
-agents, and the **hot-reload dev server** you break things in. They run side by side.
+Two instances, on purpose: an **installed PWA** you can trust with long-running agents,
+and the **hot-reload dev server** you break things in. They run side by side.
 
 | | Stable | Dev |
 |---|---|---|
-| Launch | Start-menu shortcut / `pnpm desktop` | `pnpm dev` |
+| Launch | Start-menu shortcut / `pnpm app` | `pnpm dev` |
 | Port | **4318** (scans up if taken) | **4319** |
 | Code | published payload in `%LOCALAPPDATA%` | this checkout, hot-reloaded |
-| Updated by | the *Publish to stable* VS Code task | saving a file |
+| Updated by | the *Ship: publish HEAD* VS Code task | saving a file |
+
+### Install
+```
+pnpm app:migrate -- --dry-run   # preview the data move; then drop --dry-run
+pnpm app:publish                # build + install the payload
+pnpm app:shortcut               # Start-menu entry (add -- --desktop for a Desktop one)
+```
+Then click the shortcut once and use Chrome's **Install Dispatch** (the icon in the
+address bar). That is what gives the app its own window, taskbar identity and icon —
+pin *that*, not the shortcut.
+
+The shortcut resolves the real Start-menu / Desktop folders from Windows rather than
+assuming `%USERPROFILE%\Desktop`, which OneDrive redirects. The migration **copies** —
+it verifies every file by SHA-256 and never deletes or modifies the source `.data`.
+Re-running it refuses a non-empty destination unless `--force`.
+
+**Requirements:** Python 3.10+ with `pip install pwa-launcher`, and any Chromium-based
+browser (Chrome, Edge, Brave, Vivaldi…).
 
 ### Layout
 ```
-%LOCALAPPDATA%\claude-manager\   ← still the pre-rename name; see note below
-  app\            the payload — a git clone of this repo, built in place
-  shell\          branded Electron runtime: dispatch.exe + resources
-  data\           DISPATCH_DATA_DIR   chats, checkpoints, runners   (per-instance)
-  config\         DISPATCH_CONFIG_DIR settings, projects, agents, modes (SHARED)
-  current.json    published sha + timestamp (shown in the tray tooltip)
-  runtime.json    present only while the app is running
+%LOCALAPPDATA%\claude-manager\    ← still the pre-rename name; see note below
+  app\               the payload — a git clone of this repo, built in place
+  data\              DISPATCH_DATA_DIR   chats, checkpoints, runners   (per-instance)
+  config\            DISPATCH_CONFIG_DIR settings, projects, agents, modes (SHARED)
+  browser-profile\   the PWA's own Chromium profile (window state, mic permission)
+  current.json       published sha + timestamp
+  runtime.json       present only while the app is running
 ```
 
 The root is still literally `claude-manager`. Renaming it would strand every existing
 chat transcript behind a one-shot migration, which is a poor trade for a directory
 nobody opens — so the rebrand left it alone. Move it deliberately when you want to:
-set `DISPATCH_HOME`, or run `pnpm desktop:migrate`. `DISPATCH_HOME` is read first but
+set `DISPATCH_HOME`, or run `pnpm app:migrate`. `DISPATCH_HOME` is read first but
 `CM_HOME` still works, so a shortcut created before the rename keeps launching.
-
-### Why there's a `shell\` with its own .exe
-Windows identifies a pinned taskbar item by the **target executable**, not by the
-shortcut's icon. Launch `node_modules/electron/dist/electron.exe` and Windows pins
-*Electron* — so the icon "reverts" the instant you pin it, and nothing you set on the
-`.lnk` can override it. `install-shell.mjs` copies Electron's `dist/` to `shell\`,
-renames the binary to `dispatch.exe`, and stamps the icon and version strings in
-with rcedit. It copies rather than renaming in place because `node_modules/electron`
-lives in pnpm's content-addressed store, shared with every other project on the machine.
-
-Re-run it only when Electron itself is upgraded (`pnpm desktop:install-shell`; it's a
-no-op otherwise). The icon is generated — PNG for the window/tray, multi-size `.ico` for
-the shortcut and the exe resource — by `pnpm --filter @dispatch/desktop icon`, which the
-desktop build runs automatically.
 
 **`config/` is shared, `data/` is not** — and that split is deliberate. Projects, agents
 and modes are written rarely and are miserable to maintain twice, so both instances read
@@ -335,48 +339,62 @@ would silently drop each other's entries. Losing rollback points on the instance
 trust with long work isn't a tradeoff worth making, so each instance keeps its own chats.
 Want to see stable's chats while working in dev? Open both tabs.
 
-### Install
-```
-node tools/desktop/migrate-data.mjs --dry-run   # preview; then drop --dry-run
-pnpm desktop:install-shell                      # branded dispatch.exe (~270 MB, once)
-pnpm desktop:publish                            # build + install the payload
-pnpm desktop:shortcut                           # Start-menu entry (add -- --desktop)
-```
-The shortcut resolves the real Start-menu / Desktop folders from Windows rather than
-assuming `%USERPROFILE%\Desktop`, which OneDrive redirects.
-The migration **copies** — it verifies every file by SHA-256 and never deletes or
-modifies the source `.data`. Re-running it refuses a non-empty destination unless
-`--force`.
+### Why a PWA and not an Electron shell
+The old shell did two unrelated jobs, and only one of them needed 270 MB.
 
-### Updating
-Run the **Dispatch: Publish to stable** VS Code task (or `pnpm desktop:publish`).
-It publishes the **committed** `HEAD` — a dirty working tree is reported loudly and
-*not* included, because a "stable" build you can't reproduce from git isn't stable. If
-the build fails it rolls the payload back to the previous sha and rebuilds it.
+As a **window**, Chromium does it better: an installed PWA gets its own taskbar identity
+and icon for free. Electron needed a renamed, rcedit-stamped `dispatch.exe` copied per
+version just to stop Windows pinning "Electron" — because a pinned taskbar item resolves
+to its target executable, not to the shortcut's icon.
 
-It **refuses to run while the app is open.** Quit from the tray first — *Quit (stops all
-agents & subApps)* — which tears down cleanly; killing the window does not.
+It also cost a feature. Electron ships without Chrome's speech service key, so Web Speech
+died the moment the mic opened, and dictation needed 114 MB of vendored Whisper weights
+to work around it. In a real browser the API is just there.
+
+The one thing lost is drag-and-drop of exact paths: Electron's preload could resolve
+*any* dropped file via `webUtils.getPathForFile`. A browser can't. Drags from VS Code,
+JetBrains and terminals still carry their path as text and work as before; an Explorer
+drag now falls back to matching the basename against the project index.
 
 ### Process ownership
-Everything is a descendant of the Electron shell: it spawns the server under a real
-`node` (not Electron's own binary, which would confuse anything resolving
-`process.execPath`), and the server owns every SDK session and subApp. Quitting asks the
-server to shut down over **stdin** — Windows can't deliver `SIGTERM` — waits for
-`runner.stopAll()`, then tree-kills whatever is left. If the shell dies abruptly, the
-server notices its stdin close and tears itself down rather than orphaning subApps.
+`tools/app/launch.py` supervises the server. It spawns it, holds its **stdin**, and
+advertises it in `runtime.json`. The server owns every SDK session and subApp below that.
 
-Closing the window **hides to tray**; only the tray's Quit stops anything. A reflex
-Alt-F4 must not kill a three-hour run.
+Stopping asks over stdin, because Windows can't deliver `SIGTERM` — `os.kill(pid,
+SIGTERM)` maps to `TerminateProcess`, which runs no handler and would orphan every subApp
+holding a port. The stdin request runs `services.dispose()` → `runner.stopAll()` first,
+then the supervisor waits out the grace window before killing anything.
+
+Closing the PWA window does **not** stop the server, deliberately: a reflex Alt-F4 must
+not kill a three-hour run. Agents keep working. Stop it when you mean it:
+```
+pnpm app:stop      # graceful — stops agents and subApps
+pnpm app:status    # what's running, and which sha is published
+```
+
+### Updating
+Run the **Ship: publish HEAD** VS Code task (or `pnpm app:publish`). It publishes the
+**committed** `HEAD` — a dirty working tree is reported loudly and *not* included,
+because a "stable" build you can't reproduce from git isn't stable.
+
+It **refuses to run while the app is up**; `pnpm app:stop` first. If the build fails it
+rolls the payload back to the previous sha, rebuilds, and re-prints the original error
+last, after the rollback's output. It also verifies the built payload (server entry, SPA
+shell, manifest, service worker, icon, launcher) before stamping it — a build that exits
+0 without emitting `dist` is not a successful publish.
 
 ## Config (env)
 | Var | Default | Meaning |
 |---|---|---|
-| `DISPATCH_PORT` | `4319` (desktop: `4318`) | HTTP + WebSocket port |
+| `DISPATCH_PORT` | `4319` (installed app: `4318`) | HTTP + WebSocket port |
 | `DISPATCH_DATA_DIR` | `./.data` | state dir — chats, checkpoints, runners |
 | `DISPATCH_CONFIG_DIR` | = `DISPATCH_DATA_DIR` | config dir — settings, projects, agents, modes |
 | `DISPATCH_MAX_ACTIVE_SESSIONS` | `6` | max concurrently-active chats |
-| `DISPATCH_APP_DIR` | installed payload | run the shell against a different checkout |
+| `DISPATCH_IPC` | unset | `1` makes the server accept `shutdown` on stdin (the launcher sets it) |
 | `DISPATCH_HOME` | `%LOCALAPPDATA%\claude-manager` | root for the whole installed layout |
+
+To run the launcher against a checkout instead of the installed payload, pass
+`--app-dir` rather than an env var: `python tools/app/launch.py --app-dir .`
 
 Leaving `DISPATCH_CONFIG_DIR` unset gives the original single-root layout, byte for byte.
 

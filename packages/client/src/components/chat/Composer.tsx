@@ -516,9 +516,10 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
    * verbatim; anything else falls back to resolving basenames against the
    * project index. Returns whether the drop was consumed.
    *
-   * Under the desktop shell the middle branch takes every file drag, index
-   * fallback included — see pathsFromDrop. `dropIntent` predicts which branch
-   * runs so the overlay can say so mid-drag; change one and change the other.
+   * Which of the last two runs depends entirely on the drag source: only one
+   * that publishes a text flavor discloses a path (see pathsFromDrop), so an
+   * Explorer drag lands on the index fallback. `dropIntent` predicts the branch
+   * so the overlay can say so mid-drag; change one and change the other.
    */
   const handleDrop = (dt: DataTransfer | null): boolean => {
     // Cleared here, not only in the shell's onDrop: a drop landing on the text
@@ -830,19 +831,14 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               strip shows the words still in flight and nothing else. It sits
               outside the editor because TipTap owns that DOM; rendering into it
               would fight ProseMirror for the same nodes. */}
-          {(dictation.listening || dictation.status) && (
+          {dictation.listening && (
             <div className="mt-1.5 flex items-center gap-2 text-[11.5px] text-muted">
               <span
                 aria-hidden
-                className={cn(
-                  "size-1.5 shrink-0 animate-pulse rounded-full",
-                  dictation.listening ? "bg-[var(--color-danger)]" : "bg-[var(--color-accent)]",
-                )}
+                className="size-1.5 shrink-0 animate-pulse rounded-full bg-[var(--color-danger)]"
               />
               <span className="min-w-0 flex-1 truncate italic">
-                {dictation.listening
-                  ? dictation.interim || "Listening…"
-                  : dictation.status}
+                {dictation.interim || "Listening…"}
               </span>
             </div>
           )}

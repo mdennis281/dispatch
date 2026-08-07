@@ -12,12 +12,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   createDictation,
-  engineKind,
   pressOutcome,
   unavailableReason,
   type DictationEngine,
 } from "./speech.js";
-import { createWhisperDictation } from "./whisperEngine.js";
 
 /**
  * Push-to-talk key. A single key you can hold down comfortably, which rules out
@@ -30,10 +28,8 @@ export const PTT_LABEL = "F9";
 export interface Dictation {
   /** The mic is live right now. */
   listening: boolean;
-  /** Live, uncommitted guess at the phrase in progress (Web Speech only). */
+  /** Live, uncommitted guess at the phrase in progress. */
   interim: string;
-  /** Engine work in progress — model load, transcription — or null when idle. */
-  status: string | null;
   /** Last real failure, until dismissed or superseded. */
   error: string | null;
   /** Set when dictation can't run here at all — explains why, in user terms. */
@@ -50,7 +46,6 @@ export interface Dictation {
 export function useDictation(onText: (text: string) => void): Dictation {
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
-  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Probed once: it's a capability of the build, and it can't change mid-session.
   const [unavailable] = useState(unavailableReason);
@@ -67,7 +62,7 @@ export function useDictation(onText: (text: string) => void): Dictation {
 
   const engine = useCallback((): DictationEngine | null => {
     if (!engineRef.current) {
-      const handlers = {
+      engineRef.current = createDictation({
         onFinal: (text: string) => onTextRef.current(text),
         onInterim: setInterim,
         onError: (message: string) => setError(message),
@@ -75,10 +70,7 @@ export function useDictation(onText: (text: string) => void): Dictation {
           setListening(false);
           setInterim("");
         },
-        onStatus: setStatus,
-      };
-      engineRef.current =
-        engineKind() === "whisper" ? createWhisperDictation(handlers) : createDictation(handlers);
+      });
     }
     return engineRef.current;
   }, []);
@@ -160,7 +152,6 @@ export function useDictation(onText: (text: string) => void): Dictation {
   return {
     listening,
     interim,
-    status,
     error,
     unavailable,
     dismissError,
