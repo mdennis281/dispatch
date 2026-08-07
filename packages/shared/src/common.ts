@@ -5,6 +5,21 @@
  */
 import * as z from "zod";
 
+/**
+ * Which agent runtime executes a chat.
+ *
+ * Set per project (and mirrored onto every chat at creation — see
+ * `Chat.harness`), because a session id is only meaningful to the runtime that
+ * issued it: a Claude session cannot be resumed on Codex and vice versa. Pinning
+ * at creation is what lets the project default change without stranding chats
+ * that are already running.
+ */
+export const HarnessKindSchema = z.enum(["claude", "codex"]);
+export type HarnessKind = z.infer<typeof HarnessKindSchema>;
+
+/** The harness a project gets when it has never said otherwise. */
+export const DEFAULT_HARNESS: HarnessKind = "claude";
+
 /** SDK PermissionMode literal union (mirrors @anthropic-ai/claude-agent-sdk 0.3.222). */
 export const PermissionModeSchema = z.enum([
   "default",
@@ -123,6 +138,36 @@ export const FALLBACK_MODELS: ModelOption[] = [
   { value: "sonnet", label: "Sonnet", hint: "balanced" },
   { value: "haiku", label: "Haiku", hint: "fast" },
 ];
+
+/**
+ * Codex's equivalent seed list.
+ *
+ * Unlike Claude's, these are concrete ids rather than aliases — Codex's
+ * `model/list` has no "default" alias, it flags one row `isDefault`. A stale
+ * entry here therefore degrades to a dead id rather than a wrong label, which
+ * is why the live list is always preferred and this is only ever a last resort.
+ */
+export const FALLBACK_MODELS_CODEX: ModelOption[] = [
+  { value: "gpt-5.6-sol", label: "GPT-5.6-Sol", hint: "recommended" },
+  { value: "gpt-5.6-terra", label: "GPT-5.6-Terra", hint: "deepest" },
+  { value: "gpt-5.6-luna", label: "GPT-5.6-Luna", hint: "balanced" },
+  { value: "gpt-5.4-mini", label: "GPT-5.4-Mini", hint: "fast" },
+];
+
+/** The seed model list for a harness, used before/instead of a live probe. */
+export function fallbackModels(harness: HarnessKind): ModelOption[] {
+  return harness === "codex" ? FALLBACK_MODELS_CODEX : FALLBACK_MODELS;
+}
+
+/**
+ * The default model id for a harness when a chat hasn't pinned one.
+ *
+ * Claude has a real "default" alias it resolves server-side; Codex does not, so
+ * an unpinned Codex chat sends no model at all and lets `thread/start` pick.
+ */
+export function defaultModelFor(harness: HarnessKind): string | undefined {
+  return harness === "codex" ? undefined : DEFAULT_MODEL;
+}
 
 /** Strip a context-window suffix so "claude-opus-4-8[1m]" and "claude-opus-4-8" compare equal. */
 function bareModel(id: string): string {

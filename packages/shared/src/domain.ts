@@ -6,6 +6,7 @@
 import * as z from "zod";
 import {
   EffortSchema,
+  HarnessKindSchema,
   McpServerConfigSchema,
   PermissionModeSchema,
   ChatStatusSchema,
@@ -64,6 +65,13 @@ export const ProjectSchema = z.object({
   workflow: WorkflowConfigSchema.optional(),
   /** MCP servers passed through to every session in this project. */
   mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
+  /**
+   * Which agent runtime new chats in this project start on. Absent means
+   * `DEFAULT_HARNESS` — left optional rather than defaulted so an untouched
+   * project record round-trips byte-identical and existing installs don't all
+   * show as edited on first read.
+   */
+  harness: HarnessKindSchema.optional(),
   subApps: z.array(SubAppSchema).default([]),
   /** Default branch for diff-vs-base / PR base (default "main"). */
   defaultBranch: z.string().optional(),
@@ -304,7 +312,17 @@ export const ChatSchema = z.object({
   id: z.string(),
   projectId: z.string(),
   title: z.string(),
-  /** SDK session id captured from the init message (for resume/fork). */
+  /**
+   * The runtime this chat runs on, captured from the project at creation and
+   * never changed afterwards.
+   *
+   * Pinned rather than read live because `sessionId` below is only meaningful
+   * to the runtime that issued it — re-pointing a project's harness must not
+   * silently make every existing chat unresumable. Absent means the chat
+   * predates harness selection, i.e. Claude.
+   */
+  harness: HarnessKindSchema.optional(),
+  /** Runtime session id captured from the init event (for resume/fork). */
   sessionId: z.string().optional(),
   agentId: z.string().optional(),
   modeId: z.string(),
@@ -318,6 +336,16 @@ export const ChatSchema = z.object({
   status: ChatStatusSchema.optional(),
   /** Why this chat exists, when the app spawned it for a job. Display-only. */
   purpose: ChatPurposeSchema.optional(),
+  /**
+   * Whether THIS chat's transcript shows the context Dispatch attached on your
+   * behalf — surfaced memories, a working-tree snapshot, anything the model was
+   * given that you never typed and never saw.
+   *
+   * Three-level setting: unset means inherit (project manifest `defaults`, then
+   * app settings, then off). Only ever affects rendering — the model receives
+   * the same context either way, so toggling it can't change how a chat runs.
+   */
+  showInjectedContext: z.boolean().optional(),
   archived: z.boolean().optional(),
   /**
    * A pending (or just-settled) auto-resume after a usage limit. Persisted so a
