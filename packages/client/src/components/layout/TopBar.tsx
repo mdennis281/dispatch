@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Hexagon, Search, Settings, Command, GitPullRequest, Blocks, FileCog } from "lucide-react";
+import { Search, Settings, Command, GitPullRequest, Blocks, FileCog } from "lucide-react";
 import { AttentionPopover } from "../attention/AttentionPopover.js";
 import { UsageMeter } from "./UsageMeter.js";
 import { CommandPalette } from "../command/CommandPalette.js";
@@ -10,6 +10,7 @@ import { requestOpenProjectConfig } from "../config/configViewBus.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Kbd } from "../ui/Kbd.js";
 import { StatusDot, type DotTone } from "../ui/StatusDot.js";
+import { DispatchMark } from "../ui/DispatchMark.js";
 import { useConnection, type ConnState } from "../../stores/connection.js";
 import { cn } from "../../lib/cn.js";
 
@@ -29,11 +30,11 @@ export function TopBar() {
 
   return (
     <header className="flex h-11 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
-      {/* mark */}
+      {/* mark — the real app icon, not a stand-in glyph: the thing in the
+          top-left should be the thing you launched, matching the tab favicon
+          and the taskbar icon exactly (see ui/DispatchMark). */}
       <div className="flex items-center gap-2 pr-1">
-        <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent ring-1 ring-accent-line [&_svg]:size-3.5">
-          <Hexagon />
-        </span>
+        <DispatchMark className="size-6 shrink-0 rounded-md ring-1 ring-accent-line" title="Dispatch" />
         <span className="text-[13px] font-semibold tracking-tight text-primary">Dispatch</span>
         <span className="cm-mono !text-[9.5px] text-faint">v0.1</span>
       </div>
