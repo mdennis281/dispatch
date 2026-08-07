@@ -145,3 +145,122 @@ describe("TitleService error handling", () => {
     expect(query).toHaveBeenCalledTimes(1);
   });
 });
+
+/* ------------------------------------------------ composed turns + prefixes */
+
+/** A user row the APP composed: a briefing, the human's line, injected context. */
+function composed(brief: string, instructions: string, context?: string): ChatMessage {
+  const parts = [
+    { kind: "brief" as const, label: "how this config works", text: brief },
+    { kind: "instructions" as const, label: "What I want", text: instructions },
+    ...(context ? [{ kind: "context" as const, label: "memories", text: context }] : []),
+  ];
+  return {
+    id: `u${seq++}`,
+    chatId: "c1",
+    ts: seq,
+    kind: "user",
+    // `text` is the whole composed prompt — what the SDK actually received.
+    text: parts.map((p) => p.text).join("\n\n"),
+    parts,
+  } as ChatMessage;
+}
+
+describe("TitleService — composed turns", () => {
+  it("titles from the human's words, not the briefing the app wrote", async () => {
+    // Every config chat sends the same briefing. Seeding from `text` titles all
+    // of them "Add An MCP Server To…" — the boilerplate, not the ask.
+    const { svc, saves } = make(chat(DEFAULT_CHAT_TITLE), [
+      composed(
+        "Add an MCP server to this project's Dispatch config. Where it goes — project.yaml",
+        "connect our Linear workspace",
+      ),
+    ]);
+
+    await svc.maybeGenerateInitialTitle("c1");
+
+    expect(saves).toHaveLength(1);
+    expect(saves[0]!.title.toLowerCase()).toContain("connect");
+    expect(saves[0]!.title.toLowerCase()).not.toContain("dispatch config");
+  });
+
+  it("ignores context the human never saw", async () => {
+    const { svc, saves } = make(chat(DEFAULT_CHAT_TITLE), [
+      composed("brief", "rename the worktree helper", "3 memories surfaced about pfSense"),
+    ]);
+
+    await svc.maybeGenerateInitialTitle("c1");
+
+    expect(saves[0]!.title.toLowerCase()).not.toContain("pfsense");
+  });
+
+  it("skips a turn that is ALL briefing rather than titling from it", async () => {
+    const briefOnly = {
+      id: "u-brief",
+      chatId: "c1",
+      ts: 1,
+      kind: "user",
+      text: "Land everything in this working tree as a series of commits",
+      parts: [{ kind: "brief", label: "Commit sweep", text: "Land everything…" }],
+    } as unknown as ChatMessage;
+    const { svc, saves } = make(chat(DEFAULT_CHAT_TITLE), [
+      briefOnly,
+      user("actually, split the schema change out"),
+    ]);
+
+    await svc.maybeGenerateInitialTitle("c1");
+
+    expect(saves[0]!.title.toLowerCase()).toContain("actually");
+  });
+
+  it("still reads plain rows written before parts existed", async () => {
+    const { svc, saves } = make(chat(DEFAULT_CHAT_TITLE), [user("add a dark mode toggle")]);
+    await svc.maybeGenerateInitialTitle("c1");
+    expect(saves[0]!.title.toLowerCase()).toContain("add a dark mode");
+  });
+});
+
+describe("TitleService.regenerate — title prefixes", () => {
+  it("keeps the chat's category when regenerating", async () => {
+    // The category names where the chat came from; the transcript can't tell the
+    // model that, so a regenerate would silently drop it.
+    const { svc, saves } = make(chat("**sweep**: 12 files on main"), [
+      user("group the schema and route changes together"),
+    ]);
+
+    await svc.regenerate("c1");
+
+    expect(saves).toHaveLength(1);
+    expect(saves[0]!.title.startsWith("**sweep**: ")).toBe(true);
+    expect(saves[0]!.title).not.toBe("**sweep**: 12 files on main");
+  });
+
+  it("adds no category to a chat that never had one", async () => {
+    const { svc, saves } = make(chat("Dark Mode Toggle"), [user("now do the light theme")]);
+    await svc.regenerate("c1");
+    expect(saves[0]!.title).not.toContain("**");
+  });
+
+  it("never nests marks, even if the model emits its own", async () => {
+    const marky: TitleQueryFn = () => {
+      async function* gen(): AsyncGenerator<unknown, void> {
+        yield {
+          type: "assistant",
+          message: { role: "assistant", content: [{ type: "text", text: "Fix **the** flake" }] },
+        };
+        yield { type: "result", subtype: "success", is_error: false, result: "Fix **the** flake" };
+      }
+      const g = gen() as unknown as Record<string, unknown>;
+      g.interrupt = async () => {};
+      g.setModel = async () => {};
+      g.setPermissionMode = async () => {};
+      g.setMaxThinkingTokens = async () => {};
+      return g as never;
+    };
+    const { svc, saves } = make(chat("**sweep**: 12 files"), [user("fix the flake")], marky);
+
+    await svc.regenerate("c1");
+
+    expect(saves[0]!.title).toBe("**sweep**: Fix the flake");
+  });
+});

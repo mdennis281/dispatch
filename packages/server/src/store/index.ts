@@ -86,6 +86,18 @@ export const AppSettingsSchema = z.object({
       window: z.number().int().positive().optional(),
     })
     .optional(),
+  /**
+   * App-wide default for showing the context Dispatch attaches on your behalf
+   * (surfaced memories, repo snapshots) in a transcript. The bottom of a
+   * three-level fallback — chat, then project manifest, then this, then off.
+   * Off by default: most turns carry some injected context, and a disclosure
+   * row on every one of them is noise until you go looking for it.
+   *
+   * Optional rather than `.default(false)` so every existing AppSettings
+   * literal (tests, DEFAULT_SETTINGS) stays valid — and because "unset" and
+   * "false" mean the same thing at the bottom of a fallback chain.
+   */
+  showInjectedContext: z.boolean().optional(),
 });
 export type AppSettings = z.infer<typeof AppSettingsSchema>;
 

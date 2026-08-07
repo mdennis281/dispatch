@@ -3,7 +3,6 @@
  *
  *   GET  /api/projects/:id/config          → { sourceDir, config, errors }
  *   PUT  /api/projects/:id/config/workflow  → save the workflow block (manifest or .data)
- *   POST /api/projects/:id/config/author    → spawn a chat that writes a config item
  *   DELETE /api/projects/:id/config/item    → delete one config file (path-guarded)
  *   POST /api/projects/:id/config/reload    → re-read from disk (sync + emit)
  *   POST /api/projects/:id/config/scaffold  → derive a `.dispatch/` from .data
@@ -19,9 +18,8 @@
 import type { FastifyInstance } from "fastify";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { AuthorableSectionSchema, WorkflowConfigSchema } from "@dispatch/shared";
+import { WorkflowConfigSchema } from "@dispatch/shared";
 import { saveProjectWorkflow } from "../services/workflow-writer.js";
-import { authorConfig } from "../services/config-author.js";
 import { safeArchivePath } from "../services/project-config-archive.js";
 
 export function registerProjectConfigRoutes(app: FastifyInstance): void {
@@ -60,35 +58,6 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
       } catch (err) {
         // A hand-broken project.yaml surfaces here as a 400 with the real reason
         // (rather than a 500) — the user can fix the file and save again.
-        return reply
-          .code(400)
-          .send({ error: err instanceof Error ? err.message : String(err) });
-      }
-    },
-  );
-
-  // Spawn a chat that writes a config item from a plain-English description.
-  // Returns the chat so the UI can jump into it — the work happens there, in the
-  // open, with the project's normal tools and workflow profile.
-  app.post<{ Params: { id: string }; Body?: { section?: string; description?: string } }>(
-    "/api/projects/:id/config/author",
-    async (req, reply) => {
-      const body = (req.body ?? {}) as { section?: string; description?: string };
-      const section = AuthorableSectionSchema.safeParse(body.section);
-      if (!section.success) {
-        return reply.code(400).send({ error: `unknown config section "${body.section}"` });
-      }
-      const description = typeof body.description === "string" ? body.description.trim() : "";
-      if (!description) return reply.code(400).send({ error: "description required" });
-      try {
-        const out = await authorConfig(app.services, {
-          projectId: req.params.id,
-          section: section.data,
-          description,
-        });
-        if (!out) return reply.code(404).send({ error: "project not found" });
-        return reply.code(201).send(out);
-      } catch (err) {
         return reply
           .code(400)
           .send({ error: err instanceof Error ? err.message : String(err) });

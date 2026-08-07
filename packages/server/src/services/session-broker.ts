@@ -48,6 +48,7 @@ import type {
   PermissionDecision,
   PermissionRequest,
   ChatMessage,
+  MessagePart,
   ImageRef,
   AgentConfig,
   ModeConfig,
@@ -346,6 +347,13 @@ export interface SendOptions {
   images?: ImageRef[];
   /** Per-message effort override (also updates the chat's effort going forward). */
   effort?: Effort;
+  /**
+   * Authorship breakdown for a COMPOSED message (a launched task's briefing plus
+   * the human's own words). Callers build `text` and `parts` from the same parts
+   * via `composeMessageText`, and the transcript renders these instead of one
+   * undifferentiated wall attributed to the human.
+   */
+  parts?: MessagePart[];
 }
 
 /** Host answer to a `permission-request`. */
@@ -707,6 +715,14 @@ class InputChannel implements AsyncIterable<SDKUserMessage> {
   }
 }
 
+/**
+ * What a memory lookup surfaced for one turn: the `<system-reminder>` block for
+ * the model, plus which memories went in whole vs. as one-liners (that split is
+ * what the transcript's context label reports). Derived from the service so the
+ * two can't drift.
+ */
+type SurfacedMemory = NonNullable<Awaited<ReturnType<MemoryService["surfaceFor"]>>>;
+
 interface OutboxItem {
   id: string;
   text: string;
@@ -948,6 +964,21 @@ export class SessionBroker {
 
     const steering = this.isActive(session);
     const id = this.genId();
+
+    // Auto-surface the durable memories most relevant to THIS turn: a
+    // <system-reminder> prepended to the SDK message, and a collapsed `context`
+    // part on the transcript row so what was injected is auditable rather than
+    // invisible. Once-per-session per memory, best-effort — a lookup failure
+    // must never block the turn.
+    //
+    // Resolved BEFORE the row is emitted, because a row can't be patched after
+    // the fact (transcripts are append-only). That costs the row a local memory
+    // search's worth of latency; the alternative is a transcript that silently
+    // omits context the model was given, which is the exact opacity this whole
+    // parts mechanism exists to remove.
+    const memory = await this.surfaceMemory(session, text);
+    const parts = this.messageParts(text, o.parts, memory);
+
     await this.emit(session, {
       kind: "user",
       id,
@@ -959,6 +990,7 @@ export class SessionBroker {
       images: o.images,
       effort: session.effort,
       steering: steering || undefined,
+      ...(parts ? { parts } : {}),
     });
 
     // Resolve any local asset images to inline SDK sources before queueing (the
@@ -968,19 +1000,13 @@ export class SessionBroker {
       ? await this.resolveImageSources(chatId, o.images)
       : undefined;
 
-    // Auto-surface the durable memories most relevant to THIS turn as an invisible
-    // <system-reminder> prepended to the SDK message (never on the transcript row
-    // emitted above). Once-per-session per memory, best-effort — a lookup failure
-    // must never block the turn.
-    const memoryContext = await this.surfaceMemory(session, text);
-
     this.resolveIdleAttention(session);
     session.outbox.push({
       id,
       text,
       images: o.images,
       imageSources,
-      memoryContext,
+      memoryContext: memory?.block,
       priority: o.priority ?? "next",
     });
     this.schedule(session);
@@ -999,7 +1025,7 @@ export class SessionBroker {
   private async surfaceMemory(
     session: LiveSession,
     text: string,
-  ): Promise<string | undefined> {
+  ): Promise<SurfacedMemory | undefined> {
     if (!this.memory || !session.projectId || !text.trim()) return undefined;
     try {
       const surfaced = await this.memory.surfaceFor(session.projectId, text, {
@@ -1007,10 +1033,42 @@ export class SessionBroker {
       });
       if (!surfaced) return undefined;
       for (const name of surfaced.names) session.surfacedMemories.add(name);
-      return surfaced.block;
+      return surfaced;
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * The authorship breakdown to persist on a user row, or undefined when there's
+   * nothing to break down — a plain typed message with no injected context keeps
+   * rendering exactly as it always has, and writes no extra bytes.
+   *
+   * Caller-supplied parts (a launched task's briefing) already satisfy
+   * `composeMessageText(parts) === text`; the memory block is appended as a
+   * `context` part, which composeMessageText would append to the text too. That
+   * is deliberate: the block is NOT in `text` (it's prepended to the SDK message
+   * separately, and only for the model), so it is marked `context` and the
+   * renderer keeps it collapsed and out of the message body.
+   */
+  private messageParts(
+    text: string,
+    given: MessagePart[] | undefined,
+    memory: SurfacedMemory | undefined,
+  ): MessagePart[] | undefined {
+    if (!memory) return given;
+    const count = memory.names.length + memory.pointed.length;
+    const detail = memory.names.length
+      ? `${memory.names.length} in full`
+      : "names only";
+    return [
+      ...(given ?? (text ? [{ kind: "text" as const, text }] : [])),
+      {
+        kind: "context",
+        label: `${count} project ${count === 1 ? "memory" : "memories"} surfaced — ${detail}`,
+        text: memory.block,
+      },
+    ];
   }
 
   /**

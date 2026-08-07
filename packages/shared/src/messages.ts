@@ -22,6 +22,60 @@ const MessageBase = {
   sessionId: z.string().optional(),
 };
 
+/* ------------------------------------------------------------ message parts */
+
+/**
+ * What a slice of a composed user turn IS, so the transcript can stop lying
+ * about who wrote it.
+ *
+ * When the app launches a task it sends a long composed prompt: framing and
+ * house rules it wrote, the human's own sentence, and whatever context it
+ * quietly attached (surfaced memories, a working-tree snapshot). Rendered as a
+ * single user bubble that all reads as *typed by the human*, which is both
+ * wrong and unreadable — you cannot tell your two lines from the two hundred
+ * the app added.
+ *
+ *   - `text`         — the human typed it. Normal bubble.
+ *   - `instructions` — the human typed it, as the steer for a launched task.
+ *   - `brief`        — the APP wrote it. Rendered quoted/annotated, never as
+ *                      the human's voice.
+ *   - `context`      — the app attached it and the human never saw it
+ *                      (memories, repo state). Collapsed by default: present
+ *                      and auditable, but not competing for attention.
+ */
+export const MessagePartKindSchema = z.enum(["text", "instructions", "brief", "context"]);
+export type MessagePartKind = z.infer<typeof MessagePartKindSchema>;
+
+/** One labelled slice of a composed user turn. */
+export const MessagePartSchema = z.object({
+  kind: MessagePartKindSchema,
+  /** Short heading ("What I want", "3 memories surfaced"). */
+  label: z.string().optional(),
+  text: z.string(),
+});
+export type MessagePart = z.infer<typeof MessagePartSchema>;
+
+/**
+ * The prompt text a set of parts composes: what a caller sends as the message
+ * when it builds one out of parts. An `instructions` part gets its label as a
+ * markdown heading, so the model can see where the briefing stops and the
+ * human's own words start; everything else is joined verbatim.
+ *
+ * Note this is a composition helper, not a round-trip guarantee. A row's `text`
+ * is whatever was actually sent, and a `context` part may describe something
+ * attached OUT of that text (surfaced memories ride on the SDK message as a
+ * separate `<system-reminder>` block, never in the prompt body) — so don't
+ * reconstruct `text` from a persisted row's parts, read `text`.
+ */
+export function composeMessageText(parts: MessagePart[]): string {
+  return parts
+    .map((p) =>
+      p.kind === "instructions" && p.label ? `**${p.label}**\n\n${p.text}` : p.text,
+    )
+    .filter((t) => t.trim())
+    .join("\n\n");
+}
+
 /** A user turn (or steering injection). */
 export const UserMessageRowSchema = z.object({
   ...MessageBase,
@@ -32,6 +86,14 @@ export const UserMessageRowSchema = z.object({
   effort: EffortSchema.optional(),
   /** True when this was queued mid-run to steer the agent. */
   steering: z.boolean().optional(),
+  /**
+   * Authorship breakdown of `text`, when this turn was COMPOSED rather than
+   * typed — a launched task, or a plain message that carried injected context.
+   * `text` stays the whole thing (it is what the SDK received, and what titles
+   * and search read); the client renders these instead when present, so the
+   * duplication buys back-compat with every row written before this existed.
+   */
+  parts: z.array(MessagePartSchema).optional(),
 });
 export type UserMessageRow = z.infer<typeof UserMessageRowSchema>;
 

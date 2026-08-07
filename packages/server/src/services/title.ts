@@ -19,6 +19,7 @@
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { Options, Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { stripTitleMarks, titlePrefixOf, withTitlePrefix } from "@dispatch/shared";
 import type { Chat, ChatMessage } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -92,12 +93,35 @@ function collectText(msg: SDKMessage, acc: { text: string; result: string }): vo
   }
 }
 
+/**
+ * The HUMAN's words in a user row.
+ *
+ * A composed turn's `text` is mostly Dispatch's: a launched task sends a
+ * briefing of house rules and paths with the human's one sentence buried in it,
+ * and titling from that produces "Add MCP Server To Dispatch Config" for every
+ * config chat ever launched — the boilerplate, not the ask. When the row carries
+ * an authorship breakdown we read only the parts the human actually wrote;
+ * rows without one are unchanged, and a row that is ALL briefing (a sweep
+ * launched with no instructions) contributes nothing rather than its briefing.
+ */
+function humanText(m: ChatMessage): string {
+  if (m.kind !== "user") return "";
+  const parts = m.parts;
+  if (parts?.length) {
+    return parts
+      .filter((p) => p.kind === "text" || p.kind === "instructions")
+      .map((p) => p.text.trim())
+      .filter(Boolean)
+      .join("\n");
+  }
+  return typeof m.text === "string" ? m.text.trim() : "";
+}
+
 /** First user message text (the seed for the initial title). */
 function firstUserText(messages: ChatMessage[]): string {
   for (const m of messages) {
-    if (m.kind === "user" && typeof m.text === "string" && m.text.trim()) {
-      return m.text.trim();
-    }
+    const text = humanText(m);
+    if (text) return text;
   }
   return "";
 }
@@ -112,9 +136,8 @@ function firstUserText(messages: ChatMessage[]): string {
 function recentUserText(messages: ChatMessage[]): string {
   const parts: string[] = [];
   for (const m of messages) {
-    if (m.kind === "user" && typeof m.text === "string" && m.text.trim()) {
-      parts.push(m.text.trim());
-    }
+    const text = humanText(m);
+    if (text) parts.push(text);
   }
   return parts.join("\n").slice(0, 2_000);
 }
@@ -175,16 +198,27 @@ export class TitleService {
     // reflect what I'm doing now", so we weight the latest user requests.
     const seed = recentUserText(messages) || firstUserText(messages);
     if (!seed.trim()) return;
-    await this.generate(chatId, titlePrompt(seed));
+    // A spawned chat's title leads with an emphasized category (`**sweep**: …`)
+    // that names WHERE the chat came from — something the transcript can't tell
+    // the model and regeneration would therefore drop. Carry it across.
+    await this.generate(chatId, titlePrompt(seed), titlePrefixOf(chat.title));
   }
 
   /** Run the one-shot query, sanitize, and persist + broadcast the new title. */
-  private async generate(chatId: string, prompt: string): Promise<void> {
+  private async generate(
+    chatId: string,
+    prompt: string,
+    prefix?: string | null,
+  ): Promise<void> {
     if (this.inFlight.has(chatId)) return;
     this.inFlight.add(chatId);
     try {
-      const title = sanitizeTitle(await this.runQuery(prompt));
-      if (!title) return;
+      // Marks are ours to add, never the model's: a stray `**…**` in generated
+      // prose would accent an arbitrary word and read as a category that isn't
+      // one. Only the prefix below may emphasize.
+      const generated = stripTitleMarks(sanitizeTitle(await this.runQuery(prompt)));
+      if (!generated) return;
+      const title = prefix ? withTitlePrefix(prefix, generated) : generated;
       // Re-read so we never clobber a title the user renamed while we ran, and to
       // patch onto the freshest chat record.
       const chat = await this.store.getChat(chatId).catch(() => null);

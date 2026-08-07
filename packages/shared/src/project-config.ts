@@ -125,6 +125,14 @@ export const ManifestDefaultsSchema = z.object({
   mode: z.string().optional(),
   effort: EffortSchema.optional(),
   model: z.string().optional(),
+  /**
+   * Whether chats in this project show the context Dispatch attaches on the
+   * human's behalf (surfaced memories, repo snapshots) in the transcript.
+   * Committed with the repo because it's a statement about how much this
+   * project's work wants auditing — a chat can still override it either way,
+   * and a chat that doesn't falls through to the app setting, then to off.
+   */
+  showInjectedContext: z.boolean().optional(),
 });
 export type ManifestDefaults = z.infer<typeof ManifestDefaultsSchema>;
 
@@ -186,6 +194,8 @@ export const ProjectConfigDefaultsSchema = z.object({
   mode: z.string().optional(),
   effort: EffortSchema.optional(),
   model: z.string().optional(),
+  /** Project-level default for the transcript's injected-context disclosure. */
+  showInjectedContext: z.boolean().optional(),
 });
 export type ProjectConfigDefaults = z.infer<typeof ProjectConfigDefaultsSchema>;
 
@@ -308,25 +318,10 @@ export const ConfigSectionSchema = z.enum([
 ]);
 export type ConfigSection = z.infer<typeof ConfigSectionSchema>;
 
-/** Sections the "describe it and let an agent write it" flow can target. */
-export const AUTHORABLE_SECTIONS = [
-  "instructions",
-  "agents",
-  "modes",
-  "skills",
-  "mcp",
-  "subApps",
-] as const satisfies readonly ConfigSection[];
-
-/** Narrowing helper for {@link AUTHORABLE_SECTIONS}. */
-export type AuthorableSection = (typeof AUTHORABLE_SECTIONS)[number];
-
-export const AuthorableSectionSchema = z.enum(AUTHORABLE_SECTIONS);
-
-/** The `ChatPurpose.kind` a config-authoring chat carries, e.g. `config:agents`. */
-export function configPurposeKind(section: ConfigSection): string {
-  return `config:${section}`;
-}
+// "Which sections can an agent write for me?" used to live here as
+// AUTHORABLE_SECTIONS. It moved to the agent-task catalog (agent-tasks.ts): a
+// writable section is just a task whose id is `config:<section>`, so the two
+// lists can no longer disagree. See `configTaskId`.
 
 /** Where a load error originated (for surfacing in the UI, never a throw). */
 export const ProjectConfigErrorScopeSchema = z.enum([

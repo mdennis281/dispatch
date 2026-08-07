@@ -7,6 +7,7 @@ import type { FastifyInstance } from "fastify";
 import { registerWsRoutes } from "./ws.js";
 import { registerProjectRoutes } from "./projects.js";
 import { registerProjectConfigRoutes } from "./project-config.js";
+import { registerAgentTaskRoutes } from "./agent-tasks.js";
 import { registerChatRoutes } from "./chats.js";
 import { registerAssetRoutes } from "./assets.js";
 import { registerAgentRoutes } from "./agents.js";
@@ -23,11 +24,13 @@ import { registerAttentionRoutes } from "./attention.js";
 import { registerSettingsRoutes } from "./settings.js";
 import { registerUsageRoutes } from "./usage.js";
 import { registerFileRoutes } from "./files.js";
+import { registerShutdownRoutes } from "./shutdown.js";
 
 export function registerRoutes(app: FastifyInstance): void {
   registerWsRoutes(app);
   registerProjectRoutes(app);
   registerProjectConfigRoutes(app);
+  registerAgentTaskRoutes(app);
   registerChatRoutes(app);
   registerAssetRoutes(app);
   registerAgentRoutes(app);
@@ -44,4 +47,5 @@ export function registerRoutes(app: FastifyInstance): void {
   registerSettingsRoutes(app);
   registerUsageRoutes(app);
   registerFileRoutes(app);
+  registerShutdownRoutes(app);
 }

@@ -47,6 +47,12 @@ export interface CreateChatInput {
   modeId?: string;
   agentId?: string;
   effort?: Effort;
+  /**
+   * SDK model id to pin on the new chat. Omitted leaves it unpinned, which is
+   * NOT the same as pinning today's default: an unpinned chat keeps tracking
+   * the project/runtime recommendation as it changes.
+   */
+  model?: string;
   /** Why the app spawned this chat (drives its sidebar icon/tint). */
   purpose?: ChatPurpose;
 }
@@ -72,6 +78,7 @@ export async function createChat(
     modeId: input.modeId ?? settings?.defaultModeId ?? "default",
     agentId: input.agentId,
     effort: input.effort ?? "medium",
+    ...(input.model ? { model: input.model } : {}),
     worktrees: [],
     prs: [],
     status: "idle",
