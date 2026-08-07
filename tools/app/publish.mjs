@@ -31,7 +31,7 @@
  *   node tools/app/publish.mjs [--ref <git-ref>] [--target <root>] [--dry-run]
  */
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { createConnection } from "node:net";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -221,6 +221,33 @@ function assertCommitPresent(appDir, sha) {
 }
 
 /**
+ * Delete workspace packages that no longer exist at this sha.
+ *
+ * `git clean -e node_modules` keeps installs fast — and keeps the rollback path
+ * from depending on a fresh install succeeding — but it also means a package
+ * directory that was DELETED between shas survives, hollowed out, because the
+ * `node_modules` inside it is excluded from the clean. `packages/desktop` sat
+ * there with 270MB of Electron after the shell was removed. pnpm ignores it
+ * (it isn't in the lockfile), so nothing breaks; it is just a lie on disk that
+ * grows with every package ever removed.
+ */
+function pruneStalePackages(appDir, sha) {
+  const dir = join(appDir, "packages");
+  if (!existsSync(dir)) return;
+  const tracked = new Set(
+    (capture("git", ["ls-tree", "--name-only", `${sha}:packages`], appDir) || "")
+      .split("\n")
+      .map((s) => s.trim().replace(/\/$/, ""))
+      .filter(Boolean),
+  );
+  for (const name of readdirSync(dir)) {
+    if (tracked.has(name)) continue;
+    console.log(`  pruning stale package: packages/${name}`);
+    rmSync(join(dir, name), { recursive: true, force: true });
+  }
+}
+
+/**
  * Prove the payload can actually serve before we call it published.
  *
  * Every one of these is something a "successful" build has failed to produce
@@ -302,6 +329,7 @@ async function main() {
     // A leftover file from the previous sha (a renamed module, a dropped asset)
     // is invisible to git and can satisfy an import that should have broken.
     await run("git", ["clean", "-fdx", "-e", "node_modules"], paths.app);
+    pruneStalePackages(paths.app, target);
     console.log("installing dependencies...");
     await run("pnpm", ["install", "--frozen-lockfile"], paths.app);
     console.log("building...");

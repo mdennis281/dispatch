@@ -270,9 +270,13 @@ def start(paths: Paths, app: Path, port: int) -> None:
 
     subprocess.Popen(argv, **kwargs)
 
+    # Wait for runtime.json, NOT merely for the port. Both processes are
+    # watching the same port, so returning on that alone lets this one win the
+    # race and hand back an instance that `--stop` and `--status` — which read
+    # runtime.json — would report as not running.
     deadline = time.monotonic() + START_TIMEOUT_S
     while time.monotonic() < deadline:
-        if port_alive(port, timeout=0.5):
+        if read_runtime(paths):
             return
         time.sleep(0.25)
     raise SystemExit(f"server did not come up on {port} within {START_TIMEOUT_S}s")
