@@ -47,17 +47,25 @@ function scrollToCard(id: string, triesLeft: number): void {
 }
 
 /**
- * Select the item's chat and bring its pending card into focus. Safe to call
- * before the transcript has loaded — the scroll retries until the card mounts.
+ * Select a chat and bring its pending card into focus. Safe to call before the
+ * transcript has loaded — the scroll retries until the card mounts.
+ *
+ * Takes the two fields rather than the item because a click on a *desktop
+ * notification* arrives from the service worker as plain postMessage data, not
+ * as a live `AttentionItem` (the item may even have been resolved by then).
  */
-export function focusAttentionItem(item: AttentionItem): void {
-  useChats.getState().setActiveChat(item.chatId);
-  const requestId = item.permissionRequestId;
-  if (!requestId) {
+export function focusAttentionTarget(chatId: string, permissionRequestId?: string): void {
+  useChats.getState().setActiveChat(chatId);
+  if (!permissionRequestId) {
     window.setTimeout(scrollTranscriptToBottom, INTERVAL_MS);
     return;
   }
   window.requestAnimationFrame(() =>
-    scrollToCard(attentionCardId(requestId), RETRIES),
+    scrollToCard(attentionCardId(permissionRequestId), RETRIES),
   );
+}
+
+/** {@link focusAttentionTarget} for a live queue item. */
+export function focusAttentionItem(item: AttentionItem): void {
+  focusAttentionTarget(item.chatId, item.permissionRequestId);
 }

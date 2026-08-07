@@ -1,7 +1,12 @@
 import { CheckCircle2, AlertTriangle, XCircle, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useNotices, type NoticeLevel } from "../stores/notices.js";
+import { InstallCard } from "./pwa/InstallCard.js";
+import { EnableNotificationsCard } from "./notify/EnableNotificationsCard.js";
+import { useShouldOfferInstall } from "../lib/pwaInstall.js";
+import { useShouldAskToNotify } from "../lib/browserNotify.js";
 import { cn } from "../lib/cn.js";
+import { LAYER } from "../lib/layers.js";
 
 const ICON: Record<NoticeLevel, ReactNode> = {
   info: <CheckCircle2 />,
@@ -16,17 +21,27 @@ const TONE: Record<NoticeLevel, string> = {
 };
 
 /**
- * Bottom-right transient toast stack, fed by the notices store (which the WS
- * reducer pushes `notice`/`error` events into). Reuses the overlay tokens so it
- * matches the Popover/Modal surfaces — no new design language.
+ * The bottom-right stack: transient toasts fed by the notices store (which the
+ * WS reducer pushes `notice`/`error` events into), plus the standing PWA install
+ * card underneath them. Both live in one fixed column so they can never overlap
+ * — the install card is long-lived, so a toast landing on top of it would be a
+ * guaranteed collision rather than a rare one.
+ *
+ * Reuses the overlay tokens so it matches the Popover/Modal surfaces — no new
+ * design language.
  */
 export function Toasts() {
   const toasts = useNotices((s) => s.toasts);
   const dismiss = useNotices((s) => s.dismiss);
-  if (toasts.length === 0) return null;
+  const offerInstall = useShouldOfferInstall();
+  const askNotify = useShouldAskToNotify();
+  if (toasts.length === 0 && !offerInstall && !askNotify) return null;
 
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-[min(360px,calc(100vw-2rem))] flex-col gap-2">
+    <div
+      style={{ zIndex: LAYER.toast }}
+      className="pointer-events-none fixed bottom-4 right-4 flex w-[min(360px,calc(100vw-2rem))] flex-col gap-2"
+    >
       {toasts.map((t) => (
         <div
           key={t.id}
@@ -55,6 +70,9 @@ export function Toasts() {
           </button>
         </div>
       ))}
+      {/* One standing card at a time: installing is the bigger upgrade, and it
+          carries the notification promise in its own copy anyway. */}
+      {offerInstall ? <InstallCard /> : askNotify ? <EnableNotificationsCard /> : null}
     </div>
   );
 }
