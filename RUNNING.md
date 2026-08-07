@@ -302,9 +302,14 @@ pnpm app:migrate -- --dry-run   # preview the data move; then drop --dry-run
 pnpm app:publish                # build + install the payload
 pnpm app:shortcut               # Start-menu entry (add -- --desktop for a Desktop one)
 ```
-Then click the shortcut once and use Chrome's **Install Dispatch** (the icon in the
-address bar). That is what gives the app its own window, taskbar identity and icon —
-pin *that*, not the shortcut.
+Then click the shortcut once. Dispatch notices it's running in a browser tab and offers
+**Install Dispatch** in the bottom-right corner — click the card and the browser's real
+install flow runs. (Chrome's own **Install** icon in the address bar does the same thing;
+the card exists because nobody finds that icon.) Installing is what gives the app its own
+window, taskbar identity and icon — pin *that*, not the shortcut.
+
+The card appears only when the browser is actually offering an install, so it goes away
+for good once you're installed. **Not now** hides it for a week.
 
 The shortcut resolves the real Start-menu / Desktop folders from Windows rather than
 assuming `%USERPROFILE%\Desktop`, which OneDrive redirects. The migration **copies** —
@@ -366,11 +371,26 @@ holding a port. The stdin request runs `services.dispose()` → `runner.stopAll(
 then the supervisor waits out the grace window before killing anything.
 
 Closing the PWA window does **not** stop the server, deliberately: a reflex Alt-F4 must
-not kill a three-hour run. Agents keep working. Stop it when you mean it:
-```
-pnpm app:stop      # graceful — stops agents and subApps
-pnpm app:status    # what's running, and which sha is published
-```
+not kill a three-hour run. Agents keep working. Stop it when you mean it — three doors
+onto the same teardown:
+
+| | |
+|---|---|
+| **In the app** | Settings (⚙) → **Stop** → confirm. Also `⌘K` → "Stop Dispatch". |
+| **From a terminal** | `pnpm app:stop` (and `pnpm app:status` for what's running) |
+| **In a `pnpm dev` window** | Ctrl-C |
+
+All three run `services.dispose()` → `runner.stopAll()`, so subApps die with the server
+instead of orphaning themselves onto the ports they hold. A `taskkill` on the pid does
+**not**: on Windows that's `TerminateProcess`, no handler runs, and every dev server it
+spawned survives as an orphan for the Ports & processes panel to clean up.
+
+The in-app button names what it's about to kill ("3 agents are working and 2 sub-apps are
+running") rather than asking a question nobody can answer. And because a deliberate stop
+is otherwise indistinguishable from a crash, the server announces it on the WS first:
+every connected client — including the tabs on other devices in [host mode](#host-mode) —
+stops reconnecting and shows a **Dispatch has stopped** screen with a Reconnect button,
+instead of spinning forever at a port nobody is listening on.
 
 ### Updating
 Run the **Ship: publish HEAD** VS Code task (or `pnpm app:publish`). It publishes the
@@ -387,6 +407,7 @@ shell, manifest, service worker, icon, launcher) before stamping it — a build 
 | Var | Default | Meaning |
 |---|---|---|
 | `DISPATCH_PORT` | `4319` (installed app: `4318`) | HTTP + WebSocket port |
+| `DISPATCH_HOST` | `0.0.0.0` | bind address — see [Host mode](#host-mode) |
 | `DISPATCH_DATA_DIR` | `./.data` | state dir — chats, checkpoints, runners |
 | `DISPATCH_CONFIG_DIR` | = `DISPATCH_DATA_DIR` | config dir — settings, projects, agents, modes |
 | `DISPATCH_MAX_ACTIVE_SESSIONS` | `6` | max concurrently-active chats |
@@ -397,6 +418,52 @@ To run the launcher against a checkout instead of the installed payload, pass
 `--app-dir` rather than an env var: `python tools/app/launch.py --app-dir .`
 
 Leaving `DISPATCH_CONFIG_DIR` unset gives the original single-root layout, byte for byte.
+
+## Host mode
+
+Dispatch binds **every interface** by default, so the same control plane is reachable from
+a phone or another laptop while the agents keep running on the box that owns the repos.
+Boot prints both addresses:
+
+```
+[dispatch] listening on http://127.0.0.1:4318  (data: …)
+[dispatch] host mode — also reachable at http://192.168.1.20:4318  (no auth: …)
+```
+
+Two things to know:
+
+- **There is no authentication.** Anything that can reach the port can start a chat and
+  approve a tool call, which means running commands as you. That's fine behind your own
+  NAT and wrong on a network you don't control — set `DISPATCH_HOST=127.0.0.1` there and
+  you're back to loopback-only.
+- **Only `localhost` gets the browser features.** Chromium treats `http://localhost` as a
+  secure context and a LAN IP as insecure, so over `http://192.168.x.x` there is no
+  service worker, no install prompt and no notifications — the API is withheld entirely.
+  The app says so rather than showing dead buttons (Settings → Notifications). If you want
+  those on another device, put the LAN origin behind HTTPS.
+
+## Notifications
+
+Three independent channels, in order of how far they reach:
+
+| | Where it shows | Needs |
+|---|---|---|
+| **Attention badge** | top bar, in-app | nothing |
+| **Desktop notifications** | your OS notification centre | one click to grant the browser permission |
+| **Webhook** (ntfy / Pushover) | your phone, anywhere | a URL in Settings |
+
+**Desktop notifications** fire on the same four Attention events as the webhook —
+permission needed, question, waiting for input, task done — and only while the app *isn't*
+focused, because with the window in front of you the badge already said it. Clicking one
+focuses the app and jumps to the chat, scrolling the pending card into view; answering a
+prompt in the app withdraws its toast so the notification centre never fills with
+decisions you already made.
+
+Dispatch asks once, from a card in the bottom-right corner — the permission prompt needs a
+click, and an origin that asks on page load gets auto-blocked by Firefox. Dismissed it?
+Settings (⚙) → Notifications → **Enable**. The same panel has the mute switch, which is
+stored per browser rather than server-side, because the underlying permission is granted
+per browser and "on" can't honestly mean anything else.
 
 Projects, agents, modes, and settings are plain files under `.data/` and editable in the UI.
 SubApp definitions live on the project (or its `.dispatch/project.yaml`) — adjust the run

@@ -10,7 +10,10 @@ import { existsSync } from "node:fs";
 export interface ServerConfig {
   /** HTTP + WebSocket port. */
   port: number;
-  /** Bind host. */
+  /**
+   * Bind host. Defaults to every interface ("host mode") so the app is reachable
+   * from other devices on your LAN, not just this machine — see DEFAULT_HOST.
+   */
   host: string;
   /**
    * Absolute path to the STATE dir — chats, checkpoints, runners (JSON + JSONL,
@@ -33,7 +36,25 @@ export interface ServerConfig {
 }
 
 const DEFAULT_PORT = 4319;
-const DEFAULT_HOST = "127.0.0.1";
+/**
+ * Every interface, not loopback — "host mode" is the default launch.
+ *
+ * The point is reaching the same control plane from a phone or a laptop on the
+ * same network while agents keep running on this box. Loopback made that
+ * impossible without an env var nobody remembers to set.
+ *
+ * Two things to know before you leave it on:
+ *
+ *  1. **There is no auth.** Anything that can reach this port can start a chat,
+ *     approve a tool call, and therefore run commands as you. That's fine on a
+ *     home LAN behind NAT and NOT fine on a network you don't control — set
+ *     `DISPATCH_HOST=127.0.0.1` there, which still works and takes precedence.
+ *  2. **A LAN origin is not a secure context.** `http://<lan-ip>:4318` gets no
+ *     service worker, no install prompt and no Notification API from Chromium —
+ *     only `http://localhost` and HTTPS do. The client degrades honestly (see
+ *     `lib/browserNotify.ts`) rather than showing dead buttons.
+ */
+const DEFAULT_HOST = "0.0.0.0";
 /**
  * The app root = nearest ancestor of this module containing `pnpm-workspace.yaml`.
  * Keeps `.data` co-located with the app so the whole folder stays portable — moving

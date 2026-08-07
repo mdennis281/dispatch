@@ -9,6 +9,8 @@ import {
 } from "./stores/index.js";
 import { ws } from "./lib/ws.js";
 import { RunnerLogWindow } from "./components/panels/RunnerLogWindow.js";
+import { capturePwaInstall } from "./lib/pwaInstall.js";
+import { focusAttentionTarget } from "./components/attention/focus.js";
 import "./index.css";
 
 // A detached log window (opened via openRunnerLogWindow) loads this same bundle
@@ -44,6 +46,36 @@ if (import.meta.env.PROD && !isLogWindow && "serviceWorker" in navigator) {
       console.warn("[dispatch] service worker registration failed:", err);
     });
   });
+}
+
+// Watch for the browser's install offer NOW, at module scope: Chromium fires
+// `beforeinstallprompt` as soon as the criteria are met, which on a warm load
+// happens before React's first render — a listener added in an effect misses it
+// and the install card never appears. See lib/pwaInstall.ts.
+if (!isLogWindow) capturePwaInstall();
+
+// Clicking a desktop notification comes back one of two ways, because the
+// service worker can't reach into a page that isn't running yet:
+//   - app already open → the SW focuses it and posts the target here;
+//   - app closed       → the SW opens a window with the target in the hash.
+if (!isLogWindow) {
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (e) => {
+      const d = e.data as { type?: string; chatId?: string; permissionRequestId?: string };
+      if (d?.type === "attention-focus" && d.chatId) {
+        focusAttentionTarget(d.chatId, d.permissionRequestId);
+      }
+    });
+  }
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const chatId = hash.get("chat");
+  if (chatId) {
+    // Clear it first: the chat is about to become app state, and a stale hash
+    // would re-select it on every reload for the rest of the session.
+    history.replaceState(null, "", location.pathname + location.search);
+    // After hydrate, or setActiveChat targets a chat the store hasn't seen.
+    window.setTimeout(() => focusAttentionTarget(chatId, hash.get("attn") ?? undefined), 400);
+  }
 }
 
 const el = document.getElementById("root");

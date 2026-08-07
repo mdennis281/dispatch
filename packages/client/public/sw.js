@@ -110,3 +110,40 @@ self.addEventListener("fetch", (event) => {
     );
   }
 });
+
+/**
+ * Clicking an Attention notification should land you on the thing that needs
+ * you, not merely on the app.
+ *
+ * The notification carries `data` shaped like the client's
+ * `AttentionFocusMessage` (see `lib/browserNotify.ts`). We focus an existing
+ * window if there is one — an installed PWA usually has exactly one, and opening
+ * a second would fork the session UI — and only open a new one when the app is
+ * fully closed, in which case the target rides in on the URL hash because there
+ * is no client to postMessage to yet.
+ */
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const data = event.notification.data;
+  if (!data || data.type !== "attention-focus") return;
+
+  event.waitUntil(
+    (async () => {
+      const clientList = await self.clients.matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      });
+      // The log popup loads the same bundle with ?logs=… and renders only a
+      // terminal — it can't show a chat, so never hand it the focus request.
+      const app = clientList.find((c) => !new URL(c.url).searchParams.has("logs"));
+      if (app) {
+        await app.focus();
+        app.postMessage(data);
+        return;
+      }
+      const params = new URLSearchParams({ chat: data.chatId });
+      if (data.permissionRequestId) params.set("attn", data.permissionRequestId);
+      await self.clients.openWindow(`/#${params.toString()}`);
+    })(),
+  );
+});
