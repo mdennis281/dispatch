@@ -8,3 +8,8 @@ dist/
 # Brand assets are RENDERED at build time by packages/client/scripts/
 # generate-brand.mjs — derived artifacts, so they don't belong in git.
 packages/client/public/icons/
+
+# Screenshot + fixture output from tools/verify — regenerated on demand, and a
+# few MB of PNGs per run. The harness itself (tools/verify) is committed.
+.verify-shots/
+.verify-data/
