@@ -35,6 +35,29 @@ const TAIL_LINES = 40;
  */
 const needsShell = (cmd) => process.platform === "win32" && cmd === "pnpm";
 
+/**
+ * The argv every `pnpm install` in this tooling must use.
+ *
+ * `--frozen-lockfile`: a payload is built from the committed lockfile or it is
+ * not reproducible.
+ *
+ * `--config.confirmModulesPurge=false`: NOT optional, and not cosmetic. pnpm
+ * purges a `node_modules` it considers foreign — one built for a different path
+ * (a payload moved from `staging/`) or by a different pnpm layout (`buildInto`
+ * deliberately preserves it across shas with `git clean -e node_modules`) — and
+ * it asks before doing so. Every caller here is headless: the upgrade's swap
+ * half is detached with `stdio: "ignore"`, and the launcher runs under
+ * `pythonw`. With no TTY pnpm does not default to yes, it ABORTS:
+ *
+ *     ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY
+ *
+ * which fails the build. This is a nasty one to catch by hand, because a
+ * terminal HAS a TTY: run the same command yourself and it succeeds, so the
+ * bug only ever appears in the automated path. It cost two upgrade attempts on
+ * 2026-08-08 — once in the post-move relink, once in the staging build.
+ */
+export const INSTALL_ARGS = ["--frozen-lockfile", "--config.confirmModulesPurge=false"];
+
 export class StepError extends Error {
   constructor(label, code, tail) {
     super(`${label} failed (exit ${code})`);
@@ -272,7 +295,7 @@ export async function buildInto(dir, sha, log = defaultLog) {
   await run("git", ["clean", "-fdx", "-e", "node_modules"], dir, log);
   pruneStalePackages(dir, sha, log);
   line(log)("installing dependencies...");
-  await run("pnpm", ["install", "--frozen-lockfile"], dir, log);
+  await run("pnpm", ["install", ...INSTALL_ARGS], dir, log);
   line(log)("building...");
   await run("pnpm", ["build"], dir, log);
   verifyPayload(dir);

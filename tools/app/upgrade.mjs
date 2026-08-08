@@ -113,6 +113,7 @@ import {
   assertNodeVersion,
   buildInto,
   capture,
+  INSTALL_ARGS,
   portAlive,
   prepareClone,
   run,
@@ -967,22 +968,11 @@ async function runSwap(p, args, ctx, { log, tell }) {
   writeState(p, { phase: "relinking" });
   tell(`relinking node_modules in ${p.app} (junctions still point at staging)`);
   try {
-    // `--config.confirmModulesPurge=false` is LOAD-BEARING, not tidiness.
-    //
-    // pnpm sees a modules dir built for a different path, decides it must be
-    // removed and recreated, and asks first. The swap half is detached with
-    // `stdio: "ignore"` — there is no TTY to ask — so it aborts:
-    //
-    //   ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY
-    //
-    // i.e. without this flag the relink fails exactly where it is needed, and
-    // only there: run by hand in a terminal it succeeds and the bug looks fixed.
-    await run(
-      "pnpm",
-      ["install", "--frozen-lockfile", "--config.confirmModulesPurge=false"],
-      p.app,
-      log,
-    );
+    // INSTALL_ARGS, not a hand-written pair — see its docblock. The purge
+    // confirmation is what makes this work headlessly, and having one exported
+    // constant is what stops the staging build and this relink from disagreeing
+    // about it (they already did once, which is why staging then failed too).
+    await run("pnpm", ["install", ...INSTALL_ARGS], p.app, log);
     tell(`relinked OK`);
   } catch (err) {
     writeState(p, { phase: "relinking", reason: `relink failed: ${err.message}` });
