@@ -96,14 +96,23 @@ export async function renameWithRetry(
   renameFn: (from: string, to: string) => Promise<void> = rename,
 ): Promise<void> {
   let delay = 10;
+  // The FIRST contention error, kept so exhaustion can rethrow it — see the
+  // docblock. Review caught that this used to throw the latest `err` instead,
+  // which is the one raised ~1.3s into backoff: by then every frame above us
+  // has unwound, so its stack no longer shows which caller's write was lost.
+  // The first one is raised on the original call path and still names it.
+  let firstErr: unknown;
   for (let attempt = 0; ; attempt++) {
     try {
       await renameFn(tmp, path);
       return;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
+      // Not contention — a real error (ENOENT, ENOSPC…). Surface it as-is and
+      // immediately; it is never the one we are being patient about.
       if (!code || !RENAME_CONTENTION_CODES.has(code)) throw err;
-      if (attempt >= RENAME_RETRY_ATTEMPTS - 1) throw err;
+      firstErr ??= err;
+      if (attempt >= RENAME_RETRY_ATTEMPTS - 1) throw firstErr;
       await new Promise((r) => setTimeout(r, delay));
       delay = Math.min(delay * 2, RENAME_RETRY_MAX_DELAY_MS);
     }

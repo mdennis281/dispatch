@@ -337,15 +337,26 @@ describe("renameWithRetry — Windows destination contention", () => {
     expect(calls).toBe(1);
   });
 
-  it("gives up and rethrows the original error rather than retrying forever", async () => {
+  it("gives up and rethrows the FIRST error rather than retrying forever", async () => {
+    // Every attempt throws a DISTINGUISHABLE error. The previous version of this
+    // test threw an identical EPERM each time and asserted only `code`, so it
+    // passed whether the first or the tenth came back — which is how the
+    // implementation came to throw the latest one while the docblock promised
+    // the original, and why review caught it and this test did not. The
+    // difference matters: the tenth is raised ~1.3s into backoff, by which point
+    // the callers above have unwound and its stack no longer names the write
+    // that was lost.
     let calls = 0;
+    const thrown: Error[] = [];
     await expect(
       renameWithRetry("a.tmp", "a.json", async () => {
-        calls++;
-        throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+        const err = Object.assign(new Error(`EPERM attempt ${++calls}`), { code: "EPERM" });
+        thrown.push(err);
+        throw err;
       }),
-    ).rejects.toMatchObject({ code: "EPERM" });
+    ).rejects.toBe(thrown[0]);
     expect(calls).toBe(10);
+    expect(thrown[0]?.message).toBe("EPERM attempt 1");
   });
 
   it("writeJsonAtomic still writes through and leaves no .tmp behind", async () => {
