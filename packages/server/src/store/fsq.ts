@@ -38,13 +38,85 @@ async function ensureDir(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
 }
 
+/**
+ * Errors a replace-existing rename raises on Windows when the DESTINATION is
+ * momentarily held open by someone else. Not a permissions problem despite the
+ * name — retrying is the correct response.
+ */
+const RENAME_CONTENTION_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/** ~1.3s of total patience: 10, 20, 40, 80, 160, 200, 200, 200, 200, 200 ms. */
+const RENAME_RETRY_ATTEMPTS = 10;
+const RENAME_RETRY_MAX_DELAY_MS = 200;
+
+/**
+ * `rename(tmp, path)`, retried through transient Windows destination-locking.
+ *
+ * WHY. Every JSON file the Store owns is rewritten whole through a temp file
+ * and a replace-existing rename. That rename deletes the destination, so it
+ * needs delete access to it — and a foreign process that has the destination
+ * open WITHOUT `FILE_SHARE_DELETE` takes that away for as long as it holds the
+ * handle. Defender's on-access scanner, the search indexer and backup agents
+ * all open files exactly that way, and they open a file *because* it was just
+ * written, which is precisely the moment we rename onto it.
+ *
+ * The failure looks like a permissions bug and isn't:
+ *
+ *   EPERM: operation not permitted, rename
+ *     '…/runners.json.<pid>.<hash>.tmp' -> '…/runners.json'
+ *
+ * That exact error took out `runner.test.ts` ("runs docker compose up before
+ * spawn and down on stop") on a box running several agents at once, and it is
+ * reproducible on demand by opening the destination from another process with
+ * share mode Read/ReadWrite/None — all three fail, only share mode Delete
+ * succeeds. It is NOT a test artifact: tests and production run this same
+ * function, and production's `.data` / `%LOCALAPPDATA%\claude-manager` are if
+ * anything scanned harder than TEMP.
+ *
+ * Nor is it cosmetic. The write sits UPSTREAM of the broadcast — see
+ * ResumeScheduler.patch(), which awaits `saveChat()` and only then publishes
+ * `chat-update` — so one EPERM here is a chat update, a runner record or a
+ * checkpoint that silently never happens, with the rejection swallowed by a
+ * fire-and-forget caller. That mechanism also explains (not proven, but it is
+ * the only path that fits) the other flake seen the same day: routes.test.ts
+ * "schedules a resume off the limit result" hanging to its 30s timeout on an
+ * unbounded await for a `chat-update` that never arrived.
+ *
+ * The holder is a scanner, so the window is short and backing off clears it —
+ * measured: 6 retries under a 350ms artificial hold. We give up after ~1.3s and
+ * rethrow the ORIGINAL error rather than retry forever, because a lock that
+ * outlives that is a real one (a file genuinely pinned open) and hiding it
+ * behind an unbounded retry would just move the hang somewhere worse.
+ */
+export async function renameWithRetry(
+  tmp: string,
+  path: string,
+  // Seam for the unit test: the real contention needs a second process holding a
+  // Windows handle, which is neither cheap nor available on a Linux runner.
+  renameFn: (from: string, to: string) => Promise<void> = rename,
+): Promise<void> {
+  let delay = 10;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await renameFn(tmp, path);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (!code || !RENAME_CONTENTION_CODES.has(code)) throw err;
+      if (attempt >= RENAME_RETRY_ATTEMPTS - 1) throw err;
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, RENAME_RETRY_MAX_DELAY_MS);
+    }
+  }
+}
+
 /** Atomically write pretty JSON to `path` (temp file + rename). */
 export async function writeJsonAtomic(path: string, data: unknown): Promise<void> {
   await ensureDir(path);
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
     await writeFile(tmp, JSON.stringify(data, null, 2), "utf8");
-    await rename(tmp, path);
+    await renameWithRetry(tmp, path);
   } catch (err) {
     await rm(tmp, { force: true }).catch(() => {});
     throw err;
