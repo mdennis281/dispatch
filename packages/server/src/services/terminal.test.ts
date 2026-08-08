@@ -204,6 +204,63 @@ describe("TerminalService — cap", () => {
     expect(again.error).toBeUndefined();
     expect(again.output).toBe("b");
   });
+
+  // Review caught this: `atCap` counts LIVE shells only, so an EXITED record
+  // occupies no slot — and both entry points guarded on "no record at all"
+  // rather than "about to go live". A chat at cap that also held an exited name
+  // could revive it and end up at cap+1, repeatably.
+  //
+  // The exited state has to come from the SHELL dying (emit "exit"), not from
+  // `svc.kill()` — kill DELETES the record, so it leaves nothing to revive and
+  // reproduces nothing. A first draft of these tests used kill and passed
+  // against the unfixed code; they are written this way deliberately.
+
+  const live = (svc: TerminalService, chatId: string): number =>
+    svc.listChat(chatId).filter((t) => t.status === "live").length;
+
+  it("run() will not revive an EXITED name while the chat is at cap", async () => {
+    const { svc, shells } = makeService({ maxPerChat: 2 });
+    await svc.run({ chatId: "c1", name: "one", command: "printout a", cwd: "C:\\r" });
+    await svc.run({ chatId: "c1", name: "two", command: "printout a", cwd: "C:\\r" });
+
+    // "one" dies on its own — record retained, status exited, slot freed.
+    shells[0]!.emit("exit", 0);
+    expect(live(svc, "c1")).toBe(1);
+
+    // Something else takes the freed slot: back at cap, with "one" still there.
+    await svc.run({ chatId: "c1", name: "three", command: "printout a", cwd: "C:\\r" });
+    expect(live(svc, "c1")).toBe(2);
+
+    const revived = await svc.run({ chatId: "c1", name: "one", command: "printout b", cwd: "C:\\r" });
+    expect(revived.error).toMatch(/cap reached/i);
+    expect(live(svc, "c1")).toBe(2);
+  });
+
+  it("create() will not revive an EXITED name while the chat is at cap", () => {
+    const { svc, shells } = makeService({ maxPerChat: 2 });
+    svc.create("c1", "one", "C:\\r");
+    svc.create("c1", "two", "C:\\r");
+
+    shells[0]!.emit("exit", 0);
+    svc.create("c1", "three", "C:\\r");
+    expect(live(svc, "c1")).toBe(2);
+
+    const revived = svc.create("c1", "one", "C:\\r");
+    expect(revived.terminal).toBeUndefined();
+    expect(revived.error).toMatch(/cap reached/i);
+    expect(live(svc, "c1")).toBe(2);
+  });
+
+  it("an exited shell still frees its slot for a NEW name", async () => {
+    // The other half of the rule — the fix must not make an exited shell hold a
+    // slot forever, or a crashed shell would permanently shrink the budget.
+    const { svc, shells } = makeService({ maxPerChat: 1 });
+    await svc.run({ chatId: "c1", name: "one", command: "printout a", cwd: "C:\\r" });
+    shells[0]!.emit("exit", 0);
+    const next = await svc.run({ chatId: "c1", name: "two", command: "printout b", cwd: "C:\\r" });
+    expect(next.error).toBeUndefined();
+    expect(next.output).toBe("b");
+  });
 });
 
 describe("TerminalService — teardown", () => {

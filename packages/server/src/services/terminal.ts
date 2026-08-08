@@ -194,8 +194,12 @@ export class TerminalService {
     let term = this.terminals.get(key);
 
     if (!term || term.status === "exited") {
-      // Enforce the per-chat cap only when creating a NEW live shell.
-      if (!term && this.atCap(args.chatId)) {
+      // Enforce the cap whenever this is about to make a shell LIVE — which
+      // includes reviving an exited one. `atCap` counts only live shells, so an
+      // exited record is not occupying a slot; spawning into it while already at
+      // cap is what puts the chat over. Guarding on `!term` alone let a chat
+      // exceed `maxPerChat` by reopening exited names (review caught this).
+      if (this.atCap(args.chatId)) {
         return {
           output: "",
           exitCode: null,
@@ -241,7 +245,9 @@ export class TerminalService {
     const key = TerminalService.key(chatId, trimmed);
     const existing = this.terminals.get(key);
     if (existing?.status === "live") return { terminal: this.view(existing) };
-    if (!existing && this.atCap(chatId)) return { error: this.capMessage() };
+    // Same rule as `run()`: reviving an EXITED name still spawns a live shell,
+    // so it has to clear the cap too — `atCap` counts live only.
+    if (this.atCap(chatId)) return { error: this.capMessage() };
     return { terminal: this.view(this.open(key, chatId, trimmed, cwd)) };
   }
 
