@@ -8,6 +8,12 @@ export interface TabDef {
   label: string;
   icon?: ReactNode;
   count?: number;
+  /**
+   * Overrides the collapsed tooltip's whole text. For a badge that sums two
+   * different things (Apps counts running sub-apps AND orphaned ports), the
+   * default `label · count` can't say which is which.
+   */
+  tip?: string;
 }
 
 export interface TabsProps {
@@ -77,7 +83,11 @@ export function Tabs({ tabs, value, onChange, className, iconOnly }: TabsProps) 
         );
 
         return collapsed ? (
-          <Tooltip key={t.id} label={count > 0 ? `${t.label} · ${count}` : t.label} side="bottom">
+          <Tooltip
+            key={t.id}
+            label={t.tip ?? (count > 0 ? `${t.label} · ${count}` : t.label)}
+            side="bottom"
+          >
             {button}
           </Tooltip>
         ) : (

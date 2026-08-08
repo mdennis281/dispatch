@@ -11,6 +11,7 @@ import { PRsPanel } from "../panels/PRsPanel.js";
 import { usePanels } from "../../stores/panels.js";
 import { useRunners } from "../../stores/runners.js";
 import { useTerminals } from "../../stores/terminals.js";
+import { useProcesses, useOrphanCount } from "../../stores/processes.js";
 import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
 import {
   worktreeMatchesChat,
@@ -59,10 +60,34 @@ export function RightPanel({ chat }: { chat: Chat }) {
     [runs],
   );
 
+  // Orphaned dev servers are the one thing in here you have to be TOLD about:
+  // they hold a port with no runner behind them, so nothing else in the UI
+  // reflects them and the next launch just fails with "port already in use".
+  // The scan lives in ProcessesPanel, which is two collapses deep inside Apps —
+  // so run it here, where the panel's visibility can't gate it. Not a poll: the
+  // triggers are a project switch and a runner start/stop, which is exactly when
+  // an orphan appears or is reaped.
+  const orphanCount = useOrphanCount(chat.projectId);
+  useEffect(() => {
+    void useProcesses.getState().scan(chat.projectId);
+  }, [chat.projectId, runnerCount]);
+
   const tabs: TabDef[] = [
     { id: "worktrees", label: "Worktrees", icon: <GitBranch />, count: wtCount },
     { id: "agents", label: "Agents", icon: <Bot />, count: agentsLive },
-    { id: "apps", label: "Apps", icon: <AppWindow />, count: runnerCount },
+    {
+      id: "apps",
+      label: "Apps",
+      icon: <AppWindow />,
+      // Orphans count toward the badge: both are processes this tab is the only
+      // place to see, and an orphan is the more urgent of the two. The tip keeps
+      // the sum honest, since "3" alone can't say which is which.
+      count: runnerCount + orphanCount,
+      tip:
+        orphanCount > 0
+          ? `Apps · ${runnerCount} running, ${orphanCount} orphan${orphanCount === 1 ? "" : "s"}`
+          : undefined,
+    },
     { id: "terminals", label: "Terminals", icon: <SquareTerminal />, count: termCount },
     { id: "prs", label: "PRs", icon: <GitPullRequest />, count: prOpen },
   ];
