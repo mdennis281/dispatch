@@ -4,6 +4,11 @@ dist/
 *.log
 .turbo/
 .verify-shots/*.tsbuildinfo
+.worktrees/
+.dispatch/
+.agents/
+pnpm-lock.yaml
+.claude
 
 # Brand assets are RENDERED at build time by packages/client/scripts/
 # generate-brand.mjs — derived artifacts, so they don't belong in git.
