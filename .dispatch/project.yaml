@@ -17,6 +17,22 @@ worktreeRoot: .worktrees
 workflow:
   profile: review
   autoMerge: on-green
+  # Declared here rather than left to each agent to remember. Without this block
+  # every step of the PR lifecycle rode on the agent choosing correctly: it ran
+  # `gh pr create` by hand, so nothing requested a reviewer and nothing linked
+  # the PR back to the chat, and two rounds of review comments landed into
+  # silence. See the `pr:` docblock in packages/shared/src/workflow.ts.
+  pr:
+    # The bot that actually reviews here. `create_pr` requests it; nothing else
+    # is trusted to remember to.
+    reviewers: ["copilot-pull-request-reviewer[bot]"]
+    # A PR is not done until a requested reviewer has reported.
+    requireReview: true
+    # `on-green` REFUSES when zero checks reported, rather than reading "no
+    # evidence" as "good news". Safe to turn on only as of #4, which added the
+    # first workflow to .github/workflows — before that this repo genuinely had
+    # no checks, and PRs #1 and #3 both merged reporting exactly that.
+    requireChecks: true
 
 instructions:
   - file: house-rules.md
