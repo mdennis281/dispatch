@@ -8,7 +8,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCrashNet, CRASH_LOG_NAME } from "./crash-log.js";
+import { installCrashNet, attachCrashBus, CRASH_LOG_NAME } from "./crash-log.js";
+import { EventBus } from "./bus.js";
+import type { WsServerEvent } from "@dispatch/shared";
 
 let dir: string;
 let uninstall: (() => void) | undefined;
@@ -69,5 +71,62 @@ describe("installCrashNet", () => {
     expect(process.listenerCount("unhandledRejection")).toBe(before + 1);
     off();
     expect(process.listenerCount("unhandledRejection")).toBe(before);
+  });
+
+  it("installing twice replaces rather than stacks", async () => {
+    // Review flagged that the docblock promised a no-stacking guard that did not
+    // exist. Two live nets means two handler pairs and every crash written to
+    // crash.log twice.
+    const before = process.listenerCount("unhandledRejection");
+    installCrashNet({ dataDir: dir, log: () => {} });
+    uninstall = installCrashNet({ dataDir: dir, log: () => {} });
+    expect(process.listenerCount("unhandledRejection")).toBe(before + 1);
+
+    process.emit("uncaughtException", new Error("only once"));
+    const text = await readFile(logFile(), "utf8");
+    expect(text.match(/only once/g)).toHaveLength(1);
+  });
+
+  it("a stale uninstall does not tear down the net that replaced it", () => {
+    const before = process.listenerCount("unhandledRejection");
+    const first = installCrashNet({ dataDir: dir, log: () => {} });
+    uninstall = installCrashNet({ dataDir: dir, log: () => {} });
+    // `first` no longer owns the slot; calling it must be inert, not a way to
+    // silently disarm the live net.
+    first();
+    expect(process.listenerCount("unhandledRejection")).toBe(before + 1);
+  });
+});
+
+describe("attachCrashBus", () => {
+  /**
+   * The gap review found: `start()` installs the net before `buildApp()` — it
+   * has to, everything after can reject — so it had no bus to pass, and the
+   * publish was a permanent no-op in production. A crash could never reach the
+   * UI, only crash.log.
+   */
+  it("delivers to a bus attached after install, and not before", async () => {
+    const bus = new EventBus();
+    const seen: WsServerEvent[] = [];
+    bus.on("error", (e) => seen.push(e));
+
+    uninstall = installCrashNet({ dataDir: dir, log: () => {} });
+
+    process.emit("uncaughtException", new Error("before wiring"));
+    expect(seen).toHaveLength(0);
+
+    attachCrashBus(bus);
+    process.emit("uncaughtException", new Error("after wiring"));
+
+    expect(seen).toHaveLength(1);
+    expect(JSON.stringify(seen[0])).toContain("after wiring");
+    // The disk record is unconditional either way — it never depended on a bus.
+    const text = await readFile(logFile(), "utf8");
+    expect(text).toContain("before wiring");
+    expect(text).toContain("after wiring");
+  });
+
+  it("is a no-op when nothing is installed", () => {
+    expect(() => attachCrashBus(new EventBus())).not.toThrow();
   });
 });

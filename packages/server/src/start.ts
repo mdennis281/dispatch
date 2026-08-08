@@ -9,7 +9,7 @@ import { buildApp } from "./app.js";
 import { config, envVar } from "./config.js";
 import { seedDefaultsIfEmpty } from "./seed.js";
 import { installShutdown } from "./shutdown.js";
-import { installCrashNet } from "./crash-log.js";
+import { installCrashNet, attachCrashBus } from "./crash-log.js";
 import { claudeRuntime } from "./services/runtime.js";
 
 /** Wildcard binds that answer on every interface — print real addresses instead. */
@@ -45,6 +45,10 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
   installCrashNet({ dataDir: config.dataDir });
 
   const app = await buildApp({ config, dev });
+  // The net had to go up before buildApp(), so this is the earliest the bus can
+  // exist to bind. Without it the net's publish is a permanent no-op and a
+  // survived crash is visible only in crash.log — never in the UI.
+  attachCrashBus(app.cm.bus);
   // Seed default modes/agents + the Hivebreak project on a fresh dataDir so the
   // live UI has content on first boot. No-op once anything exists.
   await seedDefaultsIfEmpty(app.cm.store).catch((err) => {

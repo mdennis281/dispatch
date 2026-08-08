@@ -60,14 +60,34 @@ function describe(err: unknown): string {
 }
 
 /**
- * Install the net. Returns an uninstall fn (tests + repeated `buildApp` calls
- * must not stack handlers — see the guard on `installed`).
+ * The one live installation, or undefined when the net is off.
+ *
+ * Module-level because `process.on` is: two live nets mean two handler pairs,
+ * every crash appended to `crash.log` twice, and an uninstall that only takes
+ * half of them down.
+ */
+interface LiveNet {
+  /** Mutable — see {@link attachCrashBus}. Read at FIRE time, not install time. */
+  bus?: EventBus;
+  off: () => void;
+}
+let live: LiveNet | undefined;
+
+/**
+ * Install the net. Returns an uninstall fn.
+ *
+ * Installing twice REPLACES the live net rather than stacking a second pair of
+ * `process.on` handlers. Replacing — rather than ignoring the second call — is
+ * what keeps re-installing with different options possible, which tests need.
  */
 export function installCrashNet(opts: CrashNetOptions): () => void {
+  live?.off();
+
   const now = opts.now ?? (() => new Date());
   // eslint-disable-next-line no-console
   const log = opts.log ?? ((m: string) => console.error(m));
   const file = join(opts.dataDir, CRASH_LOG_NAME);
+  const state: LiveNet = { bus: opts.bus, off: () => {} };
 
   const record = (kind: string, err: unknown): void => {
     const stamp = now().toISOString();
@@ -83,14 +103,15 @@ export function installCrashNet(opts: CrashNetOptions): () => void {
       // An unwritable state dir must not itself become the thing that kills us.
       log(`[dispatch] could not write ${file}: ${describe(writeErr)}`);
     }
-    // Best-effort UI surfacing. Wrapped because a throwing bus subscriber here
-    // would re-enter this very handler.
+    // Best-effort UI surfacing. Read off `state`, not `opts`, so a bus attached
+    // AFTER install still receives this — see attachCrashBus. Wrapped because a
+    // throwing bus subscriber here would re-enter this very handler.
     try {
-      opts.bus?.publish({
+      state.bus?.publish({
         type: "error",
         message: `Internal error (${kind}) — the server stayed up`,
         detail: detail.split("\n")[0],
-      } as Parameters<EventBus["publish"]>[0]);
+      });
     } catch {
       /* the disk record is the one that matters */
     }
@@ -102,8 +123,30 @@ export function installCrashNet(opts: CrashNetOptions): () => void {
   process.on("unhandledRejection", onRejection);
   process.on("uncaughtException", onException);
 
-  return () => {
+  state.off = () => {
     process.off("unhandledRejection", onRejection);
     process.off("uncaughtException", onException);
+    // Only surrender the slot if we still hold it: a later install already
+    // replaced us, and our uninstall must not tear down ITS handlers.
+    if (live === state) live = undefined;
   };
+  live = state;
+  return state.off;
+}
+
+/**
+ * Point the live net's bus at `bus`, so a survived crash also reaches the UI.
+ *
+ * `start()` installs the net as its very first statement — deliberately, because
+ * everything it goes on to await can reject — but `app.cm.bus` does not exist
+ * until `buildApp()` has returned. Binding late is what closes that gap: the net
+ * reads its bus when a crash FIRES, so the handlers never have to come down and
+ * be rebuilt, and the "installed before anything can reject" property stays
+ * literally true.
+ *
+ * Without this the publish is a permanent no-op in production and a crash is
+ * only ever visible in `crash.log`. No-op when nothing is installed.
+ */
+export function attachCrashBus(bus: EventBus): void {
+  if (live) live.bus = bus;
 }
