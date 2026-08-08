@@ -1,0 +1,165 @@
+# Dispatch CI — the gate that `workflow.autoMerge: on-green` has been trusting.
+#
+# WHY THIS EXISTS. `.dispatch/project.yaml` declares `profile: review` with
+# `autoMerge: on-green`, and agents are told to land their own PRs once CI is
+# green. There was no workflow in this directory, so `watch_pr` answered "no CI
+# checks configured" on every PR — "green" was vacuously true and auto-merge was
+# gating on nothing at all. This file is what turns that policy from a
+# description into an enforcement.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# This workflow only ever needs to read the tree. Say so explicitly, because the
+# default token is broader and `approve_pr` reads these checks to decide whether
+# to merge — a check that could rewrite the repo is a poor thing to gate on.
+permissions:
+  contents: read
+
+# Agents push several times a minute. Without this, a PR costs one run per push
+# and the badge is perpetually reporting a commit nobody is looking at any more.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # THE GATE. Windows, because that is where this application lives.
+  #
+  # This is not sentiment about the author's desktop. The Windows-only surface
+  # of this codebase is load-bearing and unreachable from a Linux runner:
+  #   * `needsShell` exists purely for pnpm's `.cmd` shims,
+  #   * services/processes.ts parses `netstat` output,
+  #   * tools/app/paths.mjs resolves `%LOCALAPPDATA%`, launch.py is the
+  #     supervisor, and stop-over-stdin exists because Windows has no SIGTERM,
+  #   * store/fsq.ts now retries an EPERM-on-rename that ONLY occurs on Windows
+  #     (a foreign handle without FILE_SHARE_DELETE). An ubuntu-only CI would
+  #     have shown green straight through the bug that motivated this file.
+  # ---------------------------------------------------------------------------
+  test:
+    name: build + typecheck + test (windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm BEFORE setup-node: `cache: pnpm` shells out to `pnpm store path`,
+      # so pnpm has to already be on PATH or the cache step fails.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # Pinned exactly rather than `11`: pnpm-workspace.yaml uses
+          # `allowBuilds:` / `minimumReleaseAgeExclude:`, and a --frozen-lockfile
+          # install has no business drifting underneath CI.
+          version: 11.5.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          # package.json engines says >=20. Pinning the LTS keeps `engines`
+          # honest — the author develops on a newer Node, so this is the leg
+          # that would notice if the floor quietly rose.
+          node-version: 22
+          cache: pnpm # caches the pnpm store, keyed off pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # ORDER MATTERS AND IT IS NOT OBVIOUS. `@dispatch/shared` and
+      # `@dispatch/cli` expose their types from `dist/` ("types":
+      # "./dist/index.d.ts"), so on a CLEAN checkout `typecheck` cannot resolve
+      # them until `build` has emitted. This passes locally in either order only
+      # because a working tree already has a stale dist/ lying around. Build
+      # first, always.
+      - name: Build
+        run: pnpm build
+
+      # The root had no aggregate typecheck, so all four packages' `typecheck`
+      # scripts went unrun by any single command. `pnpm typecheck` (added to the
+      # root package.json as `pnpm -r typecheck`) fans out in topological order.
+      # This is not redundant with Build: `pnpm build` compiles the client with
+      # vite, which strips types WITHOUT checking them, so the SPA's types are
+      # checked here and nowhere else.
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # 912 tests. The root script covers shared (56) + cli (41) + server (815).
+      - name: Test (shared, cli, server)
+        run: pnpm test
+
+      # The client is deliberately NOT in the root `test` script, which is
+      # exactly why CI has to beat `pnpm test` by hand. Its vitest config is a
+      # node-environment runner over pure logic (message store, todo-fold,
+      # project-draft): 136 tests in ~2s, no DOM, no browser, no server.
+      - name: Test (client)
+        run: pnpm --filter @dispatch/client exec vitest run
+
+      # DELIBERATELY NOT RUN: `pnpm --filter @dispatch/client e2e` (playwright).
+      # Excluded on reliability grounds, and that exclusion is the point of the
+      # whole file — a check that is red one run in five teaches everyone to
+      # ignore the badge, which is strictly worse than having no check.
+      #
+      #   * e2e/shell-live.spec.ts picks its port as `40000 + random(15000)`
+      #     with NO collision retry, boots a real Fastify server, and allows 45s
+      #     for /api/health under a 90s test timeout. On a shared, throttled
+      #     runner that is a coin flip.
+      #   * e2e/verify-smoke.spec.ts points at an ALREADY-RUNNING cockpit on
+      #     127.0.0.1:4319 and skips itself when none answers — in CI it would
+      #     assert precisely nothing while still costing a browser download.
+      #   * Both need `playwright install --with-deps chromium`: a few hundred
+      #     MB and 1-2 min, for the above.
+      #
+      # Run them locally against a real cockpit: pnpm --filter @dispatch/client e2e
+
+  # ---------------------------------------------------------------------------
+  # PORTABILITY. Linux, for the one class of defect Windows physically cannot
+  # catch: a case-wrong import. NTFS is case-insensitive, so `./Store.js` for
+  # `store.ts` resolves happily on the gate above and only ever explodes on a
+  # case-sensitive filesystem. Cheap (no test suite) and fast.
+  # ---------------------------------------------------------------------------
+  portability:
+    name: build + typecheck (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm build
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # NO SERVER SUITE HERE, ON PURPOSE — and this is measured, not assumed.
+      # Run against node:22-bookworm the server suite is 48/51 files green, with
+      # exactly five failures, all one cause: tests that use Windows
+      # drive-letter strings as path FIXTURES. POSIX `path.resolve` does not
+      # consider "C:/wt" absolute, so it prepends cwd and the assertion reads
+      # `/work/packages/server/C:/wt/services/metrics`.
+      #
+      #   routes/fs.test.ts    > inferProjectsRoot > learns the root the existing projects share
+      #   routes/fs.test.ts    > inferProjectsRoot > picks the parent the most projects sit under
+      #   services/github.test.ts > ACT methods > ship via shipCmd runs the command in the worktree and emits pr-update
+      #   services/github.test.ts > ACT methods > ship without shipCmd runs gh pr create then requests Copilot review
+      #   services/runner.test.ts > docker path (mocked) > runs docker compose up before spawn and down on stop
+      #
+      # These are fixture assumptions, not product bugs — nothing in production
+      # feeds a literal "C:/wt" to a Linux kernel. Making them portable means
+      # parameterising the fixture root per platform; until someone wants that,
+      # adding the suite here would just paint the wall red. That is the whole
+      # of the work required to promote this job to a full second gate.
