@@ -158,11 +158,13 @@ jobs:
   # EPERM-on-rename that only occurs against a Windows filesystem.
   #
   # WHAT IT DOES NOT DO, AND WHY. It does not run the full suite and it does not
-  # run `pnpm build`. The client's vite build is ~3.5 minutes of the old job and
-  # produces a bundle no server test imports; at the 2× private-repo multiplier
-  # that was the most expensive thing in this file and it was checking nothing
-  # Linux had not already checked. Only `@dispatch/shared` and `@dispatch/cli`
-  # are built, because the server's types resolve from their dist/.
+  # run `pnpm build`. Measured on windows-latest, the old job spent 2m38s in
+  # `Test (shared, cli, server)` and 1m21s in `Build` — and at the 2×
+  # private-repo multiplier both were re-checking what the Linux gate had
+  # already checked on hardware that costs nothing. The full build is skipped
+  # because the client's vite bundle is imported by no server test; only
+  # `@dispatch/shared` and `@dispatch/cli` are built, because the server's types
+  # resolve from their dist/. Net: the Windows leg went 5m31s → 1m10s.
   #
   # The subset below is the set of test files that either branch on
   # `process.platform` or touch a real filesystem — 137 tests in ~7 seconds.
