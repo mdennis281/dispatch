@@ -5,9 +5,17 @@ dist/
 .turbo/
 .verify-shots/*.tsbuildinfo
 .worktrees/
-.dispatch/
 .agents/
 .claude
+
+# `.dispatch/` is Dispatch's own committable-by-design project config, and it is
+# deliberately NOT committed here. This repo is headed for open source, and the
+# manifest's siblings — `memory/`, `instructions/` — are where the hard-won
+# lessons about how to work on this codebase accumulate. Publishing the code is
+# the point; publishing the notes that make an agent good at it is not.
+# Dispatch reads the working tree, not git, so everything still works locally;
+# it just doesn't travel with a clone.
+.dispatch/
 
 # Brand assets are RENDERED at build time by packages/client/scripts/
 # generate-brand.mjs — derived artifacts, so they don't belong in git.
