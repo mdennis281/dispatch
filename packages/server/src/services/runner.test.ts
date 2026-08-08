@@ -191,6 +191,52 @@ describe("RunnerService — docker path (mocked)", () => {
     expect((await store.getRunner(runner.id))?.status).toBe("stopped");
   });
 
+  it("tears docker down with the same port overlay it was brought up with", async () => {
+    // Review found `down` receiving only the scrubbed parent env while `up` got
+    // the overlay too. A compose file interpolating `${PORT}` or `${SERVER_PORT}`
+    // then describes a DIFFERENT stack at teardown than at startup, and can leave
+    // the real one running. Ports come from the persisted record, so this has to
+    // hold without the live map as well.
+    const envs: Record<string, string | undefined>[] = [];
+    const runOnce: RunOnceFn = async (_file, args, opts) => {
+      if (args.includes("up") || args.includes("down")) envs.push(opts.env ?? {});
+      return { exitCode: 0 };
+    };
+
+    service = new RunnerService({
+      store,
+      bus,
+      runOnce,
+      getPort: async (preferred) => preferred ?? 9999,
+      killTree: async () => {},
+    });
+
+    const subApp: SubApp = {
+      id: "stack",
+      name: "Stack",
+      path: ".",
+      dockerCompose: "services/stack/docker-compose.yml",
+      ports: [8080, 2567],
+      // The Hivebreak shape documented in RUNNING.md: the port has to cross a
+      // process boundary the runner can't pass argv to.
+      env: { SERVER_PORT: "{port2}", CLIENT_PORT: "{port}" },
+    };
+
+    const runner = await service.start("C:/wt", subApp);
+    await service.stop(runner.id);
+
+    const [up, down] = envs;
+    expect(up).toBeDefined();
+    expect(down).toBeDefined();
+    for (const key of ["PORT", "CLIENT_PORT", "SERVER_PORT"] as const) {
+      expect(down![key]).toBe(up![key]);
+    }
+    expect(down!.PORT).toBe("8080");
+    expect(down!.SERVER_PORT).toBe("2567");
+    // Still scrubbed — the fix must not have handed the manager's identity back.
+    expect(down!.DISPATCH_DATA_DIR).toBeUndefined();
+  });
+
   it("marks the runner crashed when docker compose up fails", async () => {
     const runOnce: RunOnceFn = async () => ({ exitCode: 1 });
     service = new RunnerService({

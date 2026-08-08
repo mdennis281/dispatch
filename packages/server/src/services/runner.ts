@@ -108,6 +108,31 @@ const MANAGER_ENV_KEYS = new Set(MANAGER_ENV_VARS.map((n) => n.toLowerCase()));
  * `cm_data_dir` left by an old shortcut would survive an exact-match scrub and
  * still be found by the child's `process.env.CM_DATA_DIR`.
  */
+/**
+ * The port-derived env a subApp is launched with: `PORT` for tools that honour
+ * it, plus the manifest's own `env` with `{port}` placeholders substituted, so a
+ * tool reading a differently-named var (Vite's `CLIENT_PORT`, a server's
+ * `SERVER_PORT`) gets its port too — and can override `PORT`.
+ *
+ * Extracted so `docker compose up` and `docker compose down` provably build the
+ * SAME overlay. They did not: `down` was handed only the scrubbed parent env, so
+ * a compose file interpolating `${PORT}` or `${SERVER_PORT}` resolved a
+ * different config at teardown than at startup and could fail to target the
+ * stack it had just brought up. Two call sites computing this independently is
+ * exactly how that drifts, so there is now only one.
+ */
+export function portOverlay(
+  primary: number | undefined,
+  ports: number[],
+  env: Record<string, string> | undefined,
+): Record<string, string> {
+  const overlay: Record<string, string> = primary !== undefined ? { PORT: String(primary) } : {};
+  for (const [key, value] of Object.entries(env ?? {})) {
+    overlay[key] = substitutePorts(value, ports);
+  }
+  return overlay;
+}
+
 export function scrubManagerEnv(parent: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(parent)) {
@@ -295,6 +320,13 @@ interface LiveRunner {
   usedDocker: boolean;
   composeDir?: string;
   composeFile?: string;
+  /**
+   * The port overlay this stack was brought UP with, kept so teardown resolves
+   * an identical compose config. Held here rather than persisted because the
+   * subApp is passed to `start()` directly and need not exist on the stored
+   * project at all — re-deriving it is a fallback, not the source of truth.
+   */
+  overlay?: Record<string, string>;
   stopping: boolean;
   logs: RunnerLogLine[];
   /** `subApp.url` template (for rebuilding the URL after port detection). */
@@ -369,7 +401,7 @@ export class RunnerService {
       // map is empty at boot) so containers don't leak and the UI stops showing a
       // phantom "running".
       if (r.usedDocker) {
-        await this.dockerDown(r.id, r.composeDir, r.composeFile);
+        await this.dockerDown(r.id, r.composeDir, r.composeFile, r);
       }
       await this.saveAndEmit({ ...r, status: "stopped" });
     }
@@ -448,11 +480,8 @@ export class RunnerService {
     // placeholders substituted) is overlaid on top so a tool that reads a
     // differently-named var — Vite's `CLIENT_PORT`, a server's `SERVER_PORT` —
     // gets its port too, and can even override `PORT`.
-    const overlay: Record<string, string> =
-      primary !== undefined ? { PORT: String(primary) } : {};
-    for (const [key, value] of Object.entries(subApp.env ?? {})) {
-      overlay[key] = substitutePorts(value, ports);
-    }
+    const overlay = portOverlay(primary, ports, subApp.env);
+    live.overlay = overlay;
 
     // The child's whole environment: what we inherited MINUS the manager's own
     // identity vars (see MANAGER_ENV_VARS — a subApp that inherits our
@@ -488,7 +517,7 @@ export class RunnerService {
       // A stop() can land during the multi-second `up` await. Don't spawn the dev
       // process or report "running"; ensure the stack is down and finalize.
       if (live.stopping) {
-        await this.dockerDown(id, composeDir, composeFile);
+        await this.dockerDown(id, composeDir, composeFile, runner);
         return this.finalizeStopped(id, runner);
       }
     }
@@ -545,6 +574,7 @@ export class RunnerService {
         instanceId,
         runner.composeDir ?? live?.composeDir,
         runner.composeFile ?? live?.composeFile,
+        runner,
       );
     }
 
@@ -687,20 +717,55 @@ export class RunnerService {
     id: string,
     composeDir?: string,
     composeFile?: string,
+    runner?: RunnerInstance,
   ): Promise<void> {
     if (!composeDir || !composeFile) return;
     this.pushLog(id, "stdout", `$ docker compose -f ${composeFile} down`);
     try {
-      // Scrubbed, like `up` — a compose file is free to interpolate `${...}`
-      // from the environment, and teardown must resolve the same values the
-      // stack was brought up with rather than the manager's.
       await this.runOnce("docker", ["compose", "-f", composeFile, "down"], {
         cwd: composeDir,
-        env: scrubManagerEnv(this.parentEnv),
+        // Scrubbed like `up`, AND carrying the same port overlay. A compose file
+        // is free to interpolate `${PORT}`/`${SERVER_PORT}`; teardown that
+        // resolves different values than startup describes a different stack and
+        // can leave the real one running. Ports come from the PERSISTED record,
+        // so this still holds after a server restart when the live map is gone.
+        env: { ...scrubManagerEnv(this.parentEnv), ...(await this.composeOverlay(runner)) },
       });
     } catch {
       /* best-effort teardown: a missing docker daemon must not throw here */
     }
+  }
+
+  /**
+   * Rebuild a stopped runner's port overlay for teardown.
+   *
+   * The manifest `env` is re-read from the project rather than persisted onto
+   * the runner: those values can expand `${VAR}` from the manager's environment,
+   * and `runners.json` is not a place to write anything that might be a secret.
+   * Ports come from the runner record, so `{port}` substitution is exact even
+   * if the manifest has since been edited. Best-effort throughout — a missing
+   * project or subApp degrades to `PORT` alone, which is still closer than the
+   * bare environment `down` used to get.
+   */
+  private async composeOverlay(runner?: RunnerInstance): Promise<Record<string, string>> {
+    if (!runner) return {};
+    // What `up` actually used, when we still have it. Authoritative: `start()`
+    // is handed the subApp directly, so the stored project may not carry it.
+    const held = this.live.get(runner.id)?.overlay;
+    if (held) return held;
+    const ports = runner.ports ?? (runner.port !== undefined ? [runner.port] : []);
+    let env: Record<string, string> | undefined;
+    // `projectId` is optional on a runner record, so this fallback genuinely
+    // may not be available — PORT alone is still closer than the bare env.
+    if (runner.projectId !== undefined) {
+      try {
+        const project = await this.store.getProject(runner.projectId);
+        env = project?.subApps.find((s) => s.id === runner.subAppId)?.env;
+      } catch {
+        /* unreadable project — fall through to PORT alone */
+      }
+    }
+    return portOverlay(runner.port, ports, env);
   }
 
   /** Persist a terminal `stopped` (unless already terminal) and prune the live entry. */
