@@ -115,6 +115,7 @@ import {
   capture,
   portAlive,
   prepareClone,
+  run,
   verifyPayload,
 } from "./build-payload.mjs";
 
@@ -161,7 +162,18 @@ const PARENT_EXIT_TIMEOUT_MS = 30_000;
 const LOG_MAX_BYTES = 2_000_000;
 
 /** Phases that mean the payload may not be where the launcher expects it. */
-const UNSAFE_PHASES = new Set(["stopping", "swapping", "starting", "restoring", "rolling-back"]);
+// `relinking` belongs here: the payload is already in place but its
+// node_modules are mid-repair, so an install interrupted there leaves `app/`
+// present and unstartable — which is precisely the state that needs --recover
+// rather than a cheerful "payload: present".
+const UNSAFE_PHASES = new Set([
+  "stopping",
+  "swapping",
+  "relinking",
+  "starting",
+  "restoring",
+  "rolling-back",
+]);
 
 /* ------------------------------------------------------------------ args */
 
@@ -920,6 +932,64 @@ async function runSwap(p, args, ctx, { log, tell }) {
   ctx.moved = true;
   ctx.backup = hadApp ? backup : null;
 
+  /* ---- relink node_modules --------------------------------------------- */
+
+  /**
+   * RELINK AFTER THE MOVE. Without this the payload is broken the instant it
+   * arrives, and every upgrade ends in a rollback.
+   *
+   * On Windows pnpm links each dependency as a JUNCTION, and a junction stores
+   * an ABSOLUTE target. `staging/node_modules/.pnpm/...` is baked into all of
+   * them, so renaming `staging` -> `app` leaves every link pointing at a
+   * directory that no longer exists. The build verifies fine (the `dist` files
+   * are real), then the new server dies on its first bare import:
+   *
+   *     Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'fastify'
+   *         imported from ...\app\packages\server\dist\app.js
+   *
+   * That is exactly what happened on 2026-08-08: staged OK, moved in, never
+   * answered, rolled back after the full 60s + 120s health wait. It is also why
+   * `app:publish` has always worked where `app:upgrade` never did — publish
+   * builds IN PLACE in `app/`, so its junctions are written pointing at `app/`.
+   *
+   * `pnpm install` is the repair: it rewrites the links for the directory they
+   * are now in. It is cheap — the store is content-addressed and every package
+   * is already present, so this is relinking, not downloading. No `--frozen-
+   * lockfile` fight either; the lockfile came over with the payload.
+   *
+   * A failure here deliberately FALLS THROUGH rather than branching into its own
+   * recovery: the start below will fail, the health gate will not open, and the
+   * existing rollback — the one that is actually exercised — puts the old build
+   * back and keeps the broken one for diagnosis. A second bespoke rollback path
+   * here would be the least-tested code in the file, running only when things
+   * have already gone wrong.
+   */
+  writeState(p, { phase: "relinking" });
+  tell(`relinking node_modules in ${p.app} (junctions still point at staging)`);
+  try {
+    // `--config.confirmModulesPurge=false` is LOAD-BEARING, not tidiness.
+    //
+    // pnpm sees a modules dir built for a different path, decides it must be
+    // removed and recreated, and asks first. The swap half is detached with
+    // `stdio: "ignore"` — there is no TTY to ask — so it aborts:
+    //
+    //   ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY
+    //
+    // i.e. without this flag the relink fails exactly where it is needed, and
+    // only there: run by hand in a terminal it succeeds and the bug looks fixed.
+    await run(
+      "pnpm",
+      ["install", "--frozen-lockfile", "--config.confirmModulesPurge=false"],
+      p.app,
+      log,
+    );
+    tell(`relinked OK`);
+  } catch (err) {
+    writeState(p, { phase: "relinking", reason: `relink failed: ${err.message}` });
+    tell(`RELINK FAILED — ${err.message}`);
+    tell(`  node_modules still points at ${p.staging}; the health gate below will roll this back`);
+  }
+
   /* ---- start + gate ---------------------------------------------------- */
   writeState(p, { phase: "starting" });
   tell(`starting the new payload${validPort(ctx.port) ? ` on port ${ctx.port}` : ""}`);
@@ -1225,6 +1295,14 @@ function remedyFor(p, state) {
         `    ${backup}\n` +
         `  Do NOT run \`pnpm app:publish\` — it would clone a fresh payload and abandon that one.\n` +
         `  Run:  pnpm app:upgrade -- --recover`
+      );
+    case "relinking":
+      return (
+        `The payload is in place at ${p.app} but its node_modules were mid-repair.\n` +
+        `  On Windows pnpm's junctions store absolute paths, so a payload moved from\n` +
+        `  staging needs \`pnpm install\` re-run in place before it can start.\n` +
+        `  Finish it by hand:  pnpm -C "${p.app}" install --frozen-lockfile\n` +
+        `  Or roll back:       pnpm app:upgrade -- --recover`
       );
     case "starting":
     case "restoring":
