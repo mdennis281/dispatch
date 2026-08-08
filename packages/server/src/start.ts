@@ -9,6 +9,7 @@ import { buildApp } from "./app.js";
 import { config, envVar } from "./config.js";
 import { seedDefaultsIfEmpty } from "./seed.js";
 import { installShutdown } from "./shutdown.js";
+import { installCrashNet } from "./crash-log.js";
 import { claudeRuntime } from "./services/runtime.js";
 
 /** Wildcard binds that answer on every interface — print real addresses instead. */
@@ -38,6 +39,11 @@ function lanUrls(): string[] {
 }
 
 export async function start({ dev = false }: { dev?: boolean } = {}): Promise<void> {
+  // FIRST, before anything can reject: a stray unhandled rejection used to kill
+  // the whole process (and every live session with it) leaving no record at all.
+  // See crash-log.ts for the 2026-08-07 double crash this was written for.
+  installCrashNet({ dataDir: config.dataDir });
+
   const app = await buildApp({ config, dev });
   // Seed default modes/agents + the Hivebreak project on a fresh dataDir so the
   // live UI has content on first boot. No-op once anything exists.

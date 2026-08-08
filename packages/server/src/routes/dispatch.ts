@@ -359,7 +359,9 @@ export async function dispatchClientAction(
 
       case "regenerate-title":
         // Best-effort + async: don't block the socket on a title round-trip.
-        void services.title.regenerate(action.chatId);
+        // `void` escapes this function's try/catch, so it needs its own handler —
+        // without one a failed regenerate was an unhandled rejection, i.e. fatal.
+        void services.title.regenerate(action.chatId).catch(() => {});
         return;
 
       case "set-title": {
