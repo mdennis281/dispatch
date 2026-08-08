@@ -56,7 +56,7 @@
  * the failed write is a handled event rather than a crash. The lesson worth
  * keeping: a stack trace tells you where a write STARTED, not where it failed.
  */
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { EventBus } from "./bus.js";
 
@@ -188,10 +188,22 @@ export function installCrashNet(opts: CrashNetOptions): () => void {
     }
   };
 
-  /** Keep one generation, so a fresh fault can't be buried by an old flood. */
+  /**
+   * Keep one generation, so a fresh fault can't be buried by an old flood.
+   *
+   * The `rmSync` first is not redundant. `renameSync` does replace an existing
+   * destination on Windows (libuv passes MOVEFILE_REPLACE_EXISTING — verified,
+   * it is not the silent-rotation-failure it looks like), but it still fails
+   * with EPERM/EBUSY when something holds `.1` open: a tail, an editor, a
+   * virus scanner. That failure lands in the catch below and rotation stops
+   * happening at all, which is precisely the unbounded growth this exists to
+   * prevent. Removing first turns "destination is in the way" into a no-op, and
+   * matches `rotateLog` in tools/app/upgrade.mjs, which has always done it.
+   */
   const rotateIfHuge = (): void => {
     try {
       if (statSync(file).size < CRASH_LOG_MAX_BYTES) return;
+      rmSync(`${file}.1`, { force: true });
       renameSync(file, `${file}.1`);
     } catch {
       /* no log yet, or a locked file — appending is still the priority */

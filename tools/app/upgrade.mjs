@@ -280,6 +280,24 @@ function rotateLog(p) {
 const say = (log) => (msg) => log(`[${new Date().toISOString()}] ${msg}\n`);
 
 /**
+ * A human-readable reason from an unknown thrown value.
+ *
+ * `err.message` on a thrown string/null/undefined throws a TypeError — and a
+ * TypeError raised inside a `catch` on a recovery path escapes it, replacing a
+ * handled failure with an unhandled one exactly when things are already going
+ * wrong. Everything in this file that reports a caught value goes through here.
+ */
+function reason(err) {
+  if (err instanceof Error) return err.message || String(err);
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err) ?? String(err);
+  } catch {
+    return String(err);
+  }
+}
+
+/**
  * Record a fatal from the ATTACHED half where a human can actually find it.
  *
  * ── Why this exists ─────────────────────────────────────────────────────────
@@ -712,8 +730,13 @@ async function swap(p, args, { log, tell }) {
  * is merely stopped.
  */
 async function recoverFromThrow(p, ctx, err, { log, tell }) {
-  tell(`SWAP THREW: ${err.stack ?? err.message}`);
-  writeState(p, { phase: "recovering", reason: `swap threw: ${err.message}` });
+  // This is the handler of last resort for the swap, so it above all must not
+  // become the thing that throws: `err.message` on a thrown null/undefined is a
+  // TypeError, and one raised HERE escapes with the payload half-moved and no
+  // state written. Everything below reports through `reason()`.
+  const why = reason(err);
+  tell(`SWAP THREW: ${err?.stack ?? why}`);
+  writeState(p, { phase: "recovering", reason: `swap threw: ${why}` });
 
   if (existsSync(p.app)) {
     tell(`${p.app} is on disk — restarting it before declaring anything`);
@@ -722,7 +745,7 @@ async function recoverFromThrow(p, ctx, err, { log, tell }) {
     // process would burn the whole timeout and then lie about it.
     const gate = await restart(p, ctx, { log, tell });
     if (gate.ok && !ctx.moved) {
-      writeState(p, { phase: "aborted", reason: `swap threw: ${err.message}`, ok: false });
+      writeState(p, { phase: "aborted", reason: `swap threw: ${why}`, ok: false });
       tell(
         `ABORTED: the upgrade failed but nothing had moved — the app is back up at\n` +
           `  http://127.0.0.1:${gate.port} on the payload it was already running.`,
@@ -730,7 +753,7 @@ async function recoverFromThrow(p, ctx, err, { log, tell }) {
       return 1;
     }
     if (gate.ok) {
-      writeState(p, { phase: "STUCK", reason: `swap threw mid-move: ${err.message}` });
+      writeState(p, { phase: "STUCK", reason: `swap threw mid-move: ${why}` });
       tell(
         `STUCK: the app is serving at http://127.0.0.1:${gate.port}, but the swap died\n` +
           `  mid-move and current.json may not describe it. Check: node tools/app/upgrade.mjs --status`,
@@ -739,7 +762,7 @@ async function recoverFromThrow(p, ctx, err, { log, tell }) {
     }
   }
 
-  writeState(p, { phase: "STUCK", reason: `swap threw: ${err.message}` });
+  writeState(p, { phase: "STUCK", reason: `swap threw: ${why}` });
   tell(
     `STUCK: nothing is running.\n` +
       `  Payload:  ${p.app}${existsSync(p.app) ? "" : " (MISSING)"}\n` +
@@ -975,8 +998,13 @@ async function runSwap(p, args, ctx, { log, tell }) {
     await run("pnpm", ["install", ...INSTALL_ARGS], p.app, log);
     tell(`relinked OK`);
   } catch (err) {
-    writeState(p, { phase: "relinking", reason: `relink failed: ${err.message}` });
-    tell(`RELINK FAILED — ${err.message}`);
+    // `reason(err)`, never `err.message`: a thrown non-Error (a string, null)
+    // would make THIS line throw a TypeError, and that one would escape the
+    // swap instead of falling through to the rollback below — turning a
+    // recoverable bad build into a STUCK install, from the error path.
+    const why = reason(err);
+    writeState(p, { phase: "relinking", reason: `relink failed: ${why}` });
+    tell(`RELINK FAILED — ${why}`);
     tell(`  node_modules still points at ${p.staging}; the health gate below will roll this back`);
   }
 
@@ -1291,7 +1319,12 @@ function remedyFor(p, state) {
         `The payload is in place at ${p.app} but its node_modules were mid-repair.\n` +
         `  On Windows pnpm's junctions store absolute paths, so a payload moved from\n` +
         `  staging needs \`pnpm install\` re-run in place before it can start.\n` +
-        `  Finish it by hand:  pnpm -C "${p.app}" install --frozen-lockfile\n` +
+        // Built from INSTALL_ARGS, not typed out. Advice a reader can paste has
+        // to carry the purge flag: without it this same command aborts on
+        // ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY the moment it is scripted
+        // or run headless — i.e. the remedy would reproduce the failure it is
+        // supposed to clear, and drift the day the flags change.
+        `  Finish it by hand:  pnpm -C "${p.app}" install ${INSTALL_ARGS.join(" ")}\n` +
         `  Or roll back:       pnpm app:upgrade -- --recover`
       );
     case "starting":
@@ -1377,8 +1410,9 @@ async function main() {
       const code = await swap(p, args, { log, tell });
       process.exitCode = code;
     } catch (err) {
-      writeState(p, { phase: "STUCK", reason: `swap threw: ${err.message}` });
-      tell(`SWAP THREW: ${err.stack ?? err.message}`);
+      // Outermost handler in the detached half — same rule as recoverFromThrow.
+      writeState(p, { phase: "STUCK", reason: `swap threw: ${reason(err)}` });
+      tell(`SWAP THREW: ${err?.stack ?? reason(err)}`);
       process.exitCode = 2;
     } finally {
       releaseLock(p);
