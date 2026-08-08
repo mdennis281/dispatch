@@ -7,7 +7,6 @@ dist/
 .worktrees/
 .dispatch/
 .agents/
-pnpm-lock.yaml
 .claude
 
 # Brand assets are RENDERED at build time by packages/client/scripts/
