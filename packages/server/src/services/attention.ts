@@ -13,10 +13,21 @@
 import type { AttentionItem, WsServerEvent } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 
-/** Kind → triage weight (higher = more urgent, sorted first in `list()`). */
+/**
+ * Kind → triage weight (higher = more urgent, sorted first in `list()`).
+ *
+ * `review` sits BELOW the two kinds that hold a live turn hostage (a permission
+ * prompt and a direct question block an agent that is running right now) and
+ * ABOVE the two that are purely retrospective (`idle`/`done` say a turn already
+ * finished). A review round is real, unfinished work with a deadline attached —
+ * it is the thing that went unnoticed for two full rounds — but it is not
+ * blocking a session this second, so it must not push a waiting permission
+ * prompt down the list.
+ */
 const KIND_PRIORITY: Record<AttentionItem["kind"], number> = {
-  permission: 4,
-  question: 3,
+  permission: 5,
+  question: 4,
+  review: 3,
   idle: 2,
   done: 1,
 };

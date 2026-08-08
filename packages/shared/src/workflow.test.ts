@@ -91,6 +91,64 @@ describe("resolveWorkflow", () => {
     expect(wf.mergeMethod).toBe("rebase");
   });
 
+  it("defaults `review` to requiring a reported review AND a reported check", () => {
+    // The motivating failure: a `review` + `autoMerge: on-green` project where
+    // nothing requested a reviewer and zero checks reported, which made "green"
+    // trivially true. Both requirements therefore default ON.
+    const wf = resolveWorkflow({ workflow: { profile: "review" } });
+    expect(wf.pr).toEqual({
+      reviewers: [],
+      requireReview: true,
+      requireChecks: true,
+      draft: false,
+    });
+  });
+
+  it("carries an authored `pr:` block through on `review`", () => {
+    const wf = resolveWorkflow({
+      workflow: {
+        profile: "review",
+        pr: {
+          reviewers: ["copilot-pull-request-reviewer", "acme/platform"],
+          requireChecks: false,
+          draft: true,
+        },
+      },
+    });
+    expect(wf.pr).toEqual({
+      reviewers: ["copilot-pull-request-reviewer", "acme/platform"],
+      // Unauthored fields still fall through to the profile default.
+      requireReview: true,
+      requireChecks: false,
+      draft: true,
+    });
+  });
+
+  it("clamps the PR policy to inert on the rungs that have no PR", () => {
+    // Same reason autoMerge is clamped: no consumer should have to re-check the
+    // profile before trusting a resolved field.
+    for (const profile of ["none", "commit"] as const) {
+      const wf = resolveWorkflow({
+        workflow: {
+          profile,
+          pr: { reviewers: ["someone"], requireReview: true, requireChecks: true, draft: true },
+        },
+      });
+      expect(wf.pr, profile).toEqual({
+        reviewers: [],
+        requireReview: false,
+        requireChecks: false,
+        draft: false,
+      });
+    }
+  });
+
+  it("gives a legacy ship-command project the `review` PR policy", () => {
+    // Back-compat inference has to carry the whole rung, not just its name.
+    expect(resolveWorkflow({ shipCmd: "pnpm ship" }).pr.requireReview).toBe(true);
+    expect(resolveWorkflow({}).pr.requireReview).toBe(false);
+  });
+
   it("prefers the workflow block's commands over the legacy top-level fields", () => {
     const wf = resolveWorkflow({
       workflow: { profile: "review", ship: "pnpm ship:new" },
@@ -166,6 +224,36 @@ describe("classifyWorkflowViolation", () => {
     expect(
       classifyWorkflowViolation("git merge feat/x", { ...onTrunk, autoMerge: true })?.kind,
     ).toBe("manual-merge");
+  });
+
+  it("refuses a hand-rolled `gh pr create` on a PR project, pointing at create_pr", () => {
+    // The gap that let a PR ship with no reviewer requested, no chat link and no
+    // watcher: `gh pr merge` was guarded, `gh pr create` was not.
+    const v = classifyWorkflowViolation("gh pr create --fill --base main", {
+      ...onBranch,
+      requirePr: true,
+    });
+    expect(v?.kind).toBe("pr-create-by-hand");
+    expect(v?.reason).toMatch(/mcp__manager__create_pr/);
+    // …and it says what the sanctioned path does that the raw command doesn't.
+    expect(v?.reason).toMatch(/reviewers/);
+    expect(v?.reason).toMatch(/watcher/);
+  });
+
+  it("leaves `gh pr create` alone where there is no PR workflow to redirect to", () => {
+    // On `none`/`commit` there is no create_pr to point at, and a refusal with no
+    // alternative is just a wall.
+    expect(classifyWorkflowViolation("gh pr create --fill", onBranch)).toBeNull();
+    expect(
+      classifyWorkflowViolation("gh pr create --fill", { ...onBranch, requirePr: false }),
+    ).toBeNull();
+  });
+
+  it("does not mistake other `gh pr` subcommands for a create", () => {
+    const ctx = { ...onBranch, requirePr: true };
+    expect(classifyWorkflowViolation("gh pr view 42", ctx)).toBeNull();
+    expect(classifyWorkflowViolation("gh pr checks 42", ctx)).toBeNull();
+    expect(classifyWorkflowViolation("gh pr list --state open", ctx)).toBeNull();
   });
 
   it("sees through global git flags and chained commands", () => {

@@ -13,6 +13,7 @@ import {
   createManagerTools,
   createManagerMcpServer,
   prLandingBlockers,
+  prCreateBlockers,
   WAIT_CAP_SECONDS,
   PR_POLL_INTERVAL_MS,
   NO_CHECKS_GRACE_MS,
@@ -20,8 +21,12 @@ import {
   type ManagerMcpMemory,
   type ManagerMcpGitHub,
   type ManagerMcpPrApproval,
+  type ManagerMcpPrCreate,
   type PrPollResult,
   type PrReadiness,
+  type PrLandingPolicy,
+  type PrCreateState,
+  type PrCreateResult,
 } from "./manager-mcp.js";
 
 /* ------------------------------------------------------------------ fixtures */
@@ -618,6 +623,10 @@ function readyPr(over: Partial<PrReadiness> = {}): PrReadiness {
     labels: [],
     checks: [PASS_BUILD],
     threads: [],
+    // Default to "a reviewer reported" so the pre-existing landing tests keep
+    // exercising the blocker they were written for, not the new review gate.
+    requestedReviewers: [],
+    submittedReviews: [{ author: "copilot-pull-request-reviewer", state: "APPROVED" }],
     ...over,
   };
 }
@@ -625,7 +634,7 @@ function readyPr(over: Partial<PrReadiness> = {}): PrReadiness {
 /** A scriptable approval binding that records what it was asked to do. */
 function fakeApproval(
   pr: PrReadiness | null,
-  opts: { approved?: boolean; mergeError?: string } = {},
+  opts: { approved?: boolean; mergeError?: string; policy?: PrLandingPolicy } = {},
 ) {
   const calls: { approve: { n: number; body: string }[]; merge: { n: number; method: string }[] } = {
     approve: [],
@@ -633,6 +642,7 @@ function fakeApproval(
   };
   const binding: ManagerMcpPrApproval = {
     defaultMethod: "squash",
+    policy: opts.policy ?? {},
     readiness: async () => pr,
     approve: async (n, _repo, body) => {
       calls.approve.push({ n, body });
@@ -653,6 +663,8 @@ const approveArgs = (over: Record<string, unknown> = {}) => ({
   repo: undefined,
   method: undefined,
   note: undefined,
+  allowNoChecks: undefined,
+  allowNoReview: undefined,
   ...over,
 });
 
@@ -713,6 +725,384 @@ describe("prLandingBlockers", () => {
   it("says only 'already merged' for a settled PR, without piling on", () => {
     const b = prLandingBlockers(readyPr({ state: "merged", checks: [FAIL_BUILD], threads: null }));
     expect(b.map((x) => x.code)).toEqual(["not-open"]);
+  });
+
+  /* ---- the "vacuous green" hardening (requireChecks / requireReview) ---- */
+
+  it("distinguishes 'checks passed' from 'NO checks reported' under requireChecks", () => {
+    // The observed failure: on a repo where zero checks report, `on-green` was a
+    // promise about nothing and this would have waved the PR straight through.
+    const noChecks = readyPr({ checks: [] });
+    expect(prLandingBlockers(noChecks, { requireChecks: false })).toEqual([]);
+    const blocked = prLandingBlockers(noChecks, { requireChecks: true });
+    expect(blocked.map((b) => b.code)).toEqual(["no-checks"]);
+    // …and it names the override rather than being a dead end.
+    expect(blocked[0].detail).toMatch(/allowNoChecks: true/);
+  });
+
+  it("lets the caller override the no-checks refusal explicitly", () => {
+    expect(
+      prLandingBlockers(readyPr({ checks: [] }), {
+        requireChecks: true,
+        allowNoChecks: true,
+      }),
+    ).toEqual([]);
+  });
+
+  it("still blocks a PASSING check set from being called 'no checks'", () => {
+    // requireChecks must not fire when checks exist and are green.
+    expect(prLandingBlockers(readyPr({ checks: [PASS_BUILD] }), { requireChecks: true })).toEqual([]);
+  });
+
+  it("refuses to land under requireReview when nobody has reported", () => {
+    const unreviewed = readyPr({
+      submittedReviews: [],
+      requestedReviewers: ["copilot-pull-request-reviewer"],
+    });
+    expect(prLandingBlockers(unreviewed, { requireReview: false })).toEqual([]);
+    const blocked = prLandingBlockers(unreviewed, { requireReview: true });
+    expect(blocked.map((b) => b.code)).toEqual(["no-review"]);
+    // It says WHO we're waiting on, and names the override.
+    expect(blocked[0].detail).toMatch(/copilot-pull-request-reviewer/);
+    expect(blocked[0].detail).toMatch(/allowNoReview: true/);
+  });
+
+  it("says so plainly when nobody was even ASKED to review", () => {
+    const b = prLandingBlockers(
+      readyPr({ submittedReviews: [], requestedReviewers: [] }),
+      { requireReview: true },
+    );
+    expect(b[0].detail).toMatch(/No reviewer has even been requested/);
+    expect(b[0].detail).toMatch(/create_pr/);
+  });
+
+  it("treats a PENDING (unsubmitted) review as nobody having reviewed", () => {
+    // A draft review is invisible to everyone but its author.
+    const b = prLandingBlockers(
+      readyPr({ submittedReviews: [{ author: "someone", state: "PENDING" }] }),
+      { requireReview: true },
+    );
+    expect(b.map((x) => x.code)).toEqual(["no-review"]);
+  });
+
+  it("accepts any SUBMITTED review as 'someone looked'", () => {
+    // COMMENTED counts: the point of the gate is that a human/bot engaged, not
+    // that they blessed it — `changes_requested` is caught by its own blocker.
+    for (const state of ["APPROVED", "COMMENTED"]) {
+      expect(
+        prLandingBlockers(readyPr({ submittedReviews: [{ author: "r", state }] }), {
+          requireReview: true,
+        }),
+        state,
+      ).toEqual([]);
+    }
+  });
+
+  it("reports the no-checks AND no-review refusals together", () => {
+    const codes = prLandingBlockers(
+      readyPr({ checks: [], submittedReviews: [], requestedReviewers: [] }),
+      { requireChecks: true, requireReview: true },
+    ).map((b) => b.code);
+    expect(codes).toEqual(["no-checks", "no-review"]);
+  });
+});
+
+/* -------------------------------------------------------------- create_pr */
+
+/** A branch that's ready for a PR; each test overrides the field it exercises. */
+function readyBranch(over: Partial<PrCreateState> = {}): PrCreateState {
+  return {
+    branch: "feat/thing",
+    trunk: "main",
+    base: "main",
+    aheadOfBase: 3,
+    dirty: false,
+    existing: null,
+    ...over,
+  };
+}
+
+describe("prCreateBlockers", () => {
+  it("clears a committed branch with work on it", () => {
+    expect(prCreateBlockers(readyBranch())).toEqual([]);
+  });
+
+  it("refuses to open a PR from the trunk, and names the override", () => {
+    const b = prCreateBlockers(readyBranch({ branch: "main" }));
+    expect(b.map((x) => x.code)).toEqual(["on-trunk"]);
+    expect(b[0].detail).toMatch(/allowTrunk: true/);
+    expect(prCreateBlockers(readyBranch({ branch: "main" }), { allowTrunk: true })).toEqual([]);
+  });
+
+  it("refuses an empty PR, and names the override", () => {
+    const b = prCreateBlockers(readyBranch({ aheadOfBase: 0 }));
+    expect(b.map((x) => x.code)).toEqual(["no-commits"]);
+    expect(b[0].detail).toMatch(/allowNoCommits: true/);
+    expect(prCreateBlockers(readyBranch({ aheadOfBase: 0 }), { allowNoCommits: true })).toEqual([]);
+  });
+
+  it("does NOT block when it couldn't tell how far ahead the branch is", () => {
+    // Same rule the trunk guard follows: a false positive gets the guard routed
+    // around, which is worse than an occasional miss.
+    expect(prCreateBlockers(readyBranch({ aheadOfBase: null }))).toEqual([]);
+  });
+
+  it("refuses a dirty tree, and names the override", () => {
+    const b = prCreateBlockers(readyBranch({ dirty: true }));
+    expect(b.map((x) => x.code)).toEqual(["dirty"]);
+    expect(b[0].detail).toMatch(/allowDirty: true/);
+    expect(prCreateBlockers(readyBranch({ dirty: true }), { allowDirty: true })).toEqual([]);
+  });
+
+  it("refuses when the branch's existing PR carries `hold`, case-insensitively", () => {
+    const held = readyBranch({
+      existing: { number: 7, url: "u", state: "open", labels: ["Hold"] },
+    });
+    const b = prCreateBlockers(held);
+    expect(b.map((x) => x.code)).toEqual(["hold"]);
+    expect(b[0].detail).toMatch(/allowHold: true/);
+    expect(prCreateBlockers(held, { allowHold: true })).toEqual([]);
+  });
+
+  it("says only 'detached' on a detached HEAD, without piling on", () => {
+    const b = prCreateBlockers(readyBranch({ branch: null, dirty: true, aheadOfBase: 0 }));
+    expect(b.map((x) => x.code)).toEqual(["detached"]);
+  });
+
+  it("reports EVERY blocker at once rather than the first", () => {
+    const codes = prCreateBlockers(
+      readyBranch({ branch: "main", aheadOfBase: 0, dirty: true }),
+    ).map((b) => b.code);
+    expect(codes).toEqual(["on-trunk", "no-commits", "dirty"]);
+  });
+});
+
+/** A scriptable create binding that records exactly what it was asked to do. */
+function fakePrCreate(
+  st: PrCreateState | null,
+  opts: {
+    reviewers?: string[];
+    draft?: boolean;
+    result?: Partial<PrCreateResult>;
+    createError?: string;
+  } = {},
+) {
+  const calls: { preflight: (string | undefined)[]; create: Record<string, unknown>[] } = {
+    preflight: [],
+    create: [],
+  };
+  const binding: ManagerMcpPrCreate = {
+    reviewers: opts.reviewers ?? ["copilot-pull-request-reviewer"],
+    draft: opts.draft ?? false,
+    preflight: async (base) => {
+      calls.preflight.push(base);
+      return st;
+    },
+    create: async (input) => {
+      calls.create.push({ ...input });
+      if (opts.createError) throw new Error(opts.createError);
+      return {
+        number: 91,
+        url: "https://github.com/octo/repo/pull/91",
+        branch: st?.branch ?? "feat/thing",
+        base: st?.base ?? "main",
+        draft: input.draft,
+        reviewersRequested: opts.reviewers ?? ["copilot-pull-request-reviewer"],
+        reviewersFailed: [],
+        attached: true,
+        watching: true,
+        ...opts.result,
+      };
+    },
+  };
+  return { binding, calls };
+}
+
+const createArgs = (over: Record<string, unknown> = {}) => ({
+  title: undefined,
+  body: undefined,
+  base: undefined,
+  draft: undefined,
+  allowTrunk: undefined,
+  allowNoCommits: undefined,
+  allowDirty: undefined,
+  allowHold: undefined,
+  ...over,
+});
+
+describe("manager-mcp — create_pr", () => {
+  it("opens the PR and reports the reviewers, the chat link and the watcher", async () => {
+    const { binding, calls } = fakePrCreate(readyBranch());
+    const { createPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prCreate: binding,
+    });
+
+    const res = await createPr.handler(createArgs({ title: "feat: thing" }), {});
+    expect(res.isError).toBeFalsy();
+    const text = resultText(res);
+    expect(text).toContain("Opened PR #91");
+    expect(text).toMatch(/review requested from copilot-pull-request-reviewer/);
+    expect(text).toContain("recorded on this chat");
+    expect(text).toMatch(/watching for review activity/);
+    expect(calls.create[0]).toMatchObject({ title: "feat: thing", draft: false });
+    // …and it advertises the work in the UI header like every other manager tool.
+    expect(statusLabels().some((l) => l.startsWith("opening PR from"))).toBe(true);
+  });
+
+  it("REFUSES on the trunk / no commits / a dirty tree, naming each override", async () => {
+    const { binding, calls } = fakePrCreate(
+      readyBranch({ branch: "main", aheadOfBase: 0, dirty: true }),
+    );
+    const { createPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prCreate: binding,
+    });
+
+    const res = await createPr.handler(createArgs(), {});
+    const text = resultText(res);
+    expect(text).toContain("Not opening a PR yet");
+    expect(text).toMatch(/allowTrunk: true/);
+    expect(text).toMatch(/allowNoCommits: true/);
+    expect(text).toMatch(/allowDirty: true/);
+    // A refusal is a normal answer, not an error…
+    expect(res.isError).toBeFalsy();
+    // …and nothing was created.
+    expect(calls.create).toEqual([]);
+  });
+
+  it("opens it anyway when the caller passes the overrides", async () => {
+    // Enforce, with an escape hatch — the whole point of naming them.
+    const { binding, calls } = fakePrCreate(
+      readyBranch({ branch: "main", aheadOfBase: 0, dirty: true }),
+    );
+    const { createPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prCreate: binding,
+    });
+
+    const res = await createPr.handler(
+      createArgs({ allowTrunk: true, allowNoCommits: true, allowDirty: true }),
+      {},
+    );
+    expect(resultText(res)).toContain("Opened PR #91");
+    expect(calls.create.length).toBe(1);
+  });
+
+  it("hands back an existing open PR instead of erroring or opening a second", async () => {
+    const { binding, calls } = fakePrCreate(
+      readyBranch({
+        existing: { number: 7, url: "https://x/7", state: "open", labels: [] },
+      }),
+    );
+    const { createPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prCreate: binding,
+    });
+
+    const res = await createPr.handler(createArgs(), {});
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("PR #7 is already open");
+    expect(calls.create).toEqual([]);
+  });
+
+  it("refuses when the branch's existing PR is on `hold`", async () => {
+    const { binding, calls } = fakePrCreate(
+      readyBranch({
+        existing: { number: 7, url: "https://x/7", state: "closed", labels: ["hold"] },
+      }),
+    );
+    const { createPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prCreate: binding,
+    });
+
+    const res = await createPr.handler(createArgs(), {});
+    expect(resultText(res)).toMatch(/hold/);
+    expect(calls.create).toEqual([]);
+  });
+
+  it("says out loud when NO reviewers are configured", async () => {
+    // Silence here is exactly how a PR ends up with nobody looking at it while
+    // everyone assumes somebody is.
+    const { binding } = fakePrCreate(readyBranch(), {
+      reviewers: [],
+      result: { reviewersRequested: [] },
+    });
+    const { createPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prCreate: binding,
+    });
+
+    const res = await createPr.handler(createArgs(), {});
+    expect(resultText(res)).toMatch(/no reviewers are configured/i);
+    expect(resultText(res)).toMatch(/workflow\.pr\.reviewers/);
+  });
+
+  it("warns rather than failing when a reviewer request didn't land", async () => {
+    const { binding } = fakePrCreate(readyBranch(), {
+      result: {
+        reviewersRequested: [],
+        reviewersFailed: [{ reviewer: "ghost", error: "Not Found" }],
+      },
+    });
+    const { createPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prCreate: binding,
+    });
+
+    const res = await createPr.handler(createArgs(), {});
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toMatch(/could not request ghost: Not Found/);
+  });
+
+  it("defaults `draft` to the project's configured setting", async () => {
+    const { binding, calls } = fakePrCreate(readyBranch(), { draft: true });
+    const { createPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prCreate: binding,
+    });
+
+    await createPr.handler(createArgs(), {});
+    expect(calls.create[0].draft).toBe(true);
+    await createPr.handler(createArgs({ draft: false }), {});
+    expect(calls.create[1].draft).toBe(false);
+  });
+
+  it("reports unavailable when the project doesn't ship through PRs", async () => {
+    const { createPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}) });
+    const res = await createPr.handler(createArgs(), {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("not available");
+  });
+
+  it("says so plainly when the repo/branch can't be resolved", async () => {
+    const { binding } = fakePrCreate(null);
+    const { createPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prCreate: binding,
+    });
+    const res = await createPr.handler(createArgs(), {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toMatch(/Could not resolve/);
   });
 });
 
@@ -844,6 +1234,94 @@ describe("manager-mcp — approve_pr", () => {
     const res = await approvePr.handler(approveArgs({ number: -1 }), {});
     expect(res.isError).toBe(true);
     expect(calls.merge).toEqual([]);
+  });
+
+  it("refuses to merge on NO checks when the project set requireChecks", async () => {
+    // "on-green" on a repo where nothing reports is a promise about nothing.
+    const { binding, calls } = fakeApproval(readyPr({ checks: [] }), {
+      policy: { requireChecks: true },
+    });
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs(), {});
+    expect(calls.merge).toEqual([]);
+    expect(resultText(res)).toMatch(/No checks are reporting/);
+    expect(resultText(res)).toMatch(/allowNoChecks: true/);
+  });
+
+  it("merges anyway when the caller passes allowNoChecks", async () => {
+    const { binding, calls } = fakeApproval(readyPr({ checks: [] }), {
+      policy: { requireChecks: true },
+    });
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    await approvePr.handler(approveArgs({ allowNoChecks: true }), {});
+    expect(calls.merge).toEqual([{ n: 83, method: "squash" }]);
+  });
+
+  it("refuses to merge unreviewed when the project set requireReview", async () => {
+    const { binding, calls } = fakeApproval(
+      readyPr({ submittedReviews: [], requestedReviewers: ["copilot-pull-request-reviewer"] }),
+      { policy: { requireReview: true } },
+    );
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs(), {});
+    expect(calls.merge).toEqual([]);
+    expect(resultText(res)).toMatch(/Nobody has reviewed/);
+    expect(resultText(res)).toMatch(/allowNoReview: true/);
+  });
+
+  it("merges anyway when the caller passes allowNoReview", async () => {
+    const { binding, calls } = fakeApproval(readyPr({ submittedReviews: [] }), {
+      policy: { requireReview: true },
+    });
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    await approvePr.handler(approveArgs({ allowNoReview: true }), {});
+    expect(calls.merge).toEqual([{ n: 83, method: "squash" }]);
+  });
+
+  it("keeps every pre-existing guard alongside the new ones", async () => {
+    // The hardening must ADD to the bar, never replace it.
+    const { binding, calls } = fakeApproval(
+      readyPr({ labels: ["hold"], isDraft: true, checks: [], submittedReviews: [] }),
+      { policy: { requireChecks: true, requireReview: true } },
+    );
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs(), {});
+    expect(calls.merge).toEqual([]);
+    const text = resultText(res);
+    expect(text).toMatch(/draft/i);
+    expect(text).toMatch(/hold/);
+    expect(text).toMatch(/No checks are reporting/);
+    expect(text).toMatch(/Nobody has reviewed/);
   });
 
   it("reports unavailable when the project hasn't opted into auto-merge", async () => {
@@ -1168,5 +1646,30 @@ describe("manager-mcp — server factory", () => {
         prApproval: fakeApproval(readyPr()).binding,
       }),
     ).toContain("approve_pr");
+  });
+
+  it("registers create_pr ONLY when the create binding is present", () => {
+    // The binding's presence is the permission — same pattern as approve_pr, and
+    // it's bound exactly where the guard refuses a raw `gh pr create`, so the
+    // refusal always has a sanctioned path to name.
+    const names = (ctx: Parameters<typeof createManagerMcpServer>[0]) =>
+      Object.keys(
+        (createManagerMcpServer(ctx) as unknown as {
+          instance: { _registeredTools?: Record<string, unknown> };
+        }).instance._registeredTools ?? {},
+      );
+
+    expect(names({ chatId: "c1", bus, broker: fakeBroker({}), github: fakeGitHub([]) })).not.toContain(
+      "create_pr",
+    );
+    expect(
+      names({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({}),
+        github: fakeGitHub([]),
+        prCreate: fakePrCreate(readyBranch()).binding,
+      }),
+    ).toContain("create_pr");
   });
 });

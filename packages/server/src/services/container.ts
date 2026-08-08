@@ -38,6 +38,7 @@ import { AttentionQueue } from "./attention.js";
 import { UsageService } from "./usage.js";
 import { ResumeScheduler } from "./resume-scheduler.js";
 import { TrunkSyncService } from "./trunk-sync.js";
+import { PrReviewWatcher } from "./pr-review-watcher.js";
 import { FileIndexService } from "./file-index.js";
 
 /** The shared base every service hangs off. */
@@ -70,6 +71,7 @@ export interface ServiceOverrides {
   resume?: ResumeScheduler;
   fileIndex?: FileIndexService;
   trunkSync?: TrunkSyncService;
+  prReviewWatcher?: PrReviewWatcher;
 }
 
 /** Everything the routes/WS layer needs, wired to one bus + store. */
@@ -100,6 +102,8 @@ export interface Services extends ServiceBase {
   fileIndex: FileIndexService;
   /** Fast-forwards a project's primary checkout after its PRs land. */
   trunkSync: TrunkSyncService;
+  /** Raises `review` attention (and wakes the owning chat) on PR activity. */
+  prReviewWatcher: PrReviewWatcher;
   /** Start background wiring (attention, notifier, reconcile, auto-checkpoint). */
   start(): Promise<void>;
   /** Tear everything down (broker sessions, runners, subscriptions). */
@@ -241,6 +245,38 @@ export function createServices(
   github.onMerged = ({ chatId }) => {
     void trunkSync.syncForChat(chatId, "merge").catch(() => {});
   };
+  // Review activity → the Attention Queue, and a nudge for the chat that OWNS the
+  // PR. `watch_pr` only notices while an agent keeps calling it; the run that
+  // motivated this stopped calling after one "no CI checks configured" reply and
+  // then missed two rounds of review comments entirely. This is the half that
+  // doesn't depend on anybody remembering to ask.
+  const prReviewWatcher =
+    overrides.prReviewWatcher ??
+    new PrReviewWatcher({
+      store,
+      bus,
+      github: {
+        prMergeState: (n, o) => github.prMergeState(n, o),
+        prChecks: (repo, n) => github.prChecks(repo, n),
+        reviewThreads: (repo, n) => github.reviewThreads(repo, n),
+        prReviewState: (repo, n) => github.prReviewState(repo, n),
+      },
+      // Same lazy-session path the ResumeScheduler uses — by the time a review
+      // round lands, the chat's subprocess is long gone.
+      resume: async (chatId, text) => {
+        await ensureSession(services, chatId);
+        await broker.sendMessage(chatId, text);
+      },
+      // A chat that's mid-turn is already working (quite possibly inside
+      // `watch_pr`); it gets the badge and nothing more.
+      isBusy: (chatId) => {
+        const status = broker.getStatus(chatId);
+        return status === "running" || status === "awaiting-input";
+      },
+    });
+  // `create_pr` pre-seeds the watcher so the first sweep after a PR opens can't
+  // badge the chat for activity that predates it.
+  broker.armPrWatch = (chatId, ref) => prReviewWatcher.arm(chatId, ref);
 
   let offCheckpoint: (() => void) | undefined;
   let offTitle: (() => void) | undefined;
@@ -271,6 +307,7 @@ export function createServices(
     resume,
     fileIndex,
     trunkSync,
+    prReviewWatcher,
 
     async start(): Promise<void> {
       // One-time transparent memory migration: when a project has (or gains) a
@@ -304,6 +341,9 @@ export function createServices(
       // Subscription usage polling (a missing token / offline just yields an
       // "unavailable" snapshot the header meter hides on).
       safeStart("usage", () => usage.start());
+      // Notices review rounds on PRs chats own — the half of the loop that
+      // doesn't require an agent to keep asking.
+      safeStart("prReviewWatcher", () => prReviewWatcher.start());
 
       // Agent-created worktree detection: subscribe to turn-complete signals and
       // seed the per-project baseline. Best-effort — a git/seed failure here must
@@ -377,6 +417,10 @@ export function createServices(
       await memoryCommitter.drain().catch(() => {});
       notifier.stop();
       attention.stop();
+      // Unsubscribe first, then let an in-flight sweep land rather than yanking
+      // the store out from under it.
+      prReviewWatcher.dispose();
+      await prReviewWatcher.drain().catch(() => {});
       usage.stop();
       // Disarm first so nothing new fires, then let an in-flight resume land
       // before the broker goes away under it.

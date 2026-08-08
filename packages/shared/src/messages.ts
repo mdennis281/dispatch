@@ -313,11 +313,22 @@ export type PermissionRequest = z.infer<typeof PermissionRequestSchema>;
 export const AttentionItemSchema = z.object({
   id: z.string(),
   chatId: z.string(),
-  kind: z.enum(["permission", "question", "idle", "done"]),
+  /**
+   * `review` is raised by the server-side PR watcher, not by a live session: a
+   * review landed, a review comment appeared, or a check failed on a PR a chat
+   * owns. It exists because the Attention Queue is this app's whole answer to
+   * "which chat needs you" — and the failure that motivated it was two rounds of
+   * review comments the human found by hand, on a PR the app already knew about.
+   */
+  kind: z.enum(["permission", "question", "idle", "done", "review"]),
   summary: z.string(),
   projectId: z.string().optional(),
   /** For kind==="permission", the PermissionRequest id. */
   permissionRequestId: z.string().optional(),
+  /** For kind==="review", the PR the activity landed on. */
+  prNumber: z.number().int().optional(),
+  /** For kind==="review", a link straight to the PR. */
+  url: z.string().optional(),
   createdAt: z.number().int(),
 });
 export type AttentionItem = z.infer<typeof AttentionItemSchema>;
