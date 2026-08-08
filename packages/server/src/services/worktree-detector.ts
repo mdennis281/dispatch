@@ -287,9 +287,20 @@ export class WorktreeDetector {
     // Skip a tick if the previous pass is still running (slow git / big repo).
     if (this.pollInFlight) return;
     this.pollInFlight = true;
-    void this.enqueue(() => this.pollActiveProjects()).finally(() => {
-      this.pollInFlight = false;
-    });
+    // `.finally()` used to clear the flag, but it returns a NEW promise that
+    // rejects whenever the promise it chains off rejects. `enqueue`'s own promise
+    // is safe (assigning `this.chain` attaches a rejection handler to it), but
+    // that DERIVED promise had none — so a single failed pass became an unhandled
+    // rejection, which Node treats as fatal. Settle both ways instead, so the
+    // flag clears without ever leaving an unobserved rejection behind.
+    void this.enqueue(() => this.pollActiveProjects()).then(
+      () => {
+        this.pollInFlight = false;
+      },
+      () => {
+        this.pollInFlight = false;
+      },
+    );
   }
 
   /** One cheap detection pass per distinct project with an active chat. */
@@ -301,7 +312,15 @@ export class WorktreeDetector {
     }
     for (const projectId of projectIds) {
       const project = await this.store.getProject(projectId).catch(() => null);
-      if (project) await this.reconcileProject(project);
+      // Guarded per project, exactly like `healAll` — this was the ONE
+      // `reconcileProject` call site with no catch. It is also the only loop in
+      // the server whose iteration count is the number of DISTINCT projects with
+      // an active chat, which is why the crash looked like "two projects at once"
+      // rather than "one flaky project": with a second project in the set, one
+      // project failing (a throwing bus subscriber on `chat-update`, a store
+      // write losing a race) rejected the entire pass and killed the process,
+      // and the still-healthy project's reconcile never ran either.
+      if (project) await this.reconcileProject(project).catch(() => undefined);
     }
   }
 

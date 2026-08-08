@@ -12,6 +12,7 @@
     "start": "pnpm --filter @dispatch/server start",
     "dev": "pnpm --filter @dispatch/server dev",
     "test": "pnpm --filter @dispatch/shared exec vitest run && pnpm --filter @dispatch/cli exec vitest run && pnpm --filter @dispatch/server exec vitest run",
+    "typecheck": "pnpm -r typecheck",
     "spike": "pnpm --filter @dispatch/server spike",
     "verify": "node tools/verify/shot.mjs",
     "dispatch": "node packages/cli/dist/index.js",
@@ -20,8 +21,10 @@
     "app:stop": "python tools/app/launch.py --stop",
     "app:status": "python tools/app/launch.py --status",
     "app:publish": "node tools/app/publish.mjs",
+    "app:upgrade": "node tools/app/upgrade.mjs",
     "app:shortcut": "node tools/app/create-shortcut.mjs",
-    "app:migrate": "node tools/app/migrate-data.mjs"
+    "app:migrate": "node tools/app/migrate-data.mjs",
+    "app:backsync": "node tools/app/backsync.mjs"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

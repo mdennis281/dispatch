@@ -319,7 +319,10 @@ export function createServices(
       // effectively once. Purely best-effort — a failure just leaves the default.
       offTitle = bus.on("chat-message", (evt) => {
         if (evt.message.kind !== "user" && evt.message.kind !== "result") return;
-        void title.maybeGenerateInitialTitle(evt.chatId);
+        // Caught, unlike every other `void` in this file, because it wasn't: a
+        // rejection here had no handler, and an unhandled rejection is fatal to
+        // the whole process. Titling is best-effort; it must never be terminal.
+        void title.maybeGenerateInitialTitle(evt.chatId).catch(() => {});
       });
 
       // Auto-checkpoint: after each assistant message, snapshot the owning

@@ -264,6 +264,24 @@ export class ProjectConfigService {
         } catch {
           return null;
         }
+        // An FSWatcher is an EventEmitter, and the try/catch above only covers a
+        // SYNCHRONOUS failure to start watching. Runtime failures arrive later, as
+        // an `'error'` EVENT — and Node throws an unlistened `'error'` emit as an
+        // uncaught exception, which killed the whole server. That is not a rare
+        // path here: this watches `<repoPath>/.dispatch` RECURSIVELY, the tree
+        // MemoryCommitter and TrunkSync run `git add`/`commit`/`rebase` inside,
+        // and Windows' ReadDirectoryChangesW readily reports EPERM/UNKNOWN when a
+        // watched subtree is renamed under it. One watcher exists per project, so
+        // every project added is another emitter that could take the process down.
+        // A dead watcher just means this project stops live-reloading its config
+        // until the next `watchProject` — strictly better than losing every session.
+        w.on("error", () => {
+          try {
+            w.close();
+          } catch {
+            /* already gone */
+          }
+        });
         // Never keep the event loop alive just to watch (clean shutdown).
         w.unref?.();
         return { close: () => w.close() };
