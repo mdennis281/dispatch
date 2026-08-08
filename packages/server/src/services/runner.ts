@@ -108,6 +108,16 @@ const MANAGER_ENV_KEYS = new Set(MANAGER_ENV_VARS.map((n) => n.toLowerCase()));
  * `cm_data_dir` left by an old shortcut would survive an exact-match scrub and
  * still be found by the child's `process.env.CM_DATA_DIR`.
  */
+export function scrubManagerEnv(parent: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parent)) {
+    if (value === undefined) continue; // an unset var, not an empty one
+    if (MANAGER_ENV_KEYS.has(key.toLowerCase())) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 /**
  * The port-derived env a subApp is launched with: `PORT` for tools that honour
  * it, plus the manifest's own `env` with `{port}` placeholders substituted, so a
@@ -131,16 +141,6 @@ export function portOverlay(
     overlay[key] = substitutePorts(value, ports);
   }
   return overlay;
-}
-
-export function scrubManagerEnv(parent: NodeJS.ProcessEnv): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(parent)) {
-    if (value === undefined) continue; // an unset var, not an empty one
-    if (MANAGER_ENV_KEYS.has(key.toLowerCase())) continue;
-    out[key] = value;
-  }
-  return out;
 }
 
 /* ----------------------------------------------------------- injectable seams */
