@@ -128,25 +128,30 @@ describe("probePath", () => {
 });
 
 describe("inferProjectsRoot", () => {
+  // A drive letter is only absolute on Windows; `path.resolve("C:/code")` on
+  // Linux prepends cwd and the inferred root comes back as a nonsense hybrid.
+  // Drop the prefix off-Windows so the fixture is absolute either way.
+  const D = process.platform === "win32" ? "C:" : "";
+
   it("learns the root the existing projects share", () => {
     const root = inferProjectsRoot(
-      [mkProject("C:/Users/me/projects/a"), mkProject("C:/Users/me/projects/b")],
-      "C:/Users/me",
+      [mkProject(`${D}/Users/me/projects/a`), mkProject(`${D}/Users/me/projects/b`)],
+      `${D}/Users/me`,
     );
-    expect(root).toBe("C:/Users/me/projects");
+    expect(root).toBe(`${D}/Users/me/projects`);
   });
 
   it("picks the parent the most projects sit under", () => {
     const root = inferProjectsRoot(
       [
-        mkProject("C:/work/one"),
-        mkProject("C:/code/a"),
-        mkProject("C:/code/b"),
-        mkProject("C:/code/c"),
+        mkProject(`${D}/work/one`),
+        mkProject(`${D}/code/a`),
+        mkProject(`${D}/code/b`),
+        mkProject(`${D}/code/c`),
       ],
-      "C:/Users/me",
+      `${D}/Users/me`,
     );
-    expect(root).toBe("C:/code");
+    expect(root).toBe(`${D}/code`);
   });
 
   it("falls back to the home directory when there's nothing to learn from", () => {
