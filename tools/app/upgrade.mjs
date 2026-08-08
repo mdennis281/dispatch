@@ -266,6 +266,47 @@ function rotateLog(p) {
 
 const say = (log) => (msg) => log(`[${new Date().toISOString()}] ${msg}\n`);
 
+/**
+ * Record a fatal from the ATTACHED half where a human can actually find it.
+ *
+ * ── Why this exists ─────────────────────────────────────────────────────────
+ * Every refusal before `makeLogger` (below the arg parse, the node-version
+ * assert, the git probes, the bootstrap guard, the lock) went to `console.error`
+ * and NOWHERE else. Run from a terminal that is fine. Run from the app — which
+ * is the whole point of a live self-upgrade — and stderr is inherited from
+ * `launch.py` under `pythonw`, which has no console: the explanation is written
+ * to a handle that discards it. `upgrade.log` stayed empty and `--status` said
+ * "no upgrade has been run", so the one question that mattered — WHY did it
+ * refuse — had no answer anywhere on the machine.
+ *
+ * On 2026-08-08 that hid a guard that was working perfectly and naming its own
+ * one-line remedy: the installed payload predated the readiness probe. The
+ * upgrade had been "crashing instantly" for days.
+ *
+ * NOTE it records `lastError` and never touches `phase`. Phase describes what
+ * has MOVED on disk, and a throw here usually means nothing has; overwriting a
+ * real `swapping` with a cheerful `refused` would turn a recoverable install
+ * into a lie. Non-destructive by construction.
+ */
+function reportFatal(p, err) {
+  const stamp = new Date().toISOString();
+  const message = err?.message ?? String(err);
+  const detail = err?.stack ?? message;
+  try {
+    mkdirSync(p.root, { recursive: true });
+    rotateLog(p);
+    appendFileSync(p.log, `[${stamp}] UPGRADE FAILED (nothing was swapped)\n${detail}\n\n`);
+  } catch {
+    /* an unwritable state dir must not replace the error with its own */
+  }
+  writeState(p, { lastError: message, lastErrorAt: stamp });
+  // Still say it on the console: attached from a terminal, this is the copy a
+  // human is actually looking at.
+  console.error(`\nupgrade failed: ${message}`);
+  console.error(`\n  recorded in : ${p.log}`);
+  console.error(`  or run      : node tools/app/upgrade.mjs --status`);
+}
+
 /* ---------------------------------------------------------------- state */
 
 function readState(p) {
@@ -1162,6 +1203,15 @@ function detachSwap(p, argv) {
  */
 function remedyFor(p, state) {
   const backup = state.backup ?? newestBackup(p) ?? join(p.backups, "app-*");
+  // A refusal with no phase never touched the install — say that plainly and
+  // quote the reason, rather than falling through to "unrecognised phase".
+  if (!state.phase && state.lastError) {
+    return (
+      `The upgrade refused before doing anything — the install is untouched and the\n` +
+      `  app is unaffected. It said:\n\n    ${state.lastError}\n\n` +
+      `  Full detail: ${p.log}`
+    );
+  }
   switch (state.phase) {
     case "staging":
       return `A build is in progress in ${p.staging}. Nothing has moved; the app is untouched.\n  Watch it: ${p.log}`;
@@ -1212,9 +1262,15 @@ async function printStatus(p) {
     return 0;
   }
   const live = await liveInstance(p);
-  console.log(`phase   : ${state.phase ?? "unknown"}${state.ok === true ? "  (ok)" : ""}`);
+  console.log(`phase   : ${state.phase ?? "none"}${state.ok === true ? "  (ok)" : ""}`);
   if (state.sha) console.log(`target  : ${String(state.sha).slice(0, 12)}`);
   if (state.reason) console.log(`reason  : ${state.reason}`);
+  // The refusal that never moved anything — printed FIRST-class, because for an
+  // upgrade that "crashes instantly" this is the entire answer.
+  if (state.lastError) {
+    console.log(`refused : ${state.lastError}`);
+    if (state.lastErrorAt) console.log(`   at   : ${state.lastErrorAt}`);
+  }
   if (state.backup) console.log(`backup  : ${state.backup}`);
   console.log(`updated : ${state.updatedAt ?? "?"}`);
   console.log(`payload : ${p.app}${existsSync(p.app) ? "" : "   *** MISSING ***"}`);
@@ -1224,12 +1280,23 @@ async function printStatus(p) {
   return 0;
 }
 
+/**
+ * The upgrade paths, published the moment they are known, so the top-level
+ * `catch` can write to the right `upgrade.log` for a throw from ANY depth.
+ *
+ * Module-level because the alternative is threading a logger through every
+ * function that might refuse — and the last version of "the error handler
+ * couldn't reach the log" is the bug this whole change exists to fix.
+ */
+let fatalPaths;
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const paths = desktopPaths(
     args.target ? { ...process.env, DISPATCH_HOME: args.target } : process.env,
   );
   const p = upgradePaths(paths);
+  fatalPaths = p;
 
   /* ---- the detached half ---------------------------------------------- */
   if (args.swap) {
@@ -1413,6 +1480,10 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(`\nupgrade failed: ${err.message}`);
+  // `fatalPaths` is set the instant the root is known. Falling back to the
+  // DEFAULT root matters: a throw from `parseArgs` happens before `--target` has
+  // been read, and "we could not parse your arguments" recorded in the usual
+  // place beats it recorded nowhere.
+  reportFatal(fatalPaths ?? upgradePaths(desktopPaths()), err);
   process.exitCode = 1;
 });
