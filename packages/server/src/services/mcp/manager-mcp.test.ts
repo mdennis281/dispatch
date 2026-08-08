@@ -805,6 +805,39 @@ describe("prLandingBlockers", () => {
     ).map((b) => b.code);
     expect(codes).toEqual(["no-checks", "no-review"]);
   });
+
+  // Review caught this: an unreadable review state used to be coerced to
+  // `{ requested: [], reported: [] }`, which reads downstream as "nobody was
+  // ever asked" and points the agent at re-opening the PR through `create_pr`
+  // — to fix what was actually a transient API failure. Same rule as
+  // `threads === null`: an unreadable read is its own blocker.
+  it("distinguishes an UNREADABLE review state from nobody having been asked", () => {
+    const b = prLandingBlockers(
+      readyPr({ submittedReviews: null, requestedReviewers: null }),
+      { requireReview: true },
+    );
+    expect(b.map((x) => x.code)).toEqual(["review-state-unreadable"]);
+    expect(b[0].detail).toMatch(/Couldn't read/i);
+    // Crucially it must NOT tell the agent to go re-open the PR.
+    expect(b[0].detail).not.toMatch(/create_pr/);
+  });
+
+  it("does not raise the unreadable blocker when requireReview is off", () => {
+    expect(
+      prLandingBlockers(readyPr({ submittedReviews: null, requestedReviewers: null }), {
+        requireReview: false,
+      }),
+    ).toEqual([]);
+  });
+
+  it("still honours allowNoReview when the state is unreadable", () => {
+    expect(
+      prLandingBlockers(readyPr({ submittedReviews: null, requestedReviewers: null }), {
+        requireReview: true,
+        allowNoReview: true,
+      }),
+    ).toEqual([]);
+  });
 });
 
 /* -------------------------------------------------------------- create_pr */

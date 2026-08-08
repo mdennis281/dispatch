@@ -391,9 +391,11 @@ function makePrApprovalBinding(
       // answer this: it's null both when nobody has reviewed and when the repo
       // has no review requirement, and treating those the same is what let a PR
       // be called done with nobody having looked at it.
-      const reviews = await github
-        .prReviewState(r, n)
-        .catch(() => ({ requested: [] as string[], reported: [] as Array<{ author: string; state: string }> }));
+      // `null`, NOT an empty result — the same rule `threads` follows above.
+      // Coercing a failed read into "requested: []" reads downstream as "nobody
+      // was even asked", which points the agent at re-opening the PR through
+      // `create_pr` when the actual problem was a transient API error.
+      const reviews = await github.prReviewState(r, n).catch(() => null);
       return {
         number: pr.number,
         url: pr.url,
@@ -406,8 +408,8 @@ function makePrApprovalBinding(
         labels: pr.labels ?? [],
         checks: pr.checks,
         threads,
-        requestedReviewers: reviews.requested,
-        submittedReviews: reviews.reported,
+        requestedReviewers: reviews?.requested ?? null,
+        submittedReviews: reviews?.reported ?? null,
       };
     },
     approve: async (n, repo, body) => github.approve(await requireRepo(repo), n, body, { chatId }),

@@ -371,3 +371,74 @@ describe("PrReviewWatcher — auto-resume", () => {
     await expect(watcher.sweep()).resolves.toHaveLength(1);
   });
 });
+
+describe("PrReviewWatcher — arm", () => {
+  // Review caught that `arm()` only called `stateFor`, which creates an EMPTY
+  // state — so it was a no-op, and the first sweep after `create_pr` still
+  // reported every pre-existing check, thread and review as brand-new activity.
+  // Copilot reviews fast: on a busy repo the PR you just opened could badge you
+  // for a comment that landed before the ref was even recorded.
+
+  const NOISY = {
+    prChecks: async () => [{ name: "build", status: "completed", conclusion: "failure" }],
+    reviewThreads: async () => [
+      { id: "T_1", isResolved: false, path: "src/app.ts", author: "copilot" },
+    ],
+    prReviewState: async () => ({
+      requested: [],
+      reported: [{ author: "copilot", state: "CHANGES_REQUESTED" }],
+    }),
+  };
+
+  it("seeds the dedup state so the first sweep reports nothing pre-existing", async () => {
+    await makeChat("c1", [REF]);
+    const watcher = new PrReviewWatcher({ store, bus, github: fakeGitHub(NOISY) });
+
+    await watcher.arm("c1", REF);
+    await expect(watcher.sweep()).resolves.toEqual([]);
+    expect(reviewItems()).toEqual([]);
+  });
+
+  it("still reports what happens AFTER arming", async () => {
+    await makeChat("c1", [REF]);
+    let threads = [{ id: "T_1", isResolved: false, path: "src/app.ts", author: "copilot" }];
+    const watcher = new PrReviewWatcher({
+      store,
+      bus,
+      github: fakeGitHub({ ...NOISY, reviewThreads: async () => threads }),
+    });
+
+    await watcher.arm("c1", REF);
+    // A SECOND thread lands after arming — the whole point is that this counts.
+    threads = [
+      ...threads,
+      { id: "T_2", isResolved: false, path: "src/store.ts", author: "copilot" },
+    ];
+
+    const raised = await watcher.sweep();
+    expect(raised).toHaveLength(1);
+    expect(raised[0]!.reasons.join(" ")).toMatch(/src\/store\.ts/);
+    // ...and the pre-existing one is not re-reported alongside it.
+    expect(raised[0]!.reasons.join(" ")).not.toMatch(/src\/app\.ts/);
+  });
+
+  it("is best-effort — unreadable reads leave the old behaviour, not a throw", async () => {
+    await makeChat("c1", [REF]);
+    const boom = async () => {
+      throw new Error("boom");
+    };
+    const watcher = new PrReviewWatcher({
+      store,
+      bus,
+      github: fakeGitHub({ prChecks: boom, reviewThreads: boom, prReviewState: boom }),
+    });
+
+    await expect(watcher.arm("c1", REF)).resolves.toBeUndefined();
+  });
+
+  it("does nothing when the ref carries no repo", async () => {
+    await makeChat("c1", [REF]);
+    const watcher = new PrReviewWatcher({ store, bus, github: fakeGitHub(NOISY) });
+    await expect(watcher.arm("c1", { ...REF, repo: undefined })).resolves.toBeUndefined();
+  });
+});

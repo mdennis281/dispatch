@@ -187,9 +187,38 @@ export class PrReviewWatcher {
    * doesn't badge the chat for review activity that predates it. Called by the
    * create path — "arming the watcher" is mostly this plus the fact that the
    * `PRRef` now exists for the sweep to find.
+   *
+   * This used to just call `stateFor`, which creates an EMPTY state — so it was
+   * a no-op and the first sweep still reported every pre-existing check, thread
+   * and review as new (review caught this). It now reads the current snapshot
+   * and records the same fingerprints `checkOne` would, so only what happens
+   * AFTER arming counts as activity.
+   *
+   * Best-effort and non-fatal: if the reads fail, the state stays empty and the
+   * worst case is the old behaviour — one noisy first sweep, never a crash in
+   * the create path. Returns a promise so tests can await it; the caller
+   * deliberately does not.
    */
-  arm(chatId: string, ref: PRRef): void {
-    this.stateFor(chatId, ref);
+  async arm(chatId: string, ref: PRRef): Promise<void> {
+    const st = this.stateFor(chatId, ref);
+    const repo = ref.repo;
+    if (!repo) return;
+    const [checks, threads, reviews] = await Promise.all([
+      this.github.prChecks(repo, ref.number).catch(() => null),
+      this.github.reviewThreads(repo, ref.number).catch(() => null),
+      this.github.prReviewState(repo, ref.number).catch(() => null),
+    ]);
+    // Fingerprints must match `checkOne` EXACTLY, or arming shifts the noise
+    // rather than removing it.
+    for (const c of checks ?? []) st.checks.set(c.name, c.conclusion ?? c.status);
+    for (const t of threads ?? []) {
+      if (t.isResolved || t.isOutdated) continue;
+      st.threads.add(t.id);
+    }
+    for (const r of reviews?.reported ?? []) {
+      if (r.state === "PENDING") continue;
+      st.reviews.add(`${r.author}:${r.state}`);
+    }
   }
 
   /**

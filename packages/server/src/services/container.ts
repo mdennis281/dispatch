@@ -276,7 +276,12 @@ export function createServices(
     });
   // `create_pr` pre-seeds the watcher so the first sweep after a PR opens can't
   // badge the chat for activity that predates it.
-  broker.armPrWatch = (chatId, ref) => prReviewWatcher.arm(chatId, ref);
+  // Fire-and-forget: arming now reads GitHub, and `create_pr` must not wait on
+  // (or fail from) a dedup optimisation. A rejection here is already swallowed
+  // inside `arm`; the `.catch` is belt-and-braces against an unhandled rejection.
+  broker.armPrWatch = (chatId, ref) => {
+    void prReviewWatcher.arm(chatId, ref).catch(() => {});
+  };
 
   let offCheckpoint: (() => void) | undefined;
   let offTitle: (() => void) | undefined;

@@ -375,10 +375,16 @@ export interface PrReadiness {
   /**
    * Reviewers with an OUTSTANDING request — asked, but they haven't reported.
    * Distinct from "nobody was ever asked", which is a different failure.
+   *
+   * `null` = the review state couldn't be READ, exactly like {@link threads}.
+   * An unreadable state must not collapse into the empty list: empty means
+   * "nobody was asked", which sends the agent off to re-open the PR through
+   * `create_pr`, when the truth was a transient API failure (review caught
+   * this). Both review fields go null together — they come from one call.
    */
-  requestedReviewers: string[];
-  /** Reviews that have actually been SUBMITTED (author + state). */
-  submittedReviews: Array<{ author: string; state: string }>;
+  requestedReviewers: string[] | null;
+  /** Reviews that have actually been SUBMITTED (author + state). `null` as above. */
+  submittedReviews: Array<{ author: string; state: string }> | null;
 }
 
 /**
@@ -448,7 +454,9 @@ export interface PrLandingBlocker {
     /** `requireChecks` and NO check reported at all — green on no evidence. */
     | "no-checks"
     /** `requireReview` and no requested reviewer has reported yet. */
-    | "no-review";
+    | "no-review"
+    /** `requireReview` and the review state couldn't be read — not the same as none. */
+    | "review-state-unreadable";
   detail: string;
 }
 
@@ -544,22 +552,35 @@ export function prLandingBlockers(
   }
 
   if (policy.requireReview && !policy.allowNoReview) {
-    // Someone REPORTING is the bar — an outstanding request is the opposite of a
-    // review, and the failure this guards against is a PR called done while the
-    // reviewer had said nothing at all.
-    const reported = pr.submittedReviews.filter((r) => r.state !== "PENDING");
-    if (reported.length === 0) {
-      const waiting = pr.requestedReviewers.length
-        ? `Waiting on: ${pr.requestedReviewers.join(", ")}.`
-        : "No reviewer has even been requested — open it through `mcp__manager__create_pr` " +
-          "so the configured reviewers are asked.";
+    if (pr.submittedReviews === null || pr.requestedReviewers === null) {
+      // Same rule as `threads === null`: an unreadable state is its own blocker.
+      // Reporting it as "nobody was asked" would send the agent to re-open the
+      // PR through `create_pr` to fix a problem that was a transient API error.
       blockers.push({
-        code: "no-review",
+        code: "review-state-unreadable",
         detail:
-          "Nobody has reviewed this PR yet, and this project's workflow sets " +
-          `\`pr.requireReview\`. ${waiting} Pass \`allowNoReview: true\` only if the human ` +
-          "told you to land it unreviewed.",
+          "Couldn't read this PR's review state, so there's no way to tell whether anyone " +
+          "was asked or has reported. This project's workflow sets `pr.requireReview`. " +
+          "Try again in a moment.",
       });
+    } else {
+      // Someone REPORTING is the bar — an outstanding request is the opposite of
+      // a review, and the failure this guards against is a PR called done while
+      // the reviewer had said nothing at all.
+      const reported = pr.submittedReviews.filter((r) => r.state !== "PENDING");
+      if (reported.length === 0) {
+        const waiting = pr.requestedReviewers.length
+          ? `Waiting on: ${pr.requestedReviewers.join(", ")}.`
+          : "No reviewer has even been requested — open it through `mcp__manager__create_pr` " +
+            "so the configured reviewers are asked.";
+        blockers.push({
+          code: "no-review",
+          detail:
+            "Nobody has reviewed this PR yet, and this project's workflow sets " +
+            `\`pr.requireReview\`. ${waiting} Pass \`allowNoReview: true\` only if the human ` +
+            "told you to land it unreviewed.",
+        });
+      }
     }
   }
 

@@ -67,7 +67,9 @@ workflow:
   autoMerge: on-green         # off | on-green  — agents land their own PRs
   mergeMethod: squash         # squash | merge | rebase
   pr:                         # what a PR here must include (see below); `review` only
-    reviewers: [copilot-pull-request-reviewer]
+    # Exact login. Copilot's carries the `[bot]` suffix, and quoting matters:
+    # bare `[...]` at the start of a YAML scalar is a flow sequence.
+    reviewers: ["copilot-pull-request-reviewer[bot]"]
     requireReview: true       # not "done" until a requested reviewer reports
     requireChecks: true       # on-green REFUSES when zero checks reported
     draft: false              # open PRs as drafts
