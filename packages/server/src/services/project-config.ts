@@ -41,6 +41,7 @@ import {
   PermissionModeSchema,
   EffortSchema,
   MANIFEST_FILE,
+  resolveWorkflow,
   expandEnvVars,
   expandEnvList,
   expandEnvRecord,
@@ -60,6 +61,7 @@ import {
   type SkillConfig,
   type SubApp,
   type McpServerConfig,
+  type WorkflowConfig,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -551,6 +553,9 @@ export class ProjectConfigService {
       }
     }
 
+    // --- workflow sanity (non-fatal) ---
+    await this.checkWorkflowCoherence(project, manifest, errors);
+
     const config: ProjectConfig = ProjectConfigSchema.parse({
       sourceDir,
       name: manifest.name,
@@ -574,6 +579,58 @@ export class ProjectConfigService {
     });
 
     return ProjectConfigResultSchema.parse({ sourceDir, config, errors });
+  }
+
+  /**
+   * Catch a workflow that PROMISES more than the repo can deliver, at config
+   * load rather than three PRs later.
+   *
+   * The specific shape being caught: `profile: review` + `autoMerge: on-green`
+   * on a repo that has NO CI workflows and configures NO reviewers. "Green" is
+   * then trivially true — zero checks reported, nothing failing — so auto-merge
+   * would land every PR on the strength of no evidence at all, with nobody
+   * having looked at it either. That is exactly what happened on the run this
+   * check was written for, and it went unnoticed until a human read the PRs by
+   * hand. The new-project case ("this repo's CI flow is always trash at first")
+   * is the same shape.
+   *
+   * Deliberately a WARNING, never fatal: a small repo with no CI is a legitimate
+   * state, `pr.requireChecks` already refuses the merge at the moment it
+   * matters, and breaking a project's config load over a policy opinion would be
+   * a wildly disproportionate response.
+   */
+  private async checkWorkflowCoherence(
+    project: Project,
+    manifest: { workflow?: WorkflowConfig; ship?: string },
+    errors: ProjectConfigError[],
+  ): Promise<void> {
+    const wf = resolveWorkflow({ workflow: manifest.workflow, shipCmd: manifest.ship });
+    if (wf.autoMerge !== "on-green") return;
+    if (wf.pr.reviewers.length > 0) return;
+
+    let hasCi: boolean;
+    try {
+      const entries = await readdir(join(project.repoPath, ".github", "workflows"));
+      hasCi = entries.some((f) => /\.ya?ml$/i.test(f));
+    } catch (err) {
+      // ENOENT = no workflows dir, which IS the condition. Any other error means
+      // we couldn't tell, and a warning on a guess is worse than no warning.
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return;
+      hasCi = false;
+    }
+    if (hasCi) return;
+
+    errors.push({
+      scope: "manifest",
+      file: MANIFEST_FILE,
+      message:
+        "`workflow.autoMerge: on-green` is vacuous here: this repo has no GitHub Actions " +
+        "workflows, so no check ever reports and \"green\" is trivially true — and " +
+        "`workflow.pr.reviewers` is empty, so nobody is asked to look either. Add a CI " +
+        "workflow, list reviewers under `workflow.pr.reviewers`, or turn auto-merge off. " +
+        "Until then `pr.requireChecks`/`pr.requireReview` will refuse the merge.",
+    });
   }
 
   /**

@@ -50,7 +50,7 @@ Dispatch both injects it into every session and enforces it.
 |---|---|---|
 | **`none`** | Work in the checkout. Don't branch, don't open PRs, don't commit unasked — the human batches commits. | nothing |
 | **`commit`** | Same checkout, but finish a task by committing it: small conventional commits, no dirty tree at the end. Still no branches or PRs. | memory writes are committed |
-| **`review`** | One task → one worktree → one reviewed PR. Ship, work the CI + review loop with `watch_pr`, let the merge land it — or land it yourself with `approve_pr` when [auto-merge](#workflow-profiles) is on. | `git commit`/`push` targeting the trunk and `gh pr merge` are **refused**; memory committed; trunk fast-forwarded after every merge |
+| **`review`** | One task → one worktree → one reviewed PR. Open it with `create_pr`, work the CI + review loop with `watch_pr`, let the merge land it — or land it yourself with `approve_pr` when [auto-merge](#workflow-profiles) is on. | `git commit`/`push` targeting the trunk, `gh pr create` and `gh pr merge` are all **refused**; memory committed; trunk fast-forwarded after every merge |
 
 Pick one in **Project config** (the ⚙ view), or — better, since it's then committable —
 author it in the repo's `.dispatch/project.yaml`, where it OVERRIDES the UI choice:
@@ -66,10 +66,68 @@ workflow:
   syncMainAfter: merge        # never | ship | merge
   autoMerge: on-green         # off | on-green  — agents land their own PRs
   mergeMethod: squash         # squash | merge | rebase
+  pr:                         # what a PR here must include (see below); `review` only
+    # Exact login. Copilot's carries the `[bot]` suffix, and quoting matters:
+    # bare `[...]` at the start of a YAML scalar is a flow sequence.
+    reviewers: ["copilot-pull-request-reviewer[bot]"]
+    requireReview: true       # not "done" until a requested reviewer reports
+    requireChecks: true       # on-green REFUSES when zero checks reported
+    draft: false              # open PRs as drafts
 ```
 
 A project with no `workflow:` block keeps behaving exactly as it did before profiles
 existed: it resolves to `review` if it has a ship command, else `none`.
+
+### The `pr:` block — declaring what a PR needs
+
+A profile said *how* change ships. `pr:` says what a pull request here has to
+**include**, and it exists because declaring `profile: review` + `autoMerge: on-green`
+used to buy you nothing enforceable. Every step still depended on the agent choosing
+correctly, and on a real run all four of these went wrong at once:
+
+1. The agent ran `gh pr create` by hand. **Nothing requested a reviewer** (Copilot showed
+   up only because of a GitHub-side repo setting), and nothing linked the PR to the chat.
+2. `watch_pr` is a *pull* api. The agent called it once, got "no CI checks configured",
+   concluded there was nothing to wait for, and stopped.
+3. So **two rounds of review comments landed into silence** — found by a human opening
+   GitHub, despite the Attention Queue being this app's whole answer to "which chat needs you".
+4. `autoMerge: on-green` was **vacuous**: zero checks report on that repo, so "green" was
+   trivially true and `approve_pr` would have merged on no evidence at all.
+
+| Field | Default (`review`) | What it does |
+|---|---|---|
+| `reviewers` | `[]` | Logins and/or `org/team` slugs `create_pr` requests on every PR. Nothing else remembers to. |
+| `requireReview` | `true` | `approve_pr` refuses while no requested reviewer has **reported** (an outstanding request is the opposite of a review). |
+| `requireChecks` | `true` | `approve_pr` refuses when **no check reported at all** — "green" on no evidence is not green. |
+| `draft` | `false` | Open PRs as drafts. |
+
+On `none` and `commit` the whole block resolves inert, exactly like `autoMerge` — those
+rungs have no PR, so a policy there would be a trap for anything that trusted the field.
+
+**Opening a PR: `mcp__manager__create_pr`.** A raw `gh pr create` is now **refused** on
+any `review` project, the same way `gh pr merge` always was. In one call `create_pr`
+pushes the branch with an upstream, opens the PR, requests the reviewers above, writes
+the PR onto the chat (`Chat.prs` — the ownership record everything downstream reads), and
+arms the review watcher. It refuses on the mistakes that produce a useless PR — you're on
+the trunk, no commits ahead of base, a dirty tree, an existing PR on `hold` — and **every
+refusal names the argument that overrides it** (`allowTrunk`, `allowNoCommits`,
+`allowDirty`, `allowHold`). An already-open PR for the branch is handed back rather than
+erroring. Enforcement with an escape hatch: a guard with no override is a guard that gets
+routed around the first time it's wrong.
+
+**Review activity finds you.** A background watcher polls the PRs recorded on chats and
+raises a **`review`** Attention item when a review is submitted, a new unresolved thread
+appears, or a check fails — deduped so each round fires exactly once (a badge that
+re-fires forever is worse than none). It ranks below `permission`/`question` (nothing is
+blocked on it *this second*) and above `idle`/`done`. It also **auto-resumes the owning
+chat** — the one whose own `prs` carries that PR, i.e. the one that opened it — and
+nobody else; a chat that's already mid-turn gets the badge and no nudge.
+
+**Vacuous auto-merge is caught at config load.** A project resolving to `review` +
+`autoMerge: on-green` with **no CI workflows and no reviewers** gets a project-config
+warning, because "green" there means nothing was ever run. It's a warning, not a fatal —
+a small repo with no CI is legitimate, and `requireChecks` already refuses the merge at
+the moment it actually matters.
 
 **Why memory rides its own lane.** Memory is project-scoped, not branch-scoped, so it is
 always written to the **primary checkout** — an agent in a worktree can't carry it in a
@@ -90,7 +148,10 @@ the loop.
 
 It is not a blank cheque. `approve_pr` re-reads the PR at the moment it's called and
 refuses — listing every reason at once — on a failing or still-running check, an
-unresolved review thread, a draft, a conflict, or a `changes_requested` review. Two
+unresolved review thread, a draft, a conflict, or a `changes_requested` review. Under
+[`pr.requireChecks` / `pr.requireReview`](#the-pr-block--declaring-what-a-pr-needs) it
+also refuses when **no check reported at all** and when **nobody has reviewed yet**,
+naming `allowNoChecks: true` / `allowNoReview: true` as the explicit overrides. Two
 stop signals are yours specifically:
 
 - **Say so.** If you asked the agent to leave the PR open, to let you look first, or to
@@ -546,8 +607,8 @@ Three independent channels, in order of how far they reach:
 | **Desktop notifications** | your OS notification centre | one click to grant the browser permission |
 | **Webhook** (ntfy / Pushover) | your phone, anywhere | a URL in Settings |
 
-**Desktop notifications** fire on the same four Attention events as the webhook —
-permission needed, question, waiting for input, task done — and only while the app *isn't*
+**Desktop notifications** fire on the same five Attention events as the webhook —
+permission needed, question, waiting for input, task done, PR review activity — and only while the app *isn't*
 focused, because with the window in front of you the badge already said it. Clicking one
 focuses the app and jumps to the chat, scrolling the pending card into view; answering a
 prompt in the app withdraws its toast so the notification centre never fills with

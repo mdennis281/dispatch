@@ -142,6 +142,46 @@ export interface OpCtx {
   chatId?: string;
 }
 
+/**
+ * Everything the sanctioned create path needs to know about a branch BEFORE it
+ * opens a PR on it — read fresh from the working directory, never from what the
+ * session believed earlier.
+ *
+ * `aheadOfBase` is null when we genuinely could not tell (no local ref for the
+ * base, a shallow clone). That distinction matters: the refusals below only fire
+ * when they CAN tell, the same rule the trunk guard follows — a check that
+ * blocks legitimate work on a false positive gets routed around, which is worse
+ * than one that occasionally misses.
+ */
+export interface PrCreatePreflight {
+  /** The branch checked out in the create cwd, or null when detached. */
+  branch: string | null;
+  /** The protected trunk (project `defaultBranch`). */
+  trunk: string;
+  /** The base the PR would target. */
+  base: string;
+  /** Commits on this branch that the base doesn't have; null = couldn't tell. */
+  aheadOfBase: number | null;
+  /** True when the working tree has uncommitted (tracked or untracked) changes. */
+  dirty: boolean;
+  /** An open/closed PR that already exists for this branch, if any. */
+  existing: PRInfo | null;
+}
+
+/** A PR's review state: who was asked, and who has actually reported. */
+export interface PrReviewState {
+  /** Reviewers with an OUTSTANDING request (they haven't reported yet). */
+  requested: string[];
+  /** Reviews that have been submitted, newest-per-author. */
+  reported: Array<{ author: string; state: string }>;
+}
+
+/** Outcome of requesting a batch of reviewers (some may not exist / lack access). */
+export interface RequestReviewersResult {
+  requested: string[];
+  failed: Array<{ reviewer: string; error: string }>;
+}
+
 /* ----------------------------------------------------------------- raw shapes */
 
 interface RawPr {
@@ -756,6 +796,191 @@ export class GitHubService {
     } catch {
       /* best-effort — a chat-attach failure shouldn't fail the ship */
     }
+  }
+
+  /* ------------------------------------------------------------ create_pr */
+
+  /**
+   * Read the branch state `create_pr` refuses on. Never throws — every probe
+   * degrades to "couldn't tell", which the refusal rules treat as "don't block".
+   */
+  async prCreatePreflight(
+    repo: string,
+    opts: { cwd: string; trunk: string; base?: string },
+  ): Promise<PrCreatePreflight> {
+    const base = opts.base || opts.trunk;
+    const git = async (args: string[]): Promise<{ out: string; ok: boolean }> => {
+      const r = await this.exec("git", args, { cwd: opts.cwd, reject: false }).catch(() => null);
+      return { out: (r?.stdout ?? "").trim(), ok: !!r && r.exitCode === 0 };
+    };
+
+    const head = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
+    // `HEAD` is what rev-parse prints for a detached checkout — not a branch.
+    const branch = head.ok && head.out && head.out !== "HEAD" ? head.out : null;
+
+    const dirtyProbe = await git(["status", "--porcelain"]);
+    const dirty = dirtyProbe.ok && dirtyProbe.out.length > 0;
+
+    // Prefer the REMOTE base: a stale local `main` would report commits the base
+    // already has, i.e. a false "you have work here". Fall back to the local ref,
+    // then to null (a shallow clone / brand-new repo can answer neither).
+    let aheadOfBase: number | null = null;
+    for (const ref of [`origin/${base}`, base]) {
+      const probe = await git(["rev-list", "--count", `${ref}..HEAD`]);
+      if (probe.ok && /^\d+$/.test(probe.out)) {
+        aheadOfBase = Number(probe.out);
+        break;
+      }
+    }
+
+    const existing = branch ? await this.prForBranch(repo, branch).catch(() => null) : null;
+    return { branch, trunk: opts.trunk, base, aheadOfBase, dirty, existing };
+  }
+
+  /**
+   * Push the branch with an upstream and open the PR. One call, because the two
+   * halves are not independently useful and splitting them is how you end up
+   * with a pushed branch and no PR (or a PR the agent forgot to request review
+   * on). Returns the created PR, or null when `gh` opened one we then couldn't
+   * read back.
+   */
+  async createPr(
+    repo: string,
+    input: {
+      cwd: string;
+      branch: string;
+      base: string;
+      title?: string;
+      body?: string;
+      draft?: boolean;
+      chatId?: string;
+    },
+  ): Promise<PRInfo | null> {
+    const r = this.assertRepo(repo);
+    // `--set-upstream` unconditionally: re-pushing an already-tracked branch with
+    // it is a no-op, whereas a missing upstream is a silent failure mode later
+    // (every subsequent bare `git push` in that worktree fails).
+    const pushed = await this.exec(
+      "git",
+      ["push", "--set-upstream", "origin", input.branch],
+      { cwd: input.cwd, reject: false },
+    );
+    if (pushed.exitCode !== 0) {
+      const detail = (pushed.stderr || pushed.stdout || "").trim().slice(0, 500);
+      throw new Error(`git push --set-upstream origin ${input.branch} failed: ${detail}`);
+    }
+
+    const args = [
+      "pr", "create", "--repo", r,
+      "--base", input.base,
+      "--head", input.branch,
+    ];
+    if (input.title?.trim()) args.push("--title", input.title.trim());
+    if (input.body?.trim()) args.push("--body", input.body.trim());
+    // `--fill` derives title/body from the commits — the right default when the
+    // caller supplied neither, and illegal alongside an explicit --title.
+    if (!input.title?.trim()) args.push("--fill");
+    else if (!input.body?.trim()) args.push("--body", "");
+    if (input.draft) args.push("--draft");
+    await this.gh(args, { cwd: input.cwd });
+
+    const pr = await this.prForBranch(r, input.branch);
+    if (pr) this.emitNotice(`Opened PR #${pr.number}`, "info", input.chatId);
+    return pr;
+  }
+
+  /**
+   * Request several reviewers at once, reporting per-reviewer failure rather
+   * than throwing. A reviewer that doesn't exist (or can't be assigned — a bot
+   * that isn't installed, a team you can't reach) must not sink the PR that was
+   * already opened; the caller says which ones landed so the agent knows whether
+   * anyone is actually going to look at it.
+   *
+   * An `org/team` entry goes on `team_reviewers[]`; anything else is a user login.
+   */
+  async requestReviewers(
+    repo: string,
+    prNumber: number,
+    reviewers: readonly string[],
+    opts: OpCtx = {},
+  ): Promise<RequestReviewersResult> {
+    const r = this.assertRepo(repo);
+    const out: RequestReviewersResult = { requested: [], failed: [] };
+    for (const reviewer of reviewers) {
+      const name = reviewer.trim();
+      if (!name) continue;
+      // `org/team` → the team slug on the team_reviewers key. GitHub rejects a
+      // slashed value on `reviewers[]` outright, so guessing wrong is loud.
+      const isTeam = name.includes("/");
+      const field = isTeam ? "team_reviewers[]" : "reviewers[]";
+      const value = isTeam ? (name.split("/").pop() ?? name) : name;
+      const res = await this.exec(
+        "gh",
+        [
+          "api", "--method", "POST",
+          `repos/${r}/pulls/${prNumber}/requested_reviewers`,
+          "-f", `${field}=${value}`,
+        ],
+        { reject: false },
+      ).catch((e: unknown) => ({
+        stdout: "",
+        stderr: e instanceof Error ? e.message : String(e),
+        exitCode: 1,
+      }));
+      if (res.exitCode === 0) out.requested.push(name);
+      else {
+        out.failed.push({
+          reviewer: name,
+          error: (res.stderr || res.stdout || `gh exited ${res.exitCode}`).trim().slice(0, 200),
+        });
+      }
+    }
+    if (out.requested.length) {
+      this.emitNotice(
+        `Requested review from ${out.requested.join(", ")} on PR #${prNumber}`,
+        "info",
+        opts.chatId,
+      );
+    }
+    return out;
+  }
+
+  /**
+   * Who was asked to review, and who has actually reported.
+   *
+   * `approve_pr` needs the distinction: an outstanding review REQUEST with no
+   * submitted review means nobody has looked yet, which under `requireReview` is
+   * not "ready to land" — it's "not started". Best-effort; a failed read yields
+   * empty lists, and the caller decides what that means.
+   */
+  async prReviewState(repo: string, prNumber: number): Promise<PrReviewState> {
+    const raw = await this.ghJson<{
+      reviewRequests?: Array<{ login?: string; name?: string; slug?: string } | string>;
+      latestReviews?: Array<{ author?: { login?: string } | null; state?: string }>;
+    }>(
+      [
+        "pr", "view", String(prNumber), "--repo", this.assertRepo(repo),
+        "--json", "reviewRequests,latestReviews",
+      ],
+      { allowFail: true },
+    );
+    const requested = (raw?.reviewRequests ?? [])
+      .map((x) => (typeof x === "string" ? x : (x.login ?? x.slug ?? x.name ?? "")))
+      .filter(Boolean);
+    const reported = (raw?.latestReviews ?? [])
+      .map((x) => ({ author: x.author?.login ?? "", state: String(x.state ?? "").toUpperCase() }))
+      .filter((x) => x.author);
+    return { requested, reported };
+  }
+
+  /**
+   * Attach a PR to a chat's `prs` — the ownership record the review watcher and
+   * the per-chat PRs panel both read. Public because `create_pr` needs it: a PR
+   * opened without this entry is invisible to everything downstream, which is
+   * precisely what a hand-rolled `gh pr create` produced.
+   */
+  async attachPr(chatId: string, pr: PRInfo, repo: string): Promise<void> {
+    return this.attachPrToChat(chatId, pr, repo);
   }
 
   /** Request a review from a reviewer (defaults to Copilot). Mirrors ship.mjs. */

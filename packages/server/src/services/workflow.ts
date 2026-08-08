@@ -103,6 +103,8 @@ export interface WorkflowDirectiveContext {
   branch?: string | null;
   /** Whether `mcp__manager__watch_pr` is available (GitHub wired up). */
   github: boolean;
+  /** Whether `mcp__manager__create_pr` is available (GitHub + a PR workflow). */
+  prCreate?: boolean;
   /** Whether the memory tools are available for this session. */
   memory: boolean;
 }
@@ -147,7 +149,14 @@ export function buildWorkflowDirective(
   } else {
     // review — the full worktree → PR → review-loop → merge contract.
     const worktreeCmd = wf.worktreeCmd ? ` (\`${wf.worktreeCmd} <type>/<slug>\`)` : "";
-    const shipCmd = wf.shipCmd ? `\`${wf.shipCmd}\`` : "`gh pr create`";
+    // `create_pr` when we have it, because it is the only path that requests the
+    // configured reviewers, links the PR to this chat and arms the watcher — the
+    // three things a hand-rolled `gh pr create` silently skipped.
+    const shipCmd = ctx.prCreate
+      ? "`mcp__manager__create_pr`"
+      : wf.shipCmd
+        ? `\`${wf.shipCmd}\``
+        : "`gh pr create`";
     lines.push(
       `This project is on the **\`review\`** workflow profile — a multi-agent repo where ` +
         `several agents work in parallel. **All work is isolated in a git worktree and ` +
@@ -160,7 +169,13 @@ export function buildWorkflowDirective(
       `2. **Work** — small, coherent, conventional commits (\`feat(scope): …\`). Touch only ` +
         `what your task needs; an unrelated regression you didn't cause is not yours to ` +
         `fold in.`,
-      `3. **Ship** — ${shipCmd} pushes the branch, opens the PR, and requests review.`,
+      `3. **Ship** — ${shipCmd} pushes the branch, opens the PR, and requests review` +
+        `${
+          ctx.prCreate
+            ? " — never `gh pr create` by hand, which opens a PR with nobody asked to " +
+              "review it and nothing watching it"
+            : ""
+        }.`,
     );
     if (ctx.github) {
       lines.push(
@@ -305,6 +320,11 @@ export function createWorkflowGuardHook(deps: WorkflowGuardDeps): HookCallback {
       // A session that CAN land its PR still can't do it with `gh pr merge` —
       // this only redirects the refusal to `approve_pr` instead of "wait".
       autoMerge: ctx.workflow.autoMerge === "on-green",
+      // …and the symmetric case: where change ships through a PR, OPENING one
+      // goes through `create_pr`. A raw `gh pr create` opens a PR with no
+      // reviewer requested, no link to the chat and no watcher — the failure
+      // this guard was extended to catch.
+      requirePr: ctx.workflow.requirePr,
     });
     if (!violation) return ALLOW;
 

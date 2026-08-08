@@ -82,6 +82,51 @@ export const WorkflowMergeMethodSchema = z.enum(["squash", "merge", "rebase"]);
 export type WorkflowMergeMethod = z.infer<typeof WorkflowMergeMethodSchema>;
 
 /**
+ * The PR policy — what OPENING a pull request here must include, and what
+ * "ready to land" actually requires.
+ *
+ * WHY this block exists, in the words of the failure that produced it: a project
+ * declaring `profile: review` + `autoMerge: on-green` still had every step of the
+ * PR lifecycle riding on the agent choosing correctly. It ran `gh pr create` by
+ * hand, so nothing requested a reviewer (Copilot only showed up because of a
+ * GitHub-side repo setting) and nothing linked the PR back to the chat. Two
+ * rounds of review comments then landed into silence. And because that repo has
+ * zero checks reporting, "on-green" was VACUOUS — `approve_pr` would have merged
+ * on the strength of an empty check list.
+ *
+ * So the fix is to make the project DECLARE what it needs and let the harness
+ * hold the line, rather than relying on per-project prose and accumulated
+ * memories to re-teach every new agent the same lesson:
+ *
+ *   - `reviewers`     — logins (or `org/team`) the sanctioned create path requests.
+ *                       Nothing else is trusted to remember.
+ *   - `requireReview` — a PR isn't "done" until a requested reviewer has reported.
+ *   - `requireChecks` — `on-green` REFUSES when zero checks reported, instead of
+ *                       treating "no evidence" as "good news".
+ *   - `draft`         — open PRs as drafts by default.
+ */
+export const WorkflowPrConfigSchema = z.object({
+  /** Reviewers to request on create: user logins and/or `org/team` slugs. */
+  reviewers: z.array(z.string()).optional(),
+  /** A PR is not "done" until a requested reviewer reports. */
+  requireReview: z.boolean().optional(),
+  /** `on-green` refuses when NO check reported (vacuous green). */
+  requireChecks: z.boolean().optional(),
+  /** Open the PR as a draft. */
+  draft: z.boolean().optional(),
+});
+export type WorkflowPrConfig = z.infer<typeof WorkflowPrConfigSchema>;
+
+/** The PR policy with every implication made explicit (see {@link WorkflowPrConfigSchema}). */
+export const ResolvedPrPolicySchema = z.object({
+  reviewers: z.array(z.string()),
+  requireReview: z.boolean(),
+  requireChecks: z.boolean(),
+  draft: z.boolean(),
+});
+export type ResolvedPrPolicy = z.infer<typeof ResolvedPrPolicySchema>;
+
+/**
  * The label that parks a PR. Pre-existing (the repo's auto-merge job honours it);
  * auto-merge honours it too, so a human can stop a specific PR from being landed
  * without turning the feature off project-wide.
@@ -108,6 +153,8 @@ export const WorkflowConfigSchema = z.object({
   autoMerge: WorkflowAutoMergeSchema.optional(),
   /** Strategy used when auto-merge lands a PR (default `squash`). */
   mergeMethod: WorkflowMergeMethodSchema.optional(),
+  /** What opening/landing a PR here requires (see {@link WorkflowPrConfigSchema}); `review` only. */
+  pr: WorkflowPrConfigSchema.optional(),
 });
 export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
 
@@ -135,8 +182,22 @@ export const ResolvedWorkflowSchema = z.object({
   autoMerge: WorkflowAutoMergeSchema,
   /** Strategy auto-merge lands with. */
   mergeMethod: WorkflowMergeMethodSchema,
+  /**
+   * What opening and landing a PR here requires. Non-optional so no consumer has
+   * to re-derive it (or forget to) — the same reason `autoMerge` is resolved
+   * rather than left as "maybe authored". Inert on the rungs with no PR.
+   */
+  pr: ResolvedPrPolicySchema,
 });
 export type ResolvedWorkflow = z.infer<typeof ResolvedWorkflowSchema>;
+
+/** The inert PR policy — what the rungs with no PR resolve to. */
+const INERT_PR_POLICY: ResolvedPrPolicy = {
+  reviewers: [],
+  requireReview: false,
+  requireChecks: false,
+  draft: false,
+};
 
 /** The per-profile defaults every override is applied on top of. */
 const PROFILE_DEFAULTS: Record<WorkflowProfile, Omit<ResolvedWorkflow, "worktreeCmd" | "shipCmd">> =
@@ -152,6 +213,7 @@ const PROFILE_DEFAULTS: Record<WorkflowProfile, Omit<ResolvedWorkflow, "worktree
       guard: "off",
       autoMerge: "off",
       mergeMethod: "squash",
+      pr: INERT_PR_POLICY,
     },
     commit: {
       profile: "commit",
@@ -165,6 +227,7 @@ const PROFILE_DEFAULTS: Record<WorkflowProfile, Omit<ResolvedWorkflow, "worktree
       guard: "off",
       autoMerge: "off",
       mergeMethod: "squash",
+      pr: INERT_PR_POLICY,
     },
     review: {
       profile: "review",
@@ -179,6 +242,18 @@ const PROFILE_DEFAULTS: Record<WorkflowProfile, Omit<ResolvedWorkflow, "worktree
       // human flips, not something a profile choice hands over silently.
       autoMerge: "off",
       mergeMethod: "squash",
+      // This rung is the one that HAS a PR, so its policy is the one with teeth.
+      // Both requirements default ON: the observed failure was a `review` project
+      // where a PR could be called done with nobody having looked at it and no
+      // check having reported. A reviewer list can't have a useful default (it's
+      // repo-specific), so it starts empty and the config-load check warns when
+      // that emptiness combines with `autoMerge: on-green` and no CI.
+      pr: {
+        reviewers: [],
+        requireReview: true,
+        requireChecks: true,
+        draft: false,
+      },
     },
   };
 
@@ -200,11 +275,15 @@ export interface WorkflowSource {
  * `autoMerge` is clamped to `off` outside the `review` rung — the lower rungs
  * don't open PRs, so an authored `autoMerge` there is a mistake, and resolving it
  * away here means no consumer has to re-check the profile before trusting it.
+ * The authored `pr:` block is clamped INERT on those same rungs for exactly the
+ * same reason: there is no PR to request reviewers on, so a policy there would be
+ * a trap for any consumer that trusted the field without re-checking the profile.
  */
 export function resolveWorkflow(source: WorkflowSource | null | undefined): ResolvedWorkflow {
   const wf = source?.workflow;
   const profile: WorkflowProfile = wf?.profile ?? (source?.shipCmd ? "review" : "none");
   const base = PROFILE_DEFAULTS[profile];
+  const pr = wf?.pr;
   return ResolvedWorkflowSchema.parse({
     ...base,
     // Command overrides fall back to the legacy top-level project fields.
@@ -215,6 +294,15 @@ export function resolveWorkflow(source: WorkflowSource | null | undefined): Reso
     guard: wf?.guard ?? base.guard,
     autoMerge: profile === "review" ? (wf?.autoMerge ?? base.autoMerge) : "off",
     mergeMethod: wf?.mergeMethod ?? base.mergeMethod,
+    pr:
+      profile === "review"
+        ? {
+            reviewers: pr?.reviewers ?? base.pr.reviewers,
+            requireReview: pr?.requireReview ?? base.pr.requireReview,
+            requireChecks: pr?.requireChecks ?? base.pr.requireChecks,
+            draft: pr?.draft ?? base.pr.draft,
+          }
+        : INERT_PR_POLICY,
   });
 }
 
@@ -228,6 +316,16 @@ export const WorkflowViolationKindSchema = z.enum([
   "push-to-trunk",
   /** A merge the review loop is supposed to perform, done by hand. */
   "manual-merge",
+  /**
+   * A PR opened with a raw `gh pr create` instead of `mcp__manager__create_pr`.
+   *
+   * This is the asymmetry that produced the failure this whole block exists for:
+   * a hand-rolled `gh pr merge` was already refused and redirected at
+   * `approve_pr`, but `gh pr create` was wide open — so the PR got opened with no
+   * reviewer requested, no link back to the chat, and no watcher armed, and two
+   * rounds of review comments landed into silence.
+   */
+  "pr-create-by-hand",
 ]);
 export type WorkflowViolationKind = z.infer<typeof WorkflowViolationKindSchema>;
 
@@ -254,6 +352,14 @@ export interface WorkflowCommandContext {
    * telling it to wait for a human who isn't coming.
    */
   autoMerge?: boolean;
+  /**
+   * True when this project's change reaches the trunk through a PR
+   * ({@link ResolvedWorkflow.requirePr}) — i.e. opening one is a first-class step
+   * of the workflow, so it goes through `mcp__manager__create_pr`. On the rungs
+   * that don't open PRs at all there is nothing to redirect a `gh pr create` TO,
+   * so it's left alone rather than refused with no alternative.
+   */
+  requirePr?: boolean;
 }
 
 /** Split a shell string on `&&`, `||`, `;` and `|` into its component commands. */
@@ -359,6 +465,22 @@ export function classifyWorkflowViolation(
               "and the `hold` label first, and syncs the trunk afterwards. A raw `gh pr merge` " +
               "skips all of that."
             : "Merging the PR by hand skips the review loop — ship it and let the merge land once review is green.",
+        };
+      }
+      // The counterpart to the `gh pr merge` refusal above. Same shape of
+      // argument: the raw command "works", which is exactly why it was reached
+      // for — and then every downstream guarantee the workflow promised is
+      // quietly missing, with nothing to notice it until a human reads the PR
+      // page by hand two review rounds later.
+      if (ctx.requirePr && positional[0] === "pr" && positional[1] === "create") {
+        return {
+          kind: "pr-create-by-hand",
+          reason:
+            "Use `mcp__manager__create_pr` to open this PR — it pushes the branch, requests " +
+            "the reviewers this project configured, records the PR on this chat, and arms the " +
+            "watcher so review activity comes back to you. A raw `gh pr create` does none of " +
+            "that: the PR opens with nobody asked to look at it and no way for the review " +
+            "round to reach you.",
         };
       }
       continue;

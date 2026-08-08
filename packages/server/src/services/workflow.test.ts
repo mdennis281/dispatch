@@ -109,6 +109,15 @@ describe("buildWorkflowDirective", () => {
     expect(out).toContain("You are in a task worktree on `feat/x`");
   });
 
+  it("names `create_pr` as the ship step once the tool is available", () => {
+    // The directive and the guard must agree: the guard refuses `gh pr create`
+    // exactly where this sentence exists to point somewhere else.
+    const wf = resolveWorkflow({ workflow: { profile: "review", ship: "pnpm ship" } });
+    const out = buildWorkflowDirective(wf, { ...ctx, prCreate: true })!;
+    expect(out).toContain("mcp__manager__create_pr");
+    expect(out).toMatch(/never `gh pr create` by hand/);
+  });
+
   it("warns a `review` session that is sitting in the primary checkout", () => {
     const out = buildWorkflowDirective(resolveWorkflow({ workflow: { profile: "review" } }), {
       ...ctx,
@@ -225,6 +234,28 @@ describe("createWorkflowGuardHook", () => {
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain(
       "mcp__manager__approve_pr",
     );
+  });
+
+  it("denies `gh pr create` on a PR project, redirecting to create_pr", async () => {
+    // The gap that let a PR ship with no reviewer requested, no chat link and no
+    // watcher armed. `gh pr merge` was guarded; its counterpart was not.
+    const { hook, seen } = guardFor(review, true);
+    const out = await run(hook, "gh pr create --fill --base main", worktree);
+    expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain(
+      "mcp__manager__create_pr",
+    );
+    expect(seen.map((v) => v.kind)).toEqual(["pr-create-by-hand"]);
+  });
+
+  it("leaves `gh pr create` alone on a rung with no PR loop", async () => {
+    // No create_pr to point at — a refusal with no alternative is just a wall.
+    const { hook, seen } = guardFor(
+      resolveWorkflow({ workflow: { profile: "commit", guard: "deny" } }),
+      false,
+    );
+    expect(await run(hook, "gh pr create --fill", repo)).toEqual({});
+    expect(seen).toEqual([]);
   });
 
   it("denies a push to the trunk from a worktree", async () => {

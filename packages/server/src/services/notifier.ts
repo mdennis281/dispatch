@@ -45,14 +45,22 @@ const KIND_META: Record<
   question: { title: "Question", tags: "question", priority: 4 },
   idle: { title: "Waiting for input", tags: "hourglass", priority: 3 },
   done: { title: "Task done", tags: "white_check_mark", priority: 3 },
+  review: { title: "PR review activity", tags: "eyes", priority: 4 },
 };
 
-/** The four attention kinds we notify on (defensive guard for future kinds). */
+/**
+ * The attention kinds we notify on (defensive guard for future kinds).
+ *
+ * `review` is in: a review round landing unseen is the exact failure that put it
+ * on the queue in the first place, and it reaches the human on their phone when
+ * they aren't looking at the app — which is when it matters.
+ */
 const NOTIFY_KINDS: ReadonlySet<string> = new Set([
   "permission",
   "question",
   "idle",
   "done",
+  "review",
 ]);
 
 /**

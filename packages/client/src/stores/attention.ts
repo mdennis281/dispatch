@@ -1,12 +1,17 @@
 import { create } from "zustand";
 import type { AttentionItem } from "@dispatch/shared";
 
-/** Rank order for the triage list: decisions first, then questions, then FYI. */
+/**
+ * Rank order for the triage list: decisions first, then questions, then review
+ * rounds (real work, but nothing is blocked on it this second), then FYI.
+ * Mirrors the server's KIND_PRIORITY in services/attention.ts.
+ */
 const RANK: Record<AttentionItem["kind"], number> = {
   permission: 0,
   question: 1,
-  idle: 2,
-  done: 3,
+  review: 2,
+  idle: 3,
+  done: 4,
 };
 
 interface AttentionStore {

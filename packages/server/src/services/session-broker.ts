@@ -57,6 +57,7 @@ import type {
   ContextUsage,
   ResolvedWorkflow,
   WorkflowMergeMethod,
+  PRRef,
 } from "@dispatch/shared";
 import { EffortSchema, resolveWorkflow } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
@@ -70,6 +71,8 @@ import {
   createManagerMcpServer,
   type ManagerMcpGitHub,
   type ManagerMcpPrApproval,
+  type ManagerMcpPrCreate,
+  type PrLandingPolicy,
 } from "./mcp/manager-mcp.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
@@ -93,6 +96,10 @@ export function buildManagerToolsDirective(caps: {
   mcpConfig?: boolean;
   /** The project opted into auto-merge → this session can land its own PRs. */
   prApproval?: boolean;
+  /** Change ships through a PR here → this session opens PRs with `create_pr`. */
+  prCreate?: boolean;
+  /** Reviewers `create_pr` will request (`workflow.pr.reviewers`). */
+  prReviewers?: readonly string[];
 }): string {
   const lines = [
     "# Manager tools — prefer these over improvising",
@@ -119,6 +126,22 @@ export function buildManagerToolsDirective(caps: {
         "polling loops or a background Bash/Monitor task to watch a PR — `watch_pr` is " +
         "the supported way and, unlike a one-shot loop, keeps surfacing each NEW round " +
         "of review comments so you don't stop watching after the first fix.",
+    );
+  }
+  if (caps.prCreate) {
+    // Named BEFORE approve_pr because it comes first in the loop, and stated as
+    // a prohibition on the raw command because that is the habit being replaced:
+    // an agent that reaches for `gh pr create` opens a PR nobody was asked to
+    // review, that isn't linked to this chat, and that nothing is watching.
+    lines.push(
+      "- `mcp__manager__create_pr` — open the PR for your work. **Never run `gh pr create`** " +
+        "(it's refused): `create_pr` pushes the branch with an upstream, opens the PR, " +
+        (caps.prReviewers?.length
+          ? `requests review from ${caps.prReviewers.join(", ")}, `
+          : "requests this project's configured reviewers, ") +
+        "records the PR on this chat, and arms the watcher so review activity comes back " +
+        "to you. It refuses on the mistakes that make a PR useless (on the trunk, no " +
+        "commits, dirty tree) and names the override argument for each.",
     );
   }
   if (caps.prApproval) {
@@ -224,11 +247,125 @@ function makeGithubBinding(
  * review comments we merely failed to fetch is the exact mistake this tool must
  * not make. Here a failed read stays `null` and blocks.
  */
+/**
+ * Adapt a {@link GitHubService} into the {@link ManagerMcpPrCreate} surface the
+ * `create_pr` tool needs. Built for every session whose project ships change
+ * through a PR (`requirePr`), which is the same condition under which the trunk
+ * guard refuses a raw `gh pr create` — so the refusal always has somewhere to
+ * point.
+ *
+ * `create` is deliberately one method covering all five steps (push, create,
+ * request reviewers, record on the chat, arm the watcher). Splitting it would
+ * re-create exactly the failure it exists to fix: each step individually
+ * skippable, and nothing noticing when one was.
+ */
+function makePrCreateBinding(
+  github: GitHubService,
+  cwd: string | undefined,
+  chatId: string,
+  opts: {
+    trunk: string;
+    reviewers: readonly string[];
+    draft: boolean;
+    /** Pre-seeds the review watcher's dedup state; absent → no watcher wired. */
+    arm?: (chatId: string, ref: PRRef) => void;
+  },
+): ManagerMcpPrCreate {
+  let repoP: Promise<string | null> | undefined;
+  const repoFor = async (): Promise<string | null> => {
+    if (!cwd) return null;
+    return (repoP ??= github.resolveRepo(cwd).catch(() => null));
+  };
+  return {
+    reviewers: opts.reviewers,
+    draft: opts.draft,
+    preflight: async (base) => {
+      const repo = await repoFor();
+      if (!repo || !cwd) return null;
+      const pre = await github.prCreatePreflight(repo, { cwd, trunk: opts.trunk, base });
+      return {
+        branch: pre.branch,
+        trunk: pre.trunk,
+        base: pre.base,
+        aheadOfBase: pre.aheadOfBase,
+        dirty: pre.dirty,
+        existing: pre.existing
+          ? {
+              number: pre.existing.number,
+              url: pre.existing.url,
+              state: pre.existing.state,
+              labels: pre.existing.labels ?? [],
+            }
+          : null,
+      };
+    },
+    create: async (input) => {
+      const repo = await repoFor();
+      if (!repo || !cwd) throw new Error("could not resolve this chat's repo");
+      const pre = await github.prCreatePreflight(repo, {
+        cwd,
+        trunk: opts.trunk,
+        base: input.base,
+      });
+      if (!pre.branch) throw new Error("this checkout is on a detached HEAD");
+      const pr = await github.createPr(repo, {
+        cwd,
+        branch: pre.branch,
+        base: pre.base,
+        title: input.title,
+        body: input.body,
+        draft: input.draft,
+        chatId,
+      });
+      if (!pr) throw new Error("the PR was created but could not be read back");
+
+      // Reviewers next, and NEVER fatally: the PR already exists, so throwing
+      // here would leave it open with the agent believing the call failed.
+      const reviewers = opts.reviewers.length
+        ? await github.requestReviewers(repo, pr.number, opts.reviewers, { chatId })
+        : { requested: [], failed: [] };
+
+      // The ownership record. Without it nothing downstream — the PRs panel, the
+      // review watcher, the auto-resume rule — can tell whose PR this is.
+      let attached = false;
+      try {
+        await github.attachPr(chatId, pr, repo);
+        attached = true;
+      } catch {
+        /* reported to the agent as a warning line, not a failure */
+      }
+
+      const ref: PRRef = {
+        number: pr.number,
+        url: pr.url,
+        branch: pr.branch,
+        repo,
+        title: pr.title,
+        state: pr.state,
+      };
+      opts.arm?.(chatId, ref);
+
+      return {
+        number: pr.number,
+        url: pr.url,
+        branch: pr.branch,
+        base: pr.baseBranch,
+        draft: pr.isDraft,
+        reviewersRequested: reviewers.requested,
+        reviewersFailed: reviewers.failed,
+        attached,
+        watching: Boolean(opts.arm),
+      };
+    },
+  };
+}
+
 function makePrApprovalBinding(
   github: GitHubService,
   cwd: string | undefined,
   chatId: string,
   defaultMethod: WorkflowMergeMethod,
+  policy: PrLandingPolicy,
 ): ManagerMcpPrApproval {
   let repoP: Promise<string | null> | undefined;
   const repoFor = async (override?: string): Promise<string | null> => {
@@ -243,12 +380,22 @@ function makePrApprovalBinding(
   };
   return {
     defaultMethod,
+    policy,
     readiness: async (n, repo) => {
       const r = await repoFor(repo);
       if (!r) return null;
       const pr = await github.prDetail(r, n);
       if (!pr) return null;
       const threads = await github.reviewThreads(r, n).catch(() => null);
+      // Who was asked vs who actually reported. `reviewDecision` alone can't
+      // answer this: it's null both when nobody has reviewed and when the repo
+      // has no review requirement, and treating those the same is what let a PR
+      // be called done with nobody having looked at it.
+      // `null`, NOT an empty result — the same rule `threads` follows above.
+      // Coercing a failed read into "requested: []" reads downstream as "nobody
+      // was even asked", which points the agent at re-opening the PR through
+      // `create_pr` when the actual problem was a transient API error.
+      const reviews = await github.prReviewState(r, n).catch(() => null);
       return {
         number: pr.number,
         url: pr.url,
@@ -261,6 +408,8 @@ function makePrApprovalBinding(
         labels: pr.labels ?? [],
         checks: pr.checks,
         threads,
+        requestedReviewers: reviews?.requested ?? null,
+        submittedReviews: reviews?.reported ?? null,
       };
     },
     approve: async (n, repo, body) => github.approve(await requireRepo(repo), n, body, { chatId }),
@@ -880,6 +1029,12 @@ export class SessionBroker {
   private readonly projectConfig?: BrokerProjectConfig;
   /** Settable after construction — the scheduler is built after the broker. */
   onTurnError?: (chatId: string, reason: string | undefined) => void;
+  /**
+   * Hand a freshly-created PR to the review watcher. Settable after construction
+   * for the same reason as `onTurnError`: the watcher is built after the broker.
+   * Absent → `create_pr` says so out loud rather than implying it's watched.
+   */
+  armPrWatch?: (chatId: string, ref: PRRef) => void;
   private readonly query: QueryFn;
   private readonly genId: () => string;
   private readonly now: () => number;
@@ -2492,6 +2647,10 @@ export class SessionBroker {
     session.branch = wfCtx.branch;
     session.inWorktree = Boolean(session.worktreeCwd) || wfCtx.linked;
     const canApprovePr = Boolean(this.github) && workflow.autoMerge === "on-green";
+    // `create_pr` exists wherever change ships through a PR — the same condition
+    // the guard uses to refuse a raw `gh pr create`, so a refusal always has a
+    // sanctioned path to name.
+    const canCreatePr = Boolean(this.github) && workflow.requirePr;
 
     const appends: string[] = [];
     // Lead with the manager-tools directive so EVERY session (any project)
@@ -2505,6 +2664,8 @@ export class SessionBroker {
         runner: Boolean(this.runner && this.worktrees),
         mcpConfig: Boolean(session.projectId),
         prApproval: canApprovePr,
+        prCreate: canCreatePr,
+        prReviewers: workflow.pr.reviewers,
       }),
     );
     // The rendered contract itself comes next — before the project's own
@@ -2514,6 +2675,7 @@ export class SessionBroker {
       inWorktree: session.inWorktree,
       branch: session.branch,
       github: Boolean(this.github),
+      prCreate: canCreatePr,
       memory: Boolean(this.memory && session.projectId),
     });
     if (workflowDirective) appends.push(workflowDirective);
@@ -2685,7 +2847,23 @@ export class SessionBroker {
         // discouraged) everywhere else.
         prApproval:
           github && canApprovePr
-            ? makePrApprovalBinding(github, cwd, session.chatId, workflow.mergeMethod)
+            ? makePrApprovalBinding(github, cwd, session.chatId, workflow.mergeMethod, {
+                // The project's declared bar, resolved once and handed over — so
+                // what the human authored is exactly what gets enforced.
+                requireChecks: workflow.pr.requireChecks,
+                requireReview: workflow.pr.requireReview,
+              })
+            : undefined,
+        // The PR-CREATION surface — bound wherever change ships through a PR, so
+        // the guard's refusal of a raw `gh pr create` always has a path to name.
+        prCreate:
+          github && canCreatePr
+            ? makePrCreateBinding(github, cwd, session.chatId, {
+                trunk: session.trunk ?? "main",
+                reviewers: workflow.pr.reviewers,
+                draft: workflow.pr.draft,
+                arm: this.armPrWatch,
+              })
             : undefined,
         // Bind the subApp launcher to this session's project so `run_subapp` can
         // list/start/stop apps and resolve (or create) a worktree per branch.

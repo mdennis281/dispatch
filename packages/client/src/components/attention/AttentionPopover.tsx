@@ -1,4 +1,11 @@
-import { Inbox, ShieldQuestion, MessageCircleQuestion, CheckCircle2, ArrowRight } from "lucide-react";
+import {
+  Inbox,
+  ShieldQuestion,
+  MessageCircleQuestion,
+  CheckCircle2,
+  GitPullRequestArrow,
+  ArrowRight,
+} from "lucide-react";
 import type { AttentionItem } from "@dispatch/shared";
 import { Popover } from "../ui/Popover.js";
 import { Badge, Chip } from "../ui/Chip.js";
@@ -14,13 +21,22 @@ const KIND_META = {
   question: { icon: MessageCircleQuestion, tone: "accent" as const, label: "Question" },
   idle: { icon: Inbox, tone: "muted" as const, label: "Idle" },
   done: { icon: CheckCircle2, tone: "success" as const, label: "Done" },
+  // A review round landed on a PR this chat owns — see AttentionItemSchema.
+  review: { icon: GitPullRequestArrow, tone: "accent" as const, label: "Review" },
 };
 
 function AttentionRow({ item, onGo }: { item: AttentionItem; onGo: () => void }) {
   const chatTitle = useChats((s) => s.byId[item.chatId]?.title ?? "Chat");
   const M = KIND_META[item.kind];
   const Icon = M.icon;
-  const dotTone = item.kind === "permission" ? "warn" : item.kind === "question" ? "accent" : item.kind === "done" ? "success" : "muted";
+  const dotTone =
+    item.kind === "permission"
+      ? "warn"
+      : item.kind === "question" || item.kind === "review"
+        ? "accent"
+        : item.kind === "done"
+          ? "success"
+          : "muted";
   return (
     <button
       onClick={onGo}
@@ -31,7 +47,7 @@ function AttentionRow({ item, onGo }: { item: AttentionItem; onGo: () => void })
           "mt-px flex size-6 shrink-0 items-center justify-center rounded-md ring-1 [&_svg]:size-3.5",
           item.kind === "permission"
             ? "bg-warn-ghost text-warn ring-warn/25"
-            : item.kind === "question"
+            : item.kind === "question" || item.kind === "review"
               ? "bg-accent-ghost text-accent-hi ring-accent-line"
               : item.kind === "done"
                 ? "bg-success-ghost text-success ring-transparent"

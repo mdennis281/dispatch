@@ -21,6 +21,14 @@
  *     each new signal is reported exactly once, so an agent calling it in a loop
  *     (fix → watch again) never misses a later round of review comments and never
  *     hand-rolls a `gh pr view` / `gh pr checks` sleep loop or a background watcher.
+ *   - `mcp__manager__create_pr({ title?, body?, base?, draft? })` — OPEN the PR
+ *     (via {@link ManagerMcpPrCreate}): push with upstream, create, request the
+ *     reviewers the project's `workflow.pr.reviewers` declares, write a `PRRef`
+ *     onto this chat, and arm the review watcher. Offered whenever the workflow
+ *     has `requirePr`, which is the same condition under which the trunk guard
+ *     REFUSES a raw `gh pr create` — the two are deliberately symmetric with the
+ *     long-standing `gh pr merge` → `approve_pr` pair. Its refusals (on the
+ *     trunk, no commits, dirty tree, `hold`) each name an override argument.
  *   - `mcp__manager__approve_pr({ number, repo?, method?, note? })` — approve and
  *     MERGE a PR (via {@link ManagerMcpPrApproval}), but only after re-reading its
  *     state/checks/threads/labels and finding nothing blocking ({@link prLandingBlockers}).
@@ -195,6 +203,154 @@ export interface ManagerMcpGitHub {
   notePrMerged?(): void;
 }
 
+/* ---------------------------------------------------------------- create_pr */
+
+/**
+ * The branch state `create_pr` checks before opening anything. Mirrors
+ * {@link import("../github.js").PrCreatePreflight}; kept structural so this
+ * module stays decoupled from GitHubService.
+ */
+export interface PrCreateState {
+  branch: string | null;
+  trunk: string;
+  base: string;
+  /** null = we genuinely couldn't tell (no local base ref, shallow clone). */
+  aheadOfBase: number | null;
+  dirty: boolean;
+  /** A PR that already exists for this branch, if any. */
+  existing: { number: number; url: string; state: string; labels: string[] } | null;
+}
+
+/** The escape hatches a caller passes when it genuinely knows better. */
+export interface PrCreateOverrides {
+  allowTrunk?: boolean;
+  allowNoCommits?: boolean;
+  allowDirty?: boolean;
+  allowHold?: boolean;
+}
+
+/** One reason a PR may not be opened, with the sentence shown to the agent. */
+export interface PrCreateBlocker {
+  code: "detached" | "on-trunk" | "no-commits" | "dirty" | "hold";
+  detail: string;
+}
+
+/**
+ * Decide whether a branch may have a PR opened on it, and say exactly why not.
+ *
+ * Pure + exhaustive, exactly like {@link prLandingBlockers}: one complete list
+ * rather than one obstacle per round-trip.
+ *
+ * The owner's chosen posture here is **enforce, with an escape hatch** — so
+ * every refusal NAMES the argument that overrides it. A guard with no override
+ * is a guard that gets routed around the first time it's wrong (that's how the
+ * hand-rolled `gh pr create` happened in the first place); one that makes the
+ * override explicit and auditable gets used correctly instead.
+ *
+ * An existing PR is deliberately NOT a blocker — see the tool, which returns it.
+ */
+export function prCreateBlockers(
+  st: PrCreateState,
+  overrides: PrCreateOverrides = {},
+): PrCreateBlocker[] {
+  const blockers: PrCreateBlocker[] = [];
+
+  if (!st.branch) {
+    blockers.push({
+      code: "detached",
+      detail:
+        "This checkout is on a detached HEAD, so there's no branch to open a PR from. " +
+        "Check out a task branch first.",
+    });
+    // Everything below is about a named branch; piling on is just noise.
+    return blockers;
+  }
+  if (st.branch === st.trunk && !overrides.allowTrunk) {
+    blockers.push({
+      code: "on-trunk",
+      detail:
+        `You're on \`${st.trunk}\`, the protected trunk — a PR from the trunk to itself is ` +
+        "not the workflow. Get a task worktree and branch, then open the PR from there. " +
+        "Pass `allowTrunk: true` only if this repo genuinely PRs from its default branch.",
+    });
+  }
+  // `null` means the probe couldn't tell — don't block on a guess (same rule the
+  // trunk guard follows: a false positive is worse than a miss).
+  if (st.aheadOfBase === 0 && !overrides.allowNoCommits) {
+    blockers.push({
+      code: "no-commits",
+      detail:
+        `This branch has no commits that \`${st.base}\` doesn't already have, so the PR ` +
+        "would be empty. Commit your work first. Pass `allowNoCommits: true` to open it anyway.",
+    });
+  }
+  if (st.dirty && !overrides.allowDirty) {
+    blockers.push({
+      code: "dirty",
+      detail:
+        "The working tree has uncommitted changes — they would NOT be in the PR, so the " +
+        "reviewer would be reading a different change than the one you made. Commit them " +
+        "(or stash them) first, or pass `allowDirty: true` if leaving them out is deliberate.",
+    });
+  }
+  if (
+    st.existing?.labels.some((l) => l.toLowerCase() === MERGE_HOLD_LABEL) &&
+    !overrides.allowHold
+  ) {
+    blockers.push({
+      code: "hold",
+      detail:
+        `The existing PR for this branch carries the \`${MERGE_HOLD_LABEL}\` label — someone ` +
+        "parked it deliberately. Leave it alone and say so; pass `allowHold: true` only if " +
+        "the human just told you to proceed.",
+    });
+  }
+
+  return blockers;
+}
+
+/** What `create_pr` produced, for the summary it hands back to the agent. */
+export interface PrCreateResult {
+  number: number;
+  url: string;
+  branch: string;
+  base: string;
+  draft: boolean;
+  /** Reviewers actually requested. */
+  reviewersRequested: string[];
+  /** Reviewers the request FAILED for (bad login, no access, bot not installed). */
+  reviewersFailed: Array<{ reviewer: string; error: string }>;
+  /** Whether the PR was recorded on this chat (the ownership record). */
+  attached: boolean;
+  /** Whether the server-side review watcher is now watching it. */
+  watching: boolean;
+}
+
+/**
+ * The PR-CREATION surface, bound by the broker when the project's workflow has
+ * `requirePr`. This is the sanctioned path the guard redirects a raw
+ * `gh pr create` to, and it exists because every one of the things it does was
+ * something the hand-rolled command silently skipped:
+ *
+ *   push with upstream → create → REQUEST THE CONFIGURED REVIEWERS → record the
+ *   PR on this chat (`Chat.prs`, the ownership record) → ARM THE WATCHER.
+ */
+export interface ManagerMcpPrCreate {
+  /** Reviewers the project configured (`workflow.pr.reviewers`). */
+  reviewers: readonly string[];
+  /** Whether the project opens PRs as drafts by default. */
+  draft: boolean;
+  /** Fresh branch state; null = the repo couldn't be resolved from this session. */
+  preflight(base?: string): Promise<PrCreateState | null>;
+  /** Do all five steps. Throws with the underlying message when git/gh refuses. */
+  create(input: {
+    base?: string;
+    title?: string;
+    body?: string;
+    draft: boolean;
+  }): Promise<PrCreateResult>;
+}
+
 /**
  * Everything `approve_pr` needs to decide whether a PR may LAND — read fresh at
  * the moment of the call, never from what the session saw earlier. A merge
@@ -216,6 +372,35 @@ export interface PrReadiness {
   checks: CheckRun[];
   /** null = the threads couldn't be READ — a blocker, not an empty list. */
   threads: ReviewThread[] | null;
+  /**
+   * Reviewers with an OUTSTANDING request — asked, but they haven't reported.
+   * Distinct from "nobody was ever asked", which is a different failure.
+   *
+   * `null` = the review state couldn't be READ, exactly like {@link threads}.
+   * An unreadable state must not collapse into the empty list: empty means
+   * "nobody was asked", which sends the agent off to re-open the PR through
+   * `create_pr`, when the truth was a transient API failure (review caught
+   * this). Both review fields go null together — they come from one call.
+   */
+  requestedReviewers: string[] | null;
+  /** Reviews that have actually been SUBMITTED (author + state). `null` as above. */
+  submittedReviews: Array<{ author: string; state: string }> | null;
+}
+
+/**
+ * The project's landing policy, plus the per-call escape hatches. Passed in
+ * rather than read from a module global so {@link prLandingBlockers} stays pure
+ * and every combination is directly testable.
+ */
+export interface PrLandingPolicy {
+  /** `workflow.pr.requireChecks` — zero checks reported is NOT green. */
+  requireChecks?: boolean;
+  /** `workflow.pr.requireReview` — a requested reviewer must have reported. */
+  requireReview?: boolean;
+  /** Caller override: land anyway on a repo that reports no checks. */
+  allowNoChecks?: boolean;
+  /** Caller override: land anyway with nobody having reviewed. */
+  allowNoReview?: boolean;
 }
 
 /**
@@ -246,6 +431,12 @@ export interface ManagerMcpPrApproval {
   ): Promise<void>;
   /** The project's configured merge strategy (the agent may override per call). */
   defaultMethod: WorkflowMergeMethod;
+  /**
+   * The project's declared landing bar (`workflow.pr.requireChecks` /
+   * `requireReview`). Bound here rather than re-resolved in the tool so the
+   * config the human authored is the config that gets enforced.
+   */
+  policy: PrLandingPolicy;
 }
 
 /** One reason a PR may not be landed, with the sentence shown to the agent. */
@@ -259,7 +450,13 @@ export interface PrLandingBlocker {
     | "checks-pending"
     | "threads-unreadable"
     | "unresolved-threads"
-    | "conflict";
+    | "conflict"
+    /** `requireChecks` and NO check reported at all — green on no evidence. */
+    | "no-checks"
+    /** `requireReview` and no requested reviewer has reported yet. */
+    | "no-review"
+    /** `requireReview` and the review state couldn't be read — not the same as none. */
+    | "review-state-unreadable";
   detail: string;
 }
 
@@ -275,8 +472,20 @@ export interface PrLandingBlocker {
  * An unreadable thread list BLOCKS. Everywhere else in this file a failed read
  * degrades to "nothing new"; here it would mean merging over review comments we
  * simply couldn't see, so it's the one place that fails closed.
+ *
+ * Two of the rules exist because of a specific observed failure: on a repo with
+ * ZERO checks reporting, "CI is green" was trivially true, so `autoMerge:
+ * on-green` was a promise about nothing and this function would have waved a
+ * PR through that no machine and no human had looked at. `requireChecks`
+ * distinguishes "checks passed" from "no checks reported"; `requireReview`
+ * distinguishes "review is clean" from "nobody has looked yet". Both are
+ * overridable per call, because a repo that legitimately has no CI has to be
+ * able to say so out loud rather than by the absence of evidence.
  */
-export function prLandingBlockers(pr: PrReadiness): PrLandingBlocker[] {
+export function prLandingBlockers(
+  pr: PrReadiness,
+  policy: PrLandingPolicy = {},
+): PrLandingBlocker[] {
   const blockers: PrLandingBlocker[] = [];
 
   if (pr.state !== "open") {
@@ -327,6 +536,52 @@ export function prLandingBlockers(pr: PrReadiness): PrLandingBlocker[] {
         .map((c) => c.name)
         .join(", ")}. Call watch_pr until CI settles.`,
     });
+  }
+  // "No checks reported" is not "checks passed". Under `requireChecks` this repo
+  // said it expects CI to have an opinion, so an empty rollup means the evidence
+  // isn't in yet (a workflow that failed to trigger, a fork PR awaiting approval)
+  // — not that everything is fine.
+  if (policy.requireChecks && pr.checks.length === 0 && !policy.allowNoChecks) {
+    blockers.push({
+      code: "no-checks",
+      detail:
+        "No checks are reporting on this PR at all, so \"green\" here means nothing was " +
+        "ever run. This project's workflow sets `pr.requireChecks`. Either get CI to " +
+        "report on it, or pass `allowNoChecks: true` if this repo genuinely has no CI.",
+    });
+  }
+
+  if (policy.requireReview && !policy.allowNoReview) {
+    if (pr.submittedReviews === null || pr.requestedReviewers === null) {
+      // Same rule as `threads === null`: an unreadable state is its own blocker.
+      // Reporting it as "nobody was asked" would send the agent to re-open the
+      // PR through `create_pr` to fix a problem that was a transient API error.
+      blockers.push({
+        code: "review-state-unreadable",
+        detail:
+          "Couldn't read this PR's review state, so there's no way to tell whether anyone " +
+          "was asked or has reported. This project's workflow sets `pr.requireReview`. " +
+          "Try again in a moment.",
+      });
+    } else {
+      // Someone REPORTING is the bar — an outstanding request is the opposite of
+      // a review, and the failure this guards against is a PR called done while
+      // the reviewer had said nothing at all.
+      const reported = pr.submittedReviews.filter((r) => r.state !== "PENDING");
+      if (reported.length === 0) {
+        const waiting = pr.requestedReviewers.length
+          ? `Waiting on: ${pr.requestedReviewers.join(", ")}.`
+          : "No reviewer has even been requested — open it through `mcp__manager__create_pr` " +
+            "so the configured reviewers are asked.";
+        blockers.push({
+          code: "no-review",
+          detail:
+            "Nobody has reviewed this PR yet, and this project's workflow sets " +
+            `\`pr.requireReview\`. ${waiting} Pass \`allowNoReview: true\` only if the human ` +
+            "told you to land it unreviewed.",
+        });
+      }
+    }
   }
 
   if (pr.threads === null) {
@@ -424,6 +679,13 @@ export interface ManagerMcpContext {
    * PRESENCE is the permission.
    */
   prApproval?: ManagerMcpPrApproval;
+  /**
+   * PR-CREATION surface (omitted → no `create_pr` tool). Bound whenever the
+   * project's workflow has `requirePr`, which is the same condition the trunk
+   * guard uses to refuse a raw `gh pr create` — so the refusal always has
+   * somewhere to point.
+   */
+  prCreate?: ManagerMcpPrCreate;
   /** SubApp launcher for this session (omitted → no `run_subapp` tool). */
   runner?: ManagerMcpRunner;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
@@ -1048,6 +1310,182 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
+  const createPr = tool(
+    "create_pr",
+    "Open the pull request for the work in this chat — the ONLY sanctioned way to " +
+      "create a PR on this project. Do NOT run `gh pr create` yourself: that's " +
+      "refused, and it skips everything this does. In one call it pushes the branch " +
+      "with an upstream, opens the PR, REQUESTS THE REVIEWERS this project " +
+      "configured, records the PR on this chat, and arms the server-side watcher so " +
+      "review comments and failing checks come back to you instead of sitting unseen " +
+      "on a page nobody is looking at. It refuses on the mistakes that produce a " +
+      "useless PR — you're on the trunk, the branch has no commits, the tree is " +
+      "dirty, the branch's PR is on `hold` — and every refusal names the argument " +
+      "that overrides it if you genuinely know better. If a PR already exists for " +
+      "this branch it hands that one back rather than failing.",
+    {
+      title: z
+        .string()
+        .optional()
+        .describe("PR title. Omit to derive title+body from the branch's commits."),
+      body: z.string().optional().describe("PR body (markdown)."),
+      base: z
+        .string()
+        .optional()
+        .describe("Base branch to target; defaults to the project's trunk."),
+      draft: z
+        .boolean()
+        .optional()
+        .describe("Open as a draft. Defaults to the project's configured setting."),
+      allowTrunk: z
+        .boolean()
+        .optional()
+        .describe("Override: open the PR even though you're on the trunk branch."),
+      allowNoCommits: z
+        .boolean()
+        .optional()
+        .describe("Override: open the PR even with no commits ahead of the base."),
+      allowDirty: z
+        .boolean()
+        .optional()
+        .describe("Override: open the PR with uncommitted changes left out of it."),
+      allowHold: z
+        .boolean()
+        .optional()
+        .describe("Override: proceed even though this branch's PR carries `hold`."),
+    },
+    async (args): Promise<CallToolResult> => {
+      const prCreate = ctx.prCreate;
+      if (!prCreate) {
+        return textResult(
+          "The create_pr tool is not available in this session — this project's workflow " +
+            "doesn't ship change through pull requests.",
+          true,
+        );
+      }
+      const base =
+        typeof args.base === "string" && args.base.trim() ? args.base.trim() : undefined;
+
+      let st: PrCreateState | null;
+      try {
+        st = await prCreate.preflight(base);
+      } catch (e) {
+        return textResult(
+          `Could not inspect this branch: ${e instanceof Error ? e.message : String(e)}`,
+          true,
+        );
+      }
+      if (!st) {
+        return textResult(
+          "Could not resolve this chat's repo or branch, so there's nothing to open a PR " +
+            "from. Make sure the chat has a worktree.",
+          true,
+        );
+      }
+
+      // An existing PR is an ANSWER, not an error: the agent asked for "the PR for
+      // this branch to exist", and it does. Failing here would only push it back
+      // toward the raw `gh` command to find out what already happened.
+      if (st.existing && st.existing.state === "open") {
+        return textResult(
+          `PR #${st.existing.number} is already open for \`${st.branch}\` — reusing it ` +
+            `rather than opening a second one.\n${st.existing.url}\n` +
+            "Push more commits to update it, and use `mcp__manager__watch_pr` to follow " +
+            "review.\n" +
+            JSON.stringify({
+              number: st.existing.number,
+              url: st.existing.url,
+              created: false,
+              existing: true,
+            }),
+        );
+      }
+
+      const blockers = prCreateBlockers(st, {
+        allowTrunk: args.allowTrunk === true,
+        allowNoCommits: args.allowNoCommits === true,
+        allowDirty: args.allowDirty === true,
+        allowHold: args.allowHold === true,
+      });
+      if (blockers.length) {
+        // Not an error — "not like this" is a normal, expected answer, and each
+        // line already says which argument overrides it.
+        return textResult(
+          `Not opening a PR yet:\n` +
+            blockers.map((b) => `  · ${b.detail}`).join("\n") +
+            "\n\nFix these (or pass the named override) and call create_pr again.\n" +
+            JSON.stringify({ created: false, blockers: blockers.map((b) => b.code) }),
+        );
+      }
+
+      const draft = typeof args.draft === "boolean" ? args.draft : prCreate.draft;
+      ctx.bus.publish({
+        type: "chat-status",
+        chatId: ctx.chatId,
+        status: "running",
+        activity: {
+          state: "tool",
+          label: `opening PR from ${st.branch}`,
+          toolName: "create_pr",
+        },
+      });
+
+      let res: PrCreateResult;
+      try {
+        res = await prCreate.create({
+          base,
+          title: typeof args.title === "string" ? args.title : undefined,
+          body: typeof args.body === "string" ? args.body : undefined,
+          draft,
+        });
+      } catch (e) {
+        return textResult(
+          `Could not open the PR: ${e instanceof Error ? e.message : String(e)}`,
+          true,
+        );
+      }
+
+      const lines = [
+        `Opened PR #${res.number} — ${res.url}`,
+        `  · ${res.branch} → ${res.base}${res.draft ? " (draft)" : ""}`,
+      ];
+      if (res.reviewersRequested.length) {
+        lines.push(`  · review requested from ${res.reviewersRequested.join(", ")}`);
+      } else if (!prCreate.reviewers.length) {
+        // Say it out loud. Silence here is exactly how a PR ends up with nobody
+        // looking at it and everyone assuming somebody is.
+        lines.push(
+          "  · ⚠ no reviewers are configured for this project (`workflow.pr.reviewers` " +
+            "in `.dispatch/project.yaml`), so NOBODY has been asked to look at this",
+        );
+      }
+      for (const f of res.reviewersFailed) {
+        lines.push(`  · ⚠ could not request ${f.reviewer}: ${f.error}`);
+      }
+      lines.push(
+        res.attached
+          ? "  · recorded on this chat"
+          : "  · ⚠ could not record the PR on this chat",
+        res.watching
+          ? "  · watching for review activity — a new review, comment or failing check will " +
+              "come back to this chat on its own"
+          : "  · ⚠ the review watcher is not running; call `mcp__manager__watch_pr` yourself",
+      );
+      return textResult(
+        `${lines.join("\n")}\n\nNow call \`mcp__manager__watch_pr\` in a loop to work the ` +
+          `review round.\n` +
+          JSON.stringify({
+            number: res.number,
+            url: res.url,
+            created: true,
+            draft: res.draft,
+            reviewersRequested: res.reviewersRequested,
+            watching: res.watching,
+          }),
+      );
+    },
+  );
+
   const approvePr = tool(
     "approve_pr",
     "Approve and MERGE a pull request — the sanctioned way to land your own work " +
@@ -1076,6 +1514,20 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .string()
         .optional()
         .describe("Optional one-line body for the approving review (what you verified)."),
+      allowNoChecks: z
+        .boolean()
+        .optional()
+        .describe(
+          "Override: land it even though NO check reported. Only when this repo " +
+            "genuinely has no CI — say so in your report when you use it.",
+        ),
+      allowNoReview: z
+        .boolean()
+        .optional()
+        .describe(
+          "Override: land it even though nobody has reviewed. Only when the human " +
+            "told you to land it unreviewed.",
+        ),
     },
     async (args): Promise<CallToolResult> => {
       const approval = ctx.prApproval;
@@ -1112,7 +1564,11 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         );
       }
 
-      const blockers = prLandingBlockers(pr);
+      const blockers = prLandingBlockers(pr, {
+        ...approval.policy,
+        allowNoChecks: args.allowNoChecks === true,
+        allowNoReview: args.allowNoReview === true,
+      });
       if (blockers.length) {
         // Not an error — being told "not yet" is a normal, expected answer.
         const isDone = blockers.some((b) => b.code === "not-open");
@@ -1638,6 +2094,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     contextUsage,
     compactContext,
     watchPr,
+    createPr,
     approvePr,
     terminal,
     remember,
@@ -1663,6 +2120,7 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   context_usage: null,
   compact_context: null,
   watch_pr: "github",
+  create_pr: "prCreate",
   approve_pr: "prApproval",
   terminal: "terminals",
   remember: "memory",
@@ -1678,6 +2136,7 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
 export type ManagerToolBinding =
   | "github"
   | "prApproval"
+  | "prCreate"
   | "terminals"
   | "memory"
   | "runner"
@@ -1755,6 +2214,7 @@ export function createManagerMcpServer(
     contextUsage,
     compactContext,
     watchPr,
+    createPr,
     approvePr,
     terminal,
     remember,
@@ -1773,6 +2233,9 @@ export function createManagerMcpServer(
     contextUsage,
     compactContext,
     ...(ctx.github ? [watchPr] : []),
+    // Only on a project whose change ships through PRs — which is also the only
+    // place the guard refuses a raw `gh pr create`, so the two stay in step.
+    ...(ctx.prCreate ? [createPr] : []),
     // Only when the project opted into auto-merge — no binding, no way to merge.
     ...(ctx.prApproval ? [approvePr] : []),
     ...(ctx.terminals ? [terminal] : []),

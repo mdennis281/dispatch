@@ -57,6 +57,10 @@ export function registerMcpRoutes(app: FastifyInstance): void {
           // the same condition the broker binds on, so the catalog shows the
           // tool as unavailable on every project that hasn't turned it on.
           prApproval: !!services.github && resolveWorkflow(project).autoMerge === "on-green",
+          // …and `create_pr` exists wherever change ships through a PR, which is
+          // the same condition the broker binds on AND the same one under which
+          // the trunk guard refuses a raw `gh pr create`.
+          prCreate: !!services.github && resolveWorkflow(project).requirePr,
           // The MCP-config tools only need the project's repo path, which every
           // project has — so they're offered wherever the catalog is viewable.
           mcpConfig: !!project.repoPath,

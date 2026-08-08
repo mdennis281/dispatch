@@ -45,6 +45,7 @@ describe("mcp-catalog — builder", () => {
       bindings: {
         github: true,
         prApproval: true,
+        prCreate: true,
         terminals: true,
         memory: true,
         runner: true,
@@ -65,6 +66,7 @@ describe("mcp-catalog — builder", () => {
         "wait",
         "wait_for_chat",
         "watch_pr",
+        "create_pr",
         "approve_pr",
         "terminal",
         "remember",
@@ -126,6 +128,19 @@ describe("mcp-catalog — builder", () => {
       bindings: { github: true, prApproval: true },
     });
     expect(on.servers[0]!.tools.find((t) => t.name === "approve_pr")!.available).toBe(true);
+  });
+
+  it("offers create_pr only where change ships through a PR", async () => {
+    // Same rule the trunk guard uses to refuse a raw `gh pr create`, so a
+    // refusal never points at a tool the session doesn't have.
+    const off = await buildProjectMcpCatalog(makeProject(), {
+      bindings: { github: true, prCreate: false },
+    });
+    expect(off.servers[0]!.tools.find((t) => t.name === "create_pr")!.available).toBe(false);
+    const on = await buildProjectMcpCatalog(makeProject(), {
+      bindings: { github: true, prCreate: true },
+    });
+    expect(on.servers[0]!.tools.find((t) => t.name === "create_pr")!.available).toBe(true);
   });
 
   it("reports an external server that fails to connect as status:error (endpoint intact)", async () => {

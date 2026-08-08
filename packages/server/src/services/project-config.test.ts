@@ -776,3 +776,53 @@ describe("ProjectConfigService — MCP server ${VAR} expansion", () => {
     }
   });
 });
+
+/* ------------------------------------------------- workflow coherence check */
+
+describe("ProjectConfigService — vacuous auto-merge warning", () => {
+  /** Write a manifest with the given `workflow:` YAML body. */
+  const manifest = (workflow: string) =>
+    writeConfig("project.yaml", `name: P\nworkflow:\n${workflow}`);
+
+  it("warns when `on-green` has neither CI nor reviewers to be green ABOUT", async () => {
+    // The failure this catches: a repo where zero checks report, so "green" is
+    // trivially true and auto-merge would land every PR on no evidence at all.
+    await manifest("  profile: review\n  autoMerge: on-green\n");
+    const svc = new ProjectConfigService({ store, bus, watch: () => null });
+    const res = await svc.load(await seedProject());
+
+    const warn = res.errors.find((e) => /vacuous/.test(e.message));
+    expect(warn).toBeDefined();
+    expect(warn!.scope).toBe("manifest");
+    expect(warn!.message).toMatch(/workflow\.pr\.reviewers/);
+    // Non-fatal: the config still loads in full.
+    expect(res.config?.name).toBe("P");
+  });
+
+  it("stays quiet once the repo has a CI workflow", async () => {
+    await manifest("  profile: review\n  autoMerge: on-green\n");
+    await mkdir(join(repoDir, ".github", "workflows"), { recursive: true });
+    await writeFile(join(repoDir, ".github", "workflows", "ci.yml"), "name: ci\n", "utf8");
+
+    const svc = new ProjectConfigService({ store, bus, watch: () => null });
+    const res = await svc.load(await seedProject());
+    expect(res.errors.filter((e) => /vacuous/.test(e.message))).toEqual([]);
+  });
+
+  it("stays quiet once reviewers are configured", async () => {
+    // A reviewer reporting is evidence too — CI isn't the only kind.
+    await manifest(
+      "  profile: review\n  autoMerge: on-green\n  pr:\n    reviewers: [copilot-pull-request-reviewer]\n",
+    );
+    const svc = new ProjectConfigService({ store, bus, watch: () => null });
+    const res = await svc.load(await seedProject());
+    expect(res.errors.filter((e) => /vacuous/.test(e.message))).toEqual([]);
+  });
+
+  it("stays quiet when auto-merge is off — there's nothing to be vacuous", async () => {
+    await manifest("  profile: review\n");
+    const svc = new ProjectConfigService({ store, bus, watch: () => null });
+    const res = await svc.load(await seedProject());
+    expect(res.errors.filter((e) => /vacuous/.test(e.message))).toEqual([]);
+  });
+});

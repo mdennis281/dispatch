@@ -56,6 +56,9 @@ const KIND_META: Record<
   question: { title: "Question", sticky: true },
   idle: { title: "Waiting for input", sticky: false },
   done: { title: "Task done", sticky: false },
+  // Sticky: a review round that vanishes off the notification centre before you
+  // look is the exact failure the `review` kind was added to fix.
+  review: { title: "PR review activity", sticky: true },
 };
 
 const ICON = "/icons/icon-192.png";
