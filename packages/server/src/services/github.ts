@@ -18,6 +18,7 @@
  * - execa is injectable (`deps.exec`) so tests assert exact argv construction and
  *   drive JSON parsing without any real `gh`/network calls.
  */
+import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { execa } from "execa";
 import { parse as parseYaml } from "yaml";
@@ -484,6 +485,34 @@ export class GitHubService {
       { cwd },
     );
     return this.assertRepo(out.trim());
+  }
+
+  /**
+   * Are two directories checkouts of the SAME repository (any worktree of it)?
+   *
+   * `--git-common-dir` rather than a path-prefix test, deliberately: every linked
+   * worktree shares one common dir wherever it physically sits, so this both
+   * ACCEPTS a worktree parked outside the repo and REJECTS an unrelated repo
+   * nested inside it. A prefix test gets each of those backwards.
+   *
+   * Never throws — an unreadable or non-git directory is simply "no".
+   */
+  async sameRepository(a: string, b: string): Promise<boolean> {
+    const commonDir = async (dir: string): Promise<string | null> => {
+      const r = await this.exec(
+        "git",
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        { cwd: dir, reject: false },
+      ).catch(() => null);
+      if (!r || r.exitCode !== 0) return null;
+      const out = r.stdout.trim();
+      if (!out) return null;
+      // Resolve symlinks: on macOS a temp dir reached two ways is the same repo
+      // but two different strings, and this comparison decides whether a PR opens.
+      return await realpath(out).catch(() => resolve(out));
+    };
+    const [x, y] = await Promise.all([commonDir(a), commonDir(b)]);
+    return !!x && !!y && x === y;
   }
 
   /** owner/repo for a project (from its checkout). */
