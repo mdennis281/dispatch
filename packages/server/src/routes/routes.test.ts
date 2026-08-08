@@ -231,8 +231,12 @@ describe("routes — REST CRUD", () => {
   });
 
   it("health, project + chat CRUD, messages, attention snapshot", async () => {
+    // Only the environment-independent half is asserted here: whether the SPA
+    // shell is on disk depends on whether the client happens to have been
+    // built, and app.test.ts drives both sides of that deliberately.
     const health = await app.inject({ method: "GET", url: "/api/health" });
-    expect(health.json()).toEqual({ ok: true });
+    expect(health.json().store).toBe(true);
+    expect(health.json().pid).toBe(process.pid);
 
     const projectId = await makeProject();
     const projects = await app.inject({ method: "GET", url: "/api/projects" });
