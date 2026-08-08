@@ -78,6 +78,7 @@ import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
 import { bundledSkills } from "./bundled-skills.js";
 import { buildWorkflowDirective, createWorkflowGuardHook, inspectCwd } from "./workflow.js";
+import { AgentCwdTracker } from "./agent-cwd.js";
 import { claudeExecutableOption } from "./runtime.js";
 
 /**
@@ -922,6 +923,14 @@ interface LiveSession {
    * back from that to the run whose effort it just reported.
    */
   threadOfTool: Map<string, string>;
+  /**
+   * Where each thread is working on disk, and the guard that keeps a subagent
+   * out of another task's worktree. Created on the first turn and kept for the
+   * life of the session — a background subagent outlives the turn that spawned
+   * it, which is precisely how the 2026-08-07 stray writes happened (see
+   * `agent-cwd.ts`).
+   */
+  cwdTracker?: AgentCwdTracker;
   sessionId?: string;
   /**
    * The project's resolved workflow contract, plus what `buildOptions` learned
@@ -2420,6 +2429,92 @@ export class SessionBroker {
     };
   }
 
+  /**
+   * PreToolUse guard: keep a subagent writing in the worktree it started in.
+   *
+   * WHY (2026-08-07). Five background subagents shared one session; the main
+   * loop called `EnterWorktree` to go commit one of their branches, and because
+   * `cwd` is session-scoped in the SDK — not per-thread — the others went with
+   * it. Two edits landed on the wrong branch and were nearly committed by a
+   * `git add -A`. The full account, and why refusing is the strongest thing
+   * available on this side, is in `agent-cwd.ts`.
+   *
+   * A hook rather than `canUseTool` for the same reason the workflow guard is
+   * one: it still fires under `bypassPermissions`, which is the posture the
+   * incident happened in.
+   */
+  private agentCwdGuardHook(session: LiveSession): HookCallback {
+    return async (input: HookInput): Promise<HookJSONOutput> => {
+      const tracker = session.cwdTracker;
+      const i = input as {
+        cwd?: string;
+        agent_id?: string;
+        tool_use_id?: string;
+        tool_name?: string;
+        tool_input?: unknown;
+      };
+      if (!tracker || typeof i.cwd !== "string" || !i.tool_name) return {};
+      // Same correlation the effort observer uses: a subagent's call carries
+      // `agent_id`, and the RUN it belongs to is recovered from the tool_use id.
+      // When that lookup misses (a hook that beat its own row, an id we trimmed)
+      // fall back to `agent_id` itself — still one key per thread, just one the
+      // spawn map can't reach, so the call is tracked rather than dropped.
+      const thread = i.agent_id
+        ? (i.tool_use_id ? session.threadOfTool.get(i.tool_use_id) : undefined) ??
+          `agent:${i.agent_id}`
+        : MAIN_THREAD;
+      const refusal = await tracker.observe({
+        thread,
+        toolName: i.tool_name,
+        cwd: i.cwd,
+        input: (i.tool_input ?? {}) as Record<string, unknown>,
+      });
+      if (!refusal) return {};
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: refusal.reason,
+        },
+      } as unknown as HookJSONOutput;
+    };
+  }
+
+  /**
+   * The per-session cwd tracker, created once and kept (background subagents
+   * outlive the turn that spawned them). `parentOf` is `threadOfTool` read in
+   * the other direction: a child run's id IS the `Agent` tool_use id its spawner
+   * issued, so looking that id up yields the spawning run.
+   */
+  private ensureCwdTracker(session: LiveSession): AgentCwdTracker {
+    session.cwdTracker ??= new AgentCwdTracker({
+      mainThread: MAIN_THREAD,
+      parentOf: (thread) => session.threadOfTool.get(thread),
+      onDisplaced: (loc) => {
+        this.bus.publish({
+          type: "notice",
+          chatId: session.chatId,
+          level: "warn",
+          text:
+            `A subagent's working directory moved: it started in ${loc.pinned} and is ` +
+            `now in ${loc.current}. Check which branch its work is landing on before ` +
+            `you commit.`,
+        });
+      },
+      onRefused: (loc, refusal) => {
+        this.bus.publish({
+          type: "notice",
+          chatId: session.chatId,
+          level: "warn",
+          text:
+            `Blocked: a subagent tried to write into ${refusal.attempted}, which is a ` +
+            `different worktree from the ${loc.pinned} it started in.`,
+        });
+      },
+    });
+    return session.cwdTracker;
+  }
+
   /** Remember which thread issued a tool call, FIFO-trimmed for long sessions. */
   private noteToolThread(
     session: LiveSession,
@@ -2594,6 +2689,20 @@ export class SessionBroker {
       PreToolUse: [
         ...(options.hooks?.PreToolUse ?? []),
         { hooks: [this.observeEffortHook(session)] },
+      ],
+    };
+
+    // …and keep each subagent writing where it started. No matcher, because the
+    // guard has to SEE every call to know where a thread is before it can judge
+    // a write — a `Bash` that `cd`s into another worktree is the move that
+    // matters, even though only the write that follows is refused. See
+    // `agentCwdGuardHook` for the incident this exists for.
+    this.ensureCwdTracker(session);
+    options.hooks = {
+      ...options.hooks,
+      PreToolUse: [
+        ...(options.hooks?.PreToolUse ?? []),
+        { hooks: [this.agentCwdGuardHook(session)] },
       ],
     };
 

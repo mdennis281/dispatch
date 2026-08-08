@@ -45,6 +45,32 @@ export const useRunners = create<RunnersStore>((set) => ({
     }),
 }));
 
+/**
+ * Does this runner belong on THIS chat's Apps tab?
+ *
+ * `chatId` on a runner is a provenance tag, not ownership — nothing on the
+ * server keys lifecycle off it (a runner outlives the chat that started it and
+ * is only stopped explicitly or by `runner.stopAll()` at shutdown). The
+ * Sidebar's Apps section is deliberately project-scoped and launches with no
+ * chatId at all, which put those runners in exactly NO panel: the sidebar's own
+ * rows find them by branch, but the right panel filtered on
+ * `chatId === chat.id` and dropped them, so the logs, the URL, the port and
+ * even Stop were unreachable for a subApp the user had just started from the
+ * sidebar two seconds earlier.
+ *
+ * Hence: this chat's own runners PLUS the project-level ones. A runner owned by
+ * a DIFFERENT chat stays out — it already has a panel of its own, and pulling
+ * it in here would turn every chat's Apps tab into the same global list.
+ */
+export function belongsToChat(
+  r: RunnerInstance,
+  chatId: string,
+  projectId: string | undefined,
+): boolean {
+  if (r.chatId) return r.chatId === chatId;
+  return !!projectId && r.projectId === projectId;
+}
+
 /** Selector: runners scoped to a chat (right-panel "Apps"). */
 export function useChatRunners(chatId: string | null): RunnerInstance[] {
   return useRunners(
