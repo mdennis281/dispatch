@@ -50,6 +50,16 @@ import {
   type LaunchTarget,
 } from "../panels/useLauncher.js";
 
+/**
+ * The build stamp Vite's `define` inlines (see vite.config.ts). The `typeof`
+ * guard is the one form that is safe when the identifier is UNDECLARED — which
+ * it is under the client's vitest config, a deliberately plugin-free node
+ * runner that never loads vite.config.ts. Reading the bare name there would be
+ * a ReferenceError, so a JSX test of this component would fail on the version
+ * line rather than on whatever it meant to assert.
+ */
+const BUILD_VERSION = typeof __BUILD_VERSION__ === "string" ? __BUILD_VERSION__ : "dev";
+
 const SUBAPP_ICON: Record<string, LucideIcon> = {
   game: Gamepad2,
   "metrics-server": Database,
@@ -626,9 +636,9 @@ export function Sidebar() {
             installed app (4318) disagree. */}
         <p
           className="cm-mono mt-2 text-center !text-[9.5px] text-faint"
-          title="Build version (UTC): yyyy.mm.dd.seconds-into-day"
+          title="Build version (UTC) — yyyy.mm.dd.sssss, where sssss is the seconds elapsed since UTC midnight"
         >
-          {__BUILD_VERSION__}
+          {BUILD_VERSION}
         </p>
       </div>
 
