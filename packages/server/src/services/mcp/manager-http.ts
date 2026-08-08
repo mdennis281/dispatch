@@ -125,9 +125,12 @@ export class ManagerMcpBridge {
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     // Closing the transport must also close the server, or the pair leaks for
     // the lifetime of the process.
+    // Both `.catch`ed: closing an already-torn-down stream rejects, and from a
+    // socket 'close' handler there is no caller to receive that — it surfaced as
+    // an unhandled rejection and killed the process.
     res.on("close", () => {
-      void transport.close();
-      void instance.close();
+      void transport.close().catch(() => {});
+      void instance.close().catch(() => {});
     });
     await instance.connect(transport);
     await transport.handleRequest(req, res, body);

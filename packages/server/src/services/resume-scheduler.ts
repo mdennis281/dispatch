@@ -151,7 +151,13 @@ export class ResumeScheduler {
     // never — that's the "server was down when the window reopened" case.
     const delay = Math.max(0, plan.at - this.now());
     const handle = this.setTimer(() => {
-      const p = this.fire(chatId).finally(() => this.inflight.delete(p));
+      // `.catch` BEFORE `.finally`: `fire` → `patch` does unguarded store reads,
+      // writes and a bus publish, and this runs from a timer callback with no
+      // caller. `drain()` only attaches a handler on dispose, so until then a
+      // rejection here was an unhandled one — i.e. fatal to the process.
+      const p = this.fire(chatId)
+        .catch(() => {})
+        .finally(() => this.inflight.delete(p));
       this.inflight.add(p);
     }, Math.min(delay, MAX_TIMER_MS));
     this.timers.set(chatId, handle);

@@ -1,0 +1,87 @@
+# .dispatch/ — self-contained, committable Dispatch config for this repo.
+# Discovered + loaded by Dispatch as the SOURCE OF TRUTH for authored config;
+# .data keeps only runtime state (chats, sessions, checkpoints). Safe to commit.
+#
+# NO SECRETS IN HERE — this file is committed. Use `${VAR}` placeholders, which
+# are expanded from the manager process's environment when a session starts.
+#
+# `memory/` alongside it is gitignored (see .gitignore); this manifest, the
+# instructions and the skills are not, because the sub-app commands below point
+# at files in this repo and config that lags the code it references just fails.
+name: Dispatch
+# Relative, so it survives being committed: resolved against the repo root (see
+# WorktreeService / github.ts), which lands on the same directory the absolute
+# path did — without baking one machine's home directory into a public file.
+# Already gitignored, so the worktrees themselves stay out of every diff.
+worktreeRoot: .worktrees
+workflow:
+  profile: review
+  autoMerge: on-green
+
+instructions:
+  - file: house-rules.md
+
+# Three independently runnable things. Ports are offset per launch, so the dev
+# server takes its port through DISPATCH_PORT rather than assuming 4319 — the
+# runner sets a bare `PORT` too, but this server reads DISPATCH_PORT (config.ts
+# `envVar`), so the env mapping is what actually lands.
+subApps:
+  - id: dev-server
+    name: Dev server (SPA + API + HMR, one port)
+    cwd: .
+    install: pnpm install
+    dev: pnpm dev
+    build: pnpm build
+    # Root `test` runs shared + cli + server. The client package has its own
+    # vitest + playwright suites that this deliberately does not run.
+    test: pnpm test
+    ports: [4319]
+    env:
+      DISPATCH_PORT: "{port}"
+      # These three are CLEARED, not set, and that is the whole point.
+      #
+      # A subApp launched from inside Dispatch inherits the launching instance's
+      # environment. The stable app is started by launch.py with
+      # DISPATCH_DATA_DIR / DISPATCH_CONFIG_DIR pointing at
+      # %LOCALAPPDATA%\claude-manager\{data,config} and DISPATCH_IPC=1 — so
+      # without these, `pnpm dev` here comes up pointed at PRODUCTION's state
+      # dir. Verified, not theorised: it did exactly that on the first run.
+      #
+      # Two processes on one data dir is the failure the whole data/config split
+      # exists to prevent — checkpoints.json and runners.json are whole-file
+      # read-modify-write maps under an in-process mutex, so they'd silently eat
+      # each other's writes and cost the stable instance its rollback points.
+      #
+      # Empty string reads as unset (config.ts treats a falsy value as absent),
+      # which restores the default: `.data` beside the nearest
+      # pnpm-workspace.yaml — i.e. per-worktree, which is what the Runner wants.
+      DISPATCH_DATA_DIR: ""
+      DISPATCH_CONFIG_DIR: ""
+      # Inherited DISPATCH_IPC=1 makes the server treat "stdin closed" as a
+      # shutdown request, so it dies the moment its launcher's pipe goes away.
+      DISPATCH_IPC: "0"
+    url: http://localhost:{port}
+
+  - id: backsync
+    name: Backsync chats from the stable app
+    cwd: .
+    # One-shot, not a server: it exits when the sync is done. Prod -> dev only;
+    # the stable instance is never written to. --dry-run first if unsure.
+    #
+    # The destination defaults to `.data` beside the script's own checkout — so
+    # launched against a WORKTREE it fills that worktree's store, matching what
+    # the dev-server subApp above would run there. To load the main checkout's
+    # dev instance instead, pass it explicitly:
+    #   node tools/app/backsync.mjs --to C:/Users/Michael/projects/claude-manager/.data
+    dev: node tools/app/backsync.mjs
+
+  - id: self-upgrade
+    name: Self-upgrade the stable app (restarts it)
+    cwd: .
+    # Builds the new payload in staging while the stable app keeps serving, then
+    # hands off to a DETACHED swap that stops it, swaps, restarts and health-
+    # checks — rolling back by itself if the new build fails. Safe to run from
+    # inside Dispatch: the swap deliberately outlives the server that kills it.
+    # `--status` reports where a swap got to; `--dry-run` plans without touching
+    # anything.
+    dev: node tools/app/upgrade.mjs

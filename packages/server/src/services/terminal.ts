@@ -38,6 +38,12 @@ import type { EventBus } from "../bus.js";
 export interface ShellStdin {
   write(chunk: string): void;
   end?(): void;
+  /**
+   * Optional because the test fakes are plain objects, but a REAL stdin is an
+   * emitter that reports EPIPE / ERR_STREAM_DESTROYED asynchronously — and an
+   * unlistened 'error' event is an uncaught exception that kills the server.
+   */
+  on?(event: "error", listener: (err: Error) => void): void;
 }
 
 /** The minimal readable stream surface we consume (stdout/stderr). */
@@ -265,6 +271,11 @@ export class TerminalService {
     proc.stderr.on("data", (c) => this.onData(term, "stderr", c.toString()));
     proc.on("error", () => this.onExit(term));
     proc.on("exit", () => this.onExit(term));
+    // stdin is its own emitter: writing to a shell that has already died raises
+    // EPIPE/ERR_STREAM_DESTROYED ASYNCHRONOUSLY, which the try/catch around the
+    // `.write()` calls in `run` cannot see. Unlistened, that 'error' event is an
+    // uncaught exception — a dead terminal would have taken the server with it.
+    proc.stdin.on?.("error", () => this.onExit(term));
 
     this.publishUpdate(term);
     return term;
