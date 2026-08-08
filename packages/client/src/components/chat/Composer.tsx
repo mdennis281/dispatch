@@ -14,7 +14,6 @@ import {
 import {
   Paperclip,
   ArrowUp,
-  Gauge,
   Bot,
   Map as MapIcon,
   Zap,
@@ -52,6 +51,7 @@ import { FilePathPicker } from "./FilePathPicker.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Button } from "../ui/Button.js";
 import { Select, type SelectOption } from "../ui/Select.js";
+import { EffortGauge } from "../ui/EffortGauge.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { Chip } from "../ui/Chip.js";
 import { Tooltip } from "../ui/Tooltip.js";
@@ -1039,7 +1039,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                 options={EFFORT_OPTIONS}
                 value={chat.effort}
                 onChange={setEffort}
-                leftIcon={<Gauge />}
+                leftIcon={<EffortGauge effort={chat.effort} />}
                 label="effort"
                 width={172}
                 compact={compact}
