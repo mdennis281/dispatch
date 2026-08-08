@@ -7,7 +7,8 @@
  *   2. if the subApp declares a `dockerCompose` file, runs `docker compose up -d`
  *      in that file's directory FIRST;
  *   3. spawns `subApp.dev` (via a shell) in `worktreePath/subApp.path` with `PORT`
- *      injected, registering a `RunnerInstance` in `runners.json`;
+ *      injected and the manager's own env stripped (see MANAGER_ENV_VARS),
+ *      registering a `RunnerInstance` in `runners.json`;
  *   4. streams stdout/stderr line-by-line as `runner-log` bus events and keeps a
  *      bounded in-memory ring for `logs(id)`.
  *
@@ -32,6 +33,90 @@ import type {
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
+import { envNames } from "../config.js";
+
+/* ------------------------------------------------------- manager env quarantine */
+
+/**
+ * Config suffixes that identify THIS manager process, stripped from every
+ * subApp's inherited environment by {@link scrubManagerEnv}.
+ *
+ * WHY: the installed app is started by `tools/app/launch.py`, which exports
+ * `DISPATCH_IPC=1`, `DISPATCH_PORT`, `DISPATCH_DATA_DIR` and
+ * `DISPATCH_CONFIG_DIR` into the server's environment. Everything the server
+ * spawns inherits them, so starting this repo's own `dev-server` subApp from the
+ * Runner brought a SECOND Dispatch up on the INSTALLED instance's data dir —
+ * confirmed from the dev server's own boot line. `runners.json` and
+ * `checkpoints.json` are whole-file read-modify-write maps guarded only by an
+ * in-process KeyedMutex (see `store/index.ts`), so the two processes silently
+ * dropped each other's writes: state corruption in the instance the user trusts
+ * with long runs, with no error anywhere. The inherited `DISPATCH_IPC=1` was the
+ * second half of it — the child read its launcher's closed stdin as a
+ * `shutdown` (see `shutdown.ts`) and died the moment that pipe went away.
+ *
+ * The list is exactly the "Config (env)" table in RUNNING.md: everything
+ * `loadConfig()` reads, plus the two lifecycle vars. Every one of them answers
+ * "WHICH manager is this?", and none of them can be answered for a child by
+ * copying the parent:
+ *   - `DATA_DIR` / `CONFIG_DIR` — the state and config roots; the incident above.
+ *   - `HOME` — the deployment root the other two are DERIVED from
+ *     (`tools/app/paths.mjs`), so leaking it re-creates the same incident for
+ *     anything that resolves its own paths rather than reading them.
+ *   - `PORT` — a nested Dispatch would try to bind the port this one is already
+ *     serving on. (The allocated port is injected as plain `PORT` below.)
+ *   - `HOST` / `MAX_ACTIVE_SESSIONS` — this instance's bind address and
+ *     concurrency policy, meaningless as a default for someone else's process.
+ *   - `IPC` — turns "stdin closed" into "shut down"; see above.
+ *
+ * Deliberately NOT scrubbed, because they describe the MACHINE or the user and a
+ * subApp has every right to inherit them: `DISPATCH_CLAUDE_PATH` /
+ * `DISPATCH_CODEX_PATH` (where those CLIs live on this box), `DISPATCH_THEME` (a
+ * UI preference), `DISPATCH_FAKE_SDK` (a harness switch that must reach nested
+ * test runs). `DISPATCH_MANAGER_MCP_TOKEN` looks like it belongs here but does
+ * not: it is minted per session directly into one child's env and is never set
+ * on the manager's own environment, so there is nothing to inherit. And PATH,
+ * the user's HOME, git/gh credentials and everything else pass through
+ * untouched — this is a quarantine of a handful of names, not a sanitised env.
+ */
+export const MANAGER_ENV_SUFFIXES = [
+  "DATA_DIR",
+  "CONFIG_DIR",
+  "HOME",
+  "PORT",
+  "HOST",
+  "IPC",
+  "MAX_ACTIVE_SESSIONS",
+] as const;
+
+/**
+ * Both spellings of each suffix, derived from `config.ts`'s own prefix list so
+ * the scrub can never drift from what `envVar()` actually reads. Scrubbing only
+ * the `DISPATCH_*` names would leave `CM_DATA_DIR` — still set by start-menu
+ * shortcuts created before the rename, and still honoured as a fallback — to
+ * reproduce the incident above verbatim.
+ */
+export const MANAGER_ENV_VARS: readonly string[] =
+  MANAGER_ENV_SUFFIXES.flatMap(envNames);
+
+const MANAGER_ENV_KEYS = new Set(MANAGER_ENV_VARS.map((n) => n.toLowerCase()));
+
+/**
+ * Copy an environment, dropping the manager's own identity vars.
+ *
+ * Matched case-insensitively: Windows environment names are case-insensitive and
+ * `process.env` reproduces that, but the plain object we build here does not — a
+ * `cm_data_dir` left by an old shortcut would survive an exact-match scrub and
+ * still be found by the child's `process.env.CM_DATA_DIR`.
+ */
+export function scrubManagerEnv(parent: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parent)) {
+    if (value === undefined) continue; // an unset var, not an empty one
+    if (MANAGER_ENV_KEYS.has(key.toLowerCase())) continue;
+    out[key] = value;
+  }
+  return out;
+}
 
 /* ----------------------------------------------------------- injectable seams */
 
@@ -46,7 +131,12 @@ export interface ChildLike {
 
 export interface SpawnOptions {
   cwd: string;
-  /** Extra env overlaid on the parent env (e.g. `PORT`). */
+  /**
+   * The child's COMPLETE environment — the manager's env with
+   * {@link MANAGER_ENV_VARS} removed, plus `PORT` and the manifest's `env`. Not
+   * an overlay: an implementation must NOT re-extend it with its own
+   * `process.env`, or the scrubbed vars come straight back.
+   */
   env: Record<string, string>;
 }
 
@@ -57,7 +147,11 @@ export interface RunOnceResult {
   exitCode?: number | undefined;
 }
 
-/** Runs a one-shot command to completion (docker compose up/down). */
+/**
+ * Runs a one-shot command to completion (docker compose up/down). `env`, when
+ * given, is the COMPLETE environment (same contract as {@link SpawnOptions});
+ * omitting it inherits the manager's env unchanged.
+ */
 export type RunOnceFn = (
   file: string,
   args: string[],
@@ -82,6 +176,8 @@ export interface RunnerDeps {
   genId?: () => string;
   /** Max stdout/stderr lines retained per runner for `logs()`. */
   maxLogLines?: number;
+  /** Env a child starts from, before scrubbing + overlay. Injectable for tests. */
+  parentEnv?: NodeJS.ProcessEnv;
 }
 
 /** One captured output line, returned by `logs()`. */
@@ -98,6 +194,10 @@ const defaultSpawn: SpawnFn = (command, opts) => {
     shell: true,
     cwd: opts.cwd,
     env: opts.env,
+    // `opts.env` is already the full environment, scrubbed of the manager's own
+    // DISPATCH_*/CM_* vars. execa's default would re-merge `process.env` over
+    // the top and hand every one of them back to the child.
+    extendEnv: false,
     buffer: false,
     reject: false,
     // `ignore`, NOT the execa default `pipe`: a long-running dev server never
@@ -116,7 +216,10 @@ const defaultSpawn: SpawnFn = (command, opts) => {
 const defaultRunOnce: RunOnceFn = async (file, args, opts) => {
   const res = await execa(file, args, {
     cwd: opts.cwd,
-    env: opts.env,
+    // Same contract as defaultSpawn — but only when an env was supplied, since
+    // `extendEnv:false` with no env would hand docker an EMPTY environment (no
+    // PATH, no DOCKER_HOST) rather than an inherited one.
+    ...(opts.env ? { env: opts.env, extendEnv: false as const } : {}),
     reject: false,
     buffer: true,
     stdout: "pipe",
@@ -219,6 +322,7 @@ export class RunnerService {
   private readonly now: () => number;
   private readonly genId: () => string;
   private readonly maxLogLines: number;
+  private readonly parentEnv: NodeJS.ProcessEnv;
 
   private readonly live = new Map<string, LiveRunner>();
 
@@ -233,6 +337,7 @@ export class RunnerService {
     this.now = deps.now ?? (() => Date.now());
     this.genId = deps.genId ?? (() => nanoid());
     this.maxLogLines = deps.maxLogLines ?? 2000;
+    this.parentEnv = deps.parentEnv ?? process.env;
   }
 
   /* --------------------------------------------------------------- lifecycle */
@@ -343,11 +448,22 @@ export class RunnerService {
     // placeholders substituted) is overlaid on top so a tool that reads a
     // differently-named var — Vite's `CLIENT_PORT`, a server's `SERVER_PORT` —
     // gets its port too, and can even override `PORT`.
-    const portEnv: Record<string, string> =
+    const overlay: Record<string, string> =
       primary !== undefined ? { PORT: String(primary) } : {};
     for (const [key, value] of Object.entries(subApp.env ?? {})) {
-      portEnv[key] = substitutePorts(value, ports);
+      overlay[key] = substitutePorts(value, ports);
     }
+
+    // The child's whole environment: what we inherited MINUS the manager's own
+    // identity vars (see MANAGER_ENV_VARS — a subApp that inherits our
+    // DISPATCH_DATA_DIR runs on our state root and corrupts it), then the
+    // overlay. Overlay last on purpose: a manifest that names one of the
+    // scrubbed vars outright always wins, so a subApp that genuinely wants a
+    // specific data dir — or wants ours — can still ask for it.
+    const childEnv: Record<string, string> = {
+      ...scrubManagerEnv(this.parentEnv),
+      ...overlay,
+    };
 
     // 1) docker compose up -d (in the compose file's directory), if declared.
     if (usedDocker && composeDir && composeFile) {
@@ -355,7 +471,7 @@ export class RunnerService {
       const res = await this.runOnce(
         "docker",
         ["compose", "-f", composeFile, "up", "-d"],
-        { cwd: composeDir, env: portEnv },
+        { cwd: composeDir, env: childEnv },
       );
       // exitCode is `undefined` for a signal-killed process — treat that as a
       // failure too (only exit 0 counts as "up").
@@ -381,7 +497,7 @@ export class RunnerService {
     if (hasDev) {
       const child = this.spawn(substitutePorts(subApp.dev!, ports), {
         cwd: resolve(worktreePath, subApp.path),
-        env: portEnv,
+        env: childEnv,
       });
       live.child = child;
       this.wireChild(id, child);
@@ -575,8 +691,12 @@ export class RunnerService {
     if (!composeDir || !composeFile) return;
     this.pushLog(id, "stdout", `$ docker compose -f ${composeFile} down`);
     try {
+      // Scrubbed, like `up` — a compose file is free to interpolate `${...}`
+      // from the environment, and teardown must resolve the same values the
+      // stack was brought up with rather than the manager's.
       await this.runOnce("docker", ["compose", "-f", composeFile, "down"], {
         cwd: composeDir,
+        env: scrubManagerEnv(this.parentEnv),
       });
     } catch {
       /* best-effort teardown: a missing docker daemon must not throw here */

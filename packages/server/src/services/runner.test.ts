@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { SubApp, WsServerEvent } from "@dispatch/shared";
@@ -11,10 +11,13 @@ import {
   RunnerService,
   substitutePorts,
   detectBoundPort,
+  scrubManagerEnv,
+  MANAGER_ENV_VARS,
   type ChildLike,
   type RunOnceFn,
   type SpawnFn,
 } from "./runner.js";
+import { loadConfig } from "../config.js";
 
 let dir: string;
 let store: Store;
@@ -294,6 +297,179 @@ describe("RunnerService — port injection + reconciliation (mocked)", () => {
     const after = await store.getRunner(runner.id);
     expect(after?.url).toBe("http://localhost:5175");
     expect(after?.ports).toEqual([5175]);
+  });
+});
+
+/* ------------------------------------------------- manager env quarantine */
+
+/**
+ * The regression these cover: launched from the installed app (whose env
+ * tools/app/launch.py fills with DISPATCH_DATA_DIR & co), this repo's own
+ * `dev-server` subApp came up on the INSTALLED instance's data dir — two
+ * processes read-modify-writing one `runners.json`, silently losing each
+ * other's entries. See MANAGER_ENV_VARS in runner.ts.
+ */
+const MANAGER_ENV: NodeJS.ProcessEnv = {
+  // What launch.py exports, plus the rest of RUNNING.md's "Config (env)" table.
+  DISPATCH_IPC: "1",
+  DISPATCH_PORT: "4318",
+  DISPATCH_DATA_DIR: "C:/prod/data",
+  DISPATCH_CONFIG_DIR: "C:/prod/config",
+  DISPATCH_HOME: "C:/prod",
+  DISPATCH_HOST: "0.0.0.0",
+  DISPATCH_MAX_ACTIVE_SESSIONS: "6",
+  // The pre-rename spelling `envVar()` still falls back to — a start-menu
+  // shortcut created before the rename sets exactly this.
+  CM_DATA_DIR: "C:/prod/data",
+  CM_HOME: "C:/prod",
+  // Machine/user facts and preferences a subApp is entitled to inherit.
+  PATH: "/usr/bin",
+  HOME: "/home/me",
+  GH_TOKEN: "s3cret",
+  DISPATCH_THEME: "dark",
+  DISPATCH_CLAUDE_PATH: "/usr/local/bin/claude",
+};
+
+/** Start `subApp` with `parentEnv` inherited, returning the child's env. */
+async function envForChild(
+  subApp: SubApp,
+  parentEnv: NodeJS.ProcessEnv = MANAGER_ENV,
+): Promise<Record<string, string>> {
+  let seen: Record<string, string> = {};
+  service = new RunnerService({
+    store,
+    bus,
+    parentEnv,
+    spawn: (_command, opts) => {
+      seen = opts.env;
+      return new MockChild();
+    },
+    getPort: async (p) => p ?? 0,
+  });
+  await service.start("C:/wt", subApp);
+  return seen;
+}
+
+const DEV_SERVER: SubApp = {
+  id: "dev-server",
+  name: "Dev server",
+  path: ".",
+  dev: "pnpm dev",
+  ports: [4319],
+};
+
+describe("RunnerService — manager env quarantine", () => {
+  it("drops the manager's identity vars from the inherited env", async () => {
+    const env = await envForChild(DEV_SERVER);
+
+    for (const name of MANAGER_ENV_VARS) expect(env[name]).toBeUndefined();
+
+    // The point of all of it: a child server booting on this env resolves its
+    // OWN roots, not the installed instance's.
+    const child = loadConfig(env);
+    expect(child.dataDir).not.toBe(resolve("C:/prod/data"));
+    expect(child.configDir).toBeUndefined();
+  });
+
+  it("leaves unrelated env — machine facts, credentials, preferences — alone", async () => {
+    const env = await envForChild(DEV_SERVER);
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.HOME).toBe("/home/me"); // the USER's home, not DISPATCH_HOME
+    expect(env.GH_TOKEN).toBe("s3cret");
+    expect(env.DISPATCH_THEME).toBe("dark");
+    expect(env.DISPATCH_CLAUDE_PATH).toBe("/usr/local/bin/claude");
+  });
+
+  it("drops the legacy CM_* spelling, whatever its case", async () => {
+    // Only the old names are set here: scrubbing `DISPATCH_*` alone would let
+    // these through and `envVar()` would read them, reproducing the bug.
+    const env = await envForChild(DEV_SERVER, {
+      PATH: "/usr/bin",
+      CM_DATA_DIR: "C:/prod/data",
+      CM_CONFIG_DIR: "C:/prod/config",
+      // Windows env names are case-insensitive; the plain object we build is not.
+      cm_home: "C:/prod",
+    });
+    expect(env.CM_DATA_DIR).toBeUndefined();
+    expect(env.CM_CONFIG_DIR).toBeUndefined();
+    expect(env.cm_home).toBeUndefined();
+    expect(loadConfig(env).dataDir).not.toBe(resolve("C:/prod/data"));
+    expect(env.PATH).toBe("/usr/bin");
+  });
+
+  it("lets an explicit manifest env value win over the scrub", async () => {
+    // A subApp may genuinely want a specific root — including ours.
+    const env = await envForChild({
+      ...DEV_SERVER,
+      env: {
+        DISPATCH_DATA_DIR: "C:/wt/.data",
+        DISPATCH_IPC: "0",
+        DISPATCH_PORT: "{port}",
+      },
+    });
+    expect(env.DISPATCH_DATA_DIR).toBe("C:/wt/.data");
+    expect(env.DISPATCH_IPC).toBe("0");
+    expect(env.DISPATCH_PORT).toBe("4319"); // placeholder still substituted
+    expect(loadConfig(env).dataDir).toBe(resolve("C:/wt/.data"));
+  });
+
+  it("still injects PORT and substitutes {port} placeholders", async () => {
+    const env = await envForChild({
+      id: "game",
+      name: "game",
+      path: ".",
+      dev: "pnpm dev --port {port}",
+      ports: [5173, 2567],
+      env: { CLIENT_PORT: "{port}", SERVER_PORT: "{port2}" },
+    });
+    expect(env.PORT).toBe("5173");
+    expect(env.CLIENT_PORT).toBe("5173");
+    expect(env.SERVER_PORT).toBe("2567");
+  });
+
+  it("hands docker compose the scrubbed env too", async () => {
+    let composeEnv: Record<string, string> | undefined;
+    const runOnce: RunOnceFn = async (_file, _args, opts) => {
+      composeEnv = opts.env;
+      return { exitCode: 0 };
+    };
+    service = new RunnerService({
+      store,
+      bus,
+      parentEnv: MANAGER_ENV,
+      runOnce,
+      spawn: () => new MockChild(),
+      getPort: async (p) => p ?? 0,
+    });
+    await service.start("C:/wt", {
+      id: "stack",
+      name: "Stack",
+      path: ".",
+      dev: "node server.js",
+      dockerCompose: "docker-compose.yml",
+      ports: [8080],
+    });
+    expect(composeEnv?.DISPATCH_DATA_DIR).toBeUndefined();
+    expect(composeEnv?.CM_DATA_DIR).toBeUndefined();
+    expect(composeEnv?.PORT).toBe("8080");
+    expect(composeEnv?.PATH).toBe("/usr/bin");
+  });
+});
+
+describe("scrubManagerEnv", () => {
+  it("covers both prefixes for every manager suffix", () => {
+    // Derived from config.ts's ENV_PREFIXES, so this can't drift from envVar().
+    expect(MANAGER_ENV_VARS).toContain("DISPATCH_DATA_DIR");
+    expect(MANAGER_ENV_VARS).toContain("CM_DATA_DIR");
+    expect(MANAGER_ENV_VARS).toContain("DISPATCH_IPC");
+    expect(MANAGER_ENV_VARS).toContain("CM_IPC");
+  });
+
+  it("keeps empty strings and skips undefined entries", () => {
+    // "" is a SET variable (the belt-and-braces `DISPATCH_DATA_DIR: ""` some
+    // manifests use); undefined is simply absent and must not become "undefined".
+    const out = scrubManagerEnv({ EMPTY: "", GONE: undefined, KEEP: "v" });
+    expect(out).toEqual({ EMPTY: "", KEEP: "v" });
   });
 });
 

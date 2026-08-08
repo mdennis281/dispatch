@@ -246,6 +246,16 @@ argv. That's why Hivebreak's `game` uses `CLIENT_PORT={port}` / `SERVER_PORT={po
 ⚠️ The runner also sets `PORT` automatically, but **Vite ignores `PORT`** — it reads only
 `server.port` or `--port`. Don't assume a bare `PORT` injection reaches a Vite-based subApp.
 
+**Dispatch's own env does not leak into a subApp.** Every variable in
+[Config (env)](#config-env) — `DISPATCH_DATA_DIR`, `DISPATCH_CONFIG_DIR`, `DISPATCH_HOME`,
+`DISPATCH_PORT`, `DISPATCH_HOST`, `DISPATCH_MAX_ACTIVE_SESSIONS`, `DISPATCH_IPC`, and each
+one's legacy `CM_*` spelling — is stripped from the child's environment. The installed app
+runs with those set, so without the strip a subApp that is itself a Dispatch (this repo's
+`dev-server`) came up on the *installed* instance's data dir: two processes read-modify-writing
+one `runners.json`, silently losing each other's entries. Everything else — `PATH`, your home
+dir, git/gh credentials, `DISPATCH_CLAUDE_PATH` — is inherited as usual, and naming any
+stripped var in the manifest's `env` block puts it back with the value you give it.
+
 If a service's port is baked into client code (a hardcoded `ws://host:8787`), it can't be
 offset at all without touching that code. Leave it off `ports` in the manifest and accept
 one instance at a time — see `the-salesman`'s manifest for a worked example.
