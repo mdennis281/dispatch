@@ -13,13 +13,25 @@ import { useChatMessages } from "../stores/messages.js";
 import { useChats } from "../stores/chats.js";
 import { deriveSubagentRuns, type SubagentRun } from "./subagentRuns.js";
 
+/** Joins the worktree list into one scalar. A newline can't occur in a path. */
+const WORKTREE_SEP = "\n";
+
 export function useSubagentRuns(chatId: string): SubagentRun[] {
   const messages = useChatMessages(chatId);
   // A scalar selector: the transcript re-renders on status changes anyway, and
   // this keeps a chat-object identity change from invalidating the memo.
   const chatRunning = useChats((s) => s.byId[chatId]?.status === "running");
+  // Joined for the same reason: `worktrees` is a fresh array on every
+  // `chat-update`, and the run fold is not worth re-running for that.
+  const worktreeKey = useChats((s) =>
+    (s.byId[chatId]?.worktrees ?? []).join(WORKTREE_SEP),
+  );
   return useMemo(
-    () => deriveSubagentRuns(messages, { chatRunning }),
-    [messages, chatRunning],
+    () =>
+      deriveSubagentRuns(messages, {
+        chatRunning,
+        worktrees: worktreeKey ? worktreeKey.split(WORKTREE_SEP) : [],
+      }),
+    [messages, chatRunning, worktreeKey],
   );
 }

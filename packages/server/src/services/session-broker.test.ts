@@ -1915,3 +1915,165 @@ describe("SessionBroker — effort on the transcript", () => {
     expect(main && "effort" in main ? main.effort : undefined).toBe("medium");
   });
 });
+
+describe("SessionBroker — the wrong-worktree guard", () => {
+  /**
+   * The cwd guard is the SECOND unmatched PreToolUse entry the broker registers
+   * (the effort observer is the first). Both are unmatched because both have to
+   * see every call, not just the ones they act on.
+   */
+  function cwdHook(ctl: FakeCtl) {
+    const pre = (
+      ctl.options?.hooks as
+        | {
+            PreToolUse?: {
+              matcher?: string;
+              hooks: ((i: unknown) => Promise<Record<string, unknown>>)[];
+            }[];
+          }
+        | undefined
+    )?.PreToolUse;
+    const unmatched = pre!.filter((e) => e.matcher === undefined);
+    return unmatched[unmatched.length - 1]!.hooks[0]!;
+  }
+
+  /** Two sibling worktrees on disk, as in the 2026-08-07 incident. */
+  async function twoWorktrees(): Promise<{ home: string; other: string }> {
+    const base = await mkdtemp(join(tmpdir(), "cm-wt-"));
+    tempDirs.push(base);
+    const home = join(base, "dispatch-config-subapps");
+    const other = join(base, "agent-ae028addf8d56daf9");
+    for (const wt of [home, other]) {
+      await mkdir(wt, { recursive: true });
+      // A linked worktree's `.git` is a FILE — what makes it its own root.
+      await writeFile(join(wt, ".git"), `gitdir: ${join(base, ".bare", "worktrees", "x")}`);
+    }
+    return { home, other };
+  }
+
+  /** Spawn a subagent ("task-1") that makes one tool call, so threads correlate. */
+  const spawnScript = (_t: string) => [
+    toolUseMsg("Task", { subagent_type: "general-purpose", description: "work" }, "task-1"),
+    {
+      type: "assistant",
+      parent_tool_use_id: "task-1",
+      subagent_type: "general-purpose",
+      session_id: "sess-1",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "sub-1", name: "Edit", input: { file_path: "a" } }],
+      },
+    },
+    resultMsg(),
+  ];
+
+  it("denies a subagent's write into a sibling worktree, and names both", async () => {
+    const { home, other } = await twoWorktrees();
+    const { fn, controllers } = makeFakeQuery(spawnScript);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "go");
+    await idleP;
+
+    const hook = cwdHook(controllers[0]!);
+    // The subagent's first call pins it to `home`…
+    await hook({
+      agent_id: "a1",
+      tool_use_id: "sub-1",
+      tool_name: "Edit",
+      cwd: home,
+      tool_input: { file_path: join(home, "package.json") },
+    });
+    // …then the session cwd moves under it and it writes into the other tree.
+    const verdict = await hook({
+      agent_id: "a1",
+      tool_use_id: "sub-1",
+      tool_name: "Edit",
+      cwd: other,
+      tool_input: { file_path: join(other, "RUNNING.md") },
+    });
+
+    const out = verdict.hookSpecificOutput as
+      | { permissionDecision?: string; permissionDecisionReason?: string }
+      | undefined;
+    expect(out?.permissionDecision).toBe("deny");
+    expect(out?.permissionDecisionReason).toContain(home);
+    expect(out?.permissionDecisionReason).toContain(other);
+    // …and the human is told, not just the model.
+    expect(
+      events.some(
+        (e) => e.type === "notice" && e.text.includes("different worktree") && e.level === "warn",
+      ),
+    ).toBe(true);
+  });
+
+  it("lets the MAIN loop move between worktrees — that is its job", async () => {
+    const { home, other } = await twoWorktrees();
+    const { fn, controllers } = makeFakeQuery((_t) => [assistantText("hi"), resultMsg()]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "go");
+    await idleP;
+
+    const hook = cwdHook(controllers[0]!);
+    // No `agent_id` ⇒ the main loop. It commits one agent's branch, then another.
+    for (const wt of [home, other]) {
+      const verdict = await hook({
+        tool_name: "Write",
+        cwd: wt,
+        tool_input: { file_path: join(wt, ".git-commit-msg.tmp") },
+      });
+      expect(verdict.hookSpecificOutput).toBeUndefined();
+    }
+  });
+
+  it("allows a subagent to READ around another worktree", async () => {
+    const { home, other } = await twoWorktrees();
+    const { fn, controllers } = makeFakeQuery(spawnScript);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "go");
+    await idleP;
+
+    const hook = cwdHook(controllers[0]!);
+    await hook({
+      agent_id: "a1",
+      tool_use_id: "sub-1",
+      tool_name: "Edit",
+      cwd: home,
+      tool_input: { file_path: join(home, "a.ts") },
+    });
+    const verdict = await hook({
+      agent_id: "a1",
+      tool_use_id: "sub-1",
+      tool_name: "Bash",
+      cwd: other,
+      tool_input: { command: "git log" },
+    });
+    expect(verdict.hookSpecificOutput).toBeUndefined();
+  });
+
+  it("ignores a call it can't place — a guard must never block on missing information", async () => {
+    const { fn, controllers } = makeFakeQuery((_t) => [assistantText("hi"), resultMsg()]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "go");
+    await idleP;
+
+    const hook = cwdHook(controllers[0]!);
+    expect(await hook({ tool_name: "Edit", tool_input: {} })).toEqual({});
+    expect(await hook({ cwd: join(tmpdir(), "nowhere") })).toEqual({});
+  });
+});
