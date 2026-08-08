@@ -18,6 +18,7 @@ import type {
   ToolResultRow,
   ToolUseRow,
 } from "@dispatch/shared";
+import { collectWorkRoots, deriveRunLocations, type RunLocation } from "./runLocation.js";
 
 export type RunStatus = "running" | "done" | "failed" | "stopped";
 
@@ -112,6 +113,14 @@ export interface SubagentRun {
    * status below is this run's OWN, not an inference from the parent turn.
    */
   settled?: TaskStatusRow;
+  /**
+   * WHERE this run is working on disk, and whether it stayed there. Folded in
+   * because "running" was the only thing the Agents rail could say on the day
+   * two edits landed in another agent's worktree — see `runLocation.ts` for the
+   * incident and for why every fact in here is a path the transcript recorded
+   * rather than one inferred from it.
+   */
+  location: RunLocation;
 }
 
 /**
@@ -275,6 +284,12 @@ export function deriveSubagentRuns(
      * parent turn having ended. Defaults to false (treat as settled).
      */
     chatRunning?: boolean;
+    /**
+     * Work roots the caller already knows about — the chat's own `worktrees[]`.
+     * Seeds root attribution for a chat whose worktree was made by the manager
+     * (so no `EnterWorktree` row ever named it). See `runLocation.ts`.
+     */
+    worktrees?: string[];
   } = {},
 ): SubagentRun[] {
   const chatRunning = opts.chatRunning ?? false;
@@ -299,6 +314,7 @@ export function deriveSubagentRuns(
       startedAt: row.ts,
       durationMs: 0,
       async: false,
+      location: { roots: [], files: [], strayRoots: [], strayFiles: [] },
     });
   }
   if (runs.size === 0) return [];
@@ -418,6 +434,19 @@ export function deriveSubagentRuns(
         run.report = lastAssistantText(run.rows);
       }
     }
+  }
+
+  // Pass 4: locate every run on disk. Last, because home inheritance reads a
+  // run's `parentRunId`, and pass 3 is what links a nested run to its spawner.
+  // Insertion order is spawn order (pass 1 walked the transcript), which is what
+  // lets a child read a settled parent.
+  const locations = deriveRunLocations(
+    [...runs.values()].map((r) => ({ id: r.id, parentRunId: r.parentRunId, rows: r.rows })),
+    collectWorkRoots(messages, opts.worktrees ?? []),
+  );
+  for (const run of runs.values()) {
+    const loc = locations.get(run.id);
+    if (loc) run.location = loc;
   }
 
   return [...runs.values()];
