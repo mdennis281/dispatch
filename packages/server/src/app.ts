@@ -2,7 +2,7 @@
  * Fastify app factory. Wires the shared seam every service builds on:
  *   - @fastify/websocket   (the multiplexed event stream; routes added by the WS layer)
  *   - @fastify/static      (serves the built SPA at ../client/dist when present)
- *   - GET /api/health      (placeholder liveness probe)
+ *   - GET /api/health      (readiness probe — see health.ts)
  * The config, Store, and EventBus are decorated onto the instance as `app.cm`
  * so downstream route/service registrars share one wired context.
  */
@@ -21,6 +21,7 @@ import {
   type ServiceOverrides,
 } from "./services/container.js";
 import { registerRoutes } from "./routes/index.js";
+import { healthReport } from "./health.js";
 
 /** Wired context shared across routes/services via `app.cm`. */
 export interface CmContext {
@@ -95,7 +96,19 @@ export async function buildApp(
     }
   }
 
-  app.get("/api/health", async () => ({ ok: true }));
+  // 503 when degraded, so a caller that only looks at the status code (the
+  // verify harness, any future load balancer) still gets the right answer
+  // without parsing the body.
+  app.get("/api/health", async (_req, reply) => {
+    const report = await healthReport({
+      store,
+      dataDir: config.dataDir,
+      ...(config.configDir ? { configDir: config.configDir } : {}),
+      ...(opts.dev ? { dev: true } : {}),
+      ...(opts.clientDist ? { clientDist: opts.clientDist } : {}),
+    });
+    return reply.code(report.ok ? 200 : 503).send(report);
+  });
 
   registerRoutes(app);
 

@@ -246,6 +246,16 @@ argv. That's why Hivebreak's `game` uses `CLIENT_PORT={port}` / `SERVER_PORT={po
 ⚠️ The runner also sets `PORT` automatically, but **Vite ignores `PORT`** — it reads only
 `server.port` or `--port`. Don't assume a bare `PORT` injection reaches a Vite-based subApp.
 
+**Dispatch's own env does not leak into a subApp.** Every variable in
+[Config (env)](#config-env) — `DISPATCH_DATA_DIR`, `DISPATCH_CONFIG_DIR`, `DISPATCH_HOME`,
+`DISPATCH_PORT`, `DISPATCH_HOST`, `DISPATCH_MAX_ACTIVE_SESSIONS`, `DISPATCH_IPC`, and each
+one's legacy `CM_*` spelling — is stripped from the child's environment. The installed app
+runs with those set, so without the strip a subApp that is itself a Dispatch (this repo's
+`dev-server`) came up on the *installed* instance's data dir: two processes read-modify-writing
+one `runners.json`, silently losing each other's entries. Everything else — `PATH`, your home
+dir, git/gh credentials, `DISPATCH_CLAUDE_PATH` — is inherited as usual, and naming any
+stripped var in the manifest's `env` block puts it back with the value you give it.
+
 If a service's port is baked into client code (a hardcoded `ws://host:8787`), it can't be
 offset at all without touching that code. Leave it off `ports` in the manifest and accept
 one instance at a time — see `the-salesman`'s manifest for a worked example.
@@ -364,8 +374,13 @@ browser (Chrome, Edge, Brave, Vivaldi…).
   data\              DISPATCH_DATA_DIR   chats, checkpoints, runners   (per-instance)
   config\            DISPATCH_CONFIG_DIR settings, projects, agents, modes (SHARED)
   browser-profile\   the PWA's own Chromium profile (window state, mic permission)
+  staging\           app:upgrade's build area — the live app never hears about it
+  backups\           the previous payload, one generation, put aside by a rename
+  failed\            builds that failed their health check, kept for diagnosis
   current.json       published sha + timestamp
-  runtime.json       present only while the app is running
+  runtime.json       present only while the app is running (the supervisor owns it)
+  upgrade.json       app:upgrade's phase — read it with `pnpm app:upgrade -- --status`
+  upgrade.log        the detached swap's narration (rotated past 2 MB)
 ```
 
 The root is still literally `claude-manager`. Renaming it would strand every existing
@@ -418,6 +433,12 @@ onto the same teardown:
 | **From a terminal** | `pnpm app:stop` (and `pnpm app:status` for what's running) |
 | **In a `pnpm dev` window** | Ctrl-C |
 
+`pnpm app:stop` returns when the **supervisor** has exited, not when the port goes quiet.
+Those are up to 25 seconds apart: `app.close()` drops the listener first and runs the
+teardown after it, so a dead port means the shutdown has *started*. Anything that touches
+`app/` next — `app:publish`, the upgrade's swap — has to wait for the later signal, or it
+races a process that still holds a working directory inside the payload.
+
 All three run `services.dispose()` → `runner.stopAll()`, so subApps die with the server
 instead of orphaning themselves onto the ports they hold. A `taskkill` on the pid does
 **not**: on Windows that's `TerminateProcess`, no handler runs, and every dev server it
@@ -431,7 +452,10 @@ stops reconnecting and shows a **Dispatch has stopped** screen with a Reconnect 
 instead of spinning forever at a port nobody is listening on.
 
 ### Updating
-Run the **Ship: publish HEAD** VS Code task (or `pnpm app:publish`). It publishes the
+
+Two ways in, and they differ in whether you have to be there for it.
+
+**`pnpm app:publish`** (or the **Ship: publish HEAD** VS Code task) publishes the
 **committed** `HEAD` — a dirty working tree is reported loudly and *not* included,
 because a "stable" build you can't reproduce from git isn't stable.
 
@@ -440,6 +464,38 @@ rolls the payload back to the previous sha, rebuilds, and re-prints the original
 last, after the rollback's output. It also verifies the built payload (server entry, SPA
 shell, manifest, service worker, icon, launcher) before stamping it — a build that exits
 0 without emitting `dist` is not a successful publish.
+
+**`pnpm app:upgrade`** does the same job *under a live install*, unattended, with the
+downtime cut from "a multi-minute build" to "a directory rename". It builds the target sha
+in a separate `staging/` clone the running app has never heard of — so a failed build
+costs nothing — and only then stops the app, moves the live payload aside, moves staging
+in, restarts on the same port, and polls `/api/health` until the **new** process reports
+ready. If that gate fails it puts the old payload back. That rollback is a rename of an
+already-built, already-verified directory, so it cannot fail the way the build did.
+
+```
+pnpm app:upgrade                  # stage HEAD, then swap it in
+pnpm app:upgrade -- --ref v1.2    # some other commit
+pnpm app:upgrade -- --dry-run     # say what it would do
+pnpm app:upgrade -- --stage-only  # build staging/, don't swap
+pnpm app:upgrade -- --status      # where it got to, and what to do about it
+pnpm app:upgrade -- --recover     # finish or reverse an interrupted swap
+```
+
+The swap half runs **detached**, because stopping Dispatch tree-kills every process the
+runner spawned and an upgrade launched from inside Dispatch is one of them. It has no
+console, so `upgrade.log` and `upgrade.json` in the deployment root are the progress UI.
+`--status` reads the second one and prints a remedy rather than raw JSON.
+
+A swap killed mid-move leaves `app/` absent with the previous payload under `backups/`;
+`--recover` puts it back and starts it. **Don't reach for `app:publish` there** — it would
+see no payload, clone a fresh one, cold-build for ten minutes and leave the good build
+stranded. The launcher says the same thing if you click the shortcut in that state.
+
+`backups/` holds **one** generation, deliberately: the success path recycles the old
+payload straight back into `staging/`, which is what keeps the next build incremental.
+`--keep-backup` opts out. A build that fails its health check goes to `failed/` instead
+and is never deleted — it's the only copy of the thing that broke.
 
 ## Config (env)
 | Var | Default | Meaning |
