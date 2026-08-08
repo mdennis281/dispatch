@@ -61,6 +61,10 @@ export function registerMcpRoutes(app: FastifyInstance): void {
           // the same condition the broker binds on AND the same one under which
           // the trunk guard refuses a raw `gh pr create`.
           prCreate: !!services.github && resolveWorkflow(project).requirePr,
+          // `spawn_chat` is wired for every session in production (the container
+          // sets the broker's spawn hook unconditionally) — what varies is
+          // whether the human is ASKED, not whether the tool exists.
+          chats: !!services.broker.spawnChat,
           // The MCP-config tools only need the project's repo path, which every
           // project has — so they're offered wherever the catalog is viewable.
           mcpConfig: !!project.repoPath,

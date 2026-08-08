@@ -35,6 +35,19 @@
  *     Offered ONLY when the project's workflow sets `autoMerge: "on-green"`, which
  *     is what makes "the agent lands its own work" a per-project decision rather
  *     than something every session can do. A raw `gh pr merge` stays denied.
+ *   - `mcp__manager__spawn_chat({ prompt, projectId?, … })` — start ANOTHER chat
+ *     (via {@link ManagerMcpChats}), but only after the human says yes. The
+ *     consent rides the broker's ordinary permission channel, so the request
+ *     lands as the same card + Attention Queue entry as any tool prompt rather
+ *     than as a surface nobody watches. The tool deliberately has NO bypass
+ *     argument: only the human's own `spawnChat.autoApprove` setting (global, or
+ *     a project's manifest) can skip the prompt, because a gate an agent can
+ *     argue its way past is not a gate. A decline comes back as a plain,
+ *     non-error result telling it not to retry — a denial is an answer. Because
+ *     the tool gates itself, the broker treats it as SELF-GATED and does not
+ *     prompt for it at the `canUseTool` layer too (one decision, one prompt) —
+ *     which also means the gate holds under `bypassPermissions`, where
+ *     `canUseTool` is never consulted.
  *
  * Every handler awaits a REAL promise (a `setTimeout`, a poll `setInterval`,
  * and/or a `chat-status` bus subscription) and unwinds cleanly the instant the
@@ -55,6 +68,7 @@ import {
   type ChatStatus,
   type CheckRun,
   type ContextUsage,
+  type Effort,
   type ManifestMcpServer,
   type ProjectMemory,
   type ReviewDecision,
@@ -699,6 +713,74 @@ export interface ManagerMcpRunner {
   stop(input: { chatId: string; subAppId: string; branch?: string }): Promise<boolean>;
 }
 
+/** What an agent asks for when it calls `spawn_chat`. */
+export interface SpawnChatRequest {
+  /** The first message the new chat receives (its whole brief). */
+  prompt: string;
+  title?: string;
+  /** Target project; omitted → the caller's own. */
+  projectId?: string;
+  modeId?: string;
+  agentId?: string;
+  effort?: Effort;
+  model?: string;
+  /** Why the agent wants it — shown on the consent card, not sent to the chat. */
+  reason?: string;
+}
+
+/** The project a spawn targets, resolved to a real record. */
+export interface SpawnChatTarget {
+  id: string;
+  name: string;
+}
+
+/** The human's answer to a spawn request. */
+export interface SpawnChatConsent {
+  approved: boolean;
+  /** True when a setting auto-approved it — nobody was actually asked. */
+  auto: boolean;
+  /** The decline reason (or allow note) the human typed, if any. */
+  message?: string;
+}
+
+/** A chat `spawn_chat` actually created. */
+export interface SpawnedChat {
+  chatId: string;
+  title: string;
+  projectId: string;
+  projectName: string;
+}
+
+/**
+ * Chat-spawning surface for this session (omitted → no `spawn_chat` tool).
+ *
+ * Split into three calls rather than one because the CONSENT is the point: the
+ * tool must be able to ask, be refused, and say so without a chat ever existing.
+ * `consent` rides the broker's ordinary permission channel — the same card, the
+ * same Attention Queue entry, the same resolve endpoint as any tool prompt — so
+ * a spawn request can't be a surface nobody is watching. It auto-approves ONLY
+ * where the human's own setting says so ({@link ManagerMcpChats.consent}); the
+ * tool takes no bypass argument, so an agent cannot talk its way past the gate.
+ */
+export interface ManagerMcpChats {
+  /**
+   * The project a spawn would land in — the caller's own when `projectId` is
+   * omitted. Null when the id names no project (the tool reports that rather
+   * than silently spawning somewhere else).
+   */
+  resolveProject(projectId?: string): Promise<SpawnChatTarget | null>;
+  /** Ask the human (or consult the auto-approve setting). Never throws on deny. */
+  consent(input: {
+    request: SpawnChatRequest;
+    project: SpawnChatTarget;
+  }): Promise<SpawnChatConsent>;
+  /** Create the chat, start its session, and deliver the prompt. */
+  spawn(input: {
+    request: SpawnChatRequest;
+    project: SpawnChatTarget;
+  }): Promise<SpawnedChat>;
+}
+
 /** Per-session context the factory closes over. */
 export interface ManagerMcpContext {
   /** The chat this session drives (for the waiting status label). */
@@ -726,6 +808,8 @@ export interface ManagerMcpContext {
   prCreate?: ManagerMcpPrCreate;
   /** SubApp launcher for this session (omitted → no `run_subapp` tool). */
   runner?: ManagerMcpRunner;
+  /** Chat spawner for this session (omitted → no `spawn_chat` tool). */
+  chats?: ManagerMcpChats;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
   mcpConfig?: ManagerMcpConfig;
   /** The session's abort signal — cancels in-flight waits on stop/fork. */
@@ -1916,6 +2000,125 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
+  const spawnChat = tool(
+    "spawn_chat",
+    "Start a NEW Dispatch chat to carry work that shouldn't ride in yours — a long " +
+      "independent task, a second workstream, a job for another project. THE HUMAN " +
+      "MUST CONSENT: this call blocks while an approval prompt sits in front of them, " +
+      "and returns 'declined' if they say no. There is no argument that skips the " +
+      "prompt (only their own setting can), so ask for what you actually need and " +
+      "explain it in `reason`. On approval the chat is created, started, and handed " +
+      "your `prompt` as its first message — write that prompt as a complete, " +
+      "standalone brief, because the new chat inherits NONE of this conversation. " +
+      "Returns the new chatId; pass it to wait_for_chat to sequence behind it.",
+    {
+      prompt: z
+        .string()
+        .describe(
+          "The new chat's first message — a complete, self-contained brief (it " +
+            "cannot see this conversation).",
+        ),
+      title: z.string().optional().describe("Title for the new chat. Omit to auto-title it."),
+      projectId: z
+        .string()
+        .optional()
+        .describe("Project to spawn in. Defaults to this chat's own project."),
+      modeId: z.string().optional().describe("Mode id for the new chat (default: your project's)."),
+      agentId: z.string().optional().describe("Custom agent id to run the new chat as."),
+      effort: z
+        .enum(["low", "medium", "high", "xhigh", "max"])
+        .optional()
+        .describe("Reasoning effort for the new chat (default: medium)."),
+      model: z.string().optional().describe("Model id override for the new chat."),
+      reason: z
+        .string()
+        .optional()
+        .describe("Why you want this chat — shown to the human on the approval prompt."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.chats) {
+        return textResult("The spawn_chat tool is not available in this session.", true);
+      }
+      const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
+      if (!prompt) {
+        return textResult(
+          "spawn_chat requires a non-empty prompt — the new chat starts with no " +
+            "context but that message.",
+          true,
+        );
+      }
+      const request: SpawnChatRequest = {
+        prompt,
+        title: typeof args.title === "string" ? args.title.trim() || undefined : undefined,
+        projectId:
+          typeof args.projectId === "string" ? args.projectId.trim() || undefined : undefined,
+        modeId: typeof args.modeId === "string" ? args.modeId.trim() || undefined : undefined,
+        agentId: typeof args.agentId === "string" ? args.agentId.trim() || undefined : undefined,
+        effort: args.effort as Effort | undefined,
+        model: typeof args.model === "string" ? args.model.trim() || undefined : undefined,
+        reason: typeof args.reason === "string" ? args.reason.trim() || undefined : undefined,
+      };
+
+      const project = await ctx.chats.resolveProject(request.projectId);
+      if (!project) {
+        return textResult(
+          request.projectId
+            ? `No project "${request.projectId}" — check the id, or omit projectId to ` +
+                "spawn in this chat's own project."
+            : "This session has no project, so there is nowhere to spawn a chat. Pass " +
+                "an explicit projectId.",
+          true,
+        );
+      }
+
+      let consent: SpawnChatConsent;
+      try {
+        consent = await ctx.chats.consent({ request, project });
+      } catch (err) {
+        return textResult(
+          `Could not ask for approval to spawn a chat: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          true,
+        );
+      }
+      if (!consent.approved) {
+        // Not an error: a refusal is a legitimate answer, and flagging it as one
+        // pushes the model into retrying the thing it was just told not to do.
+        return textResult(
+          `Declined — the human did not approve spawning a chat in ${project.name}.` +
+            `${consent.message ? ` They said: ${consent.message}` : ""}\n` +
+            "Do NOT retry it; carry on here, or ask them what they'd prefer.\n" +
+            JSON.stringify({ approved: false, projectId: project.id }),
+        );
+      }
+
+      try {
+        const spawned = await ctx.chats.spawn({ request, project });
+        return textResult(
+          `Spawned chat "${spawned.title}" in ${spawned.projectName} and sent it the ` +
+            `brief${consent.auto ? " (auto-approved by your settings)" : ""}. It runs ` +
+            "independently of this one — use wait_for_chat if you need to sequence " +
+            "behind it.\n" +
+            JSON.stringify({
+              approved: true,
+              autoApproved: consent.auto,
+              chatId: spawned.chatId,
+              title: spawned.title,
+              projectId: spawned.projectId,
+            }),
+        );
+      } catch (err) {
+        return textResult(
+          `Approved, but the chat could not be created: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          true,
+        );
+      }
+    },
+  );
+
   const runSubapp = tool(
     "run_subapp",
     "Launch one of THIS project's apps and get back a live localhost URL so you can " +
@@ -2180,6 +2383,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     recall,
     forget,
     runSubapp,
+    spawnChat,
     mcpList,
     mcpAdd,
     mcpRemove,
@@ -2206,6 +2410,7 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   recall: "memory",
   forget: "memory",
   run_subapp: "runner",
+  spawn_chat: "chats",
   mcp_list: "mcpConfig",
   mcp_add: "mcpConfig",
   mcp_remove: "mcpConfig",
@@ -2219,6 +2424,7 @@ export type ManagerToolBinding =
   | "terminals"
   | "memory"
   | "runner"
+  | "chats"
   | "mcpConfig";
 
 /** Which bindings a session has — decides which tools are offered/available. */
@@ -2300,6 +2506,7 @@ export function createManagerMcpServer(
     recall,
     forget,
     runSubapp,
+    spawnChat,
     mcpList,
     mcpAdd,
     mcpRemove,
@@ -2320,6 +2527,9 @@ export function createManagerMcpServer(
     ...(ctx.terminals ? [terminal] : []),
     ...(ctx.memory ? [remember, recall, forget] : []),
     ...(ctx.runner ? [runSubapp] : []),
+    // Spawning a sibling chat needs a project to spawn INTO and a live session to
+    // route the consent prompt through; both are bound together or not at all.
+    ...(ctx.chats ? [spawnChat] : []),
     ...(ctx.mcpConfig ? [mcpList, mcpAdd, mcpRemove] : []),
   ];
   return createSdkMcpServer({

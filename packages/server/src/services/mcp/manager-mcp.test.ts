@@ -27,6 +27,10 @@ import {
   type PrLandingPolicy,
   type PrCreateState,
   type PrCreateResult,
+  type ManagerMcpChats,
+  type SpawnChatConsent,
+  type SpawnChatRequest,
+  type SpawnChatTarget,
 } from "./manager-mcp.js";
 
 /* ------------------------------------------------------------------ fixtures */
@@ -1724,6 +1728,179 @@ describe("manager-mcp — memory tools", () => {
 
 /* --------------------------------------------------------- server assembly */
 
+/* -------------------------------------------------------------- spawn_chat */
+
+/** A scriptable chats binding recording what the tool asked for. */
+function fakeChats(opts: {
+  project?: SpawnChatTarget | null;
+  consent?: SpawnChatConsent;
+  spawnError?: Error;
+}) {
+  const calls = {
+    resolved: [] as (string | undefined)[],
+    consented: [] as SpawnChatRequest[],
+    spawned: [] as SpawnChatRequest[],
+  };
+  const project = opts.project === undefined ? { id: "p1", name: "Dispatch" } : opts.project;
+  const binding: ManagerMcpChats = {
+    resolveProject: async (id) => {
+      calls.resolved.push(id);
+      return project;
+    },
+    consent: async ({ request }) => {
+      calls.consented.push(request);
+      return opts.consent ?? { approved: true, auto: false };
+    },
+    spawn: async ({ request, project: target }) => {
+      calls.spawned.push(request);
+      if (opts.spawnError) throw opts.spawnError;
+      return {
+        chatId: "c-new",
+        title: request.title ?? "New chat",
+        projectId: target.id,
+        projectName: target.name,
+      };
+    },
+  };
+  return { binding, calls };
+}
+
+/** Full arg object for spawn_chat's handler (its shape has no optional keys). */
+function spawnArgs(over: Partial<SpawnChatRequest> & { prompt: string }) {
+  return {
+    title: undefined,
+    projectId: undefined,
+    modeId: undefined,
+    agentId: undefined,
+    effort: undefined,
+    model: undefined,
+    reason: undefined,
+    ...over,
+  };
+}
+
+describe("manager-mcp — spawn_chat", () => {
+  it("asks for consent BEFORE creating anything, then spawns", async () => {
+    const chats = fakeChats({});
+    const { spawnChat } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      chats: chats.binding,
+    });
+
+    const res = await spawnChat.handler(
+      spawnArgs({
+        prompt: "  Audit the SQL migrations.  ",
+        title: "Migration audit",
+        reason: "long job",
+      }),
+      {},
+    );
+
+    expect(chats.calls.consented).toHaveLength(1);
+    expect(chats.calls.consented[0]?.prompt).toBe("Audit the SQL migrations.");
+    expect(chats.calls.consented[0]?.reason).toBe("long job");
+    expect(chats.calls.spawned).toHaveLength(1);
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("c-new");
+  });
+
+  it("does NOT spawn when the human declines, and says so without erroring", async () => {
+    // A refusal is an answer, not a fault: flagging it as an error is what pushes
+    // a model into retrying the exact thing it was just told not to do.
+    const chats = fakeChats({
+      consent: { approved: false, auto: false, message: "not now" },
+    });
+    const { spawnChat } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      chats: chats.binding,
+    });
+
+    const res = await spawnChat.handler(spawnArgs({ prompt: "go" }), {});
+
+    expect(chats.calls.spawned).toHaveLength(0);
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("Declined");
+    expect(resultText(res)).toContain("not now");
+    expect(resultText(res)).toContain("Do NOT retry");
+  });
+
+  it("refuses an empty prompt without bothering the human", async () => {
+    const chats = fakeChats({});
+    const { spawnChat } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      chats: chats.binding,
+    });
+
+    const res = await spawnChat.handler(spawnArgs({ prompt: "   " }), {});
+
+    expect(res.isError).toBe(true);
+    expect(chats.calls.consented).toHaveLength(0);
+  });
+
+  it("reports an unknown projectId instead of spawning somewhere else", async () => {
+    const chats = fakeChats({ project: null });
+    const { spawnChat } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      chats: chats.binding,
+    });
+
+    const res = await spawnChat.handler(spawnArgs({ prompt: "go", projectId: "nope" }), {});
+
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("nope");
+    expect(chats.calls.consented).toHaveLength(0);
+  });
+
+  it("says the chat could not be created when spawning fails AFTER approval", async () => {
+    const chats = fakeChats({ spawnError: new Error("disk full") });
+    const { spawnChat } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      chats: chats.binding,
+    });
+
+    const res = await spawnChat.handler(spawnArgs({ prompt: "go" }), {});
+
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("Approved, but");
+    expect(resultText(res)).toContain("disk full");
+  });
+
+  it("notes when a setting auto-approved the spawn", async () => {
+    const chats = fakeChats({ consent: { approved: true, auto: true } });
+    const { spawnChat } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      chats: chats.binding,
+    });
+
+    const res = await spawnChat.handler(spawnArgs({ prompt: "go" }), {});
+
+    expect(resultText(res)).toContain("auto-approved");
+  });
+
+  it("exposes no argument that skips the consent gate", () => {
+    // The whole design: only the human's own setting lifts the prompt. A bypass
+    // argument would make the gate exactly as strong as the model's restraint.
+    const keys = Object.keys(
+      createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}) }).spawnChat.inputSchema,
+    );
+    expect(keys).not.toContain("requireConsent");
+    expect(keys).not.toContain("force");
+    expect(keys).not.toContain("skipConsent");
+  });
+});
+
 describe("manager-mcp — server factory", () => {
   it("builds an in-process SDK MCP server named 'manager'", () => {
     const server = createManagerMcpServer({
@@ -1782,5 +1959,19 @@ describe("manager-mcp — server factory", () => {
         prCreate: fakePrCreate(readyBranch()).binding,
       }),
     ).toContain("create_pr");
+  });
+
+  it("registers spawn_chat ONLY when the chats binding is present", () => {
+    const names = (ctx: Parameters<typeof createManagerMcpServer>[0]) =>
+      Object.keys(
+        (createManagerMcpServer(ctx) as unknown as {
+          instance: { _registeredTools?: Record<string, unknown> };
+        }).instance._registeredTools ?? {},
+      );
+
+    expect(names({ chatId: "c1", bus, broker: fakeBroker({}) })).not.toContain("spawn_chat");
+    expect(
+      names({ chatId: "c1", bus, broker: fakeBroker({}), chats: fakeChats({}).binding }),
+    ).toContain("spawn_chat");
   });
 });

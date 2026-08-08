@@ -73,6 +73,10 @@ import {
   type ManagerMcpPrApproval,
   type ManagerMcpPrCreate,
   type PrLandingPolicy,
+  type SpawnChatConsent,
+  type SpawnChatRequest,
+  type SpawnChatTarget,
+  type SpawnedChat,
 } from "./mcp/manager-mcp.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
@@ -491,6 +495,9 @@ export interface BrokerProjectConfig {
   /** A project's config-sourced skills (from `.dispatch/skills/`), or `[]`.
    *  Materialized into the session cwd's `.claude/skills/` so the SDK finds them. */
   getSkills(projectId: string): SkillConfig[];
+  /** A project's authored spawn-chat consent override, or null when it has none
+   *  (then the app setting decides). Optional so older fakes stay valid. */
+  getSpawnAutoApprove?(projectId: string): boolean | null;
 }
 
 export interface SessionBrokerOptions {
@@ -715,6 +722,17 @@ function questionSummary(input: Record<string, unknown>): string {
     pick(input.question);
   if (!text) return "Claude has a question";
   return text.length > 80 ? `${text.slice(0, 80)}…` : text;
+}
+
+/**
+ * Tools that run their OWN human gate and must therefore not be prompted for at
+ * the `canUseTool` layer as well (see {@link SessionBroker.handlePermission}).
+ */
+const SELF_GATED_TOOLS: ReadonlySet<string> = new Set(["mcp__manager__spawn_chat"]);
+
+/** Shorten text for a prompt card, marking that it was cut. */
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
 /** One answer within a (possibly multi-question) AskUserQuestion response. */
@@ -1067,6 +1085,20 @@ export class SessionBroker {
    * Absent → `create_pr` says so out loud rather than implying it's watched.
    */
   armPrWatch?: (chatId: string, ref: PRRef) => void;
+  /**
+   * Create + start a chat on the agent's behalf, once the human has approved it
+   * (see `mcp__manager__spawn_chat`). Settable after construction for the same
+   * reason as `onTurnError`: creating a chat goes through the routes' `createChat`
+   * / `ensureSession` pair, which needs the whole service container — and the
+   * container is built around the broker, not before it. Absent → the tool isn't
+   * offered at all, rather than offered and broken.
+   */
+  spawnChat?: (input: {
+    request: SpawnChatRequest;
+    project: SpawnChatTarget;
+    /** The chat that asked, so the new one can be traced back to it. */
+    parentChatId: string;
+  }) => Promise<SpawnedChat>;
   private readonly query: QueryFn;
   private readonly genId: () => string;
   private readonly now: () => number;
@@ -2203,6 +2235,17 @@ export class SessionBroker {
       description?: string;
     },
   ): Promise<PermissionResult> {
+    // A SELF-GATED tool asks for itself, in its own words, with its own card —
+    // `spawn_chat` cannot create anything until `consentToSpawn` returns approved.
+    // Prompting at this layer too would ask the human twice for one decision in
+    // ask-y modes, and a deny HERE would skip the handler entirely, taking with it
+    // the "declined — don't retry" answer the tool exists to give. So the generic
+    // gate steps aside and the specific one stands. This is not a hole: the tool's
+    // own gate is unconditional, and unlike this one it also holds under
+    // bypassPermissions, where `canUseTool` is never consulted at all.
+    if (SELF_GATED_TOOLS.has(toolName)) {
+      return Promise.resolve({ behavior: "allow", updatedInput: input });
+    }
     const requestId = this.genId();
     const request: PermissionRequest = {
       id: requestId,
@@ -2252,6 +2295,79 @@ export class SessionBroker {
         attentionId,
       });
     });
+  }
+
+  /**
+   * Decide whether a `spawn_chat` request needs the human, and get their answer
+   * if it does.
+   *
+   * The policy is theirs alone: the TARGET project's manifest first (a repo can
+   * insist on the prompt even where auto-approve is on globally, and vice versa),
+   * then the app setting, which defaults to asking. Nothing the agent passes in
+   * reaches this decision — that's the whole design, so that a chat spawning
+   * chats stays something the human said yes to rather than something they read
+   * about afterwards.
+   */
+  async consentToSpawn(
+    chatId: string,
+    request: SpawnChatRequest,
+    target: SpawnChatTarget,
+  ): Promise<SpawnChatConsent> {
+    const projectPolicy = this.projectConfig?.getSpawnAutoApprove?.(target.id) ?? null;
+    const auto =
+      projectPolicy ??
+      (await this.store
+        .getSettings()
+        .then((s) => s.spawnChat?.autoApprove ?? false)
+        .catch(() => false));
+    if (auto) return { approved: true, auto: true };
+
+    const { approved, message } = await this.requestApproval(chatId, {
+      toolName: "spawn_chat",
+      title: `Start a new chat in ${target.name}?`,
+      description: [
+        request.reason ? `Why: ${request.reason}` : null,
+        request.title ? `Title: ${request.title}` : null,
+        `Brief: ${truncate(request.prompt, 600)}`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      // The card renders the input, so hand it the request AS ASKED — including
+      // the prompt the new chat would receive verbatim, which is the one thing
+      // worth reading before saying yes.
+      input: { ...request },
+    });
+    return { approved, auto: false, message };
+  }
+
+  /**
+   * Put a NON-tool decision in front of the human on a live session's behalf and
+   * block until they answer — the same card, Attention Queue entry, transcript
+   * row and resolve endpoint an ordinary `canUseTool` prompt uses.
+   *
+   * It rides the permission channel rather than inventing a parallel approval
+   * surface because everything that makes a permission prompt hard to miss
+   * (triage priority, notifier webhooks, the deny-all-pending teardown that stops
+   * a stopped session from stranding a question) is wired to THAT channel. A
+   * second one would have to re-earn all of it, and would be the surface that
+   * quietly rots. `deny` on an unknown chat, so a caller can never read "no live
+   * session" as consent.
+   */
+  async requestApproval(
+    chatId: string,
+    opts: { toolName: string; title: string; description?: string; input?: Record<string, unknown> },
+  ): Promise<{ approved: boolean; message?: string }> {
+    const session = this.sessions.get(chatId);
+    if (!session) return { approved: false, message: "no live session to ask through" };
+    const result = await this.handlePermission(
+      session,
+      opts.toolName,
+      opts.input ?? {},
+      { title: opts.title, description: opts.description, displayName: opts.toolName },
+    );
+    return result.behavior === "allow"
+      ? { approved: true }
+      : { approved: false, message: result.message };
   }
 
   /* ----------------------------------------------------- state helpers */
@@ -2967,6 +3083,28 @@ export class SessionBroker {
                 },
               }
             : undefined,
+        // Spawning a sibling chat: resolve the target project, ASK THE HUMAN,
+        // then create it. Bound only when the container wired `spawnChat` in.
+        chats: this.spawnChat
+          ? {
+              resolveProject: async (id) => {
+                const target = id || projectId;
+                if (!target) return null;
+                const proj = await this.store.getProject(target).catch(() => null);
+                return proj ? { id: proj.id, name: proj.name } : null;
+              },
+              consent: async ({ request, project: target }) =>
+                this.consentToSpawn(session.chatId, request, target),
+              spawn: async ({ request, project: target }) => {
+                if (!this.spawnChat) throw new Error("chat spawning is not wired in");
+                return this.spawnChat({
+                  request,
+                  project: target,
+                  parentChatId: session.chatId,
+                });
+              },
+            }
+          : undefined,
         // Bind the MCP-config editor to the project's MAIN repo path, NOT this
         // session's cwd: `.dispatch/` is committed config, so a server the
         // agent adds while working in a throwaway worktree has to land in the
