@@ -16,7 +16,7 @@
 import type { ServerConfig } from "../config.js";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
-import { ensureSession } from "../routes/dispatch.js";
+import { createChat, ensureSession } from "../routes/dispatch.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
 import { MemoryService } from "./memory.js";
@@ -281,6 +281,32 @@ export function createServices(
   // inside `arm`; the `.catch` is belt-and-braces against an unhandled rejection.
   broker.armPrWatch = (chatId, ref) => {
     void prReviewWatcher.arm(chatId, ref).catch(() => {});
+  };
+  // `mcp__manager__spawn_chat`: an agent starting ANOTHER chat, after the human
+  // approved it (the broker asks; this only runs once they said yes). Deliberately
+  // the SAME `createChat` → `ensureSession` → `sendMessage` path a human's "New
+  // chat" takes, so a spawned chat is an ordinary chat in every respect — same
+  // project defaults, worktree isolation, workflow profile and guards. The purpose
+  // tag is the only difference, and it exists so the sidebar can say where the
+  // chat came from.
+  broker.spawnChat = async ({ request, project, parentChatId }) => {
+    const chat = await createChat(services, {
+      projectId: project.id,
+      title: request.title,
+      modeId: request.modeId,
+      agentId: request.agentId,
+      effort: request.effort,
+      model: request.model,
+      purpose: { kind: "spawned", label: `Spawned by chat ${parentChatId}` },
+    });
+    await ensureSession(services, chat.id);
+    await broker.sendMessage(chat.id, request.prompt);
+    return {
+      chatId: chat.id,
+      title: chat.title,
+      projectId: chat.projectId,
+      projectName: project.name,
+    };
   };
 
   let offCheckpoint: (() => void) | undefined;

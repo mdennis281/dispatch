@@ -137,6 +137,19 @@ export const ManifestDefaultsSchema = z.object({
 export type ManifestDefaults = z.infer<typeof ManifestDefaultsSchema>;
 
 /**
+ * Per-project override of the app's spawn-chat consent policy — whether an agent
+ * calling `mcp__manager__spawn_chat` here may start a chat WITHOUT stopping for
+ * the human's approval. Absent → the global setting decides, which defaults to
+ * asking. Committed with the repo because "agents may fan themselves out
+ * unattended in this codebase" is a statement about the codebase, not about
+ * whoever happens to be at the keyboard.
+ */
+export const ManifestSpawnChatSchema = z.object({
+  autoApprove: z.boolean(),
+});
+export type ManifestSpawnChat = z.infer<typeof ManifestSpawnChatSchema>;
+
+/**
  * The raw `.dispatch/project.yaml` manifest. All fields optional except
  * `name`. Unknown keys are rejected (strict) so a typo surfaces as a structured
  * error instead of silently dropping.
@@ -154,6 +167,8 @@ export const ProjectManifestSchema = z.object({
    * from whether a `ship` command is set, so pre-profile manifests keep working.
    */
   workflow: WorkflowConfigSchema.optional(),
+  /** Per-project spawn-chat consent policy (see {@link ManifestSpawnChatSchema}). */
+  spawnChat: ManifestSpawnChatSchema.optional(),
   defaults: ManifestDefaultsSchema.optional(),
   instructions: z.array(ManifestInstructionSchema).optional(),
   subApps: z.array(ManifestSubAppSchema).optional(),
@@ -266,6 +281,8 @@ export const ProjectConfigSchema = z.object({
   shipCmd: z.string().optional(),
   /** From manifest `workflow` (maps to Project.workflow). */
   workflow: WorkflowConfigSchema.optional(),
+  /** From manifest `spawnChat` — this project's spawn-consent override. */
+  spawnChat: ManifestSpawnChatSchema.optional(),
   defaults: ProjectConfigDefaultsSchema.optional(),
   /** Resolved instructions in load order (files read + inline text). */
   instructions: z.array(NormalizedInstructionSchema).default([]),

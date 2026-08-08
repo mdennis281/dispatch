@@ -337,6 +337,16 @@ export class ProjectConfigService {
     return !!this.cache.get(projectId)?.config;
   }
 
+  /**
+   * This project's spawn-chat consent override, or null when it doesn't author
+   * one (then the app setting decides — which defaults to asking). Null and
+   * `false` are deliberately distinct: a project may insist on the prompt even
+   * where the human turned auto-approve on globally.
+   */
+  getSpawnAutoApprove(projectId: string): boolean | null {
+    return this.cache.get(projectId)?.config?.spawnChat?.autoApprove ?? null;
+  }
+
   /* ----------------------------------------------------- agent/mode registry */
 
   /**
@@ -563,6 +573,7 @@ export class ProjectConfigService {
       worktreeCmd: manifest.worktree,
       shipCmd: manifest.ship,
       workflow: manifest.workflow,
+      spawnChat: manifest.spawnChat,
       defaults: manifest.defaults,
       instructions,
       instructionsText: instructionsText || undefined,

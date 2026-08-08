@@ -67,6 +67,14 @@ export interface AppSettings {
    * an individual chat can override it; unset everywhere means off.
    */
   showInjectedContext?: boolean;
+  /**
+   * Whether an agent calling `spawn_chat` may start a chat WITHOUT asking. Off
+   * by default: a spawn stops for an approval prompt, and this is the only thing
+   * that lifts it (a project's manifest may override it per repo).
+   */
+  spawnChat?: {
+    autoApprove?: boolean;
+  };
 }
 
 /** An OS process LISTENING on a project's port (mirrors server ProjectProcess). */

@@ -49,6 +49,7 @@ describe("mcp-catalog — builder", () => {
         terminals: true,
         memory: true,
         runner: true,
+        chats: true,
         mcpConfig: true,
       },
     });
@@ -73,6 +74,7 @@ describe("mcp-catalog — builder", () => {
         "recall",
         "forget",
         "run_subapp",
+        "spawn_chat",
         "mcp_list",
         "mcp_add",
         "mcp_remove",

@@ -98,6 +98,18 @@ export const AppSettingsSchema = z.object({
    * "false" mean the same thing at the bottom of a fallback chain.
    */
   showInjectedContext: z.boolean().optional(),
+  /**
+   * Policy for `mcp__manager__spawn_chat` — an agent starting ANOTHER chat.
+   * `autoApprove` off (the default, and the reason this is opt-in rather than
+   * opt-out) means every spawn stops for a permission prompt the human answers;
+   * the tool itself takes no bypass argument, so this setting is the ONLY way
+   * past the gate. A project's manifest may override it for that project.
+   */
+  spawnChat: z
+    .object({
+      autoApprove: z.boolean().default(false),
+    })
+    .optional(),
 });
 export type AppSettings = z.infer<typeof AppSettingsSchema>;
 

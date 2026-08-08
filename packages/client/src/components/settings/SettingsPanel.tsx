@@ -139,6 +139,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
             window: s.autoCompact?.window,
           },
           showInjectedContext: s.showInjectedContext ?? false,
+          spawnChat: { autoApprove: s.spawnChat?.autoApprove ?? false },
         };
         setDraft(next);
         applyTheme(next.theme);
@@ -183,6 +184,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
         window: draft.autoCompact?.window || undefined,
       },
       showInjectedContext: draft.showInjectedContext ?? false,
+      spawnChat: { autoApprove: draft.spawnChat?.autoApprove ?? false },
     };
     try {
       const saved = await api.settings.update(body);
@@ -275,6 +277,26 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
               checked={!!draft.showInjectedContext}
               onChange={(v) => patch({ showInjectedContext: v })}
               label={draft.showInjectedContext ? "Shown" : "Hidden"}
+            />
+          </div>
+
+          {/* The ONLY way past the spawn_chat consent prompt — the tool itself
+              takes no bypass argument, so an agent can't turn this on for you.
+              A project's `.dispatch/project.yaml` can override it per repo. */}
+          <div className="mt-3 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[11px] font-medium text-secondary">
+                Auto-approve spawned chats
+              </div>
+              <p className="mt-0.5 text-[10.5px] leading-snug text-faint">
+                Agents can start new chats with <span className="font-mono">spawn_chat</span>.
+                Off, every spawn waits on your approval; on, they start unattended.
+              </p>
+            </div>
+            <Switch
+              checked={!!draft.spawnChat?.autoApprove}
+              onChange={(v) => patch({ spawnChat: { autoApprove: v } })}
+              label={draft.spawnChat?.autoApprove ? "Automatic" : "Ask me"}
             />
           </div>
         </div>

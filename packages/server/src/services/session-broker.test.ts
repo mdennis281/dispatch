@@ -2077,3 +2077,92 @@ describe("SessionBroker — the wrong-worktree guard", () => {
     expect(await hook({ cwd: join(tmpdir(), "nowhere") })).toEqual({});
   });
 });
+
+describe("SessionBroker — spawn_chat consent", () => {
+  /** A live session, so an approval request has somewhere to land. */
+  async function liveSession(): Promise<SessionBroker> {
+    const { fn } = makeFakeQuery(() => [assistantText("hi"), resultMsg()]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    return broker;
+  }
+
+  it("asks the human by default — and a DENY is not consent", async () => {
+    const broker = await liveSession();
+
+    const reqP = nextPermissionId();
+    const consentP = broker.consentToSpawn(
+      "c1",
+      { prompt: "audit the migrations", reason: "long job" },
+      { id: "p1", name: "Dispatch" },
+    );
+    const reqId = await reqP;
+
+    // It rides the ordinary permission channel: same card, same triage entry.
+    expect(
+      events.some((e) => e.type === "attention-add" && e.item.permissionRequestId === reqId),
+    ).toBe(true);
+    const req = events.find(
+      (e): e is Extract<WsServerEvent, { type: "permission-request" }> =>
+        e.type === "permission-request" && e.request.id === reqId,
+    );
+    expect(req?.request.title).toContain("Dispatch");
+    // The brief the new chat would receive is ON the card — it's the one thing
+    // worth reading before saying yes.
+    expect(JSON.stringify(req?.request.input)).toContain("audit the migrations");
+
+    broker.resolvePermission(reqId, { decision: "deny", message: "not now" });
+    await expect(consentP).resolves.toEqual({
+      approved: false,
+      auto: false,
+      message: "not now",
+    });
+  });
+
+  it("skips the prompt only when the human's own setting says so", async () => {
+    const broker = await liveSession();
+    await store.saveSettings({ theme: "dark", spawnChat: { autoApprove: true } });
+
+    const consent = await broker.consentToSpawn(
+      "c1",
+      { prompt: "go" },
+      { id: "p1", name: "Dispatch" },
+    );
+
+    expect(consent).toEqual({ approved: true, auto: true });
+    expect(events.some((e) => e.type === "permission-request")).toBe(false);
+  });
+
+  it("lets a project's manifest insist on the prompt over a permissive setting", async () => {
+    const broker = await liveSession();
+    await store.saveSettings({ theme: "dark", spawnChat: { autoApprove: true } });
+    (broker as unknown as { projectConfig?: unknown }).projectConfig = {
+      getAgent: () => null,
+      getMode: () => null,
+      buildInstructionsInjection: () => null,
+      getMcpServers: () => ({}),
+      getSkills: () => [],
+      getSpawnAutoApprove: () => false,
+    };
+
+    const reqP = nextPermissionId();
+    const consentP = broker.consentToSpawn(
+      "c1",
+      { prompt: "go" },
+      { id: "p1", name: "Dispatch" },
+    );
+    const reqId = await reqP;
+    broker.resolvePermission(reqId, { decision: "allow" });
+
+    await expect(consentP).resolves.toMatchObject({ approved: true, auto: false });
+  });
+
+  it("refuses rather than assuming consent when there's no live session to ask", async () => {
+    const broker = await liveSession();
+
+    await expect(
+      broker.consentToSpawn("nobody", { prompt: "go" }, { id: "p1", name: "Dispatch" }),
+    ).resolves.toMatchObject({ approved: false, auto: false });
+  });
+});
