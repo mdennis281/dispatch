@@ -57,9 +57,13 @@ export function EffortGauge({ effort, className }: { effort: Effort; className?:
       aria-hidden
     >
       <defs>
-        {/* userSpaceOnUse across the dial's width: because the arc's x grows
-            monotonically left→right, a plain horizontal gradient lands each
-            level's colour under its own stretch of arc. */}
+        {/* userSpaceOnUse across the dial's width (x = CX±R, the sweep's own
+            extremes at ±90°): a plain horizontal gradient then lands each
+            level's colour under its own stretch of arc. Only the two tails past
+            ±90° double back in x, and both sit under the end caps where a level
+            boundary never falls. objectBoundingBox would be wrong here — the
+            lit arc must keep the colour it has at full sweep, not restretch the
+            ramp across whatever fraction is currently showing. */}
         <linearGradient id={id} gradientUnits="userSpaceOnUse" x1={CX - R} y1="0" x2={CX + R} y2="0">
           {EFFORT_OPTIONS.map((o, i) => (
             <stop
