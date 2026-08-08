@@ -16,4 +16,5 @@ export * from "./limits.js";
 export * from "./mcp.js";
 export * from "./messages.js";
 export * from "./titles.js";
+export * from "./version.js";
 export * from "./wire.js";

@@ -621,6 +621,15 @@ export function Sidebar() {
           <Plus />
           New chat
         </button>
+        {/* Build stamp, not a page-load clock: it says which bundle you're
+            looking at, which is the first question when dev (4319) and the
+            installed app (4318) disagree. */}
+        <p
+          className="cm-mono mt-2 text-center !text-[9.5px] text-faint"
+          title="Build version (UTC): yyyy.mm.dd.seconds-into-day"
+        >
+          {__BUILD_VERSION__}
+        </p>
       </div>
 
       <ManageConfigDialog open={manageOpen} onClose={() => setManageOpen(false)} />
