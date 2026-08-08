@@ -42,6 +42,19 @@
  * second is what makes it robust against the failure we did NOT predict — the
  * first version did wrap its file write and its bus publish, and still looped,
  * because the console write nobody thought could fail was the one that did.
+ *
+ * ── And that still wasn't it (same day, second attempt) ─────────────────────
+ * Wrapping the console write in `try/catch` did not stop the loop either. These
+ * are ASYNC pipe writes on Windows: `console.error` returns normally and the
+ * EPIPE arrives later as an `error` event on the stream, which — with no
+ * listener — is itself an uncaught exception. So the fault landed back here
+ * with `record` already returned and the `try` block long exited, carrying a
+ * stack captured at write time that pointed straight at the guarded call and
+ * made it look synchronous. The evidence agreed with the wrong theory.
+ *
+ * What actually fixes it is attaching an `error` listener to stdout/stderr, so
+ * the failed write is a handled event rather than a crash. The lesson worth
+ * keeping: a stack trace tells you where a write STARTED, not where it failed.
  */
 import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -131,20 +144,41 @@ export function installCrashNet(opts: CrashNetOptions): () => void {
   let dropped = 0;
 
   /**
-   * Console output that cannot throw.
+   * Console output that cannot take the process down.
    *
    * Under the installed launcher, stderr is a pipe whose read end is gone —
-   * `launch.py` runs under `pythonw`, which has no console. Writing to it throws
-   * EPIPE **synchronously** rather than discarding quietly, so the "loud on
-   * stderr too" line was a guaranteed throw in exactly the deployment this module
-   * exists to serve. The irony is on the record: the header above notes the
-   * original crash was invisible because output went "to a handle that goes
-   * nowhere" — a handle that goes nowhere is precisely one that raises EPIPE.
+   * `launch.py` runs under `pythonw`, which has no console.
    *
-   * Latched: once the pipe is dead it stays dead, so this stops paying for a
-   * throw per line.
+   * ── The try/catch here was NOT enough, and the reason matters ──────────────
+   * On Windows these are ASYNC pipe writes. `console.error` queues and returns
+   * normally; the EPIPE surfaces later as an `error` event on the stream. A
+   * stream `error` event with no listener IS an uncaught exception — so the
+   * fault arrives at `onException` long after `safeLog`'s `try` block has
+   * exited, carrying a stack captured at write time that makes it LOOK
+   * synchronous. `recording` cannot help either: by then `record` has returned,
+   * so every one of them is a fresh top-level fault.
+   *
+   * The first fix read the stack, believed it, and wrapped the call. The result
+   * was a loop that no longer recursed but still ran flat out — bounded only by
+   * log rotation. The error listeners below are the actual fix: with a listener
+   * attached, the failure is a handled event and never becomes a crash at all.
+   *
+   * Latched, so once the pipe is known dead nothing writes to it again.
    */
   let consoleDead = false;
+
+  /**
+   * Adopt stdout/stderr's `error` events.
+   *
+   * This is the load-bearing line. Without it every failed write to a dead pipe
+   * is an uncaught exception; with it, it is a no-op that flips `consoleDead`.
+   * Removed on uninstall so tests don't stack listeners on the real streams.
+   */
+  const onStreamError = (): void => {
+    consoleDead = true;
+  };
+  const streams = [process.stdout, process.stderr];
+  for (const s of streams) s.on("error", onStreamError);
   const safeLog = (msg: string): void => {
     if (consoleDead) return;
     try {
@@ -218,6 +252,7 @@ export function installCrashNet(opts: CrashNetOptions): () => void {
   process.on("uncaughtException", onException);
 
   state.off = () => {
+    for (const s of streams) s.off("error", onStreamError);
     process.off("unhandledRejection", onRejection);
     process.off("uncaughtException", onException);
     // Only surrender the slot if we still hold it: a later install already

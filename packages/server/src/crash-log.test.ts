@@ -160,6 +160,55 @@ describe("the net is not itself the crash", () => {
     expect(text).not.toContain("secondary");
   });
 
+  /**
+   * The failure the FIRST fix missed. `try/catch` around the console write is
+   * useless here: on Windows these are async pipe writes, so the EPIPE arrives
+   * later as an `error` event on the stream — and a stream `error` with no
+   * listener is itself an uncaught exception. The net must adopt those events.
+   */
+  it("adopts stdout/stderr error events instead of letting them crash", () => {
+    const before = {
+      out: process.stdout.listenerCount("error"),
+      err: process.stderr.listenerCount("error"),
+    };
+    uninstall = installCrashNet({ dataDir: dir, log: () => {} });
+
+    expect(process.stdout.listenerCount("error")).toBe(before.out + 1);
+    expect(process.stderr.listenerCount("error")).toBe(before.err + 1);
+
+    // With a listener attached this is delivered, not thrown. Without one it
+    // would take the process down.
+    expect(() =>
+      process.stderr.emit("error", Object.assign(new Error("EPIPE"), { code: "EPIPE" })),
+    ).not.toThrow();
+
+    uninstall();
+    uninstall = undefined;
+    // And it gives them back — otherwise every install leaks a listener on the
+    // real streams, which is the exact bug class this module exists for.
+    expect(process.stdout.listenerCount("error")).toBe(before.out);
+    expect(process.stderr.listenerCount("error")).toBe(before.err);
+  });
+
+  it("stops writing to the console once a stream has reported an error", async () => {
+    const seen: string[] = [];
+    uninstall = installCrashNet({ dataDir: dir, log: (m) => seen.push(m) });
+
+    process.emit("uncaughtException", new Error("before the pipe died"));
+    expect(seen).toHaveLength(1);
+
+    // The async EPIPE lands.
+    process.stderr.emit("error", Object.assign(new Error("EPIPE"), { code: "EPIPE" }));
+
+    process.emit("uncaughtException", new Error("after the pipe died"));
+    // No second console write — that write is what kept feeding the loop.
+    expect(seen).toHaveLength(1);
+    // The disk record is unaffected: it is the one that matters.
+    const text = await readFile(logFile(), "utf8");
+    expect(text).toContain("before the pipe died");
+    expect(text).toContain("after the pipe died");
+  });
+
   it("rotates rather than growing without bound", async () => {
     uninstall = installCrashNet({ dataDir: dir, log: () => {} });
     await writeFile(logFile(), "x".repeat(CRASH_LOG_MAX_BYTES + 1), "utf8");
