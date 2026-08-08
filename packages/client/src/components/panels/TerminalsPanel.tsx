@@ -1,10 +1,12 @@
-import { useEffect, useRef } from "react";
-import { TerminalSquare, FolderClosed } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { TerminalSquare, FolderClosed, Plus, X, CornerDownLeft } from "lucide-react";
 import type { Chat, TerminalInfo } from "@dispatch/shared";
-import { useTerminals, type TerminalLine } from "../../stores/terminals.js";
+import { useTerminals, nextShellName, type TerminalLine } from "../../stores/terminals.js";
 import { api } from "../../lib/api.js";
 import { StatusDot } from "../ui/StatusDot.js";
 import { Chip } from "../ui/Chip.js";
+import { Button } from "../ui/Button.js";
+import { IconButton } from "../ui/IconButton.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate } from "../../lib/format.js";
 
@@ -25,6 +27,48 @@ function useScrollbackFetch(id: string, hasLines: boolean): void {
         /* best-effort — live events still fill the view */
       });
   }, [id, hasLines]);
+}
+
+/**
+ * The command line for a shell. Kept dumb on purpose: the request is
+ * fire-and-forget because the output, the busy flag and the exit code all
+ * arrive over the WS the same way an AGENT-run command's do — so a human
+ * command and an agent command narrate through one path, and a `pnpm build`
+ * that runs for four minutes doesn't need this promise to stay pending.
+ */
+function CommandInput({ terminal }: { terminal: TerminalInfo }) {
+  const [command, setCommand] = useState("");
+  const busy = Boolean(terminal.busy);
+
+  const submit = () => {
+    const c = command.trim();
+    if (!c || busy) return;
+    setCommand("");
+    void api.terminals.run(terminal.chatId, terminal.name, c).catch(() => {
+      /* the failure shows up as stderr in the stream; nothing to add here */
+    });
+  };
+
+  return (
+    <div className="flex items-center gap-1.5 border-t border-line-soft px-2 py-1.5">
+      <span className="select-none pl-1 cm-mono !text-[11px] text-accent-hi">$</span>
+      <input
+        value={command}
+        onChange={(e) => setCommand(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") submit();
+        }}
+        spellCheck={false}
+        disabled={busy}
+        placeholder={busy ? "running…" : "Run a command…"}
+        aria-label={`Run a command in ${terminal.name}`}
+        className="h-6 min-w-0 flex-1 rounded-md bg-transparent px-1 cm-mono !text-[11px] text-primary outline-none placeholder:text-faint disabled:opacity-60"
+      />
+      <IconButton size="sm" tip="Run" disabled={busy || !command.trim()} onClick={submit}>
+        <CornerDownLeft />
+      </IconButton>
+    </div>
+  );
 }
 
 function TerminalCard({ terminal }: { terminal: TerminalInfo }) {
@@ -67,6 +111,13 @@ function TerminalCard({ terminal }: { terminal: TerminalInfo }) {
             exit {terminal.lastExitCode}
           </Chip>
         )}
+        <IconButton
+          size="sm"
+          tip="Close shell"
+          onClick={() => void api.terminals.kill(terminal.id).catch(() => {})}
+        >
+          <X />
+        </IconButton>
       </div>
 
       <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-[10.5px] text-faint">
@@ -99,6 +150,8 @@ function TerminalCard({ terminal }: { terminal: TerminalInfo }) {
           ))}
         </div>
       )}
+
+      {live && <CommandInput terminal={terminal} />}
     </div>
   );
 }
@@ -107,6 +160,23 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
   const byId = useTerminals((s) => s.byId);
   const order = useTerminals((s) => s.order);
   const mine = order.map((id) => byId[id]!).filter((t) => t && t.chatId === chat.id);
+  const [opening, setOpening] = useState(false);
+
+  // Open a shell the way the agent's `terminal` tool does — same service, same
+  // cwd rule. Until this button existed the ONLY door into this panel was
+  // mcp__manager__terminal, so a human who had never watched an agent run one
+  // saw an empty tab and no way to fill it.
+  const openShell = () => {
+    if (opening) return;
+    setOpening(true);
+    const name = nextShellName(mine.map((t) => t.name));
+    // No local upsert: the server publishes `terminal-update` on spawn, which is
+    // the same path an agent-opened shell arrives by. One source of truth.
+    void api.terminals
+      .create(chat.id, name)
+      .catch(() => {})
+      .finally(() => setOpening(false));
+  };
 
   if (mine.length === 0) {
     return (
@@ -114,8 +184,15 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
         <TerminalSquare className="mx-auto mb-2 size-5 text-faint" />
         <p className="text-[12px] text-muted">No terminals yet.</p>
         <p className="mt-0.5 text-[11px] text-faint">
-          The agent opens persistent shells here (cwd + env survive across commands).
+          Persistent shells — cwd and env survive across commands. The agent opens
+          them with its <span className="cm-mono !text-[10.5px]">terminal</span> tool;
+          you can open one too.
         </p>
+        <div className="mt-3 flex justify-center">
+          <Button size="xs" variant="subtle" leftIcon={<Plus />} disabled={opening} onClick={openShell}>
+            New shell
+          </Button>
+        </div>
       </div>
     );
   }
@@ -125,6 +202,11 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
       {mine.map((t) => (
         <TerminalCard key={t.id} terminal={t} />
       ))}
+      <div className="flex justify-center pt-0.5">
+        <Button size="xs" variant="ghost" leftIcon={<Plus />} disabled={opening} onClick={openShell}>
+          New shell
+        </Button>
+      </div>
     </div>
   );
 }

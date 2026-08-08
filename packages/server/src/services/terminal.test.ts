@@ -240,4 +240,72 @@ describe("TerminalService — teardown", () => {
     expect(info.lastCommand).toBe("printout x");
     expect(info.lastExitCode).toBe(0);
   });
+
+  it("kill() closes ONE shell and leaves its siblings alone", async () => {
+    const { svc, shells } = makeService();
+    await svc.run({ chatId: "c1", name: "a", command: "printout x", cwd: "C:\\r" });
+    await svc.run({ chatId: "c1", name: "b", command: "printout x", cwd: "C:\\r" });
+
+    expect(svc.kill("c1::a")).toBe(true);
+
+    expect(shells[0]!.killed).toBe(true);
+    expect(shells[1]!.killed).toBe(false);
+    expect(svc.listChat("c1").map((t) => t.name)).toEqual(["b"]);
+    expect(events.some((e) => e.type === "terminal-closed" && e.terminalId === "c1::a")).toBe(true);
+  });
+
+  it("kill() on an unknown id reports false instead of throwing", () => {
+    const { svc } = makeService();
+    expect(svc.kill("c1::nope")).toBe(false);
+  });
+});
+
+/* The human-facing door: `run()` spawns lazily, which only works for a caller
+ * that already has a command. "New shell" doesn't. */
+describe("TerminalService — create", () => {
+  it("spawns an empty live shell and announces it", () => {
+    const { svc, shells } = makeService();
+    const { terminal, error } = svc.create("c1", "shell", "C:\\repo");
+
+    expect(error).toBeUndefined();
+    expect(terminal).toMatchObject({ id: "c1::shell", name: "shell", cwd: "C:\\repo", status: "live" });
+    // Empty: nothing has been run in it yet.
+    expect(terminal!.lastCommand).toBeUndefined();
+    expect(shells.length).toBe(1);
+    expect(events.some((e) => e.type === "terminal-update")).toBe(true);
+  });
+
+  it("is the SAME shell run() would reuse — cwd persists across the handoff", async () => {
+    const { svc, shells } = makeService();
+    svc.create("c1", "shell", "C:\\repo");
+    const first = await svc.run({ chatId: "c1", name: "shell", command: "cd C:\\Windows" });
+    expect(first.cwd).toBe("C:\\Windows");
+    const second = await svc.run({ chatId: "c1", name: "shell", command: "printout here" });
+    expect(second.cwd).toBe("C:\\Windows");
+    // One shell for create + both runs — no second powershell behind the UI's back.
+    expect(shells.length).toBe(1);
+  });
+
+  it("re-creating a LIVE name returns the existing shell, not a second one", () => {
+    const { svc, shells } = makeService();
+    const a = svc.create("c1", "shell", "C:\\repo");
+    const b = svc.create("c1", "shell", "C:\\repo");
+    expect(b.terminal!.id).toBe(a.terminal!.id);
+    expect(shells.length).toBe(1);
+  });
+
+  it("respects the per-chat cap and says so", () => {
+    const { svc } = makeService({ maxPerChat: 1 });
+    svc.create("c1", "one", "C:\\r");
+    const second = svc.create("c1", "two", "C:\\r");
+    expect(second.terminal).toBeUndefined();
+    expect(second.error).toMatch(/cap reached/i);
+  });
+
+  it("a killed shell frees its slot again", () => {
+    const { svc } = makeService({ maxPerChat: 1 });
+    svc.create("c1", "one", "C:\\r");
+    svc.kill("c1::one");
+    expect(svc.create("c1", "two", "C:\\r").terminal).toBeDefined();
+  });
 });

@@ -442,7 +442,8 @@ export const api = {
       post<KillResult[]>(`/api/projects/${projectId}/processes/kill`, { pids }),
   },
 
-  /* persistent terminals (agent-driven named shells) */
+  /* persistent named shells — opened by the agent (mcp__manager__terminal) OR
+     by a human from the Terminals panel; both land on the same shells. */
   terminals: {
     list: (chatId?: string) =>
       get<TerminalInfo[]>(`/api/terminals${qs({ chatId })}`),
@@ -450,6 +451,21 @@ export const api = {
       get<{ stream: "command" | "stdout" | "stderr"; chunk: string; ts: number }[]>(
         `/api/terminals/${encodeURIComponent(id)}/output`,
       ),
+    /** Open an empty shell (cwd = the chat's worktree, else the project checkout). */
+    create: (chatId: string, name: string) =>
+      post<TerminalInfo>("/api/terminals", { chatId, name }),
+    /**
+     * Run one command. The promise settles when the command does — which for a
+     * build is minutes — so callers drive their spinner off the terminal's own
+     * `busy` flag (pushed over the WS the instant the shell starts) rather than
+     * off this fetch.
+     */
+    run: (chatId: string, name: string, command: string) =>
+      post<{ output: string; exitCode: number | null; cwd: string; error?: string }>(
+        "/api/terminals/run",
+        { chatId, name, command },
+      ),
+    kill: (id: string) => del<{ ok: true }>(`/api/terminals/${encodeURIComponent(id)}`),
   },
 
   /* file-path picker (the browser can't see the filesystem; the server can) */

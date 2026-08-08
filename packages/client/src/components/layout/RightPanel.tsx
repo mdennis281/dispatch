@@ -9,7 +9,7 @@ import { RunnerPanel } from "../panels/RunnerPanel.js";
 import { TerminalsPanel } from "../panels/TerminalsPanel.js";
 import { PRsPanel } from "../panels/PRsPanel.js";
 import { usePanels } from "../../stores/panels.js";
-import { useRunners } from "../../stores/runners.js";
+import { useRunners, belongsToChat } from "../../stores/runners.js";
 import { useTerminals } from "../../stores/terminals.js";
 import { useProcesses, useOrphanCount } from "../../stores/processes.js";
 import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
@@ -43,8 +43,14 @@ export function RightPanel({ chat }: { chat: Chat }) {
   }, []);
 
   const wtCount = usePanels((s) => s.worktrees.filter((w) => worktreeMatchesChat(w, chat)).length);
+  // Same membership rule the panel renders with (see `belongsToChat`), so the
+  // badge can't promise a count the tab then fails to show.
   const runnerCount = useRunners(
-    (s) => s.order.map((id) => s.byId[id]!).filter((r) => r?.chatId === chat.id && r.status === "running").length,
+    (s) =>
+      s.order
+        .map((id) => s.byId[id]!)
+        .filter((r) => r && r.status === "running" && belongsToChat(r, chat.id, chat.projectId))
+        .length,
   );
   const termCount = useTerminals(
     (s) => s.order.map((id) => s.byId[id]!).filter((t) => t?.chatId === chat.id && t.status === "live").length,
@@ -96,8 +102,16 @@ export function RightPanel({ chat }: { chat: Chat }) {
     <aside className="flex w-[360px] shrink-0 flex-col border-l border-line bg-surface">
       <div className="flex h-12 shrink-0 items-center cm-hairline-b">
         {/* Icon-only: five labelled tabs overflowed the 360px column, so the
-            later ones were unreachable. Labels live in the tooltips. */}
-        <Tabs iconOnly tabs={tabs} value={tab} onChange={(id) => setTab(id as PanelTab)} />
+            later ones were unreachable. `labelSlot` buys the vocabulary back
+            inside the budget — the strip is 196px, the label sits in the 164px
+            the icons freed and names whichever tab the mouse is over. */}
+        <Tabs
+          iconOnly
+          labelSlot
+          tabs={tabs}
+          value={tab}
+          onChange={(id) => setTab(id as PanelTab)}
+        />
       </div>
       <ScrollArea className="min-h-0 flex-1">
         {tab === "worktrees" && <WorktreesPanel chat={chat} />}

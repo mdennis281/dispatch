@@ -189,18 +189,13 @@ export class TerminalService {
 
     if (!term || term.status === "exited") {
       // Enforce the per-chat cap only when creating a NEW live shell.
-      if (!term) {
-        const live = [...this.terminals.values()].filter(
-          (t) => t.chatId === args.chatId && t.status === "live",
-        ).length;
-        if (live >= this.maxPerChat) {
-          return {
-            output: "",
-            exitCode: null,
-            cwd: args.cwd ?? "",
-            error: `Terminal cap reached (${this.maxPerChat} shells for this chat). Reuse an existing terminal name.`,
-          };
-        }
+      if (!term && this.atCap(args.chatId)) {
+        return {
+          output: "",
+          exitCode: null,
+          cwd: args.cwd ?? "",
+          error: this.capMessage(),
+        };
       }
       term = this.open(key, args.chatId, name, args.cwd ?? process.cwd());
     }
@@ -210,6 +205,38 @@ export class TerminalService {
     const run = gate.then(() => this.exec(term!, args));
     term.queue = run.catch(() => {});
     return run;
+  }
+
+  /** True when this chat already holds `maxPerChat` LIVE shells. */
+  private atCap(chatId: string): boolean {
+    const live = [...this.terminals.values()].filter(
+      (t) => t.chatId === chatId && t.status === "live",
+    ).length;
+    return live >= this.maxPerChat;
+  }
+
+  private capMessage(): string {
+    return `Terminal cap reached (${this.maxPerChat} shells for this chat). Reuse an existing terminal name.`;
+  }
+
+  /**
+   * Open a named shell with NOTHING in it, and hand back its snapshot.
+   *
+   * `run()` already spawns lazily, which is all `mcp__manager__terminal` ever
+   * needed — the agent always arrives with a command. A human pressing "New
+   * shell" does not, and until this existed the only way to get a terminal at
+   * all was to ask an agent for one, so the Terminals tab was permanently empty
+   * for anyone who never had. Re-opening a name that is already live returns the
+   * existing shell rather than a second one, so a double-click can't strand a
+   * powershell process the UI has no handle on.
+   */
+  create(chatId: string, name: string, cwd: string): { terminal?: TerminalInfo; error?: string } {
+    const trimmed = name.trim() || "main";
+    const key = TerminalService.key(chatId, trimmed);
+    const existing = this.terminals.get(key);
+    if (existing?.status === "live") return { terminal: this.view(existing) };
+    if (!existing && this.atCap(chatId)) return { error: this.capMessage() };
+    return { terminal: this.view(this.open(key, chatId, trimmed, cwd)) };
   }
 
   /** Spawn + register a shell for `key`. */
@@ -424,17 +451,29 @@ export class TerminalService {
 
   /* ----------------------------------------------------------- teardown */
 
+  /**
+   * Kill + forget ONE shell. `killChat` is chat-wide teardown; this is the
+   * single-shell door a human needs, because a person who can open shells from
+   * the UI can also reach the per-chat cap, and without this the only way back
+   * under it would be to delete the chat.
+   */
+  kill(terminalId: string): boolean {
+    const term = this.terminals.get(terminalId);
+    if (!term) return false;
+    this.terminals.delete(terminalId);
+    try {
+      term.proc.kill();
+    } catch {
+      /* already dead */
+    }
+    this.bus.publish({ type: "terminal-closed", terminalId: term.id, chatId: term.chatId });
+    return true;
+  }
+
   /** Kill + forget every terminal owned by a chat (chat deleted / teardown). */
   killChat(chatId: string): void {
     for (const [key, term] of [...this.terminals.entries()]) {
-      if (term.chatId !== chatId) continue;
-      this.terminals.delete(key);
-      try {
-        term.proc.kill();
-      } catch {
-        /* already dead */
-      }
-      this.bus.publish({ type: "terminal-closed", terminalId: term.id, chatId });
+      if (term.chatId === chatId) this.kill(key);
     }
   }
 
