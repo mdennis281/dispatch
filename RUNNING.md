@@ -23,6 +23,13 @@ Open **http://127.0.0.1:4319** — same URL as prod. In dev the server runs Vite
 middleware mode, so the SPA, REST, WebSocket, and HMR are all on one port and one
 process. No separate client server, no second port to open.
 
+Dev resolves `@dispatch/shared` and `@dispatch/cli` to their TypeScript **sources**
+(`packages/server/tsconfig.dev.json`), not to their compiled `dist/`. So a change in
+`packages/shared` hot-reloads like any server change, and `pnpm dev` never runs the
+server against whatever `dist/` a stale `pnpm build` left behind — which used to fail
+as a runtime `undefined` deep inside a session start, naming neither the stale build
+nor the field. The production build is unaffected; it still uses `tsconfig.json`.
+
 ## First steps in the UI
 1. **Project** — pick one from the selector, or start a new one (⌘K → *New project*, or
    *New project…* in the selector). *Hivebreak is pre-seeded.* See

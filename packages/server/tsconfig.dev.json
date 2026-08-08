@@ -1,0 +1,33 @@
+{
+  /*
+   * DEV-ONLY tsconfig for `pnpm dev` (tsx watch). Identical to tsconfig.json
+   * except that the workspace deps resolve to their TypeScript SOURCES instead
+   * of their compiled `dist/`.
+   *
+   * Why: `@dispatch/shared` and `@dispatch/cli` publish `exports` pointing at
+   * `dist/`, so the dev server — which runs the SERVER from source — was still
+   * loading a COMPILED snapshot of its own workspace deps. Nothing in `pnpm dev`
+   * builds them, so the snapshot is whatever the last `pnpm build` left behind.
+   *
+   * That failed silently and expensively: after `workflow.pr` (the PR policy)
+   * was added to `ResolvedWorkflowSchema`, an unrebuilt `shared/dist` returned a
+   * workflow with NO `pr` key at all (zod strips what the old schema doesn't
+   * know), so every new chat died in `startSession` on
+   * `workflow.pr.reviewers` — surfacing only as
+   * "Session error: Cannot read properties of undefined (reading 'reviewers')",
+   * which names neither the stale build nor the field's real owner.
+   *
+   * Mapping to source removes the snapshot entirely: tsx compiles shared/cli on
+   * the fly, edits there hot-reload like server edits, and there is no build
+   * step that can be forgotten. The production build still uses tsconfig.json
+   * and still compiles against `dist/` types, so emitted output is unchanged.
+   */
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@dispatch/shared": ["../shared/src/index.ts"],
+      "@dispatch/cli": ["../cli/src/core/index.ts"],
+      "@dispatch/cli/core": ["../cli/src/core/index.ts"]
+    }
+  }
+}
