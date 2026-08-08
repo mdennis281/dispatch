@@ -5,10 +5,15 @@
  * Application log (a Node fatal error is an orderly exit, not an SEH fault).
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCrashNet, attachCrashBus, CRASH_LOG_NAME } from "./crash-log.js";
+import {
+  installCrashNet,
+  attachCrashBus,
+  CRASH_LOG_NAME,
+  CRASH_LOG_MAX_BYTES,
+} from "./crash-log.js";
 import { EventBus } from "./bus.js";
 import type { WsServerEvent } from "@dispatch/shared";
 
@@ -95,6 +100,126 @@ describe("installCrashNet", () => {
     // silently disarm the live net.
     first();
     expect(process.listenerCount("unhandledRejection")).toBe(before + 1);
+  });
+});
+
+/**
+ * The 2026-08-08 regression: the net turned a fatal crash into an infinite one.
+ * One `MaxListenersExceededWarning` -> stderr write -> EPIPE (the launcher's
+ * stderr has no reader) -> uncaughtException -> this handler -> stderr write ->
+ * EPIPE -> ... 391,428 entries and 106 MB in about three minutes.
+ */
+describe("the net is not itself the crash", () => {
+  const epipe = (): never => {
+    throw Object.assign(new Error("EPIPE: broken pipe, write"), { code: "EPIPE" });
+  };
+
+  it("survives a console whose pipe has no reader", async () => {
+    uninstall = installCrashNet({ dataDir: dir, log: epipe });
+
+    // The throw must not escape: out of an uncaughtException handler, an
+    // escaping throw IS the next uncaughtException.
+    expect(() => process.emit("uncaughtException", new Error("seed"))).not.toThrow();
+
+    const text = await readFile(logFile(), "utf8");
+    expect(text).toContain("seed");
+    expect(text.match(/uncaughtException/g)).toHaveLength(1);
+  });
+
+  it("still writes the disk record when stderr is dead", async () => {
+    // The console is the nice-to-have; the file is the thing being protected.
+    uninstall = installCrashNet({ dataDir: dir, log: epipe });
+    process.emit("unhandledRejection", new Error("unreadable stderr"), Promise.resolve());
+    expect(await readFile(logFile(), "utf8")).toContain("unreadable stderr");
+  });
+
+  it("refuses to re-enter, and says how many faults it swallowed", async () => {
+    let depth = 0;
+    let deepest = 0;
+    uninstall = installCrashNet({
+      dataDir: dir,
+      log: () => {
+        depth++;
+        deepest = Math.max(deepest, depth);
+        try {
+          // Stand in for what Node does with a throw from this handler.
+          process.emit("uncaughtException", new Error("secondary"));
+        } finally {
+          depth--;
+        }
+      },
+    });
+
+    process.emit("uncaughtException", new Error("seed"));
+
+    expect(deepest).toBe(1);
+    const text = await readFile(logFile(), "utf8");
+    expect(text.match(/uncaughtException/g)).toHaveLength(1);
+    expect(text).toContain("seed");
+    expect(text).toContain("1 further fault(s) suppressed");
+    expect(text).not.toContain("secondary");
+  });
+
+  /**
+   * The failure the FIRST fix missed. `try/catch` around the console write is
+   * useless here: on Windows these are async pipe writes, so the EPIPE arrives
+   * later as an `error` event on the stream — and a stream `error` with no
+   * listener is itself an uncaught exception. The net must adopt those events.
+   */
+  it("adopts stdout/stderr error events instead of letting them crash", () => {
+    const before = {
+      out: process.stdout.listenerCount("error"),
+      err: process.stderr.listenerCount("error"),
+    };
+    uninstall = installCrashNet({ dataDir: dir, log: () => {} });
+
+    expect(process.stdout.listenerCount("error")).toBe(before.out + 1);
+    expect(process.stderr.listenerCount("error")).toBe(before.err + 1);
+
+    // With a listener attached this is delivered, not thrown. Without one it
+    // would take the process down.
+    expect(() =>
+      process.stderr.emit("error", Object.assign(new Error("EPIPE"), { code: "EPIPE" })),
+    ).not.toThrow();
+
+    uninstall();
+    uninstall = undefined;
+    // And it gives them back — otherwise every install leaks a listener on the
+    // real streams, which is the exact bug class this module exists for.
+    expect(process.stdout.listenerCount("error")).toBe(before.out);
+    expect(process.stderr.listenerCount("error")).toBe(before.err);
+  });
+
+  it("stops writing to the console once a stream has reported an error", async () => {
+    const seen: string[] = [];
+    uninstall = installCrashNet({ dataDir: dir, log: (m) => seen.push(m) });
+
+    process.emit("uncaughtException", new Error("before the pipe died"));
+    expect(seen).toHaveLength(1);
+
+    // The async EPIPE lands.
+    process.stderr.emit("error", Object.assign(new Error("EPIPE"), { code: "EPIPE" }));
+
+    process.emit("uncaughtException", new Error("after the pipe died"));
+    // No second console write — that write is what kept feeding the loop.
+    expect(seen).toHaveLength(1);
+    // The disk record is unaffected: it is the one that matters.
+    const text = await readFile(logFile(), "utf8");
+    expect(text).toContain("before the pipe died");
+    expect(text).toContain("after the pipe died");
+  });
+
+  it("rotates rather than growing without bound", async () => {
+    uninstall = installCrashNet({ dataDir: dir, log: () => {} });
+    await writeFile(logFile(), "x".repeat(CRASH_LOG_MAX_BYTES + 1), "utf8");
+
+    process.emit("uncaughtException", new Error("after the flood"));
+
+    // The fresh fault is readable, and the flood is kept exactly one deep.
+    const text = await readFile(logFile(), "utf8");
+    expect(text).toContain("after the flood");
+    expect(text.length).toBeLessThan(CRASH_LOG_MAX_BYTES);
+    expect((await readFile(`${logFile()}.1`, "utf8")).length).toBeGreaterThan(CRASH_LOG_MAX_BYTES);
   });
 });
 

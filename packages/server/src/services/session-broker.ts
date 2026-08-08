@@ -276,13 +276,38 @@ function makePrCreateBinding(
     if (!cwd) return null;
     return (repoP ??= github.resolveRepo(cwd).catch(() => null));
   };
+
+  /**
+   * Which directory to inspect: the caller's, if it is a worktree of the SAME
+   * repository, else the session's.
+   *
+   * The bound `cwd` is fixed when the session is built, so it is stale for any
+   * agent that moved afterwards — notably one the Claude Code harness put in
+   * `.claude/worktrees/` via its own `EnterWorktree`, which the server never
+   * hears about. See `PrCreateWhere` in manager-mcp.ts for what that cost.
+   *
+   * The same-repository check is the whole safety story, and it is deliberately
+   * `--git-common-dir` rather than a path-prefix test: linked worktrees share one
+   * common dir wherever they physically live, and a prefix test would both miss
+   * a worktree parked outside the repo and accept an unrelated repo nested
+   * inside it. Anything that fails the check falls back to the bound cwd rather
+   * than throwing — a bad hint must not be able to BLOCK a PR that the default
+   * would have opened correctly.
+   */
+  const cwdFor = async (requested?: string): Promise<string | undefined> => {
+    if (!requested || !cwd) return cwd;
+    const ok = await github.sameRepository(requested, cwd).catch(() => false);
+    return ok ? requested : cwd;
+  };
+
   return {
     reviewers: opts.reviewers,
     draft: opts.draft,
-    preflight: async (base) => {
+    preflight: async (base, at) => {
       const repo = await repoFor();
-      if (!repo || !cwd) return null;
-      const pre = await github.prCreatePreflight(repo, { cwd, trunk: opts.trunk, base });
+      const where = await cwdFor(at);
+      if (!repo || !where) return null;
+      const pre = await github.prCreatePreflight(repo, { cwd: where, trunk: opts.trunk, base });
       return {
         branch: pre.branch,
         trunk: pre.trunk,
@@ -297,19 +322,26 @@ function makePrCreateBinding(
               labels: pre.existing.labels ?? [],
             }
           : null,
+        cwd: where,
       };
     },
     create: async (input) => {
       const repo = await repoFor();
-      if (!repo || !cwd) throw new Error("could not resolve this chat's repo");
+      // NOT named `cwd`: shadowing the binding's own parameter is how the next
+      // reader convinces themselves the two are the same directory.
+      const where = await cwdFor(input.cwd);
+      if (!repo || !where) throw new Error("could not resolve this chat's repo");
       const pre = await github.prCreatePreflight(repo, {
-        cwd,
+        cwd: where,
         trunk: opts.trunk,
         base: input.base,
       });
       if (!pre.branch) throw new Error("this checkout is on a detached HEAD");
       const pr = await github.createPr(repo, {
-        cwd,
+        // `where`, NOT the binding's cwd: this is the call that PUSHES. Reading
+        // the branch from one checkout and pushing from another would ship
+        // whatever the session's directory happened to be sitting on.
+        cwd: where,
         branch: pre.branch,
         base: pre.base,
         title: input.title,

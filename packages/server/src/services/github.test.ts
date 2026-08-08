@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { execa } from "execa";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventBus } from "../bus.js";
 import type { WsServerEvent } from "@dispatch/shared";
@@ -737,6 +740,93 @@ describe("gh failure handling", () => {
     const gh = new GitHubService({ bus, exec });
     const checks = await gh.prChecks(REPO, 42);
     expect(checks).toEqual([{ name: "Guard", status: "in_progress", conclusion: null }]);
+  });
+});
+
+/* ------------------------------------------------------- sameRepository */
+
+/**
+ * This decides whether `create_pr` will honour a caller-supplied directory, so
+ * "yes" to the wrong repo means opening a PR against someone else's work. Both
+ * halves are tested: the comparison logic on a mock, and — because the whole
+ * design rests on one claim about git — the claim itself, against real git.
+ */
+describe("sameRepository", () => {
+  it("compares git common dirs, not paths", async () => {
+    const { exec, calls, push } = makeExec();
+    push({ stdout: "/repo/.git\n", exitCode: 0 });
+    push({ stdout: "/repo/.git\n", exitCode: 0 });
+    const gh = new GitHubService({ bus, exec });
+
+    expect(await gh.sameRepository("/repo/.claude/worktrees/x", "/repo")).toBe(true);
+    // The flag matters: without --path-format=absolute git may answer a relative
+    // path, and two relative answers compare equal across DIFFERENT repos.
+    expect(calls[0].args).toEqual([
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ]);
+    expect(calls[0].options?.cwd).toBe("/repo/.claude/worktrees/x");
+  });
+
+  it("says no for two different repositories", async () => {
+    const { exec, push } = makeExec();
+    push({ stdout: "/repo-a/.git\n", exitCode: 0 });
+    push({ stdout: "/repo-b/.git\n", exitCode: 0 });
+    const gh = new GitHubService({ bus, exec });
+    expect(await gh.sameRepository("/repo-a", "/repo-b")).toBe(false);
+  });
+
+  it("says no — never throws — when a directory isn't a git repo at all", async () => {
+    const { exec, push } = makeExec();
+    push({ stdout: "", stderr: "not a git repository", exitCode: 128 });
+    push({ stdout: "/repo/.git\n", exitCode: 0 });
+    const gh = new GitHubService({ bus, exec });
+    expect(await gh.sameRepository("/tmp/nowhere", "/repo")).toBe(false);
+  });
+});
+
+describe("sameRepository — against real git", () => {
+  let root: string;
+  let hasGit = true;
+
+  beforeEach(async () => {
+    try {
+      await execa("git", ["--version"]);
+    } catch {
+      hasGit = false;
+      return;
+    }
+    root = await mkdtemp(join(tmpdir(), "cm-samerepo-"));
+  });
+
+  it("accepts a linked worktree and rejects an unrelated repo nested inside", async () => {
+    if (!hasGit) return;
+    const main = join(root, "main");
+    const run = (args: string[], cwd: string) => execa("git", args, { cwd });
+    await execa("git", ["init", "-q", "-b", "main", main]);
+    await run(["config", "user.email", "t@example.com"], main);
+    await run(["config", "user.name", "T"], main);
+    await writeFile(join(main, "f.txt"), "hi\n");
+    await run(["add", "-A"], main);
+    await run(["commit", "-q", "-m", "initial"], main);
+
+    // A linked worktree, physically OUTSIDE the main checkout — the case a
+    // path-prefix test would wrongly reject.
+    const wt = join(root, "elsewhere");
+    await run(["worktree", "add", "-q", "-b", "task", wt], main);
+
+    // An unrelated repo nested INSIDE it — the case a path-prefix test would
+    // wrongly accept.
+    const nested = join(main, "vendor", "other");
+    await execa("git", ["init", "-q", "-b", "main", nested]);
+
+    const gh = new GitHubService({ bus, exec: execa });
+    expect(await gh.sameRepository(wt, main)).toBe(true);
+    expect(await gh.sameRepository(nested, main)).toBe(false);
+    expect(await gh.sameRepository(main, main)).toBe(true);
+
+    await rm(root, { recursive: true, force: true });
   });
 });
 

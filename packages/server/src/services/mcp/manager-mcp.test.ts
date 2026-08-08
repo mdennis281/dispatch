@@ -851,6 +851,7 @@ function readyBranch(over: Partial<PrCreateState> = {}): PrCreateState {
     aheadOfBase: 3,
     dirty: false,
     existing: null,
+    cwd: "/repo",
     ...over,
   };
 }
@@ -920,15 +921,21 @@ function fakePrCreate(
     createError?: string;
   } = {},
 ) {
-  const calls: { preflight: (string | undefined)[]; create: Record<string, unknown>[] } = {
+  const calls: {
+    preflight: (string | undefined)[];
+    preflightCwd: (string | undefined)[];
+    create: Record<string, unknown>[];
+  } = {
     preflight: [],
+    preflightCwd: [],
     create: [],
   };
   const binding: ManagerMcpPrCreate = {
     reviewers: opts.reviewers ?? ["copilot-pull-request-reviewer"],
     draft: opts.draft ?? false,
-    preflight: async (base) => {
+    preflight: async (base, at) => {
       calls.preflight.push(base);
+      calls.preflightCwd.push(at);
       return st;
     },
     create: async (input) => {
@@ -960,6 +967,7 @@ const createArgs = (over: Record<string, unknown> = {}) => ({
   allowNoCommits: undefined,
   allowDirty: undefined,
   allowHold: undefined,
+  cwd: undefined,
   ...over,
 });
 
@@ -1026,6 +1034,76 @@ describe("manager-mcp — create_pr", () => {
     );
     expect(resultText(res)).toContain("Opened PR #91");
     expect(calls.create.length).toBe(1);
+  });
+
+  /**
+   * The 2026-08-08 dead end: a complete, committed, tested change sat on a task
+   * branch while create_pr reported `on-trunk` + `no-commits`, because the
+   * binding's cwd is fixed when the SESSION is built and the agent had since
+   * moved into a worktree. Both overrides it named would have opened an empty
+   * main→main PR.
+   */
+  describe("which directory it inspects", () => {
+    it("passes an explicit cwd to preflight, and pushes from the same one", async () => {
+      const wt = "/repo/.claude/worktrees/task";
+      const { binding, calls } = fakePrCreate(readyBranch({ cwd: wt }));
+      const { createPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({}),
+        prCreate: binding,
+      });
+
+      const res = await createPr.handler(createArgs({ cwd: wt }), {});
+
+      expect(resultText(res)).toContain("Opened PR #91");
+      expect(calls.preflightCwd).toEqual([wt]);
+      // The create must run where preflight looked — reading the branch from one
+      // checkout and pushing from another ships an unreviewed branch.
+      expect(calls.create[0].cwd).toBe(wt);
+    });
+
+    it("names the directory it inspected when it refuses", async () => {
+      const { binding } = fakePrCreate(
+        readyBranch({ branch: "main", aheadOfBase: 0, cwd: "/repo" }),
+      );
+      const { createPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({}),
+        prCreate: binding,
+      });
+
+      const res = await createPr.handler(createArgs(), {});
+      const text = resultText(res);
+
+      // Without this the refusal is a true sentence about the wrong directory,
+      // which reads as "you haven't done the work".
+      expect(text).toContain("/repo");
+      expect(text).toContain("pass `cwd`");
+      expect(text).toContain('"inspected":"/repo"');
+    });
+
+    it("says so when the cwd it was handed was ignored", async () => {
+      // The binding fell back — it returns the session's dir, not the requested
+      // one, because the request wasn't a worktree of this repo.
+      const { binding } = fakePrCreate(
+        readyBranch({ branch: "main", aheadOfBase: 0, cwd: "/repo" }),
+      );
+      const { createPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({}),
+        prCreate: binding,
+      });
+
+      const res = await createPr.handler(createArgs({ cwd: "/somewhere/else" }), {});
+      const text = resultText(res);
+
+      expect(text).toContain("NOT a worktree of this chat's repository");
+      expect(text).toContain("/somewhere/else");
+      expect(text).toContain('"ignoredCwd":"/somewhere/else"');
+    });
   });
 
   it("hands back an existing open PR instead of erroring or opening a second", async () => {

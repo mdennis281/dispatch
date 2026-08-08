@@ -21,7 +21,7 @@
  *     each new signal is reported exactly once, so an agent calling it in a loop
  *     (fix → watch again) never misses a later round of review comments and never
  *     hand-rolls a `gh pr view` / `gh pr checks` sleep loop or a background watcher.
- *   - `mcp__manager__create_pr({ title?, body?, base?, draft? })` — OPEN the PR
+ *   - `mcp__manager__create_pr({ title?, body?, base?, draft?, cwd? })` — OPEN the PR
  *     (via {@link ManagerMcpPrCreate}): push with upstream, create, request the
  *     reviewers the project's `workflow.pr.reviewers` declares, write a `PRRef`
  *     onto this chat, and arm the review watcher. Offered whenever the workflow
@@ -219,6 +219,12 @@ export interface PrCreateState {
   dirty: boolean;
   /** A PR that already exists for this branch, if any. */
   existing: { number: number; url: string; state: string; labels: string[] } | null;
+  /**
+   * The directory actually inspected. Reported in every refusal, because the
+   * whole class of bug here is looking at the wrong checkout and saying nothing
+   * about it. See {@link PrCreateWhere}.
+   */
+  cwd: string;
 }
 
 /** The escape hatches a caller passes when it genuinely knows better. */
@@ -340,16 +346,48 @@ export interface ManagerMcpPrCreate {
   reviewers: readonly string[];
   /** Whether the project opens PRs as drafts by default. */
   draft: boolean;
-  /** Fresh branch state; null = the repo couldn't be resolved from this session. */
-  preflight(base?: string): Promise<PrCreateState | null>;
+  /**
+   * Fresh branch state; null = the repo couldn't be resolved from this session.
+   *
+   * `cwd` overrides the directory inspected — see {@link PrCreateWhere}. The
+   * resolved directory comes back on the state so every refusal can say WHERE it
+   * looked, which is the difference between "get a worktree" (baffling, when you
+   * are standing in one) and "I inspected X, which is on main".
+   */
+  preflight(base?: string, cwd?: string): Promise<PrCreateState | null>;
   /** Do all five steps. Throws with the underlying message when git/gh refuses. */
   create(input: {
     base?: string;
     title?: string;
     body?: string;
     draft: boolean;
+    cwd?: string;
   }): Promise<PrCreateResult>;
 }
+
+/**
+ * Why `create_pr` takes a directory at all.
+ *
+ * The binding's cwd is fixed when the SESSION is built — `session.worktreeCwd ??
+ * project.repoPath`. That is right for a chat given a Dispatch worktree up front,
+ * and wrong for every other way an agent legitimately ends up somewhere else:
+ * the Claude Code harness's own `EnterWorktree` moves the agent into
+ * `.claude/worktrees/<name>` without telling the server, and a session that
+ * started in the primary checkout can be handed a worktree later.
+ *
+ * The failure this caused is not a refusal to work — it is a refusal that reads
+ * as the OPPOSITE of the truth. On 2026-08-08 a complete, committed, tested
+ * change sat on a task branch while `create_pr` reported `on-trunk` and
+ * `no-commits`, because it had inspected the primary checkout. Both overrides it
+ * named (`allowTrunk`, `allowNoCommits`) would have opened an EMPTY `main`→`main`
+ * PR — the guard's own escape hatches pointed away from the fix.
+ *
+ * So: let the caller say where, and VALIDATE it — the directory must be a
+ * worktree of the same repository the chat is bound to. That keeps the useful
+ * case (this repo's other worktree) and refuses the dangerous one (some other
+ * repo entirely, or another project's checkout).
+ */
+export type PrCreateWhere = string | undefined;
 
 /**
  * Everything `approve_pr` needs to decide whether a PR may LAND — read fresh at
@@ -1322,7 +1360,10 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "useless PR — you're on the trunk, the branch has no commits, the tree is " +
       "dirty, the branch's PR is on `hold` — and every refusal names the argument " +
       "that overrides it if you genuinely know better. If a PR already exists for " +
-      "this branch it hands that one back rather than failing.",
+      "this branch it hands that one back rather than failing. It inspects the " +
+      "chat's worktree (or project root) by default — if you moved since the chat " +
+      "started, pass `cwd` so it opens the PR for the branch you actually " +
+      "committed on rather than the one the STARTING directory is sitting on.",
     {
       title: z
         .string()
@@ -1353,6 +1394,17 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .boolean()
         .optional()
         .describe("Override: proceed even though this branch's PR carries `hold`."),
+      cwd: z
+        .string()
+        .optional()
+        .describe(
+          "Directory whose branch to open the PR for. Defaults to the chat's " +
+            "worktree, or its project root. Pass this when you are working " +
+            "somewhere the chat wasn't bound to at startup — e.g. a worktree you " +
+            "entered mid-session — otherwise the PR is opened for whatever branch " +
+            "the STARTING directory is on. Must be a worktree of the same " +
+            "repository; anything else is ignored in favour of the default.",
+        ),
     },
     async (args): Promise<CallToolResult> => {
       const prCreate = ctx.prCreate;
@@ -1366,9 +1418,11 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       const base =
         typeof args.base === "string" && args.base.trim() ? args.base.trim() : undefined;
 
+      const at = typeof args.cwd === "string" && args.cwd.trim() ? args.cwd.trim() : undefined;
+
       let st: PrCreateState | null;
       try {
-        st = await prCreate.preflight(base);
+        st = await prCreate.preflight(base, at);
       } catch (e) {
         return textResult(
           `Could not inspect this branch: ${e instanceof Error ? e.message : String(e)}`,
@@ -1382,6 +1436,10 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           true,
         );
       }
+      // A `cwd` that was asked for but not honoured is the single most confusing
+      // thing that can happen here — every downstream sentence would describe a
+      // directory the caller didn't name. Say so before any of them are printed.
+      const ignoredCwd = at && at !== st.cwd ? at : undefined;
 
       // An existing PR is an ANSWER, not an error: the agent asked for "the PR for
       // this branch to exist", and it does. Failing here would only push it back
@@ -1410,11 +1468,29 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       if (blockers.length) {
         // Not an error — "not like this" is a normal, expected answer, and each
         // line already says which argument overrides it.
+        //
+        // The directory is named unconditionally. Every one of these refusals is
+        // a statement ABOUT a checkout, and the expensive failure is a true
+        // statement about the wrong one: `on-trunk` + `no-commits` reads as "you
+        // haven't done the work" when the work is committed one directory over.
         return textResult(
-          `Not opening a PR yet:\n` +
+          `Not opening a PR yet (inspected \`${st.cwd}\`):\n` +
             blockers.map((b) => `  · ${b.detail}`).join("\n") +
+            (ignoredCwd
+              ? `\n\nNOTE: you passed cwd \`${ignoredCwd}\`, which is NOT a worktree of ` +
+                `this chat's repository, so it was ignored and the above describes ` +
+                `\`${st.cwd}\` instead.`
+              : "") +
+            "\n\nIf that is not where your work is, pass `cwd` pointing at the worktree " +
+            "you committed in — the default is where the chat STARTED, which is stale " +
+            "if you moved since.\n" +
             "\n\nFix these (or pass the named override) and call create_pr again.\n" +
-            JSON.stringify({ created: false, blockers: blockers.map((b) => b.code) }),
+            JSON.stringify({
+              created: false,
+              blockers: blockers.map((b) => b.code),
+              inspected: st.cwd,
+              ...(ignoredCwd ? { ignoredCwd } : {}),
+            }),
         );
       }
 
@@ -1437,6 +1513,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           title: typeof args.title === "string" ? args.title : undefined,
           body: typeof args.body === "string" ? args.body : undefined,
           draft,
+          // The SAME directory preflight approved. Deciding from one checkout and
+          // pushing from another is how you ship a branch nobody reviewed.
+          cwd: st.cwd,
         });
       } catch (e) {
         return textResult(

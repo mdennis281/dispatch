@@ -113,8 +113,10 @@ import {
   assertNodeVersion,
   buildInto,
   capture,
+  INSTALL_ARGS,
   portAlive,
   prepareClone,
+  run,
   verifyPayload,
 } from "./build-payload.mjs";
 
@@ -161,7 +163,18 @@ const PARENT_EXIT_TIMEOUT_MS = 30_000;
 const LOG_MAX_BYTES = 2_000_000;
 
 /** Phases that mean the payload may not be where the launcher expects it. */
-const UNSAFE_PHASES = new Set(["stopping", "swapping", "starting", "restoring", "rolling-back"]);
+// `relinking` belongs here: the payload is already in place but its
+// node_modules are mid-repair, so an install interrupted there leaves `app/`
+// present and unstartable — which is precisely the state that needs --recover
+// rather than a cheerful "payload: present".
+const UNSAFE_PHASES = new Set([
+  "stopping",
+  "swapping",
+  "relinking",
+  "starting",
+  "restoring",
+  "rolling-back",
+]);
 
 /* ------------------------------------------------------------------ args */
 
@@ -265,6 +278,65 @@ function rotateLog(p) {
 }
 
 const say = (log) => (msg) => log(`[${new Date().toISOString()}] ${msg}\n`);
+
+/**
+ * A human-readable reason from an unknown thrown value.
+ *
+ * `err.message` on a thrown string/null/undefined throws a TypeError — and a
+ * TypeError raised inside a `catch` on a recovery path escapes it, replacing a
+ * handled failure with an unhandled one exactly when things are already going
+ * wrong. Everything in this file that reports a caught value goes through here.
+ */
+function reason(err) {
+  if (err instanceof Error) return err.message || String(err);
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err) ?? String(err);
+  } catch {
+    return String(err);
+  }
+}
+
+/**
+ * Record a fatal from the ATTACHED half where a human can actually find it.
+ *
+ * ── Why this exists ─────────────────────────────────────────────────────────
+ * Every refusal before `makeLogger` (below the arg parse, the node-version
+ * assert, the git probes, the bootstrap guard, the lock) went to `console.error`
+ * and NOWHERE else. Run from a terminal that is fine. Run from the app — which
+ * is the whole point of a live self-upgrade — and stderr is inherited from
+ * `launch.py` under `pythonw`, which has no console: the explanation is written
+ * to a handle that discards it. `upgrade.log` stayed empty and `--status` said
+ * "no upgrade has been run", so the one question that mattered — WHY did it
+ * refuse — had no answer anywhere on the machine.
+ *
+ * On 2026-08-08 that hid a guard that was working perfectly and naming its own
+ * one-line remedy: the installed payload predated the readiness probe. The
+ * upgrade had been "crashing instantly" for days.
+ *
+ * NOTE it records `lastError` and never touches `phase`. Phase describes what
+ * has MOVED on disk, and a throw here usually means nothing has; overwriting a
+ * real `swapping` with a cheerful `refused` would turn a recoverable install
+ * into a lie. Non-destructive by construction.
+ */
+function reportFatal(p, err) {
+  const stamp = new Date().toISOString();
+  const message = err?.message ?? String(err);
+  const detail = err?.stack ?? message;
+  try {
+    mkdirSync(p.root, { recursive: true });
+    rotateLog(p);
+    appendFileSync(p.log, `[${stamp}] UPGRADE FAILED (nothing was swapped)\n${detail}\n\n`);
+  } catch {
+    /* an unwritable state dir must not replace the error with its own */
+  }
+  writeState(p, { lastError: message, lastErrorAt: stamp });
+  // Still say it on the console: attached from a terminal, this is the copy a
+  // human is actually looking at.
+  console.error(`\nupgrade failed: ${message}`);
+  console.error(`\n  recorded in : ${p.log}`);
+  console.error(`  or run      : node tools/app/upgrade.mjs --status`);
+}
 
 /* ---------------------------------------------------------------- state */
 
@@ -658,8 +730,13 @@ async function swap(p, args, { log, tell }) {
  * is merely stopped.
  */
 async function recoverFromThrow(p, ctx, err, { log, tell }) {
-  tell(`SWAP THREW: ${err.stack ?? err.message}`);
-  writeState(p, { phase: "recovering", reason: `swap threw: ${err.message}` });
+  // This is the handler of last resort for the swap, so it above all must not
+  // become the thing that throws: `err.message` on a thrown null/undefined is a
+  // TypeError, and one raised HERE escapes with the payload half-moved and no
+  // state written. Everything below reports through `reason()`.
+  const why = reason(err);
+  tell(`SWAP THREW: ${err?.stack ?? why}`);
+  writeState(p, { phase: "recovering", reason: `swap threw: ${why}` });
 
   if (existsSync(p.app)) {
     tell(`${p.app} is on disk — restarting it before declaring anything`);
@@ -668,7 +745,7 @@ async function recoverFromThrow(p, ctx, err, { log, tell }) {
     // process would burn the whole timeout and then lie about it.
     const gate = await restart(p, ctx, { log, tell });
     if (gate.ok && !ctx.moved) {
-      writeState(p, { phase: "aborted", reason: `swap threw: ${err.message}`, ok: false });
+      writeState(p, { phase: "aborted", reason: `swap threw: ${why}`, ok: false });
       tell(
         `ABORTED: the upgrade failed but nothing had moved — the app is back up at\n` +
           `  http://127.0.0.1:${gate.port} on the payload it was already running.`,
@@ -676,7 +753,7 @@ async function recoverFromThrow(p, ctx, err, { log, tell }) {
       return 1;
     }
     if (gate.ok) {
-      writeState(p, { phase: "STUCK", reason: `swap threw mid-move: ${err.message}` });
+      writeState(p, { phase: "STUCK", reason: `swap threw mid-move: ${why}` });
       tell(
         `STUCK: the app is serving at http://127.0.0.1:${gate.port}, but the swap died\n` +
           `  mid-move and current.json may not describe it. Check: node tools/app/upgrade.mjs --status`,
@@ -685,7 +762,7 @@ async function recoverFromThrow(p, ctx, err, { log, tell }) {
     }
   }
 
-  writeState(p, { phase: "STUCK", reason: `swap threw: ${err.message}` });
+  writeState(p, { phase: "STUCK", reason: `swap threw: ${why}` });
   tell(
     `STUCK: nothing is running.\n` +
       `  Payload:  ${p.app}${existsSync(p.app) ? "" : " (MISSING)"}\n` +
@@ -878,6 +955,58 @@ async function runSwap(p, args, ctx, { log, tell }) {
   }
   ctx.moved = true;
   ctx.backup = hadApp ? backup : null;
+
+  /* ---- relink node_modules --------------------------------------------- */
+
+  /**
+   * RELINK AFTER THE MOVE. Without this the payload is broken the instant it
+   * arrives, and every upgrade ends in a rollback.
+   *
+   * On Windows pnpm links each dependency as a JUNCTION, and a junction stores
+   * an ABSOLUTE target. `staging/node_modules/.pnpm/...` is baked into all of
+   * them, so renaming `staging` -> `app` leaves every link pointing at a
+   * directory that no longer exists. The build verifies fine (the `dist` files
+   * are real), then the new server dies on its first bare import:
+   *
+   *     Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'fastify'
+   *         imported from ...\app\packages\server\dist\app.js
+   *
+   * That is exactly what happened on 2026-08-08: staged OK, moved in, never
+   * answered, rolled back after the full 60s + 120s health wait. It is also why
+   * `app:publish` has always worked where `app:upgrade` never did — publish
+   * builds IN PLACE in `app/`, so its junctions are written pointing at `app/`.
+   *
+   * `pnpm install` is the repair: it rewrites the links for the directory they
+   * are now in. It is cheap — the store is content-addressed and every package
+   * is already present, so this is relinking, not downloading. No `--frozen-
+   * lockfile` fight either; the lockfile came over with the payload.
+   *
+   * A failure here deliberately FALLS THROUGH rather than branching into its own
+   * recovery: the start below will fail, the health gate will not open, and the
+   * existing rollback — the one that is actually exercised — puts the old build
+   * back and keeps the broken one for diagnosis. A second bespoke rollback path
+   * here would be the least-tested code in the file, running only when things
+   * have already gone wrong.
+   */
+  writeState(p, { phase: "relinking" });
+  tell(`relinking node_modules in ${p.app} (junctions still point at staging)`);
+  try {
+    // INSTALL_ARGS, not a hand-written pair — see its docblock. The purge
+    // confirmation is what makes this work headlessly, and having one exported
+    // constant is what stops the staging build and this relink from disagreeing
+    // about it (they already did once, which is why staging then failed too).
+    await run("pnpm", ["install", ...INSTALL_ARGS], p.app, log);
+    tell(`relinked OK`);
+  } catch (err) {
+    // `reason(err)`, never `err.message`: a thrown non-Error (a string, null)
+    // would make THIS line throw a TypeError, and that one would escape the
+    // swap instead of falling through to the rollback below — turning a
+    // recoverable bad build into a STUCK install, from the error path.
+    const why = reason(err);
+    writeState(p, { phase: "relinking", reason: `relink failed: ${why}` });
+    tell(`RELINK FAILED — ${why}`);
+    tell(`  node_modules still points at ${p.staging}; the health gate below will roll this back`);
+  }
 
   /* ---- start + gate ---------------------------------------------------- */
   writeState(p, { phase: "starting" });
@@ -1162,6 +1291,15 @@ function detachSwap(p, argv) {
  */
 function remedyFor(p, state) {
   const backup = state.backup ?? newestBackup(p) ?? join(p.backups, "app-*");
+  // A refusal with no phase never touched the install — say that plainly and
+  // quote the reason, rather than falling through to "unrecognised phase".
+  if (!state.phase && state.lastError) {
+    return (
+      `The upgrade refused before doing anything — the install is untouched and the\n` +
+      `  app is unaffected. It said:\n\n    ${state.lastError}\n\n` +
+      `  Full detail: ${p.log}`
+    );
+  }
   switch (state.phase) {
     case "staging":
       return `A build is in progress in ${p.staging}. Nothing has moved; the app is untouched.\n  Watch it: ${p.log}`;
@@ -1175,6 +1313,19 @@ function remedyFor(p, state) {
         `    ${backup}\n` +
         `  Do NOT run \`pnpm app:publish\` — it would clone a fresh payload and abandon that one.\n` +
         `  Run:  pnpm app:upgrade -- --recover`
+      );
+    case "relinking":
+      return (
+        `The payload is in place at ${p.app} but its node_modules were mid-repair.\n` +
+        `  On Windows pnpm's junctions store absolute paths, so a payload moved from\n` +
+        `  staging needs \`pnpm install\` re-run in place before it can start.\n` +
+        // Built from INSTALL_ARGS, not typed out. Advice a reader can paste has
+        // to carry the purge flag: without it this same command aborts on
+        // ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY the moment it is scripted
+        // or run headless — i.e. the remedy would reproduce the failure it is
+        // supposed to clear, and drift the day the flags change.
+        `  Finish it by hand:  pnpm -C "${p.app}" install ${INSTALL_ARGS.join(" ")}\n` +
+        `  Or roll back:       pnpm app:upgrade -- --recover`
       );
     case "starting":
     case "restoring":
@@ -1212,9 +1363,15 @@ async function printStatus(p) {
     return 0;
   }
   const live = await liveInstance(p);
-  console.log(`phase   : ${state.phase ?? "unknown"}${state.ok === true ? "  (ok)" : ""}`);
+  console.log(`phase   : ${state.phase ?? "none"}${state.ok === true ? "  (ok)" : ""}`);
   if (state.sha) console.log(`target  : ${String(state.sha).slice(0, 12)}`);
   if (state.reason) console.log(`reason  : ${state.reason}`);
+  // The refusal that never moved anything — printed FIRST-class, because for an
+  // upgrade that "crashes instantly" this is the entire answer.
+  if (state.lastError) {
+    console.log(`refused : ${state.lastError}`);
+    if (state.lastErrorAt) console.log(`   at   : ${state.lastErrorAt}`);
+  }
   if (state.backup) console.log(`backup  : ${state.backup}`);
   console.log(`updated : ${state.updatedAt ?? "?"}`);
   console.log(`payload : ${p.app}${existsSync(p.app) ? "" : "   *** MISSING ***"}`);
@@ -1224,12 +1381,23 @@ async function printStatus(p) {
   return 0;
 }
 
+/**
+ * The upgrade paths, published the moment they are known, so the top-level
+ * `catch` can write to the right `upgrade.log` for a throw from ANY depth.
+ *
+ * Module-level because the alternative is threading a logger through every
+ * function that might refuse — and the last version of "the error handler
+ * couldn't reach the log" is the bug this whole change exists to fix.
+ */
+let fatalPaths;
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const paths = desktopPaths(
     args.target ? { ...process.env, DISPATCH_HOME: args.target } : process.env,
   );
   const p = upgradePaths(paths);
+  fatalPaths = p;
 
   /* ---- the detached half ---------------------------------------------- */
   if (args.swap) {
@@ -1242,8 +1410,9 @@ async function main() {
       const code = await swap(p, args, { log, tell });
       process.exitCode = code;
     } catch (err) {
-      writeState(p, { phase: "STUCK", reason: `swap threw: ${err.message}` });
-      tell(`SWAP THREW: ${err.stack ?? err.message}`);
+      // Outermost handler in the detached half — same rule as recoverFromThrow.
+      writeState(p, { phase: "STUCK", reason: `swap threw: ${reason(err)}` });
+      tell(`SWAP THREW: ${err?.stack ?? reason(err)}`);
       process.exitCode = 2;
     } finally {
       releaseLock(p);
@@ -1275,26 +1444,45 @@ async function main() {
     return;
   }
 
+  // The logger comes up HERE, before the first decision — not at the staging
+  // step it used to. Everything below can end the run, and an upgrade that ends
+  // without saying why into a console that does not exist is indistinguishable
+  // from one that crashed. `alsoConsole` keeps a terminal run identical.
+  const log = makeLogger(p, { alsoConsole: true });
+  const tell = say(log);
+
   assertNodeVersion();
 
   const sha = capture("git", ["rev-parse", args.ref], repoRoot);
   const subject = capture("git", ["log", "-1", "--format=%s", sha], repoRoot);
   const dirty = capture("git", ["status", "--porcelain"], repoRoot);
 
-  console.log(`source : ${repoRoot}`);
-  console.log(`root   : ${p.root}`);
-  console.log(`ref    : ${args.ref} -> ${sha.slice(0, 12)}  "${subject}"`);
+  log(`source : ${repoRoot}\n`);
+  log(`root   : ${p.root}\n`);
+  log(`ref    : ${args.ref} -> ${sha.slice(0, 12)}  "${subject}"\n`);
 
   const live = await liveInstance(p);
-  console.log(
+  log(
     live
-      ? `running: pid ${live.pid} at ${live.url}\n`
-      : `running: nothing (a cold swap, no downtime to speak of)\n`,
+      ? `running: pid ${live.pid} at ${live.url}\n\n`
+      : `running: nothing (a cold swap, no downtime to speak of)\n\n`,
   );
 
   const currentSha = readStamp(p).sha ?? null;
   if (currentSha === sha && !args.dryRun && !args.stageOnly) {
-    console.log(`already at ${sha.slice(0, 12)} — nothing to do.`);
+    // The most common "it ran for two seconds and stopped" report there is. It
+    // is a SUCCESS — the install is already at the requested sha — but pressing
+    // a button and getting two seconds of nothing reads as a crash, so this
+    // states the outcome somewhere the UI and `--status` can both find it.
+    tell(`already at ${sha.slice(0, 12)} — nothing to do.`);
+    writeState(p, {
+      phase: "done",
+      ok: true,
+      sha,
+      subject,
+      ref: args.ref,
+      reason: `already at ${sha.slice(0, 12)} — the source has nothing newer than the install`,
+    });
     return;
   }
 
@@ -1323,7 +1511,7 @@ async function main() {
 
   if (dirty) {
     const n = dirty.split("\n").filter(Boolean).length;
-    console.log(
+    log(
       `WARNING: ${n} uncommitted change(s) in this checkout.\n` +
         `  Upgrading to the COMMITTED sha above — those changes are NOT included,\n` +
         `  including any to tools/app/launch.py, which the swap drives from the\n` +
@@ -1332,10 +1520,10 @@ async function main() {
   }
 
   if (args.dryRun) {
-    console.log(
+    log(
       `--dry-run: would stage ${sha.slice(0, 12)} into ${p.staging}, then swap it in` +
         `${live ? ` (stopping pid ${live.pid} first)` : ""}.\n` +
-        `  current: ${currentSha?.slice(0, 12) ?? "none"}`,
+        `  current: ${currentSha?.slice(0, 12) ?? "none"}\n`,
     );
     return;
   }
@@ -1350,28 +1538,27 @@ async function main() {
     // Only ever clear a lock whose owner is demonstrably gone. The old code
     // deleted it unconditionally one line after checking it, which made the
     // check decorative.
-    console.log(`clearing a stale upgrade lock (its process is gone)\n`);
+    log(`clearing a stale upgrade lock (its process is gone)\n`);
     rmSync(p.lock, { force: true });
   }
   if (!acquireLock(p)) throw new Error(`could not take the upgrade lock at ${p.lock}`);
 
-  const log = makeLogger(p, { alsoConsole: true });
-  const tell = say(log);
   try {
     writeState(p, { phase: "staging", sha, subject, ref: args.ref, startedAt: new Date().toISOString() });
     await stage(p, sha, subject, { log, tell });
   } catch (err) {
     writeState(p, { phase: "aborted", reason: `stage failed: ${err.message}` });
-    console.error(`\n${"=".repeat(72)}`);
-    console.error(`STAGING FAILED — ${err.message}`);
+    // Through `log`, not `console.error`: a build failure is the single thing
+    // someone most needs to read afterwards, and stderr is the one place it is
+    // guaranteed not to survive.
+    log(`\n${"=".repeat(72)}\n`);
+    log(`STAGING FAILED — ${err.message}\n`);
     if (err.tail?.length) {
-      console.error(`\nLast ${err.tail.length} lines before the failure:\n`);
-      for (const l of err.tail) console.error(`  | ${l}`);
+      log(`\nLast ${err.tail.length} lines before the failure:\n\n`);
+      for (const l of err.tail) log(`  | ${l}\n`);
     }
-    console.error(`${"=".repeat(72)}`);
-    console.error(
-      `\nThe running instance was never touched — it is still serving the old build.`,
-    );
+    log(`${"=".repeat(72)}\n`);
+    log(`\nThe running instance was never touched — it is still serving the old build.\n`);
     releaseLock(p);
     process.exitCode = 1;
     return;
@@ -1380,7 +1567,7 @@ async function main() {
   if (args.stageOnly) {
     writeState(p, { phase: "staged", sha });
     releaseLock(p);
-    console.log(`\n--stage-only: ${p.staging} is built at ${sha.slice(0, 12)}. Not swapped.`);
+    log(`\n--stage-only: ${p.staging} is built at ${sha.slice(0, 12)}. Not swapped.\n`);
     return;
   }
 
@@ -1403,16 +1590,20 @@ async function main() {
   // until it is scheduled, and this process is about to exit.
   if (validPid(pid)) stampLock(p, pid);
 
-  console.log(
+  log(
     `\nhanded off to a detached swap (pid ${pid}).\n` +
       `  It waits for this process to exit, then stops the app, swaps the payload,\n` +
       `  restarts and health-checks — and rolls back by itself if that fails.\n\n` +
       `  watch:  node tools/app/upgrade.mjs --status\n` +
-      `  log:    ${p.log}`,
+      `  log:    ${p.log}\n`,
   );
 }
 
 main().catch((err) => {
-  console.error(`\nupgrade failed: ${err.message}`);
+  // `fatalPaths` is set the instant the root is known. Falling back to the
+  // DEFAULT root matters: a throw from `parseArgs` happens before `--target` has
+  // been read, and "we could not parse your arguments" recorded in the usual
+  // place beats it recorded nowhere.
+  reportFatal(fatalPaths ?? upgradePaths(desktopPaths()), err);
   process.exitCode = 1;
 });
