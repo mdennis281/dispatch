@@ -211,12 +211,19 @@ describe("READ methods — argv + JSON parsing", () => {
 /* --------------------------------------------------------------------- ACT */
 
 describe("ACT methods — argv + bus events", () => {
+  // `ship` joins worktreeRoot with the branch slug via node:path, so the
+  // fixture has to be absolute on the HOST platform: a POSIX `join`/`resolve`
+  // treats "C:/repo" as relative and silently prefixes cwd.
+  const D = process.platform === "win32" ? "C:" : "";
+  const REPO_PATH = `${D}/repo`;
+  const WT_ROOT = `${D}/repo-worktrees`;
+
   function project(over: Partial<Project> = {}): Project {
     return {
       id: "p1",
       name: "Hivebreak",
-      repoPath: "C:/repo",
-      worktreeRoot: "C:/repo-worktrees",
+      repoPath: REPO_PATH,
+      worktreeRoot: WT_ROOT,
       subApps: [],
       createdAt: 1,
       ...over,
@@ -239,14 +246,14 @@ describe("ACT methods — argv + bus events", () => {
     expect(calls[0]).toEqual({
       file: "gh",
       args: ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-      options: { cwd: "C:/repo", reject: false },
+      options: { cwd: REPO_PATH, reject: false },
     });
     // ship command is split into argv and run in the branch worktree
     // (slug = branch with "/" flattened to "-", joined via node:path).
     expect(calls[1]).toEqual({
       file: "pnpm",
       args: ["ship"],
-      options: { cwd: join("C:/repo-worktrees", "feat-thing"), reject: false },
+      options: { cwd: join(WT_ROOT, "feat-thing"), reject: false },
     });
     // No `gh pr create` on the shipCmd path.
     expect(calls.some((c) => c.file === "gh" && c.args[0] === "pr" && c.args[1] === "create")).toBe(false);
@@ -270,7 +277,7 @@ describe("ACT methods — argv + bus events", () => {
     expect(calls[1]).toEqual({
       file: "gh",
       args: ["pr", "create", "--repo", REPO, "--base", "main", "--head", "feat/thing", "--fill"],
-      options: { cwd: join("C:/repo-worktrees", "feat-thing"), reject: false },
+      options: { cwd: join(WT_ROOT, "feat-thing"), reject: false },
     });
     const review = calls.find((c) => c.args.some((a) => a.includes("requested_reviewers")));
     expect(review?.args).toEqual([

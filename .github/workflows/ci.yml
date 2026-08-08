@@ -6,6 +6,14 @@
 # checks configured" on every PR — "green" was vacuously true and auto-merge was
 # gating on nothing at all. This file is what turns that policy from a
 # description into an enforcement.
+#
+# WHY IT IS SHAPED LIKE THIS. The bulk of the work runs on a SELF-HOSTED Linux
+# box, because this repo is private and GitHub bills private-repo minutes at 1×
+# for Linux and 2× for Windows. The previous layout ran the whole suite on
+# `windows-latest` plus a second `ubuntu-latest` leg, which was the single
+# largest line on the Actions bill. The self-hosted leg is free; what remains on
+# GitHub's dime is one small Windows job covering only what Linux physically
+# cannot check.
 name: CI
 
 on:
@@ -22,28 +30,34 @@ permissions:
 
 # Agents push several times a minute. Without this, a PR costs one run per push
 # and the badge is perpetually reporting a commit nobody is looking at any more.
+# This matters more with a single self-hosted runner than it did on GitHub's
+# elastic fleet: superseded runs would otherwise sit in a queue one deep.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   # ---------------------------------------------------------------------------
-  # THE GATE. Windows, because that is where this application lives.
+  # THE GATE. Everything — build, typecheck, all 1226 tests — on the self-hosted
+  # Linux runner (`dispatch-runner`, an 8GB/4-core Proxmox guest). Free, so it
+  # runs the full suite rather than a means-tested subset.
   #
-  # This is not sentiment about the author's desktop. The Windows-only surface
-  # of this codebase is load-bearing and unreachable from a Linux runner:
-  #   * `needsShell` exists purely for pnpm's `.cmd` shims,
-  #   * services/processes.ts parses `netstat` output,
-  #   * tools/app/paths.mjs resolves `%LOCALAPPDATA%`, launch.py is the
-  #     supervisor, and stop-over-stdin exists because Windows has no SIGTERM,
-  #   * store/fsq.ts now retries an EPERM-on-rename that ONLY occurs on Windows
-  #     (a foreign handle without FILE_SHARE_DELETE). An ubuntu-only CI would
-  #     have shown green straight through the bug that motivated this file.
+  # ⚠️ THIS JOB IS SAFE ONLY WHILE THE REPO IS PRIVATE. A self-hosted runner
+  # executes whatever the workflow says, on a box inside the LAN, with the
+  # persistent state of every previous job still on disk. On a PUBLIC repo
+  # anyone may open a pull request, and GitHub will happily run it here — that
+  # is remote code execution on the home network, and it is GitHub's own
+  # documented reason for saying not to do this. `.dispatch/` is gitignored
+  # "ahead of open-sourcing", so this is a live concern, not a hypothetical.
+  # The `if:` below is the guard: a pull request from a FORK does not run on
+  # this runner. Before flipping the repo public, decide deliberately what
+  # should gate fork PRs — an ephemeral GitHub-hosted job, or nothing.
   # ---------------------------------------------------------------------------
   test:
-    name: build + typecheck + test (windows)
-    runs-on: windows-latest
+    name: build + typecheck + test (linux, self-hosted)
+    runs-on: [self-hosted, Linux, X64, dispatch]
     timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
     steps:
       - uses: actions/checkout@v4
@@ -65,8 +79,19 @@ jobs:
           # honest — the author develops on a newer Node, so this is the leg
           # that would notice if the floor quietly rose.
           node-version: 22
-          cache: pnpm # caches the pnpm store, keyed off pnpm-lock.yaml
+          # NO `cache: pnpm` HERE, DELIBERATELY. That option uploads and
+          # downloads the pnpm store through GitHub's cache service on every
+          # run. This runner is persistent: its pnpm store already survives
+          # between jobs on local disk, so a warm install is hardlinks from
+          # ~/.local/share/pnpm/store and needs no network at all. Adding the
+          # cache action here would make a fast install slower and burn cache
+          # quota to do it.
 
+      # `actions/checkout` runs `git clean -ffdx`, which deletes node_modules
+      # (gitignored) on every run. That is the correct trade: a self-hosted
+      # runner's workspace is otherwise the one place stale build output
+      # accumulates forever, and this repo has already been bitten by a stale
+      # tsbuildinfo skipping emit. The local store makes the reinstall cheap.
       - name: Install
         run: pnpm install --frozen-lockfile
 
@@ -88,14 +113,22 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      # 912 tests. The root script covers shared (56) + cli (41) + server (815).
+      # 1055 tests. The root script covers shared (63) + cli (41) + server (951).
+      #
+      # The server suite runs here at all only because its Windows-shaped path
+      # FIXTURES were made portable. Seventeen tests across four files used
+      # literal "C:/wt"-style strings that production code then fed to
+      # `path.resolve`; POSIX does not consider those absolute, so it prepended
+      # cwd and the assertions read `/…/packages/server/C:/wt/…`. Those fixtures
+      # now pick their root from `process.platform`. If you add a test whose
+      # fixture is an absolute path, root it the same way or this leg goes red.
       - name: Test (shared, cli, server)
         run: pnpm test
 
       # The client is deliberately NOT in the root `test` script, which is
       # exactly why CI has to beat `pnpm test` by hand. Its vitest config is a
       # node-environment runner over pure logic (message store, todo-fold,
-      # project-draft): 136 tests in ~2s, no DOM, no browser, no server.
+      # project-draft): 171 tests in ~2s, no DOM, no browser, no server.
       - name: Test (client)
         run: pnpm --filter @dispatch/client exec vitest run
 
@@ -106,60 +139,74 @@ jobs:
       #
       #   * e2e/shell-live.spec.ts picks its port as `40000 + random(15000)`
       #     with NO collision retry, boots a real Fastify server, and allows 45s
-      #     for /api/health under a 90s test timeout. On a shared, throttled
-      #     runner that is a coin flip.
+      #     for /api/health under a 90s test timeout. That was a coin flip on a
+      #     shared runner and is a WORSE bet on this one, where a port may
+      #     genuinely be held by another repo's job on the same box.
       #   * e2e/verify-smoke.spec.ts points at an ALREADY-RUNNING cockpit on
       #     127.0.0.1:4319 and skips itself when none answers — in CI it would
       #     assert precisely nothing while still costing a browser download.
-      #   * Both need `playwright install --with-deps chromium`: a few hundred
-      #     MB and 1-2 min, for the above.
       #
       # Run them locally against a real cockpit: pnpm --filter @dispatch/client e2e
 
   # ---------------------------------------------------------------------------
-  # PORTABILITY. Linux, for the one class of defect Windows physically cannot
-  # catch: a case-wrong import. NTFS is case-insensitive, so `./Store.js` for
-  # `store.ts` resolves happily on the gate above and only ever explodes on a
-  # case-sensitive filesystem. Cheap (no test suite) and fast.
+  # THE WINDOWS SURFACE. The only job that costs money, so it buys exactly one
+  # thing: running the platform-branching code on a real Windows host. This
+  # application lives on Windows and the Windows-only surface is load-bearing —
+  # `needsShell` exists for pnpm's `.cmd` shims, services/processes.ts parses
+  # `netstat`, tools/app/paths.mjs resolves %LOCALAPPDATA%, stop-over-stdin
+  # exists because Windows has no SIGTERM, and store/fsq.ts retries an
+  # EPERM-on-rename that only occurs against a Windows filesystem.
+  #
+  # WHAT IT DOES NOT DO, AND WHY. It does not run the full suite and it does not
+  # run `pnpm build`. The client's vite build is ~3.5 minutes of the old job and
+  # produces a bundle no server test imports; at the 2× private-repo multiplier
+  # that was the most expensive thing in this file and it was checking nothing
+  # Linux had not already checked. Only `@dispatch/shared` and `@dispatch/cli`
+  # are built, because the server's types resolve from their dist/.
+  #
+  # The subset below is the set of test files that either branch on
+  # `process.platform` or touch a real filesystem — 137 tests in ~7 seconds.
+  # Everything else is platform-agnostic and is covered by the Linux gate.
+  # If you add a test that asserts Windows-specific behaviour, add its file here
+  # or it will only ever run on a developer's machine.
   # ---------------------------------------------------------------------------
-  portability:
-    name: build + typecheck (ubuntu)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  windows:
+    name: windows-specific tests
+    runs-on: windows-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 11.5.0
+
       - name: Install Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          # Kept here, unlike the self-hosted leg: this runner IS ephemeral, so
+          # without the cache every run pays a cold pnpm install at 2× billing.
           cache: pnpm
+
       - name: Install
         run: pnpm install --frozen-lockfile
-      - name: Build
-        run: pnpm build
-      - name: Typecheck
-        run: pnpm typecheck
 
-      # NO SERVER SUITE HERE, ON PURPOSE — and this is measured, not assumed.
-      # Run against node:22-bookworm the server suite is 48/51 files green, with
-      # exactly five failures, all one cause: tests that use Windows
-      # drive-letter strings as path FIXTURES. POSIX `path.resolve` does not
-      # consider "C:/wt" absolute, so it prepends cwd and the assertion reads
-      # `/work/packages/server/C:/wt/services/metrics`.
-      #
-      #   routes/fs.test.ts    > inferProjectsRoot > learns the root the existing projects share
-      #   routes/fs.test.ts    > inferProjectsRoot > picks the parent the most projects sit under
-      #   services/github.test.ts > ACT methods > ship via shipCmd runs the command in the worktree and emits pr-update
-      #   services/github.test.ts > ACT methods > ship without shipCmd runs gh pr create then requests Copilot review
-      #   services/runner.test.ts > docker path (mocked) > runs docker compose up before spawn and down on stop
-      #
-      # These are fixture assumptions, not product bugs — nothing in production
-      # feeds a literal "C:/wt" to a Linux kernel. Making them portable means
-      # parameterising the fixture root per platform; until someone wants that,
-      # adding the suite here would just paint the wall red. That is the whole
-      # of the work required to promote this job to a full second gate.
+      # shared + cli only — see the note above on skipping the client build.
+      - name: Build (shared + cli)
+        run: pnpm --filter @dispatch/shared --filter @dispatch/cli build
+
+      - name: Test (windows-sensitive files)
+        run: >
+          pnpm --filter @dispatch/server exec vitest run
+          src/store/store.test.ts
+          src/services/agent-cwd.test.ts
+          src/services/runtime.test.ts
+          src/services/processes.test.ts
+          src/services/terminal.test.ts
+          src/services/file-index.test.ts
+          src/services/runner.test.ts
+          src/routes/fs.test.ts
+          src/services/mcp/manager-mcp.integration.test.ts

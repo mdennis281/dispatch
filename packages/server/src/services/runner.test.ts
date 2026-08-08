@@ -19,6 +19,13 @@ import {
 } from "./runner.js";
 import { loadConfig } from "../config.js";
 
+/* The stand-in worktree every runner fixture starts from. It has to be
+ * absolute on the HOST platform: `start()` joins it with the sub-app's `cwd`
+ * before handing the result to docker, and POSIX `path.join`/`resolve` treat a
+ * drive letter as a relative segment — the docker assertion below came back as
+ * `/…/packages/server/C:/wt/services/metrics` on the Linux CI leg. */
+const WT = process.platform === "win32" ? "C:/wt" : "/wt";
+
 let dir: string;
 let store: Store;
 let bus: EventBus;
@@ -162,7 +169,7 @@ describe("RunnerService — docker path (mocked)", () => {
       ports: [8080],
     };
 
-    const runner = await service.start("C:/wt", subApp);
+    const runner = await service.start(WT, subApp);
     expect(runner.kind).toBe("process");
     expect(runner.pid).toBe(4242);
     expect(runner.status).toBe("running");
@@ -177,7 +184,7 @@ describe("RunnerService — docker path (mocked)", () => {
       "up",
       "-d",
     ]);
-    expect(dockerCalls[0].cwd).toBe("C:/wt/services/metrics");
+    expect(dockerCalls[0].cwd).toBe(`${WT}/services/metrics`);
 
     // A stdout line from the child becomes a runner-log event.
     child!.stdout.write("metrics listening on 8080\n");
@@ -222,7 +229,7 @@ describe("RunnerService — docker path (mocked)", () => {
       env: { SERVER_PORT: "{port2}", CLIENT_PORT: "{port}" },
     };
 
-    const runner = await service.start("C:/wt", subApp);
+    const runner = await service.start(WT, subApp);
     await service.stop(runner.id);
 
     const [up, down] = envs;
@@ -257,7 +264,7 @@ describe("RunnerService — docker path (mocked)", () => {
       dockerCompose: "docker-compose.yml",
       ports: [8080],
     };
-    const runner = await service.start("C:/wt", subApp);
+    const runner = await service.start(WT, subApp);
     expect(runner.status).toBe("crashed");
     expect(runner.exitCode).toBe(1);
     expect((await store.getRunner(runner.id))?.status).toBe("crashed");
@@ -310,7 +317,7 @@ describe("RunnerService — port injection + reconciliation (mocked)", () => {
       ports: [5173, 2567],
       env: { CLIENT_PORT: "{port}", SERVER_PORT: "{port2}" },
     };
-    await service.start("C:/wt", subApp);
+    await service.start(WT, subApp);
     expect(seen?.command).toBe("pnpm dev --port 5173");
     expect(seen?.env.PORT).toBe("5173");
     expect(seen?.env.CLIENT_PORT).toBe("5173");
@@ -334,7 +341,7 @@ describe("RunnerService — port injection + reconciliation (mocked)", () => {
       ports: [5173],
       url: "http://localhost:{port}",
     };
-    const runner = await service.start("C:/wt", subApp);
+    const runner = await service.start(WT, subApp);
     expect(runner.port).toBe(5173);
 
     // Vite hopped to 5175 (base busy) and printed its real URL.
@@ -392,7 +399,7 @@ async function envForChild(
     },
     getPort: async (p) => p ?? 0,
   });
-  await service.start("C:/wt", subApp);
+  await service.start(WT, subApp);
   return seen;
 }
 
@@ -448,15 +455,15 @@ describe("RunnerService — manager env quarantine", () => {
     const env = await envForChild({
       ...DEV_SERVER,
       env: {
-        DISPATCH_DATA_DIR: "C:/wt/.data",
+        DISPATCH_DATA_DIR: `${WT}/.data`,
         DISPATCH_IPC: "0",
         DISPATCH_PORT: "{port}",
       },
     });
-    expect(env.DISPATCH_DATA_DIR).toBe("C:/wt/.data");
+    expect(env.DISPATCH_DATA_DIR).toBe(`${WT}/.data`);
     expect(env.DISPATCH_IPC).toBe("0");
     expect(env.DISPATCH_PORT).toBe("4319"); // placeholder still substituted
-    expect(loadConfig(env).dataDir).toBe(resolve("C:/wt/.data"));
+    expect(loadConfig(env).dataDir).toBe(resolve(`${WT}/.data`));
   });
 
   it("still injects PORT and substitutes {port} placeholders", async () => {
@@ -487,7 +494,7 @@ describe("RunnerService — manager env quarantine", () => {
       spawn: () => new MockChild(),
       getPort: async (p) => p ?? 0,
     });
-    await service.start("C:/wt", {
+    await service.start(WT, {
       id: "stack",
       name: "Stack",
       path: ".",
@@ -525,7 +532,7 @@ describe("RunnerService — reconcile", () => {
   it("stops dead runners, REAPS live orphans, and leaves terminal ones", async () => {
     await store.saveRunner({
       id: "dead",
-      worktreePath: "C:/wt",
+      worktreePath: WT,
       subAppId: "a",
       kind: "process",
       pid: 111,
@@ -533,7 +540,7 @@ describe("RunnerService — reconcile", () => {
     });
     await store.saveRunner({
       id: "alive",
-      worktreePath: "C:/wt",
+      worktreePath: WT,
       subAppId: "b",
       kind: "process",
       pid: 222,
@@ -541,7 +548,7 @@ describe("RunnerService — reconcile", () => {
     });
     await store.saveRunner({
       id: "done",
-      worktreePath: "C:/wt",
+      worktreePath: WT,
       subAppId: "c",
       kind: "process",
       pid: 333,
