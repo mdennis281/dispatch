@@ -43,7 +43,11 @@
  *     argument: only the human's own `spawnChat.autoApprove` setting (global, or
  *     a project's manifest) can skip the prompt, because a gate an agent can
  *     argue its way past is not a gate. A decline comes back as a plain,
- *     non-error result telling it not to retry — a denial is an answer.
+ *     non-error result telling it not to retry — a denial is an answer. Because
+ *     the tool gates itself, the broker treats it as SELF-GATED and does not
+ *     prompt for it at the `canUseTool` layer too (one decision, one prompt) —
+ *     which also means the gate holds under `bypassPermissions`, where
+ *     `canUseTool` is never consulted.
  *
  * Every handler awaits a REAL promise (a `setTimeout`, a poll `setInterval`,
  * and/or a `chat-status` bus subscription) and unwinds cleanly the instant the

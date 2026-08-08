@@ -2158,6 +2158,27 @@ describe("SessionBroker — spawn_chat consent", () => {
     await expect(consentP).resolves.toMatchObject({ approved: true, auto: false });
   });
 
+  it("does not ALSO prompt at the canUseTool layer — one decision, one prompt", async () => {
+    // The tool gates itself. A second generic prompt would ask twice for one
+    // decision, and a deny there would skip the handler that returns the
+    // "declined — don't retry" answer entirely.
+    let verdict: unknown;
+    const { fn } = makeFakeQuery(async (_t, ctl) => {
+      verdict = await ctl.canUseTool!("mcp__manager__spawn_chat", { prompt: "go" }, {});
+      return [assistantText("hi"), resultMsg()];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "spawn one");
+    await idleP;
+
+    expect(verdict).toEqual({ behavior: "allow", updatedInput: { prompt: "go" } });
+    expect(events.some((e) => e.type === "permission-request")).toBe(false);
+  });
+
   it("refuses rather than assuming consent when there's no live session to ask", async () => {
     const broker = await liveSession();
 

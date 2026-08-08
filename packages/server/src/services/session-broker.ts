@@ -692,6 +692,12 @@ function questionSummary(input: Record<string, unknown>): string {
   return text.length > 80 ? `${text.slice(0, 80)}…` : text;
 }
 
+/**
+ * Tools that run their OWN human gate and must therefore not be prompted for at
+ * the `canUseTool` layer as well (see {@link SessionBroker.handlePermission}).
+ */
+const SELF_GATED_TOOLS: ReadonlySet<string> = new Set(["mcp__manager__spawn_chat"]);
+
 /** Shorten text for a prompt card, marking that it was cut. */
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -2197,6 +2203,17 @@ export class SessionBroker {
       description?: string;
     },
   ): Promise<PermissionResult> {
+    // A SELF-GATED tool asks for itself, in its own words, with its own card —
+    // `spawn_chat` cannot create anything until `consentToSpawn` returns approved.
+    // Prompting at this layer too would ask the human twice for one decision in
+    // ask-y modes, and a deny HERE would skip the handler entirely, taking with it
+    // the "declined — don't retry" answer the tool exists to give. So the generic
+    // gate steps aside and the specific one stands. This is not a hole: the tool's
+    // own gate is unconditional, and unlike this one it also holds under
+    // bypassPermissions, where `canUseTool` is never consulted at all.
+    if (SELF_GATED_TOOLS.has(toolName)) {
+      return Promise.resolve({ behavior: "allow", updatedInput: input });
+    }
     const requestId = this.genId();
     const request: PermissionRequest = {
       id: requestId,
