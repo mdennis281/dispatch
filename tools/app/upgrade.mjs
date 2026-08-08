@@ -165,6 +165,19 @@ const UNSAFE_PHASES = new Set(["stopping", "swapping", "starting", "restoring", 
 
 /* ------------------------------------------------------------------ args */
 
+/**
+ * A flag that takes a value must GET one, and must not swallow the next flag.
+ *
+ * `--ref` last on the line, or `--target --dry-run`, otherwise reads as
+ * undefined / `"--dry-run"` and fails much later with an error about a git ref
+ * or a directory — nowhere near the typo. `backsync.mjs` guards its own flags
+ * the same way, for the same reason.
+ */
+function need(value, flag) {
+  if (value === undefined || value.startsWith("--")) throw new Error(`${flag} needs a value`);
+  return value;
+}
+
 const asInt = (v) => {
   const n = Number.parseInt(v ?? "", 10);
   // `--port` with a missing value used to yield NaN, and `NaN ?? fallback` is
@@ -192,15 +205,15 @@ function parseArgs(argv) {
     else if (a === "--status") args.status = true;
     else if (a === "--recover") args.recover = true;
     else if (a === "--keep-backup") args.keepBackup = true;
-    else if (a === "--ref") args.ref = argv[++i];
-    else if (a === "--target") args.target = argv[++i];
+    else if (a === "--ref") args.ref = need(argv[++i], a);
+    else if (a === "--target") args.target = need(argv[++i], a);
     // Internal: the detached half. Never typed by a human.
     else if (a === "--swap") args.swap = true;
-    else if (a === "--sha") args.sha = argv[++i];
-    else if (a === "--subject") args.subject = argv[++i];
-    else if (a === "--port") args.port = asInt(argv[++i]);
-    else if (a === "--old-pid") args.oldPid = asInt(argv[++i]);
-    else if (a === "--parent-pid") args.parentPid = asInt(argv[++i]);
+    else if (a === "--sha") args.sha = need(argv[++i], a);
+    else if (a === "--subject") args.subject = need(argv[++i], a);
+    else if (a === "--port") args.port = asInt(need(argv[++i], a));
+    else if (a === "--old-pid") args.oldPid = asInt(need(argv[++i], a));
+    else if (a === "--parent-pid") args.parentPid = asInt(need(argv[++i], a));
     else throw new Error(`unknown argument: ${a}`);
   }
   return args;
