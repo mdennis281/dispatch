@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./index.js";
+import { renameWithRetry, writeJsonAtomic, readJson } from "./fsq.js";
 import type { Project, Chat, ChatMessage, RunnerInstance, Checkpoint } from "@dispatch/shared";
 
 let dir: string;
@@ -287,5 +288,82 @@ describe("Store config/state split", () => {
     } finally {
       await rm(only, { recursive: true, force: true });
     }
+  });
+});
+
+/* ------------------------------------------------- atomic write under a lock */
+
+describe("renameWithRetry — Windows destination contention", () => {
+  // Reproduced on a real box: a foreign process holding runners.json open with
+  // share mode Read / ReadWrite / None makes the replace-existing rename fail
+  // `EPERM: operation not permitted, rename '…tmp' -> 'runners.json'` — the
+  // failure that took out runner.test.ts under parallel agent load. The holder
+  // is a virus scanner or indexer, so it lets go within a few hundred ms.
+  //
+  // These drive the policy through the injected rename rather than a real lock.
+  // Provoking the genuine handle costs a spawned process and a sleep, and would
+  // assert nothing anywhere but Windows — so the real-lock case was verified by
+  // hand (a PowerShell holder against the built writeJsonAtomic: EPERM before
+  // this change, clean write 600ms later after it) and the policy itself — which
+  // codes retry, how many times, what is rethrown — is pinned here, fast and
+  // deterministic.
+
+  it("rides out a burst of EPERM and then succeeds", async () => {
+    let calls = 0;
+    await renameWithRetry("a.tmp", "a.json", async () => {
+      if (++calls < 4) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+    });
+    expect(calls).toBe(4);
+  });
+
+  it("retries EACCES and EBUSY too — same cause, different code", async () => {
+    for (const code of ["EACCES", "EBUSY"]) {
+      let calls = 0;
+      await renameWithRetry("a.tmp", "a.json", async () => {
+        if (++calls < 3) throw Object.assign(new Error(code), { code });
+      });
+      expect(calls).toBe(3);
+    }
+  });
+
+  it("does NOT retry an unrelated error — a missing temp file is a real bug", async () => {
+    let calls = 0;
+    await expect(
+      renameWithRetry("a.tmp", "a.json", async () => {
+        calls++;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(calls).toBe(1);
+  });
+
+  it("gives up and rethrows the FIRST error rather than retrying forever", async () => {
+    // Every attempt throws a DISTINGUISHABLE error. The previous version of this
+    // test threw an identical EPERM each time and asserted only `code`, so it
+    // passed whether the first or the tenth came back — which is how the
+    // implementation came to throw the latest one while the docblock promised
+    // the original, and why review caught it and this test did not. The
+    // difference matters: the tenth is raised ~1.3s into backoff, by which point
+    // the callers above have unwound and its stack no longer names the write
+    // that was lost.
+    let calls = 0;
+    const thrown: Error[] = [];
+    await expect(
+      renameWithRetry("a.tmp", "a.json", async () => {
+        const err = Object.assign(new Error(`EPERM attempt ${++calls}`), { code: "EPERM" });
+        thrown.push(err);
+        throw err;
+      }),
+    ).rejects.toBe(thrown[0]);
+    expect(calls).toBe(10);
+    expect(thrown[0]?.message).toBe("EPERM attempt 1");
+  });
+
+  it("writeJsonAtomic still writes through and leaves no .tmp behind", async () => {
+    const target = join(dir, "atomic.json");
+    await writeJsonAtomic(target, { v: 1 });
+    await writeJsonAtomic(target, { v: 2 });
+    expect(await readJson(target)).toEqual({ v: 2 });
+    expect((await readdir(dir)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 });

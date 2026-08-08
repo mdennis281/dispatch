@@ -163,7 +163,13 @@ export class Notifier {
   start(): void {
     if (this.unsub) return;
     this.unsub = this.bus.on("attention-add", (evt) => {
-      const p = this.handle(evt.item).finally(() => this.pending.delete(p));
+      // `handle` is *meant* never to reject, but `buildWebhookRequest` sits
+      // outside its try — and this fires once per turn-end on every chat, from a
+      // bus listener with no caller. Catch first so the derived `.finally`
+      // promise can't become an unhandled rejection and kill the server.
+      const p = this.handle(evt.item)
+        .catch(() => {})
+        .finally(() => this.pending.delete(p));
       this.pending.add(p);
     });
   }
