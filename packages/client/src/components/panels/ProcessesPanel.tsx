@@ -8,7 +8,8 @@ import {
   ChevronDown,
   AlertTriangle,
 } from "lucide-react";
-import { api, type ProjectProcess } from "../../lib/api.js";
+import { api } from "../../lib/api.js";
+import { useProcesses, useProjectProcesses } from "../../stores/processes.js";
 import { Button } from "../ui/Button.js";
 import { Chip } from "../ui/Chip.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -25,25 +26,25 @@ import { cn } from "../../lib/cn.js";
  */
 export function ProcessesPanel({ projectId }: { projectId: string }) {
   const [open, setOpen] = useState(false);
-  const [rows, setRows] = useState<ProjectProcess[]>([]);
-  const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [killError, setKillError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setRows(await api.processes.list(projectId));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId]);
+  // Rows live in the store, not here: held locally they only existed once this
+  // section had been expanded, which made the collapsed "N orphans" chip below
+  // dead code — the one hint that the panel had something to say could only
+  // appear after you'd already looked. See stores/processes.ts.
+  const rows = useProjectProcesses(projectId);
+  const loading = useProcesses((s) => s.scanning[projectId] ?? false);
+  const scanError = useProcesses((s) => s.errors[projectId] ?? null);
+  const error = killError ?? scanError;
 
-  // Load once when the section is first expanded (and whenever the project changes
-  // while open) — this is an on-demand OS scan, not something to poll continuously.
+  const refresh = useCallback(
+    () => useProcesses.getState().scan(projectId),
+    [projectId],
+  );
+
+  // Expanding is an explicit "show me now", so re-scan even though the store may
+  // already hold rows — an on-demand OS scan, never a poll.
   useEffect(() => {
     if (open) void refresh();
   }, [open, refresh]);
@@ -52,19 +53,19 @@ export function ProcessesPanel({ projectId }: { projectId: string }) {
     async (pids: number[]) => {
       if (pids.length === 0) return;
       setBusy(true);
-      setError(null);
+      setKillError(null);
       try {
         const results = await api.processes.kill(projectId, pids);
         const failed = results.filter((r) => !r.ok);
         if (failed.length) {
-          setError(
+          setKillError(
             `Failed to kill ${failed.length} process(es): ${failed
               .map((f) => `${f.pid} (${f.error ?? "unknown"})`)
               .join(", ")}`,
           );
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        setKillError(err instanceof Error ? err.message : String(err));
       } finally {
         setBusy(false);
         await refresh();

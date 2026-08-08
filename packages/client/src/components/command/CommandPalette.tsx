@@ -22,7 +22,9 @@ import {
   MessageSquare,
   SlidersHorizontal,
   GitBranch,
-  TerminalSquare,
+  Bot,
+  AppWindow,
+  SquareTerminal,
   GitPullRequest,
   Sparkles,
   Blocks,
@@ -203,10 +205,33 @@ export function CommandPalette({
         keywords: "rename ai summarize",
         run: () => actions.regenerateTitle(activeChatId),
       });
-      const panelCmds: { id: string; title: string; icon: ReactNode; tab: FocusPanelTab }[] = [
+      // The right-panel tabs are icon-only (five labels don't fit 360px), so this
+      // is the only place their NAMES are searchable — hence one entry per tab,
+      // each icon matching the tab's own, plus the words people actually type
+      // when they've lost one ("shell", "orphan", "port").
+      const panelCmds: {
+        id: string;
+        title: string;
+        icon: ReactNode;
+        tab: FocusPanelTab;
+        keywords?: string;
+      }[] = [
         { id: "go-worktrees", title: "Go to Worktrees", icon: <GitBranch />, tab: "worktrees" },
-        { id: "go-apps", title: "Go to Apps", icon: <TerminalSquare />, tab: "apps" },
-        { id: "go-terminals", title: "Go to Terminals", icon: <TerminalSquare />, tab: "terminals" },
+        { id: "go-agents", title: "Go to Agents", icon: <Bot />, tab: "agents", keywords: "subagent task run" },
+        {
+          id: "go-apps",
+          title: "Go to Apps",
+          icon: <AppWindow />,
+          tab: "apps",
+          keywords: "subapp runner dev server port process orphan kill",
+        },
+        {
+          id: "go-terminals",
+          title: "Go to Terminals",
+          icon: <SquareTerminal />,
+          tab: "terminals",
+          keywords: "shell shells console command",
+        },
         { id: "go-prs", title: "Go to PRs", icon: <GitPullRequest />, tab: "prs" },
       ];
       for (const p of panelCmds) {
@@ -215,7 +240,7 @@ export function CommandPalette({
           title: p.title,
           group: "Navigate",
           icon: p.icon,
-          keywords: "panel tab jump",
+          keywords: `panel tab jump ${p.keywords ?? ""}`,
           run: () => requestFocusPanel(p.tab),
         });
       }

@@ -14,7 +14,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { Chat, RunnerInstance, SubApp } from "@dispatch/shared";
-import { useRunners } from "../../stores/runners.js";
+import { useRunners, belongsToChat } from "../../stores/runners.js";
 import { useProjects } from "../../stores/projects.js";
 import { actions } from "../../lib/actions.js";
 import { openCodeViewer } from "../monaco/store.js";
@@ -82,6 +82,14 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
             {runner.pid && <span className="cm-mono">· pid {runner.pid}</span>}
           </span>
         </span>
+        {/* Started from the Sidebar, which launches per PROJECT rather than per
+            chat. Say so, or the card looks like something this chat started and
+            Stop reads as "stop my app" when it's shared with every other chat. */}
+        {!runner.chatId && (
+          <Chip tone="muted" title="Launched from the sidebar — belongs to the project, not this chat">
+            project
+          </Chip>
+        )}
         {runner.usedDocker && <Chip tone="accent">docker</Chip>}
         {runner.port &&
           (runner.url ? (
@@ -230,7 +238,9 @@ export function RunnerPanel({ chat }: { chat: Chat }) {
   const project = useProjects((s) => s.projects.find((p) => p.id === chat.projectId));
   const byId = useRunners((s) => s.byId);
   const order = useRunners((s) => s.order);
-  const mine = order.map((id) => byId[id]!).filter((r) => r && r.chatId === chat.id);
+  const mine = order
+    .map((id) => byId[id]!)
+    .filter((r) => r && belongsToChat(r, chat.id, chat.projectId));
 
   const subApps = project?.subApps ?? [];
   const { targets } = useLaunchTargets(project?.id);
@@ -245,10 +255,14 @@ export function RunnerPanel({ chat }: { chat: Chat }) {
   }, [targets, selectedBranch, chat.worktrees]);
   const selectedTarget = targets.find((t) => t.branch === selectedBranch);
 
+  // No chatId in the match — deliberately, and matching what the Sidebar has
+  // always done. "Is this subApp already up?" is a question about the BRANCH and
+  // its ports, not about who pressed Start: a sidebar-launched app used to leave
+  // this row showing an enabled Start, and pressing it launched a second copy of
+  // something already holding the port.
   const activeFor = (subAppId: string) =>
     findRunner(byId, {
       subAppId,
-      chatId: chat.id,
       branch: selectedTarget?.branch,
       worktreePath: selectedTarget?.worktreePath,
     });

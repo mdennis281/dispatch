@@ -204,6 +204,63 @@ describe("TerminalService — cap", () => {
     expect(again.error).toBeUndefined();
     expect(again.output).toBe("b");
   });
+
+  // Review caught this: `atCap` counts LIVE shells only, so an EXITED record
+  // occupies no slot — and both entry points guarded on "no record at all"
+  // rather than "about to go live". A chat at cap that also held an exited name
+  // could revive it and end up at cap+1, repeatably.
+  //
+  // The exited state has to come from the SHELL dying (emit "exit"), not from
+  // `svc.kill()` — kill DELETES the record, so it leaves nothing to revive and
+  // reproduces nothing. A first draft of these tests used kill and passed
+  // against the unfixed code; they are written this way deliberately.
+
+  const live = (svc: TerminalService, chatId: string): number =>
+    svc.listChat(chatId).filter((t) => t.status === "live").length;
+
+  it("run() will not revive an EXITED name while the chat is at cap", async () => {
+    const { svc, shells } = makeService({ maxPerChat: 2 });
+    await svc.run({ chatId: "c1", name: "one", command: "printout a", cwd: "C:\\r" });
+    await svc.run({ chatId: "c1", name: "two", command: "printout a", cwd: "C:\\r" });
+
+    // "one" dies on its own — record retained, status exited, slot freed.
+    shells[0]!.emit("exit", 0);
+    expect(live(svc, "c1")).toBe(1);
+
+    // Something else takes the freed slot: back at cap, with "one" still there.
+    await svc.run({ chatId: "c1", name: "three", command: "printout a", cwd: "C:\\r" });
+    expect(live(svc, "c1")).toBe(2);
+
+    const revived = await svc.run({ chatId: "c1", name: "one", command: "printout b", cwd: "C:\\r" });
+    expect(revived.error).toMatch(/cap reached/i);
+    expect(live(svc, "c1")).toBe(2);
+  });
+
+  it("create() will not revive an EXITED name while the chat is at cap", () => {
+    const { svc, shells } = makeService({ maxPerChat: 2 });
+    svc.create("c1", "one", "C:\\r");
+    svc.create("c1", "two", "C:\\r");
+
+    shells[0]!.emit("exit", 0);
+    svc.create("c1", "three", "C:\\r");
+    expect(live(svc, "c1")).toBe(2);
+
+    const revived = svc.create("c1", "one", "C:\\r");
+    expect(revived.terminal).toBeUndefined();
+    expect(revived.error).toMatch(/cap reached/i);
+    expect(live(svc, "c1")).toBe(2);
+  });
+
+  it("an exited shell still frees its slot for a NEW name", async () => {
+    // The other half of the rule — the fix must not make an exited shell hold a
+    // slot forever, or a crashed shell would permanently shrink the budget.
+    const { svc, shells } = makeService({ maxPerChat: 1 });
+    await svc.run({ chatId: "c1", name: "one", command: "printout a", cwd: "C:\\r" });
+    shells[0]!.emit("exit", 0);
+    const next = await svc.run({ chatId: "c1", name: "two", command: "printout b", cwd: "C:\\r" });
+    expect(next.error).toBeUndefined();
+    expect(next.output).toBe("b");
+  });
 });
 
 describe("TerminalService — teardown", () => {
@@ -239,5 +296,73 @@ describe("TerminalService — teardown", () => {
     expect(info.name).toBe("main");
     expect(info.lastCommand).toBe("printout x");
     expect(info.lastExitCode).toBe(0);
+  });
+
+  it("kill() closes ONE shell and leaves its siblings alone", async () => {
+    const { svc, shells } = makeService();
+    await svc.run({ chatId: "c1", name: "a", command: "printout x", cwd: "C:\\r" });
+    await svc.run({ chatId: "c1", name: "b", command: "printout x", cwd: "C:\\r" });
+
+    expect(svc.kill("c1::a")).toBe(true);
+
+    expect(shells[0]!.killed).toBe(true);
+    expect(shells[1]!.killed).toBe(false);
+    expect(svc.listChat("c1").map((t) => t.name)).toEqual(["b"]);
+    expect(events.some((e) => e.type === "terminal-closed" && e.terminalId === "c1::a")).toBe(true);
+  });
+
+  it("kill() on an unknown id reports false instead of throwing", () => {
+    const { svc } = makeService();
+    expect(svc.kill("c1::nope")).toBe(false);
+  });
+});
+
+/* The human-facing door: `run()` spawns lazily, which only works for a caller
+ * that already has a command. "New shell" doesn't. */
+describe("TerminalService — create", () => {
+  it("spawns an empty live shell and announces it", () => {
+    const { svc, shells } = makeService();
+    const { terminal, error } = svc.create("c1", "shell", "C:\\repo");
+
+    expect(error).toBeUndefined();
+    expect(terminal).toMatchObject({ id: "c1::shell", name: "shell", cwd: "C:\\repo", status: "live" });
+    // Empty: nothing has been run in it yet.
+    expect(terminal!.lastCommand).toBeUndefined();
+    expect(shells.length).toBe(1);
+    expect(events.some((e) => e.type === "terminal-update")).toBe(true);
+  });
+
+  it("is the SAME shell run() would reuse — cwd persists across the handoff", async () => {
+    const { svc, shells } = makeService();
+    svc.create("c1", "shell", "C:\\repo");
+    const first = await svc.run({ chatId: "c1", name: "shell", command: "cd C:\\Windows" });
+    expect(first.cwd).toBe("C:\\Windows");
+    const second = await svc.run({ chatId: "c1", name: "shell", command: "printout here" });
+    expect(second.cwd).toBe("C:\\Windows");
+    // One shell for create + both runs — no second powershell behind the UI's back.
+    expect(shells.length).toBe(1);
+  });
+
+  it("re-creating a LIVE name returns the existing shell, not a second one", () => {
+    const { svc, shells } = makeService();
+    const a = svc.create("c1", "shell", "C:\\repo");
+    const b = svc.create("c1", "shell", "C:\\repo");
+    expect(b.terminal!.id).toBe(a.terminal!.id);
+    expect(shells.length).toBe(1);
+  });
+
+  it("respects the per-chat cap and says so", () => {
+    const { svc } = makeService({ maxPerChat: 1 });
+    svc.create("c1", "one", "C:\\r");
+    const second = svc.create("c1", "two", "C:\\r");
+    expect(second.terminal).toBeUndefined();
+    expect(second.error).toMatch(/cap reached/i);
+  });
+
+  it("a killed shell frees its slot again", () => {
+    const { svc } = makeService({ maxPerChat: 1 });
+    svc.create("c1", "one", "C:\\r");
+    svc.kill("c1::one");
+    expect(svc.create("c1", "two", "C:\\r").terminal).toBeDefined();
   });
 });

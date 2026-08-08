@@ -61,6 +61,25 @@ export const useTerminals = create<TerminalsStore>((set) => ({
   setLines: (id, lines) => set((s) => ({ lines: { ...s.lines, [id]: lines } })),
 }));
 
+/**
+ * A free name for a human-opened shell: `shell`, then `shell 2`, `shell 3`…
+ *
+ * Shells are keyed by `${chatId}::${name}`, so re-using a live name silently
+ * hands back the SAME shell — fine for an agent, which picks a name on purpose
+ * ("build", "server"), and wrong for a "New shell" button, where two clicks
+ * must mean two shells. Naming is the only reason that button would otherwise
+ * need a dialog, and a dialog in front of the panel that nobody found is
+ * exactly the wrong trade.
+ */
+export function nextShellName(taken: readonly string[], base = "shell"): string {
+  const used = new Set(taken);
+  if (!used.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const candidate = `${base} ${n}`;
+    if (!used.has(candidate)) return candidate;
+  }
+}
+
 /** Selector: terminals scoped to a chat (right-panel "Terminals"). */
 export function useChatTerminals(chatId: string | null): TerminalInfo[] {
   return useTerminals(
