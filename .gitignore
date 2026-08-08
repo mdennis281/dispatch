@@ -5,9 +5,23 @@ dist/
 .turbo/
 .verify-shots/*.tsbuildinfo
 .worktrees/
-.dispatch/
 .agents/
 .claude
+
+# `.dispatch/` IS committed. The manifest declares sub-apps whose commands point
+# at files in THIS repo, so config and code have to move together — keeping it
+# out of git meant a sub-app could go live referencing a script that hadn't
+# merged yet, and "Start" failed with `cannot find module`.
+#
+# NEVER put a secret in it. It is a committed file. Use `${VAR}` placeholders,
+# which Dispatch expands from the manager process's environment when a session
+# starts; an unset one becomes a config warning rather than a leak.
+#
+# `memory/` stays out. It is where the hard-won lessons about working on this
+# codebase accumulate, this repo is headed for open source, and anything
+# committed is in the history for good. Unlike the manifest, it has no reason to
+# travel with the code.
+.dispatch/memory/
 
 # Brand assets are RENDERED at build time by packages/client/scripts/
 # generate-brand.mjs — derived artifacts, so they don't belong in git.

@@ -618,14 +618,17 @@ export class RunnerService {
       out.flush();
       err.flush();
       const code = args[0];
-      void this.onExit(id, typeof code === "number" ? code : null, false);
+      // `.catch` because `onExit` reads `runners.json` through a Zod parse that
+      // THROWS on a torn/contended file — and a rejection raised from a child
+      // process event handler has no caller to catch it, so it killed the server.
+      void this.onExit(id, typeof code === "number" ? code : null, false).catch(() => {});
     });
     child.once("error", (...args: unknown[]) => {
       const e = args[0] as Error | undefined;
       this.pushLog(id, "stderr", `spawn error: ${e?.message ?? String(e)}`);
       out.flush();
       err.flush();
-      void this.onExit(id, null, true);
+      void this.onExit(id, null, true).catch(() => {});
     });
   }
 
@@ -667,7 +670,9 @@ export class RunnerService {
     const port = detectBoundPort(line);
     if (port === null) return;
     live.detectedPort = port; // latch: only reconcile once
-    void this.reconcilePort(id, port, live.urlTemplate);
+    // Same reason as `onExit` above — called from a stdout data handler, so a
+    // rejection would surface as an unhandled one rather than to any caller.
+    void this.reconcilePort(id, port, live.urlTemplate).catch(() => {});
   }
 
   private async reconcilePort(
