@@ -86,8 +86,12 @@ class Paths:
         self.app = root / "app"
         self.data_dir = root / "data"
         self.config_dir = root / "config"
+        self.backups = root / "backups"
         self.stamp = root / "current.json"
         self.runtime = root / "runtime.json"
+        #: Written by tools/app/upgrade.mjs. Read here only to tell a user whose
+        #: payload is missing what actually happened to it.
+        self.upgrade_state = root / "upgrade.json"
         #: How `--stop` reaches a supervisor it has no handle on. A sentinel
         #: file is crude, but it is the one channel that works across detached
         #: processes on Windows without opening a control port on localhost.
@@ -106,11 +110,19 @@ def port_alive(port: int, timeout: float = 1.5) -> bool:
         return False
 
 
+def read_json(path: Path) -> dict | None:
+    """Parse a small JSON file, or None if it's absent, truncated or not an object."""
+    try:
+        value = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def read_runtime(paths: Paths) -> dict | None:
     """The live instance's advertisement, or None if absent/unreadable/stale."""
-    try:
-        rt = json.loads(paths.runtime.read_text("utf-8"))
-    except (OSError, ValueError):
+    rt = read_json(paths.runtime)
+    if rt is None:
         return None
     port = rt.get("port")
     # runtime.json survives a hard crash, so the file alone proves nothing —
@@ -134,12 +146,42 @@ def resolve_app_dir(paths: Paths, override: str | None) -> Path:
         app = paths.app
     entry = app / "packages" / "server" / "dist" / "index.js"
     if not entry.exists():
-        raise SystemExit(
-            f"no built server at {entry}\n"
-            f"  Publish the payload first:  pnpm app:publish\n"
-            f"  Or point at a checkout:     launch.py --app-dir <repo>"
-        )
+        raise SystemExit(f"no built server at {entry}\n{_missing_payload_remedy(paths, app)}")
     return app
+
+
+def _missing_payload_remedy(paths: Paths, app: Path) -> str:
+    """
+    What to actually do about a missing payload.
+
+    The generic advice is worse than useless after an interrupted upgrade: a
+    swap killed mid-move leaves app/ ABSENT with the only good build under
+    backups/, and `pnpm app:publish` would see no payload, clone a fresh one,
+    cold-build for ten minutes and silently abandon the good one sitting right
+    there. So when there is evidence of an upgrade, point at the backup.
+    """
+    if app == paths.app:
+        state = read_json(paths.upgrade_state) or {}
+        backup = state.get("backup")
+        if not (isinstance(backup, str) and Path(backup).exists()):
+            found = sorted(
+                (d for d in paths.backups.glob("app-*") if d.is_dir()),
+                key=lambda d: d.name,
+            )
+            backup = str(found[-1]) if found else None
+        if backup:
+            return (
+                f"  An upgrade left this install mid-swap (phase: {state.get('phase', 'unknown')}).\n"
+                f"  The previous payload is still here:\n"
+                f"    {backup}\n"
+                f"  Put it back:  pnpm app:upgrade -- --recover\n"
+                f"  Do NOT run `pnpm app:publish` first - it would clone a fresh payload\n"
+                f"  and leave that one stranded."
+            )
+    return (
+        "  Publish the payload first:  pnpm app:publish\n"
+        "  Or point at a checkout:     launch.py --app-dir <repo>"
+    )
 
 
 # ---------------------------------------------------------------- supervise
@@ -151,8 +193,8 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
 
     This is the blocking half, re-launched detached by `start()`. It owns
     runtime.json for its whole lifetime: written once the port answers, removed
-    on the way out, so publish.mjs never sees a live app as stale (or the
-    reverse).
+    on the way out IF IT IS STILL OURS (see _release_runtime), so publish.mjs
+    never sees a live app as stale (or the reverse).
     """
     node = shutil.which("node")
     if not node:
@@ -224,8 +266,36 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
             proc.kill()
         return proc.returncode or 0
     finally:
-        paths.runtime.unlink(missing_ok=True)
-        paths.stop_request.unlink(missing_ok=True)
+        _release_runtime(paths)
+
+
+def _release_runtime(paths: Paths) -> None:
+    """
+    Drop runtime.json only if it is still OURS.
+
+    An unconditional unlink here was the worst bug in the upgrade path. Our
+    teardown runs for up to STOP_TIMEOUT_S AFTER the server stopped listening,
+    and an upgrade that watched the port (rather than this process) would by
+    then have started a whole new instance — which had written its own
+    runtime.json. Deleting it left a live, healthy server that `--stop`,
+    `--status` and publish.mjs all reported as NOT RUNNING, and publish.mjs
+    would then happily rebuild the payload in place underneath it.
+
+    The file already carries the pid that wrote it, so this is just a
+    compare-and-delete - and it deletes only on PROOF of ownership, never on a
+    failed read: an unreadable runtime.json is a file some other process is
+    halfway through writing at least as often as it is garbage, and leaving a
+    stale one behind is a far milder failure than deleting a live one.
+
+    Same reasoning for the stop sentinel: a stop aimed at the next instance must
+    not be swallowed by our exit. (A leftover sentinel is harmless - supervise()
+    clears it before starting anything.)
+    """
+    rt = read_json(paths.runtime)
+    if rt is None or rt.get("supervisor") != os.getpid():
+        return
+    paths.runtime.unlink(missing_ok=True)
+    paths.stop_request.unlink(missing_ok=True)
 
 
 def _ask_to_stop(proc: subprocess.Popen) -> None:
@@ -317,15 +387,28 @@ def stop(paths: Paths) -> int:
     paths.stop_request.write_text("stop", "utf-8")
     print(f"asked Dispatch to stop (pid {rt.get('pid')}) - stopping agents and subApps...")
 
-    deadline = time.monotonic() + STOP_TIMEOUT_S
+    # Wait for the SUPERVISOR to let go, not merely for the port. The listener
+    # closes FIRST and teardown (services.dispose -> runner.stopAll) runs after
+    # it, with the supervisor holding a cwd inside app/ for the whole grace
+    # window - so a dead port is the start of the shutdown, not the end. Both
+    # `app:publish` and the upgrade's swap act on this answer.
+    sup = rt.get("supervisor")
+    deadline = time.monotonic() + STOP_TIMEOUT_S + 10
     while time.monotonic() < deadline:
-        if not port_alive(rt["port"], timeout=0.5):
+        current = read_json(paths.runtime)
+        # Its owner deletes it on the way out; a different owner means ours is
+        # already gone and something new has taken the port.
+        if current is None or (sup is not None and current.get("supervisor") != sup):
+            print("stopped.")
+            return 0
+        # A payload older than the `supervisor` field: the port is all we have.
+        if sup is None and not port_alive(rt["port"], timeout=0.5):
             print("stopped.")
             return 0
         time.sleep(0.5)
 
     print(
-        f"still up after {STOP_TIMEOUT_S}s - teardown may be wedged on a hung child.\n"
+        f"still up after {STOP_TIMEOUT_S + 10}s - teardown may be wedged on a hung child.\n"
         f"  Check the Ports & processes panel, or kill pid {rt.get('pid')} by hand.",
         file=sys.stderr,
     )
