@@ -416,17 +416,28 @@ export class ClaudeSession implements HarnessSession {
   ): Promise<PermissionResult> {
     const requestId = this.genId();
     return new Promise<PermissionResult>((resolve) => {
-      this.pendingPermissions.set(requestId, resolve);
       // An aborted turn must settle the promise, or the SDK waits forever.
-      opts?.signal?.addEventListener(
-        "abort",
-        () => {
-          if (this.pendingPermissions.delete(requestId)) {
-            resolve({ behavior: "deny", message: "interrupted" });
-          }
-        },
-        { once: true },
-      );
+      //
+      // `{ once: true }` is NOT sufficient on its own: it unregisters when the
+      // event FIRES, and in the normal case abort never comes. The signal here
+      // belongs to the whole session (one AbortController per `startQuery`), not
+      // to this one request, so every permission prompt used to leave a listener
+      // on it for the life of the session. Past ten, Node emits a
+      // `MaxListenersExceededWarning` — which, under a launcher whose stderr has
+      // no reader, was the seed of a 106 MB crash-log loop. Unregister on the
+      // settle path too, so the listener count tracks OUTSTANDING prompts.
+      const signal = opts?.signal;
+      const onAbort = (): void => {
+        if (this.pendingPermissions.delete(requestId)) {
+          resolve({ behavior: "deny", message: "interrupted" });
+        }
+      };
+      const settle = (result: PermissionResult): void => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      this.pendingPermissions.set(requestId, settle);
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       if (name === QUESTION_TOOL) {
         this.questionInputs.set(requestId, input);
