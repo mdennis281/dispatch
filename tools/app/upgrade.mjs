@@ -1342,26 +1342,45 @@ async function main() {
     return;
   }
 
+  // The logger comes up HERE, before the first decision — not at the staging
+  // step it used to. Everything below can end the run, and an upgrade that ends
+  // without saying why into a console that does not exist is indistinguishable
+  // from one that crashed. `alsoConsole` keeps a terminal run identical.
+  const log = makeLogger(p, { alsoConsole: true });
+  const tell = say(log);
+
   assertNodeVersion();
 
   const sha = capture("git", ["rev-parse", args.ref], repoRoot);
   const subject = capture("git", ["log", "-1", "--format=%s", sha], repoRoot);
   const dirty = capture("git", ["status", "--porcelain"], repoRoot);
 
-  console.log(`source : ${repoRoot}`);
-  console.log(`root   : ${p.root}`);
-  console.log(`ref    : ${args.ref} -> ${sha.slice(0, 12)}  "${subject}"`);
+  log(`source : ${repoRoot}\n`);
+  log(`root   : ${p.root}\n`);
+  log(`ref    : ${args.ref} -> ${sha.slice(0, 12)}  "${subject}"\n`);
 
   const live = await liveInstance(p);
-  console.log(
+  log(
     live
-      ? `running: pid ${live.pid} at ${live.url}\n`
-      : `running: nothing (a cold swap, no downtime to speak of)\n`,
+      ? `running: pid ${live.pid} at ${live.url}\n\n`
+      : `running: nothing (a cold swap, no downtime to speak of)\n\n`,
   );
 
   const currentSha = readStamp(p).sha ?? null;
   if (currentSha === sha && !args.dryRun && !args.stageOnly) {
-    console.log(`already at ${sha.slice(0, 12)} — nothing to do.`);
+    // The most common "it ran for two seconds and stopped" report there is. It
+    // is a SUCCESS — the install is already at the requested sha — but pressing
+    // a button and getting two seconds of nothing reads as a crash, so this
+    // states the outcome somewhere the UI and `--status` can both find it.
+    tell(`already at ${sha.slice(0, 12)} — nothing to do.`);
+    writeState(p, {
+      phase: "done",
+      ok: true,
+      sha,
+      subject,
+      ref: args.ref,
+      reason: `already at ${sha.slice(0, 12)} — the source has nothing newer than the install`,
+    });
     return;
   }
 
@@ -1390,7 +1409,7 @@ async function main() {
 
   if (dirty) {
     const n = dirty.split("\n").filter(Boolean).length;
-    console.log(
+    log(
       `WARNING: ${n} uncommitted change(s) in this checkout.\n` +
         `  Upgrading to the COMMITTED sha above — those changes are NOT included,\n` +
         `  including any to tools/app/launch.py, which the swap drives from the\n` +
@@ -1399,10 +1418,10 @@ async function main() {
   }
 
   if (args.dryRun) {
-    console.log(
+    log(
       `--dry-run: would stage ${sha.slice(0, 12)} into ${p.staging}, then swap it in` +
         `${live ? ` (stopping pid ${live.pid} first)` : ""}.\n` +
-        `  current: ${currentSha?.slice(0, 12) ?? "none"}`,
+        `  current: ${currentSha?.slice(0, 12) ?? "none"}\n`,
     );
     return;
   }
@@ -1417,28 +1436,27 @@ async function main() {
     // Only ever clear a lock whose owner is demonstrably gone. The old code
     // deleted it unconditionally one line after checking it, which made the
     // check decorative.
-    console.log(`clearing a stale upgrade lock (its process is gone)\n`);
+    log(`clearing a stale upgrade lock (its process is gone)\n`);
     rmSync(p.lock, { force: true });
   }
   if (!acquireLock(p)) throw new Error(`could not take the upgrade lock at ${p.lock}`);
 
-  const log = makeLogger(p, { alsoConsole: true });
-  const tell = say(log);
   try {
     writeState(p, { phase: "staging", sha, subject, ref: args.ref, startedAt: new Date().toISOString() });
     await stage(p, sha, subject, { log, tell });
   } catch (err) {
     writeState(p, { phase: "aborted", reason: `stage failed: ${err.message}` });
-    console.error(`\n${"=".repeat(72)}`);
-    console.error(`STAGING FAILED — ${err.message}`);
+    // Through `log`, not `console.error`: a build failure is the single thing
+    // someone most needs to read afterwards, and stderr is the one place it is
+    // guaranteed not to survive.
+    log(`\n${"=".repeat(72)}\n`);
+    log(`STAGING FAILED — ${err.message}\n`);
     if (err.tail?.length) {
-      console.error(`\nLast ${err.tail.length} lines before the failure:\n`);
-      for (const l of err.tail) console.error(`  | ${l}`);
+      log(`\nLast ${err.tail.length} lines before the failure:\n\n`);
+      for (const l of err.tail) log(`  | ${l}\n`);
     }
-    console.error(`${"=".repeat(72)}`);
-    console.error(
-      `\nThe running instance was never touched — it is still serving the old build.`,
-    );
+    log(`${"=".repeat(72)}\n`);
+    log(`\nThe running instance was never touched — it is still serving the old build.\n`);
     releaseLock(p);
     process.exitCode = 1;
     return;
@@ -1447,7 +1465,7 @@ async function main() {
   if (args.stageOnly) {
     writeState(p, { phase: "staged", sha });
     releaseLock(p);
-    console.log(`\n--stage-only: ${p.staging} is built at ${sha.slice(0, 12)}. Not swapped.`);
+    log(`\n--stage-only: ${p.staging} is built at ${sha.slice(0, 12)}. Not swapped.\n`);
     return;
   }
 
@@ -1470,12 +1488,12 @@ async function main() {
   // until it is scheduled, and this process is about to exit.
   if (validPid(pid)) stampLock(p, pid);
 
-  console.log(
+  log(
     `\nhanded off to a detached swap (pid ${pid}).\n` +
       `  It waits for this process to exit, then stops the app, swaps the payload,\n` +
       `  restarts and health-checks — and rolls back by itself if that fails.\n\n` +
       `  watch:  node tools/app/upgrade.mjs --status\n` +
-      `  log:    ${p.log}`,
+      `  log:    ${p.log}\n`,
   );
 }
 
