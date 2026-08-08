@@ -1,5 +1,8 @@
 /// <reference types="vite/client" />
 
+/** Build stamp (`yyyy.mm.dd.sssss`, UTC) injected by `define` in vite.config.ts. */
+declare const __BUILD_VERSION__: string;
+
 /** Deep ESM language imports from react-syntax-highlighter lack bundled types. */
 declare module "react-syntax-highlighter/dist/esm/languages/prism/*" {
   const language: unknown;

@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { buildVersion } from "@dispatch/shared";
 
 /**
  * Vite config for the Dispatch SPA.
@@ -11,6 +12,13 @@ import tailwindcss from "@tailwindcss/vite";
  */
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: {
+    // Stamped when this config is EVALUATED: once per `vite build` in prod, and
+    // once per dev-server start in dev (dev-vite.ts imports this file). That is
+    // the intent — the number the sidebar shows is when the running bundle was
+    // built, not when the page was loaded.
+    __BUILD_VERSION__: JSON.stringify(buildVersion()),
+  },
   build: {
     outDir: "dist",
     emptyOutDir: true,
