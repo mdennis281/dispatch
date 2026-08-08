@@ -6,7 +6,7 @@
  *   node tools/verify/shot.mjs --flow panels
  *   node tools/verify/shot.mjs --flow all
  *
- * Flows: app | chat | panels | all   (add one in a few lines — see FLOWS below).
+ * Flows: app | chat | panels | newproject | all  (add one in a few lines — see FLOWS below).
  * Screenshots land in --out (default: <repoRoot>/.verify-shots), numbered
  * `NN-<label>.png`. Prints every saved path + byte size.
  */
@@ -106,6 +106,42 @@ const FLOWS = {
       await ctx.page.waitForTimeout(350);
       await ctx.shot(`panel-${label}`);
     }
+  },
+
+  // Walk the new-project page: the name→path derivation, the live project.yaml
+  // preview, and the path probe's verdict for a repo that already exists.
+  //
+  // Creates NOTHING — it never presses either button — so it's safe to run
+  // against a live install.
+  async newproject(ctx) {
+    await gotoApp(ctx.page, ctx.base);
+    // Via the command palette: the one entry point that works with no project.
+    await ctx.page.keyboard.press("Control+k");
+    await ctx.page.waitForTimeout(300);
+    await ctx.page.keyboard.type("new project");
+    await ctx.page.waitForTimeout(400);
+    await ctx.page.keyboard.press("Enter");
+    await ctx.page.waitForTimeout(700);
+    await ctx.shot("newproject-empty");
+
+    // Typing the name should fill the path and grow the yaml beside it.
+    await ctx.page.getByPlaceholder("Acme Billing").fill("Zombie Arena");
+    await ctx.page.waitForTimeout(900);
+    await ctx.shot("newproject-named");
+
+    // A profile + a sub-app row: everything on the left lands on the right.
+    await ctx.page.getByText("Review", { exact: true }).first().click();
+    await ctx.page.getByPlaceholder("web").first().fill("game");
+    await ctx.page.getByPlaceholder("apps/web").first().fill("apps/client");
+    await ctx.page.getByPlaceholder("pnpm dev").first().fill("pnpm dev");
+    await ctx.page.getByPlaceholder("5173").first().fill("5173");
+    await ctx.page.waitForTimeout(600);
+    await ctx.shot("newproject-configured");
+
+    // Point it at this very repo — the probe should flip to "existing git repo".
+    await ctx.page.getByPlaceholder(/acme-billing$/).fill(process.cwd().replace(/\\/g, "/"));
+    await ctx.page.waitForTimeout(1200);
+    await ctx.shot("newproject-existing-repo");
   },
 
   // Drive a REAL agent turn end-to-end: create a chat under a project, send a

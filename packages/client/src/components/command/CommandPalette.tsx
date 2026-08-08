@@ -18,6 +18,7 @@ import {
   Search,
   Plus,
   FolderGit2,
+  FolderPlus,
   MessageSquare,
   SlidersHorizontal,
   GitBranch,
@@ -34,6 +35,7 @@ import {
 import { actions } from "../../lib/actions.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
+import { useView } from "../../stores/view.js";
 import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
 import { requestOpenProjectPrs } from "../prs/projectPrsBus.js";
 import { requestOpenMcpCatalog } from "../mcp/mcpCatalogBus.js";
@@ -239,6 +241,19 @@ export function CommandPalette({
       icon: <Power />,
       keywords: "quit exit shutdown kill halt close server stop app",
       run: onOpenSettings,
+    });
+
+    // Not gated on an active project — this is how the FIRST one gets made, and
+    // the palette is the only entry point that works before there's a sidebar
+    // selector worth opening.
+    list.push({
+      id: "new-project",
+      title: "New project",
+      subtitle: "name it, point it at a directory, let an agent finish the setup",
+      group: "Actions",
+      icon: <FolderPlus />,
+      keywords: "add create project repo directory setup init clone import scaffold",
+      run: () => useView.getState().setView("new-project"),
     });
 
     for (const p of projects) {

@@ -7,7 +7,7 @@
  * answer), the global Attention Queue, and a gh-action.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -361,6 +361,103 @@ describe("routes — REST CRUD", () => {
     });
     expect(res.statusCode).toBe(201);
     expect(existsSync(missing)).toBe(false);
+  });
+
+  it("POST /api/projects with initRepo creates the directory and git-inits it", async () => {
+    // The new-project page's "I'm starting a project" path: the human names a
+    // directory that doesn't exist yet, and create makes it a repo on the trunk
+    // the project record already committed to.
+    const fresh = join(dir, "brand-new-project");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: {
+        name: "Brand New",
+        repoPath: fresh,
+        worktreeRoot: ".worktrees",
+        defaultBranch: "trunk",
+        initRepo: true,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(existsSync(join(fresh, ".git"))).toBe(true);
+    // The initial branch matches the project's declared trunk — a repo that
+    // landed on `master` while the config says otherwise breaks diff-vs-base.
+    expect(readFileSync(join(fresh, ".git", "HEAD"), "utf8")).toContain("refs/heads/trunk");
+    // The repo now exists, so the scaffold ran too.
+    expect(existsSync(join(fresh, ".dispatch", "project.yaml"))).toBe(true);
+  });
+
+  it("initRepo leaves an existing checkout's git dir alone", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "cm-existing-"));
+    try {
+      // A `.git` that is deliberately NOT a real repo: if create touched it,
+      // `git init` would have replaced this with a directory.
+      await writeFile(join(repo, ".git"), "gitdir: /elsewhere");
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Adopted", repoPath: repo, worktreeRoot: "wt", initRepo: true },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(readFileSync(join(repo, ".git"), "utf8")).toBe("gitdir: /elsewhere");
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("initRepo never nests a repo inside an existing checkout", async () => {
+    const outer = await mkdtemp(join(tmpdir(), "cm-monorepo-"));
+    try {
+      await writeFile(join(outer, ".git"), "gitdir: /elsewhere");
+      // A path INSIDE that repo has no `.git` of its own but is already tracked;
+      // git-initting it would give it a second, empty history.
+      const inner = join(outer, "apps", "service");
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Nested", repoPath: inner, worktreeRoot: ".worktrees", initRepo: true },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(existsSync(join(inner, ".git"))).toBe(false);
+    } finally {
+      await rm(outer, { recursive: true, force: true });
+    }
+  });
+
+  it("initRepo refuses a relative repoPath instead of git-initting the server's cwd", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: {
+        name: "Relative",
+        repoPath: "some-relative-dir",
+        worktreeRoot: ".worktrees",
+        initRepo: true,
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/absolute/i);
+    expect(existsSync("some-relative-dir")).toBe(false);
+  });
+
+  it("initRepo creates nothing when the branch name isn't a legal ref", async () => {
+    // `main..` passes the shell-safety filter but git rejects it. The repo must
+    // not be left behind on `master` — the create guard would then skip the fix.
+    const fresh = join(dir, "bad-branch-project");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: {
+        name: "Bad Branch",
+        repoPath: fresh,
+        worktreeRoot: ".worktrees",
+        defaultBranch: "main..",
+        initRepo: true,
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(existsSync(join(fresh, ".git"))).toBe(false);
   });
 
   it("rejects a chat with no projectId and a project with no name", async () => {

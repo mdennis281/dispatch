@@ -18,22 +18,20 @@
  *
  * The manifest mapping is the mirror of `project-config.ts`'s `load`:
  * `SubApp.path → cwd`, `dockerCompose → docker`, and the `mcpServers` record →
- * an array of `{ name, transport }` with the transport un-flattened.
+ * an array of `{ name, transport }` with the transport un-flattened. It lives in
+ * `@dispatch/shared` (and is re-exported here) because the new-project form
+ * renders the SAME function's output as a live preview of the file this writes.
  */
 import { join, sep } from "node:path";
 import { readdir, readFile, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { configDirFor } from "@dispatch/cli/core";
-import { stringify as stringifyYaml } from "yaml";
 import {
   ARCHIVE_EXT,
   MANIFEST_FILE,
+  projectToManifest,
+  renderManifestYaml,
   type Project,
-  type ProjectManifest,
-  type ManifestSubApp,
-  type ManifestMcpServer,
-  type ManifestMcpTransport,
-  type McpServerConfig,
   type ProjectConfigResult,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
@@ -52,80 +50,11 @@ export interface ProjectConfigArchiveOptions {
 
 /* ------------------------------------------------------------ pure mapping */
 
-/** Un-flatten a stored {@link McpServerConfig} back into a manifest transport. */
-export function mcpConfigToTransport(cfg: McpServerConfig): ManifestMcpTransport {
-  if (cfg.type === "stdio") {
-    return {
-      type: "stdio",
-      command: cfg.command ?? "",
-      ...(cfg.args ? { args: cfg.args } : {}),
-      ...(cfg.env ? { env: cfg.env } : {}),
-    };
-  }
-  return {
-    type: cfg.type === "sse" ? "sse" : "http",
-    url: cfg.url ?? "",
-    ...(cfg.headers ? { headers: cfg.headers } : {}),
-  };
-}
-
-/** Drop `undefined` values so the emitted YAML stays clean (no `key: null`). */
-function pruneUndefined<T extends Record<string, unknown>>(obj: T): T {
-  for (const k of Object.keys(obj)) {
-    if (obj[k] === undefined) delete obj[k];
-  }
-  return obj;
-}
-
-/**
- * Derive a `.dispatch/` manifest from a stored Project — the inverse of the
- * loader's manifest→Project mapping. Identity/runtime fields (id, repoPath,
- * createdAt, defaultBranch) are intentionally omitted: they belong to `.data`,
- * not the committable authored config.
- */
-export function projectToManifest(project: Project): ProjectManifest {
-  const subApps: ManifestSubApp[] | undefined = project.subApps.length
-    ? project.subApps.map((s) =>
-        pruneUndefined<ManifestSubApp>({
-          id: s.id,
-          name: s.name,
-          cwd: s.path,
-          install: s.install,
-          dev: s.dev,
-          build: s.build,
-          test: s.test,
-          ports: s.ports,
-          url: s.url,
-          docker: s.dockerCompose,
-        }),
-      )
-    : undefined;
-
-  const mcpEntries = Object.entries(project.mcpServers ?? {});
-  const mcpServers: ManifestMcpServer[] | undefined = mcpEntries.length
-    ? mcpEntries.map(([name, cfg]) => ({ name, transport: mcpConfigToTransport(cfg) }))
-    : undefined;
-
-  return pruneUndefined<ProjectManifest>({
-    name: project.name,
-    worktreeRoot: project.worktreeRoot || undefined,
-    worktree: project.worktreeCmd,
-    ship: project.shipCmd,
-    subApps,
-    mcpServers,
-  });
-}
-
-/** Render a manifest to `project.yaml` text with a self-describing header. */
-export function renderManifestYaml(manifest: ProjectManifest): string {
-  const header = [
-    "# .dispatch/ — self-contained, committable Dispatch config for this repo.",
-    "# Discovered + loaded by Dispatch as the SOURCE OF TRUTH for authored config;",
-    "# .data keeps only runtime state (chats, sessions, checkpoints). Safe to commit.",
-    "",
-  ].join("\n");
-  return header + stringifyYaml(manifest);
-}
+// The Project→manifest mapping and the YAML render moved to `@dispatch/shared`
+// so the new-project form can preview the exact file this writes. Re-exported
+// here because this module is still where "the archive format" is documented,
+// and every existing importer (and its tests) reaches for them by this path.
+export { mcpConfigToTransport, projectToManifest, renderManifestYaml } from "@dispatch/shared";
 
 /**
  * Build the scaffold file set for a project: `project.yaml` derived from the

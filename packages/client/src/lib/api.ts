@@ -123,6 +123,36 @@ export interface FileSearchResult {
   files: IndexedFile[];
 }
 
+/**
+ * What's at a filesystem path right now (mirrors the server /api/fs/probe
+ * payload). The new-project form asks before it lets you create anything: an
+ * existing checkout, an empty directory and a path that doesn't exist yet are
+ * three different setups, and only the server can tell them apart.
+ */
+export interface PathProbe {
+  /** The path as resolved by the server (absolute, forward-slashed). */
+  path: string;
+  /** The text sent was already absolute; a relative one resolves against the server. */
+  absolute: boolean;
+  exists: boolean;
+  isDirectory: boolean;
+  /** Inside a git repo — resolved by walking up, so a nested path counts. */
+  isGit: boolean;
+  /** The enclosing repo's top level, when `isGit`. */
+  repoRoot: string | null;
+  /** No code here yet: empty, or holding only `.git`/`.dispatch`. */
+  empty: boolean;
+  /** The immediate parent exists — i.e. only this directory has to be created. */
+  parentExists: boolean;
+  /** Nearest existing ancestor — null when even the drive/root is missing. */
+  existingParent: string | null;
+  /** The repo's already-committed `.dispatch/project.yaml`, verbatim, if it has one. */
+  dispatchConfig: string | null;
+  /** That manifest's `name:` / `worktreeRoot:` — what the project will actually have. */
+  dispatchName: string | null;
+  dispatchWorktreeRoot: string | null;
+}
+
 /** A single file's content for the Monaco viewer/diff (mirrors WorktreeFile). */
 export interface WorktreeFileContent {
   path: string;
@@ -219,7 +249,13 @@ export const api = {
   projects: {
     list: () => get<Project[]>("/api/projects"),
     get: (id: string) => get<Project>(`/api/projects/${id}`),
-    create: (body: Partial<Project>) => post<Project>("/api/projects", body),
+    /**
+     * Create a project. `initRepo` additionally creates the directory and
+     * `git init`s it — for the case where the human is STARTING a project
+     * rather than adopting one. Ignored when the path already exists.
+     */
+    create: (body: Partial<Project> & { initRepo?: boolean }) =>
+      post<Project>("/api/projects", body),
     update: (id: string, body: Partial<Project>) =>
       put<Project>(`/api/projects/${id}`, body),
     remove: (id: string) => del<void>(`/api/projects/${id}`),
@@ -424,6 +460,14 @@ export const api = {
      */
     search: (chatId: string, q = "", limit?: number) =>
       get<FileSearchResult>(`/api/files${qs({ chatId, q, limit })}`),
+  },
+
+  /* filesystem questions the new-project form has to ask before it can act */
+  fs: {
+    /** Where this human keeps projects (learned from the ones they already have). */
+    roots: () => get<{ home: string; projectsRoot: string; sep: string }>("/api/fs/roots"),
+    /** What's at a path right now: exists / directory / git repo / has code. */
+    probe: (path: string) => get<PathProbe>(`/api/fs/probe${qs({ path })}`),
   },
 
   /* worktrees */

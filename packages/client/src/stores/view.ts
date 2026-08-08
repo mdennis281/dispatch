@@ -2,8 +2,14 @@ import { create } from "zustand";
 
 /** The app's primary surface. "chat" = the transcript workspace; "memory" = the
  *  top-level, chat-independent memory browser (list+search + viewer); "git" =
- *  the project's Source Control cockpit (changes, history, branches, stashes). */
-export type AppView = "chat" | "memory" | "git";
+ *  the project's Source Control cockpit (changes, history, branches, stashes);
+ *  "new-project" = the full-bleed project setup page.
+ *
+ *  "new-project" is the one view that also hides the SIDEBAR. It isn't scoped to
+ *  the active project — it's how a project comes to exist — so a rail of the
+ *  current project's chats and apps beside it is noise at best and a misread at
+ *  worst ("am I editing that one?"). Everything else keeps its chrome. */
+export type AppView = "chat" | "memory" | "git" | "new-project";
 
 interface ViewStore {
   view: AppView;

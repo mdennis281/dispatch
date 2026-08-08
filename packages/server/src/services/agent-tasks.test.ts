@@ -3,6 +3,8 @@ import {
   AGENT_TASK_IDS,
   AGENT_TASKS,
   composeMessageText,
+  projectToManifest,
+  renderManifestYaml,
   taskTitlePrefix,
   type AgentTaskId,
   type Chat,
@@ -229,6 +231,118 @@ describe("buildTaskParts — commit sweep", () => {
   });
 });
 
+describe("buildTaskParts — project setup", () => {
+  const project = {
+    id: "p1",
+    name: "Acme",
+    repoPath: "/repo",
+    worktreeRoot: ".worktrees",
+    defaultBranch: "trunk",
+    subApps: [],
+    createdAt: 1,
+  };
+  const setup = (over: Partial<Parameters<typeof buildTaskParts>[0]> = {}) =>
+    prompt("project:setup", { instructions: "", project, ...over });
+
+  it("names the repo and the trunk the form chose", () => {
+    const out = setup();
+    expect(out).toContain("/repo");
+    expect(out).toContain("trunk `trunk`");
+  });
+
+  it("treats an empty directory as a build, not an audit", () => {
+    const out = setup({ fresh: true });
+    expect(out).toMatch(/directory is empty/i);
+    expect(out).toMatch(/Scaffold the project/);
+    // The one thing it must not do quietly: pick the stack for you.
+    expect(out).toMatch(/TELL me what you picked/);
+  });
+
+  it("treats an existing repo as an audit, and forbids the rewrite", () => {
+    const out = setup({ fresh: false });
+    expect(out).toMatch(/already has code/i);
+    expect(out).toMatch(/Do NOT restructure/);
+    expect(out).not.toMatch(/directory is empty/i);
+  });
+
+  it("tells it what makes the Runner work, in the manifest's own vocabulary", () => {
+    const out = setup();
+    for (const key of ["subApps:", "cwd", "install", "dev", "build", "test", "ports"]) {
+      expect(out, key).toContain(key);
+    }
+  });
+
+  it("leaves the human's workflow choice to the human", () => {
+    expect(setup()).toMatch(/Leave `workflow:` alone/);
+  });
+
+  it("guards against a confidently invented config", () => {
+    expect(setup()).toMatch(/An empty config beats a confident wrong one/);
+  });
+
+  it("only asks it to run things when the toggle is on", () => {
+    expect(setup({ params: { runInstall: true } })).toMatch(/Verify before you claim done/);
+    expect(setup({ params: { runInstall: false } })).toMatch(/Don't run anything/);
+  });
+
+  it("honours manifest dir overrides like the config tasks do", () => {
+    const out = setup({
+      config: config({ sourceDir: "/repo/.claude-manager" }),
+    });
+    expect(out).toContain(".claude-manager/project.yaml");
+    expect(out).not.toContain(".dispatch/project.yaml");
+  });
+
+  it("attaches the saved manifest as context, so turn one is already grounded", () => {
+    const synthesized = renderManifestYaml(projectToManifest(project));
+    const out = parts("project:setup", {
+      instructions: "",
+      project,
+      savedManifest: { text: synthesized, adopted: false },
+    });
+    const ctx = out.find((p) => p.kind === "context");
+    expect(ctx?.label).toContain("project.yaml");
+    expect(ctx?.label).toContain("as saved");
+    expect(ctx?.text).toContain("name: Acme");
+    expect(ctx?.text).toContain("worktreeRoot: .worktrees");
+  });
+
+  it("attaches an ADOPTED manifest verbatim, and says whose it is", () => {
+    // The failure this guards: re-deriving the manifest from the stored record
+    // drops `instructions:`, the dir overrides and every comment — and handing
+    // the agent that, labelled "as saved", reads as permission to delete them.
+    const authored = "# hand-authored\nname: Adopted\ninstructions:\n  - file: house.md\n";
+    const out = parts("project:setup", {
+      instructions: "",
+      project,
+      savedManifest: { text: authored, adopted: true },
+    });
+    const ctx = out.find((p) => p.kind === "context");
+    expect(ctx?.text).toBe(authored);
+    expect(ctx?.label).toContain("already in this repo");
+
+    const brief = out.find((p) => p.kind === "brief")!.text;
+    expect(brief).toMatch(/ALREADY CARRIES/);
+    expect(brief).toMatch(/keep every key and comment/);
+    expect(brief).not.toMatch(/exactly what I typed/);
+  });
+
+  it("says the manifest is its own when the form scaffolded it", () => {
+    const brief = briefOf("project:setup", {
+      project,
+      savedManifest: { text: "name: Acme\n", adopted: false },
+    });
+    expect(brief).toMatch(/holds exactly what I typed and nothing more/);
+    expect(brief).not.toMatch(/ALREADY CARRIES/);
+  });
+
+  it("keeps the human's brief in its own part", () => {
+    const out = parts("project:setup", { instructions: "a Vite app and a Fastify api", project });
+    expect(out.find((p) => p.kind === "instructions")?.text).toBe("a Vite app and a Fastify api");
+    expect(briefOf("project:setup", { project })).not.toContain("Vite");
+  });
+});
+
 /* ----------------------------------------------------------------- catalog */
 
 describe("the catalog is complete enough to render a launcher", () => {
@@ -252,11 +366,11 @@ describe("the catalog is complete enough to render a launcher", () => {
 /* ------------------------------------------------------------------ launch */
 
 /** Minimal Services double: enough for createChat + ensureSession + send. */
-function services(over: { status?: GitStatus | null } = {}) {
+function services(over: { status?: GitStatus | null; project?: Record<string, unknown> } = {}) {
   const saved: Chat[] = [];
   const sent: { chatId: string; text: string; parts?: unknown }[] = [];
   const store = {
-    getProject: async () => ({ id: "p1", repoPath: "/repo" }),
+    getProject: async () => over.project ?? { id: "p1", repoPath: "/repo" },
     getSettings: async () => ({ theme: "dark" }),
     saveChat: async (c: Chat) => {
       saved.push(c);
@@ -336,6 +450,15 @@ describe("launchAgentTask", () => {
     const { svc: b } = services({ status: status() });
     const dflt = await launchAgentTask(b, { projectId: "p1", taskId: "git:commit-sweep" });
     expect(dflt?.chat.effort).toBe(AGENT_TASKS["git:commit-sweep"].defaultEffort);
+  });
+
+  it("titles a setup chat after the project when there's no brief to summarize", async () => {
+    const { svc } = services({
+      project: { id: "p1", name: "Acme", repoPath: "/repo", subApps: [], createdAt: 1 },
+    });
+    const out = await launchAgentTask(svc, { projectId: "p1", taskId: "project:setup" });
+    expect(out?.chat.title).toBe("**setup**: Acme");
+    expect(out?.chat.purpose?.label).toBe("Setting up Acme");
   });
 
   it("sends the composed prompt with its parts attached", async () => {

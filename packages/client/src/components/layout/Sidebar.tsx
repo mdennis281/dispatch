@@ -39,7 +39,6 @@ import { actions, deleteChat } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate, relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
-import { AddProjectDialog } from "../sidebar/AddProjectDialog.js";
 import { ManageConfigDialog } from "../sidebar/ManageConfigDialog.js";
 import { RenameChatDialog } from "../chat/RenameChatDialog.js";
 import { BranchWorktreePicker } from "../panels/BranchWorktreePicker.js";
@@ -130,7 +129,7 @@ function ProjectSelector({
               onAddProject();
             }}
           >
-            Add project…
+            New project…
           </MenuItem>
           <MenuItem
             icon={<Bot />}
@@ -461,7 +460,6 @@ export function Sidebar() {
     setActiveChatRaw(id);
   };
 
-  const [addProjectOpen, setAddProjectOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
 
   // Project-level launch target for the Apps section — same picker as the right
@@ -519,8 +517,11 @@ export function Sidebar() {
   return (
     <aside className="flex w-[260px] shrink-0 flex-col border-r border-line bg-surface">
       <div className="flex h-12 shrink-0 items-center px-2.5 cm-hairline-b">
+        {/* Adding a project is a full page, not a dialog: it ends by handing
+            the repo to an agent, and that hand-off needs the config it's
+            handing over visible beside it. See NewProjectView. */}
         <ProjectSelector
-          onAddProject={() => setAddProjectOpen(true)}
+          onAddProject={() => setView("new-project")}
           onManageConfig={() => setManageOpen(true)}
         />
       </div>
@@ -622,7 +623,6 @@ export function Sidebar() {
         </button>
       </div>
 
-      <AddProjectDialog open={addProjectOpen} onClose={() => setAddProjectOpen(false)} />
       <ManageConfigDialog open={manageOpen} onClose={() => setManageOpen(false)} />
     </aside>
   );

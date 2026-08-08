@@ -25,7 +25,8 @@
  * {@link ChatPurpose} whose `kind` IS the task id, so the sidebar recognizes it
  * without a mapping table.
  */
-import { basename } from "node:path";
+import { basename, join } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
 import {
   AGENT_TASKS,
   CONFIG_DIR_NAME,
@@ -33,8 +34,11 @@ import {
   DEFAULT_INSTRUCTIONS_DIR,
   DEFAULT_MODES_DIR,
   DEFAULT_SKILLS_DIR,
+  LEGACY_CONFIG_DIR_NAME,
   MANIFEST_FILE,
   composeMessageText,
+  projectToManifest,
+  renderManifestYaml,
   taskTitlePrefix,
   withTitlePrefix,
   type AgentTaskId,
@@ -43,6 +47,7 @@ import {
   type GitFileChange,
   type GitStatus,
   type MessagePart,
+  type Project,
   type ProjectConfig,
 } from "@dispatch/shared";
 import type { Services } from "./container.js";
@@ -191,6 +196,176 @@ function configBriefText(taskId: AgentTaskId, config: ProjectConfig | null): str
   ].join("\n");
 }
 
+/* ----------------------------------------------------------- project setup */
+
+/**
+ * The project-setup briefing — the second half of the new-project form.
+ *
+ * The form asks for the four things a human can actually answer in thirty
+ * seconds: what it's called, where it lives, which branch is the trunk, and how
+ * change ships. Everything else in a real `project.yaml` — which sub-apps exist,
+ * what their dev commands are, which ports they bind, what house rules the repo
+ * has — is a READING job, and the form has no business guessing at it. So the
+ * form saves what it knows and hands the rest here.
+ *
+ * The one branch that matters is whether the directory has code in it yet:
+ *
+ *   - an EMPTY directory means the human is starting a project, and "set it up"
+ *     means scaffolding one to their brief and then recording what was built;
+ *   - an EXISTING repo means the config is behind the code, and the job is to
+ *     read the code and describe it — never to restructure it to match a config.
+ *
+ * Getting that backwards is the expensive failure: an agent that "sets up" an
+ * existing repo by rewriting its build is a much worse afternoon than one that
+ * writes a slightly thin manifest.
+ */
+function projectSetupBriefText(input: {
+  repoPath: string;
+  trunk: string;
+  dirs: ConfigDirs;
+  fresh: boolean;
+  runInstall: boolean;
+  /** The repo brought its own committed config; the form didn't write this file. */
+  adopted: boolean;
+}): string {
+  const { repoPath, trunk, dirs, fresh, runInstall, adopted } = input;
+  const manifest = `${dirs.configDir}/${dirs.manifest}`;
+
+  const lines = [
+    fresh
+      ? "Set this project up from scratch, then record what you built in its Dispatch config."
+      : "Finish this project's Dispatch config by reading the repo it points at.",
+    "",
+    // Which of these two sentences is true decides whether the agent may treat
+    // the attached file as disposable scaffolding or as someone's committed
+    // work. Getting it wrong is how a real `instructions:` block gets rewritten
+    // away, so it's stated rather than left to inference.
+    adopted
+      ? `**The repo** — \`${repoPath}\`, trunk \`${trunk}\`. This repo ALREADY CARRIES a ` +
+          `committed \`${manifest}\` — I adopted it, I did not write it. The config attached ` +
+          "below is that file, read from disk. Treat it as someone's authored work: extend " +
+          "it, keep every key and comment already in it, and don't re-derive it from scratch."
+      : `**The repo** — \`${repoPath}\`, trunk \`${trunk}\`. I just created this project ` +
+          `in Dispatch from a form that captured only the essentials; \`${manifest}\` was ` +
+          "scaffolded from it and holds exactly what I typed and nothing more. The config " +
+          "attached below is that file as it stands.",
+    "",
+  ];
+
+  if (fresh) {
+    lines.push(
+      "**The directory is empty** — there is no code here yet. That makes this a build, not " +
+        "an audit:",
+      "",
+      "- Scaffold the project described below. Where I didn't specify a stack, pick a " +
+        "conventional one and TELL me what you picked and why before you commit to it — " +
+        "don't quietly decide the language.",
+      "- Prefer the ecosystem's own scaffolder (`create-vite`, `cargo new`, `uv init`, …) " +
+        "over hand-writing files. It gets the boring parts right.",
+      "- Get it to the point where the dev command actually starts and the test command " +
+        "actually runs. A scaffold nobody ran is a scaffold that doesn't work.",
+      "- Add a `README.md` that says what this is, and a `.gitignore` for the stack.",
+      "",
+    );
+  } else {
+    lines.push(
+      "**The repo already has code** — so this is an audit, not a rewrite:",
+      "",
+      "- Read it. `package.json` scripts, compose files, Makefiles, CI workflows, the " +
+        "README, and whatever else says how this thing is actually run.",
+      "- Record what you find. Do NOT restructure the repo, rename scripts, change ports, " +
+        "or \"standardize\" anything to make the config tidier — the code is the truth and " +
+        "the config follows it.",
+      "- If something genuinely looks broken, say so at the end; don't fix it as part of " +
+        "setup.",
+      "",
+    );
+  }
+
+  lines.push(
+    `**What to write into \`${manifest}\`**`,
+    "",
+    "- `subApps:` — one entry per independently runnable thing in this repo. Keys: `id`, " +
+      "`name`, `cwd` (relative to the repo root), and the commands `install` / `dev` / " +
+      "`build` / `test`. Optional: `ports`, `env` (with `{port}` / `{portN}` placeholders " +
+      "substituted from the allocated ports), `url`, `docker` (a compose file). This is the " +
+      "part that makes the Runner work, so the commands have to be the real ones.",
+    "- `worktreeRoot:` is already set. Make sure it's in `.gitignore` if it resolves inside " +
+      "the repo — an untracked worktree directory shows up as noise in every diff otherwise.",
+    "- Leave `workflow:` alone unless what you found contradicts it (say, I picked `review` " +
+      "and there's no remote). If it does, say so and let me change it — that choice is mine.",
+    "- Preserve the file's existing comments and key order.",
+    "",
+    `**Beyond the manifest** — only where this repo actually earns it:`,
+    "",
+    `- \`${dirs.configDir}/${dirs.instructions}/<name>.md\` (registered under ` +
+      "`instructions:` in the manifest) for house rules an agent would otherwise get " +
+      "wrong here. Short and imperative, and only for things that are TRUE of this repo — " +
+      "a generic \"write clean code\" file is worse than no file.",
+    `- \`${dirs.configDir}/${dirs.skills}/<name>/SKILL.md\` for a multi-step procedure this ` +
+      "repo has that isn't obvious from the code (a release ritual, a data reset).",
+    "- Skip both if you'd be inventing. An empty config beats a confident wrong one.",
+    "",
+    runInstall
+      ? "**Verify before you claim done** — run the install command, then the dev and test " +
+          "commands you wrote down (start dev, confirm it binds the port you recorded, stop " +
+          "it). Fix the manifest to match what actually happened, not what the scripts " +
+          "implied."
+      : "**Don't run anything** — I've asked you to record the commands without executing " +
+          "them. Read them out of the scripts and config files, and flag anything you " +
+          "couldn't confirm by reading alone.",
+    "",
+    "When you're done: tell me what this project is, what sub-apps you registered and how " +
+      "to run each one, and anything you deliberately left out of the config.",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Is the project directory effectively empty — i.e. is this a brand-new project
+ * rather than an existing checkout? `.git` and `.dispatch` don't count: the
+ * create flow just made both, so a repo that has only those has no code in it.
+ */
+async function isFreshRepo(repoPath: string): Promise<boolean> {
+  try {
+    const entries = await readdir(repoPath);
+    return entries.every((e) => e === ".git" || e === CONFIG_DIR_NAME || e === LEGACY_CONFIG_DIR_NAME);
+  } catch {
+    // An unreadable path is not evidence of emptiness — the safer briefing is
+    // the one that tells the agent to read before it writes.
+    return false;
+  }
+}
+
+/**
+ * The project's manifest AS IT IS ON DISK, plus whether the repo brought it.
+ *
+ * Never re-derived from the stored record. `projectToManifest` emits the five
+ * keys `.data` knows about and nothing else, so re-deriving an ADOPTED repo's
+ * manifest produces a file missing its `instructions:`, its dir overrides and
+ * every comment — and handing the agent that, labelled "as saved", is an
+ * instruction to delete them.
+ *
+ * `adopted` is decided by content, not by timing: a scaffolded manifest is
+ * byte-identical to what `projectToManifest` renders, so anything that ISN'T is
+ * a file the repo already had.
+ */
+async function readSavedManifest(
+  config: ProjectConfig | null,
+  project: Project,
+): Promise<{ text: string; adopted: boolean }> {
+  const synthesized = renderManifestYaml(projectToManifest(project));
+  if (!config?.sourceDir) return { text: synthesized, adopted: false };
+  try {
+    const text = await readFile(join(config.sourceDir, MANIFEST_FILE), "utf8");
+    return { text, adopted: text.trim() !== synthesized.trim() };
+  } catch {
+    // No readable file (a race with the scaffold, a permissions problem): the
+    // derived one still describes the record the agent is working for.
+    return { text: synthesized, adopted: false };
+  }
+}
+
 /* ------------------------------------------------------------ commit sweep */
 
 /**
@@ -335,6 +510,12 @@ interface BriefContext {
   config: ProjectConfig | null;
   status: GitStatus | null;
   repoPath: string;
+  /** The stored record — project setup briefs the agent about the project itself. */
+  project?: Project | null;
+  /** Project setup only: the directory has no code in it yet (see `isFreshRepo`). */
+  fresh?: boolean;
+  /** Project setup only: the manifest as it is ON DISK (see `readSavedManifest`). */
+  savedManifest?: { text: string; adopted: boolean };
 }
 
 const boolParam = (params: Record<string, unknown>, id: string, fallback: boolean): boolean =>
@@ -361,6 +542,19 @@ export function buildTaskParts(ctx: BriefContext): MessagePart[] {
         includeUntracked: boolParam(ctx.params, "includeUntracked", true),
       }),
     });
+  } else if (ctx.taskId === "project:setup") {
+    parts.push({
+      kind: "brief",
+      label: ctx.fresh ? "Project setup — empty directory" : "Project setup — existing repo",
+      text: projectSetupBriefText({
+        repoPath: ctx.repoPath,
+        trunk: ctx.project?.defaultBranch || "main",
+        dirs: dirsFor(ctx.config),
+        fresh: ctx.fresh ?? false,
+        runInstall: boolParam(ctx.params, "runInstall", true),
+        adopted: ctx.savedManifest?.adopted ?? false,
+      }),
+    });
   } else {
     parts.push({
       kind: "brief",
@@ -372,6 +566,20 @@ export function buildTaskParts(ctx: BriefContext): MessagePart[] {
   const instructions = ctx.instructions.trim();
   if (instructions) {
     parts.push({ kind: "instructions", label: "What I want", text: instructions });
+  }
+
+  // The manifest as it is ON DISK, verbatim. The agent could open the file (and
+  // will), but attaching it means the first turn is already grounded in what is
+  // actually there — and the transcript records the starting point, which is the
+  // only way to read the setup's decisions back later.
+  if (ctx.taskId === "project:setup" && ctx.savedManifest) {
+    parts.push({
+      kind: "context",
+      label:
+        `${dirsFor(ctx.config).configDir}/${MANIFEST_FILE}` +
+        (ctx.savedManifest.adopted ? " — already in this repo" : " as saved"),
+      text: ctx.savedManifest.text,
+    });
   }
 
   if (ctx.taskId === "git:commit-sweep" && ctx.status) {
@@ -440,6 +648,11 @@ export async function launchAgentTask(
       (await services.projectConfig.reload(input.projectId).catch(() => null))?.config ??
       null);
   const status = isGit ? await services.git.status(repoPath).catch(() => null) : null;
+  // Setup reads the directory itself: "is there code here yet" is the one fact
+  // that decides whether this is a build or an audit (see projectSetupBriefText).
+  const fresh = input.taskId === "project:setup" ? await isFreshRepo(repoPath) : false;
+  const savedManifest =
+    input.taskId === "project:setup" ? await readSavedManifest(config, project) : undefined;
 
   const parts = buildTaskParts({
     taskId: input.taskId,
@@ -448,6 +661,9 @@ export async function launchAgentTask(
     config,
     status,
     repoPath,
+    project,
+    fresh,
+    savedManifest,
   });
   const prompt = composeMessageText(parts);
 
@@ -459,11 +675,15 @@ export async function launchAgentTask(
     // with no instructions falls back to something concrete about the target.
     title: withTitlePrefix(
       taskTitlePrefix(input.taskId),
-      instructions ? summarize(instructions) : sweepSubject(status),
+      instructions
+        ? summarize(instructions)
+        : input.taskId === "project:setup"
+          ? project.name
+          : sweepSubject(status),
     ),
     effort: input.effort ?? meta.defaultEffort,
     model: input.model ?? meta.defaultModel,
-    purpose: { kind: input.taskId, label: taskLabel(input.taskId, status) },
+    purpose: { kind: input.taskId, label: taskLabel(input.taskId, status, project) },
   });
 
   await ensureSession(services, chat.id);
@@ -472,8 +692,11 @@ export async function launchAgentTask(
 }
 
 /** The sidebar's one-line "what is this chat off doing". */
-function taskLabel(taskId: AgentTaskId, status: GitStatus | null): string {
+function taskLabel(taskId: AgentTaskId, status: GitStatus | null, project?: Project): string {
   const meta = AGENT_TASKS[taskId];
+  if (taskId === "project:setup") {
+    return project ? `Setting up ${project.name}` : "Setting this project up";
+  }
   if (taskId !== "git:commit-sweep") {
     return `Writing a ${meta.noun} for this project's config`;
   }

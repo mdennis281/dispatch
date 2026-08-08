@@ -39,6 +39,20 @@ export interface TaskLauncherProps {
   taskId: AgentTaskId;
   projectId: string | null;
   /**
+   * Produce the project to launch into, at launch time, when it doesn't exist
+   * yet. The new-project page is the whole reason: its task is "finish setting
+   * up this project", and the project only becomes real when you press the
+   * button — creating it earlier would leave a half-configured record behind
+   * every time someone opened the page and changed their mind.
+   *
+   * Called only when `projectId` is null. Throwing surfaces in the launcher's
+   * own error strip, so a failed create reads as a failed launch, which is what
+   * it is.
+   */
+  resolveProjectId?: () => Promise<string>;
+  /** Overrides the launch button's verb (defaults to "Have Claude do it"). */
+  submitLabel?: string;
+  /**
    * Task-specific values merged into the launch `params` — a sweep's target
    * repo, for instance. Toggle values are collected here too and win over these
    * only for keys the toggles own.
@@ -76,6 +90,8 @@ function initialToggles(taskId: AgentTaskId): Record<string, boolean> {
 export function TaskLauncher({
   taskId,
   projectId,
+  resolveProjectId,
+  submitLabel,
   params,
   disabled,
   blockedReason,
@@ -98,15 +114,19 @@ export function TaskLauncher({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const ready = !!projectId && !disabled && !blockedReason;
+  const ready = (!!projectId || !!resolveProjectId) && !disabled && !blockedReason;
   const canLaunch = ready && !sending && (!meta.instructionsRequired || !!instructions.trim());
 
   async function launch() {
-    if (!projectId || !canLaunch) return;
+    if (!canLaunch) return;
     setSending(true);
     setError(null);
     try {
-      const out = await api.tasks.launch(projectId, {
+      // Either the host already has a project, or it makes one now. Anything
+      // thrown here (a path that can't be created, a name the server rejects)
+      // lands in the same error strip as a failed launch.
+      const id = projectId ?? (await resolveProjectId!());
+      const out = await api.tasks.launch(id, {
         taskId,
         instructions: instructions.trim() || undefined,
         effort: prefs.effort,
@@ -161,7 +181,9 @@ export function TaskLauncher({
           onKeyDown={(e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void launch();
           }}
-          rows={bare ? 5 : dense ? 2 : 3}
+          // A bare dialog gives the ask room to be a paragraph; a bare strip
+          // pinned under a form is one control among many and stays short.
+          rows={bare ? (dense ? 3 : 5) : dense ? 2 : 3}
           placeholder={meta.placeholder}
           disabled={sending || !ready}
           className={cn(
@@ -226,7 +248,7 @@ export function TaskLauncher({
             disabled={!canLaunch}
             onClick={() => void launch()}
           >
-            {sending ? "Starting…" : "Have Claude do it"}
+            {sending ? "Starting…" : (submitLabel ?? "Have Claude do it")}
           </Button>
         </div>
       </div>

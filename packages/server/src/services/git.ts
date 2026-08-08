@@ -443,6 +443,45 @@ export class GitService {
     return out.trim();
   }
 
+  /* ------------------------------------------------------------ creating */
+
+  /**
+   * `git init` a directory that isn't a repo yet, with `branch` as the initial
+   * branch. Used by project create when the human is starting a project rather
+   * than adopting one.
+   *
+   * `--initial-branch` rather than an init-then-rename: the project record has
+   * already committed to a trunk name, and a repo that lands on `master` while
+   * the config says `main` breaks diff-vs-base everywhere downstream. Old git
+   * (< 2.28) doesn't know the flag, so that one case falls back to a rename on
+   * the unborn branch, which is the same outcome by a longer road.
+   *
+   * The name is validated FIRST, and nothing is written if it fails. `assertRev`
+   * is a shell-safety filter, not a ref grammar — it happily passes `main..` and
+   * `feature/`, which git rejects. Discovering that after `git init .` has
+   * already succeeded is the bad case: the directory is now a repo on `master`,
+   * so the caller's "is this already a repo?" guard sends the corrected retry
+   * straight past the fix, and the project ends up pointing at a trunk that
+   * doesn't exist. Validating up front means a bad name costs an error message
+   * and nothing else.
+   */
+  async init(repoPath: string, branch = "main"): Promise<void> {
+    const safe = assertRev(branch);
+    // `check-ref-format` needs no repo, so this runs before anything exists.
+    const fmt = await this.exec("git", ["check-ref-format", `refs/heads/${safe}`], {
+      cwd: repoPath,
+    });
+    if (fmt.exitCode !== 0) {
+      throw new Error(`"${branch}" is not a valid git branch name`);
+    }
+    const r = await this.exec("git", ["init", `--initial-branch=${safe}`, "."], {
+      cwd: repoPath,
+    });
+    if (r.exitCode === 0) return;
+    await this.git(["init", "."], repoPath);
+    await this.git(["symbolic-ref", "HEAD", `refs/heads/${safe}`], repoPath);
+  }
+
   /* --------------------------------------------------------------- remotes */
 
   /** Fetch, pull or push. `setUpstream` publishes a branch that has none. */

@@ -28,6 +28,7 @@ import { EffortSchema, type Effort } from "./common.js";
 /* -------------------------------------------------------------------- ids */
 
 export const AGENT_TASK_IDS = [
+  "project:setup",
   "config:instructions",
   "config:agents",
   "config:modes",
@@ -109,6 +110,30 @@ export interface AgentTaskMeta {
 }
 
 export const AGENT_TASKS: Record<AgentTaskId, AgentTaskMeta> = {
+  "project:setup": {
+    id: "project:setup",
+    action: "Finish with AI",
+    noun: "project setup",
+    icon: "FolderGit2",
+    titlePrefix: "setup",
+    blurb: "Reads the repo and finishes the config the form only started.",
+    placeholder:
+      "e.g. a Vite + React frontend and a Fastify API in apps/, pnpm workspaces — I want the review workflow once CI exists",
+    // The form deliberately captures only what a human can type in thirty
+    // seconds: a name, a path, a rung. Everything else — which sub-apps exist,
+    // what their dev commands and ports are, what house rules this repo has —
+    // is a reading job across an entire codebase, and reading a codebase badly
+    // is how you get a config that looks right and runs nothing.
+    defaultEffort: "high",
+    toggles: [
+      {
+        id: "runInstall",
+        label: "Install + verify commands",
+        hint: "off = record the commands without running them",
+        default: true,
+      },
+    ],
+  },
   "config:instructions": {
     id: "config:instructions",
     action: "Add an instruction",

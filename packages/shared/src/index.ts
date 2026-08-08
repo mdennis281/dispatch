@@ -7,6 +7,7 @@ export * from "./common.js";
 export * from "./domain.js";
 export * from "./git.js";
 export * from "./project-config.js";
+export * from "./manifest.js";
 export * from "./agent-tasks.js";
 export * from "./workflow.js";
 export * from "./env-expand.js";

@@ -8,6 +8,7 @@ import { AgentRunHost } from "./components/agents/AgentRunHost.js";
 import { ProjectPRsView } from "./components/prs/ProjectPRsView.js";
 import { McpCatalogView } from "./components/mcp/McpCatalogView.js";
 import { ProjectConfigView } from "./components/config/ProjectConfigView.js";
+import { NewProjectView } from "./components/project/NewProjectView.js";
 import { MemoryView } from "./components/memory/MemoryView.js";
 import { GitView } from "./components/git/GitView.js";
 import { Toasts } from "./components/Toasts.js";
@@ -32,14 +33,21 @@ export default function App() {
   const activeChatId = useChats((s) => s.activeChatId);
   const chat = useChats((s) => (activeChatId ? s.byId[activeChatId] : undefined));
   const view = useView((s) => s.view);
+  // Project setup is the one surface that isn't ABOUT the active project — it's
+  // how a project comes to exist — so it takes the whole window under the top
+  // bar. A sidebar listing some other project's chats beside it is noise at
+  // best, and at worst reads as "you're editing that one".
+  const fullBleed = view === "new-project";
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-app text-primary antialiased">
       <TopBar />
       <div className="flex min-h-0 flex-1">
-        <Sidebar />
+        {!fullBleed && <Sidebar />}
         <main className="flex min-w-0 flex-1">
-          {view === "memory" ? (
+          {view === "new-project" ? (
+            <NewProjectView />
+          ) : view === "memory" ? (
             <MemoryView />
           ) : view === "git" ? (
             <GitView />

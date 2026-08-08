@@ -24,7 +24,9 @@ middleware mode, so the SPA, REST, WebSocket, and HMR are all on one port and on
 process. No separate client server, no second port to open.
 
 ## First steps in the UI
-1. **Project** — pick or add one (a git repo + its subApps). *Hivebreak is pre-seeded.*
+1. **Project** — pick one from the selector, or start a new one (⌘K → *New project*, or
+   *New project…* in the selector). *Hivebreak is pre-seeded.* See
+   [New project](#new-project) below.
 2. **New chat** → *(optional)* **Create worktree** — do this **before the first message** so
    the agent is isolated to that worktree (a session started without one runs in the main
    checkout, and can't retro-bind — you'll get a warning if you add a worktree late).
@@ -100,6 +102,42 @@ A raw `gh pr merge` stays refused either way — `approve_pr` is the only sancti
 because it's what runs those checks, records the approval, and fast-forwards the trunk
 afterwards. Projects that leave the toggle off are unchanged: the tool isn't merely
 discouraged there, it isn't offered.
+
+## New project
+
+**⌘K → New project** (or *New project…* in the project selector) opens a full-page setup
+screen: the form on the left, the `.dispatch/project.yaml` it's about to write on the
+right, re-rendered as you type. Both halves come from the same function the server writes
+the file with, so the preview is the file rather than an impression of it.
+
+- **Name → directory.** Typing a name fills the project directory, under wherever your
+  existing projects live. Edit the path and it stops following; every derived field works
+  the same way.
+- **The line under the path is the disk talking.** An existing checkout, an empty folder
+  and a path that doesn't exist yet are three different setups, and it says which one you
+  have *before* you press anything. A directory that isn't a repo yet (or isn't there yet)
+  gets `git init`-ed on create — `git init` only ever adds `.git/`, never runs against a
+  repo that already exists, and never runs against a path *inside* one (a monorepo
+  subdirectory is already tracked; a nested repo there would describe an empty tree). The
+  path has to be absolute: a relative one would resolve against the server.
+- **A repo that already has a `.dispatch/` keeps it.** The committed manifest is the source
+  of truth and overrides the stored record on every config load, so when you point at a
+  repo that carries one, the fields it owns (name, worktree root, workflow, apps) go
+  read-only, the right pane shows *that file* rather than a preview, and the setup agent is
+  told to extend it — not to re-derive it and drop your `instructions:` along the way.
+- **Worktree root** defaults to `.worktrees` inside the repo — one directory per repo
+  holding a subdirectory per branch, which keeps a project one folder you can move or
+  delete as a unit. Add it to `.gitignore`. A relative root is resolved against the repo,
+  so it stays portable across machines.
+- **Finish with AI** saves exactly what the form has — nothing invented — and opens a chat
+  briefed to do the rest: read the repo, register the sub-apps with their real dev/build/
+  test commands and ports, and write instructions or skills where the repo earns them. An
+  empty directory flips that brief from an audit into a build: it scaffolds the project to
+  your description first, then records what it built. **Create without AI** skips the
+  hand-off and just saves.
+
+Screenshot it any time with `node tools/verify/shot.mjs --flow newproject` — the flow
+never presses either button, so it's safe against a live install.
 
 ## Project config
 
