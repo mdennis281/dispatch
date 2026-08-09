@@ -1,9 +1,27 @@
 import type { HTMLAttributes, ReactNode } from "react";
 import { cn } from "../../lib/cn.js";
 
+/**
+ * A chip's tone says what KIND of thing it is, and each one owns exactly one
+ * meaning. `accent` used to own six — selected, merged, PR number, custom
+ * agent, live, brand — which read as mush in the old indigo and shouts in the
+ * brand amber, because amber is the one colour the eye goes to first. So:
+ *
+ *   accent  — amber. Live and yours: this is happening NOW, or it's the thing
+ *             you have selected. Rare on purpose; if half the row is amber,
+ *             none of it is.
+ *   agent   — violet. Something the machine did on your behalf: a subagent, an
+ *             MCP tool server, context Dispatch attached for you.
+ *   info    — blue. Cool metadata that is true rather than urgent: branch
+ *             names, PR numbers, refs, profiles, ports.
+ *   success / warn / danger — outcomes.
+ *   neutral / muted — no semantic claim at all.
+ */
 export type Tone =
   | "neutral"
   | "accent"
+  | "agent"
+  | "info"
   | "success"
   | "warn"
   | "danger"
@@ -12,6 +30,8 @@ export type Tone =
 const tones: Record<Tone, string> = {
   neutral: "bg-hover text-secondary border-line",
   accent: "bg-accent-ghost text-accent-hi border-accent-line",
+  agent: "bg-accent-2-ghost text-accent-2-hi border-accent-2-line",
+  info: "bg-info-ghost text-info-hi border-info-line",
   success: "bg-success-ghost text-success border-transparent",
   warn: "bg-warn-ghost text-warn border-transparent",
   danger: "bg-danger-ghost text-danger border-transparent",
@@ -55,7 +75,11 @@ export function Badge({ count, tone = "accent" }: { count: number; tone?: Tone }
       ? "bg-danger text-accent-fg"
       : tone === "warn"
         ? "bg-warn text-accent-fg"
-        : "bg-accent text-accent-fg";
+        : tone === "agent"
+          ? "bg-accent-2 text-accent-2-fg"
+          : tone === "info"
+            ? "bg-info text-accent-fg"
+            : "bg-accent text-accent-fg";
   return (
     <span
       className={cn(

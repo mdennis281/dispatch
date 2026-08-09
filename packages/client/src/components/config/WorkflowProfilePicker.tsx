@@ -134,7 +134,7 @@ export function WorkflowProfilePicker({
       <div className="flex items-center gap-2 px-3 py-2 [&_svg]:size-3.5">
         <GitPullRequest className="shrink-0 text-muted" />
         <span className="text-[12px] font-semibold text-primary">Workflow profile</span>
-        <Chip tone="accent" mono>
+        <Chip tone="info" mono>
           {active}
         </Chip>
         <span className="ml-auto truncate text-[10.5px] text-faint">

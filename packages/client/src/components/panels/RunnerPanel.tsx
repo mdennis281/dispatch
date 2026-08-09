@@ -90,7 +90,7 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
             project
           </Chip>
         )}
-        {runner.usedDocker && <Chip tone="accent">docker</Chip>}
+        {runner.usedDocker && <Chip tone="info">docker</Chip>}
         {runner.port &&
           (runner.url ? (
             <button

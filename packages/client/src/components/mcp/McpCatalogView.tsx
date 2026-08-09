@@ -401,7 +401,7 @@ export function McpCatalogView() {
               <div className="space-y-2 pr-0.5">
                 {activeServer.transport && (
                   <div className="flex flex-wrap items-center gap-1.5 pb-0.5">
-                    <Chip tone="accent" mono>
+                    <Chip tone="info" mono>
                       {activeServer.transport.type}
                     </Chip>
                     {activeServer.transport.command && (

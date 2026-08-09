@@ -433,7 +433,7 @@ export function GitView() {
               </Chip>
             )}
             {ahead > 0 && (
-              <Chip tone="accent" mono>
+              <Chip tone="info" mono>
                 ↑{ahead}
               </Chip>
             )}

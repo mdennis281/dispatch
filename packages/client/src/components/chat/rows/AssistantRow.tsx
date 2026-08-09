@@ -53,7 +53,7 @@ export const AssistantRow = memo(function AssistantRow({
       meta={
         <>
           {row.model && <Chip tone="muted" mono>{row.model}</Chip>}
-          {row.subagentType && <Chip tone="accent">{row.subagentType}</Chip>}
+          {row.subagentType && <Chip tone="agent">{row.subagentType}</Chip>}
         </>
       }
       gutter={

@@ -1072,13 +1072,15 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                     "inline-flex h-7 items-center gap-1.5 rounded-md border text-[12px] " +
                       "font-medium transition-colors [&_svg]:size-3.5",
                     compact ? "justify-center px-1.5" : "px-2",
+                    // Violet, not amber: a custom agent is machine chrome, and
+                    // amber in this row means "live / yours" (see ui/Chip).
                     currentAgent
-                      ? "border-accent-line bg-accent-ghost text-accent-hi hover:border-accent-line"
+                      ? "border-accent-2-line bg-accent-2-ghost text-accent-2-hi hover:border-accent-2-line"
                       : "border-line bg-panel-2 text-secondary hover:border-line-strong hover:text-primary",
                     open && !currentAgent && "border-line-strong text-primary",
                   )}
                 >
-                  <span className={currentAgent ? "text-accent-hi" : "text-muted"}>
+                  <span className={currentAgent ? "text-accent-2-hi" : "text-muted"}>
                     {currentAgent ? <Bot /> : <Cpu />}
                   </span>
                   {!compact && (

@@ -403,7 +403,7 @@ export function ChatView({ chat }: { chat: Chat }) {
           <div className="ml-auto flex items-center gap-1.5">
             {primaryBranch && (
               <Chip
-                tone={primaryMerged ? "accent" : "neutral"}
+                tone={primaryMerged ? "success" : "info"}
                 icon={primaryMerged ? <GitMerge /> : <GitBranch />}
                 mono
               >
@@ -418,7 +418,7 @@ export function ChatView({ chat }: { chat: Chat }) {
               </span>
             )}
             {pr && (
-              <Chip tone="accent" icon={<GitPullRequest />}>
+              <Chip tone="info" icon={<GitPullRequest />}>
                 #{pr.number}
               </Chip>
             )}
@@ -468,7 +468,7 @@ export function ChatView({ chat }: { chat: Chat }) {
                       model got the same context either way. Toggling here
                       overrides the project/app default for THIS chat. */}
                   <MenuItem
-                    icon={injected.show ? <Eye className="text-accent" /> : <EyeOff />}
+                    icon={injected.show ? <Eye className="text-accent-2" /> : <EyeOff />}
                     hint={injected.source === "chat" ? "this chat" : injectedContextSourceLabel(injected.source)}
                     onClick={() => {
                       toggleInjected();

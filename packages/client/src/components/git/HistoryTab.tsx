@@ -129,7 +129,7 @@ export function HistoryTab({
                 {c.refs.length > 0 && (
                   <span className="mt-1 flex flex-wrap gap-1">
                     {c.refs.slice(0, 3).map((r) => (
-                      <Chip key={r} tone="accent" mono>
+                      <Chip key={r} tone="info" mono>
                         <Tag className="mr-1 inline size-2.5" />
                         {r.replace(/^HEAD -> /, "")}
                       </Chip>

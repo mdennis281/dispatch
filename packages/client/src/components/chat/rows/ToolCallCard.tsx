@@ -136,7 +136,7 @@ export const ToolCallCard = memo(function ToolCallCard({
             <span className="shrink-0 text-[12px] font-semibold text-primary">
               {toolLabel(use.name)}
             </span>
-            {mcp && <Chip tone="accent">MCP · {mcp.server}</Chip>}
+            {mcp && <Chip tone="agent">MCP · {mcp.server}</Chip>}
             {command && !open && (
               <span className="min-w-0 truncate cm-mono !text-[11px] text-muted">{command}</span>
             )}
