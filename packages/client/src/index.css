@@ -1,53 +1,138 @@
 @import "tailwindcss";
+@import "./theme/dark.css";
+@import "./theme/light.css";
 
-/* Dark is the only theme we ship for the shell; `class="dark"` is on <html>. */
-@custom-variant dark (&:where(.dark, .dark *));
+/*
+ * `dark:` still works, but the switch is now the `data-theme` attribute rather
+ * than a class — `index.html`'s pre-paint script sets it, and driving both the
+ * palette and the variant off ONE attribute means they can never disagree.
+ */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+@custom-variant light (&:where([data-theme="light"], [data-theme="light"] *));
 
 /*
  * ─────────────────────────────────────────────────────────────────────────
- * TOKENS — single source of truth (Linear / Zed: near-black, hairline borders,
- * one restrained indigo accent, muted semantics). Exposed both as Tailwind
- * theme colors (bg-app, text-secondary, border-line…) AND as raw CSS vars for
- * inline use (gradients, shadows, canvases).
+ * COLOR TOKENS — the ONLY bridge between the palettes and Tailwind.
+ *
+ * Tailwind v4 resolves `@theme` at build time, so a literal here would be baked
+ * into every utility and no runtime theme switch could reach it. Each token is
+ * therefore a pointer at a `--p-*` variable, and the palettes in `theme/` swap
+ * the values under `[data-theme]`. `bg-app`, `text-secondary`, `border-line`,
+ * `text-accent` … keep their exact names and simply follow the active theme.
+ *
+ * `inline` matters: without it Tailwind would emit `--color-app: var(--p-app)`
+ * on `:root` and freeze the resolved value there, so a `--p-*` override on any
+ * nested element (a future themed preview pane, a light popover on a dark page)
+ * would be ignored. With `inline` the utility carries the `var()` itself and
+ * resolves it wherever it is used.
+ *
+ * NOTE for hand-written CSS and inline styles: reference `var(--p-*)` directly,
+ * NOT `var(--color-*)`. Tailwind only emits `--color-*` for tokens its scanner
+ * saw used as a utility class, so `var(--color-cat-3)` in a style attribute is
+ * a silent empty value. The `--p-*` vars are ours and always present.
+ * ─────────────────────────────────────────────────────────────────────────
+ */
+@theme inline {
+  /* surfaces */
+  --color-app: var(--p-app);
+  --color-surface: var(--p-surface);
+  --color-panel: var(--p-panel);
+  --color-panel-2: var(--p-panel-2);
+  --color-elevated: var(--p-elevated);
+  --color-overlay: var(--p-overlay);
+  --color-inset: var(--p-inset);
+  --color-scrim: var(--p-scrim);
+  --color-scrim-strong: var(--p-scrim-strong);
+  --color-bubble: var(--p-bubble);
+  --color-bubble-line: var(--p-bubble-line);
+
+  /* hairlines */
+  --color-line: var(--p-line);
+  --color-line-strong: var(--p-line-strong);
+  --color-line-soft: var(--p-line-soft);
+
+  /* text */
+  --color-primary: var(--p-text-primary);
+  --color-secondary: var(--p-text-secondary);
+  --color-muted: var(--p-text-muted);
+  --color-faint: var(--p-text-faint);
+
+  /* primary accent — brand amber */
+  --color-accent: var(--p-accent);
+  --color-accent-hi: var(--p-accent-hi);
+  --color-accent-dim: var(--p-accent-dim);
+  --color-accent-ghost: var(--p-accent-ghost);
+  --color-accent-line: var(--p-accent-line);
+  --color-accent-fg: var(--p-accent-fg);
+
+  /* secondary accent — violet */
+  --color-accent-2: var(--p-accent-2);
+  --color-accent-2-hi: var(--p-accent-2-hi);
+  --color-accent-2-dim: var(--p-accent-2-dim);
+  --color-accent-2-ghost: var(--p-accent-2-ghost);
+  --color-accent-2-line: var(--p-accent-2-line);
+  --color-accent-2-fg: var(--p-accent-2-fg);
+
+  /* semantics */
+  --color-success: var(--p-success);
+  --color-success-hi: var(--p-success-hi);
+  --color-success-ghost: var(--p-success-ghost);
+  --color-success-line: var(--p-success-line);
+  --color-warn: var(--p-warn);
+  --color-warn-hi: var(--p-warn-hi);
+  --color-warn-ghost: var(--p-warn-ghost);
+  --color-warn-line: var(--p-warn-line);
+  --color-danger: var(--p-danger);
+  --color-danger-hi: var(--p-danger-hi);
+  --color-danger-ghost: var(--p-danger-ghost);
+  --color-danger-line: var(--p-danger-line);
+  --color-info: var(--p-info);
+  --color-info-hi: var(--p-info-hi);
+  --color-info-ghost: var(--p-info-ghost);
+  --color-info-line: var(--p-info-line);
+  /* "working" is the accent by definition (the live thing IS the primary
+   * thing); it stays a separate name so a future spinner-only hue is a
+   * one-line change here rather than a sweep of every status surface. */
+  --color-working: var(--p-accent);
+
+  /* interaction states */
+  --color-hover: var(--p-hover);
+  --color-active: var(--p-active);
+  --color-selected: var(--p-selected);
+  --color-focus-ring: var(--p-focus-ring);
+  --color-disabled: var(--p-disabled);
+  --color-sheen: var(--p-sheen);
+
+  /* categorical — charts, agent avatars, graph/diff chrome */
+  --color-cat-1: var(--p-cat-1);
+  --color-cat-2: var(--p-cat-2);
+  --color-cat-3: var(--p-cat-3);
+  --color-cat-4: var(--p-cat-4);
+  --color-cat-5: var(--p-cat-5);
+  --color-cat-6: var(--p-cat-6);
+  --color-cat-7: var(--p-cat-7);
+  --color-cat-8: var(--p-cat-8);
+
+  /* diff */
+  --color-diff-add: var(--p-diff-add);
+  --color-diff-add-ghost: var(--p-diff-add-ghost);
+  --color-diff-remove: var(--p-diff-remove);
+  --color-diff-remove-ghost: var(--p-diff-remove-ghost);
+  --color-diff-change: var(--p-diff-change);
+  --color-diff-change-ghost: var(--p-diff-change-ghost);
+
+  /* brand — the mark's amber, theme-independent (see theme/dark.css) */
+  --color-brand: var(--p-brand);
+  --color-brand-plate: var(--p-brand-plate);
+}
+
+/*
+ * ─────────────────────────────────────────────────────────────────────────
+ * NON-COLOR TOKENS — identical in every theme, so they stay out of the palette
+ * files. Anything added here is one value; anything added there is N values.
  * ─────────────────────────────────────────────────────────────────────────
  */
 @theme {
-  /* surfaces */
-  --color-app: #0b0d10;
-  --color-surface: #0e1114;
-  --color-panel: #111418;
-  --color-panel-2: #14181d;
-  --color-elevated: #171b21;
-  --color-overlay: #1b2027;
-  --color-inset: #0a0c0f;
-
-  /* hairlines */
-  --color-line: rgba(255, 255, 255, 0.07);
-  --color-line-strong: rgba(255, 255, 255, 0.11);
-  --color-line-soft: rgba(255, 255, 255, 0.045);
-
-  /* text */
-  --color-primary: #e6e8eb;
-  --color-secondary: #9aa1a9;
-  --color-muted: #6b7280;
-  --color-faint: #4b5563;
-
-  /* the one accent */
-  --color-accent: #7c8aff;
-  --color-accent-hi: #9aa5ff;
-  --color-accent-dim: #5a67d8;
-  --color-accent-ghost: rgba(124, 138, 255, 0.12);
-  --color-accent-line: rgba(124, 138, 255, 0.32);
-
-  /* muted semantics */
-  --color-success: #3fb950;
-  --color-success-ghost: rgba(63, 185, 80, 0.13);
-  --color-warn: #d6a44b;
-  --color-warn-ghost: rgba(214, 164, 75, 0.13);
-  --color-danger: #ec5f6a;
-  --color-danger-ghost: rgba(236, 95, 106, 0.13);
-  --color-working: #7c8aff;
-
   /* typography */
   --font-sans: "Inter", "Inter var", "Segoe UI", ui-sans-serif, system-ui,
     -apple-system, sans-serif;
@@ -63,14 +148,36 @@
 
   /* motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-
-  /* elevation — lean on borders, whisper of shadow */
-  --shadow-pop: 0 8px 28px -6px rgba(0, 0, 0, 0.6), 0 2px 8px -2px rgba(0, 0, 0, 0.5);
 }
 
 @layer base {
+  /*
+   * Elevation, composed once. The geometry (offset, blur, spread) is a constant
+   * of the design; only the INK is a palette decision, so a theme can't
+   * accidentally reshape every popover in the app while retinting it.
+   * Declared as a plain custom property, not a `@theme` shadow token, because
+   * every callsite uses it as `shadow-[var(--shadow-pop)]` — an arbitrary value
+   * Tailwind's scanner does not connect back to a theme key.
+   */
+  :root {
+    --shadow-pop: 0 8px 28px -6px var(--p-shadow-1), 0 2px 8px -2px var(--p-shadow-2);
+  }
+
+  /*
+   * Tell the BROWSER which way round we are. Without this, form controls,
+   * scrollbars and the canvas behind an overscroll keep painting dark chrome
+   * on a light page. It lives here rather than in the palettes so those stay
+   * pure `--p-*` declarations and remain copy-pasteable.
+   */
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+  }
+
   * {
-    border-color: var(--color-line);
+    border-color: var(--p-line);
   }
 
   html,
@@ -80,15 +187,14 @@
   }
 
   html {
-    color-scheme: dark;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
 
   body {
     margin: 0;
-    background: var(--color-app);
-    color: var(--color-primary);
+    background: var(--p-app);
+    color: var(--p-text-primary);
     font-family: var(--font-sans);
     font-size: 13px;
     line-height: 1.45;
@@ -96,15 +202,20 @@
     letter-spacing: -0.006em;
   }
 
+  /* Selection is the SECONDARY accent, not the primary: a highlighted run of
+   * text should not look like the one live/primary element on the page, and on
+   * light mode an amber wash under dark text is barely visible. */
   ::selection {
-    background: var(--color-accent-ghost);
-    color: var(--color-accent-hi);
+    background: var(--p-accent-2-ghost);
+    color: var(--p-accent-2-hi);
   }
 
-  /* Focus: crisp accent ring, never a browser default halo. */
+  /* Focus: crisp accent ring, never a browser default halo. The inner 1px is
+   * the PAGE color, punching a gap so the ring stays readable when the focused
+   * element sits directly on top of another accent-tinted surface. */
   :focus-visible {
     outline: none;
-    box-shadow: 0 0 0 1px var(--color-app), 0 0 0 2.5px var(--color-accent-line);
+    box-shadow: 0 0 0 1px var(--p-app), 0 0 0 2.5px var(--p-focus-ring);
   }
 }
 
@@ -115,9 +226,14 @@
  * ─────────────────────────────────────────────────────────────────────────
  */
 @layer components {
+  /* Scrollbars are token-driven because they are painted by the browser on top
+   * of whatever surface they overlay: a hardcoded white thumb disappears
+   * entirely on a light panel. `-strong` is the resting state and `--p-selected`
+   * the hover — both neutral washes, so the thumb reads on every rung of the
+   * surface ladder. */
   .cm-scroll {
     scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+    scrollbar-color: var(--p-line-strong) transparent;
   }
   .cm-scroll::-webkit-scrollbar {
     width: 9px;
@@ -127,10 +243,10 @@
     background-clip: padding-box;
     border: 2px solid transparent;
     border-radius: 999px;
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: var(--p-line-strong);
   }
   .cm-scroll::-webkit-scrollbar-thumb:hover {
-    background-color: rgba(255, 255, 255, 0.18);
+    background-color: var(--p-selected);
   }
   .cm-scroll::-webkit-scrollbar-corner {
     background: transparent;
@@ -155,8 +271,8 @@
   }
 
   .cm-panel {
-    background: var(--color-panel);
-    border: 1px solid var(--color-line);
+    background: var(--p-panel);
+    border: 1px solid var(--p-line);
     border-radius: var(--radius);
   }
 
@@ -164,15 +280,15 @@
    * weight; only a whisper of depth so cards sit, never float. */
   .cm-raise {
     box-shadow:
-      inset 0 1px 0 0 rgba(255, 255, 255, 0.035),
-      0 1px 2px -1px rgba(0, 0, 0, 0.4);
+      inset 0 1px 0 0 var(--p-sheen-soft),
+      0 1px 2px -1px var(--p-shadow-2);
   }
 
   .cm-hairline-b {
-    border-bottom: 1px solid var(--color-line);
+    border-bottom: 1px solid var(--p-line);
   }
   .cm-hairline-t {
-    border-top: 1px solid var(--color-line);
+    border-top: 1px solid var(--p-line);
   }
 
   .cm-mono {
@@ -188,7 +304,7 @@
     min-height: 44px;
     font-size: 13px;
     line-height: 1.6;
-    color: var(--color-primary);
+    color: var(--p-text-primary);
   }
   .cm-prose .ProseMirror > * + * {
     margin-top: 0.4rem;
@@ -199,23 +315,23 @@
   .cm-prose .ProseMirror code {
     font-family: var(--font-mono);
     font-size: 11.5px;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid var(--color-line-soft);
+    background: var(--p-active);
+    border: 1px solid var(--p-line-soft);
     border-radius: 4px;
     padding: 0 3px;
-    color: var(--color-accent-hi);
+    color: var(--p-syn-keyword);
   }
   .cm-prose .ProseMirror pre {
     font-family: var(--font-mono);
     font-size: 11.5px;
-    background: var(--color-inset);
-    border: 1px solid var(--color-line);
+    background: var(--p-inset);
+    border: 1px solid var(--p-line);
     border-radius: 6px;
     padding: 8px 10px;
   }
   .cm-prose .ProseMirror p.is-editor-empty:first-child::before {
     content: attr(data-placeholder);
-    color: var(--color-faint);
+    color: var(--p-text-faint);
     float: left;
     height: 0;
     pointer-events: none;
@@ -241,7 +357,7 @@
 
 @keyframes cm-ring {
   0% {
-    box-shadow: 0 0 0 0 var(--color-accent-line);
+    box-shadow: 0 0 0 0 var(--p-accent-line);
   }
   70% {
     box-shadow: 0 0 0 5px transparent;
@@ -312,7 +428,7 @@
   background: linear-gradient(
     90deg,
     transparent,
-    var(--color-accent-ghost),
+    var(--p-accent-ghost),
     transparent
   );
   background-size: 200% 100%;
@@ -325,10 +441,10 @@
  * here as literal rules. Accent wash on the line(s) + a crisp accent gutter bar.
  */
 .cm-ptr-line {
-  background: rgba(124, 138, 255, 0.13);
+  background: var(--p-accent-ghost);
 }
 .cm-ptr-gutter {
-  background: var(--color-accent);
+  background: var(--p-accent);
   width: 2px !important;
   margin-left: 3px;
 }
