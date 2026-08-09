@@ -553,6 +553,27 @@ describe("manager-mcp — watch_pr", () => {
     expect(resultText(await p)).not.toContain("review-stalled");
   });
 
+  // A binding with no `prReviewState` at all (an older/narrower GitHub surface)
+  // must watch normally and never mention a stall. Most tests in this file run
+  // on such a binding; this one states the contract by name.
+  it("watches normally when the binding has no prReviewState at all", async () => {
+    const gh: ManagerMcpGitHub = {
+      prMergeState: async () => OPEN,
+      prChecks: async () => [PASS_BUILD],
+      reviewThreads: async () => [THREAD_A],
+      // no prReviewState — `gh.prReviewState?.(…)` short-circuits the whole chain
+      // (including the `.catch`), so this is a quiet no-op, not a crash.
+    };
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const res = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain('"threadId":"T_A"');
+    expect(resultText(res)).toContain('"reviewStalled":false');
+    expect(resultText(res)).not.toContain("review-stalled");
+  });
+
   // The grace window is a claim about CONTINUOUS observation. If the queue is
   // seen empty, then goes unreadable for a while, then reads empty again, firing
   // off the ORIGINAL timestamp asserts a minute of emptiness we never watched —
