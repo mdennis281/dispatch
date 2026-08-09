@@ -391,20 +391,9 @@ export async function hydrateFromServer(): Promise<boolean> {
   const activeChat = useChats.getState().activeChatId;
   if (activeChat) void ensureChatMessages(activeChat);
 
-  // Re-materialize open permission/question cards. They're synthesized from the
-  // transient `permission-request` event and only persisted on resolution, so
-  // the transcript wipe above drops them; without this a reconnect mid-tool
-  // leaves an attention badge whose inline card is gone and the tool blocked.
-  // `upsertPermissionRequest` is idempotent and `setForChat` carries these
-  // (absent-from-snapshot) rows, so it's safe regardless of load ordering.
-  void api.attention
-    .pendingPermissions()
-    .then((reqs) => {
-      for (const r of reqs) useMessages.getState().upsertPermissionRequest(r.chatId, r);
-    })
-    .catch(() => {
-      /* best-effort — a failed snapshot just means no re-materialized cards */
-    });
+  // Re-materialize open permission/question cards dropped by the transcript wipe
+  // above (see {@link restorePendingPermissions}).
+  void restorePendingPermissions();
 
   return true;
 }
@@ -436,6 +425,33 @@ function touchChat(chatId: string): void {
 }
 
 /**
+ * Re-materialize the inline cards for permission/question requests that are
+ * still open on the server, optionally narrowed to one chat.
+ *
+ * These cards are synthesized client-side from the transient `permission-request`
+ * event and are only PERSISTED once resolved, so anything that (re)builds a
+ * transcript from the REST snapshot drops them — a reconnect, and equally an
+ * ordinary chat re-open after LRU eviction. Left un-restored, the chat sits at
+ * "Awaiting input" with its tool card spinning and no card to answer, and the
+ * blocked tool can never be released.
+ *
+ * `upsertPermissionRequest` is idempotent and `setForChat` carries these
+ * (absent-from-snapshot) rows, so it's safe regardless of load ordering.
+ * Best-effort: a failed snapshot just means no re-materialized cards.
+ */
+export async function restorePendingPermissions(chatId?: string): Promise<void> {
+  try {
+    const reqs = await api.attention.pendingPermissions();
+    for (const r of reqs) {
+      if (chatId && r.chatId !== chatId) continue;
+      useMessages.getState().upsertPermissionRequest(r.chatId, r);
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
  * Lazily fetch the NEWEST page of a chat's transcript + its rollback anchors
  * (once per session, until evicted). Older rows load on demand via
  * {@link loadOlderMessages}.
@@ -451,6 +467,9 @@ export async function ensureChatMessages(chatId: string): Promise<void> {
     useMessages
       .getState()
       .setForChat(chatId, messages, { hasMore: messages.length >= TRANSCRIPT_PAGE_SIZE });
+    // The snapshot never contains a still-open permission card, so re-open of a
+    // chat blocked on one has to put it back explicitly.
+    void restorePendingPermissions(chatId);
     const checkpoints = await api.chats.checkpoints(chatId).catch(() => []);
     useCheckpoints.getState().hydrate(chatId, checkpoints.map((c) => c.messageId));
   } catch {
