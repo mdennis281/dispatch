@@ -40,7 +40,7 @@ function AttentionRow({ item, onGo }: { item: AttentionItem; onGo: () => void })
   return (
     <button
       onClick={onGo}
-      className="group flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-white/[0.05]"
+      className="group flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-active"
     >
       <span
         className={cn(

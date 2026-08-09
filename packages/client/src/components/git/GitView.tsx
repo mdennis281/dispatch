@@ -99,7 +99,7 @@ function StashButton({ disabled }: { disabled: boolean }) {
               type="checkbox"
               checked={includeUntracked}
               onChange={(e) => setIncludeUntracked(e.target.checked)}
-              className="size-3 accent-[var(--accent)]"
+              className="size-3 accent-[var(--p-accent)]"
             />
             Include untracked files
           </label>

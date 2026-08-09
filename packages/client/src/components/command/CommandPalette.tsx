@@ -376,7 +376,7 @@ export function CommandPalette({
       style={{ zIndex: LAYER.palette }}
       className="fixed inset-0 flex items-start justify-center p-6 sm:pt-[12vh]"
     >
-      <div className="fixed inset-0 bg-black/55 backdrop-blur-[2px]" onClick={close} aria-hidden />
+      <div className="fixed inset-0 bg-scrim backdrop-blur-[2px]" onClick={close} aria-hidden />
       <div
         role="dialog"
         aria-modal="true"
@@ -418,7 +418,7 @@ export function CommandPalette({
                 onMouseMove={() => setActive(idx)}
                 className={cn(
                   "flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors",
-                  idx === active ? "bg-white/[0.07]" : "hover:bg-white/[0.04]",
+                  idx === active ? "bg-selected" : "hover:bg-hover",
                 )}
               >
                 <span

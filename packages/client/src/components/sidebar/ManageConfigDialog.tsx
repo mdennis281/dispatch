@@ -256,7 +256,7 @@ export function ManageConfigDialog({ open, onClose }: { open: boolean; onClose: 
                   }}
                   className={cn(
                     "mb-0.5 flex w-full flex-col gap-1 rounded-md px-2 py-1.5 text-left transition-colors",
-                    form?.id === r.id ? "bg-accent-ghost/70" : "hover:bg-white/[0.04]",
+                    form?.id === r.id ? "bg-accent-ghost/70" : "hover:bg-hover",
                   )}
                 >
                   <span className="flex items-center gap-1.5">

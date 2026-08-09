@@ -58,7 +58,7 @@ export function TodosStrip({ messages }: { messages: ChatMessage[] }) {
       <button
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 px-4 py-1.5 text-left transition-colors hover:bg-white/[0.02]"
+        className="flex w-full items-center gap-2 px-4 py-1.5 text-left transition-colors hover:bg-hover"
       >
         <ListChecks
           className={cn("size-3.5 shrink-0", allDone ? "text-success" : "text-accent-hi")}

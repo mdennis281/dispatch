@@ -10,7 +10,7 @@ export type Tone =
   | "muted";
 
 const tones: Record<Tone, string> = {
-  neutral: "bg-white/[0.04] text-secondary border-line",
+  neutral: "bg-hover text-secondary border-line",
   accent: "bg-accent-ghost text-accent-hi border-accent-line",
   success: "bg-success-ghost text-success border-transparent",
   warn: "bg-warn-ghost text-warn border-transparent",
@@ -45,12 +45,17 @@ export function Chip({ tone = "neutral", icon, mono, className, children, ...res
 /** A small numeric badge (attention count etc). */
 export function Badge({ count, tone = "accent" }: { count: number; tone?: Tone }) {
   if (count <= 0) return null;
+  // One foreground for all three fills. `-fg` tokens are the ink for a
+  // SATURATED fill, and every saturated colour in a given theme shares the same
+  // polarity (light fills on dark, dark fills on light) — so the accent's ink
+  // is correct on the semantic fills too, and stays correct across a switch.
+  // The old `text-white` / `text-black` pair was right in exactly one theme.
   const toneCls =
     tone === "danger"
-      ? "bg-danger text-white"
+      ? "bg-danger text-accent-fg"
       : tone === "warn"
-        ? "bg-warn text-black"
-        : "bg-accent text-white";
+        ? "bg-warn text-accent-fg"
+        : "bg-accent text-accent-fg";
   return (
     <span
       className={cn(

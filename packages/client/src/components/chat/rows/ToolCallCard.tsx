@@ -128,7 +128,7 @@ export const ToolCallCard = memo(function ToolCallCard({
         <div className="flex items-center">
           <button
             onClick={toggle}
-            className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-white/[0.02]"
+            className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-hover"
           >
             <ChevronRight
               className={cn("size-3 shrink-0 text-faint transition-transform", open && "rotate-90")}
@@ -155,7 +155,7 @@ export const ToolCallCard = memo(function ToolCallCard({
             <button
               onClick={() => openCodeViewer(fileTarget)}
               title={fileTarget.mode === "diff" ? "Open diff vs main" : "Open file"}
-              className="mr-1.5 inline-flex shrink-0 items-center gap-1 rounded-[5px] border border-transparent px-1.5 py-1 text-[11px] text-muted transition-colors hover:bg-white/[0.06] hover:text-primary [&_svg]:size-3.5"
+              className="mr-1.5 inline-flex shrink-0 items-center gap-1 rounded-[5px] border border-transparent px-1.5 py-1 text-[11px] text-muted transition-colors hover:bg-active hover:text-primary [&_svg]:size-3.5"
             >
               {fileTarget.mode === "diff" ? <FileDiff /> : <FileCode2 />}
               Open

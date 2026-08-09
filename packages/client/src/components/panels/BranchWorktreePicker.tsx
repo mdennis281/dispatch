@@ -128,8 +128,8 @@ function PickerList({
                 onClick={() => onPick(t.branch)}
                 title={KIND_TIP[t.kind]}
                 className={cn(
-                  "flex w-full items-center gap-1.5 rounded-sm px-1.5 py-1 text-left transition-colors hover:bg-white/[0.05]",
-                  selected && "bg-white/[0.04]",
+                  "flex w-full items-center gap-1.5 rounded-sm px-1.5 py-1 text-left transition-colors hover:bg-active",
+                  selected && "bg-hover",
                 )}
               >
                 <Icon

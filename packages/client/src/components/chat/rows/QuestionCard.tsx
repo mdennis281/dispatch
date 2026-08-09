@@ -386,7 +386,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
                               "mt-px flex size-4 shrink-0 items-center justify-center border [&_svg]:size-3",
                               q.multiSelect ? "rounded-[4px]" : "rounded-full",
                               isSel
-                                ? "border-accent-line bg-accent-dim text-white"
+                                ? "border-accent-line bg-accent text-accent-fg"
                                 : "border-line-strong text-transparent",
                             )}
                           >

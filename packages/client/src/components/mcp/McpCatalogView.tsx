@@ -195,7 +195,7 @@ function ServerButton({
         "flex w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left transition-colors",
         active
           ? "border-accent-line bg-accent-ghost"
-          : "border-transparent hover:bg-white/[0.04]",
+          : "border-transparent hover:bg-hover",
       )}
     >
       <StatusDot tone={meta.tone} size={7} />

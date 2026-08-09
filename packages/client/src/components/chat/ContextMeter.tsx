@@ -75,8 +75,8 @@ export function ContextMeter({ chatId, model, iconOnly = false }: ContextMeterPr
             aria-label="Context window"
             className={cn(
               "inline-flex select-none items-center gap-1.5 rounded-md px-1 py-0.5 " +
-                "transition-colors hover:bg-white/[0.06]",
-              open && "bg-white/[0.06]",
+                "transition-colors hover:bg-active",
+              open && "bg-active",
             )}
           >
             <span className="relative h-1 w-7 overflow-hidden rounded-full bg-line">
@@ -211,7 +211,7 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
               <div key={c.name} className="flex items-center gap-2 text-[11px]">
                 <span
                   className="size-2 shrink-0 rounded-[2px]"
-                  style={{ background: c.color || "var(--accent)" }}
+                  style={{ background: c.color || "var(--p-text-faint)" }}
                 />
                 <span className="flex-1 truncate text-secondary">{c.name}</span>
                 <span className="cm-mono shrink-0 tabular-nums text-muted">
@@ -232,7 +232,7 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
         <button
           type="button"
           onClick={doCompact}
-          className="flex items-start gap-2 rounded-sm px-2 py-1.5 text-left transition-colors hover:bg-white/[0.06]"
+          className="flex items-start gap-2 rounded-sm px-2 py-1.5 text-left transition-colors hover:bg-active"
         >
           <Layers className="mt-0.5 size-3.5 shrink-0 text-accent" />
           <span className="leading-tight">
@@ -266,7 +266,7 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
           <button
             type="button"
             onClick={() => setConfirmClear(true)}
-            className="flex items-start gap-2 rounded-sm px-2 py-1.5 text-left transition-colors hover:bg-white/[0.06]"
+            className="flex items-start gap-2 rounded-sm px-2 py-1.5 text-left transition-colors hover:bg-active"
           >
             <Eraser className="mt-0.5 size-3.5 shrink-0 text-muted" />
             <span className="leading-tight">

@@ -344,7 +344,7 @@ function RunRow({ run }: { run: WorkflowRun }) {
     </div>
   );
   return run.url && run.url !== "#" ? (
-    <a href={run.url} target="_blank" rel="noopener noreferrer" className="block hover:bg-white/[0.02]">
+    <a href={run.url} target="_blank" rel="noopener noreferrer" className="block hover:bg-hover">
       {inner}
     </a>
   ) : (

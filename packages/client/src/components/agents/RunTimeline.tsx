@@ -58,7 +58,7 @@ function StepRow({
       onClick={onClick}
       className={cn(
         "group/step relative flex w-full items-start gap-2.5 rounded-[5px] py-1 pl-1 pr-2 text-left transition-colors",
-        active ? "bg-accent-ghost/60" : "hover:bg-white/[0.04]",
+        active ? "bg-accent-ghost/60" : "hover:bg-hover",
       )}
     >
       {/* connector + node */}

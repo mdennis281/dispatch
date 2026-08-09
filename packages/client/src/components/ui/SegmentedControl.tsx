@@ -48,7 +48,7 @@ export function SegmentedControl<T extends string>({
               compact ? "justify-center px-1.5" : "px-2",
               h,
               active
-                ? "bg-panel-2 text-primary shadow-[inset_0_1px_0_0_rgba(255,255,255,0.05)] border border-line"
+                ? "bg-panel-2 text-primary shadow-[inset_0_1px_0_0_var(--p-sheen-soft)] border border-line"
                 : "border border-transparent text-muted hover:text-secondary",
             )}
           >

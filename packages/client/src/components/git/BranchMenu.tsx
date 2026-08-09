@@ -52,7 +52,7 @@ function BranchRow({
       }
       className={cn(
         "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
-        disabled ? "opacity-60" : "hover:bg-white/[0.05]",
+        disabled ? "opacity-60" : "hover:bg-active",
         current && "bg-accent-ghost",
       )}
     >

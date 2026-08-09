@@ -118,7 +118,7 @@ export function FilePathPicker({
   return createPortal(
     <div
       style={{ zIndex: LAYER.palette }}
-      className="fixed inset-0 flex items-start justify-center bg-black/40 pt-[12vh] backdrop-blur-[2px]"
+      className="fixed inset-0 flex items-start justify-center bg-scrim pt-[12vh] backdrop-blur-[2px]"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -166,7 +166,7 @@ export function FilePathPicker({
                 title={f.abs}
                 className={cn(
                   "flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors",
-                  i === active ? "bg-white/[0.07]" : "hover:bg-white/[0.04]",
+                  i === active ? "bg-selected" : "hover:bg-hover",
                 )}
               >
                 <span className="shrink-0 text-faint [&_svg]:size-3.5">

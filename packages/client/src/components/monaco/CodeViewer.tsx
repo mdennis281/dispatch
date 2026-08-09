@@ -187,7 +187,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
       <button
         aria-label="Close preview"
         onClick={close}
-        className="absolute inset-0 cursor-default bg-black/55 backdrop-blur-[2px] cm-anim-rise"
+        className="absolute inset-0 cursor-default bg-scrim backdrop-blur-[2px] cm-anim-rise"
       />
 
       <div className="relative flex h-[86vh] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-lg border border-line-strong bg-panel shadow-[var(--shadow-pop)] cm-anim-rise">
@@ -367,8 +367,11 @@ function ImagePreview({ file, relPath }: { file: WorktreeFileContent; relPath: s
     <div
       className="flex h-full items-center justify-center overflow-auto p-6"
       style={{
+        // Transparency checkerboard. Token-driven so the squares stay one rung
+        // off the surface behind them; a fixed dark hex would turn into a black
+        // grid on a light theme and read as image content, not as "no pixels".
         backgroundImage:
-          "linear-gradient(45deg,#14181d 25%,transparent 25%),linear-gradient(-45deg,#14181d 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#14181d 75%),linear-gradient(-45deg,transparent 75%,#14181d 75%)",
+          "linear-gradient(45deg,var(--p-panel-2) 25%,transparent 25%),linear-gradient(-45deg,var(--p-panel-2) 25%,transparent 25%),linear-gradient(45deg,transparent 75%,var(--p-panel-2) 75%),linear-gradient(-45deg,transparent 75%,var(--p-panel-2) 75%)",
         backgroundSize: "18px 18px",
         backgroundPosition: "0 0,0 9px,9px -9px,-9px 0",
       }}

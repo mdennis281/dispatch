@@ -120,7 +120,7 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
       {runner.url && (
         <button
           onClick={open}
-          className="flex w-full items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-left text-[11px] text-accent-hi transition-colors hover:bg-white/[0.02] [&_svg]:size-3"
+          className="flex w-full items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-left text-[11px] text-accent-hi transition-colors hover:bg-hover [&_svg]:size-3"
         >
           <ExternalLink />
           <span className="cm-mono !text-[10.5px] truncate">{runner.url}</span>

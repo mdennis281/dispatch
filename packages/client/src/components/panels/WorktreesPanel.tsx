@@ -125,7 +125,7 @@ function WorktreePrRow({ pr }: { pr: PRInfo }) {
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="flex items-center gap-2 border-t border-line-soft px-3 py-2 transition-colors hover:bg-white/[0.03]"
+      className="flex items-center gap-2 border-t border-line-soft px-3 py-2 transition-colors hover:bg-hover"
     >
       <Icon className={cn("size-3.5 shrink-0", pr.state === "merged" ? "text-accent-hi" : "text-success")} />
       <span className="min-w-0 flex-1 truncate text-[11px] text-secondary">{pr.title}</span>
@@ -199,7 +199,7 @@ function WorktreeCard({
         disabled={fileCount === 0}
         className={cn(
           "flex w-full items-center justify-between border-t border-line-soft px-3 py-2 text-[11px] text-left",
-          fileCount > 0 && "transition-colors hover:bg-white/[0.03]",
+          fileCount > 0 && "transition-colors hover:bg-hover",
         )}
       >
         <span className="flex items-center gap-1.5 text-faint">
@@ -225,7 +225,7 @@ function WorktreeCard({
               key={f.path}
               onClick={() => requestOpenFile({ worktreePath: wt.path, relPath: f.path, base })}
               title={`Open ${f.path} in Monaco`}
-              className="flex w-full items-center gap-2 rounded-sm px-1.5 py-1 text-left text-[11px] transition-colors hover:bg-white/[0.05]"
+              className="flex w-full items-center gap-2 rounded-sm px-1.5 py-1 text-left text-[11px] transition-colors hover:bg-active"
             >
               <FileDiff className="size-3 shrink-0 text-muted" />
               <span className="min-w-0 flex-1 truncate cm-mono !text-[10.5px] text-secondary">

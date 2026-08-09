@@ -66,7 +66,7 @@ export const AssistantRow = memo(function AssistantRow({
         <div className="mb-2">
           <button
             onClick={() => setShowThinking((v) => !v)}
-            className="inline-flex items-center gap-1.5 rounded-[5px] px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-white/[0.05] hover:text-secondary [&_svg]:size-3"
+            className="inline-flex items-center gap-1.5 rounded-[5px] px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-active hover:text-secondary [&_svg]:size-3"
           >
             <Brain />
             <span>Thought for a moment</span>

@@ -193,7 +193,7 @@ function SubAppRow({
   };
 
   return (
-    <div className="group flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-white/[0.035]">
+    <div className="group flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-hover">
       <Icon className={cn("size-3.5 shrink-0", running ? "text-accent-hi" : "text-muted")} />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[12px] text-secondary group-hover:text-primary">
@@ -280,7 +280,7 @@ function ChatRow({
         onClick={onClick}
         className={cn(
           "relative flex w-full items-center gap-2.5 rounded-md py-1.5 pl-2.5 pr-8 text-left transition-colors",
-          active ? "bg-accent-ghost/70" : "hover:bg-white/[0.04]",
+          active ? "bg-accent-ghost/70" : "hover:bg-hover",
         )}
       >
         {active && <span className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-accent" />}

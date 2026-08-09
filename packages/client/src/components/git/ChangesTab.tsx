@@ -52,7 +52,7 @@ function FileRow({
         title={file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
         className={cn(
           "flex w-full items-center gap-2 rounded-md py-1 pl-2 pr-16 text-left transition-colors",
-          active ? "bg-accent-ghost" : "hover:bg-white/[0.04]",
+          active ? "bg-accent-ghost" : "hover:bg-hover",
         )}
       >
         <span
@@ -256,7 +256,7 @@ function CommitBox({
             type="checkbox"
             checked={amend}
             onChange={(e) => onAmend(e.target.checked)}
-            className="size-3 accent-[var(--accent)]"
+            className="size-3 accent-[var(--p-accent)]"
           />
           Amend
         </label>

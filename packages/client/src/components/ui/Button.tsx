@@ -26,13 +26,17 @@ const sizes: Record<Size, string> = {
 const variants: Record<Variant, string> = {
   default:
     "bg-panel-2 text-primary border border-line hover:bg-elevated hover:border-line-strong",
+  // `text-accent-fg`, never `text-white`: the accent is amber, and amber is a
+  // light colour at every brightness that still reads as amber — white on it
+  // never clears 4.5:1. The token is dark on the dark theme and light on the
+  // light one, which a literal colour here could not be.
   primary:
-    "bg-accent-dim/90 text-white border border-accent-line hover:bg-accent-dim " +
-    "shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]",
+    "bg-accent text-accent-fg border border-accent-line hover:bg-accent-hi " +
+    "shadow-[inset_0_1px_0_0_var(--p-sheen)]",
   subtle:
-    "bg-white/[0.03] text-secondary border border-transparent hover:bg-white/[0.06] hover:text-primary",
+    "bg-hover text-secondary border border-transparent hover:bg-active hover:text-primary",
   ghost:
-    "bg-transparent text-secondary border border-transparent hover:bg-white/[0.05] hover:text-primary",
+    "bg-transparent text-secondary border border-transparent hover:bg-active hover:text-primary",
   danger:
     "bg-danger-ghost text-danger border border-transparent hover:bg-danger/20",
 };

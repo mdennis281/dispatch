@@ -31,7 +31,7 @@ function CommitFileRow({
       title={file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
       className={cn(
         "flex w-full items-center gap-2 rounded-md py-1 pl-5 pr-2 text-left transition-colors",
-        active ? "bg-accent-ghost" : "hover:bg-white/[0.04]",
+        active ? "bg-accent-ghost" : "hover:bg-hover",
       )}
     >
       <span
@@ -106,7 +106,7 @@ export function HistoryTab({
               onClick={() => onToggle(c.hash)}
               className={cn(
                 "flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
-                open ? "bg-white/[0.045]" : "hover:bg-white/[0.03]",
+                open ? "bg-hover" : "hover:bg-hover",
               )}
             >
               <span className="mt-[3px] shrink-0">

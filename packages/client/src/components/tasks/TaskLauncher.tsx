@@ -209,7 +209,7 @@ export function TaskLauncher({
                   checked={toggles[t.id] ?? t.default}
                   disabled={sending || !ready}
                   onChange={(e) => setToggles((prev) => ({ ...prev, [t.id]: e.target.checked }))}
-                  className="size-3 accent-[var(--accent)]"
+                  className="size-3 accent-[var(--p-accent)]"
                 />
                 {t.label}
               </label>

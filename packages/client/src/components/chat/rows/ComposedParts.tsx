@@ -63,7 +63,7 @@ function CopyButton({ text }: { text: string }) {
           setTimeout(() => setDone(false), 2_000);
         });
       }}
-      className="rounded-[4px] p-1 text-faint transition-colors hover:bg-white/[0.06] hover:text-secondary [&_svg]:size-3"
+      className="rounded-[4px] p-1 text-faint transition-colors hover:bg-active hover:text-secondary [&_svg]:size-3"
     >
       {done ? <Check className="text-accent" /> : <Copy />}
     </button>
@@ -89,7 +89,7 @@ function BriefCard({ part }: { part: MessagePart }) {
           "overflow-hidden rounded-lg border border-accent-line/60 bg-accent-ghost/40",
           // A hairline of accent along the top edge, so the card reads as
           // "system" at a glance from across the transcript.
-          "shadow-[inset_0_1px_0_0_var(--color-accent-line)]",
+          "shadow-[inset_0_1px_0_0_var(--p-accent-line)]",
         )}
       >
         {/* The toggle and the copy button are siblings, not nested: a button
@@ -99,7 +99,7 @@ function BriefCard({ part }: { part: MessagePart }) {
             type="button"
             onClick={() => setOpen((o) => !o)}
             aria-expanded={open}
-            className="flex min-w-0 flex-1 items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors hover:bg-white/[0.03] [&_svg]:size-3"
+            className="flex min-w-0 flex-1 items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors hover:bg-hover [&_svg]:size-3"
           >
             <span className="text-faint">{open ? <ChevronDown /> : <ChevronRight />}</span>
             <Send className="shrink-0 text-accent" />
@@ -149,7 +149,7 @@ function InjectedRow({ part }: { part: MessagePart }) {
         className={cn(
           "flex w-full items-center gap-1.5 rounded-[5px] border border-dashed border-line-soft",
           "px-2 py-1 text-left text-[10px] text-faint transition-colors",
-          "hover:border-line hover:bg-white/[0.03] hover:text-muted [&_svg]:size-3",
+          "hover:border-line hover:bg-hover hover:text-muted [&_svg]:size-3",
         )}
       >
         {open ? <ChevronDown /> : <ChevronRight />}
@@ -181,7 +181,7 @@ function SpokenPart({ part }: { part: MessagePart }) {
           {part.label}
         </div>
       )}
-      <div className="inline-block max-w-full rounded-2xl rounded-tr-sm border border-white/10 bg-white/[0.09] px-3 py-1.5 text-left align-top text-[13px] leading-[1.6] text-white whitespace-pre-wrap">
+      <div className="inline-block max-w-full rounded-2xl rounded-tr-sm border border-bubble-line bg-bubble px-3 py-1.5 text-left align-top text-[13px] leading-[1.6] text-primary whitespace-pre-wrap">
         {part.text}
       </div>
     </div>

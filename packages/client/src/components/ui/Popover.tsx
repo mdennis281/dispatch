@@ -230,7 +230,7 @@ export function MenuItem({
       title={title}
       className={cn(
         "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[12px] text-secondary " +
-          "transition-colors hover:bg-white/[0.06] hover:text-primary",
+          "transition-colors hover:bg-active hover:text-primary",
         active && "text-primary",
         className,
       )}

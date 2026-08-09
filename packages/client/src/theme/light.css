@@ -147,6 +147,17 @@
   --p-cat-7: #b75415; /* orange */
   --p-cat-8: #12707e; /* teal */
 
+  /* ── ordinal ramp (gauge / heat / severity) ─────────────────────────────
+   * Same five ordered steps as dark, deepened for white. The yellow middle is
+   * the one that must not be taken by formula — a light yellow is invisible on
+   * a white ground, so it becomes an olive/ochre that still reads as "middle".
+   */
+  --p-gauge-1: #197f3d;
+  --p-gauge-2: #5b8a12;
+  --p-gauge-3: #a07b06;
+  --p-gauge-4: #b7500f;
+  --p-gauge-5: #c02b34;
+
   /* ── diff ────────────────────────────────────────────────────────────────
    * Foregrounds match the semantics; the washes stay very weak because they sit
    * behind code, where a heavy tint destroys syntax-color legibility — the

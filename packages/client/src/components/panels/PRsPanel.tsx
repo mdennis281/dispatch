@@ -198,7 +198,7 @@ function CheckLine({ check }: { check: CheckRun }) {
     </div>
   );
   return check.url ? (
-    <a href={check.url} target="_blank" rel="noopener noreferrer" className="block hover:bg-white/[0.02]">
+    <a href={check.url} target="_blank" rel="noopener noreferrer" className="block hover:bg-hover">
       {inner}
     </a>
   ) : (
@@ -247,7 +247,7 @@ function ChecksSection({ checks }: { checks: CheckRun[] }) {
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-white/[0.02]"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-hover"
       >
         <ChevronRight
           className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")}

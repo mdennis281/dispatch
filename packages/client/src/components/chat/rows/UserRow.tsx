@@ -41,7 +41,7 @@ export const UserRow = memo(function UserRow({
         </>
       }
       gutter={
-        <span className="flex size-6 items-center justify-center rounded-md bg-white/[0.14] text-[10px] font-semibold text-white ring-1 ring-white/20">
+        <span className="flex size-6 items-center justify-center rounded-md bg-bubble text-[10px] font-semibold text-primary ring-1 ring-bubble-line">
           M
         </span>
       }
@@ -50,7 +50,7 @@ export const UserRow = memo(function UserRow({
         <ComposedParts chatId={chatId} parts={composed} />
       ) : (
         row.text && (
-          <div className="inline-block max-w-full rounded-2xl rounded-tr-sm border border-white/10 bg-white/[0.09] px-3 py-1.5 text-left align-top text-[13px] leading-[1.6] text-white whitespace-pre-wrap">
+          <div className="inline-block max-w-full rounded-2xl rounded-tr-sm border border-bubble-line bg-bubble px-3 py-1.5 text-left align-top text-[13px] leading-[1.6] text-primary whitespace-pre-wrap">
             {row.text}
           </div>
         )

@@ -72,7 +72,7 @@ export function RowShell({
                 <Tooltip label="Roll back here — restores code + thread">
                   <button
                     onClick={onRollback}
-                    className="inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-faint hover:bg-white/[0.06] hover:text-secondary [&_svg]:size-3"
+                    className="inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-faint hover:bg-active hover:text-secondary [&_svg]:size-3"
                   >
                     <RotateCcw />
                     Roll back

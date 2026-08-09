@@ -33,7 +33,7 @@ export function ImageLightbox({
   return createPortal(
     <div
       style={{ zIndex: z }}
-      className="fixed inset-0 flex flex-col bg-black/80 backdrop-blur-[2px]"
+      className="fixed inset-0 flex flex-col bg-scrim-strong backdrop-blur-[2px]"
       onClick={onClose}
     >
       <header
@@ -45,7 +45,7 @@ export function ImageLightbox({
         <a
           href={src}
           download={name}
-          className="flex size-7 items-center justify-center rounded-md text-muted transition-colors hover:bg-white/[0.06] hover:text-primary [&_svg]:size-4"
+          className="flex size-7 items-center justify-center rounded-md text-muted transition-colors hover:bg-active hover:text-primary [&_svg]:size-4"
           title="Download"
           aria-label="Download image"
         >

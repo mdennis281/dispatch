@@ -46,7 +46,7 @@ const ToolBlock = memo(function ToolBlock({
     >
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full min-w-0 items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-white/[0.03]"
+        className="flex w-full min-w-0 items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-hover"
       >
         <ChevronRight
           className={cn("size-3 shrink-0 text-faint transition-transform", open && "rotate-90")}

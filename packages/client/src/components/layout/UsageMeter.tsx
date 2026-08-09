@@ -166,7 +166,7 @@ export function UsageMeter() {
               <button
                 onClick={() => void refresh()}
                 disabled={refreshing}
-                className="inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-secondary transition-colors hover:bg-white/[0.06] hover:text-primary disabled:opacity-50 [&_svg]:size-3"
+                className="inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-secondary transition-colors hover:bg-active hover:text-primary disabled:opacity-50 [&_svg]:size-3"
               >
                 <RotateCw className={cn(refreshing && "cm-anim-spin")} />
                 Refresh

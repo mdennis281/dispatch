@@ -69,7 +69,7 @@ export function ManifestPreview({
         </span>
         <button
           onClick={copy}
-          className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-faint transition-colors hover:bg-white/[0.06] hover:text-secondary [&_svg]:size-3"
+          className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-faint transition-colors hover:bg-active hover:text-secondary [&_svg]:size-3"
         >
           {copied ? <Check className="text-success" /> : <Copy />}
           {copied ? "Copied" : "Copy"}

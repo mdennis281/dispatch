@@ -88,7 +88,7 @@ const components: Components = {
       const request = resolve ? resolveWholeRef(raw, resolve) : null;
       if (request) return <CodeRefChip label={raw.trim()} request={request} />;
       return (
-        <code className="rounded-[4px] border border-line-soft bg-white/[0.05] px-1 py-px cm-mono !text-[11.5px] text-accent-hi">
+        <code className="rounded-[4px] border border-line-soft bg-active px-1 py-px cm-mono !text-[11.5px] text-accent-hi">
           {children}
         </code>
       );

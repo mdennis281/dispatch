@@ -18,6 +18,14 @@
  *     inside a tinted chip and want the surrounding text colour instead.
  */
 
+/*
+ * Hardcoded on purpose, and exempt from the theme sweep: the mark is the BRAND,
+ * so it must be identical in the tab icon, the installed app icon and the top
+ * bar — including on a light theme, where a token-driven amber would darken and
+ * the top bar would stop matching the taskbar. `theme/dark.css` carries the same
+ * two values as `--p-brand` / `--p-brand-plate` so UI chrome can match the mark;
+ * that token reads FROM here, never the other way round.
+ */
 const BG = "#14171B";
 const FG = "#E5A33C";
 

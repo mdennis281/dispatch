@@ -169,6 +169,17 @@
   --p-cat-7: #ff9e64; /* orange */
   --p-cat-8: #41a6b5; /* teal */
 
+  /* ── ordinal ramp (gauge / heat / severity) ─────────────────────────────
+   * Five steps of "how much", green→red. Distinct from the categorical set
+   * above because the ORDER carries meaning here: swapping two of these is a
+   * lie, swapping two `cat-*` is a re-colour. Used by the effort gauge; the
+   * natural home for any future load/heat/pressure meter. */
+  --p-gauge-1: #22c55e;
+  --p-gauge-2: #a3e635;
+  --p-gauge-3: #eab308;
+  --p-gauge-4: #f97316;
+  --p-gauge-5: #ef4444;
+
   /* ── diff ────────────────────────────────────────────────────────────────
    * Green/red are near-universal for +/- and stay put; "change" is the info
    * blue so a modified-not-added line is a third signal rather than a blend.

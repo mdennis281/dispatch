@@ -773,7 +773,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                     alt={img.alt ?? "attachment"}
                     className="size-full object-cover"
                   />
-                  <span className="absolute inset-0 flex items-center justify-center bg-black/50 text-primary opacity-0 transition-opacity group-hover/thumb:opacity-100 [&_svg]:size-3.5">
+                  <span className="absolute inset-0 flex items-center justify-center bg-scrim text-primary opacity-0 transition-opacity group-hover/thumb:opacity-100 [&_svg]:size-3.5">
                     <Pencil />
                   </span>
                 </button>
@@ -844,7 +844,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             <div className="mt-1.5 flex items-center gap-2 text-[11.5px] text-muted">
               <span
                 aria-hidden
-                className="size-1.5 shrink-0 animate-pulse rounded-full bg-[var(--color-danger)]"
+                className="size-1.5 shrink-0 animate-pulse rounded-full bg-danger"
               />
               <span className="min-w-0 flex-1 truncate italic">
                 {dictation.interim || "Listening…"}

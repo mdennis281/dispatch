@@ -147,7 +147,7 @@ export function StashesTab({
                             "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
                             selection?.relPath === f.path && selection.rightRev === s.ref
                               ? "bg-accent-ghost"
-                              : "hover:bg-white/[0.04]",
+                              : "hover:bg-hover",
                           )}
                         >
                           <span

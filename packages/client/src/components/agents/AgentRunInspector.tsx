@@ -71,7 +71,7 @@ function RunReport({ run }: { run: SubagentRun }) {
     <div>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-4 py-2 text-left transition-colors hover:bg-white/[0.02]"
+        className="flex w-full items-center gap-2 px-4 py-2 text-left transition-colors hover:bg-hover"
       >
         <ChevronRight
           className={cn("size-3 shrink-0 text-faint transition-transform", open && "rotate-90")}
@@ -132,7 +132,7 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
       <button
         aria-label="Close run inspector"
         onClick={close}
-        className="absolute inset-0 cursor-default bg-black/55 backdrop-blur-[2px] cm-anim-rise"
+        className="absolute inset-0 cursor-default bg-scrim backdrop-blur-[2px] cm-anim-rise"
       />
 
       <div className="relative flex h-[86vh] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-lg border border-line-strong bg-panel shadow-[var(--shadow-pop)] cm-anim-rise">

@@ -59,7 +59,7 @@ export function Modal({
       className="fixed inset-0 flex items-start justify-center overflow-y-auto p-6 sm:pt-[9vh]"
     >
       <div
-        className="fixed inset-0 bg-black/55 backdrop-blur-[2px]"
+        className="fixed inset-0 bg-scrim backdrop-blur-[2px]"
         onClick={onClose}
         aria-hidden
       />

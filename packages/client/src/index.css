@@ -113,6 +113,13 @@
   --color-cat-7: var(--p-cat-7);
   --color-cat-8: var(--p-cat-8);
 
+  /* ordinal ramp — gauges, heat, severity */
+  --color-gauge-1: var(--p-gauge-1);
+  --color-gauge-2: var(--p-gauge-2);
+  --color-gauge-3: var(--p-gauge-3);
+  --color-gauge-4: var(--p-gauge-4);
+  --color-gauge-5: var(--p-gauge-5);
+
   /* diff */
   --color-diff-add: var(--p-diff-add);
   --color-diff-add-ghost: var(--p-diff-add-ghost);
