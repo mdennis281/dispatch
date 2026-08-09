@@ -1743,7 +1743,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "and watch_pr will report reviewStalled:true. Call this AFTER pushing your " +
       "fixes and resolving the threads you addressed, then go back to watch_pr. " +
       "Do not call it before your fixes are pushed: you'd be asking for a review of " +
-      "the code they already rejected.",
+      "the code they already rejected. It RE-READS the queue afterwards and tells " +
+      "you who is actually on the hook — GitHub can accept the request and queue " +
+      "nobody, and going back to watch_pr on that is a guaranteed dead wait.",
     {
       number: z.number().describe("The PR number."),
       reviewers: z
@@ -1800,24 +1802,48 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         );
       }
       const lines: string[] = [];
-      if (res.requested.length) {
-        lines.push(`  · review requested from ${res.requested.join(", ")}`);
-      }
       for (const f of res.failed) {
         lines.push(`  · ⚠ could not ask ${f.reviewer}: ${f.error}`);
       }
-      // GitHub answers 200 for "already requested" too, so a success here means
-      // "on the hook", not necessarily "newly queued" — don't oversell it.
-      const ok = res.requested.length > 0;
+
+      // VERIFY, don't trust the status code. GitHub answers 200 for this POST and
+      // can still queue nobody — observed asking Copilot for a re-review after it
+      // had already reported: exit 0, `requested_reviewers: []`. Reporting that as
+      // success is the worst possible outcome here, because it sends the agent
+      // back to watch_pr to wait on the empty queue this tool exists to refill.
+      const queue = await gh.prReviewState?.(number, repo).catch(() => null);
+      const onHook = queue?.requested ?? null;
+      if (onHook !== null) {
+        lines.push(
+          onHook.length
+            ? `  · now awaiting review from ${onHook.join(", ")}`
+            : "  · ⚠ the reviewer queue is STILL EMPTY — GitHub accepted the request but " +
+              "queued nobody",
+        );
+      } else if (res.requested.length) {
+        lines.push(`  · asked ${res.requested.join(", ")} (queue not re-read)`);
+      }
+
+      // Truth is what's on the hook now. Only fall back to "gh said ok" when the
+      // queue genuinely couldn't be re-read.
+      const ok = onHook !== null ? onHook.length > 0 : res.requested.length > 0;
+      const advice = ok
+        ? "Now call `mcp__manager__watch_pr` again to wait for their review."
+        : onHook !== null && !res.failed.length
+          ? "Do NOT go back to watch_pr — it would block on an empty queue. A bot reviewer " +
+            "often refuses a re-request on a head it has already reviewed; ask a human, or " +
+            "land the PR on the review you already have if there's nothing outstanding."
+          : "Fix the reviewer names or the project's `workflow.pr.reviewers`; retrying the " +
+            "same list will fail the same way.";
       return textResult(
-        `${ok ? `Requested review on PR #${number}.` : `Nobody could be asked on PR #${number}.`}\n` +
-          `${lines.join("\n")}\n\n` +
-          (ok
-            ? "Now call `mcp__manager__watch_pr` again to wait for their review."
-            : "Fix the reviewer names or the project's `workflow.pr.reviewers`; retrying " +
-              "the same list will fail the same way.") +
-          "\n" +
-          JSON.stringify({ number, requested: res.requested, failed: res.failed }),
+        `${ok ? `Review requested on PR #${number}.` : `Nobody is queued on PR #${number}.`}\n` +
+          `${lines.join("\n")}\n\n${advice}\n` +
+          JSON.stringify({
+            number,
+            requested: onHook ?? res.requested,
+            failed: res.failed,
+            verified: onHook !== null,
+          }),
         !ok,
       );
     },

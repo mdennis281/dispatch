@@ -972,14 +972,21 @@ describe("manager-mcp — request_review", () => {
   const ghWith = (
     result: { requested: string[]; failed: Array<{ reviewer: string; error: string }> },
     defaults: readonly string[] = ["copilot-pull-request-reviewer[bot]"],
+    /**
+     * What the queue reads back as afterwards. Defaults to "whatever gh claimed
+     * it requested"; `null` stands for a queue that couldn't be re-read.
+     */
+    verify?: string[] | null,
   ): ManagerMcpGitHub & { asked: Array<{ n: number; list: readonly string[] }> } => {
     const asked: Array<{ n: number; list: readonly string[] }> = [];
+    const queued = verify === undefined ? result.requested : verify;
     return {
       asked,
       prMergeState: async () => OPEN,
       prChecks: async () => [],
       reviewThreads: async () => [],
       defaultReviewers: defaults,
+      prReviewState: async () => (queued === null ? null : { requested: queued, reported: [] }),
       requestReviewers: async (n, list) => {
         asked.push({ n, list });
         return result;
@@ -1000,7 +1007,8 @@ describe("manager-mcp — request_review", () => {
 
     expect(gh.asked).toEqual([{ n: 83, list: ["copilot-pull-request-reviewer[bot]"] }]);
     expect(res.isError).toBeFalsy();
-    expect(resultText(res)).toContain("Requested review on PR #83");
+    expect(resultText(res)).toContain("Review requested on PR #83");
+    expect(resultText(res)).toContain("now awaiting review from copilot-pull-request-reviewer[bot]");
     expect(resultText(res)).toContain("watch_pr");
   });
 
@@ -1048,9 +1056,67 @@ describe("manager-mcp — request_review", () => {
     const res = await requestReview.handler({ number: 83, reviewers: ["ghost"], repo: undefined }, {});
 
     expect(res.isError).toBe(true);
-    expect(resultText(res)).toContain("Nobody could be asked");
+    expect(resultText(res)).toContain("Nobody is queued");
     expect(resultText(res)).toContain("Not Found");
     expect(resultText(res)).toContain("retrying the same list will fail the same way");
+  });
+
+  // Observed live on PR #22: asking Copilot for a re-review after it had already
+  // reported returned exit 0 and queued NOBODY. Calling that a success is the
+  // worst outcome available — it sends the agent back to watch_pr to wait on the
+  // very empty queue this tool exists to refill.
+  it("does not claim success when GitHub accepts the request but queues nobody", async () => {
+    const gh = ghWith({ requested: ["copilot-pull-request-reviewer[bot]"], failed: [] }, undefined, []);
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler({ number: 83, reviewers: undefined, repo: undefined }, {});
+
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("Nobody is queued");
+    expect(resultText(res)).toContain("STILL EMPTY");
+    expect(resultText(res)).toContain("Do NOT go back to watch_pr");
+    expect(resultText(res)).toContain('"verified":true');
+  });
+
+  it("reports who is actually on the hook, not merely who was asked", async () => {
+    // gh claims two; the queue only really holds one.
+    const gh = ghWith({ requested: ["alice", "bob"], failed: [] }, undefined, ["alice"]);
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, reviewers: ["alice", "bob"], repo: undefined },
+      {},
+    );
+
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("now awaiting review from alice");
+    expect(resultText(res)).toContain('"requested":["alice"]');
+  });
+
+  it("falls back to gh's own answer when the queue can't be re-read", async () => {
+    const gh = ghWith({ requested: ["alice"], failed: [] }, undefined, null);
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler({ number: 83, reviewers: ["alice"], repo: undefined }, {});
+
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("queue not re-read");
+    expect(resultText(res)).toContain('"verified":false');
   });
 
   it("validates the PR number and reports an unavailable binding", async () => {
