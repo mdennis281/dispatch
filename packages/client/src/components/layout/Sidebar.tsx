@@ -320,37 +320,42 @@ function ChatRow({
 
       {/* right rail (sibling of the row button — never a nested button): the
           needs-input dot by default, swapped for hover-revealed actions.
-          The two live in SEPARATE overlays rather than one flex row: the actions
-          stay mounted at opacity-0 so they can still be tabbed to and can fade,
-          and an opacity-0 button is invisible but still occupies its 24px — in
-          one row that pushed the dot two icon-widths off the right edge, which
-          read as a stray dot floating mid-row. */}
+          The actions stay MOUNTED at opacity-0 so they keep their tab stop and
+          their fade — but an opacity-0 button is invisible and still occupies
+          its 24px, so a dot sharing their flex row got pushed two icon-widths
+          off the right edge and read as a stray dot floating mid-row. Hence the
+          dot is taken out of flow and pinned to the rail's right edge instead.
+          It stands down for EITHER way the actions can appear: pointer hover of
+          the row, or keyboard focus landing in the rail. */}
       {!rename.editing && (
-        <>
+        <div className="group/rail absolute inset-y-0 right-1.5 flex items-center gap-0.5">
           {needsInput && (
-            <div
+            <span
               className={cn(
-                "pointer-events-none absolute inset-y-0 right-1.5 flex w-6 items-center justify-center",
-                "group-hover/row:hidden",
+                "pointer-events-none absolute inset-y-0 right-0 flex w-6 items-center justify-center",
+                "group-hover/row:hidden group-focus-within/rail:hidden",
               )}
             >
               <StatusDot tone="warn" pulse size={6} />
-            </div>
+            </span>
           )}
-          <div
-            className={cn(
-              "absolute inset-y-0 right-1.5 flex items-center gap-0.5",
-              "opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover/row:opacity-100",
-            )}
+          <IconButton
+            size="sm"
+            tip="Rename chat"
+            onClick={rename.start}
+            className="opacity-0 transition-opacity duration-150 focus-visible:opacity-100 group-hover/row:opacity-100"
           >
-            <IconButton size="sm" tip="Rename chat" onClick={rename.start}>
-              <Pencil />
-            </IconButton>
-            <IconButton size="sm" tip="Delete chat" onClick={() => setConfirmDelete(true)}>
-              <Trash2 />
-            </IconButton>
-          </div>
-        </>
+            <Pencil />
+          </IconButton>
+          <IconButton
+            size="sm"
+            tip="Delete chat"
+            onClick={() => setConfirmDelete(true)}
+            className="opacity-0 transition-opacity duration-150 focus-visible:opacity-100 group-hover/row:opacity-100"
+          >
+            <Trash2 />
+          </IconButton>
+        </div>
       )}
 
       <DeleteChatDialog
