@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveWorkflow, classifyWorkflowViolation } from "./workflow.js";
+import { resolveWorkflow, classifyWorkflowViolation, COPILOT_LOGIN } from "./workflow.js";
 
 describe("resolveWorkflow", () => {
   it("resolves `none` to the no-ceremony posture", () => {
@@ -97,7 +97,9 @@ describe("resolveWorkflow", () => {
     // trivially true. Both requirements therefore default ON.
     const wf = resolveWorkflow({ workflow: { profile: "review" } });
     expect(wf.pr).toEqual({
-      reviewers: [],
+      // Copilot by default, so `requireReview` asks for a review someone can
+      // actually give instead of blocking on a reviewer nobody configured.
+      reviewers: [COPILOT_LOGIN],
       requireReview: true,
       requireChecks: true,
       draft: false,
@@ -122,6 +124,13 @@ describe("resolveWorkflow", () => {
       requireChecks: false,
       draft: true,
     });
+  });
+
+  it("lets an authored empty list opt out of the default reviewer", () => {
+    // `?? base` and not `|| base`: an explicit `reviewers: []` is a decision to
+    // request nobody, not an absent value to be filled in with Copilot.
+    const wf = resolveWorkflow({ workflow: { profile: "review", pr: { reviewers: [] } } });
+    expect(wf.pr.reviewers).toEqual([]);
   });
 
   it("clamps the PR policy to inert on the rungs that have no PR", () => {

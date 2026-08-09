@@ -133,6 +133,15 @@ export type ResolvedPrPolicy = z.infer<typeof ResolvedPrPolicySchema>;
  */
 export const MERGE_HOLD_LABEL = "hold";
 
+/**
+ * GitHub's Copilot code reviewer. The `review` profile's default reviewer, and
+ * the login every hand-rolled ship path in this repo already requested.
+ *
+ * It lives HERE rather than in the server's GitHub service because the profile
+ * default needs it and `@dispatch/shared` can't import from the server.
+ */
+export const COPILOT_LOGIN = "copilot-pull-request-reviewer[bot]";
+
 /* ------------------------------------------------------- authored + resolved */
 
 /**
@@ -245,11 +254,16 @@ const PROFILE_DEFAULTS: Record<WorkflowProfile, Omit<ResolvedWorkflow, "worktree
       // This rung is the one that HAS a PR, so its policy is the one with teeth.
       // Both requirements default ON: the observed failure was a `review` project
       // where a PR could be called done with nobody having looked at it and no
-      // check having reported. A reviewer list can't have a useful default (it's
-      // repo-specific), so it starts empty and the config-load check warns when
-      // that emptiness combines with `autoMerge: on-green` and no CI.
+      // check having reported.
+      //
+      // The reviewer list defaults to Copilot rather than empty because the
+      // empty default paired with `requireReview: true` produced pure friction:
+      // `approve_pr` refused for want of a review that NOBODY COULD BE ASKED
+      // for, so agents merged with `allowNoReview` and the requirement bought
+      // nothing. Copilot is repo-agnostic and works on any GitHub repo, so it's
+      // the one reviewer a default can name. Author `reviewers: []` to opt out.
       pr: {
-        reviewers: [],
+        reviewers: [COPILOT_LOGIN],
         requireReview: true,
         requireChecks: true,
         draft: false,

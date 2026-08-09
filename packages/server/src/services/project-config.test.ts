@@ -787,7 +787,9 @@ describe("ProjectConfigService — vacuous auto-merge warning", () => {
   it("warns when `on-green` has neither CI nor reviewers to be green ABOUT", async () => {
     // The failure this catches: a repo where zero checks report, so "green" is
     // trivially true and auto-merge would land every PR on no evidence at all.
-    await manifest("  profile: review\n  autoMerge: on-green\n");
+    // `reviewers: []` is authored explicitly — the profile default is Copilot,
+    // so opting OUT of a reviewer is now what reaches this state.
+    await manifest("  profile: review\n  autoMerge: on-green\n  pr:\n    reviewers: []\n");
     const svc = new ProjectConfigService({ store, bus, watch: () => null });
     const res = await svc.load(await seedProject());
 
@@ -800,7 +802,7 @@ describe("ProjectConfigService — vacuous auto-merge warning", () => {
   });
 
   it("stays quiet once the repo has a CI workflow", async () => {
-    await manifest("  profile: review\n  autoMerge: on-green\n");
+    await manifest("  profile: review\n  autoMerge: on-green\n  pr:\n    reviewers: []\n");
     await mkdir(join(repoDir, ".github", "workflows"), { recursive: true });
     await writeFile(join(repoDir, ".github", "workflows", "ci.yml"), "name: ci\n", "utf8");
 
@@ -814,6 +816,13 @@ describe("ProjectConfigService — vacuous auto-merge warning", () => {
     await manifest(
       "  profile: review\n  autoMerge: on-green\n  pr:\n    reviewers: [copilot-pull-request-reviewer]\n",
     );
+    const svc = new ProjectConfigService({ store, bus, watch: () => null });
+    const res = await svc.load(await seedProject());
+    expect(res.errors.filter((e) => /vacuous/.test(e.message))).toEqual([]);
+  });
+
+  it("stays quiet with no `pr:` block at all — Copilot is the default reviewer", async () => {
+    await manifest("  profile: review\n  autoMerge: on-green\n");
     const svc = new ProjectConfigService({ store, bus, watch: () => null });
     const res = await svc.load(await seedProject());
     expect(res.errors.filter((e) => /vacuous/.test(e.message))).toEqual([]);

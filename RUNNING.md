@@ -103,7 +103,7 @@ correctly, and on a real run all four of these went wrong at once:
 
 | Field | Default (`review`) | What it does |
 |---|---|---|
-| `reviewers` | `[]` | Logins and/or `org/team` slugs `create_pr` requests on every PR. Nothing else remembers to. |
+| `reviewers` | `["copilot-pull-request-reviewer[bot]"]` | Logins and/or `org/team` slugs `create_pr` requests on every PR. Nothing else remembers to. Defaults to Copilot so `requireReview` asks for a review someone can actually give; author `reviewers: []` to request nobody. |
 | `requireReview` | `true` | `approve_pr` refuses while no requested reviewer has **reported** (an outstanding request is the opposite of a review). |
 | `requireChecks` | `true` | `approve_pr` refuses when **no check reported at all** — "green" on no evidence is not green. |
 | `draft` | `false` | Open PRs as drafts. |
@@ -131,7 +131,7 @@ chat** — the one whose own `prs` carries that PR, i.e. the one that opened it 
 nobody else; a chat that's already mid-turn gets the badge and no nudge.
 
 **Vacuous auto-merge is caught at config load.** A project resolving to `review` +
-`autoMerge: on-green` with **no CI workflows and no reviewers** gets a project-config
+`autoMerge: on-green` with **no CI workflows and an explicitly emptied `reviewers`** gets a project-config
 warning, because "green" there means nothing was ever run. It's a warning, not a fatal —
 a small repo with no CI is legitimate, and `requireChecks` already refuses the merge at
 the moment it actually matters.
