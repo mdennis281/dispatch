@@ -25,7 +25,8 @@ import { Spinner } from "../ui/Spinner.js";
 import { Popover } from "../ui/Popover.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate } from "../../lib/format.js";
-import { requestOpenFile, worktreeMatchesChat, samePath, copyToClipboard, suggestBranch } from "./panelBus.js";
+import { requestOpenFile, worktreeMatchesChat, samePath, suggestBranch } from "./panelBus.js";
+import { copyToClipboard } from "../../lib/clipboard.js";
 
 /** A GitHub-style +/- block bar. */
 function DiffStat({ add, del }: { add: number; del: number }) {
