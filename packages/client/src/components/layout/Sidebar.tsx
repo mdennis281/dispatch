@@ -638,7 +638,7 @@ export function Sidebar() {
           className="cm-mono mt-2 text-center !text-[9.5px] text-faint"
           title="Build version (UTC) — yyyy.mm.dd.sssss, where sssss is the seconds elapsed since UTC midnight"
         >
-          {BUILD_VERSION}
+          v{BUILD_VERSION}
         </p>
       </div>
 
