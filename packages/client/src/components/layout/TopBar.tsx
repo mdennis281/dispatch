@@ -35,8 +35,11 @@ export function TopBar() {
           and the taskbar icon exactly (see ui/DispatchMark). */}
       <div className="flex items-center gap-2 pr-1">
         <DispatchMark className="size-6 shrink-0 rounded-md ring-1 ring-accent-line" title="Dispatch" />
+        {/* No version here. `v0.1` was a hardcoded stand-in that never moved and
+            said nothing about the bundle you're running; the sidebar's build
+            stamp does, so a second, permanently-wrong number next to the logo is
+            worse than none. */}
         <span className="text-[13px] font-semibold tracking-tight text-primary">Dispatch</span>
-        <span className="cm-mono !text-[9.5px] text-faint">v0.1</span>
       </div>
 
       {/* connection */}
