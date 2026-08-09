@@ -7,8 +7,9 @@ import { cn } from "../../lib/cn.js";
  * one-off `text-xs text-muted hover:text-primary` in each of a dozen files,
  * and a pressed-state control was another `<button>` with its own idea of what
  * "on" looks like. Both are now one word at the call site, which is what makes
- * the no-raw-`<button>` lint rule (see eslint.config.js) a rule you can follow
- * rather than one you have to fight.
+ * the no-raw-`<button>` ratchet a rule you can follow rather than one you have
+ * to fight. That ratchet is `ui/rawButtons.test.ts` — a test rather than a lint
+ * rule because this repo has no ESLint and CI runs vitest.
  */
 type Variant = "default" | "primary" | "subtle" | "ghost" | "danger" | "link" | "toggle";
 /**

@@ -10,7 +10,7 @@
  * whole-chat actions live (the ⋯ menu and the command palette), and renaming is
  * the same edit-in-place everywhere.
  */
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { stripTitleMarks } from "@dispatch/shared";
 import type { Chat } from "@dispatch/shared";
 import { actions } from "../../lib/actions.js";
@@ -41,20 +41,38 @@ export interface ChatRename {
 export function useChatRename(chat: Chat | undefined): ChatRename {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  /**
+   * "This edit was abandoned — ignore the next commit."
+   *
+   * Cancelling unmounts the focused input, and tearing focus out of a focused
+   * element fires `blur`. `onBlur` is our commit, so without this latch Escape
+   * (and any caller-driven `cancel()`, e.g. switching chats mid-rename) would
+   * SAVE the very edit it was meant to throw away. A ref, not state, because
+   * the blur arrives in the same tick as the unmount — a state update wouldn't
+   * have landed yet.
+   */
+  const abandoned = useRef(false);
 
   const start = useCallback(() => {
     if (!chat) return;
     // Edited as plain text: `**` in an input box reads as a typo, not as the
     // accent it renders to (see ui/TitleText). Typing them back still works.
+    abandoned.current = false;
     setDraft(stripTitleMarks(chat.title));
     setEditing(true);
   }, [chat]);
 
-  const cancel = useCallback(() => setEditing(false), []);
+  const cancel = useCallback(() => {
+    abandoned.current = true;
+    setEditing(false);
+  }, []);
 
   const commit = useCallback(() => {
     setEditing(false);
-    if (!chat) return;
+    // Consume the latch either way, so a later legitimate edit isn't swallowed.
+    const wasAbandoned = abandoned.current;
+    abandoned.current = false;
+    if (wasAbandoned || !chat) return;
     const next = draft.trim();
     // No-op on empty / unchanged — don't churn the title or emit a needless turn.
     if (!next || next === chat.title || next === stripTitleMarks(chat.title)) return;
@@ -87,7 +105,9 @@ export function useChatRename(chat: Chat | undefined): ChatRename {
         } else if (e.key === "Escape") {
           e.preventDefault();
           e.stopPropagation();
-          setEditing(false);
+          // `cancel`, not a bare setEditing — it arms the latch that stops the
+          // resulting blur from committing what we just discarded.
+          cancel();
         }
       },
     },
