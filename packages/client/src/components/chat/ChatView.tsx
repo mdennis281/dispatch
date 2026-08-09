@@ -5,6 +5,7 @@ import {
   GitMerge,
   MoreHorizontal,
   Hash,
+  Copy,
   ChevronDown,
   MessagesSquare,
   RefreshCw,
@@ -32,7 +33,8 @@ import { loadOlderMessages } from "../../stores/index.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
 import { usePanels } from "../../stores/panels.js";
-import { worktreeMatchesChat, samePath } from "../panels/panelBus.js";
+import { worktreeMatchesChat, samePath, copyToClipboard } from "../panels/panelBus.js";
+import { useNotices } from "../../stores/notices.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
@@ -126,6 +128,20 @@ export function ChatView({ chat }: { chat: Chat }) {
     useChats.getState().upsertChat({ ...chat, showInjectedContext: next });
     void api.chats.update(chat.id, { showInjectedContext: next }).catch(() => {});
   }, [chat, injected.show]);
+
+  const pushToast = useNotices((s) => s.push);
+  const copyId = useCallback(
+    (value: string, label: string) => {
+      void copyToClipboard(value).then((ok) => {
+        pushToast(
+          ok
+            ? { level: "info", text: `${label} copied`, detail: value }
+            : { level: "error", text: `Couldn't copy ${label.toLowerCase()}`, detail: value },
+        );
+      });
+    },
+    [pushToast],
+  );
 
   // Inline title rename + delete confirmation, both shared with the sidebar row
   // so a chat renames and deletes the same way wherever you reach for it.
@@ -374,11 +390,6 @@ export function ChatView({ chat }: { chat: Chat }) {
                 #{pr.number}
               </Chip>
             )}
-            {chat.sessionId && (
-              <Chip tone="muted" icon={<Hash />} mono className="hidden lg:inline-flex">
-                {chat.sessionId}
-              </Chip>
-            )}
             <Popover
               align="end"
               width={200}
@@ -409,6 +420,30 @@ export function ChatView({ chat }: { chat: Chat }) {
                   >
                     Regenerate title
                   </MenuItem>
+                  <div className="my-1 h-px bg-line" />
+                  {/* The ids used to ride in the header as a chip, which cost a
+                      permanent slice of the title bar to show a string nobody
+                      reads — only copies. Here they cost nothing until wanted. */}
+                  <MenuItem
+                    icon={<Copy />}
+                    onClick={() => {
+                      copyId(chat.id, "Chat ID");
+                      close();
+                    }}
+                  >
+                    Copy chat ID
+                  </MenuItem>
+                  {chat.sessionId && (
+                    <MenuItem
+                      icon={<Hash />}
+                      onClick={() => {
+                        copyId(chat.sessionId!, "Session ID");
+                        close();
+                      }}
+                    >
+                      Copy session ID
+                    </MenuItem>
+                  )}
                   <div className="my-1 h-px bg-line" />
                   {/* Show what Dispatch attached to a turn on your behalf —
                       surfaced memories, repo snapshots. Rendering only: the
