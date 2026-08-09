@@ -11,7 +11,13 @@ import { ws } from "./lib/ws.js";
 import { RunnerLogWindow } from "./components/panels/RunnerLogWindow.js";
 import { capturePwaInstall } from "./lib/pwaInstall.js";
 import { focusAttentionTarget } from "./components/attention/focus.js";
+import { watchSystemTheme } from "./stores/theme.js";
 import "./index.css";
+
+// The palette itself was applied by the inline script in index.html (before the
+// first paint); this only subscribes to later OS changes, which matters solely
+// while the preference is "system".
+watchSystemTheme();
 
 // A detached log window (opened via openRunnerLogWindow) loads this same bundle
 // with `?logs=<runnerId>` — render only the read-only log terminal for it.

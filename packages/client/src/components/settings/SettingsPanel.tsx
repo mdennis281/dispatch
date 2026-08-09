@@ -6,8 +6,8 @@
  * merges + revalidates server-side. Theme applies to the document on save so the
  * change is reflected immediately (and re-reflected whenever the modal loads).
  */
-import { useCallback, useEffect, useState } from "react";
-import { SlidersHorizontal, Moon, Sun, Bell, Layers } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { SlidersHorizontal, Moon, Sun, Monitor, Bell, Layers } from "lucide-react";
 import { Modal, Field, TextInput, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
@@ -17,15 +17,10 @@ import { api, type AppSettings } from "../../lib/api.js";
 import { useProjects } from "../../stores/projects.js";
 import { useNotices } from "../../stores/notices.js";
 import { useSettings } from "../../stores/settings.js";
+import { useTheme, type ThemePref } from "../../stores/theme.js";
 import { useBrowserNotify, notifyUnavailableReason } from "../../lib/browserNotify.js";
 import { StopDispatch } from "./StopDispatch.js";
 import { cn } from "../../lib/cn.js";
-
-/** Apply the persisted theme to the document (mirrors index.html `class="dark"`). */
-function applyTheme(theme: AppSettings["theme"]): void {
-  document.documentElement.classList.toggle("dark", theme !== "light");
-  document.documentElement.style.colorScheme = theme === "light" ? "light" : "dark";
-}
 
 /** A compact token-styled on/off switch (no primitive exists yet). */
 function Switch({
@@ -110,16 +105,22 @@ const DEFAULT_DRAFT: AppSettings = { theme: "dark", webhook: { enabled: false } 
 export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const modes = useProjects((s) => s.modes);
   const pushToast = useNotices((s) => s.push);
+  const setTheme = useTheme((s) => s.setTheme);
 
   const [draft, setDraft] = useState<AppSettings>(DEFAULT_DRAFT);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // What the theme was when the modal opened, so cancelling can put it back —
+  // the picker applies LIVE (you cannot judge a palette from a word), which
+  // means abandoning the dialog would otherwise leave the app repainted.
+  const themeOnOpen = useRef<ThemePref>("dark");
 
   // (Re)load the live settings each time the modal opens.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    themeOnOpen.current = useTheme.getState().pref;
     setLoading(true);
     setError(null);
     api.settings
@@ -142,7 +143,10 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
           spawnChat: { autoApprove: s.spawnChat?.autoApprove ?? false },
         };
         setDraft(next);
-        applyTheme(next.theme);
+        // The server value is the cross-device truth; localStorage only ever
+        // held a pre-paint cache of it, so reconcile toward the server on load.
+        themeOnOpen.current = next.theme;
+        setTheme(next.theme);
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -156,6 +160,11 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
   }, [open]);
 
   const patch = useCallback((p: Partial<AppSettings>) => setDraft((d) => ({ ...d, ...p })), []);
+  // Every exit that isn't "Save" (Cancel, Esc, backdrop) undoes the live preview.
+  const cancel = useCallback(() => {
+    setTheme(themeOnOpen.current);
+    onClose();
+  }, [onClose, setTheme]);
   const patchWebhook = useCallback(
     (p: Partial<NonNullable<AppSettings["webhook"]>>) =>
       setDraft((d) => ({ ...d, webhook: { ...d.webhook, ...p } })),
@@ -188,7 +197,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
     };
     try {
       const saved = await api.settings.update(body);
-      applyTheme(saved.theme ?? body.theme);
+      setTheme(saved.theme ?? body.theme);
       // Push into the live store too: transcripts read this on every render and
       // would otherwise keep the boot-time value until a reload.
       useSettings.getState().apply(saved);
@@ -212,7 +221,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
   return (
     <Modal
       open={open}
-      onClose={onClose}
+      onClose={cancel}
       width={480}
       icon={<SlidersHorizontal />}
       title="Settings"
@@ -224,7 +233,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
               <InlineError message={error} />
             </div>
           )}
-          <Button variant="ghost" onClick={onClose} disabled={busy}>
+          <Button variant="ghost" onClick={cancel} disabled={busy}>
             Cancel
           </Button>
           <Button variant="primary" onClick={save} disabled={busy || loading}>
@@ -237,14 +246,18 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
         {/* appearance */}
         <div>
           <SectionLabel className="mb-1.5 px-0">Appearance</SectionLabel>
-          <Field label="Theme" hint="applies on save">
+          <Field label="Theme" hint="previews live, saved for all devices">
             <SegmentedControl
               size="md"
               value={draft.theme}
-              onChange={(v) => patch({ theme: v })}
+              onChange={(v) => {
+                patch({ theme: v });
+                setTheme(v);
+              }}
               segments={[
                 { value: "dark", label: "Dark", icon: <Moon /> },
                 { value: "light", label: "Light", icon: <Sun /> },
+                { value: "system", label: "System", icon: <Monitor /> },
               ]}
             />
           </Field>
