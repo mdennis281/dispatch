@@ -26,15 +26,20 @@
 
   /* ── surfaces ────────────────────────────────────────────────────────────
    * Inverted ladder: the shell is a cool off-white and content rises to pure
-   * white. Kept within ~4% of each other for the same reason dark is —
-   * hairlines carry structure, not fills. */
-  --p-app: #f1f3f6;
-  --p-surface: #f6f7f9;
+   * white.
+   *
+   * The rungs are spaced WIDER than dark's, which is not symmetry-breaking for
+   * its own sake: the eye resolves lightness differences much better in the
+   * dark half of the range, so the ~2% steps that read clearly at #0b0d10 are
+   * invisible at #f4f6f8. The first cut of this palette used a 2% app/surface
+   * gap and the sidebar/main boundary genuinely disappeared on screen. */
+  --p-app: #e9edf2;
+  --p-surface: #f7f8fa;
   --p-panel: #ffffff;
-  --p-panel-2: #f4f6f8;
+  --p-panel-2: #f2f5f8;
   --p-elevated: #ffffff;
   --p-overlay: #ffffff;
-  --p-inset: #eef1f4;
+  --p-inset: #eaeef3;
 
   /* Dimming toward pure black on a light UI looks like a rendering fault, so
    * the scrim is a desaturated slate — it reads as "the page stepped back". */
@@ -49,9 +54,9 @@
   /* ── hairlines ───────────────────────────────────────────────────────────
    * Slate-tinted rather than neutral gray: a pure-gray border against a warm
    * white panel reads as dirty, a cool one reads as drawn. */
-  --p-line-soft: rgba(15, 23, 42, 0.05);
-  --p-line: rgba(15, 23, 42, 0.1);
-  --p-line-strong: rgba(15, 23, 42, 0.17);
+  --p-line-soft: rgba(15, 23, 42, 0.07);
+  --p-line: rgba(15, 23, 42, 0.13);
+  --p-line-strong: rgba(15, 23, 42, 0.2);
 
   /* Solid base for consumers that must append their own alpha (Monaco). */
   --p-wash: #0f172a;
@@ -73,7 +78,11 @@
   --p-accent: #9a5b00;
   --p-accent-hi: #7a4700;
   --p-accent-dim: #c98a2e;
-  --p-accent-ghost: rgba(154, 91, 0, 0.1);
+  /* Mixed from the LIGHTER amber, not from `--p-accent`. A 10% wash of the
+   * darkened #9a5b00 comes out mud-brown and light mode loses the brand
+   * entirely — the ghost is where amber still gets to look like amber, since
+   * nothing has to be legible against it except the text token on top. */
+  --p-accent-ghost: rgba(201, 138, 46, 0.2);
   --p-accent-line: rgba(154, 91, 0, 0.3);
   /* Dark accent + light foreground, the reverse of dark mode's pairing —
    * anything that hardcoded a dark on-accent text color breaks here. */

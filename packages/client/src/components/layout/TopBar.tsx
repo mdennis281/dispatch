@@ -34,7 +34,11 @@ export function TopBar() {
           top-left should be the thing you launched, matching the tab favicon
           and the taskbar icon exactly (see ui/DispatchMark). */}
       <div className="flex items-center gap-2 pr-1">
-        <DispatchMark className="size-6 shrink-0 rounded-md ring-1 ring-accent-line" title="Dispatch" />
+        <DispatchMark
+          platedTheme
+          className="size-6 shrink-0 rounded-md ring-1 ring-accent-line"
+          title="Dispatch"
+        />
         <span className="text-[13px] font-semibold tracking-tight text-primary">Dispatch</span>
         <span className="cm-mono !text-[9.5px] text-faint">v0.1</span>
       </div>
