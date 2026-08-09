@@ -553,6 +553,38 @@ describe("manager-mcp — watch_pr", () => {
     expect(resultText(await p)).not.toContain("review-stalled");
   });
 
+  // The grace window is a claim about CONTINUOUS observation. If the queue is
+  // seen empty, then goes unreadable for a while, then reads empty again, firing
+  // off the ORIGINAL timestamp asserts a minute of emptiness we never watched —
+  // and the reviewer may have been re-requested while we were blind.
+  it("restarts the grace window after a gap in observation", async () => {
+    let review: { requested: string[]; reported: Array<{ author: string; state: string }> } | null =
+      { requested: [], reported: [] };
+    const gh: ManagerMcpGitHub = {
+      prMergeState: async () => OPEN,
+      prChecks: async () => [RUNNING_BUILD],
+      reviewThreads: async () => [],
+      prReviewState: async () => review,
+    };
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    // Empty, but only briefly — then the read goes dark for well past the window.
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+    await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS);
+    review = null;
+    await vi.advanceTimersByTimeAsync(REVIEW_QUEUE_GRACE_MS * 2);
+
+    // Readable again and still empty: the clock has to start over, so nothing
+    // fires on this poll.
+    review = { requested: [], reported: [] };
+    await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS);
+    expect(vi.getTimerCount()).toBeGreaterThan(0); // still watching, no stall yet
+
+    // A full fresh window of continuous emptiness — now it's earned.
+    await vi.advanceTimersByTimeAsync(REVIEW_QUEUE_GRACE_MS);
+    expect(resultText(await p)).toContain("review-stalled");
+  });
+
   it("prints each review comment's thread id so resolve_thread is one call away", async () => {
     const gh = fakeGitHub([{ merge: OPEN, checks: [], threads: [THREAD_A] }]);
     const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });

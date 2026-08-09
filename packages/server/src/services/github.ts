@@ -988,7 +988,7 @@ export class GitHubService {
    * not "ready to land" — it's "not started". Best-effort; a failed read yields
    * empty lists, and the caller decides what that means.
    */
-  async prReviewState(repo: string, prNumber: number): Promise<PrReviewState> {
+  async prReviewState(repo: string, prNumber: number): Promise<PrReviewState | null> {
     const raw = await this.ghJson<{
       reviewRequests?: Array<{ login?: string; name?: string; slug?: string } | string>;
       latestReviews?: Array<{ author?: { login?: string } | null; state?: string }>;
@@ -999,10 +999,16 @@ export class GitHubService {
       ],
       { allowFail: true },
     );
-    const requested = (raw?.reviewRequests ?? [])
+    // `allowFail` yields null ONLY when the read failed — a PR with nobody
+    // requested still answers `{"reviewRequests":[],"latestReviews":[]}`. Passing
+    // the failure off as an empty queue is indistinguishable from "nobody is
+    // queued", which is precisely the false alarm `watch_pr`'s stall signal must
+    // never raise. Callers treat null as "couldn't read", not as news.
+    if (!raw) return null;
+    const requested = (raw.reviewRequests ?? [])
       .map((x) => (typeof x === "string" ? x : (x.login ?? x.slug ?? x.name ?? "")))
       .filter(Boolean);
-    const reported = (raw?.latestReviews ?? [])
+    const reported = (raw.latestReviews ?? [])
       .map((x) => ({ author: x.author?.login ?? "", state: String(x.state ?? "").toUpperCase() }))
       .filter((x) => x.author);
     return { requested, reported };

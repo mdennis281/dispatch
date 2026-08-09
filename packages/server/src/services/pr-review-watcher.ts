@@ -72,11 +72,14 @@ export interface PrReviewGitHub {
     path?: string;
     author?: string;
   }>>;
-  /** Who was asked and who reported (submitted reviews are the signal here). */
+  /**
+   * Who was asked and who reported (submitted reviews are the signal here).
+   * null = unreadable this pass, same contract as the other reads.
+   */
   prReviewState(repo: string, prNumber: number): Promise<{
     requested: string[];
     reported: Array<{ author: string; state: string }>;
-  }>;
+  } | null>;
 }
 
 /** Per-(chat, PR) dedup memory — what we have ALREADY told this chat about. */

@@ -1232,18 +1232,25 @@ async function watchForPrActivity(
     // queue is not "waiting for review", it is stopped. Report that rather than
     // burning the quiet window on a review that is never coming, which is the
     // whole reason this poll exists.
-    if (review) {
-      if (review.requested.length > 0) {
-        // Someone IS on the hook: waiting is the right move, and the next time
-        // the queue empties is news again.
-        st.notedStalled = false;
-        st.queueEmptySince = undefined;
-      } else {
-        st.queueEmptySince ??= opts.now();
-        if (!st.notedStalled && opts.now() - st.queueEmptySince >= REVIEW_QUEUE_GRACE_MS) {
-          st.notedStalled = true;
-          events.push({ type: "review-stalled", reported: review.reported });
-        }
+    if (!review) {
+      // Couldn't read the queue this poll. Drop the timer: the grace window is a
+      // claim about CONTINUOUS observation ("empty for a full minute"), and a
+      // gap means we can't make it — the reviewer may well have been re-requested
+      // while we were blind. Carrying the old timestamp lets the next readable
+      // poll fire instantly off evidence we never actually had.
+      st.queueEmptySince = undefined;
+      // `notedStalled` deliberately survives. It is dedup memory for news already
+      // delivered, and a read hiccup is not a reason to say the same thing twice.
+    } else if (review.requested.length > 0) {
+      // Someone IS on the hook: waiting is the right move, and the next time the
+      // queue empties is news again.
+      st.notedStalled = false;
+      st.queueEmptySince = undefined;
+    } else {
+      st.queueEmptySince ??= opts.now();
+      if (!st.notedStalled && opts.now() - st.queueEmptySince >= REVIEW_QUEUE_GRACE_MS) {
+        st.notedStalled = true;
+        events.push({ type: "review-stalled", reported: review.reported });
       }
     }
 
