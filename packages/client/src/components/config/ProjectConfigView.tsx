@@ -20,8 +20,8 @@
  *     the format the loader actually accepts. Manifest-backed kinds (MCP
  *     servers, sub-apps) point at `project.yaml`, because that's where they live.
  *
- * Mounted once in App; opens on the `cm:open-project-config` window event
- * (command palette / top-bar affordance). Pure REST via the `useConfig` store,
+ * Mounted once in App; open state lives in the view store's `overlay` field
+ * (see stores/view.ts). Pure REST via the `useConfig` store,
  * fetched on open + on project change; live-updated by the `project-config-update`
  * WS event (a watcher edit, a scaffold, an import, or an authoring chat writing
  * a file all refresh it in place).
@@ -57,7 +57,7 @@ import { useProjectMemories } from "../../stores/memory.js";
 import { useNotices } from "../../stores/notices.js";
 import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
-import { OPEN_PROJECT_CONFIG_EVENT } from "./configViewBus.js";
+import { useOverlay } from "../../stores/view.js";
 import { WorkflowProfilePicker } from "./WorkflowProfilePicker.js";
 import { ConfigSectionPane } from "./ConfigSectionPane.js";
 import { sectionItems } from "./configItems.js";
@@ -112,7 +112,7 @@ function savedWorkflow(project: Project | null): WorkflowConfig {
 /* ------------------------------------------------------------------ overlay */
 
 export function ProjectConfigView() {
-  const [open, setOpen] = useState(false);
+  const { open, close: setClosed } = useOverlay("config");
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null);
   const projectId = project?.id ?? null;
   const { result, loading, error } = useProjectConfig(projectId);
@@ -144,12 +144,6 @@ export function ProjectConfigView() {
     const parts = src.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
     return parts[parts.length - 1] || CONFIG_DIR_NAME;
   }, [result?.sourceDir]);
-
-  useEffect(() => {
-    const onOpen = () => setOpen(true);
-    window.addEventListener(OPEN_PROJECT_CONFIG_EVENT, onOpen);
-    return () => window.removeEventListener(OPEN_PROJECT_CONFIG_EVENT, onOpen);
-  }, []);
 
   // Fetch on open / project change while open (the WS event keeps it fresh after).
   useEffect(() => {
@@ -201,7 +195,7 @@ export function ProjectConfigView() {
       return;
     }
     setDraft(null);
-    setOpen(false);
+    setClosed();
   }, [dirty]);
 
   // Open a config file in the editor. Saving there writes it back and the
@@ -393,7 +387,7 @@ export function ProjectConfigView() {
                 variant="ghost"
                 onClick={() => {
                   discard();
-                  setOpen(false);
+                  setClosed();
                 }}
               >
                 Discard &amp; close
@@ -402,7 +396,7 @@ export function ProjectConfigView() {
                 variant="primary"
                 leftIcon={saving ? <Spinner size={12} /> : <Save />}
                 disabled={saving}
-                onClick={() => void saveWorkflow().then(() => setOpen(false))}
+                onClick={() => void saveWorkflow().then(() => setClosed())}
               >
                 Save &amp; close
               </Button>
@@ -482,7 +476,7 @@ export function ProjectConfigView() {
                 // The launcher already focused the spawned chat; getting out of
                 // the way is all that's left. A dirty workflow draft would be
                 // lost, so it holds the dialog open with its usual confirmation.
-                onLaunched={() => (dirty ? setConfirmClose(true) : setOpen(false))}
+                onLaunched={() => (dirty ? setConfirmClose(true) : setClosed())}
               >
                 {activeSection.id === "workflow" && project && (
                   <WorkflowProfilePicker

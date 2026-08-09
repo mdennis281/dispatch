@@ -30,7 +30,7 @@ import { ProcessesPanel } from "./ProcessesPanel.js";
 import { BranchWorktreePicker } from "./BranchWorktreePicker.js";
 import {
   useLaunchTargets,
-  defaultBranch,
+  useLaunchBranch,
   launchSubApp,
   findRunner,
   type LaunchTarget,
@@ -245,15 +245,13 @@ export function RunnerPanel({ chat }: { chat: Chat }) {
   const subApps = project?.subApps ?? [];
   const { targets } = useLaunchTargets(project?.id);
 
-  // Selected launch branch — defaults to the chat's own worktree branch (keeping
-  // the prior behaviour), self-healing if the selection disappears.
-  const [selectedBranch, setSelectedBranch] = useState<string | undefined>();
-  useEffect(() => {
-    if (!targets.some((t) => t.branch === selectedBranch)) {
-      setSelectedBranch(defaultBranch(targets, chat.worktrees[0]));
-    }
-  }, [targets, selectedBranch, chat.worktrees]);
-  const selectedTarget = targets.find((t) => t.branch === selectedBranch);
+  // Selected launch branch — shared with the sidebar's Apps picker, seeded from
+  // this chat's own worktree when nothing has been chosen yet.
+  const {
+    branch: selectedBranch,
+    setBranch: setSelectedBranch,
+    target: selectedTarget,
+  } = useLaunchBranch(project?.id, targets, chat.worktrees[0]);
 
   // No chatId in the match — deliberately, and matching what the Sidebar has
   // always done. "Is this subApp already up?" is a question about the BRANCH and

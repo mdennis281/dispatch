@@ -12,8 +12,6 @@ import {
   Circle,
   Trash2,
   Pencil,
-  Check,
-  X,
   Brain,
   GitBranch,
   type LucideIcon,
@@ -30,21 +28,21 @@ import { Spinner } from "../ui/Spinner.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { useProjects, useActiveProject } from "../../stores/projects.js";
 import { useChats, useProjectChats } from "../../stores/chats.js";
-import { useView } from "../../stores/view.js";
+import { useView, openOverlay } from "../../stores/view.js";
 import { useProjectMemories } from "../../stores/memory.js";
 import { useGit, useGitChangeCount } from "../../stores/git.js";
 import { useRunners } from "../../stores/runners.js";
 import { useAttention } from "../../stores/attention.js";
-import { actions, deleteChat } from "../../lib/actions.js";
+import { actions } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate, relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
-import { ManageConfigDialog } from "../sidebar/ManageConfigDialog.js";
-import { RenameChatDialog } from "../chat/RenameChatDialog.js";
+import { DeleteChatDialog } from "../chat/DeleteChatDialog.js";
+import { useChatRename } from "../chat/useChatRename.js";
 import { BranchWorktreePicker } from "../panels/BranchWorktreePicker.js";
 import {
   useLaunchTargets,
-  defaultBranch,
+  useLaunchBranch,
   launchSubApp,
   findRunner,
   type LaunchTarget,
@@ -253,25 +251,8 @@ function ChatRow({
   );
   const age = relTimeShort(activityAt, now);
   const PurposeIcon = purposeIcon(chat.purpose?.kind);
-  const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-
-  // Two-click inline confirm (trash → check/✕) so a stray click can't nuke a
-  // chat. On confirm: delete server-side, then purge the local stores + reselect
-  // (mirrors the header dialog path). A failure just resets so the user retries.
-  const doDelete = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await deleteChat(chat.id);
-      useAttention.getState().clearChat(chat.id);
-      useChats.getState().removeChat(chat.id);
-    } catch {
-      setBusy(false);
-      setConfirming(false);
-    }
-  };
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const rename = useChatRename(chat);
 
   return (
     <div className="group/row relative" data-flip-id={chat.id}>
@@ -320,50 +301,52 @@ function ChatRow({
         </span>
       </button>
 
-      {/* right rail (sibling of the row button — never a nested button): the
-          needs-input dot by default, swapped for a hover-revealed delete that
-          expands to a check/✕ confirm. */}
-      <div className="absolute inset-y-0 right-1.5 flex items-center gap-0.5">
-        {confirming ? (
-          <>
-            <IconButton
-              size="sm"
-              tip="Confirm delete"
-              onClick={doDelete}
-              className="!text-danger hover:!bg-danger/15"
-            >
-              {busy ? <Spinner size={12} /> : <Check />}
-            </IconButton>
-            <IconButton size="sm" tip="Cancel" onClick={() => setConfirming(false)}>
-              <X />
-            </IconButton>
-          </>
-        ) : (
-          <>
-            {needsInput && (
-              <StatusDot tone="warn" pulse size={6} className="group-hover/row:hidden" />
-            )}
-            <IconButton
-              size="sm"
-              tip="Rename chat"
-              onClick={() => setRenaming(true)}
-              className="opacity-0 group-hover/row:opacity-100"
-            >
-              <Pencil />
-            </IconButton>
-            <IconButton
-              size="sm"
-              tip="Delete chat"
-              onClick={() => setConfirming(true)}
-              className="opacity-0 group-hover/row:opacity-100"
-            >
-              <Trash2 />
-            </IconButton>
-          </>
-        )}
-      </div>
+      {/* Rename edits the row IN PLACE — same interaction as the transcript
+          header, overlaid on the row so the list doesn't reflow mid-edit. It's
+          a sibling of the row button because an input nested inside a button is
+          invalid and swallows its own clicks. */}
+      {rename.editing && (
+        <div className="absolute inset-x-1 inset-y-0 flex items-center pl-[26px] pr-1">
+          <input
+            {...rename.inputProps}
+            aria-label="Rename chat"
+            className="w-full rounded-sm border border-accent-line bg-inset px-1.5 py-0.5 text-[12.5px] font-semibold text-primary outline-none"
+          />
+        </div>
+      )}
 
-      <RenameChatDialog chatId={chat.id} open={renaming} onClose={() => setRenaming(false)} />
+      {/* right rail (sibling of the row button — never a nested button): the
+          needs-input dot by default, swapped for hover-revealed actions. */}
+      {!rename.editing && (
+        <div className="absolute inset-y-0 right-1.5 flex items-center gap-0.5">
+          {needsInput && (
+            <StatusDot tone="warn" pulse size={6} className="group-hover/row:hidden" />
+          )}
+          <IconButton
+            size="sm"
+            tip="Rename chat"
+            onClick={rename.start}
+            className="opacity-0 group-hover/row:opacity-100"
+          >
+            <Pencil />
+          </IconButton>
+          <IconButton
+            size="sm"
+            tip="Delete chat"
+            onClick={() => setConfirmDelete(true)}
+            className="opacity-0 group-hover/row:opacity-100"
+          >
+            <Trash2 />
+          </IconButton>
+        </div>
+      )}
+
+      <DeleteChatDialog
+        chatId={chat.id}
+        title={chat.title}
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+      />
     </div>
   );
 }
@@ -470,18 +453,15 @@ export function Sidebar() {
     setActiveChatRaw(id);
   };
 
-  const [manageOpen, setManageOpen] = useState(false);
-
-  // Project-level launch target for the Apps section — same picker as the right
-  // panel, defaulting to the project's default (current) branch.
+  // Launch target for the Apps section. The SAME selection the right panel's
+  // Runner picker drives (see useLaunchBranch) — one project, one answer to
+  // "which branch does Run use?".
   const { targets } = useLaunchTargets(project?.id);
-  const [selectedBranch, setSelectedBranch] = useState<string | undefined>();
-  useEffect(() => {
-    if (!targets.some((t) => t.branch === selectedBranch)) {
-      setSelectedBranch(defaultBranch(targets, project?.repoPath));
-    }
-  }, [targets, selectedBranch, project?.repoPath]);
-  const selectedTarget = targets.find((t) => t.branch === selectedBranch);
+  const {
+    branch: selectedBranch,
+    setBranch: setSelectedBranch,
+    target: selectedTarget,
+  } = useLaunchBranch(project?.id, targets, project?.repoPath);
 
   // Shared clock so every chat row's "age" label ages together. 30s is plenty
   // for m/h/d/w granularity and keeps the sidebar idle-cheap.
@@ -532,7 +512,7 @@ export function Sidebar() {
             handing over visible beside it. See NewProjectView. */}
         <ProjectSelector
           onAddProject={() => setView("new-project")}
-          onManageConfig={() => setManageOpen(true)}
+          onManageConfig={() => openOverlay("agents")}
         />
       </div>
 
@@ -594,12 +574,14 @@ export function Sidebar() {
 
         <div className="my-2.5 h-px bg-line-soft" />
 
-        {/* chats */}
+        {/* chats — no "+" here. It fired the exact same startNewChat as the
+            pinned footer button 400px below it, and two controls for one action
+            in one column is how a sidebar starts feeling like a toolbar. The
+            footer one wins: it's pinned, so it's reachable from any scroll
+            position, and it's labelled. */}
         <div className="mb-1 flex items-center justify-between px-2.5 pb-1">
           <SectionLabel className="px-0">Chats</SectionLabel>
-          <IconButton size="sm" tip="New chat" onClick={startNewChat} disabled={!project}>
-            <Plus />
-          </IconButton>
+          <span className="cm-mono !text-[9.5px] text-faint">{chats.length || ""}</span>
         </div>
         <div ref={chatListRef} className="space-y-0.5 px-1.5">
           {chats.length === 0 ? (
@@ -642,7 +624,6 @@ export function Sidebar() {
         </p>
       </div>
 
-      <ManageConfigDialog open={manageOpen} onClose={() => setManageOpen(false)} />
     </aside>
   );
 }

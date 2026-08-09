@@ -18,6 +18,7 @@ import { useProjects } from "../../stores/projects.js";
 import { useNotices } from "../../stores/notices.js";
 import { useSettings } from "../../stores/settings.js";
 import { useTheme, type ThemePref } from "../../stores/theme.js";
+import { useOverlay } from "../../stores/view.js";
 import { useBrowserNotify, notifyUnavailableReason } from "../../lib/browserNotify.js";
 import { StopDispatch } from "./StopDispatch.js";
 import { cn } from "../../lib/cn.js";
@@ -102,7 +103,8 @@ function DesktopNotifications() {
 
 const DEFAULT_DRAFT: AppSettings = { theme: "dark", webhook: { enabled: false } };
 
-export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function SettingsPanel() {
+  const { open, close: onClose } = useOverlay("settings");
   const modes = useProjects((s) => s.modes);
   const pushToast = useNotices((s) => s.push);
   const setTheme = useTheme((s) => s.setTheme);

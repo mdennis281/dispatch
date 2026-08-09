@@ -2,8 +2,8 @@
  * ProjectPRsView — the GLOBAL, project-wide open-PR roster. Unlike the per-chat
  * PRsPanel (which scopes to a single chat's PR), this overlay lists EVERY open PR
  * for the active project via `GET /api/github/project-prs` so you can see + act on
- * the whole board from one place. Mounted once in App; opens on the
- * `cm:open-project-prs` window event (command palette / top-bar affordance).
+ * the whole board from one place. Mounted once in App; open state lives in the
+ * view store's `overlay` field (see stores/view.ts).
  *
  * Each PR renders its number, title, branch→base, draft state, a folded check
  * rollup, review decision, comment count, labels, updated time, an external link,
@@ -38,7 +38,7 @@ import { actions } from "../../lib/actions.js";
 import { useProjects } from "../../stores/projects.js";
 import { relTime } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
-import { OPEN_PROJECT_PRS_EVENT } from "./projectPrsBus.js";
+import { useOverlay } from "../../stores/view.js";
 
 /** Labels that hold a PR from the auto-merge job (house convention). */
 const HOLD_LABELS = new Set(["hold", "no-automerge", "do-not-merge", "wip"]);
@@ -240,7 +240,7 @@ function PrRow({
 /* ------------------------------------------------------------------ overlay */
 
 export function ProjectPRsView() {
-  const [open, setOpen] = useState(false);
+  const { open, close } = useOverlay("prs");
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null);
   const projectId = project?.id;
 
@@ -248,13 +248,6 @@ export function ProjectPRsView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
-
-  // Open on the app-wide event (command palette / top-bar affordance).
-  useEffect(() => {
-    const onOpen = () => setOpen(true);
-    window.addEventListener(OPEN_PROJECT_PRS_EVENT, onOpen);
-    return () => window.removeEventListener(OPEN_PROJECT_PRS_EVENT, onOpen);
-  }, []);
 
   const load = useCallback(async () => {
     if (!projectId) {
@@ -315,7 +308,7 @@ export function ProjectPRsView() {
   return (
     <Modal
       open={open}
-      onClose={() => setOpen(false)}
+      onClose={close}
       width={620}
       icon={<GitPullRequest />}
       title="Open pull requests"

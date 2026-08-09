@@ -4,8 +4,8 @@
  * external/passthrough servers on the project's config, each tool shown with its
  * qualified name, description, and input-parameter schema.
  *
- * Mounted once in App; opens on the `cm:open-mcp-catalog` window event (command
- * palette / top-bar affordance). Left pane = server list (grouped Custom vs
+ * Mounted once in App; open state lives in the view store's `overlay` field
+ * (see stores/view.ts). Left pane = server list (grouped Custom vs
  * External, each with a status dot); right pane = the selected server's tools as
  * expandable endpoint cards (params table + raw JSON Schema toggle). Pure REST via
  * the `useMcp` store — fetched on open, on project change, and on Refresh.
@@ -38,7 +38,7 @@ import { useProjects } from "../../stores/projects.js";
 import { useMcp, useProjectMcp } from "../../stores/mcp.js";
 import { copyToClipboard } from "../panels/panelBus.js";
 import { cn } from "../../lib/cn.js";
-import { OPEN_MCP_CATALOG_EVENT } from "./mcpCatalogBus.js";
+import { useOverlay } from "../../stores/view.js";
 
 /* --------------------------------------------------------------- status */
 
@@ -253,19 +253,12 @@ function ServerGroup({
 /* ------------------------------------------------------------------ overlay */
 
 export function McpCatalogView() {
-  const [open, setOpen] = useState(false);
+  const { open, close } = useOverlay("mcp");
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null);
   const projectId = project?.id ?? null;
   const { catalog, loading, error } = useProjectMcp(projectId);
 
   const [selected, setSelected] = useState<string | null>(null);
-
-  // Open on the app-wide event (command palette / top-bar affordance).
-  useEffect(() => {
-    const onOpen = () => setOpen(true);
-    window.addEventListener(OPEN_MCP_CATALOG_EVENT, onOpen);
-    return () => window.removeEventListener(OPEN_MCP_CATALOG_EVENT, onOpen);
-  }, []);
 
   const load = useCallback(
     (fresh?: boolean) => {
@@ -295,7 +288,7 @@ export function McpCatalogView() {
   return (
     <Modal
       open={open}
-      onClose={() => setOpen(false)}
+      onClose={close}
       width={920}
       icon={<Blocks />}
       title="MCP tools"

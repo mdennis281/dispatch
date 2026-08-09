@@ -11,6 +11,8 @@ import { ProjectConfigView } from "./components/config/ProjectConfigView.js";
 import { NewProjectView } from "./components/project/NewProjectView.js";
 import { MemoryView } from "./components/memory/MemoryView.js";
 import { GitView } from "./components/git/GitView.js";
+import { SettingsPanel } from "./components/settings/SettingsPanel.js";
+import { ManageConfigDialog } from "./components/sidebar/ManageConfigDialog.js";
 import { Toasts } from "./components/Toasts.js";
 import { ShutdownScreen } from "./components/ShutdownScreen.js";
 import { useChats } from "./stores/chats.js";
@@ -61,11 +63,16 @@ export default function App() {
           )}
         </main>
       </div>
+      {/* Overlays. Every one of these is open/closed by a single field in the
+          view store (see stores/view.ts) rather than by the three bespoke
+          window-event buses and two stray useStates this used to take. */}
       <CodeViewerHost />
       <AgentRunHost />
       <ProjectPRsView />
       <McpCatalogView />
       <ProjectConfigView />
+      <SettingsPanel />
+      <ManageConfigDialog />
       <Toasts />
       <ShutdownScreen />
     </div>

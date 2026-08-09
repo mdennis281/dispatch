@@ -37,11 +37,8 @@ import {
 import { actions } from "../../lib/actions.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
-import { useView } from "../../stores/view.js";
+import { useView, openOverlay } from "../../stores/view.js";
 import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
-import { requestOpenProjectPrs } from "../prs/projectPrsBus.js";
-import { requestOpenMcpCatalog } from "../mcp/mcpCatalogBus.js";
-import { requestOpenProjectConfig } from "../config/configViewBus.js";
 import { Kbd } from "../ui/Kbd.js";
 import { cn } from "../../lib/cn.js";
 import { LAYER } from "../../lib/layers.js";
@@ -106,11 +103,9 @@ function newChatAndFocus(projectId: string): void {
 export function CommandPalette({
   open,
   onOpenChange,
-  onOpenSettings,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onOpenSettings: () => void;
 }) {
   const projects = useProjects((s) => s.projects);
   const activeProjectId = useProjects((s) => s.activeProjectId);
@@ -170,7 +165,7 @@ export function CommandPalette({
         group: "Navigate",
         icon: <GitPullRequest />,
         keywords: "pr pull request github review merge hold board project all open",
-        run: () => requestOpenProjectPrs(),
+        run: () => openOverlay("prs"),
       });
       // MCP catalog — every tool endpoint (custom manager + external) for the project.
       list.push({
@@ -180,7 +175,7 @@ export function CommandPalette({
         group: "Navigate",
         icon: <Blocks />,
         keywords: "mcp tool endpoint schema server manager show visualize catalog",
-        run: () => requestOpenMcpCatalog(),
+        run: () => openOverlay("mcp"),
       });
       // Project config — the loaded `.dispatch/` (instructions/subApps/
       // MCP/agents/modes/memory) + reload / export / import.
@@ -191,7 +186,7 @@ export function CommandPalette({
         group: "Navigate",
         icon: <FileCog />,
         keywords: "config Dispatch manifest instructions subapps mcp agents modes memory export import cm scaffold reload",
-        run: () => requestOpenProjectConfig(),
+        run: () => openOverlay("config"),
       });
     }
 
@@ -252,7 +247,7 @@ export function CommandPalette({
       group: "Navigate",
       icon: <SlidersHorizontal />,
       keywords: "preferences theme webhook config gear notifications",
-      run: onOpenSettings,
+      run: () => openOverlay("settings"),
     });
 
     // "How do I quit this thing" is a top-level question, so it gets a top-level
@@ -265,7 +260,7 @@ export function CommandPalette({
       group: "Actions",
       icon: <Power />,
       keywords: "quit exit shutdown kill halt close server stop app",
-      run: onOpenSettings,
+      run: () => openOverlay("settings"),
     });
 
     // Not gated on an active project — this is how the FIRST one gets made, and
@@ -312,7 +307,7 @@ export function CommandPalette({
     }
 
     return list;
-  }, [projects, activeProjectId, chatsById, chatOrder, activeChatId, onOpenSettings]);
+  }, [projects, activeProjectId, chatsById, chatOrder, activeChatId]);
 
   const results = useMemo(() => {
     const scored: { cmd: Command; score: number; i: number }[] = [];

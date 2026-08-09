@@ -22,6 +22,7 @@ import { Chip } from "../ui/Chip.js";
 import { cn } from "../../lib/cn.js";
 import { api } from "../../lib/api.js";
 import { useProjects } from "../../stores/projects.js";
+import { useOverlay } from "../../stores/view.js";
 
 type Tab = "agents" | "modes";
 
@@ -115,7 +116,8 @@ async function refreshConfig(): Promise<void> {
   if (active) st.setActiveProject(active);
 }
 
-export function ManageConfigDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function ManageConfigDialog() {
+  const { open, close: onClose } = useOverlay("agents");
   const agents = useProjects((s) => s.agents);
   const modes = useProjects((s) => s.modes);
   const projects = useProjects((s) => s.projects);
