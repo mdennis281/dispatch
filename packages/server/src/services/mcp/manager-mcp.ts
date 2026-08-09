@@ -34,7 +34,10 @@
  *     state/checks/threads/labels and finding nothing blocking ({@link prLandingBlockers}).
  *     Offered ONLY when the project's workflow sets `autoMerge: "on-green"`, which
  *     is what makes "the agent lands its own work" a per-project decision rather
- *     than something every session can do. A raw `gh pr merge` stays denied.
+ *     than something every session can do. A raw `gh pr merge` stays denied. Its
+ *     `allowNoChecks`/`allowNoReview` escape hatches don't grant themselves: a
+ *     load-bearing one goes to the human as a permission card and waits
+ *     ({@link ManagerMcpPrApproval.confirmOverride}).
  *   - `mcp__manager__spawn_chat({ prompt, projectId?, … })` — start ANOTHER chat
  *     (via {@link ManagerMcpChats}), but only after the human says yes. The
  *     consent rides the broker's ordinary permission channel, so the request
@@ -449,6 +452,14 @@ export interface PrLandingPolicy {
   requireChecks?: boolean;
   /** `workflow.pr.requireReview` — a requested reviewer must have reported. */
   requireReview?: boolean;
+  /**
+   * `workflow.pr.reviewers` — who this project asks. Only used to make the
+   * `no-review` blocker say the RIGHT thing: "waiting on X" and "nobody was
+   * asked because this project configures no reviewers at all" are different
+   * problems with different fixes, and telling an agent to re-open the PR when
+   * the reviewer list is empty sends it round a loop that cannot terminate.
+   */
+  reviewers?: readonly string[];
   /** Caller override: land anyway on a repo that reports no checks. */
   allowNoChecks?: boolean;
   /** Caller override: land anyway with nobody having reviewed. */
@@ -481,6 +492,30 @@ export interface ManagerMcpPrApproval {
     repo: string | undefined,
     method: WorkflowMergeMethod,
   ): Promise<void>;
+  /**
+   * Put a load-bearing `allowNoChecks` / `allowNoReview` in front of the HUMAN
+   * and block until they answer.
+   *
+   * This exists because of a specific merge that should not have happened: the
+   * human said "pr it and merge", `approve_pr` correctly refused with
+   * `no-review`, and the agent then re-called it with `allowNoReview: true`,
+   * reasoning that "merge" had authorised an UNREVIEWED merge. It hadn't — the
+   * reviewer reported two minutes after the branch was gone.
+   *
+   * The flaw was structural, not a lapse of judgement: an override whose whole
+   * justification is "the human told me to" was self-certified by the one party
+   * who cannot be a witness to that. So the flag no longer decides anything. It
+   * asks, on the session's ordinary permission channel, and the merge waits.
+   * Required rather than optional so no binder can quietly omit it; a denial
+   * (or no live session to ask through) leaves the blocker standing.
+   */
+  confirmOverride(input: {
+    number: number;
+    title?: string;
+    url?: string;
+    /** The blockers the override would suppress — what the human is agreeing to. */
+    blockers: PrLandingBlocker[];
+  }): Promise<{ approved: boolean; message?: string }>;
   /** The project's configured merge strategy (the agent may override per call). */
   defaultMethod: WorkflowMergeMethod;
   /**
@@ -534,6 +569,44 @@ export interface PrLandingBlocker {
  * overridable per call, because a repo that legitimately has no CI has to be
  * able to say so out loud rather than by the absence of evidence.
  */
+/**
+ * The card the human reads before an override lands a PR their project's own bar
+ * says isn't ready.
+ *
+ * Pure and separate from the tool so the wording is directly testable — this is
+ * the entire content of a decision that cannot be taken back, and "merge it
+ * anyway?" with no statement of what "anyway" is covering would be a rubber
+ * stamp with extra steps.
+ */
+export function overrideConsentPrompt(
+  pr: { number: number; title?: string; url?: string },
+  suppressed: PrLandingBlocker[],
+): { title: string; description: string } {
+  const codes = new Set(suppressed.map((b) => b.code));
+  const what =
+    codes.has("no-review") && codes.has("no-checks")
+      ? "nobody has reviewed it and no CI reported"
+      : codes.has("no-review")
+        ? "nobody has reviewed it"
+        : codes.has("no-checks")
+          ? "no CI check reported"
+          : "this project's landing bar isn't met";
+  return {
+    title: `Merge PR #${pr.number} even though ${what}?`,
+    description: [
+      pr.title ? `PR #${pr.number}: ${pr.title}` : `PR #${pr.number}`,
+      pr.url,
+      "",
+      "The agent asked to override this project's landing bar:",
+      ...suppressed.map((b) => `  · ${b.detail}`),
+      "",
+      "Say no to leave the PR open.",
+    ]
+      .filter((l) => l !== undefined)
+      .join("\n"),
+  };
+}
+
 export function prLandingBlockers(
   pr: PrReadiness,
   policy: PrLandingPolicy = {},
@@ -621,16 +694,26 @@ export function prLandingBlockers(
       // the reviewer had said nothing at all.
       const reported = pr.submittedReviews.filter((r) => r.state !== "PENDING");
       if (reported.length === 0) {
+        // Three different problems wear the same "nobody has reviewed" face, and
+        // only the first is a matter of waiting. Saying "re-open it through
+        // create_pr" for all three is what sent an agent round a loop it could
+        // not win on a project whose reviewer list was empty — there was no
+        // reviewer for create_pr to ask, so the advice could never come true.
         const waiting = pr.requestedReviewers.length
-          ? `Waiting on: ${pr.requestedReviewers.join(", ")}.`
-          : "No reviewer has even been requested — open it through `mcp__manager__create_pr` " +
-            "so the configured reviewers are asked.";
+          ? `Waiting on: ${pr.requestedReviewers.join(", ")}. Call watch_pr until they report.`
+          : policy.reviewers?.length
+            ? `This project asks ${policy.reviewers.join(", ")} to review, but nobody is ` +
+              "currently requested on this PR — open it through `mcp__manager__create_pr` " +
+              "so they are."
+            : "This project configures NO reviewers (`workflow.pr.reviewers` in " +
+              "`.dispatch/project.yaml`), so nobody will ever be asked and this PR cannot " +
+              "satisfy its own bar. Fix the config rather than working around it.";
         blockers.push({
           code: "no-review",
           detail:
             "Nobody has reviewed this PR yet, and this project's workflow sets " +
-            `\`pr.requireReview\`. ${waiting} Pass \`allowNoReview: true\` only if the human ` +
-            "told you to land it unreviewed.",
+            `\`pr.requireReview\`. ${waiting} \`allowNoReview: true\` does not settle this ` +
+            "by itself — it puts the question to the human, who has to say yes.",
         });
       }
     }
@@ -1681,15 +1764,18 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .boolean()
         .optional()
         .describe(
-          "Override: land it even though NO check reported. Only when this repo " +
-            "genuinely has no CI — say so in your report when you use it.",
+          "ASK the human to land it even though NO check reported. This does not " +
+            "grant itself — it puts a card in front of them and waits, and their no " +
+            "is final. Only when you believe this repo genuinely has no CI.",
         ),
       allowNoReview: z
         .boolean()
         .optional()
         .describe(
-          "Override: land it even though nobody has reviewed. Only when the human " +
-            "told you to land it unreviewed.",
+          "ASK the human to land it even though nobody has reviewed. This does not " +
+            "grant itself — it puts a card in front of them and waits, and their no " +
+            "is final. A general 'merge it' is NOT permission to merge unreviewed: " +
+            "the normal move is to wait for the reviewer with watch_pr.",
         ),
     },
     async (args): Promise<CallToolResult> => {
@@ -1727,6 +1813,12 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         );
       }
 
+      // Two verdicts: what the project's bar says on its own, and what it says
+      // with the caller's overrides applied. The DIFFERENCE is what an override
+      // is actually buying — and that's the only thing worth waking the human
+      // for. An `allowNoReview` on a PR a reviewer already approved suppresses
+      // nothing and asks nothing.
+      const strict = prLandingBlockers(pr, approval.policy);
       const blockers = prLandingBlockers(pr, {
         ...approval.policy,
         allowNoChecks: args.allowNoChecks === true,
@@ -1746,6 +1838,48 @@ export function createManagerTools(ctx: ManagerMcpContext) {
               blockers: blockers.map((b) => b.code),
             }),
         );
+      }
+
+      // Nothing else stands in the way — so if an override is what got us here,
+      // the human has to say so themselves. See `confirmOverride`'s docblock for
+      // the merge that produced this gate.
+      const remaining = new Set(blockers.map((b) => b.code));
+      const suppressed = strict.filter((b) => !remaining.has(b.code));
+      if (suppressed.length) {
+        const prompt = overrideConsentPrompt(pr, suppressed);
+        let verdict: { approved: boolean; message?: string };
+        try {
+          verdict = await approval.confirmOverride({
+            number,
+            title: pr.title,
+            url: pr.url,
+            blockers: suppressed,
+          });
+        } catch (e) {
+          // Fail CLOSED: an unanswerable question is not a yes.
+          verdict = { approved: false, message: e instanceof Error ? e.message : String(e) };
+        }
+        if (!verdict.approved) {
+          return textResult(
+            `Not landing PR #${number} — the human did not approve the override:\n` +
+              suppressed.map((b) => `  · ${b.detail}`).join("\n") +
+              (verdict.message ? `\n\nThey said: ${verdict.message}` : "") +
+              "\n\nThis is their call, not yours: don't re-ask, and don't reach for " +
+              "`gh pr merge`. Say the PR is ready and waiting, and stop.\n" +
+              JSON.stringify({
+                number,
+                merged: false,
+                blockers: suppressed.map((b) => b.code),
+                overrideDeclined: true,
+              }),
+          );
+        }
+        ctx.bus.publish({
+          type: "notice",
+          chatId: ctx.chatId,
+          level: "warn",
+          text: `${prompt.title} — approved, landing PR #${number}`,
+        });
       }
 
       ctx.bus.publish({

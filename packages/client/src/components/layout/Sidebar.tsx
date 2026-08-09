@@ -55,8 +55,11 @@ import {
  * runner that never loads vite.config.ts. Reading the bare name there would be
  * a ReferenceError, so a JSX test of this component would fail on the version
  * line rather than on whatever it meant to assert.
+ *
+ * The `v` prefix belongs to the STAMP, not to the label — the fallback is the
+ * word "dev", and `vdev` would be nonsense.
  */
-const BUILD_VERSION = typeof __BUILD_VERSION__ === "string" ? __BUILD_VERSION__ : "dev";
+const BUILD_VERSION = typeof __BUILD_VERSION__ === "string" ? `v${__BUILD_VERSION__}` : "dev";
 
 const SUBAPP_ICON: Record<string, LucideIcon> = {
   game: Gamepad2,
@@ -618,7 +621,7 @@ export function Sidebar() {
             installed app (4318) disagree. */}
         <p
           className="cm-mono mt-2 text-center !text-2xs text-faint"
-          title="Build version (UTC) — yyyy.mm.dd.sssss, where sssss is the seconds elapsed since UTC midnight"
+          title="Build version (UTC) — vyyyy.mm.dd.sssss, where sssss is the seconds elapsed since UTC midnight"
         >
           {BUILD_VERSION}
         </p>

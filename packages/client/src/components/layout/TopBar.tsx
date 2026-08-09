@@ -35,8 +35,11 @@ export function TopBar() {
           className="size-6 shrink-0 rounded-md ring-1 ring-accent-line"
           title="Dispatch"
         />
+        {/* No version here. `v0.1` was a hardcoded stand-in that never moved and
+            said nothing about the bundle you're running; the sidebar's build
+            stamp does, so a second, permanently-wrong number next to the logo is
+            worse than none. */}
         <span className="text-base font-semibold tracking-tight text-primary">Dispatch</span>
-        <span className="cm-mono !text-2xs text-faint">v0.1</span>
       </div>
 
       {/* connection */}
