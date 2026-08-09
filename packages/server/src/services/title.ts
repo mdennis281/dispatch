@@ -14,8 +14,17 @@
  * messages (ignoring the default-title gate) so a user can force a fresh title.
  * Both flows read ONLY user messages — assistant output never seeds a title.
  *
- * The `query` fn + `now` are injectable so tests script a fake stream without a
- * `claude` subprocess or the network.
+ * Each generation spawns a `claude` subprocess, so the failure mode that
+ * actually bit was contention, not the model: finish a few turns at once and
+ * several title queries race the real chats' own spawns, every one of them
+ * blows a short deadline, and the user gets a row of "Title generation skipped
+ * (Operation aborted)" notices — the SDK's message for OUR timeout firing. So
+ * generations are gated to {@link TITLE_CONCURRENCY} at a time, get a wall-clock
+ * budget a cold Windows spawn can actually fit in, and retry before giving up.
+ * A notice is emitted only once the whole budget is spent.
+ *
+ * The `query` fn, `now` and `sleep` are injectable so tests script a fake stream
+ * without a `claude` subprocess, the network, or real backoff waits.
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { Options, Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -31,8 +40,26 @@ export const DEFAULT_CHAT_TITLE = "New chat";
 /** Cheapest model — titles never justify Opus/Sonnet spend. */
 export const TITLE_MODEL = "claude-haiku-4-5";
 
-/** Max wall-clock a single title generation may take before we abandon it. */
-const TITLE_TIMEOUT_MS = 20_000;
+/**
+ * Max wall-clock ONE attempt may take before we abandon it. Generous on
+ * purpose: nothing waits on a title, and the old 20s couldn't cover a cold
+ * `claude` spawn on Windows while the machine was busy starting a real turn —
+ * which is precisely when a title is generated.
+ */
+const TITLE_TIMEOUT_MS = 60_000;
+
+/** Attempts one generation gets. A spawn that lost a race deserves a rerun. */
+const TITLE_ATTEMPTS = 3;
+
+/** Backoff before attempt 2, 3, … — let the contention that killed us clear. */
+const TITLE_RETRY_DELAY_MS = [2_000, 6_000];
+
+/**
+ * How many title queries may be in flight across ALL chats. Each is a `claude`
+ * subprocess; letting eight fire at once is how they starve each other into the
+ * timeout. Queued generations don't start their clock until they run.
+ */
+const TITLE_CONCURRENCY = 2;
 
 /** The subset of the SDK `query` signature this service calls (single-shot). */
 export type TitleQueryFn = (params: {
@@ -45,6 +72,8 @@ export interface TitleServiceOptions {
   bus: EventBus;
   query?: TitleQueryFn;
   now?: () => number;
+  /** Backoff waiter — tests pass a no-op so retries don't cost real seconds. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /* --------------------------------------------------------------- helpers */
@@ -163,14 +192,24 @@ export class TitleService {
   private readonly bus: EventBus;
   private readonly query: TitleQueryFn;
   private readonly now: () => number;
-  /** chatIds with an in-flight generation — dedupes concurrent triggers. */
-  private readonly inFlight = new Set<string>();
+  private readonly sleep: (ms: number) => Promise<void>;
+  /**
+   * In-flight generation per chatId — dedupes concurrent triggers. Holds the
+   * PROMISE, not just the id, so a user-initiated regenerate can wait for the
+   * automatic run it collided with instead of being silently dropped.
+   */
+  private readonly inFlight = new Map<string, Promise<void>>();
+  /** Free slots in the global gate; waiters queue in `slotWaiters`. */
+  private slots = TITLE_CONCURRENCY;
+  private readonly slotWaiters: Array<() => void> = [];
 
   constructor(opts: TitleServiceOptions) {
     this.store = opts.store;
     this.bus = opts.bus;
     this.query = opts.query ?? (sdkQuery as unknown as TitleQueryFn);
     this.now = opts.now ?? (() => Date.now());
+    this.sleep =
+      opts.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   }
 
   /**
@@ -183,7 +222,7 @@ export class TitleService {
     const messages = await this.store.readMessages(chatId).catch(() => []);
     const seed = firstUserText(messages);
     if (!seed) return;
-    await this.generate(chatId, titlePrompt(seed));
+    await this.generate(chatId, titlePrompt(seed), { requireDefaultTitle: true });
   }
 
   /**
@@ -201,41 +240,114 @@ export class TitleService {
     // A spawned chat's title leads with an emphasized category (`**sweep**: …`)
     // that names WHERE the chat came from — something the transcript can't tell
     // the model and regeneration would therefore drop. Carry it across.
-    await this.generate(chatId, titlePrompt(seed), titlePrefixOf(chat.title));
+    await this.generate(chatId, titlePrompt(seed), {
+      prefix: titlePrefixOf(chat.title),
+      userInitiated: true,
+    });
   }
 
-  /** Run the one-shot query, sanitize, and persist + broadcast the new title. */
+  /**
+   * Run the one-shot query, sanitize, and persist + broadcast the new title.
+   *
+   * A collision with an already-running generation means one of two things. An
+   * AUTOMATIC trigger (we fire on every user/result row until the chat is named)
+   * is redundant, so it's dropped. A USER-initiated regenerate is a request we
+   * owe an answer to — dropping it is why "clicked Regenerate, nothing
+   * happened" — so it waits for the run in flight and then takes its own turn.
+   */
   private async generate(
     chatId: string,
     prompt: string,
-    prefix?: string | null,
+    opts: {
+      prefix?: string | null;
+      userInitiated?: boolean;
+      /** Abandon the result if the chat stopped being default-titled meanwhile. */
+      requireDefaultTitle?: boolean;
+    } = {},
   ): Promise<void> {
-    if (this.inFlight.has(chatId)) return;
-    this.inFlight.add(chatId);
+    const running = this.inFlight.get(chatId);
+    if (running) {
+      if (!opts.userInitiated) return;
+      await running.catch(() => {});
+      // Whoever we waited on may have been another regenerate that already
+      // started a third; one hand-off is enough to avoid an unbounded chain.
+      if (this.inFlight.has(chatId)) return;
+    }
+    const run = this.runGeneration(chatId, prompt, opts.prefix ?? null, {
+      requireDefaultTitle: opts.requireDefaultTitle === true,
+    });
+    this.inFlight.set(chatId, run);
     try {
-      // Marks are ours to add, never the model's: a stray `**…**` in generated
-      // prose would accent an arbitrary word and read as a category that isn't
-      // one. Only the prefix below may emphasize.
-      const generated = stripTitleMarks(sanitizeTitle(await this.runQuery(prompt)));
-      if (!generated) return;
-      const title = prefix ? withTitlePrefix(prefix, generated) : generated;
-      // Re-read so we never clobber a title the user renamed while we ran, and to
-      // patch onto the freshest chat record.
-      const chat = await this.store.getChat(chatId).catch(() => null);
-      if (!chat) return;
-      const updated: Chat = { ...chat, title, updatedAt: this.now() };
-      const saved = await this.store.saveChat(updated);
-      this.bus.publish({ type: "chat-update", chat: saved });
-    } catch (err) {
-      // Best-effort: a title is a nicety, never surface as a chat error.
-      this.bus.publish({
-        type: "notice",
-        chatId,
-        level: "info",
-        text: `Title generation skipped (${err instanceof Error ? err.message : String(err)}).`,
-      });
+      await run;
     } finally {
-      this.inFlight.delete(chatId);
+      // Only clear OUR entry — a regenerate that queued behind us may have
+      // installed its own by now.
+      if (this.inFlight.get(chatId) === run) this.inFlight.delete(chatId);
+    }
+  }
+
+  /** One generation, retries and all. Never throws — a title is best-effort. */
+  private async runGeneration(
+    chatId: string,
+    prompt: string,
+    prefix: string | null,
+    guard: { requireDefaultTitle: boolean },
+  ): Promise<void> {
+    let lastError = "";
+    for (let attempt = 0; attempt < TITLE_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        await this.sleep(TITLE_RETRY_DELAY_MS[attempt - 1] ?? 6_000);
+      }
+      try {
+        // Marks are ours to add, never the model's: a stray `**…**` in generated
+        // prose would accent an arbitrary word and read as a category that isn't
+        // one. Only the prefix below may emphasize.
+        const generated = stripTitleMarks(sanitizeTitle(await this.gated(prompt)));
+        // An empty answer is as useless as a thrown one, and just as likely to
+        // be a truncated stream — worth another attempt rather than a silent
+        // no-op that leaves the chat on "New chat".
+        if (!generated) {
+          lastError = "the model returned an empty title";
+          continue;
+        }
+        const title = prefix ? withTitlePrefix(prefix, generated) : generated;
+        // Re-read so we never clobber a title the user renamed while we ran, and
+        // to patch onto the freshest chat record. The window is wide now —
+        // retries can span minutes — so the automatic path re-checks the gate it
+        // was admitted through rather than trusting the read from before.
+        const chat = await this.store.getChat(chatId).catch(() => null);
+        if (!chat) return;
+        if (guard.requireDefaultTitle && chat.title.trim() !== DEFAULT_CHAT_TITLE) return;
+        const updated: Chat = { ...chat, title, updatedAt: this.now() };
+        const saved = await this.store.saveChat(updated);
+        this.bus.publish({ type: "chat-update", chat: saved });
+        return;
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    // Every attempt spent. Best-effort: a title is a nicety, never a chat error
+    // — but say how to get one rather than leaving a dead end.
+    this.bus.publish({
+      type: "notice",
+      chatId,
+      level: "info",
+      text: `Title generation skipped after ${TITLE_ATTEMPTS} tries (${lastError}). Chat menu → Regenerate title to retry.`,
+    });
+  }
+
+  /** Run a query under the global concurrency gate. */
+  private async gated(prompt: string): Promise<string> {
+    if (this.slots > 0) this.slots--;
+    else await new Promise<void>((resolve) => this.slotWaiters.push(resolve));
+    try {
+      return await this.runQuery(prompt);
+    } finally {
+      const next = this.slotWaiters.shift();
+      // Hand the slot straight to the next waiter rather than releasing it —
+      // releasing would let a newly-arriving generation jump the queue.
+      if (next) next();
+      else this.slots++;
     }
   }
 
@@ -255,6 +367,16 @@ export class TitleService {
         },
       });
       for await (const msg of q) collectText(msg, acc);
+    } catch (err) {
+      // The SDK reports OUR abort as a bare "Operation aborted", which reads as
+      // if something cancelled the chat. Name the actual cause — but only when
+      // we're the ones who aborted; a partial answer still beats an error.
+      if (abort.signal.aborted) {
+        const text = acc.text.trim() || acc.result.trim();
+        if (text) return text;
+        throw new Error(`timed out after ${Math.round(TITLE_TIMEOUT_MS / 1000)}s`);
+      }
+      throw err;
     } finally {
       clearTimeout(timer);
     }
