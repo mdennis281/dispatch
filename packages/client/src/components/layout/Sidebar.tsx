@@ -319,17 +319,31 @@ function ChatRow({
       )}
 
       {/* right rail (sibling of the row button — never a nested button): the
-          needs-input dot by default, swapped for hover-revealed actions. */}
+          needs-input dot by default, swapped for hover-revealed actions.
+          The actions stay MOUNTED at opacity-0 so they keep their tab stop and
+          their fade — but an opacity-0 button is invisible and still occupies
+          its 24px, so a dot sharing their flex row got pushed two icon-widths
+          off the right edge and read as a stray dot floating mid-row. Hence the
+          dot is taken out of flow and pinned to the rail's right edge instead.
+          It stands down for EITHER way the actions can appear: pointer hover of
+          the row, or keyboard focus landing in the rail. */}
       {!rename.editing && (
-        <div className="absolute inset-y-0 right-1.5 flex items-center gap-0.5">
+        <div className="group/rail absolute inset-y-0 right-1.5 flex items-center gap-0.5">
           {needsInput && (
-            <StatusDot tone="warn" pulse size={6} className="group-hover/row:hidden" />
+            <span
+              className={cn(
+                "pointer-events-none absolute inset-y-0 right-0 flex w-6 items-center justify-center",
+                "group-hover/row:hidden group-focus-within/rail:hidden",
+              )}
+            >
+              <StatusDot tone="warn" pulse size={6} />
+            </span>
           )}
           <IconButton
             size="sm"
             tip="Rename chat"
             onClick={rename.start}
-            className="opacity-0 group-hover/row:opacity-100"
+            className="opacity-0 transition-opacity duration-150 focus-visible:opacity-100 group-hover/row:opacity-100"
           >
             <Pencil />
           </IconButton>
@@ -337,7 +351,7 @@ function ChatRow({
             size="sm"
             tip="Delete chat"
             onClick={() => setConfirmDelete(true)}
-            className="opacity-0 group-hover/row:opacity-100"
+            className="opacity-0 transition-opacity duration-150 focus-visible:opacity-100 group-hover/row:opacity-100"
           >
             <Trash2 />
           </IconButton>
