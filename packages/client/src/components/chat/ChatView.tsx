@@ -96,8 +96,8 @@ function EmptyTranscript() {
       <span className="flex size-10 items-center justify-center rounded-lg border border-line bg-panel-2 text-muted [&_svg]:size-5">
         <MessagesSquare />
       </span>
-      <p className="text-[12.5px] text-secondary">No messages yet</p>
-      <p className="text-[11.5px] text-muted">Send a message below to start the turn.</p>
+      <p className="text-base text-secondary">No messages yet</p>
+      <p className="text-xs text-muted">Send a message below to start the turn.</p>
     </div>
   );
 }
@@ -324,19 +324,19 @@ export function ChatView({ chat }: { chat: Chat }) {
                 <input
                   {...rename.inputProps}
                   aria-label="Rename chat"
-                  className="w-[min(60vw,420px)] rounded-sm border border-accent-line bg-inset px-1.5 py-0.5 text-[13.5px] font-semibold tracking-tight text-primary outline-none"
+                  className="w-[min(60vw,420px)] rounded-sm border border-accent-line bg-inset px-1.5 py-0.5 text-lg font-semibold tracking-tight text-primary outline-none"
                 />
               ) : (
                 <h1
                   onDoubleClick={rename.start}
                   title="Double-click to rename"
-                  className="truncate text-[13.5px] font-semibold tracking-tight text-primary"
+                  className="truncate text-lg font-semibold tracking-tight text-primary"
                 >
                   <TitleText title={chat.title} />
                 </h1>
               )}
             </div>
-            <div className="flex items-center gap-1.5 text-[11px] text-muted">
+            <div className="flex items-center gap-1.5 text-xs text-muted">
               <span className={cn(running && "text-accent-hi")}>{meta.label}</span>
               {activity?.label && (
                 <>
@@ -464,7 +464,7 @@ export function ChatView({ chat }: { chat: Chat }) {
                     <button
                       onClick={loadOlderNow}
                       disabled={loadingOlder}
-                      className="inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-[11px] text-faint transition-colors hover:border-line-strong hover:text-secondary disabled:cursor-default disabled:hover:border-line disabled:hover:text-faint"
+                      className="inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-xs text-faint transition-colors hover:border-line-strong hover:text-secondary disabled:cursor-default disabled:hover:border-line disabled:hover:text-faint"
                     >
                       {loadingOlder ? (
                         <>
@@ -496,7 +496,7 @@ export function ChatView({ chat }: { chat: Chat }) {
             onClick={() => scrollToBottom("smooth")}
             className={cn(
               "absolute bottom-3 left-1/2 inline-flex -translate-x-1/2 items-center gap-1.5",
-              "rounded-full border border-line-strong bg-overlay px-2.5 py-1 text-[11px] font-medium text-secondary",
+              "rounded-full border border-line-strong bg-overlay px-2.5 py-1 text-xs font-medium text-secondary",
               "shadow-[var(--shadow-pop)] transition-colors hover:text-primary cm-anim-rise [&_svg]:size-3.5",
             )}
           >

@@ -100,10 +100,10 @@ function ProjectSelector({
             <FolderGit2 />
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-[12.5px] font-semibold text-primary">
+            <span className="block truncate text-base font-semibold text-primary">
               {active?.name ?? "No project"}
             </span>
-            <span className="block truncate cm-mono !text-[9.5px] text-faint">
+            <span className="block truncate cm-mono !text-2xs text-faint">
               {active ? midTruncate(active.repoPath, 30) : "—"}
             </span>
           </span>
@@ -114,7 +114,7 @@ function ProjectSelector({
       {(close) => (
         <div className="flex flex-col">
           {projects.length === 0 && (
-            <p className="px-2 py-1.5 text-[11.5px] text-faint">No projects yet.</p>
+            <p className="px-2 py-1.5 text-xs text-faint">No projects yet.</p>
           )}
           {projects.map((p) => (
             <MenuItem
@@ -194,7 +194,7 @@ function SubAppRow({
     <div className="group flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-hover">
       <Icon className={cn("size-3.5 shrink-0", running ? "text-accent-hi" : "text-muted")} />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[12px] text-secondary group-hover:text-primary">
+        <span className="block truncate text-sm text-secondary group-hover:text-primary">
           {app.name}
         </span>
       </span>
@@ -286,7 +286,7 @@ function ChatRow({
         <span className="min-w-0 flex-1">
           <span
             className={cn(
-              "block truncate text-[12.5px]",
+              "block truncate text-base",
               active ? "font-semibold text-primary" : "text-secondary",
             )}
           >
@@ -294,7 +294,7 @@ function ChatRow({
                 what the eye scans a long sidebar FOR. See ui/TitleText. */}
             <TitleText title={chat.title} />
           </span>
-          <span className="mt-px block truncate text-[10.5px] text-faint">
+          <span className="mt-px block truncate text-2xs text-faint">
             {meta.label}
             <span className="text-faint/70"> · {age}</span>
           </span>
@@ -310,7 +310,7 @@ function ChatRow({
           <input
             {...rename.inputProps}
             aria-label="Rename chat"
-            className="w-full rounded-sm border border-accent-line bg-inset px-1.5 py-0.5 text-[12.5px] font-semibold text-primary outline-none"
+            className="w-full rounded-sm border border-accent-line bg-inset px-1.5 py-0.5 text-base font-semibold text-primary outline-none"
           />
         </div>
       )}
@@ -372,7 +372,7 @@ function NavButton({
     <button
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12px] font-medium transition-colors [&_svg]:size-3.5",
+        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium transition-colors [&_svg]:size-3.5",
         active
           ? "bg-accent-ghost text-primary"
           : "text-secondary hover:bg-panel-2/60 hover:text-primary",
@@ -381,7 +381,7 @@ function NavButton({
       <Icon className={active ? "text-accent" : "text-muted"} />
       <span className="flex-1 text-left">{label}</span>
       {count !== undefined && (
-        <span className="cm-mono !text-[9.5px] text-faint">{count}</span>
+        <span className="cm-mono !text-2xs text-faint">{count}</span>
       )}
     </button>
   );
@@ -542,7 +542,7 @@ export function Sidebar() {
         {/* subApps */}
         <div className="mb-1 flex items-center gap-1.5 px-2.5 pb-1">
           <SectionLabel className="px-0">Apps</SectionLabel>
-          <span className="cm-mono !text-[9.5px] text-faint">{project?.subApps.length ?? 0}</span>
+          <span className="cm-mono !text-2xs text-faint">{project?.subApps.length ?? 0}</span>
           {project && project.subApps.length > 0 && (
             <div className="ml-auto">
               <BranchWorktreePicker
@@ -556,9 +556,9 @@ export function Sidebar() {
         </div>
         <div className="px-1.5">
           {!project ? (
-            <p className="px-2 py-1.5 text-[11px] text-faint">No project selected.</p>
+            <p className="px-2 py-1.5 text-xs text-faint">No project selected.</p>
           ) : project.subApps.length === 0 ? (
-            <p className="px-2 py-1.5 text-[11px] text-faint">No apps configured.</p>
+            <p className="px-2 py-1.5 text-xs text-faint">No apps configured.</p>
           ) : (
             project.subApps.map((app) => (
               <SubAppRow
@@ -581,11 +581,11 @@ export function Sidebar() {
             position, and it's labelled. */}
         <div className="mb-1 flex items-center justify-between px-2.5 pb-1">
           <SectionLabel className="px-0">Chats</SectionLabel>
-          <span className="cm-mono !text-[9.5px] text-faint">{chats.length || ""}</span>
+          <span className="cm-mono !text-2xs text-faint">{chats.length || ""}</span>
         </div>
         <div ref={chatListRef} className="space-y-0.5 px-1.5">
           {chats.length === 0 ? (
-            <p className="px-2 py-1.5 text-[11px] text-faint">
+            <p className="px-2 py-1.5 text-xs text-faint">
               {project ? "No chats yet." : "Select a project to see its chats."}
             </p>
           ) : (
@@ -608,7 +608,7 @@ export function Sidebar() {
         <button
           onClick={startNewChat}
           disabled={!project}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-line bg-panel-2 py-1.5 text-[12px] font-medium text-secondary transition-colors hover:border-line-strong hover:text-primary disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5"
+          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-line bg-panel-2 py-1.5 text-sm font-medium text-secondary transition-colors hover:border-line-strong hover:text-primary disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5"
         >
           <Plus />
           New chat
@@ -617,7 +617,7 @@ export function Sidebar() {
             looking at, which is the first question when dev (4319) and the
             installed app (4318) disagree. */}
         <p
-          className="cm-mono mt-2 text-center !text-[9.5px] text-faint"
+          className="cm-mono mt-2 text-center !text-2xs text-faint"
           title="Build version (UTC) — yyyy.mm.dd.sssss, where sssss is the seconds elapsed since UTC midnight"
         >
           {BUILD_VERSION}

@@ -195,7 +195,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-3">
           <FileCode2 className="size-4 shrink-0 text-accent-hi" />
           <span
-            className="min-w-0 truncate cm-mono !text-[12px] text-primary"
+            className="min-w-0 truncate cm-mono !text-sm text-primary"
             title={`${worktreePath}/${relPath}`}
           >
             {midTruncate(relPath, 60)}
@@ -207,7 +207,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
           <div className="ml-auto flex items-center gap-2">
             {editable && (
               <Button
-                size="xs"
+                size="sm"
                 variant={dirty ? "primary" : "subtle"}
                 leftIcon={
                   saving ? <Spinner size={12} /> : savedTick ? <Check /> : <Save />
@@ -301,18 +301,18 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
         </div>
 
         {/* footer */}
-        <div className="flex h-8 shrink-0 items-center gap-3 border-t border-line px-3 text-[10.5px] text-faint">
+        <div className="flex h-8 shrink-0 items-center gap-3 border-t border-line px-3 text-2xs text-faint">
           <span className="uppercase tracking-[0.08em]">{language}</span>
           {working && !workingBinary && (
             <span className="tabular-nums">{fmtBytes(working.size)}</span>
           )}
           {effectiveMode === "diff" && (
             <span className="text-muted">
-              vs <span className="cm-mono !text-[10px] text-secondary">{base}</span>
+              vs <span className="cm-mono !text-2xs text-secondary">{base}</span>
             </span>
           )}
           {editable && (
-            <span className={cn("cm-mono !text-[10px]", dirty ? "text-warn" : "text-faint")}>
+            <span className={cn("cm-mono !text-2xs", dirty ? "text-warn" : "text-faint")}>
               {dirty ? "unsaved changes" : "saved"}
             </span>
           )}
@@ -349,9 +349,9 @@ function StateNote({
       <span className="mb-2 flex size-9 items-center justify-center rounded-md border border-line bg-panel-2 [&_svg]:size-4">
         {icon}
       </span>
-      <p className="text-[12.5px] font-medium text-secondary">{title}</p>
+      <p className="text-base font-medium text-secondary">{title}</p>
       {detail && (
-        <p className="mt-0.5 max-w-md cm-mono !text-[11px] text-faint break-words">{detail}</p>
+        <p className="mt-0.5 max-w-md cm-mono !text-xs text-faint break-words">{detail}</p>
       )}
     </div>
   );

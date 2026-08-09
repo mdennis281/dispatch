@@ -114,9 +114,9 @@ export function GitDiffPane({
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line bg-panel px-3">
         <FileCode2 className="size-4 shrink-0 text-accent-hi" />
         <span className="min-w-0 truncate" title={relPath}>
-          <span className="cm-mono !text-[12px] text-primary">{name}</span>
+          <span className="cm-mono !text-sm text-primary">{name}</span>
           {dir && (
-            <span className="ml-1.5 cm-mono !text-[10.5px] text-faint">
+            <span className="ml-1.5 cm-mono !text-2xs text-faint">
               {midTruncate(dir, 46)}
             </span>
           )}
@@ -175,9 +175,9 @@ export function GitDiffPane({
         )}
       </div>
 
-      <div className="flex h-7 shrink-0 items-center gap-3 border-t border-line bg-panel px-3 text-[10.5px] text-faint">
+      <div className="flex h-7 shrink-0 items-center gap-3 border-t border-line bg-panel px-3 text-2xs text-faint">
         <span className="uppercase tracking-[0.08em]">{language}</span>
-        <span className="cm-mono !text-[10px] text-muted">
+        <span className="cm-mono !text-2xs text-muted">
           {leftRev === GIT_REV_EMPTY ? "∅" : leftRev} → {rightRev}
         </span>
         {truncated && (
@@ -209,9 +209,9 @@ function Note({
       <span className="mb-2 flex size-9 items-center justify-center rounded-md border border-line bg-panel-2 [&_svg]:size-4">
         {icon}
       </span>
-      <p className="text-[12.5px] font-medium text-secondary">{title}</p>
+      <p className="text-base font-medium text-secondary">{title}</p>
       {detail && (
-        <p className="mt-0.5 max-w-md cm-mono !text-[11px] text-faint break-words">{detail}</p>
+        <p className="mt-0.5 max-w-md cm-mono !text-xs text-faint break-words">{detail}</p>
       )}
     </div>
   );

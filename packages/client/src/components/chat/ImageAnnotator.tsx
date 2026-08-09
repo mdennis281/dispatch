@@ -297,10 +297,10 @@ export default function ImageAnnotator({
             {mode === "crop" ? <CropIcon /> : <Pencil />}
           </span>
           <div className="min-w-0 flex-1">
-            <h2 className="truncate text-[13px] font-semibold text-primary">
+            <h2 className="truncate text-base font-semibold text-primary">
               {mode === "crop" ? "Crop & rotate" : "Edit image"}
             </h2>
-            <p className="mt-px truncate text-[11px] text-muted">
+            <p className="mt-px truncate text-xs text-muted">
               {mode === "crop"
                 ? "Drag to crop, rotate/flip, then confirm with ✓"
                 : "Pen is ready — just drag. Other tools above, colour & width below."}
@@ -327,7 +327,7 @@ export default function ImageAnnotator({
             </div>
           ) : (
             <div className="flex items-center gap-1.5">
-              <span className="hidden items-center gap-1 text-[11px] text-faint sm:flex">
+              <span className="hidden items-center gap-1 text-xs text-faint sm:flex">
                 <RotateCcw className="size-3.5" /> confirm with ✓
               </span>
               <IconButton tip="Close editor" onClick={onCancel}>
@@ -338,7 +338,7 @@ export default function ImageAnnotator({
         </header>
 
         {error && (
-          <div className="flex items-center gap-1.5 bg-danger-ghost px-4 py-2 text-[11.5px] text-danger [&_svg]:size-3.5" role="alert">
+          <div className="flex items-center gap-1.5 bg-danger-ghost px-4 py-2 text-xs text-danger [&_svg]:size-3.5" role="alert">
             <ImageOff />
             {error}
           </div>

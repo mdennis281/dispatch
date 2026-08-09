@@ -87,7 +87,7 @@ function Section({
     <section className="space-y-2.5">
       <div className="flex items-baseline gap-2">
         <SectionLabel className="px-0">{title}</SectionLabel>
-        {hint && <span className="min-w-0 text-[10.5px] text-faint">{hint}</span>}
+        {hint && <span className="min-w-0 text-2xs text-faint">{hint}</span>}
       </div>
       {children}
     </section>
@@ -390,8 +390,8 @@ export function NewProjectView() {
           <FolderPlus />
         </span>
         <div className="min-w-0">
-          <h1 className="truncate text-[13px] font-semibold text-primary">New project</h1>
-          <p className="mt-px truncate text-[11px] text-muted">
+          <h1 className="truncate text-base font-semibold text-primary">New project</h1>
+          <p className="mt-px truncate text-xs text-muted">
             Name it and point it at a directory — an agent finishes the rest.
           </p>
         </div>
@@ -438,7 +438,7 @@ export function NewProjectView() {
                 {draft.repoPath.trim() && (
                   <div
                     className={cn(
-                      "flex items-start gap-1.5 text-[11px] leading-snug [&_svg]:mt-px [&_svg]:size-3.5 [&_svg]:shrink-0",
+                      "flex items-start gap-1.5 text-xs leading-snug [&_svg]:mt-px [&_svg]:size-3.5 [&_svg]:shrink-0",
                       TONE_CLS[probing ? "info" : verdict.tone],
                     )}
                   >
@@ -453,7 +453,7 @@ export function NewProjectView() {
                     them on save would be the worst version of this. They go
                     read-only, and the pane on the right shows the real file. */}
                 {adoptedConfig && (
-                  <div className="flex items-start gap-1.5 rounded-md border border-accent-line bg-accent-ghost px-2.5 py-2 text-[11px] leading-snug text-secondary [&_svg]:mt-px [&_svg]:size-3.5 [&_svg]:shrink-0">
+                  <div className="flex items-start gap-1.5 rounded-md border border-accent-line bg-accent-ghost px-2.5 py-2 text-xs leading-snug text-secondary [&_svg]:mt-px [&_svg]:size-3.5 [&_svg]:shrink-0">
                     <FileCog className="text-accent" />
                     <span className="min-w-0">
                       Name, worktree root, workflow and apps come from this repo&rsquo;s committed{" "}
@@ -499,7 +499,7 @@ export function NewProjectView() {
                     />
                   </Field>
                 </div>
-                <p className="text-[10.5px] leading-snug text-faint">
+                <p className="text-2xs leading-snug text-faint">
                   One directory per repo holding a subdirectory per branch — the convention
                   worktree tooling has settled on.{" "}
                   {/* The .gitignore advice only applies to a root that actually
@@ -600,7 +600,7 @@ export function NewProjectView() {
                   >
                     Add app
                   </Button>
-                  <span className="text-[10.5px] text-faint">
+                  <span className="text-2xs text-faint">
                     Name + path are required per row; empty rows are ignored.
                   </span>
                 </div>
@@ -612,8 +612,8 @@ export function NewProjectView() {
           <div className="shrink-0 border-t border-line bg-surface px-5 py-3.5 [&>*]:mx-auto [&>*]:max-w-[640px]">
             <div className="mb-2 flex items-center gap-2 [&_svg]:size-3.5">
               <Sparkles className="shrink-0 text-accent" />
-              <span className="text-[12px] font-semibold text-primary">Finish with AI</span>
-              <span className="ml-auto min-w-0 truncate text-[10.5px] text-faint">
+              <span className="text-sm font-semibold text-primary">Finish with AI</span>
+              <span className="ml-auto min-w-0 truncate text-2xs text-faint">
                 saves this config, then opens a chat that completes it
               </span>
             </div>

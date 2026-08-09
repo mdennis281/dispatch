@@ -64,7 +64,7 @@ function CreateWorktreeForm({ chat, onDone }: { chat: Chat; onDone: () => void }
   };
   return (
     <div className="flex flex-col gap-2 p-2.5">
-      <label className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint">Branch</label>
+      <label className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">Branch</label>
       <input
         autoFocus
         value={branch}
@@ -74,17 +74,17 @@ function CreateWorktreeForm({ chat, onDone }: { chat: Chat; onDone: () => void }
         }}
         spellCheck={false}
         placeholder="feat/my-task"
-        className="h-7 w-full rounded-md border border-line bg-inset px-2 cm-mono !text-[11.5px] text-primary outline-none placeholder:text-faint focus:border-line-strong"
+        className="h-7 w-full rounded-md border border-line bg-inset px-2 cm-mono !text-xs text-primary outline-none placeholder:text-faint focus:border-line-strong"
       />
-      <div className="flex items-center gap-1.5 text-[10.5px] text-faint">
+      <div className="flex items-center gap-1.5 text-2xs text-faint">
         <CornerDownRight className="size-3" />
         cut fresh from the project base
       </div>
       <div className="flex items-center justify-end gap-1.5 pt-0.5">
-        <Button size="xs" variant="ghost" onClick={onDone}>
+        <Button size="sm" variant="ghost" onClick={onDone}>
           Cancel
         </Button>
-        <Button size="xs" variant="primary" leftIcon={<GitBranch />} disabled={!valid} onClick={submit}>
+        <Button size="sm" variant="primary" leftIcon={<GitBranch />} disabled={!valid} onClick={submit}>
           Create
         </Button>
       </div>
@@ -100,7 +100,7 @@ function NewWorktreeButton({ chat }: { chat: Chat }) {
       width={240}
       className="p-0"
       trigger={({ toggle, open }) => (
-        <Button size="xs" variant="subtle" leftIcon={<Plus />} onClick={toggle} aria-expanded={open}>
+        <Button size="sm" variant="subtle" leftIcon={<Plus />} onClick={toggle} aria-expanded={open}>
           New
         </Button>
       )}
@@ -128,9 +128,9 @@ function WorktreePrRow({ pr }: { pr: PRInfo }) {
       className="flex items-center gap-2 border-t border-line-soft px-3 py-2 transition-colors hover:bg-hover"
     >
       <Icon className={cn("size-3.5 shrink-0", pr.state === "merged" ? "text-accent-hi" : "text-success")} />
-      <span className="min-w-0 flex-1 truncate text-[11px] text-secondary">{pr.title}</span>
+      <span className="min-w-0 flex-1 truncate text-xs text-secondary">{pr.title}</span>
       <Chip tone={PR_STATE_TONE[pr.state]}>{pr.isDraft ? "draft" : pr.state}</Chip>
-      <span className="shrink-0 cm-mono !text-[10px] text-faint">#{pr.number}</span>
+      <span className="shrink-0 cm-mono !text-2xs text-faint">#{pr.number}</span>
     </a>
   );
 }
@@ -171,8 +171,8 @@ function WorktreeCard({
       <div className="flex items-center gap-2 px-3 py-2">
         <GitBranch className="size-3.5 shrink-0 text-accent-hi" />
         <span className="min-w-0 flex-1">
-          <span className="block truncate cm-mono !text-[11.5px] font-medium text-primary">{wt.branch}</span>
-          <span className="flex items-center gap-1 text-[10.5px] text-faint">
+          <span className="block truncate cm-mono !text-xs font-medium text-primary">{wt.branch}</span>
+          <span className="flex items-center gap-1 text-2xs text-faint">
             <CornerDownRight className="size-3" />
             from {base}
             {wt.isDirty && (
@@ -198,7 +198,7 @@ function WorktreeCard({
         }}
         disabled={fileCount === 0}
         className={cn(
-          "flex w-full items-center justify-between border-t border-line-soft px-3 py-2 text-[11px] text-left",
+          "flex w-full items-center justify-between border-t border-line-soft px-3 py-2 text-xs text-left",
           fileCount > 0 && "transition-colors hover:bg-hover",
         )}
       >
@@ -225,10 +225,10 @@ function WorktreeCard({
               key={f.path}
               onClick={() => requestOpenFile({ worktreePath: wt.path, relPath: f.path, base })}
               title={`Open ${f.path} in Monaco`}
-              className="flex w-full items-center gap-2 rounded-sm px-1.5 py-1 text-left text-[11px] transition-colors hover:bg-active"
+              className="flex w-full items-center gap-2 rounded-sm px-1.5 py-1 text-left text-xs transition-colors hover:bg-active"
             >
               <FileDiff className="size-3 shrink-0 text-muted" />
-              <span className="min-w-0 flex-1 truncate cm-mono !text-[10.5px] text-secondary">
+              <span className="min-w-0 flex-1 truncate cm-mono !text-2xs text-secondary">
                 {midTruncate(f.path, 32)}
               </span>
               <span className="shrink-0 tabular-nums text-success">+{f.add}</span>
@@ -242,7 +242,7 @@ function WorktreeCard({
 
       <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-2">
         <Button
-          size="xs"
+          size="sm"
           variant="subtle"
           leftIcon={<FileDiff />}
           disabled={!diff || diff.files.length === 0}
@@ -253,7 +253,7 @@ function WorktreeCard({
         >
           Open diff
         </Button>
-        <Button size="xs" variant="ghost" leftIcon={copied ? <Check /> : <FolderOpen />} onClick={reveal}>
+        <Button size="sm" variant="ghost" leftIcon={copied ? <Check /> : <FolderOpen />} onClick={reveal}>
           {copied ? "Copied" : "Reveal"}
         </Button>
         <IconButton
@@ -293,15 +293,15 @@ function PendingWorktreeCard({ path, chatId }: { path: string; chatId: string })
       <div className="flex items-center gap-2 px-3 py-2">
         <GitBranch className="size-3.5 shrink-0 text-faint" />
         <span className="min-w-0 flex-1">
-          <span className="block truncate cm-mono !text-[11.5px] font-medium text-secondary">{name}</span>
-          <span className="flex items-center gap-1 text-[10.5px] text-faint">
+          <span className="block truncate cm-mono !text-xs font-medium text-secondary">{name}</span>
+          <span className="flex items-center gap-1 text-2xs text-faint">
             <Spinner size={10} />
             syncing worktree…
           </span>
         </span>
       </div>
       <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-2">
-        <Button size="xs" variant="ghost" leftIcon={copied ? <Check /> : <FolderOpen />} onClick={reveal}>
+        <Button size="sm" variant="ghost" leftIcon={copied ? <Check /> : <FolderOpen />} onClick={reveal}>
           {copied ? "Copied" : "Reveal"}
         </Button>
         <IconButton
@@ -359,8 +359,8 @@ export function WorktreesPanel({ chat }: { chat: Chat }) {
     return (
       <div className="px-4 py-10 text-center">
         <GitBranch className="mx-auto mb-2 size-5 text-faint" />
-        <p className="text-[12px] text-muted">No worktrees yet.</p>
-        <p className="mt-0.5 text-[11px] text-faint">
+        <p className="text-sm text-muted">No worktrees yet.</p>
+        <p className="mt-0.5 text-xs text-faint">
           Worktrees appear here when the agent creates one for this chat.
         </p>
         <div className="mt-3 flex justify-center">
@@ -373,7 +373,7 @@ export function WorktreesPanel({ chat }: { chat: Chat }) {
   return (
     <div className="space-y-2.5 p-3">
       <div className="flex items-center justify-between px-0.5">
-        <span className="text-[11px] text-faint">
+        <span className="text-xs text-faint">
           {total} worktree{total > 1 ? "s" : ""}
         </span>
         <NewWorktreeButton chat={chat} />

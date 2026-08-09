@@ -139,19 +139,19 @@ export function FilePathPicker({
             onKeyDown={onKeyDown}
             placeholder="Find a file — its full path is inserted into your message"
             aria-label="Search files"
-            className="min-w-0 flex-1 bg-transparent text-[13px] text-primary outline-none placeholder:text-faint"
+            className="min-w-0 flex-1 bg-transparent text-base text-primary outline-none placeholder:text-faint"
           />
           {loading && <Spinner size={13} />}
         </div>
 
         <div ref={listRef} className="cm-scroll min-h-0 flex-1 overflow-y-auto py-1">
           {error && (
-            <div className="px-3 py-6 text-center text-[12px] text-danger" role="alert">
+            <div className="px-3 py-6 text-center text-sm text-danger" role="alert">
               {error}
             </div>
           )}
           {!error && files.length === 0 && !loading && (
-            <div className="px-3 py-6 text-center text-[12px] text-muted">
+            <div className="px-3 py-6 text-center text-sm text-muted">
               {query ? `No files match “${query}”` : "No files found in this checkout"}
             </div>
           )}
@@ -172,7 +172,7 @@ export function FilePathPicker({
                 <span className="shrink-0 text-faint [&_svg]:size-3.5">
                   <FileIcon />
                 </span>
-                <span className="min-w-0 flex-1 truncate text-[12.5px]">
+                <span className="min-w-0 flex-1 truncate text-base">
                   {/* The directory is context, the filename is the answer — so the
                       filename carries the weight and the dir recedes. Truncation
                       is left-biased (`dir` shrinks first) for the same reason. */}
@@ -190,7 +190,7 @@ export function FilePathPicker({
         </div>
 
         {root && (
-          <div className="cm-mono shrink-0 truncate border-t border-line-soft px-3 py-1.5 !text-[10px] text-faint">
+          <div className="cm-mono shrink-0 truncate border-t border-line-soft px-3 py-1.5 !text-2xs text-faint">
             {root}
           </div>
         )}

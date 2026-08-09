@@ -23,7 +23,7 @@ export const TYPE_OPTIONS = (Object.keys(TYPE_META) as MemoryType[]).map((value)
 }));
 
 const inputCls =
-  "h-7 w-full rounded-md border border-line bg-inset px-2 text-[12px] text-primary outline-none " +
+  "h-7 w-full rounded-md border border-line bg-inset px-2 text-sm text-primary outline-none " +
   "placeholder:text-faint focus:border-line-strong";
 
 /** Create/edit form. `initial` set → edit (name is the fixed identity). Shared by
@@ -69,7 +69,7 @@ export function MemoryForm({
   return (
     <div className="flex flex-col gap-2.5 p-4">
       <div className="flex items-center justify-between">
-        <span className="text-[11px] font-semibold uppercase tracking-[0.09em] text-faint">
+        <span className="text-xs font-semibold uppercase tracking-[0.09em] text-faint">
           {editing ? "Edit memory" : "New memory"}
         </span>
         <IconButton size="sm" tip="Cancel" onClick={() => onDone()}>
@@ -78,7 +78,7 @@ export function MemoryForm({
       </div>
 
       <label className="flex flex-col gap-1">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint">Name</span>
+        <span className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">Name</span>
         <input
           autoFocus={!editing}
           value={name}
@@ -86,20 +86,20 @@ export function MemoryForm({
           onChange={(e) => setName(e.target.value)}
           spellCheck={false}
           placeholder="deploy-runbook"
-          className={cn(inputCls, "cm-mono !text-[11.5px]", editing && "opacity-60")}
+          className={cn(inputCls, "cm-mono !text-xs", editing && "opacity-60")}
         />
         {editing && (
-          <span className="text-[10px] text-faint">Name is the memory's identity and can't be changed.</span>
+          <span className="text-2xs text-faint">Name is the memory's identity and can't be changed.</span>
         )}
       </label>
 
       <label className="flex flex-col gap-1">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint">Type</span>
+        <span className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">Type</span>
         <Select options={TYPE_OPTIONS} value={type} onChange={setType} width={200} />
       </label>
 
       <label className="flex flex-col gap-1">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint">Description</span>
+        <span className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">Description</span>
         <input
           value={description}
           onChange={(e) => setDescription(e.target.value)}
@@ -109,7 +109,7 @@ export function MemoryForm({
       </label>
 
       <label className="flex flex-col gap-1">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint">Body</span>
+        <span className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">Body</span>
         <textarea
           value={body}
           onChange={(e) => setBody(e.target.value)}
@@ -117,19 +117,19 @@ export function MemoryForm({
           placeholder="The full fact, in markdown…  Link related memories with [[their-name]]."
           className={cn(
             inputCls,
-            "h-auto min-h-48 resize-y py-1.5 cm-mono !text-[11.5px] leading-relaxed",
+            "h-auto min-h-48 resize-y py-1.5 cm-mono !text-xs leading-relaxed",
           )}
         />
       </label>
 
-      {error && <p className="text-[11px] text-danger">{error}</p>}
+      {error && <p className="text-xs text-danger">{error}</p>}
 
       <div className="flex items-center justify-end gap-1.5 pt-0.5">
-        <Button size="xs" variant="ghost" onClick={() => onDone()}>
+        <Button size="sm" variant="ghost" onClick={() => onDone()}>
           Cancel
         </Button>
         <Button
-          size="xs"
+          size="sm"
           variant="primary"
           leftIcon={<Check />}
           disabled={!valid || saving}

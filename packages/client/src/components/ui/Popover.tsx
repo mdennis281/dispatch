@@ -229,7 +229,7 @@ export function MenuItem({
       onClick={onClick}
       title={title}
       className={cn(
-        "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[12px] text-secondary " +
+        "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-secondary " +
           "transition-colors hover:bg-active hover:text-primary",
         active && "text-primary",
         className,
@@ -237,7 +237,7 @@ export function MenuItem({
     >
       {icon && <span className="text-muted [&_svg]:size-3.5">{icon}</span>}
       <span className="flex-1 truncate">{children}</span>
-      {hint && <span className="shrink-0 text-[10.5px] text-faint">{hint}</span>}
+      {hint && <span className="shrink-0 text-2xs text-faint">{hint}</span>}
     </button>
   );
 }

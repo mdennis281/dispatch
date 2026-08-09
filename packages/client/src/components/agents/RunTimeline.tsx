@@ -94,20 +94,20 @@ function StepRow({
         <span className="flex items-baseline gap-1.5">
           <span
             className={cn(
-              "truncate text-[11.5px] font-medium",
+              "truncate text-xs font-medium",
               failed ? "text-danger" : active ? "text-primary" : "text-secondary",
             )}
           >
             {title}
           </span>
           {step.kind === "tool" && step.durationMs !== undefined && (
-            <span className="ml-auto shrink-0 cm-mono !text-[9.5px] text-faint">
+            <span className="ml-auto shrink-0 cm-mono !text-2xs text-faint">
               {runDuration(step.durationMs)}
             </span>
           )}
         </span>
         {detail && (
-          <span className="mt-px block truncate cm-mono !text-[10px] text-faint">
+          <span className="mt-px block truncate cm-mono !text-2xs text-faint">
             {detail}
           </span>
         )}
@@ -127,11 +127,11 @@ export function RunTimeline({
 }) {
   return (
     <div className="flex flex-col gap-px p-2">
-      <div className="px-1 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">
+      <div className="px-1 pb-1.5 text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
         Timeline
       </div>
       {run.steps.length === 0 ? (
-        <p className="px-1 py-2 text-[11.5px] text-faint">
+        <p className="px-1 py-2 text-xs text-faint">
           {run.status === "running" ? "Starting up…" : "No recorded steps."}
         </p>
       ) : (

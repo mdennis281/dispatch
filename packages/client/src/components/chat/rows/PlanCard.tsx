@@ -70,7 +70,7 @@ export function PlanBody({
             expanded ? "cm-scroll max-h-[60vh] overflow-y-auto" : "max-h-64 overflow-hidden",
           )}
         >
-          <Markdown className="!text-[12.5px]">{plan}</Markdown>
+          <Markdown className="!text-base">{plan}</Markdown>
           {!expanded && (
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-inset to-transparent" />
           )}
@@ -78,7 +78,7 @@ export function PlanBody({
         {long && (
           <button
             onClick={() => setExpanded((v) => !v)}
-            className="mt-0.5 mb-1 inline-flex items-center gap-1 text-[11px] text-muted transition-colors hover:text-primary"
+            className="mt-0.5 mb-1 inline-flex items-center gap-1 text-xs text-muted transition-colors hover:text-primary"
           >
             <ChevronDown className={cn("size-3 transition-transform", expanded && "rotate-180")} />
             {expanded ? "Collapse plan" : "Show full plan"}
@@ -88,7 +88,7 @@ export function PlanBody({
 
       {allowedPrompts.length > 0 && (
         <div className="mt-2">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">
+          <div className="mb-1 text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
             Pre-approved for this run · {allowedPrompts.length}
           </div>
           <div className="flex flex-col gap-1">
@@ -99,9 +99,9 @@ export function PlanBody({
               >
                 <Terminal className="mt-px size-3 shrink-0 text-faint" />
                 {p.tool && (
-                  <span className="shrink-0 cm-mono !text-[10.5px] text-accent-hi">{p.tool}</span>
+                  <span className="shrink-0 cm-mono !text-2xs text-accent-hi">{p.tool}</span>
                 )}
-                <span className="min-w-0 break-words text-[11.5px] text-secondary">{p.prompt}</span>
+                <span className="min-w-0 break-words text-xs text-secondary">{p.prompt}</span>
               </div>
             ))}
           </div>
@@ -164,7 +164,7 @@ export function PlanCard({ row }: PlanCardProps) {
         )}
       >
         <div className="flex items-center gap-2 px-3 py-2">
-          <span className="text-[12.5px] text-primary">
+          <span className="text-base text-primary">
             Claude finished <span className="font-semibold text-accent-hi">planning</span>
           </span>
           {pending ? (
@@ -195,7 +195,7 @@ export function PlanCard({ row }: PlanCardProps) {
               onChange={(e) => setFeedback(e.target.value)}
               disabled={busy}
               placeholder="What to change (optional) — sent to Claude if you keep planning"
-              className="h-7 w-full rounded-md border border-line bg-panel-2 px-2 text-[12px] text-primary placeholder:text-faint focus:border-line-strong focus:outline-none"
+              className="h-7 w-full rounded-md border border-line bg-panel-2 px-2 text-sm text-primary placeholder:text-faint focus:border-line-strong focus:outline-none"
             />
             <div className="flex items-center gap-1.5">
               <Button
@@ -226,7 +226,7 @@ export function PlanCard({ row }: PlanCardProps) {
 
         {!pending && row.message && (
           <div className="border-t border-line-soft px-3 py-2">
-            <p className="text-[11.5px] text-muted">{row.message}</p>
+            <p className="text-xs text-muted">{row.message}</p>
           </div>
         )}
       </div>

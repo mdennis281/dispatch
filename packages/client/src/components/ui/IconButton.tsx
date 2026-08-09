@@ -11,9 +11,10 @@ export interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>
   children: ReactNode;
 }
 
+// Square counterparts of Button's two heights — see the note there.
 const sizes: Record<Size, string> = {
   sm: "size-6 [&_svg]:size-3.5",
-  md: "size-7 [&_svg]:size-4",
+  md: "size-8 [&_svg]:size-4",
 };
 
 export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(

@@ -66,13 +66,13 @@ export function CodeBlock({ code, language = "ts", filename, className }: CodeBl
     >
       <div className="flex h-8 items-center gap-2 border-b border-line-soft bg-hover px-3">
         <span className="size-2 rounded-full bg-line-strong" />
-        <span className="cm-mono !text-[10.5px] text-muted">{label}</span>
+        <span className="cm-mono !text-2xs text-muted">{label}</span>
         {filename && (
-          <span className="cm-mono !text-[10px] text-faint">{LABELS[lang] ?? lang}</span>
+          <span className="cm-mono !text-2xs text-faint">{LABELS[lang] ?? lang}</span>
         )}
         <button
           onClick={copy}
-          className="ml-auto inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-faint opacity-0 transition-opacity hover:bg-active hover:text-secondary group-hover:opacity-100 [&_svg]:size-3"
+          className="ml-auto inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-2xs text-faint opacity-0 transition-opacity hover:bg-active hover:text-secondary group-hover:opacity-100 [&_svg]:size-3"
         >
           {copied ? <Check className="text-success" /> : <Copy />}
           {copied ? "Copied" : "Copy"}

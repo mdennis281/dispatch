@@ -32,8 +32,8 @@ function WindowRow({
   return (
     <div className="px-3 py-2">
       <div className="mb-1 flex items-baseline justify-between gap-2">
-        <span className="text-[11.5px] font-medium text-secondary">{label}</span>
-        <span className={cn("cm-mono text-[11px] font-semibold", t.text)}>{pct}%</span>
+        <span className="text-xs font-medium text-secondary">{label}</span>
+        <span className={cn("cm-mono text-xs font-semibold", t.text)}>{pct}%</span>
       </div>
       <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-line">
         <span
@@ -42,7 +42,7 @@ function WindowRow({
         />
       </div>
       {win.resetsAt !== null && (
-        <div className="mt-1 text-[10.5px] text-faint">resets in {untilShort(win.resetsAt, now)}</div>
+        <div className="mt-1 text-2xs text-faint">resets in {untilShort(win.resetsAt, now)}</div>
       )}
     </div>
   );
@@ -119,14 +119,14 @@ export function UsageMeter() {
           usage.stale && "opacity-70",
         )}
       >
-        <span className="cm-mono text-[9.5px] text-faint">{primaryLabel}</span>
+        <span className="cm-mono text-2xs text-faint">{primaryLabel}</span>
         <span className="relative h-1 w-7 overflow-hidden rounded-full bg-line">
           <span
             className={cn("absolute inset-y-0 left-0 rounded-full", t.bar)}
             style={{ width: `${clampPct(primary.percent)}%` }}
           />
         </span>
-        <span className={cn("text-[11px] font-semibold tabular-nums", t.text)}>
+        <span className={cn("text-xs font-semibold tabular-nums", t.text)}>
           {Math.round(primary.percent)}%
         </span>
       </button>
@@ -145,7 +145,7 @@ export function UsageMeter() {
           >
             <div className="flex items-center gap-1.5 border-b border-line px-3 py-2">
               <Gauge className="size-3.5 text-muted" />
-              <span className="text-[11.5px] font-semibold tracking-tight text-primary">
+              <span className="text-xs font-semibold tracking-tight text-primary">
                 Claude usage
               </span>
             </div>
@@ -156,7 +156,7 @@ export function UsageMeter() {
             </div>
 
             <div className="flex items-center justify-between gap-2 border-t border-line px-3 py-1.5">
-              <span className="text-[10px] text-faint">
+              <span className="text-2xs text-faint">
                 {usage.error === "rate_limited"
                   ? "rate-limited · showing last"
                   : usage.error === "unauthenticated"
@@ -166,7 +166,7 @@ export function UsageMeter() {
               <button
                 onClick={() => void refresh()}
                 disabled={refreshing}
-                className="inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-secondary transition-colors hover:bg-active hover:text-primary disabled:opacity-50 [&_svg]:size-3"
+                className="inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-2xs text-secondary transition-colors hover:bg-active hover:text-primary disabled:opacity-50 [&_svg]:size-3"
               >
                 <RotateCw className={cn(refreshing && "cm-anim-spin")} />
                 Refresh

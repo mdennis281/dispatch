@@ -25,8 +25,8 @@ function NoChat() {
       <span className="mb-3 flex size-11 items-center justify-center rounded-lg border border-line bg-panel-2 text-muted [&_svg]:size-5">
         <MessageSquareDashed />
       </span>
-      <p className="text-[13px] font-medium text-secondary">No chat selected</p>
-      <p className="mt-0.5 text-[11.5px] text-muted">Pick a chat from the sidebar or start a new one.</p>
+      <p className="text-base font-medium text-secondary">No chat selected</p>
+      <p className="mt-0.5 text-xs text-muted">Pick a chat from the sidebar or start a new one.</p>
     </div>
   );
 }

@@ -40,8 +40,8 @@ export function ImageLightbox({
         className="flex items-center gap-2 px-4 py-2.5 text-secondary"
         onClick={(e) => e.stopPropagation()}
       >
-        <span className="min-w-0 flex-1 truncate text-[12px] text-secondary">{name}</span>
-        {dims && <span className="cm-mono !text-[10.5px] text-faint">{dims}</span>}
+        <span className="min-w-0 flex-1 truncate text-sm text-secondary">{name}</span>
+        {dims && <span className="cm-mono !text-2xs text-faint">{dims}</span>}
         <a
           href={src}
           download={name}

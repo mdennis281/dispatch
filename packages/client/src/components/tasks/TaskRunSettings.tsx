@@ -119,8 +119,8 @@ function OptionRow({
       )}
     >
       <span className={selected ? "text-accent" : "text-faint"}>{icon}</span>
-      <span className="min-w-0 truncate text-[12px]">{label}</span>
-      {hint && <span className="shrink-0 text-[10.5px] text-faint">{hint}</span>}
+      <span className="min-w-0 truncate text-sm">{label}</span>
+      {hint && <span className="shrink-0 text-2xs text-faint">{hint}</span>}
       {selected && <Check className="ml-auto text-accent" />}
     </button>
   );
@@ -128,7 +128,7 @@ function OptionRow({
 
 function GroupLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="mb-1 mt-3 flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-faint first:mt-0 [&_svg]:size-3">
+    <div className="mb-1 mt-3 flex items-center gap-1.5 text-2xs uppercase tracking-wide text-faint first:mt-0 [&_svg]:size-3">
       {children}
     </div>
   );
@@ -170,7 +170,7 @@ export function TaskRunSettings({
       description="Remembered for this task, on this browser."
       footer={
         <>
-          <span className="min-w-0 flex-1 text-[10.5px] leading-snug text-faint">
+          <span className="min-w-0 flex-1 text-2xs leading-snug text-faint">
             {customized
               ? `Default for this task: ${runSummary(models, defaults)}`
               : "Using this task's defaults."}

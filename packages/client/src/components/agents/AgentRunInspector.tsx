@@ -36,7 +36,7 @@ import { useDialogLayer } from "../../lib/layers.js";
 /** A labelled metric in the header strip. */
 function Stat({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
   return (
-    <span className="inline-flex items-center gap-1 text-[11px] text-muted [&_svg]:size-3 [&_svg]:text-faint">
+    <span className="inline-flex items-center gap-1 text-xs text-muted [&_svg]:size-3 [&_svg]:text-faint">
       {icon}
       {children}
     </span>
@@ -52,7 +52,7 @@ function RunReport({ run }: { run: SubagentRun }) {
 
   if (run.status === "running") {
     return (
-      <div className="flex items-center gap-2 px-4 py-2.5 text-[11.5px] text-faint">
+      <div className="flex items-center gap-2 px-4 py-2.5 text-xs text-faint">
         <span className="size-1.5 rounded-full bg-accent cm-anim-pulse" />
         {run.async
           ? "Launched in the background — its closing message appears here when it finishes."
@@ -62,7 +62,7 @@ function RunReport({ run }: { run: SubagentRun }) {
   }
   if (!run.report) {
     return (
-      <div className="px-4 py-2.5 text-[11.5px] text-faint">
+      <div className="px-4 py-2.5 text-xs text-faint">
         This run returned no report.
       </div>
     );
@@ -76,12 +76,12 @@ function RunReport({ run }: { run: SubagentRun }) {
         <ChevronRight
           className={cn("size-3 shrink-0 text-faint transition-transform", open && "rotate-90")}
         />
-        <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">
+        <span className="text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
           {run.async ? "Final message" : "Report to the main agent"}
         </span>
         {run.status === "failed" && <Chip tone="danger">failed</Chip>}
         {!open && (
-          <span className="min-w-0 truncate text-[11px] text-muted">
+          <span className="min-w-0 truncate text-xs text-muted">
             {run.report.split("\n").find((l) => l.trim())}
           </span>
         )}
@@ -139,14 +139,14 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
         {!run ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
             <ListTree className="size-5 text-faint" />
-            <p className="text-[12.5px] text-secondary">This run isn&rsquo;t loaded</p>
-            <p className="max-w-[380px] text-[11.5px] text-muted">
+            <p className="text-base text-secondary">This run isn&rsquo;t loaded</p>
+            <p className="max-w-[380px] text-xs text-muted">
               Its rows are above the part of the transcript that&rsquo;s loaded. Scroll up
               in the chat to page them in, then reopen.
             </p>
             <button
               onClick={close}
-              className="mt-1 rounded-[5px] border border-line px-2.5 py-1 text-[11.5px] text-secondary hover:text-primary"
+              className="mt-1 rounded-[5px] border border-line px-2.5 py-1 text-xs text-secondary hover:text-primary"
             >
               Close
             </button>
@@ -167,7 +167,7 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
                 <AgentGlyph status={run.status} size={7} />
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <h2 className="truncate text-[13.5px] font-semibold tracking-tight text-primary">
+                    <h2 className="truncate text-lg font-semibold tracking-tight text-primary">
                       {run.agentType}
                     </h2>
                     {run.model && (
@@ -186,7 +186,7 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
                     )}
                   </div>
                   {run.description && (
-                    <p className="truncate text-[11.5px] text-muted" title={run.description}>
+                    <p className="truncate text-xs text-muted" title={run.description}>
                       {run.description}
                     </p>
                   )}
@@ -195,7 +195,7 @@ export function AgentRunInspector({ chatId, runId }: { chatId: string; runId: st
                 <div className="ml-auto flex items-center gap-3">
                   <Stat icon={<Clock />}>
                     <span
-                      className={cn("cm-mono !text-[11px] tabular-nums", live && "text-accent-hi")}
+                      className={cn("cm-mono !text-xs tabular-nums", live && "text-accent-hi")}
                     >
                       {runDuration(elapsed)}
                     </span>

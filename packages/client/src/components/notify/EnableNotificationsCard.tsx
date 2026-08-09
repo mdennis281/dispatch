@@ -30,10 +30,10 @@ export function EnableNotificationsCard() {
           <Bell />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-[12.5px] font-medium leading-snug text-primary">
+          <p className="text-base font-medium leading-snug text-primary">
             Turn on notifications
           </p>
-          <p className="mt-0.5 text-[11px] leading-snug text-muted">
+          <p className="mt-0.5 text-xs leading-snug text-muted">
             Get pinged when an agent needs a decision while you're in another window.
           </p>
         </div>

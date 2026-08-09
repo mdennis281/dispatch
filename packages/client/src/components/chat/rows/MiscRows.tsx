@@ -30,7 +30,7 @@ export function WorkingRow({ label }: { label?: string }) {
     >
       <div className="inline-flex items-center gap-2.5 rounded-md border border-accent-line/60 bg-accent-ghost/40 px-2.5 py-1.5">
         <TypingPulse />
-        <span className="text-[12px] font-medium text-accent-hi">{label ?? "Working…"}</span>
+        <span className="text-sm font-medium text-accent-hi">{label ?? "Working…"}</span>
       </div>
     </RowShell>
   );
@@ -64,13 +64,13 @@ export function StreamingRow({ text, thinking }: { text: string; thinking?: stri
         </div>
       ) : (
         <div className="min-w-0">
-          <div className="inline-flex items-center gap-2 text-[12px] text-muted">
+          <div className="inline-flex items-center gap-2 text-sm text-muted">
             <Brain className="size-3.5 text-accent-hi" />
             <span>Thinking…</span>
             <TypingPulse />
           </div>
           {thinking && (
-            <div className="mt-1 line-clamp-3 border-l-2 border-line pl-3 text-[12px] italic leading-[1.55] text-muted">
+            <div className="mt-1 line-clamp-3 border-l-2 border-line pl-3 text-sm italic leading-[1.55] text-muted">
               {thinking}
             </div>
           )}
@@ -95,7 +95,7 @@ function CenterNote({
   return (
     <div className="flex items-center gap-2.5 px-4 py-1.5">
       <span className="h-px flex-1 bg-line-soft" />
-      <span className={cn("inline-flex items-center gap-1.5 text-[10.5px] [&_svg]:size-3", toneCls)}>
+      <span className={cn("inline-flex items-center gap-1.5 text-2xs [&_svg]:size-3", toneCls)}>
         {icon}
         {children}
       </span>
@@ -123,7 +123,7 @@ export const ResultRowView = memo(function ResultRowView({ row }: { row: ResultR
   return (
     <CenterNote icon={<CheckCircle2 />}>
       Turn complete
-      {parts.length > 0 && <span className="cm-mono !text-[10px] text-faint"> · {parts.join(" · ")}</span>}
+      {parts.length > 0 && <span className="cm-mono !text-2xs text-faint"> · {parts.join(" · ")}</span>}
     </CenterNote>
   );
 });
@@ -160,7 +160,7 @@ export const NoticeRowView = memo(function NoticeRowView({ row }: { row: NoticeR
     <div className="flex items-center gap-2 px-4 py-1.5">
       <div className="ml-7 flex items-center gap-2">
         <Icon className={cn("size-3.5", tone)} />
-        <span className={cn("text-[11.5px]", tone)}>{row.text}</span>
+        <span className={cn("text-xs", tone)}>{row.text}</span>
       </div>
     </div>
   );

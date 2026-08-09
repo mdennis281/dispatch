@@ -33,7 +33,9 @@ export function SegmentedControl<T extends string>({
   className,
   compact = false,
 }: SegmentedControlProps<T>) {
-  const h = size === "sm" ? "h-6" : "h-7";
+  // Button's two heights (see ui/Button), so a segmented control sits on the
+  // same baseline as the buttons beside it in a toolbar.
+  const h = size === "sm" ? "h-6" : "h-8";
   return (
     <div
       className={cn(
@@ -49,7 +51,7 @@ export function SegmentedControl<T extends string>({
             onClick={() => onChange(s.value)}
             aria-label={compact ? s.label : undefined}
             className={cn(
-              "inline-flex items-center gap-1 rounded-[5px] text-[11.5px] font-medium " +
+              "inline-flex items-center gap-1 rounded-[5px] text-xs font-medium " +
                 "transition-colors duration-150 ease-[var(--ease-out)] [&_svg]:size-3",
               compact ? "justify-center px-1.5" : "px-2",
               h,

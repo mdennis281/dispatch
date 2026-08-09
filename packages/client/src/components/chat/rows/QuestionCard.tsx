@@ -303,7 +303,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
         )}
       >
         <div className="flex items-center gap-2 px-3 py-2">
-          <span className="text-[12.5px] text-primary">
+          <span className="text-base text-primary">
             {multi ? (
               <>
                 Claude has some <span className="font-semibold text-accent-hi">questions</span>
@@ -335,7 +335,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
 
         {reverting && (
           <div className="border-t border-line-soft bg-accent-ghost/30 px-3 py-2">
-            <p className="text-[11.5px] text-secondary">
+            <p className="text-xs text-secondary">
               Agent stopped. {declined ? "You declined this." : `Previously: ${row.message ?? "—"}.`}{" "}
               Pick again — your answer is sent as a correction.
             </p>
@@ -349,11 +349,11 @@ export function QuestionCard({ row }: QuestionCardProps) {
             <div key={qi}>
               <div className="border-t border-line-soft px-3 py-2">
                 {multi && q.header && (
-                  <p className="mb-1 text-[10.5px] font-medium uppercase tracking-wide text-accent-hi">
+                  <p className="mb-1 text-2xs font-medium uppercase tracking-wide text-accent-hi">
                     {q.header}
                   </p>
                 )}
-                <p className="whitespace-pre-wrap break-words text-[12.5px] leading-relaxed text-secondary">
+                <p className="whitespace-pre-wrap break-words text-base leading-relaxed text-secondary">
                   {q.question}
                 </p>
                 {/* Say the selection rule in words. The checkbox-vs-radio shape
@@ -361,7 +361,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
                     nobody reads before their first click — which on a
                     multi-select is the click that matters. */}
                 {pending && q.options.length > 0 && (
-                  <p className="mt-1 text-[11px] text-muted">
+                  <p className="mt-1 text-xs text-muted">
                     {q.multiSelect ? "Select all that apply" : "Select one"}
                     {q.multiSelect && sel.length > 0 && (
                       <span className="text-accent-hi"> · {sel.length} selected</span>
@@ -403,9 +403,9 @@ export function QuestionCard({ row }: QuestionCardProps) {
                           <Check />
                         </span>
                         <span className="min-w-0 flex-1">
-                          <span className="block text-[12px] font-medium">{o.label}</span>
+                          <span className="block text-sm font-medium">{o.label}</span>
                           {o.description && (
-                            <span className="mt-0.5 block text-[11px] text-muted">{o.description}</span>
+                            <span className="mt-0.5 block text-xs text-muted">{o.description}</span>
                           )}
                         </span>
                       </button>
@@ -429,7 +429,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
                     }}
                     placeholder={q.options.length ? "…or type a custom answer" : "Type your answer"}
                     className={cn(
-                      "mt-1 h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-[12px] text-primary",
+                      "mt-1 h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-sm text-primary",
                       "placeholder:text-faint focus:border-line-strong focus:outline-none",
                     )}
                   />
@@ -445,7 +445,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
                     }}
                     placeholder="Notes (optional) — sent with your answer"
                     className={cn(
-                      "h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-[12px] text-primary",
+                      "h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-sm text-primary",
                       "placeholder:text-faint focus:border-line-strong focus:outline-none",
                     )}
                   />
@@ -468,7 +468,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
               {submitLabel}
             </Button>
             {!allAnswered && (
-              <span className="text-[11px] text-muted">
+              <span className="text-xs text-muted">
                 {multi ? "Answer every question to continue" : "Pick an option or type an answer"}
               </span>
             )}
@@ -486,7 +486,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
 
         {!pending && (declined || row.message || corrected) && (
           <div className="flex items-center gap-2 border-t border-line-soft px-3 py-2">
-            <p className="min-w-0 flex-1 text-[11.5px] text-muted">
+            <p className="min-w-0 flex-1 text-xs text-muted">
               {corrected
                 ? "Correction sent — the agent was stopped and told your real answer."
                 : declined
@@ -499,7 +499,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
               onClick={revert}
               onBlur={() => setConfirmRevert(false)}
               className={cn(
-                "flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors [&_svg]:size-3",
+                "flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-xs transition-colors [&_svg]:size-3",
                 confirmRevert
                   ? "bg-accent-ghost text-accent-hi"
                   : "text-muted hover:text-primary",

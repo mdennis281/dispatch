@@ -27,8 +27,8 @@ export function ImageThumb({ chatId, img }: { chatId: string; img: ImageRef }) {
           <ImageIcon />
         </span>
         <div className="leading-tight">
-          <div className="text-[11.5px] text-secondary">{name}</div>
-          {dims && <div className="cm-mono !text-[10px] text-faint">{dims}</div>}
+          <div className="text-xs text-secondary">{name}</div>
+          {dims && <div className="cm-mono !text-2xs text-faint">{dims}</div>}
         </div>
       </div>
     );
@@ -52,8 +52,8 @@ export function ImageThumb({ chatId, img }: { chatId: string; img: ImageRef }) {
           />
         </button>
         <figcaption className="flex items-center gap-1.5 border-t border-line-soft px-2 py-1">
-          <span className="truncate text-[10.5px] text-secondary">{name}</span>
-          {dims && <span className="cm-mono !text-[10px] text-faint">{dims}</span>}
+          <span className="truncate text-2xs text-secondary">{name}</span>
+          {dims && <span className="cm-mono !text-2xs text-faint">{dims}</span>}
         </figcaption>
       </figure>
       {zoomed && (

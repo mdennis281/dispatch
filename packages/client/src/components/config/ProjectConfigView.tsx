@@ -69,13 +69,13 @@ function ErrorList({ errors }: { errors: ProjectConfigError[] }) {
   if (!errors.length) return null;
   return (
     <div className="rounded-md border border-danger/30 bg-danger-ghost px-3 py-2">
-      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-danger [&_svg]:size-3.5">
+      <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-danger [&_svg]:size-3.5">
         <TriangleAlert />
         {errors.length} load {errors.length === 1 ? "error" : "errors"}
       </div>
       <ul className="space-y-0.5">
         {errors.map((e, i) => (
-          <li key={i} className="text-[11px] leading-snug text-muted">
+          <li key={i} className="text-xs leading-snug text-muted">
             <span className="cm-mono text-danger/90">[{e.scope}]</span>{" "}
             {e.file ? <span className="cm-mono text-faint">{e.file}: </span> : null}
             {e.message}
@@ -299,11 +299,11 @@ export function ProjectConfigView() {
               <InlineError message={error} />
             </div>
           ) : dirty ? (
-            <span className="mr-auto truncate text-[10.5px] font-medium text-warn">
+            <span className="mr-auto truncate text-2xs font-medium text-warn">
               Unsaved changes
             </span>
           ) : (
-            <span className="mr-auto truncate text-[10.5px] text-faint" title={result?.sourceDir ?? ""}>
+            <span className="mr-auto truncate text-2xs text-faint" title={result?.sourceDir ?? ""}>
               {result?.sourceDir ?? "no .dispatch/ — using .data defaults"}
             </span>
           )}
@@ -366,10 +366,10 @@ export function ProjectConfigView() {
       {!projectId ? (
         <div className="rounded-md border border-dashed border-line px-3 py-10 text-center">
           <FolderGit2 className="mx-auto mb-1.5 size-5 text-faint" />
-          <p className="text-[12px] text-muted">No active project.</p>
+          <p className="text-sm text-muted">No active project.</p>
         </div>
       ) : loading && !result ? (
-        <div className="flex items-center justify-center gap-2 py-16 text-[12px] text-muted">
+        <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted">
           <Spinner size={14} /> Loading config…
         </div>
       ) : (
@@ -377,7 +377,7 @@ export function ProjectConfigView() {
           {confirmClose && (
             <div className="flex items-center gap-2 rounded-md border border-warn/40 bg-warn-ghost px-3 py-2">
               <TriangleAlert className="size-3.5 shrink-0 text-warn" />
-              <span className="min-w-0 flex-1 text-[11.5px] text-secondary">
+              <span className="min-w-0 flex-1 text-xs text-secondary">
                 You have unsaved workflow changes.
               </span>
               <Button variant="ghost" onClick={() => setConfirmClose(false)}>
@@ -407,8 +407,8 @@ export function ProjectConfigView() {
           {!hasDir && !config && (
             <div className="rounded-md border border-dashed border-line px-3 py-4 text-center">
               <FileCog className="mx-auto mb-1.5 size-5 text-faint" />
-              <p className="text-[12px] text-secondary">No .dispatch/ in this repo.</p>
-              <p className="mx-auto mt-0.5 max-w-md text-[11px] text-faint">
+              <p className="text-sm text-secondary">No .dispatch/ in this repo.</p>
+              <p className="mx-auto mt-0.5 max-w-md text-xs text-faint">
                 The workflow profile below still applies. Scaffold a committable
                 <span className="cm-mono"> .dispatch/</span> to add instructions, agents, skills
                 and the rest — and to share them with the repo.
@@ -448,7 +448,7 @@ export function ProjectConfigView() {
                     )}
                   >
                     <Icon className={cn("shrink-0", selected ? "text-accent" : "text-muted")} />
-                    <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">
+                    <span className="min-w-0 flex-1 truncate text-xs font-medium">
                       {s.label}
                     </span>
                     {count !== null && (

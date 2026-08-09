@@ -52,15 +52,15 @@ const ToolBlock = memo(function ToolBlock({
           className={cn("size-3 shrink-0 text-faint transition-transform", open && "rotate-90")}
         />
         <span className="shrink-0 text-muted [&_svg]:size-3.5">{toolIcon(step.use.name)}</span>
-        <span className="shrink-0 text-[12px] font-medium text-primary">
+        <span className="shrink-0 text-sm font-medium text-primary">
           {toolLabel(step.use.name)}
         </span>
         {detail && (
-          <span className="min-w-0 truncate cm-mono !text-[11px] text-muted">{detail}</span>
+          <span className="min-w-0 truncate cm-mono !text-xs text-muted">{detail}</span>
         )}
         <span className="ml-auto flex shrink-0 items-center gap-2">
           {step.durationMs !== undefined && (
-            <span className="cm-mono !text-[10px] text-faint">
+            <span className="cm-mono !text-2xs text-faint">
               {runDuration(step.durationMs)}
             </span>
           )}
@@ -78,7 +78,7 @@ const ToolBlock = memo(function ToolBlock({
       {open && (
         <div className="cm-anim-rise space-y-2 border-t border-line-soft px-3 py-2.5">
           <div>
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">
+            <div className="mb-1 text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
               Arguments
             </div>
             <div className="cm-scroll max-h-40 overflow-auto rounded-[5px] border border-line-soft bg-inset px-2.5 py-2">
@@ -89,7 +89,7 @@ const ToolBlock = memo(function ToolBlock({
           </div>
           {step.result && (
             <div>
-              <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">
+              <div className="mb-1 text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
                 Result
               </div>
               <div
@@ -137,10 +137,10 @@ function NestedRunBlock({
       <CornerDownRight className="size-3.5 shrink-0 text-faint" />
       <AgentGlyph status={status} size={5} />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[12px] font-medium text-accent-hi">{type}</span>
-        {desc && <span className="block truncate text-[11px] text-muted">{desc}</span>}
+        <span className="block truncate text-sm font-medium text-accent-hi">{type}</span>
+        {desc && <span className="block truncate text-xs text-muted">{desc}</span>}
       </span>
-      <span className="shrink-0 text-[11px] text-faint transition-colors group-hover:text-accent-hi">
+      <span className="shrink-0 text-xs text-faint transition-colors group-hover:text-accent-hi">
         Open →
       </span>
     </button>
@@ -187,7 +187,7 @@ export function RunStream({
     >
       <div className="flex flex-col gap-2.5">
         {run.steps.length === 0 && (
-          <p className="py-6 text-center text-[12px] text-faint">
+          <p className="py-6 text-center text-sm text-faint">
             {run.status === "running"
               ? "The subagent is starting up…"
               : "This run recorded no messages."}
@@ -206,10 +206,10 @@ export function RunStream({
             {step.kind === "message" ? (
               <div className="px-0.5">
                 <div className="mb-1 flex items-center gap-2">
-                  <span className="text-[11.5px] font-semibold tracking-tight text-accent-hi">
+                  <span className="text-xs font-semibold tracking-tight text-accent-hi">
                     {run.agentType}
                   </span>
-                  <span className="cm-mono !text-[10px] text-faint">{clock(step.ts)}</span>
+                  <span className="cm-mono !text-2xs text-faint">{clock(step.ts)}</span>
                 </div>
                 <Markdown>{step.row.text}</Markdown>
               </div>
@@ -224,7 +224,7 @@ export function RunStream({
         {run.status === "running" && (
           <div className="flex items-center gap-2 px-0.5 py-1">
             <TypingPulse />
-            <span className="text-[11.5px] text-muted">{run.latest ?? "Working…"}</span>
+            <span className="text-xs text-muted">{run.latest ?? "Working…"}</span>
           </div>
         )}
       </div>

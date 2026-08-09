@@ -170,7 +170,7 @@ export function CodeRefChip({
       type="button"
       onClick={() => openCodeViewer(request)}
       title={`Open ${request.relPath}${range ? `:${range}` : ""}`}
-      className="inline-flex items-center gap-1 rounded-[4px] border border-accent-line/70 bg-accent-ghost px-1 py-px align-baseline cm-mono !text-[11.5px] text-accent-hi transition-colors hover:border-accent hover:bg-accent-ghost/80 hover:text-accent-hi [&_svg]:size-3 [&_svg]:-mb-px [&_svg]:opacity-80"
+      className="inline-flex items-center gap-1 rounded-[4px] border border-accent-line/70 bg-accent-ghost px-1 py-px align-baseline cm-mono !text-xs text-accent-hi transition-colors hover:border-accent hover:bg-accent-ghost/80 hover:text-accent-hi [&_svg]:size-3 [&_svg]:-mb-px [&_svg]:opacity-80"
     >
       <FileCode2 />
       {label}

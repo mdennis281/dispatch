@@ -39,7 +39,7 @@ function Switch({
       role="switch"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className="flex items-center gap-2 text-[12px] font-medium text-secondary"
+      className="flex items-center gap-2 text-sm font-medium text-secondary"
     >
       <span
         className={cn(
@@ -76,7 +76,7 @@ function DesktopNotifications() {
   return (
     <div className="mb-3 rounded-md border border-line bg-inset/40 px-2.5 py-2">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-[12px] font-medium text-secondary">Desktop notifications</span>
+        <span className="text-sm font-medium text-secondary">Desktop notifications</span>
         {unavailable || permission === "unsupported" ? null : permission === "granted" ? (
           <Switch
             checked={enabled}
@@ -84,14 +84,14 @@ function DesktopNotifications() {
             label={enabled ? "On" : "Muted"}
           />
         ) : permission === "denied" ? (
-          <span className="text-[11px] text-warn">Blocked</span>
+          <span className="text-xs text-warn">Blocked</span>
         ) : (
-          <Button size="xs" onClick={() => void request()}>
+          <Button size="sm" onClick={() => void request()}>
             Enable
           </Button>
         )}
       </div>
-      <p className="mt-1 text-[11px] leading-snug text-faint">
+      <p className="mt-1 text-xs leading-snug text-faint">
         {unavailable ??
           (permission === "denied"
             ? "You blocked notifications for this origin — re-allow them in the browser's site settings, then reopen this panel."
@@ -282,8 +282,8 @@ export function SettingsPanel() {
               that repo, and any single chat can override both. */}
           <div className="mt-3 flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[11px] font-medium text-secondary">Show sent context</div>
-              <p className="mt-0.5 text-[10.5px] leading-snug text-faint">
+              <div className="text-xs font-medium text-secondary">Show sent context</div>
+              <p className="mt-0.5 text-2xs leading-snug text-faint">
                 Reveal what Dispatch attaches to your turns on your behalf — surfaced
                 memories, repo snapshots. Rendering only; the agent receives it either way.
               </p>
@@ -300,10 +300,10 @@ export function SettingsPanel() {
               A project's `.dispatch/project.yaml` can override it per repo. */}
           <div className="mt-3 flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[11px] font-medium text-secondary">
+              <div className="text-xs font-medium text-secondary">
                 Auto-approve spawned chats
               </div>
-              <p className="mt-0.5 text-[10.5px] leading-snug text-faint">
+              <p className="mt-0.5 text-2xs leading-snug text-faint">
                 Agents can start new chats with <span className="font-mono">spawn_chat</span>.
                 Off, every spawn waits on your approval; on, they start unattended.
               </p>
@@ -376,7 +376,7 @@ export function SettingsPanel() {
               label={(ac.enabled ?? true) ? "Auto-compact on" : "Auto-compact off"}
             />
           </div>
-          <p className="mb-2 text-[11px] text-faint">
+          <p className="mb-2 text-xs text-faint">
             When a session's context window fills, summarize the conversation and continue
             automatically instead of erroring. Applies to new turns.
           </p>

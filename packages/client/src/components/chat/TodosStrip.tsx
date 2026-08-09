@@ -26,7 +26,7 @@ function TodoRow({ todo }: { todo: Todo }) {
       </span>
       <span
         className={cn(
-          "min-w-0 flex-1 text-[12px] leading-snug",
+          "min-w-0 flex-1 text-sm leading-snug",
           todo.status === "completed" && "text-muted line-through decoration-line-strong",
           todo.status === "in_progress" && "font-medium text-primary",
           todo.status === "pending" && "text-secondary",
@@ -63,10 +63,10 @@ export function TodosStrip({ messages }: { messages: ChatMessage[] }) {
         <ListChecks
           className={cn("size-3.5 shrink-0", allDone ? "text-success" : "text-accent-hi")}
         />
-        <span className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.08em] text-secondary">
+        <span className="shrink-0 text-xs font-semibold uppercase tracking-[0.08em] text-secondary">
           Tasks
         </span>
-        <span className="shrink-0 cm-mono !text-[10px] tabular-nums text-faint">
+        <span className="shrink-0 cm-mono !text-2xs tabular-nums text-faint">
           {completed}/{total}
         </span>
         <span className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-line">
@@ -80,12 +80,12 @@ export function TodosStrip({ messages }: { messages: ChatMessage[] }) {
         </span>
         {/* Collapsed → surface what the agent is doing right now (or "all done"). */}
         {!open && active && (
-          <span className="min-w-0 flex-1 truncate text-[11px] text-accent-hi">
+          <span className="min-w-0 flex-1 truncate text-xs text-accent-hi">
             {active.activeForm ?? active.content}
           </span>
         )}
         {!open && !active && allDone && (
-          <span className="min-w-0 flex-1 truncate text-[11px] text-success">All tasks done</span>
+          <span className="min-w-0 flex-1 truncate text-xs text-success">All tasks done</span>
         )}
         <ChevronDown
           className={cn(

@@ -108,14 +108,14 @@ export function ProcessesPanel({ projectId }: { projectId: string }) {
       {open && (
         <div className="border-t border-line-soft">
           {error && (
-            <div className="flex items-start gap-1.5 px-3 py-2 text-[11px] text-danger [&_svg]:size-3 [&_svg]:mt-px">
+            <div className="flex items-start gap-1.5 px-3 py-2 text-xs text-danger [&_svg]:size-3 [&_svg]:mt-px">
               <AlertTriangle />
               <span className="min-w-0 flex-1 break-words">{error}</span>
             </div>
           )}
 
           {rows.length === 0 ? (
-            <div className="px-3 py-4 text-center text-[11px] text-faint">
+            <div className="px-3 py-4 text-center text-xs text-faint">
               {loading ? "Scanning ports…" : "Nothing listening on this project's ports."}
             </div>
           ) : (
@@ -129,13 +129,13 @@ export function ProcessesPanel({ projectId }: { projectId: string }) {
                     :{p.port}
                   </Chip>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[11.5px] text-secondary">
+                    <span className="block truncate text-xs text-secondary">
                       {p.name ?? "unknown"}
                       {p.subAppId && (
                         <span className="text-faint"> · {p.subAppId}</span>
                       )}
                     </span>
-                    <span className="flex items-center gap-1.5 cm-mono !text-[10px] text-faint">
+                    <span className="flex items-center gap-1.5 cm-mono !text-2xs text-faint">
                       pid {p.pid}
                       {p.branch && <span className="truncate">· {p.branch}</span>}
                     </span>
@@ -160,7 +160,7 @@ export function ProcessesPanel({ projectId }: { projectId: string }) {
             <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-2">
               {orphans.length > 0 && (
                 <Button
-                  size="xs"
+                  size="sm"
                   variant="subtle"
                   leftIcon={<Skull />}
                   disabled={busy}
@@ -170,7 +170,7 @@ export function ProcessesPanel({ projectId }: { projectId: string }) {
                 </Button>
               )}
               <Button
-                size="xs"
+                size="sm"
                 variant="danger"
                 leftIcon={<Skull />}
                 disabled={busy}

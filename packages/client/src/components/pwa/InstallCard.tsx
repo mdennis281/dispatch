@@ -37,10 +37,10 @@ export function InstallCard() {
           <Download />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-[12.5px] font-medium leading-snug text-primary">
+          <p className="text-base font-medium leading-snug text-primary">
             Install Dispatch
           </p>
-          <p className="mt-0.5 text-[11px] leading-snug text-muted">
+          <p className="mt-0.5 text-xs leading-snug text-muted">
             Click to install as an app — its own window, taskbar icon, and desktop
             notifications while agents run.
           </p>
@@ -49,7 +49,7 @@ export function InstallCard() {
               e.stopPropagation();
               snooze();
             }}
-            className="mt-1.5 text-[11px] font-medium text-faint underline-offset-2 transition-colors hover:text-secondary hover:underline"
+            className="mt-1.5 text-xs font-medium text-faint underline-offset-2 transition-colors hover:text-secondary hover:underline"
           >
             Not now
           </button>

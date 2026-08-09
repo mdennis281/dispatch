@@ -392,7 +392,7 @@ export function CommandPalette({
               setActive(0);
             }}
             placeholder="Search or run a command…"
-            className="min-w-0 flex-1 bg-transparent text-[13.5px] text-primary placeholder:text-faint outline-none"
+            className="min-w-0 flex-1 bg-transparent text-lg text-primary placeholder:text-faint outline-none"
             spellCheck={false}
             autoComplete="off"
           />
@@ -401,7 +401,7 @@ export function CommandPalette({
 
         <div ref={listRef} className="cm-scroll max-h-[52vh] overflow-y-auto p-1.5">
           {results.length === 0 ? (
-            <div className="px-3 py-10 text-center text-[12.5px] text-muted">
+            <div className="px-3 py-10 text-center text-base text-muted">
               No commands match “{query}”.
             </div>
           ) : (
@@ -427,14 +427,14 @@ export function CommandPalette({
                   {cmd.icon}
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[12.5px] font-medium text-primary">
+                  <span className="block truncate text-base font-medium text-primary">
                     {cmd.title}
                   </span>
                   {cmd.subtitle && (
-                    <span className="block truncate text-[11px] text-muted">{cmd.subtitle}</span>
+                    <span className="block truncate text-xs text-muted">{cmd.subtitle}</span>
                   )}
                 </span>
-                <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-faint">
+                <span className="shrink-0 text-2xs font-medium uppercase tracking-wide text-faint">
                   {cmd.group}
                 </span>
               </button>
@@ -442,7 +442,7 @@ export function CommandPalette({
           )}
         </div>
 
-        <div className="flex items-center gap-3 px-3.5 py-2 cm-hairline-t text-[10.5px] text-faint">
+        <div className="flex items-center gap-3 px-3.5 py-2 cm-hairline-t text-2xs text-faint">
           <span className="flex items-center gap-1">
             <Kbd>
               <ArrowUp className="size-2.5" />

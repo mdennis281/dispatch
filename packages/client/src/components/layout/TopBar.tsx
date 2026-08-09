@@ -35,14 +35,14 @@ export function TopBar() {
           className="size-6 shrink-0 rounded-md ring-1 ring-accent-line"
           title="Dispatch"
         />
-        <span className="text-[13px] font-semibold tracking-tight text-primary">Dispatch</span>
-        <span className="cm-mono !text-[9.5px] text-faint">v0.1</span>
+        <span className="text-base font-semibold tracking-tight text-primary">Dispatch</span>
+        <span className="cm-mono !text-2xs text-faint">v0.1</span>
       </div>
 
       {/* connection */}
       <div className="flex items-center gap-1.5 rounded-md border border-line bg-panel-2/60 px-2 py-1">
         <StatusDot tone={c.tone} pulse={c.pulse} size={6} />
-        <span className={cn("text-[11px] font-medium", c.text)}>{c.label}</span>
+        <span className={cn("text-xs font-medium", c.text)}>{c.label}</span>
       </div>
 
       {/* Command palette — ONE affordance, not three. This box used to sit
@@ -56,7 +56,7 @@ export function TopBar() {
         className="group ml-2 hidden items-center gap-2 rounded-md border border-line bg-panel-2/50 px-2 py-1 text-muted transition-colors hover:border-line-strong hover:text-secondary md:flex"
       >
         <Search className="size-3.5" />
-        <span className="text-[11.5px]">Search or run a command</span>
+        <span className="text-xs">Search or run a command</span>
         <span className="ml-6 flex items-center gap-0.5">
           <Kbd>⌘</Kbd>
           <Kbd>K</Kbd>

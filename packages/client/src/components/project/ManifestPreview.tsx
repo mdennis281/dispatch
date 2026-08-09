@@ -58,18 +58,18 @@ export function ManifestPreview({
     <div className={cn("flex min-h-0 flex-col overflow-hidden bg-inset", className)}>
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line-soft px-4 [&_svg]:size-3.5">
         <FileCode2 className={cn("shrink-0", existing ? "text-accent" : "text-muted")} />
-        <span className="cm-mono !text-[11px] font-medium text-secondary">project.yaml</span>
+        <span className="cm-mono !text-xs font-medium text-secondary">project.yaml</span>
         {existing && (
-          <span className="shrink-0 rounded-[4px] bg-accent-ghost px-1.5 py-px text-[10px] font-medium text-accent">
+          <span className="shrink-0 rounded-[4px] bg-accent-ghost px-1.5 py-px text-2xs font-medium text-accent">
             already in this repo
           </span>
         )}
-        <span className="min-w-0 truncate text-[10.5px] text-faint" title={path}>
+        <span className="min-w-0 truncate text-2xs text-faint" title={path}>
           {path}
         </span>
         <button
           onClick={copy}
-          className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-[10.5px] text-faint transition-colors hover:bg-active hover:text-secondary [&_svg]:size-3"
+          className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-2xs text-faint transition-colors hover:bg-active hover:text-secondary [&_svg]:size-3"
         >
           {copied ? <Check className="text-success" /> : <Copy />}
           {copied ? "Copied" : "Copy"}
@@ -94,7 +94,7 @@ export function ManifestPreview({
         </SyntaxHighlighter>
       </div>
 
-      <p className="shrink-0 border-t border-line-soft px-4 py-2 text-[10.5px] leading-snug text-faint">
+      <p className="shrink-0 border-t border-line-soft px-4 py-2 text-2xs leading-snug text-faint">
         {existing ? (
           <>
             This repo already carries this file, and it stays exactly as it is — it&rsquo;s the

@@ -47,10 +47,10 @@ export const SubagentCard = memo(function SubagentCard({ run }: SubagentCardProp
         )}
       >
         <div className="flex min-w-0 items-center gap-2 px-2.5 pt-2">
-          <span className="shrink-0 text-[12px] font-semibold text-accent-2-hi">subagent</span>
+          <span className="shrink-0 text-sm font-semibold text-accent-2-hi">subagent</span>
           <RunIdentity run={run} />
           {run.description && (
-            <span className="min-w-0 truncate text-[11.5px] text-muted">
+            <span className="min-w-0 truncate text-xs text-muted">
               {run.description}
             </span>
           )}
@@ -63,30 +63,30 @@ export const SubagentCard = memo(function SubagentCard({ run }: SubagentCardProp
         {live && run.latest && (
           <div className="mt-1.5 flex min-w-0 items-center gap-1.5 px-2.5">
             <span className="size-1 shrink-0 rounded-full bg-accent cm-anim-pulse" />
-            <span className="min-w-0 truncate cm-mono !text-[10.5px] text-accent-2-hi/90">
+            <span className="min-w-0 truncate cm-mono !text-2xs text-accent-2-hi/90">
               {run.latest}
             </span>
           </div>
         )}
 
         <div className="mt-2 flex items-center gap-3 px-2.5 pb-2">
-          <span className="inline-flex items-center gap-1 text-[10.5px] text-faint [&_svg]:size-3">
+          <span className="inline-flex items-center gap-1 text-2xs text-faint [&_svg]:size-3">
             <Clock />
-            <span className={cn("cm-mono !text-[10px] tabular-nums", live && "text-accent-hi")}>
+            <span className={cn("cm-mono !text-2xs tabular-nums", live && "text-accent-hi")}>
               {runDuration(elapsed)}
             </span>
           </span>
-          <span className="inline-flex items-center gap-1 text-[10.5px] text-faint [&_svg]:size-3">
+          <span className="inline-flex items-center gap-1 text-2xs text-faint [&_svg]:size-3">
             <Wrench />
             {run.toolCount}
           </span>
           {run.childRunIds.length > 0 && (
-            <span className="text-[10.5px] text-faint">
+            <span className="text-2xs text-faint">
               +{run.childRunIds.length} nested
             </span>
           )}
           <RunProgressRail run={run} className="ml-1 min-w-0 flex-1 justify-start" />
-          <span className="inline-flex shrink-0 items-center gap-0.5 text-[10.5px] text-faint transition-colors group-hover/run:text-accent-2-hi [&_svg]:size-3">
+          <span className="inline-flex shrink-0 items-center gap-0.5 text-2xs text-faint transition-colors group-hover/run:text-accent-2-hi [&_svg]:size-3">
             Open run
             <ArrowUpRight />
           </span>

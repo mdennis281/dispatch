@@ -50,8 +50,8 @@ export function Select<T extends string>({
             aria-expanded={open}
             aria-label={compact ? tip : undefined}
             className={cn(
-              "inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-panel-2 " +
-                "text-[12px] font-medium text-secondary transition-colors hover:border-line-strong hover:text-primary " +
+              "inline-flex h-6 items-center gap-1.5 rounded-md border border-line bg-panel-2 " +
+                "text-sm font-medium text-secondary transition-colors hover:border-line-strong hover:text-primary " +
                 "[&_svg]:size-3.5",
               compact ? "justify-center px-1.5" : "px-2",
               open && "border-line-strong text-primary",

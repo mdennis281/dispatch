@@ -75,8 +75,8 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
           <Icon />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[12px] font-medium text-primary">{runner.subAppId}</span>
-          <span className="flex items-center gap-1.5 text-[10.5px] text-faint">
+          <span className="block truncate text-sm font-medium text-primary">{runner.subAppId}</span>
+          <span className="flex items-center gap-1.5 text-2xs text-faint">
             <StatusDot tone={running ? "working" : runner.status === "crashed" ? "danger" : "muted"} pulse={active} size={5} />
             {runner.status === "starting" ? "starting…" : running ? "running" : runner.status}
             {runner.pid && <span className="cm-mono">· pid {runner.pid}</span>}
@@ -111,30 +111,30 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
 
       {/* branch this runner is on */}
       {runner.branch && (
-        <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-1 text-[10.5px] text-faint [&_svg]:size-3">
+        <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-1 text-2xs text-faint [&_svg]:size-3">
           <GitBranch className="text-accent-hi/70" />
-          <span className="truncate cm-mono !text-[10px] text-muted">{runner.branch}</span>
+          <span className="truncate cm-mono !text-2xs text-muted">{runner.branch}</span>
         </div>
       )}
 
       {runner.url && (
         <button
           onClick={open}
-          className="flex w-full items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-left text-[11px] text-accent-hi transition-colors hover:bg-hover [&_svg]:size-3"
+          className="flex w-full items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-left text-xs text-accent-hi transition-colors hover:bg-hover [&_svg]:size-3"
         >
           <ExternalLink />
-          <span className="cm-mono !text-[10.5px] truncate">{runner.url}</span>
+          <span className="cm-mono !text-2xs truncate">{runner.url}</span>
         </button>
       )}
 
       {logs.length > 0 && (
         <div className="border-t border-line-soft">
           <div className="flex items-center gap-1.5 px-3 pt-1.5">
-            <span className="text-[9.5px] font-semibold uppercase tracking-[0.09em] text-faint">Output</span>
+            <span className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">Output</span>
             <button
               onClick={popOut}
               title="Pop out logs into a separate window"
-              className="ml-auto flex items-center gap-1 text-[10px] text-muted transition-colors hover:text-accent-hi [&_svg]:size-3"
+              className="ml-auto flex items-center gap-1 text-2xs text-muted transition-colors hover:text-accent-hi [&_svg]:size-3"
             >
               <Terminal />
               pop out
@@ -142,7 +142,7 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
           </div>
           <div ref={logRef} className="cm-scroll max-h-48 overflow-y-auto bg-inset px-3 py-2">
             {logs.map((l, i) => (
-              <div key={i} className="flex gap-2 py-px cm-mono !text-[10.5px] leading-relaxed">
+              <div key={i} className="flex gap-2 py-px cm-mono !text-2xs leading-relaxed">
                 <span className="shrink-0 text-faint">{clock(l.ts)}</span>
                 <span className={cn("min-w-0 flex-1 break-all", l.stream === "stderr" ? "text-warn" : "text-secondary")}>
                   {l.line}
@@ -155,12 +155,12 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
 
       <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-2">
         {active ? (
-          <Button size="xs" variant="danger" leftIcon={<Square />} onClick={() => actions.stopRunner(runner.id)}>
+          <Button size="sm" variant="danger" leftIcon={<Square />} onClick={() => actions.stopRunner(runner.id)}>
             Stop
           </Button>
         ) : (
           <Button
-            size="xs"
+            size="sm"
             variant="default"
             leftIcon={<Play />}
             onClick={() =>
@@ -209,9 +209,9 @@ function LaunchRow({
     <div className="flex items-center gap-2 rounded-md px-2 py-1.5">
       <Icon className="size-3.5 shrink-0 text-muted" />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[11.5px] text-secondary">{subApp.name}</span>
+        <span className="block truncate text-xs text-secondary">{subApp.name}</span>
         {subApp.ports && subApp.ports.length > 0 && (
-          <span className="cm-mono !text-[10px] text-faint">:{subApp.ports.join(" :")}</span>
+          <span className="cm-mono !text-2xs text-faint">:{subApp.ports.join(" :")}</span>
         )}
       </span>
       {subApp.dockerCompose && <Chip tone="muted">docker</Chip>}
@@ -221,7 +221,7 @@ function LaunchRow({
         </Chip>
       ) : (
         <Button
-          size="xs"
+          size="sm"
           variant="subtle"
           leftIcon={<Play />}
           disabled={!canStart}
@@ -280,11 +280,11 @@ export function RunnerPanel({ chat }: { chat: Chat }) {
     return (
       <div className="px-4 py-10 text-center">
         <Gamepad2 className="mx-auto mb-2 size-5 text-faint" />
-        <p className="text-[12px] text-muted">No subApps configured.</p>
-        <p className="mt-0.5 text-[11px] text-faint">Add subApps to this project to run them here.</p>
+        <p className="text-sm text-muted">No subApps configured.</p>
+        <p className="mt-0.5 text-xs text-faint">Add subApps to this project to run them here.</p>
         {project?.repoPath && (
           <div className="mt-3 flex justify-center">
-            <Button size="xs" variant="subtle" leftIcon={<SquarePen />} onClick={editDefinitions}>
+            <Button size="sm" variant="subtle" leftIcon={<SquarePen />} onClick={editDefinitions}>
               Edit definitions
             </Button>
           </div>

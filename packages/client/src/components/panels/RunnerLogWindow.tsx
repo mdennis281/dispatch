@@ -97,10 +97,10 @@ export function RunnerLogWindow() {
       {/* header */}
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-panel px-3">
         <Terminal className="size-4 shrink-0 text-accent-hi" />
-        <span className="truncate text-[12px] font-medium">
+        <span className="truncate text-sm font-medium">
           {runner?.subAppId ?? "runner"}
         </span>
-        <span className="flex items-center gap-1.5 text-[10.5px] text-faint">
+        <span className="flex items-center gap-1.5 text-2xs text-faint">
           <StatusDot
             tone={
               active ? "working" : status === "crashed" ? "danger" : "muted"
@@ -112,17 +112,17 @@ export function RunnerLogWindow() {
           {runner?.pid && <span className="cm-mono">· pid {runner.pid}</span>}
         </span>
         {conn !== "open" && (
-          <span className="text-[10.5px] text-warn">· {conn}</span>
+          <span className="text-2xs text-warn">· {conn}</span>
         )}
         {runner?.url && (
           <a
             href={runner.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="ml-auto flex items-center gap-1 text-[10.5px] text-accent-hi hover:underline [&_svg]:size-3"
+            className="ml-auto flex items-center gap-1 text-2xs text-accent-hi hover:underline [&_svg]:size-3"
           >
             <ExternalLink />
-            <span className="cm-mono !text-[10px]">{runner.url}</span>
+            <span className="cm-mono !text-2xs">{runner.url}</span>
           </a>
         )}
       </div>
@@ -134,7 +134,7 @@ export function RunnerLogWindow() {
         className="cm-scroll min-h-0 flex-1 overflow-y-auto px-3 py-2"
       >
         {lines.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-[11px] text-faint">
+          <div className="flex h-full items-center justify-center text-xs text-faint">
             <Circle className="mr-1.5 size-2 animate-pulse" />
             waiting for output…
           </div>
@@ -142,7 +142,7 @@ export function RunnerLogWindow() {
           lines.map((l, i) => (
             <div
               key={i}
-              className="flex gap-2 py-px cm-mono !text-[11px] leading-relaxed"
+              className="flex gap-2 py-px cm-mono !text-xs leading-relaxed"
             >
               <span className="shrink-0 text-faint">{clock(l.ts)}</span>
               <span

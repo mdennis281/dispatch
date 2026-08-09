@@ -78,7 +78,7 @@ export function DeleteChatDialog({
         </>
       }
     >
-      <p className="text-[12.5px] leading-relaxed text-secondary">
+      <p className="text-base leading-relaxed text-secondary">
         This permanently removes the transcript and stops any running turn. This
         can&rsquo;t be undone.
       </p>

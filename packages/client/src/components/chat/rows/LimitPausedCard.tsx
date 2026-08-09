@@ -96,7 +96,7 @@ export function LimitPausedCard({ row, reason }: LimitPausedCardProps) {
         )}
       >
         <div className="flex flex-wrap items-center gap-2 px-3 py-2">
-          <span className="text-[12.5px] font-medium text-primary">{headline}</span>
+          <span className="text-base font-medium text-primary">{headline}</span>
           {pending && (
             <Chip tone="warn" icon={<CalendarClock />}>
               in {untilShort(plan.at, now)}
@@ -116,9 +116,9 @@ export function LimitPausedCard({ row, reason }: LimitPausedCardProps) {
           )}
         </div>
         <div className="border-t border-line-soft px-3 py-1.5">
-          <p className="text-[11px] text-muted">{reason}</p>
+          <p className="text-xs text-muted">{reason}</p>
           {plan?.cancelledAt && (
-            <p className="mt-0.5 text-[11px] text-faint">
+            <p className="mt-0.5 text-xs text-faint">
               Send a message when you're ready — nothing will run on its own.
             </p>
           )}

@@ -146,6 +146,33 @@
   --font-mono: "JetBrains Mono", "Cascadia Code", "Cascadia Mono",
     ui-monospace, "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
 
+  /*
+   * TYPE SCALE — six steps, and only these six.
+   *
+   * The app had reached twelve distinct arbitrary sizes across ~540 uses:
+   * 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13, 13.5, 14, 15. Both `text-[11px]`
+   * (126 uses) and `text-[11.5px]` (75) were in play, and nobody can see a
+   * half-pixel difference — those weren't decisions, they were drift, and each
+   * new one made the next one easier to add.
+   *
+   * The collapse: 9/9.5/10/10.5 → 2xs, 11/11.5 → xs, 12 → sm, 12.5/13 → base,
+   * 13.5/14 → lg, 15 → xl. Named steps mean `text-sm` in review reads as a
+   * choice from a scale, where `text-[12px]` only ever read as a number
+   * somebody typed.
+   */
+  --text-2xs: 10px;
+  --text-2xs--line-height: 1.35;
+  --text-xs: 11px;
+  --text-xs--line-height: 1.4;
+  --text-sm: 12px;
+  --text-sm--line-height: 1.45;
+  --text-base: 12.5px;
+  --text-base--line-height: 1.5;
+  --text-lg: 13.5px;
+  --text-lg--line-height: 1.4;
+  --text-xl: 15px;
+  --text-xl--line-height: 1.35;
+
   /* radius — small, crisp */
   --radius-xs: 4px;
   --radius-sm: 6px;

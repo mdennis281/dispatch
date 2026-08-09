@@ -4,14 +4,24 @@ import { cn } from "../../lib/cn.js";
 /**
  * `link` and `toggle` exist because the panels kept hand-rolling them. Before
  * this, a "Cancel"/"Decline"/"pop out" text action was a raw `<button>` with a
- * one-off `text-[11px] text-muted hover:text-primary` in each of a dozen files,
+ * one-off `text-xs text-muted hover:text-primary` in each of a dozen files,
  * and a pressed-state control was another `<button>` with its own idea of what
  * "on" looks like. Both are now one word at the call site, which is what makes
  * the no-raw-`<button>` lint rule (see eslint.config.js) a rule you can follow
  * rather than one you have to fight.
  */
 type Variant = "default" | "primary" | "subtle" | "ghost" | "danger" | "link" | "toggle";
-type Size = "xs" | "sm" | "md";
+/**
+ * TWO heights, not three.
+ *
+ * `xs`/`sm`/`md` were h-6/h-7/h-8 and every call site picked by feel, so the
+ * composer's own toolbar ran four different baselines in one 40px row (h-6
+ * posture, h-6/h-7 segmented, h-7 brain, h-8 Send) and nothing lined up. There
+ * are only two jobs here: dense chrome that packs into a toolbar or a row
+ * (`sm`, 24px) and a primary action you are meant to aim at (`md`, 32px).
+ * `IconButton`, `SegmentedControl` and `Select` use the same two numbers.
+ */
+type Size = "sm" | "md";
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
@@ -27,9 +37,8 @@ const base =
   "disabled:pointer-events-none disabled:opacity-45";
 
 const sizes: Record<Size, string> = {
-  xs: "h-6 px-2 text-[11px]",
-  sm: "h-7 px-2.5 text-[12px]",
-  md: "h-8 px-3 text-[12.5px]",
+  sm: "h-6 px-2 text-xs",
+  md: "h-8 px-3 text-base",
 };
 
 const variants: Record<Variant, string> = {

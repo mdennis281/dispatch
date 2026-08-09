@@ -91,7 +91,7 @@ export function ContextMeter({ chatId, model, iconOnly = false }: ContextMeterPr
             {!iconOnly && (
               <span
                 className={cn(
-                  "cm-mono text-[10.5px] font-medium tabular-nums",
+                  "cm-mono text-2xs font-medium tabular-nums",
                   tokens === null ? "text-faint" : t.text,
                 )}
               >
@@ -172,22 +172,22 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
       {/* headline */}
       <div className="px-3 pt-3 pb-2">
         <div className="flex items-baseline justify-between">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-faint">
+          <span className="text-xs font-medium uppercase tracking-wide text-faint">
             Context window
           </span>
-          <span className={cn("cm-mono text-[11px] tabular-nums", t.text)}>
+          <span className={cn("cm-mono text-xs tabular-nums", t.text)}>
             {Math.round(pct)}%
           </span>
         </div>
         <div className="mt-1.5 flex items-baseline gap-1">
-          <span className={cn("cm-mono text-[15px] font-semibold tabular-nums", t.text)}>
+          <span className={cn("cm-mono text-xl font-semibold tabular-nums", t.text)}>
             {compactTokens(total)}
           </span>
-          <span className="cm-mono text-[11px] tabular-nums text-faint">
+          <span className="cm-mono text-xs tabular-nums text-faint">
             / {compactTokens(max)}
           </span>
           {usage?.model && (
-            <span className="ml-auto truncate text-[10.5px] text-faint">{usage.model}</span>
+            <span className="ml-auto truncate text-2xs text-faint">{usage.model}</span>
           )}
         </div>
         <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-line">
@@ -201,14 +201,14 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
       {/* breakdown */}
       <div className="border-t border-line-soft px-3 py-2">
         {loading ? (
-          <div className="flex items-center gap-2 py-1 text-[11px] text-muted">
+          <div className="flex items-center gap-2 py-1 text-xs text-muted">
             <Loader2 className="size-3.5 animate-spin" />
             Reading context…
           </div>
         ) : cats.length > 0 ? (
           <div className="flex flex-col gap-1">
             {cats.map((c) => (
-              <div key={c.name} className="flex items-center gap-2 text-[11px]">
+              <div key={c.name} className="flex items-center gap-2 text-xs">
                 <span
                   className="size-2 shrink-0 rounded-[2px]"
                   style={{ background: c.color || "var(--p-text-faint)" }}
@@ -221,7 +221,7 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
             ))}
           </div>
         ) : (
-          <div className="py-1 text-[11px] text-faint">
+          <div className="py-1 text-xs text-faint">
             Live breakdown unavailable — run a turn, then reopen.
           </div>
         )}
@@ -236,8 +236,8 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
         >
           <Layers className="mt-0.5 size-3.5 shrink-0 text-accent" />
           <span className="leading-tight">
-            <span className="block text-[12px] text-secondary">Compact context</span>
-            <span className="block text-[10.5px] text-faint">
+            <span className="block text-sm text-secondary">Compact context</span>
+            <span className="block text-2xs text-faint">
               Summarize the conversation, keep going smaller
             </span>
           </span>
@@ -246,18 +246,18 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
         {confirmClear ? (
           <div className="flex items-center gap-1 px-2 py-1">
             <AlertTriangle className="size-3.5 shrink-0 text-warn" />
-            <span className="flex-1 text-[11px] text-secondary">Clear the model's context?</span>
+            <span className="flex-1 text-xs text-secondary">Clear the model's context?</span>
             <button
               type="button"
               onClick={doClear}
-              className="rounded-sm bg-danger/15 px-1.5 py-0.5 text-[11px] font-medium text-danger hover:bg-danger/25"
+              className="rounded-sm bg-danger/15 px-1.5 py-0.5 text-xs font-medium text-danger hover:bg-danger/25"
             >
               Clear
             </button>
             <button
               type="button"
               onClick={() => setConfirmClear(false)}
-              className="rounded-sm px-1.5 py-0.5 text-[11px] text-muted hover:text-secondary"
+              className="rounded-sm px-1.5 py-0.5 text-xs text-muted hover:text-secondary"
             >
               Cancel
             </button>
@@ -270,8 +270,8 @@ function ContextPanel({ chatId, fallbackTokens, fallbackWindow, close }: Context
           >
             <Eraser className="mt-0.5 size-3.5 shrink-0 text-muted" />
             <span className="leading-tight">
-              <span className="block text-[12px] text-secondary">Clear context</span>
-              <span className="block text-[10.5px] text-faint">
+              <span className="block text-sm text-secondary">Clear context</span>
+              <span className="block text-2xs text-faint">
                 Reset the model's window; transcript is kept
               </span>
             </span>

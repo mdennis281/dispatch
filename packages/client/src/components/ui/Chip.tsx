@@ -49,8 +49,8 @@ export function Chip({ tone = "neutral", icon, mono, className, children, ...res
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-[5px] border px-1.5 py-px text-[10.5px] font-medium leading-4",
-        mono && "cm-mono !text-[10.5px]",
+        "inline-flex items-center gap-1 rounded-[5px] border px-1.5 py-px text-2xs font-medium leading-4",
+        mono && "cm-mono !text-2xs",
         tones[tone],
         className,
       )}
@@ -83,7 +83,7 @@ export function Badge({ count, tone = "accent" }: { count: number; tone?: Tone }
   return (
     <span
       className={cn(
-        "inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold tabular-nums",
+        "inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-2xs font-semibold tabular-nums",
         toneCls,
       )}
     >

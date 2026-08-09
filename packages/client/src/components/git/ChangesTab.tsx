@@ -57,7 +57,7 @@ function FileRow({
       >
         <span
           className={cn(
-            "w-3 shrink-0 text-center cm-mono !text-[10.5px] font-bold",
+            "w-3 shrink-0 text-center cm-mono !text-2xs font-bold",
             meta.className,
           )}
           title={meta.label}
@@ -67,7 +67,7 @@ function FileRow({
         <span className="min-w-0 flex-1 truncate">
           <span
             className={cn(
-              "cm-mono !text-[11.5px]",
+              "cm-mono !text-xs",
               file.status === "deleted"
                 ? "text-muted line-through"
                 : active
@@ -78,7 +78,7 @@ function FileRow({
             {name}
           </span>
           {dir && (
-            <span className="ml-1.5 cm-mono !text-[10px] text-faint">
+            <span className="ml-1.5 cm-mono !text-2xs text-faint">
               {midTruncate(dir, 30)}
             </span>
           )}
@@ -152,10 +152,10 @@ function Group({
           ) : (
             <ChevronRight className="size-3 shrink-0 text-faint" />
           )}
-          <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint">
+          <span className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">
             {title}
           </span>
-          <span className="cm-mono !text-[9.5px] text-faint">{files.length}</span>
+          <span className="cm-mono !text-2xs text-faint">{files.length}</span>
         </button>
         <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover/head:opacity-100 focus-within:opacity-100">
           {headerActions}
@@ -232,7 +232,7 @@ function CommitBox({
               ? "Commit message (⌘/Ctrl+Enter to commit)"
               : "Stage some changes to commit…"
           }
-          className="w-full resize-y rounded-md border border-line bg-inset px-2 py-1.5 pr-8 text-[12px] leading-[1.45] text-primary outline-none placeholder:text-faint focus:border-line-strong"
+          className="w-full resize-y rounded-md border border-line bg-inset px-2 py-1.5 pr-8 text-sm leading-[1.45] text-primary outline-none placeholder:text-faint focus:border-line-strong"
         />
         <div className="absolute right-1.5 top-1.5">
           <IconButton
@@ -251,7 +251,7 @@ function CommitBox({
       </div>
 
       <div className="mt-1.5 flex items-center gap-2">
-        <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted hover:text-secondary">
+        <label className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted hover:text-secondary">
           <input
             type="checkbox"
             checked={amend}
@@ -261,12 +261,12 @@ function CommitBox({
           Amend
         </label>
         {conflicts > 0 && (
-          <span className="text-[11px] text-danger">
+          <span className="text-xs text-danger">
             {conflicts} conflict{conflicts > 1 ? "s" : ""} to resolve
           </span>
         )}
         <Button
-          size="xs"
+          size="sm"
           variant="primary"
           className="ml-auto"
           leftIcon={busy === "Commit" ? <Spinner size={12} /> : <Check />}
@@ -340,7 +340,7 @@ export function ChangesTab(props: ChangesTabProps) {
 
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
         {nothing && (
-          <p className="px-3 py-8 text-center text-[11.5px] text-faint">
+          <p className="px-3 py-8 text-center text-xs text-faint">
             Working tree clean — nothing to commit.
           </p>
         )}
