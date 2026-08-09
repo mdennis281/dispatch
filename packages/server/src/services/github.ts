@@ -42,6 +42,7 @@ import {
   WorkflowRunSchema,
   WorkflowWithLastRunSchema,
   WorkflowInputSchema,
+  COPILOT_LOGIN,
 } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
@@ -76,8 +77,13 @@ const defaultExec: ExecaLike = (file, args = [], options) =>
 /** owner/repo shape — GitHub-valid chars only (alnum . _ -). Strict on purpose. */
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
-/** The reviewer login ship requests (matches ship.mjs / auto-merge.mjs). */
-export const COPILOT_LOGIN = "copilot-pull-request-reviewer[bot]";
+/**
+ * The reviewer login ship requests (matches ship.mjs / auto-merge.mjs).
+ * Re-exported so the existing `from "./github.js"` importers keep working; the
+ * definition lives in `@dispatch/shared` because the `review` profile's default
+ * reviewer list needs it too.
+ */
+export { COPILOT_LOGIN };
 
 /** `--json` field list for a rich PR view/list. */
 const PR_JSON_FIELDS =
