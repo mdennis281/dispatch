@@ -33,8 +33,9 @@ import { loadOlderMessages } from "../../stores/index.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
 import { usePanels } from "../../stores/panels.js";
-import { worktreeMatchesChat, samePath, copyToClipboard } from "../panels/panelBus.js";
+import { worktreeMatchesChat, samePath } from "../panels/panelBus.js";
 import { useNotices } from "../../stores/notices.js";
+import { copyToClipboard } from "../../lib/clipboard.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
@@ -129,6 +130,7 @@ export function ChatView({ chat }: { chat: Chat }) {
     void api.chats.update(chat.id, { showInjectedContext: next }).catch(() => {});
   }, [chat, injected.show]);
 
+  const sessionId = chat.sessionId;
   const pushToast = useNotices((s) => s.push);
   const copyId = useCallback(
     (value: string, label: string) => {
@@ -433,11 +435,11 @@ export function ChatView({ chat }: { chat: Chat }) {
                   >
                     Copy chat ID
                   </MenuItem>
-                  {chat.sessionId && (
+                  {sessionId && (
                     <MenuItem
                       icon={<Hash />}
                       onClick={() => {
-                        copyId(chat.sessionId!, "Session ID");
+                        copyId(sessionId, "Session ID");
                         close();
                       }}
                     >

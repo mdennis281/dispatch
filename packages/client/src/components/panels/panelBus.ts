@@ -48,16 +48,6 @@ export function samePath(a: string, b: string): boolean {
   return norm(a) === norm(b);
 }
 
-/** Best-effort copy to the OS clipboard (localhost is a secure context). */
-export async function copyToClipboard(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** Suggest a conventional branch name from a chat title (feat/<slug>). */
 export function suggestBranch(title: string): string {
   const slug = title

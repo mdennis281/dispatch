@@ -36,7 +36,7 @@ import { Spinner } from "../ui/Spinner.js";
 import { StatusDot, type DotTone } from "../ui/StatusDot.js";
 import { useProjects } from "../../stores/projects.js";
 import { useMcp, useProjectMcp } from "../../stores/mcp.js";
-import { copyToClipboard } from "../panels/panelBus.js";
+import { copyToClipboard } from "../../lib/clipboard.js";
 import { cn } from "../../lib/cn.js";
 import { useOverlay } from "../../stores/view.js";
 
