@@ -130,7 +130,18 @@ export function buildManagerToolsDirective(caps: {
         "until it returns `done:true`. **Never** hand-roll `gh pr view` / `gh pr checks` " +
         "polling loops or a background Bash/Monitor task to watch a PR — `watch_pr` is " +
         "the supported way and, unlike a one-shot loop, keeps surfacing each NEW round " +
-        "of review comments so you don't stop watching after the first fix.",
+        "of review comments so you don't stop watching after the first fix. It also " +
+        "reports `reviewStalled:true` when NO reviewer is actually queued, so you stop " +
+        "waiting on a review that isn't coming.",
+      "- `mcp__manager__resolve_thread` — reply in a review thread and mark it RESOLVED. " +
+        "Fixing the code and replying is not enough: an unresolved thread still reads as " +
+        "outstanding and blocks the merge. Call it for every comment you addressed, " +
+        "passing the `thread:` id `watch_pr` printed with the comment. Leave a thread " +
+        "open (`resolve: false`) only when you did NOT act on it.",
+      "- `mcp__manager__request_review` — put reviewers back on the hook. GitHub clears a " +
+        "reviewer's request the moment they submit, and your fix commits do NOT re-queue " +
+        "them — so after you address a round, call this (once your fixes are PUSHED) and " +
+        "then go back to `watch_pr`. Without it the PR sits with an empty queue forever.",
     );
   }
   if (caps.prCreate) {
@@ -209,16 +220,22 @@ export function buildManagerToolsDirective(caps: {
 /**
  * Adapt a {@link GitHubService} into the narrow {@link ManagerMcpGitHub} surface
  * the manager MCP's `watch_pr` tool needs, bound to one session's `cwd`.
- * `prMergeState` lets `gh` auto-detect the repo from cwd; `prChecks` and
- * `reviewThreads` require an explicit `owner/name`, so we resolve it from cwd
- * lazily and cache the promise (a per-session one-shot). Any resolve/gh failure
- * on checks/threads degrades to `null` — the watcher treats that as "nothing new
- * this poll" rather than aborting. An explicit `repo` override always wins.
+ * `prMergeState` lets `gh` auto-detect the repo from cwd; `prChecks`,
+ * `reviewThreads` and `prReviewState` require an explicit `owner/name`, so we
+ * resolve it from cwd lazily and cache the promise (a per-session one-shot). Any
+ * resolve/gh failure on those READS degrades to `null` — the watcher treats that
+ * as "nothing new this poll" rather than aborting. An explicit `repo` override
+ * always wins.
+ *
+ * The three ACTIONS (`requestReviewers`, `replyToThread`, `resolveThread`) throw
+ * instead, because the failure they'd otherwise hide is the one that matters:
+ * an agent told "resolved" for a thread that is still open.
  */
 function makeGithubBinding(
   github: GitHubService,
   cwd: string | undefined,
   chatId: string,
+  reviewers: readonly string[] = [],
 ): ManagerMcpGitHub {
   let repoP: Promise<string | null> | undefined;
   const repoFor = async (override?: string): Promise<string | null> => {
@@ -236,6 +253,22 @@ function makeGithubBinding(
       const r = await repoFor(repo);
       return r ? github.reviewThreads(r, n).catch(() => null) : null;
     },
+    // Same degrade-to-null contract as checks/threads: an unreadable queue is
+    // "no news this poll", never a claim that nobody is queued.
+    prReviewState: async (n, repo) => {
+      const r = await repoFor(repo);
+      return r ? github.prReviewState(r, n).catch(() => null) : null;
+    },
+    // These three THROW on failure rather than degrading — they are actions the
+    // agent asked for, and silently doing nothing is how a thread stays open.
+    requestReviewers: async (n, list, repo) => {
+      const r = await repoFor(repo);
+      if (!r) throw new Error("could not resolve the repo — pass `repo` as 'owner/name'");
+      return github.requestReviewers(r, n, list, { chatId });
+    },
+    replyToThread: (threadId, body) => github.replyToThread(threadId, body, { chatId }),
+    resolveThread: (threadId) => github.resolveThread(threadId, { chatId }),
+    defaultReviewers: reviewers,
     notePrMerged: () => github.notePrMerged(chatId),
   };
 }
@@ -2996,8 +3029,12 @@ export class SessionBroker {
         // Bind the PR watcher to this session's default cwd. `prMergeState` lets
         // `gh` auto-detect the repo from cwd; `prChecks`/`reviewThreads` need an
         // explicit owner/name, so resolve it from cwd ONCE (cached) and reuse it.
-        // The agent may still pass an explicit repo override on any call.
-        github: github ? makeGithubBinding(github, cwd, session.chatId) : undefined,
+        // The agent may still pass an explicit repo override on any call. The
+        // project's reviewer list rides along so `request_review` has a default —
+        // the same list `create_pr` asks on the first round.
+        github: github
+          ? makeGithubBinding(github, cwd, session.chatId, workflow.pr.reviewers)
+          : undefined,
         // The PR-landing surface — bound ONLY when this project's workflow opted
         // into auto-merge, which is what makes `approve_pr` absent (not merely
         // discouraged) everywhere else.

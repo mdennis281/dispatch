@@ -103,6 +103,17 @@ export const WATCH_PR_DEFAULT_TIMEOUT_SECONDS = 1800;
 export const NO_CHECKS_GRACE_MS = 60_000;
 
 /**
+ * How long a watch tolerates an EMPTY reviewer queue before reporting it once.
+ *
+ * A review request takes a moment to register after `create_pr` asks for it, and
+ * a bot reviewer can briefly show as neither requested nor reported while it
+ * picks the job up. Firing instantly would call that "nobody is queued" — the
+ * exact false alarm that makes a signal ignorable. Same shape and reasoning as
+ * {@link NO_CHECKS_GRACE_MS}.
+ */
+export const REVIEW_QUEUE_GRACE_MS = 60_000;
+
+/**
  * Check conclusions that count as a FAILING check for `watch_pr` — the ones an
  * agent must react to (a red build, a required check it must satisfy). `neutral`,
  * `skipped`, and `success` are not actionable.
@@ -211,6 +222,36 @@ export interface ManagerMcpGitHub {
   prMergeState(prNumber: number, repo?: string): Promise<PrPollResult | null>;
   prChecks(prNumber: number, repo?: string): Promise<CheckRun[] | null>;
   reviewThreads(prNumber: number, repo?: string): Promise<ReviewThread[] | null>;
+  /**
+   * Who is CURRENTLY on the hook to review, and who has already reported. null =
+   * couldn't read this poll (treated like a failed checks read: no news, not an
+   * abort).
+   *
+   * The watch needs this because GitHub CLEARS a reviewer's request the moment
+   * they submit a review, and pushing fix commits does not re-queue them. Without
+   * it, `watch_pr` cannot tell "the reviewer is working on it" from "nobody will
+   * ever look at this again" — and it spent the whole quiet window on the second
+   * one, reporting it as waiting.
+   */
+  prReviewState?(
+    prNumber: number,
+    repo?: string,
+  ): Promise<{ requested: string[]; reported: Array<{ author: string; state: string }> } | null>;
+  /** Put reviewers back on the hook. Omitted → the `request_review` tool isn't offered. */
+  requestReviewers?(
+    prNumber: number,
+    reviewers: readonly string[],
+    repo?: string,
+  ): Promise<{ requested: string[]; failed: Array<{ reviewer: string; error: string }> }>;
+  /** Reply in a review thread. Paired with `resolveThread` by `resolve_thread`. */
+  replyToThread?(threadId: string, body: string): Promise<void>;
+  /** Mark a review thread resolved. Omitted → the `resolve_thread` tool isn't offered. */
+  resolveThread?(threadId: string): Promise<void>;
+  /**
+   * The reviewers this project asks for (`workflow.pr.reviewers`), so
+   * `request_review` has a default and the stalled-queue report can name them.
+   */
+  defaultReviewers?: readonly string[];
   /**
    * Report that the watched PR has MERGED. Most merges here are performed by the
    * repo's auto-merge job rather than by us, so `watch_pr` observing the terminal
@@ -702,9 +743,14 @@ export function prLandingBlockers(
         const waiting = pr.requestedReviewers.length
           ? `Waiting on: ${pr.requestedReviewers.join(", ")}. Call watch_pr until they report.`
           : policy.reviewers?.length
-            ? `This project asks ${policy.reviewers.join(", ")} to review, but nobody is ` +
-              "currently requested on this PR — open it through `mcp__manager__create_pr` " +
-              "so they are."
+            ? // An OPEN PR with an empty queue is fixed by asking again, not by
+              // re-opening it. Pointing at `create_pr` here sent an agent round a
+              // loop it could not win: `create_pr` refuses a branch that already
+              // has a PR, so the only advice on offer was impossible to take.
+              `This project asks ${policy.reviewers.join(", ")} to review, but nobody is ` +
+              "currently requested on this PR. Call `mcp__manager__request_review` to ask " +
+              "them (GitHub clears a reviewer's request once they report, and new commits " +
+              "do not re-queue them), then watch_pr until they report."
             : "This project configures NO reviewers (`workflow.pr.reviewers` in " +
               "`.dispatch/project.yaml`), so nobody will ever be asked and this PR cannot " +
               "satisfy its own bar. Fix the config rather than working around it.";
@@ -1025,6 +1071,15 @@ export type WatchPrEvent =
   | { type: "ci-passed"; names: string[] }
   /** This PR has no checks at all (see {@link NO_CHECKS_GRACE_MS}). Reported once. */
   | { type: "no-checks" }
+  /**
+   * NOBODY is queued to review this PR — no outstanding review request. Waiting
+   * is futile from here; the agent has to re-request or land it. `reported` names
+   * anyone who already reviewed, which is what separates "the round is over,
+   * re-request after your fixes" from "this PR was never sent to anyone".
+   * Reported once per state (see {@link REVIEW_QUEUE_GRACE_MS}); a fresh request
+   * followed by a fresh emptying re-fires.
+   */
+  | { type: "review-stalled"; reported: Array<{ author: string; state: string }> }
   | {
       type: "review-comment";
       threadId: string;
@@ -1056,6 +1111,15 @@ export interface WatchPrState {
   greenAt?: string;
   /** The "no checks configured" note has been delivered for this PR. */
   notedNoChecks?: boolean;
+  /**
+   * The empty-reviewer-queue note has been delivered. CLEARED again the moment a
+   * request is outstanding, so the next round's stall reports too — a once-ever
+   * flag would tell the agent about the dead queue in round 2 and then let it
+   * block silently in rounds 3 and 4.
+   */
+  notedStalled?: boolean;
+  /** First poll at which the reviewer queue was seen empty (drives the grace window). */
+  queueEmptySince?: number;
 }
 
 type WatchPrOutcome =
@@ -1118,9 +1182,10 @@ async function watchForPrActivity(
 
     // Checks + threads are best-effort: a transient gh failure on either yields
     // null, which we treat as "no new activity of that kind" (not fatal).
-    const [checks, threads] = await Promise.all([
+    const [checks, threads, review] = await Promise.all([
       gh.prChecks(number, repo).catch(() => null),
       gh.reviewThreads(number, repo).catch(() => null),
+      gh.prReviewState?.(number, repo).catch(() => null) ?? Promise.resolve(null),
     ]);
 
     const events: WatchPrEvent[] = [];
@@ -1162,6 +1227,33 @@ async function watchForPrActivity(
       st.notedNoChecks = true;
       events.push({ type: "no-checks" });
     }
+    // The reviewer queue. GitHub drops a reviewer's request the instant they
+    // submit, and new commits do NOT re-queue them — so an open PR with an empty
+    // queue is not "waiting for review", it is stopped. Report that rather than
+    // burning the quiet window on a review that is never coming, which is the
+    // whole reason this poll exists.
+    if (!review) {
+      // Couldn't read the queue this poll. Drop the timer: the grace window is a
+      // claim about CONTINUOUS observation ("empty for a full minute"), and a
+      // gap means we can't make it — the reviewer may well have been re-requested
+      // while we were blind. Carrying the old timestamp lets the next readable
+      // poll fire instantly off evidence we never actually had.
+      st.queueEmptySince = undefined;
+      // `notedStalled` deliberately survives. It is dedup memory for news already
+      // delivered, and a read hiccup is not a reason to say the same thing twice.
+    } else if (review.requested.length > 0) {
+      // Someone IS on the hook: waiting is the right move, and the next time the
+      // queue empties is news again.
+      st.notedStalled = false;
+      st.queueEmptySince = undefined;
+    } else {
+      st.queueEmptySince ??= opts.now();
+      if (!st.notedStalled && opts.now() - st.queueEmptySince >= REVIEW_QUEUE_GRACE_MS) {
+        st.notedStalled = true;
+        events.push({ type: "review-stalled", reported: review.reported });
+      }
+    }
+
     for (const t of threads ?? []) {
       if (!t.isResolved && !st.threads.has(t.id)) {
         events.push({
@@ -1368,9 +1460,12 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "(failing checks, new comments) or checksPassing:true meaning CI is green and " +
       "you can merge; act, then call watch_pr AGAIN. Each check result and comment " +
       "is reported only once, so repeated calls surface each NEW round instead of " +
-      "going silent or re-firing the same news. It returns done:true only when the " +
-      "PR merges or closes — keep calling until then and you'll never miss a late " +
-      "review round.",
+      "going silent or re-firing the same news. It also watches the REVIEWER QUEUE: " +
+      "if no reviewer is actually on the hook it returns reviewStalled:true rather " +
+      "than blocking on a review that will never arrive (GitHub clears a reviewer's " +
+      "request when they submit, and your fix commits do NOT re-queue them — use " +
+      "request_review). It returns done:true only when the PR merges or closes — " +
+      "keep calling until then and you'll never miss a late review round.",
     {
       number: z.number().describe("The PR number to watch."),
       repo: z
@@ -1473,11 +1568,13 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       const comments = events.filter((e) => e.type === "review-comment");
       const passed = events.find((e) => e.type === "ci-passed");
       const noChecks = events.some((e) => e.type === "no-checks");
+      const stalled = events.find((e) => e.type === "review-stalled");
       const parts: string[] = [];
       if (failing.length) parts.push(`${failing.length} failing check(s)`);
       if (comments.length) parts.push(`${comments.length} new review comment(s)`);
       if (passed) parts.push(`all ${passed.names.length} check(s) passing`);
       if (noChecks) parts.push("no CI checks configured");
+      if (stalled) parts.push("no reviewer is queued");
       const lines = events.map((e) => {
         switch (e.type) {
           case "ci-failed":
@@ -1486,21 +1583,57 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             return `  ✓ checks passed: ${e.names.join(", ")}`;
           case "no-checks":
             return `  · no checks are reporting on this PR`;
+          case "review-stalled":
+            return e.reported.length
+              ? `  ⏸ nobody is queued to review — ${e.reported
+                  .map((r) => `${r.author} already ${r.state.toLowerCase().replace(/_/g, " ")}`)
+                  .join(", ")}. GitHub cleared their request when they reported, and your ` +
+                `commits since then did NOT re-queue them.`
+              : `  ⏸ nobody is queued to review and nobody has reviewed — no review will ` +
+                `ever arrive on this PR as it stands.`;
           default:
+            // The threadId is here so `resolve_thread` is one obvious call away.
+            // Replying without resolving is the failure mode; making the id
+            // invisible is what caused it.
             return `  💬 ${e.author ?? "reviewer"} on ${e.path ?? "the PR"}${
               e.line ? `:${e.line}` : ""
-            } — ${firstLine(e.body) || "(see thread)"}`;
+            } — ${firstLine(e.body) || "(see thread)"}\n     thread: ${e.threadId}`;
         }
       });
       // Green (or an empty check list) is news, not a to-do list — telling the
       // agent to "address these" when nothing is wrong is what sends it hunting
       // for a problem that isn't there.
       const needsWork = failing.length > 0 || comments.length > 0;
-      const advice = needsWork
-        ? `Address these, then call watch_pr again — it keeps watching (reporting only ` +
-          `NEW activity) until the PR merges.`
-        : `Nothing to fix. Merge it if you're ready, or call watch_pr again to wait ` +
-          `for the merge and any later review round.`;
+      const adviceParts: string[] = [];
+      if (needsWork) {
+        adviceParts.push(
+          "Address these, then call `mcp__manager__resolve_thread` for each comment you " +
+            "actually fixed (pass the thread id above, and a `reply` saying what you did) " +
+            "— an unresolved thread blocks the merge even after the code is fixed.",
+        );
+      } else if (!stalled) {
+        adviceParts.push(
+          "Nothing to fix. Merge it if you're ready, or call watch_pr again to wait for " +
+            "the merge and any later review round.",
+        );
+      }
+      // A stalled queue is the one case where "call watch_pr again" is WRONG
+      // advice — it would block for the full window on a review nobody is going
+      // to write. Name the action instead.
+      if (stalled) {
+        adviceParts.push(
+          "Do NOT just call watch_pr again — with an empty queue it will sit until the " +
+            "timeout for nothing. Either call `mcp__manager__request_review` to put a " +
+            "reviewer back on the hook (do this once you've pushed your fixes, not before), " +
+            "or land the PR if it's already been reviewed and there's nothing outstanding.",
+        );
+      } else if (needsWork) {
+        adviceParts.push(
+          "Then call watch_pr again — it keeps watching (reporting only NEW activity) " +
+            "until the PR merges.",
+        );
+      }
+      const advice = adviceParts.join(" ");
       return textResult(
         `PR #${number} ${needsWork ? "needs attention" : "update"}: ${parts.join(" and ")}.\n` +
           `${lines.join("\n")}\n\n${advice}\n` +
@@ -1509,8 +1642,209 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             state: s.state,
             done: false,
             checksPassing: !!passed,
+            reviewStalled: !!stalled,
             events,
           }),
+      );
+    },
+  );
+
+  const resolveThread = tool(
+    "resolve_thread",
+    "Mark a PR review thread RESOLVED, optionally replying in the thread first. " +
+      "Use this for every review comment you actually addressed — fixing the code " +
+      "and replying is not enough, an unresolved thread still reads as outstanding " +
+      "to the reviewer and blocks the merge. Pass the `threadId` watch_pr reported " +
+      "with the comment. Prefer this over a hand-rolled `gh api graphql` mutation. " +
+      "If you did NOT fix it (you disagree, or it's out of scope), reply with " +
+      "`resolve: false` and leave the thread open for the human.",
+    {
+      threadId: z
+        .string()
+        .describe("The review thread's node id, as reported by watch_pr ('thread: …')."),
+      reply: z
+        .string()
+        .optional()
+        .describe(
+          "Posted IN the thread before resolving. Say what you changed — a thread " +
+            "resolved in silence tells the reviewer nothing.",
+        ),
+      resolve: z
+        .boolean()
+        .optional()
+        .describe("Default true. Pass false to reply WITHOUT resolving."),
+    },
+    async (args): Promise<CallToolResult> => {
+      const gh = ctx.github;
+      if (!gh?.resolveThread) {
+        return textResult("The resolve_thread tool is not available in this session.", true);
+      }
+      const threadId = typeof args.threadId === "string" ? args.threadId.trim() : "";
+      if (!threadId) {
+        return textResult(
+          "resolve_thread requires a threadId — watch_pr reports one with every review " +
+            "comment (the 'thread: …' line).",
+          true,
+        );
+      }
+      const reply = typeof args.reply === "string" ? args.reply.trim() : "";
+      const shouldResolve = args.resolve !== false;
+      if (!reply && !shouldResolve) {
+        return textResult(
+          "resolve_thread with `resolve: false` and no `reply` would do nothing at all.",
+          true,
+        );
+      }
+
+      // Reply BEFORE resolving: if the resolve fails, the reviewer still has the
+      // answer. The other order can leave a thread closed with no explanation.
+      if (reply) {
+        if (!gh.replyToThread) {
+          return textResult("Replying in a thread is not available in this session.", true);
+        }
+        try {
+          await gh.replyToThread(threadId, reply);
+        } catch (err) {
+          return textResult(
+            `Could not reply in thread ${threadId}: ${
+              err instanceof Error ? err.message : String(err)
+            }. The thread was NOT resolved.`,
+            true,
+          );
+        }
+      }
+      if (!shouldResolve) {
+        return textResult(
+          `Replied in thread ${threadId} and left it OPEN, as asked. It still counts as an ` +
+            "outstanding thread and will block the merge until someone resolves it.",
+        );
+      }
+      try {
+        await gh.resolveThread(threadId);
+      } catch (err) {
+        return textResult(
+          `${reply ? "Replied, but could not resolve" : "Could not resolve"} thread ` +
+            `${threadId}: ${err instanceof Error ? err.message : String(err)}.`,
+          true,
+        );
+      }
+      return textResult(
+        `Resolved thread ${threadId}${reply ? " (reply posted)" : ""}. ` +
+          "Resolve every thread you fixed, then call watch_pr again.",
+      );
+    },
+  );
+
+  const requestReview = tool(
+    "request_review",
+    "Put reviewers back on the hook for a PR. GitHub CLEARS a reviewer's request " +
+      "the moment they submit a review, and pushing fix commits does NOT re-queue " +
+      "them — so after you address a review round, nobody is waiting to look at it " +
+      "and watch_pr will report reviewStalled:true. Call this AFTER pushing your " +
+      "fixes and resolving the threads you addressed, then go back to watch_pr. " +
+      "Do not call it before your fixes are pushed: you'd be asking for a review of " +
+      "the code they already rejected. It RE-READS the queue afterwards and tells " +
+      "you who is actually on the hook — GitHub can accept the request and queue " +
+      "nobody, and going back to watch_pr on that is a guaranteed dead wait.",
+    {
+      number: z.number().describe("The PR number."),
+      reviewers: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Logins or 'org/team' slugs. Defaults to this project's configured " +
+            "reviewers (`workflow.pr.reviewers`).",
+        ),
+      repo: z
+        .string()
+        .optional()
+        .describe("Optional 'owner/name' override; defaults to the chat's repo."),
+    },
+    async (args): Promise<CallToolResult> => {
+      const gh = ctx.github;
+      if (!gh?.requestReviewers) {
+        return textResult("The request_review tool is not available in this session.", true);
+      }
+      const number =
+        typeof args.number === "number" && Number.isInteger(args.number) ? args.number : NaN;
+      if (!Number.isFinite(number) || number <= 0) {
+        return textResult("request_review requires a positive integer PR number.", true);
+      }
+      const repo =
+        typeof args.repo === "string" && args.repo.trim() ? args.repo.trim() : undefined;
+      const asked = (
+        Array.isArray(args.reviewers) && args.reviewers.length
+          ? args.reviewers
+          : (gh.defaultReviewers ?? [])
+      )
+        .map((r) => String(r).trim())
+        .filter(Boolean);
+      // An empty list is a CONFIG problem, not a call to retry with. Saying so
+      // here stops the loop where an agent re-requests nothing and re-watches.
+      if (!asked.length) {
+        return textResult(
+          "No reviewers to request: none were passed and this project configures none " +
+            "(`workflow.pr.reviewers` in `.dispatch/project.yaml`). Nobody will ever be " +
+            "asked to review here — that's a config fix, not something to retry.",
+          true,
+        );
+      }
+
+      let res: { requested: string[]; failed: Array<{ reviewer: string; error: string }> };
+      try {
+        res = await gh.requestReviewers(number, asked, repo);
+      } catch (err) {
+        return textResult(
+          `Could not request review on PR #${number}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          true,
+        );
+      }
+      const lines: string[] = [];
+      for (const f of res.failed) {
+        lines.push(`  · ⚠ could not ask ${f.reviewer}: ${f.error}`);
+      }
+
+      // VERIFY, don't trust the status code. GitHub answers 200 for this POST and
+      // can still queue nobody — observed asking Copilot for a re-review after it
+      // had already reported: exit 0, `requested_reviewers: []`. Reporting that as
+      // success is the worst possible outcome here, because it sends the agent
+      // back to watch_pr to wait on the empty queue this tool exists to refill.
+      const queue = await gh.prReviewState?.(number, repo).catch(() => null);
+      const onHook = queue?.requested ?? null;
+      if (onHook !== null) {
+        lines.push(
+          onHook.length
+            ? `  · now awaiting review from ${onHook.join(", ")}`
+            : "  · ⚠ the reviewer queue is STILL EMPTY — GitHub accepted the request but " +
+              "queued nobody",
+        );
+      } else if (res.requested.length) {
+        lines.push(`  · asked ${res.requested.join(", ")} (queue not re-read)`);
+      }
+
+      // Truth is what's on the hook now. Only fall back to "gh said ok" when the
+      // queue genuinely couldn't be re-read.
+      const ok = onHook !== null ? onHook.length > 0 : res.requested.length > 0;
+      const advice = ok
+        ? "Now call `mcp__manager__watch_pr` again to wait for their review."
+        : onHook !== null && !res.failed.length
+          ? "Do NOT go back to watch_pr — it would block on an empty queue. A bot reviewer " +
+            "often refuses a re-request on a head it has already reviewed; ask a human, or " +
+            "land the PR on the review you already have if there's nothing outstanding."
+          : "Fix the reviewer names or the project's `workflow.pr.reviewers`; retrying the " +
+            "same list will fail the same way.";
+      return textResult(
+        `${ok ? `Review requested on PR #${number}.` : `Nobody is queued on PR #${number}.`}\n` +
+          `${lines.join("\n")}\n\n${advice}\n` +
+          JSON.stringify({
+            number,
+            requested: onHook ?? res.requested,
+            failed: res.failed,
+            verified: onHook !== null,
+          }),
+        !ok,
       );
     },
   );
@@ -2510,6 +2844,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     contextUsage,
     compactContext,
     watchPr,
+    resolveThread,
+    requestReview,
     createPr,
     approvePr,
     terminal,
@@ -2537,6 +2873,8 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   context_usage: null,
   compact_context: null,
   watch_pr: "github",
+  resolve_thread: "github",
+  request_review: "github",
   create_pr: "prCreate",
   approve_pr: "prApproval",
   terminal: "terminals",
@@ -2633,6 +2971,8 @@ export function createManagerMcpServer(
     contextUsage,
     compactContext,
     watchPr,
+    resolveThread,
+    requestReview,
     createPr,
     approvePr,
     terminal,
@@ -2653,6 +2993,11 @@ export function createManagerMcpServer(
     contextUsage,
     compactContext,
     ...(ctx.github ? [watchPr] : []),
+    // Working a review round needs BOTH halves: resolving what you fixed, and
+    // re-queueing the reviewer afterwards. Each is gated on its own binding so a
+    // GitHub surface missing one still offers the other.
+    ...(ctx.github?.resolveThread ? [resolveThread] : []),
+    ...(ctx.github?.requestReviewers ? [requestReview] : []),
     // Only on a project whose change ships through PRs — which is also the only
     // place the guard refuses a raw `gh pr create`, so the two stay in step.
     ...(ctx.prCreate ? [createPr] : []),

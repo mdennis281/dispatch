@@ -988,7 +988,7 @@ export class GitHubService {
    * not "ready to land" — it's "not started". Best-effort; a failed read yields
    * empty lists, and the caller decides what that means.
    */
-  async prReviewState(repo: string, prNumber: number): Promise<PrReviewState> {
+  async prReviewState(repo: string, prNumber: number): Promise<PrReviewState | null> {
     const raw = await this.ghJson<{
       reviewRequests?: Array<{ login?: string; name?: string; slug?: string } | string>;
       latestReviews?: Array<{ author?: { login?: string } | null; state?: string }>;
@@ -999,10 +999,16 @@ export class GitHubService {
       ],
       { allowFail: true },
     );
-    const requested = (raw?.reviewRequests ?? [])
+    // `allowFail` yields null ONLY when the read failed — a PR with nobody
+    // requested still answers `{"reviewRequests":[],"latestReviews":[]}`. Passing
+    // the failure off as an empty queue is indistinguishable from "nobody is
+    // queued", which is precisely the false alarm `watch_pr`'s stall signal must
+    // never raise. Callers treat null as "couldn't read", not as news.
+    if (!raw) return null;
+    const requested = (raw.reviewRequests ?? [])
       .map((x) => (typeof x === "string" ? x : (x.login ?? x.slug ?? x.name ?? "")))
       .filter(Boolean);
-    const reported = (raw?.latestReviews ?? [])
+    const reported = (raw.latestReviews ?? [])
       .map((x) => ({ author: x.author?.login ?? "", state: String(x.state ?? "").toUpperCase() }))
       .filter((x) => x.author);
     return { requested, reported };
@@ -1120,6 +1126,32 @@ export class GitHubService {
       "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}";
     await this.gh(["api", "graphql", "-f", `query=${mutation}`, "-f", `id=${threadId}`]);
     this.emitNotice(`Resolved review thread`, "info", opts.chatId);
+  }
+
+  /**
+   * Reply IN a review thread (not as a new top-level PR comment) via GraphQL.
+   *
+   * Exists because "answer the reviewer" and "answer the reviewer where they
+   * asked" are different things, and only the second one closes the loop:
+   * `addComment` posts to the PR conversation, leaving the inline thread looking
+   * untouched to both the reviewer and to `reviewThreads`. Paired with
+   * {@link resolveThread} by the `resolve_thread` tool, which is how an agent
+   * says what it did and marks it handled in one step.
+   */
+  async replyToThread(threadId: string, body: string, opts: OpCtx = {}): Promise<void> {
+    if (!threadId || typeof threadId !== "string") {
+      throw new Error("replyToThread: threadId required");
+    }
+    const mutation =
+      "mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(" +
+      "input:{pullRequestReviewThreadId:$id,body:$body}){comment{id}}}";
+    await this.gh([
+      "api", "graphql",
+      "-f", `query=${mutation}`,
+      "-f", `id=${threadId}`,
+      "-f", `body=${body}`,
+    ]);
+    this.emitNotice(`Replied to a review thread`, "info", opts.chatId);
   }
 
   /** Post a comment on a PR. */

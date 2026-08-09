@@ -88,6 +88,46 @@ describe("owner/repo validation", () => {
 
 /* -------------------------------------------------------------------- READ */
 
+describe("prReviewState — the reviewer queue", () => {
+  it("maps requested reviewers and submitted reviews", async () => {
+    const { exec, calls, json } = makeExec();
+    json({
+      reviewRequests: [{ login: "copilot-pull-request-reviewer" }, { slug: "reviewers" }],
+      latestReviews: [{ author: { login: "alice" }, state: "changes_requested" }],
+    });
+    const gh = new GitHubService({ bus, exec });
+
+    const state = await gh.prReviewState(REPO, 42);
+
+    expect(calls[0]!.args).toEqual([
+      "pr", "view", "42", "--repo", REPO, "--json", "reviewRequests,latestReviews",
+    ]);
+    expect(state).toEqual({
+      requested: ["copilot-pull-request-reviewer", "reviewers"],
+      reported: [{ author: "alice", state: "CHANGES_REQUESTED" }],
+    });
+  });
+
+  // The distinction the stall signal rests on: a PR with nobody requested still
+  // answers with empty ARRAYS. Only a failed read yields nothing at all, and
+  // coercing that into "nobody is queued" is a false alarm, not a reading.
+  it("returns null when the read FAILS, not an empty queue", async () => {
+    const { exec, push } = makeExec();
+    push({ stdout: "", exitCode: 1, stderr: "gh: could not resolve to a PullRequest" });
+    const gh = new GitHubService({ bus, exec });
+
+    expect(await gh.prReviewState(REPO, 42)).toBeNull();
+  });
+
+  it("reports a genuinely empty queue as empty arrays", async () => {
+    const { exec, json } = makeExec();
+    json({ reviewRequests: [], latestReviews: [] });
+    const gh = new GitHubService({ bus, exec });
+
+    expect(await gh.prReviewState(REPO, 42)).toEqual({ requested: [], reported: [] });
+  });
+});
+
 describe("READ methods — argv + JSON parsing", () => {
   it("prForBranch builds argv and maps PRInfo", async () => {
     const { exec, calls, json } = makeExec();
