@@ -116,7 +116,23 @@ export interface QuestionCardProps {
   row: PermissionRow;
 }
 
-/** An AskUserQuestion card — options + notes + free-text, answered via actions.answerQuestion. */
+/**
+ * An AskUserQuestion card — options + notes + free-text, answered via
+ * actions.answerQuestion.
+ *
+ * ONE interaction grammar for every shape of ask (single/multi question,
+ * single/multi select, live/re-answer): clicking an option only SELECTS it, and
+ * a single Submit in the footer sends the lot.
+ *
+ * The card used to fire the answer on the click itself for the commonest shape
+ * (one question, one choice). That forced the notes field to sit ABOVE the
+ * options — you had to be able to type it before the click that ended the
+ * interaction — which put an optional field in front of the thing everyone came
+ * to do, and meant the same card taught two different grammars depending on a
+ * `multiSelect` flag the reader can't see. Selecting first costs one click and
+ * buys a card you can read top-to-bottom: question, choices, then the optional
+ * qualifiers, then send.
+ */
 export function QuestionCard({ row }: QuestionCardProps) {
   const resolvedPending = row.decision === "pending";
   const declined = row.decision === "deny";
@@ -216,7 +232,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
   const toggle = (qi: number, id: string, single: boolean) =>
     setSelected((s) => {
       const cur = s[qi] ?? [];
-      if (single) return { ...s, [qi]: [id] };
+      if (single) return { ...s, [qi]: cur.includes(id) ? [] : [id] };
       return { ...s, [qi]: cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id] };
     });
 
@@ -243,31 +259,26 @@ export function QuestionCard({ row }: QuestionCardProps) {
     return null;
   };
 
-  const allAnswered = questions.every((_, qi) => valueFor(qi) !== null);
+  const answeredCount = questions.filter((_, qi) => valueFor(qi) !== null).length;
+  const allAnswered = answeredCount === questions.length;
 
-  // Submit every question at once (the multi-question path). Gated by disabling
-  // until all are answered — never allow-then-error.
-  const submitAll = () => send(questions.map((_, qi) => valueFor(qi)!));
+  /** Submit every question at once — the one send path for every card shape. */
+  const submitAll = () => {
+    if (!allAnswered) return;
+    send(questions.map((_, qi) => valueFor(qi)!));
+  };
 
-  // Immediate-submit helpers for the single-question case (preserved UX).
-  const answerSingleOption = (o: QuestionOption) =>
-    send([{ questionIndex: 0, optionId: o.id, answer: o.label, notes: noteFor(0) }]);
-  const submitSingleMulti = () => {
-    const sel = selected[0] ?? [];
-    if (!sel.length) return;
-    send([
-      {
-        questionIndex: 0,
-        optionId: sel[0],
-        answer: sel.map((id) => labelOf(0, id)).join(", "),
-        notes: noteFor(0),
-      },
-    ]);
-  };
-  const submitSingleFree = () => {
-    const t = (freeText[0] ?? "").trim();
-    if (t) send([{ questionIndex: 0, answer: t, notes: noteFor(0) }]);
-  };
+  /**
+   * What the footer button says. A single-question card names the act ("Send
+   * answer"); a multi-question one has to report progress, because the button is
+   * disabled until the last question is answered and "Submit" alone gives no
+   * clue which one is still empty.
+   */
+  const submitLabel = reverting
+    ? "Send correction"
+    : multi
+      ? `Submit answers (${answeredCount}/${questions.length})`
+      : "Send answer";
 
   return (
     <RowShell
@@ -333,6 +344,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
 
         {questions.map((q, qi) => {
           const sel = selected[qi] ?? [];
+          const overridden = (freeText[qi] ?? "").trim().length > 0;
           return (
             <div key={qi}>
               <div className="border-t border-line-soft px-3 py-2">
@@ -344,55 +356,52 @@ export function QuestionCard({ row }: QuestionCardProps) {
                 <p className="whitespace-pre-wrap break-words text-[12.5px] leading-relaxed text-secondary">
                   {q.question}
                 </p>
+                {/* Say the selection rule in words. The checkbox-vs-radio shape
+                    is the only other cue, and it's a 16px difference that
+                    nobody reads before their first click — which on a
+                    multi-select is the click that matters. */}
+                {pending && q.options.length > 0 && (
+                  <p className="mt-1 text-[11px] text-muted">
+                    {q.multiSelect ? "Select all that apply" : "Select one"}
+                    {q.multiSelect && sel.length > 0 && (
+                      <span className="text-accent-hi"> · {sel.length} selected</span>
+                    )}
+                  </p>
+                )}
               </div>
 
               {pending && (
                 <div className="flex flex-col gap-1.5 border-t border-line-soft bg-inset/60 px-3 py-2.5">
-                  {/* Above the options on purpose: a single-question ask submits
-                      the moment an option is clicked, so the notes have to be
-                      typeable before that click. */}
-                  <input
-                    value={notes[qi] ?? ""}
-                    onChange={(e) => setNotes((s) => ({ ...s, [qi]: e.target.value }))}
-                    disabled={busy}
-                    placeholder="Notes (optional) — sent along with whichever option you pick"
-                    className={cn(
-                      "h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-[12px] text-primary",
-                      "placeholder:text-faint focus:border-line-strong focus:outline-none",
-                    )}
-                  />
-
                   {q.options.map((o) => {
                     const isSel = sel.includes(o.id);
                     return (
                       <button
                         key={o.id}
                         disabled={busy}
-                        onClick={() => {
-                          if (q.multiSelect) toggle(qi, o.id, false);
-                          else if (multi) toggle(qi, o.id, true);
-                          else answerSingleOption(o);
-                        }}
+                        aria-pressed={isSel}
+                        onClick={() => toggle(qi, o.id, !q.multiSelect)}
                         className={cn(
                           "group flex w-full items-start gap-2 rounded-md border px-2.5 py-1.5 text-left transition-colors",
                           isSel
                             ? "border-accent-line bg-accent-ghost text-primary"
                             : "border-line bg-panel-2 text-secondary hover:border-line-strong hover:text-primary",
+                          // A typed custom answer replaces the options entirely
+                          // (see valueFor), so they stop looking live rather
+                          // than silently losing to the text field below.
+                          overridden && "opacity-45",
                         )}
                       >
-                        {(q.multiSelect || multi) && (
-                          <span
-                            className={cn(
-                              "mt-px flex size-4 shrink-0 items-center justify-center border [&_svg]:size-3",
-                              q.multiSelect ? "rounded-[4px]" : "rounded-full",
-                              isSel
-                                ? "border-accent-line bg-accent text-accent-fg"
-                                : "border-line-strong text-transparent",
-                            )}
-                          >
-                            <Check />
-                          </span>
-                        )}
+                        <span
+                          className={cn(
+                            "mt-px flex size-4 shrink-0 items-center justify-center border [&_svg]:size-3",
+                            q.multiSelect ? "rounded-[4px]" : "rounded-full",
+                            isSel
+                              ? "border-accent-line bg-accent text-accent-fg"
+                              : "border-line-strong text-transparent",
+                          )}
+                        >
+                          <Check />
+                        </span>
                         <span className="min-w-0 flex-1">
                           <span className="block text-[12px] font-medium">{o.label}</span>
                           {o.description && (
@@ -403,79 +412,65 @@ export function QuestionCard({ row }: QuestionCardProps) {
                     );
                   })}
 
-                  {/* Single-question multi-select submits on its own button. */}
-                  {!multi && q.multiSelect && q.options.length > 0 && (
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      className="self-start"
-                      disabled={sel.length === 0 || busy}
-                      onClick={submitSingleMulti}
-                    >
-                      Submit{sel.length ? ` (${sel.length})` : ""}
-                    </Button>
-                  )}
-
-                  <div className="mt-0.5 flex items-center gap-1.5">
-                    <input
-                      value={freeText[qi] ?? ""}
-                      onChange={(e) => setFreeText((s) => ({ ...s, [qi]: e.target.value }))}
-                      disabled={busy}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !multi) {
-                          e.preventDefault();
-                          submitSingleFree();
-                        }
-                      }}
-                      placeholder={q.options.length ? "…or type a custom answer" : "Type your answer"}
-                      className={cn(
-                        "h-7 min-w-0 flex-1 rounded-md border border-line bg-panel-2 px-2 text-[12px] text-primary",
-                        "placeholder:text-faint focus:border-line-strong focus:outline-none",
-                      )}
-                    />
-                    {/* Single-question free-text has its own inline send. */}
-                    {!multi && (
-                      <Button
-                        variant="default"
-                        size="sm"
-                        leftIcon={<CornerDownLeft />}
-                        disabled={!(freeText[qi] ?? "").trim() || busy}
-                        onClick={submitSingleFree}
-                      >
-                        Send
-                      </Button>
+                  {/* Qualifiers, BELOW the choices: both are optional refinements
+                      of the answer above them, and nothing here submits, so
+                      there's no longer a reason to hoist them in front of the
+                      options. Free text replaces the selection; notes ride
+                      along with it. */}
+                  <input
+                    value={freeText[qi] ?? ""}
+                    onChange={(e) => setFreeText((s) => ({ ...s, [qi]: e.target.value }))}
+                    disabled={busy}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && allAnswered) {
+                        e.preventDefault();
+                        submitAll();
+                      }
+                    }}
+                    placeholder={q.options.length ? "…or type a custom answer" : "Type your answer"}
+                    className={cn(
+                      "mt-1 h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-[12px] text-primary",
+                      "placeholder:text-faint focus:border-line-strong focus:outline-none",
                     )}
-                  </div>
+                  />
+                  <input
+                    value={notes[qi] ?? ""}
+                    onChange={(e) => setNotes((s) => ({ ...s, [qi]: e.target.value }))}
+                    disabled={busy}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && allAnswered) {
+                        e.preventDefault();
+                        submitAll();
+                      }
+                    }}
+                    placeholder="Notes (optional) — sent with your answer"
+                    className={cn(
+                      "h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-[12px] text-primary",
+                      "placeholder:text-faint focus:border-line-strong focus:outline-none",
+                    )}
+                  />
                 </div>
               )}
             </div>
           );
         })}
 
-        {/* Pending footer: multi-question submit (when applicable) + a decline
-            escape hatch. Declining resolves the question without answering. */}
+        {/* One submit for every shape of card, plus the escape hatch. */}
         {pending && (
           <div className="flex items-center gap-2 border-t border-line-soft bg-inset/60 px-3 py-2.5">
-            {/* While re-answering, EVERY shape needs an explicit submit: the
-                immediate-on-click path belongs to the live permission channel,
-                and a correction goes out as a message instead. */}
-            {(multi || reverting) && (
-              <>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  leftIcon={<CornerDownLeft />}
-                  disabled={!allAnswered || busy}
-                  onClick={submitAll}
-                >
-                  {reverting ? "Send correction" : "Submit answers"}
-                </Button>
-                {!allAnswered && (
-                  <span className="text-[11px] text-muted">
-                    {multi ? `Answer all ${questions.length} to continue` : "Pick an answer"}
-                  </span>
-                )}
-              </>
+            <Button
+              variant="primary"
+              size="sm"
+              leftIcon={<CornerDownLeft />}
+              disabled={!allAnswered || busy}
+              onClick={submitAll}
+            >
+              {submitLabel}
+            </Button>
+            {!allAnswered && (
+              <span className="text-[11px] text-muted">
+                {multi ? "Answer every question to continue" : "Pick an option or type an answer"}
+              </span>
             )}
             {reverting ? (
               <button
