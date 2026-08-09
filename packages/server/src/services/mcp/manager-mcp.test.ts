@@ -13,6 +13,7 @@ import {
   createManagerTools,
   createManagerMcpServer,
   prLandingBlockers,
+  overrideConsentPrompt,
   prCreateBlockers,
   WAIT_CAP_SECONDS,
   PR_POLL_INTERVAL_MS,
@@ -25,6 +26,7 @@ import {
   type PrPollResult,
   type PrReadiness,
   type PrLandingPolicy,
+  type PrLandingBlocker,
   type PrCreateState,
   type PrCreateResult,
   type ManagerMcpChats,
@@ -638,15 +640,33 @@ function readyPr(over: Partial<PrReadiness> = {}): PrReadiness {
 /** A scriptable approval binding that records what it was asked to do. */
 function fakeApproval(
   pr: PrReadiness | null,
-  opts: { approved?: boolean; mergeError?: string; policy?: PrLandingPolicy } = {},
+  opts: {
+    approved?: boolean;
+    mergeError?: string;
+    policy?: PrLandingPolicy;
+    /** What the human says to an override card. Defaults to yes. */
+    consent?: { approved: boolean; message?: string };
+    /** Make the consent ask THROW, standing in for a dead session. */
+    consentThrows?: string;
+  } = {},
 ) {
-  const calls: { approve: { n: number; body: string }[]; merge: { n: number; method: string }[] } = {
+  const calls: {
+    approve: { n: number; body: string }[];
+    merge: { n: number; method: string }[];
+    confirm: { n: number; codes: string[] }[];
+  } = {
     approve: [],
     merge: [],
+    confirm: [],
   };
   const binding: ManagerMcpPrApproval = {
     defaultMethod: "squash",
     policy: opts.policy ?? {},
+    confirmOverride: async ({ number, blockers }) => {
+      calls.confirm.push({ n: number, codes: blockers.map((b) => b.code) });
+      if (opts.consentThrows) throw new Error(opts.consentThrows);
+      return opts.consent ?? { approved: true };
+    },
     readiness: async () => pr,
     approve: async (n, _repo, body) => {
       calls.approve.push({ n, body });
@@ -771,13 +791,36 @@ describe("prLandingBlockers", () => {
     expect(blocked[0].detail).toMatch(/allowNoReview: true/);
   });
 
-  it("says so plainly when nobody was even ASKED to review", () => {
-    const b = prLandingBlockers(
-      readyPr({ submittedReviews: [], requestedReviewers: [] }),
-      { requireReview: true },
-    );
-    expect(b[0].detail).toMatch(/No reviewer has even been requested/);
+  it("points at create_pr when nobody was ASKED but reviewers ARE configured", () => {
+    const b = prLandingBlockers(readyPr({ submittedReviews: [], requestedReviewers: [] }), {
+      requireReview: true,
+      reviewers: ["copilot-pull-request-reviewer[bot]"],
+    });
+    expect(b[0].detail).toMatch(/copilot-pull-request-reviewer/);
     expect(b[0].detail).toMatch(/create_pr/);
+  });
+
+  // The loop that actually happened: this project configured NO reviewers, so
+  // "re-open it through create_pr so the configured reviewers are asked" was
+  // advice that could never come true — there were none to ask. The agent read
+  // the dead end for what it was and reached for the override instead.
+  it("names the EMPTY reviewer list as the fault when there is nobody to ask", () => {
+    const b = prLandingBlockers(readyPr({ submittedReviews: [], requestedReviewers: [] }), {
+      requireReview: true,
+      reviewers: [],
+    });
+    expect(b[0].detail).toMatch(/configures NO reviewers/);
+    expect(b[0].detail).toMatch(/workflow\.pr\.reviewers/);
+    // It must NOT send the agent back to create_pr, which would change nothing.
+    expect(b[0].detail).not.toMatch(/create_pr/);
+  });
+
+  it("tells the agent to WAIT when a requested reviewer just hasn't reported", () => {
+    const b = prLandingBlockers(
+      readyPr({ submittedReviews: [], requestedReviewers: ["copilot-pull-request-reviewer"] }),
+      { requireReview: true, reviewers: ["copilot-pull-request-reviewer"] },
+    );
+    expect(b[0].detail).toMatch(/watch_pr/);
   });
 
   it("treats a PENDING (unsubmitted) review as nobody having reviewed", () => {
@@ -841,6 +884,42 @@ describe("prLandingBlockers", () => {
         allowNoReview: true,
       }),
     ).toEqual([]);
+  });
+});
+
+describe("overrideConsentPrompt", () => {
+  const pr = { number: 83, title: "feat: thing", url: "https://x/pull/83" };
+  const blocker = (code: PrLandingBlocker["code"], detail: string = code): PrLandingBlocker => ({
+    code,
+    detail,
+  });
+
+  it("says in the TITLE what is being waived", () => {
+    expect(overrideConsentPrompt(pr, [blocker("no-review")]).title).toMatch(
+      /nobody has reviewed it/,
+    );
+    expect(overrideConsentPrompt(pr, [blocker("no-checks")]).title).toMatch(/no CI check reported/);
+    expect(
+      overrideConsentPrompt(pr, [blocker("no-checks"), blocker("no-review")]).title,
+    ).toMatch(/nobody has reviewed it and no CI reported/);
+  });
+
+  it("spells out every blocker being waived, and how to say no", () => {
+    const { description } = overrideConsentPrompt(pr, [
+      blocker("no-review", "Nobody has reviewed this PR yet"),
+    ]);
+    // "Merge it anyway?" with no statement of what "anyway" covers is a rubber
+    // stamp with extra steps.
+    expect(description).toContain("Nobody has reviewed this PR yet");
+    expect(description).toContain("feat: thing");
+    expect(description).toContain("https://x/pull/83");
+    expect(description).toMatch(/Say no to leave the PR open/);
+  });
+
+  it("survives a PR with no title or url", () => {
+    const { title, description } = overrideConsentPrompt({ number: 7 }, [blocker("no-review")]);
+    expect(title).toContain("#7");
+    expect(description).not.toContain("undefined");
   });
 });
 
@@ -1369,7 +1448,7 @@ describe("manager-mcp — approve_pr", () => {
     expect(resultText(res)).toMatch(/allowNoChecks: true/);
   });
 
-  it("merges anyway when the caller passes allowNoChecks", async () => {
+  it("asks the human, then merges, when allowNoChecks is passed and they say yes", async () => {
     const { binding, calls } = fakeApproval(readyPr({ checks: [] }), {
       policy: { requireChecks: true },
     });
@@ -1381,6 +1460,7 @@ describe("manager-mcp — approve_pr", () => {
     });
 
     await approvePr.handler(approveArgs({ allowNoChecks: true }), {});
+    expect(calls.confirm).toEqual([{ n: 83, codes: ["no-checks"] }]);
     expect(calls.merge).toEqual([{ n: 83, method: "squash" }]);
   });
 
@@ -1402,7 +1482,17 @@ describe("manager-mcp — approve_pr", () => {
     expect(resultText(res)).toMatch(/allowNoReview: true/);
   });
 
-  it("merges anyway when the caller passes allowNoReview", async () => {
+  /* ---- the override consent gate ----
+   *
+   * The merge this exists to prevent: the human said "pr it and merge",
+   * approve_pr correctly refused with `no-review`, and the agent re-called it
+   * with `allowNoReview: true` on the reasoning that "merge" had authorised an
+   * UNREVIEWED merge. The reviewer reported two minutes after the branch was
+   * gone. An override justified by "the human told me to" cannot be granted by
+   * the one party who can't witness that, so the flag now asks and waits.
+   */
+
+  it("asks the human, then merges, when allowNoReview is passed and they say yes", async () => {
     const { binding, calls } = fakeApproval(readyPr({ submittedReviews: [] }), {
       policy: { requireReview: true },
     });
@@ -1414,7 +1504,107 @@ describe("manager-mcp — approve_pr", () => {
     });
 
     await approvePr.handler(approveArgs({ allowNoReview: true }), {});
+    expect(calls.confirm).toEqual([{ n: 83, codes: ["no-review"] }]);
     expect(calls.merge).toEqual([{ n: 83, method: "squash" }]);
+  });
+
+  it("does NOT merge when the human declines the override", async () => {
+    const { binding, calls } = fakeApproval(readyPr({ submittedReviews: [] }), {
+      policy: { requireReview: true },
+      consent: { approved: false, message: "wait for copilot" },
+    });
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs({ allowNoReview: true }), {});
+    expect(calls.confirm).toHaveLength(1);
+    expect(calls.merge).toEqual([]);
+    // Nor may it approve — a review it then didn't land is noise on the PR.
+    expect(calls.approve).toEqual([]);
+    const text = resultText(res);
+    expect(text).toMatch(/did not approve the override/i);
+    expect(text).toMatch(/wait for copilot/);
+    expect(text).toMatch(/don't re-ask/i);
+    expect(JSON.parse(text.slice(text.lastIndexOf("{")))).toMatchObject({
+      merged: false,
+      overrideDeclined: true,
+      blockers: ["no-review"],
+    });
+  });
+
+  it("fails CLOSED when the human can't be asked at all", async () => {
+    // No live session to put the card in front of. An unanswerable question is
+    // not a yes — the whole point is that this decision has a witness.
+    const { binding, calls } = fakeApproval(readyPr({ submittedReviews: [] }), {
+      policy: { requireReview: true },
+      consentThrows: "no live session to ask through",
+    });
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs({ allowNoReview: true }), {});
+    expect(calls.merge).toEqual([]);
+    expect(resultText(res)).toMatch(/no live session/);
+  });
+
+  it("does not ask when the override suppresses nothing", async () => {
+    // `allowNoReview` on a PR a reviewer already approved buys nothing, so it
+    // must not wake the human — the gate keys off what the flag actually did.
+    const { binding, calls } = fakeApproval(readyPr(), { policy: { requireReview: true } });
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    await approvePr.handler(approveArgs({ allowNoReview: true, allowNoChecks: true }), {});
+    expect(calls.confirm).toEqual([]);
+    expect(calls.merge).toEqual([{ n: 83, method: "squash" }]);
+  });
+
+  it("does not ask while a blocker the override can't touch still stands", async () => {
+    // The human is asked once, about a decision that's actually theirs — not
+    // about a PR that a failing check stops regardless of what they say.
+    const { binding, calls } = fakeApproval(
+      readyPr({ submittedReviews: [], checks: [FAIL_BUILD] }),
+      { policy: { requireReview: true } },
+    );
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    const res = await approvePr.handler(approveArgs({ allowNoReview: true }), {});
+    expect(calls.confirm).toEqual([]);
+    expect(calls.merge).toEqual([]);
+    expect(resultText(res)).toMatch(/check\(s\) failing/);
+  });
+
+  it("names BOTH overrides on one card rather than asking twice", async () => {
+    const { binding, calls } = fakeApproval(
+      readyPr({ submittedReviews: [], requestedReviewers: [], checks: [] }),
+      { policy: { requireChecks: true, requireReview: true } },
+    );
+    const { approvePr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prApproval: binding,
+    });
+
+    await approvePr.handler(approveArgs({ allowNoReview: true, allowNoChecks: true }), {});
+    expect(calls.confirm).toEqual([{ n: 83, codes: ["no-checks", "no-review"] }]);
   });
 
   it("keeps every pre-existing guard alongside the new ones", async () => {

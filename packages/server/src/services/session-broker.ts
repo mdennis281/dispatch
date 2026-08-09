@@ -69,6 +69,7 @@ import type { RunnerService } from "./runner.js";
 import type { WorktreeService } from "./worktree.js";
 import {
   createManagerMcpServer,
+  overrideConsentPrompt,
   type ManagerMcpGitHub,
   type ManagerMcpPrApproval,
   type ManagerMcpPrCreate,
@@ -402,6 +403,12 @@ function makePrApprovalBinding(
   chatId: string,
   defaultMethod: WorkflowMergeMethod,
   policy: PrLandingPolicy,
+  /**
+   * Puts a load-bearing override in front of the human. Injected rather than
+   * reached for off the broker so this stays a plain function and the "what
+   * happens when they say no" path is testable without a live session.
+   */
+  confirmOverride: ManagerMcpPrApproval["confirmOverride"],
 ): ManagerMcpPrApproval {
   let repoP: Promise<string | null> | undefined;
   const repoFor = async (override?: string): Promise<string | null> => {
@@ -417,6 +424,7 @@ function makePrApprovalBinding(
   return {
     defaultMethod,
     policy,
+    confirmOverride,
     readiness: async (n, repo) => {
       const r = await repoFor(repo);
       if (!r) return null;
@@ -2995,12 +3003,35 @@ export class SessionBroker {
         // discouraged) everywhere else.
         prApproval:
           github && canApprovePr
-            ? makePrApprovalBinding(github, cwd, session.chatId, workflow.mergeMethod, {
-                // The project's declared bar, resolved once and handed over — so
-                // what the human authored is exactly what gets enforced.
-                requireChecks: workflow.pr.requireChecks,
-                requireReview: workflow.pr.requireReview,
-              })
+            ? makePrApprovalBinding(
+                github,
+                cwd,
+                session.chatId,
+                workflow.mergeMethod,
+                {
+                  // The project's declared bar, resolved once and handed over — so
+                  // what the human authored is exactly what gets enforced.
+                  requireChecks: workflow.pr.requireChecks,
+                  requireReview: workflow.pr.requireReview,
+                  reviewers: workflow.pr.reviewers,
+                },
+                // An `allowNoReview`/`allowNoChecks` that actually suppresses a
+                // blocker goes to the HUMAN on the ordinary permission channel.
+                // Deliberately NOT routed through SELF_GATED_TOOLS: this gate is
+                // conditional (almost every merge never reaches it), so the
+                // generic canUseTool prompt for approve_pr must stay in place.
+                (input) =>
+                  this.requestApproval(session.chatId, {
+                    toolName: "approve_pr_override",
+                    ...overrideConsentPrompt(input, input.blockers),
+                    input: {
+                      number: input.number,
+                      title: input.title,
+                      url: input.url,
+                      overriding: input.blockers.map((b) => b.code),
+                    },
+                  }),
+              )
             : undefined,
         // The PR-CREATION surface — bound wherever change ships through a PR, so
         // the guard's refusal of a raw `gh pr create` always has a path to name.

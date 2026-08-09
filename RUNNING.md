@@ -158,8 +158,19 @@ refuses — listing every reason at once — on a failing or still-running check
 unresolved review thread, a draft, a conflict, or a `changes_requested` review. Under
 [`pr.requireChecks` / `pr.requireReview`](#the-pr-block--declaring-what-a-pr-needs) it
 also refuses when **no check reported at all** and when **nobody has reviewed yet**,
-naming `allowNoChecks: true` / `allowNoReview: true` as the explicit overrides. Two
-stop signals are yours specifically:
+naming `allowNoChecks: true` / `allowNoReview: true` as the explicit overrides.
+
+**Those two overrides don't grant themselves.** When one of them actually suppresses a
+blocker, the merge stops and a permission card goes to you — naming the PR and exactly
+what's being waived — and waits for your answer. A no leaves the PR open, and the agent
+is told not to re-ask. If there's no live session to ask through, it fails closed. This
+is deliberate: an override whose only justification is "the human told me to" was being
+self-certified by the one party who can't witness that, and a PR got merged two minutes
+before its reviewer reported, on the strength of the human having said "pr it and merge".
+An override that suppresses nothing (an `allowNoReview` on an already-reviewed PR) asks
+nothing.
+
+Two stop signals are yours specifically:
 
 - **Say so.** If you asked the agent to leave the PR open, to let you look first, or to
   "just open a PR", it's told to stand down and report the PR as ready instead.
