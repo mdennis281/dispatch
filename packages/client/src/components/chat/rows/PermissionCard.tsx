@@ -101,7 +101,7 @@ export function PermissionCard({ row }: PermissionCardProps) {
         )}
       >
         <div className="flex items-center gap-2 px-3 py-2">
-          <span className="text-[12.5px] text-primary">
+          <span className="text-base text-primary">
             Claude wants to{" "}
             <span className="font-semibold text-warn">{row.displayName ?? row.toolName}</span>
           </span>
@@ -120,7 +120,7 @@ export function PermissionCard({ row }: PermissionCardProps) {
           <div className="cm-scroll max-h-48 overflow-auto border-t border-line-soft px-3 py-2">
             <pre className="whitespace-pre-wrap break-words cm-mono text-secondary">{target}</pre>
             {typeof row.input.content === "string" && (
-              <pre className="mt-1.5 line-clamp-3 whitespace-pre-wrap break-words cm-mono !text-[10.5px] text-faint">
+              <pre className="mt-1.5 line-clamp-3 whitespace-pre-wrap break-words cm-mono !text-2xs text-faint">
                 {row.input.content}
               </pre>
             )}
@@ -136,7 +136,7 @@ export function PermissionCard({ row }: PermissionCardProps) {
 
         {pending && refine && (
           <div className="flex flex-col gap-2 border-t border-line-soft px-3 py-2.5">
-            <label className="flex items-center justify-between text-[10.5px] font-medium uppercase tracking-wide text-faint">
+            <label className="flex items-center justify-between text-2xs font-medium uppercase tracking-wide text-faint">
               Edit tool input (JSON)
               {invalid && <span className="normal-case tracking-normal text-danger">invalid JSON</span>}
             </label>
@@ -154,7 +154,7 @@ export function PermissionCard({ row }: PermissionCardProps) {
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="Deny reason (optional) — sent to the agent"
-              className="h-7 w-full rounded-md border border-line bg-panel-2 px-2 text-[12px] text-primary placeholder:text-faint focus:border-line-strong focus:outline-none"
+              className="h-7 w-full rounded-md border border-line bg-panel-2 px-2 text-sm text-primary placeholder:text-faint focus:border-line-strong focus:outline-none"
             />
           </div>
         )}
@@ -199,7 +199,7 @@ export function PermissionCard({ row }: PermissionCardProps) {
 
         {!pending && row.message && (
           <div className="border-t border-line-soft px-3 py-2">
-            <p className="text-[11.5px] text-muted">{row.message}</p>
+            <p className="text-xs text-muted">{row.message}</p>
           </div>
         )}
       </div>

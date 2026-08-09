@@ -23,7 +23,7 @@ export function PanelHeader({ title, icon, actions, className }: PanelHeaderProp
       )}
     >
       {icon && <span className="text-secondary [&_svg]:size-3.5">{icon}</span>}
-      <span className="text-[12px] font-semibold tracking-tight text-primary">{title}</span>
+      <span className="text-sm font-semibold tracking-tight text-primary">{title}</span>
       {actions && <div className="ml-auto flex items-center gap-1">{actions}</div>}
     </div>
   );
@@ -34,7 +34,7 @@ export function SectionLabel({ children, className }: { children: ReactNode; cla
   return (
     <div
       className={cn(
-        "px-2 text-[10px] font-semibold uppercase tracking-[0.09em] text-faint",
+        "px-2 text-2xs font-semibold uppercase tracking-[0.09em] text-faint",
         className,
       )}
     >

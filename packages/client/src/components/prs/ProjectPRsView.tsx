@@ -2,8 +2,8 @@
  * ProjectPRsView — the GLOBAL, project-wide open-PR roster. Unlike the per-chat
  * PRsPanel (which scopes to a single chat's PR), this overlay lists EVERY open PR
  * for the active project via `GET /api/github/project-prs` so you can see + act on
- * the whole board from one place. Mounted once in App; opens on the
- * `cm:open-project-prs` window event (command palette / top-bar affordance).
+ * the whole board from one place. Mounted once in App; open state lives in the
+ * view store's `overlay` field (see stores/view.ts).
  *
  * Each PR renders its number, title, branch→base, draft state, a folded check
  * rollup, review decision, comment count, labels, updated time, an external link,
@@ -38,7 +38,7 @@ import { actions } from "../../lib/actions.js";
 import { useProjects } from "../../stores/projects.js";
 import { relTime } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
-import { OPEN_PROJECT_PRS_EVENT } from "./projectPrsBus.js";
+import { useOverlay } from "../../stores/view.js";
 
 /** Labels that hold a PR from the auto-merge job (house convention). */
 const HOLD_LABELS = new Set(["hold", "no-automerge", "do-not-merge", "wip"]);
@@ -147,7 +147,7 @@ function PrRow({
           href={link}
           target="_blank"
           rel="noopener noreferrer"
-          className="min-w-0 flex-1 truncate text-[12.5px] font-medium leading-snug text-primary hover:text-accent-hi"
+          className="min-w-0 flex-1 truncate text-base font-medium leading-snug text-primary hover:text-accent-hi"
         >
           {pr.title}
         </a>
@@ -170,11 +170,11 @@ function PrRow({
           #{pr.number}
         </Chip>
         {pr.isDraft && <Chip tone="muted">draft</Chip>}
-        <span className="cm-mono !text-[10px] text-faint">
+        <span className="cm-mono !text-2xs text-faint">
           {pr.branch} → {pr.baseBranch}
         </span>
-        {pr.author && <span className="text-[10.5px] text-faint">by {pr.author}</span>}
-        <span className="ml-auto text-[10.5px] text-faint">
+        {pr.author && <span className="text-2xs text-faint">by {pr.author}</span>}
+        <span className="ml-auto text-2xs text-faint">
           {pr.updatedAt ? relTime(Date.parse(pr.updatedAt)) : ""}
         </span>
       </div>
@@ -184,7 +184,7 @@ function PrRow({
         <ChecksChip checks={pr.checks} />
         <ReviewChip decision={pr.reviewDecision} />
         {(pr.commentCount ?? 0) > 0 && (
-          <span className="inline-flex items-center gap-1 text-[10.5px] text-muted [&_svg]:size-3">
+          <span className="inline-flex items-center gap-1 text-2xs text-muted [&_svg]:size-3">
             <MessageSquare />
             {pr.commentCount}
           </span>
@@ -204,7 +204,7 @@ function PrRow({
       {/* actions row */}
       <div className="mt-2.5 flex items-center gap-1.5 border-t border-line-soft pt-2 pl-6">
         <Button
-          size="xs"
+          size="sm"
           variant="primary"
           leftIcon={busy("merge") ? <Spinner size={12} /> : <GitMerge />}
           disabled={pr.isDraft || held}
@@ -215,7 +215,7 @@ function PrRow({
         </Button>
         {held ? (
           <Button
-            size="xs"
+            size="sm"
             variant="default"
             leftIcon={busy("unhold") ? <Spinner size={12} /> : <Play />}
             onClick={() => onAction("unhold", pr.number)}
@@ -224,7 +224,7 @@ function PrRow({
           </Button>
         ) : (
           <Button
-            size="xs"
+            size="sm"
             variant="default"
             leftIcon={busy("hold") ? <Spinner size={12} /> : <Pause />}
             onClick={() => onAction("hold", pr.number)}
@@ -240,7 +240,7 @@ function PrRow({
 /* ------------------------------------------------------------------ overlay */
 
 export function ProjectPRsView() {
-  const [open, setOpen] = useState(false);
+  const { open, close } = useOverlay("prs");
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null);
   const projectId = project?.id;
 
@@ -248,13 +248,6 @@ export function ProjectPRsView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
-
-  // Open on the app-wide event (command palette / top-bar affordance).
-  useEffect(() => {
-    const onOpen = () => setOpen(true);
-    window.addEventListener(OPEN_PROJECT_PRS_EVENT, onOpen);
-    return () => window.removeEventListener(OPEN_PROJECT_PRS_EVENT, onOpen);
-  }, []);
 
   const load = useCallback(async () => {
     if (!projectId) {
@@ -315,7 +308,7 @@ export function ProjectPRsView() {
   return (
     <Modal
       open={open}
-      onClose={() => setOpen(false)}
+      onClose={close}
       width={620}
       icon={<GitPullRequest />}
       title="Open pull requests"
@@ -327,7 +320,7 @@ export function ProjectPRsView() {
               <InlineError message={error} />
             </div>
           ) : (
-            <span className="mr-auto text-[11px] text-muted tabular-nums">
+            <span className="mr-auto text-xs text-muted tabular-nums">
               {loading ? "Loading…" : `${sorted.length} open`}
             </span>
           )}
@@ -345,18 +338,18 @@ export function ProjectPRsView() {
       {!projectId ? (
         <div className="rounded-md border border-dashed border-line px-3 py-10 text-center">
           <GitPullRequest className="mx-auto mb-1.5 size-5 text-faint" />
-          <p className="text-[12px] text-muted">No active project.</p>
-          <p className="mt-0.5 text-[11px] text-faint">Pick a project to see its open PRs.</p>
+          <p className="text-sm text-muted">No active project.</p>
+          <p className="mt-0.5 text-xs text-faint">Pick a project to see its open PRs.</p>
         </div>
       ) : loading && sorted.length === 0 ? (
-        <div className="flex items-center justify-center gap-2 py-12 text-[12px] text-muted">
+        <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted">
           <Spinner size={14} /> Loading pull requests…
         </div>
       ) : sorted.length === 0 ? (
         <div className="rounded-md border border-dashed border-line px-3 py-10 text-center">
           <GitPullRequest className="mx-auto mb-1.5 size-5 text-faint" />
-          <p className="text-[12px] text-muted">No open pull requests.</p>
-          <p className="mt-0.5 text-[11px] text-faint">Ship a worktree to open one.</p>
+          <p className="text-sm text-muted">No open pull requests.</p>
+          <p className="mt-0.5 text-xs text-faint">Ship a worktree to open one.</p>
         </div>
       ) : (
         <div className={cn("space-y-2", loading && "opacity-70")}>

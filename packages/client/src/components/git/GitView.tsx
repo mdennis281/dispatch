@@ -70,7 +70,7 @@ function StashButton({ disabled }: { disabled: boolean }) {
       className="p-0"
       trigger={({ toggle, open }) => (
         <Button
-          size="xs"
+          size="sm"
           variant="subtle"
           leftIcon={<Archive />}
           disabled={disabled}
@@ -83,7 +83,7 @@ function StashButton({ disabled }: { disabled: boolean }) {
     >
       {(close) => (
         <div className="flex flex-col gap-2 p-2.5">
-          <label className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint">
+          <label className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">
             Stash message
           </label>
           <input
@@ -92,23 +92,23 @@ function StashButton({ disabled }: { disabled: boolean }) {
             onChange={(e) => setMessage(e.target.value)}
             placeholder="optional"
             spellCheck={false}
-            className="h-7 w-full rounded-md border border-line bg-inset px-2 text-[11.5px] text-primary outline-none placeholder:text-faint focus:border-line-strong"
+            className="h-7 w-full rounded-md border border-line bg-inset px-2 text-xs text-primary outline-none placeholder:text-faint focus:border-line-strong"
           />
-          <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted hover:text-secondary">
+          <label className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted hover:text-secondary">
             <input
               type="checkbox"
               checked={includeUntracked}
               onChange={(e) => setIncludeUntracked(e.target.checked)}
-              className="size-3 accent-[var(--accent)]"
+              className="size-3 accent-[var(--p-accent)]"
             />
             Include untracked files
           </label>
           <div className="flex justify-end gap-1.5 pt-0.5">
-            <Button size="xs" variant="ghost" onClick={close}>
+            <Button size="sm" variant="ghost" onClick={close}>
               Cancel
             </Button>
             <Button
-              size="xs"
+              size="sm"
               variant="primary"
               leftIcon={<Archive />}
               onClick={() => {
@@ -161,7 +161,7 @@ function SweepButton({
       className="p-0"
       trigger={({ toggle, open }) => (
         <Button
-          size="xs"
+          size="sm"
           variant="subtle"
           leftIcon={<GitCommitVertical />}
           disabled={disabled}
@@ -377,8 +377,8 @@ export function GitView() {
     return (
       <div className="flex h-full flex-1 flex-col items-center justify-center bg-app text-center">
         <GitBranch className="mb-2 size-6 text-faint" />
-        <p className="text-[13px] font-medium text-secondary">No project selected</p>
-        <p className="mt-0.5 text-[11.5px] text-muted">
+        <p className="text-base font-medium text-secondary">No project selected</p>
+        <p className="mt-0.5 text-xs text-muted">
           Pick a project to see its working copy.
         </p>
       </div>
@@ -407,7 +407,7 @@ export function GitView() {
             className="max-w-[220px]"
           />
         ) : (
-          <span className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-panel-2 px-2 text-[12px] text-secondary [&_svg]:size-3.5">
+          <span className="inline-flex h-6 items-center gap-1.5 rounded-md border border-line bg-panel-2 px-2 text-sm text-secondary [&_svg]:size-3.5">
             <FolderGit2 className="text-muted" />
             <span className="truncate">{project.name}</span>
           </span>
@@ -433,7 +433,7 @@ export function GitView() {
               </Chip>
             )}
             {ahead > 0 && (
-              <Chip tone="accent" mono>
+              <Chip tone="info" mono>
                 ↑{ahead}
               </Chip>
             )}
@@ -452,7 +452,7 @@ export function GitView() {
           />
           <StashButton disabled={!dirty || !!busy} />
           <Button
-            size="xs"
+            size="sm"
             variant="subtle"
             leftIcon={busy === "Fetch" ? <Spinner size={12} /> : <RefreshCw />}
             disabled={!!busy}
@@ -461,7 +461,7 @@ export function GitView() {
             Fetch
           </Button>
           <Button
-            size="xs"
+            size="sm"
             variant="subtle"
             leftIcon={busy === "Pull" ? <Spinner size={12} /> : <ArrowDownToLine />}
             disabled={!!busy || behind === 0}
@@ -470,7 +470,7 @@ export function GitView() {
             Pull{behind > 0 ? ` ${behind}` : ""}
           </Button>
           <Button
-            size="xs"
+            size="sm"
             variant={ahead > 0 ? "primary" : "subtle"}
             leftIcon={busy === "Push" ? <Spinner size={12} /> : <ArrowUpFromLine />}
             disabled={!!busy || (ahead === 0 && !!status?.upstream)}
@@ -491,7 +491,7 @@ export function GitView() {
       </div>
 
       {error && (
-        <div className="shrink-0 border-b border-line bg-danger-ghost px-3 py-1.5 text-[11.5px] text-danger">
+        <div className="shrink-0 border-b border-line bg-danger-ghost px-3 py-1.5 text-xs text-danger">
           {error}
         </div>
       )}
@@ -562,8 +562,8 @@ export function GitView() {
         ) : (
           <div className="flex min-w-0 flex-1 flex-col items-center justify-center bg-inset text-center">
             <GitCompare className="mb-2 size-6 text-faint" />
-            <p className="text-[12.5px] text-muted">Select a file to see its diff</p>
-            <p className="mt-0.5 max-w-sm text-[11px] text-faint">
+            <p className="text-base text-muted">Select a file to see its diff</p>
+            <p className="mt-0.5 max-w-sm text-xs text-faint">
               Changes, commits and stashes all open here side by side.
             </p>
           </div>

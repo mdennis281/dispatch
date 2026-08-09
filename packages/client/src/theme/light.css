@@ -1,0 +1,197 @@
+/*
+ * ═════════════════════════════════════════════════════════════════════════
+ * LIGHT PALETTE.
+ *
+ * Same key set, same order, same grouping as `dark.css` — read them side by
+ * side. It is NOT an inversion: an algorithmically flipped dark theme produces
+ * muddy mid-grays and accents that fail contrast the moment the background goes
+ * white. Every value here was picked against a light background on its own.
+ *
+ * Three things change shape rather than value when crossing over:
+ *   - the surface ladder RISES toward white instead of falling toward black, so
+ *     the app shell is the darkest surface and cards are the lightest;
+ *   - washes (hairlines, hover, bubble) mix from slate, not white — white on
+ *     white is invisible;
+ *   - `-hi` means DARKER here. "-hi" is more emphasis, and on a light ground
+ *     more emphasis is more contrast, which is downward.
+ * ═════════════════════════════════════════════════════════════════════════
+ */
+:root[data-theme="light"] {
+  /* ── brand ───────────────────────────────────────────────────────────────
+   * Identical to dark: the mark is the mark. Duplicated in
+   * `components/ui/DispatchMark.tsx`, `public/favicon.svg` and
+   * `scripts/generate-brand.mjs` — change one, change all four. */
+  --p-brand: #e5a33c;
+  --p-brand-plate: #14171b;
+
+  /* ── surfaces ────────────────────────────────────────────────────────────
+   * Inverted ladder: the shell is a cool off-white and content rises to pure
+   * white.
+   *
+   * The rungs are spaced WIDER than dark's, which is not symmetry-breaking for
+   * its own sake: the eye resolves lightness differences much better in the
+   * dark half of the range, so the ~2% steps that read clearly at #0b0d10 are
+   * invisible at #f4f6f8. The first cut of this palette used a 2% app/surface
+   * gap and the sidebar/main boundary genuinely disappeared on screen. */
+  --p-app: #e9edf2;
+  --p-surface: #f7f8fa;
+  --p-panel: #ffffff;
+  --p-panel-2: #f2f5f8;
+  --p-elevated: #ffffff;
+  --p-overlay: #ffffff;
+  --p-inset: #eaeef3;
+
+  /* Dimming toward pure black on a light UI looks like a rendering fault, so
+   * the scrim is a desaturated slate — it reads as "the page stepped back". */
+  --p-scrim: rgba(17, 22, 28, 0.32);
+  --p-scrim-strong: rgba(17, 22, 28, 0.62);
+
+  /* The user's bubble reads as "mine" by being DARKER than the white panel it
+   * sits on — the exact opposite move from dark, hence a hand-picked value. */
+  --p-bubble: rgba(15, 23, 42, 0.07);
+  --p-bubble-line: rgba(15, 23, 42, 0.12);
+
+  /* ── hairlines ───────────────────────────────────────────────────────────
+   * Slate-tinted rather than neutral gray: a pure-gray border against a warm
+   * white panel reads as dirty, a cool one reads as drawn. */
+  --p-line-soft: rgba(15, 23, 42, 0.07);
+  --p-line: rgba(15, 23, 42, 0.13);
+  --p-line-strong: rgba(15, 23, 42, 0.2);
+
+  /* Solid base for consumers that must append their own alpha (Monaco). */
+  --p-wash: #0f172a;
+
+  /* ── text ────────────────────────────────────────────────────────────────
+   * Near-black, never pure black — #000 on white is harsh at 13px and makes the
+   * antialiasing bloom. */
+  --p-text-primary: #11161c;
+  --p-text-secondary: #48525e;
+  --p-text-muted: #66717e;
+  --p-text-faint: #929cab;
+
+  /* ── primary accent — brand amber, darkened to survive white ─────────────
+   * The dark theme's #e5a33c sits at ~2:1 on white: unusable for text, borders
+   * or icons. So the amber is taken down the value axis (it stays amber; hue is
+   * held near the brand's ~36°) until it clears 4.5:1 as body-sized text.
+   * `-dim` inverts its role here — it is the LIGHTER amber, for decorative
+   * fills that must not out-weigh the text on top of them. */
+  --p-accent: #9a5b00;
+  --p-accent-hi: #7a4700;
+  --p-accent-dim: #c98a2e;
+  /* Mixed from the LIGHTER amber, not from `--p-accent`. A 10% wash of the
+   * darkened #9a5b00 comes out mud-brown and light mode loses the brand
+   * entirely — the ghost is where amber still gets to look like amber, since
+   * nothing has to be legible against it except the text token on top. */
+  --p-accent-ghost: rgba(201, 138, 46, 0.2);
+  --p-accent-line: rgba(154, 91, 0, 0.3);
+  /* Dark accent + light foreground, the reverse of dark mode's pairing —
+   * anything that hardcoded a dark on-accent text color breaks here. */
+  --p-accent-fg: #fff8ec;
+
+  /* ── secondary accent — violet ───────────────────────────────────────────
+   * Same role as in dark (secondary emphasis, selection, agent chrome, never a
+   * primary CTA), re-picked deep enough to be readable on white. */
+  --p-accent-2: #6d28d9;
+  --p-accent-2-hi: #5b21b6;
+  --p-accent-2-dim: #8b5cf6;
+  --p-accent-2-ghost: rgba(109, 40, 217, 0.1);
+  --p-accent-2-line: rgba(109, 40, 217, 0.28);
+  --p-accent-2-fg: #f7f3ff;
+
+  /* ── semantics ───────────────────────────────────────────────────────────
+   * The dark theme's semantics are all too light to read on white, so each is
+   * re-picked at roughly 5:1 rather than shifted. Warn keeps its burnt-orange
+   * identity for the same reason it moved in dark: it must never be read as the
+   * amber accent. */
+  --p-success: #1a7f37;
+  --p-success-hi: #12622a;
+  --p-success-ghost: rgba(26, 127, 55, 0.1);
+  --p-success-line: rgba(26, 127, 55, 0.28);
+
+  --p-warn: #a85216;
+  --p-warn-hi: #85400f;
+  --p-warn-ghost: rgba(168, 82, 22, 0.1);
+  --p-warn-line: rgba(168, 82, 22, 0.28);
+
+  --p-danger: #c0303c;
+  --p-danger-hi: #9c222d;
+  --p-danger-ghost: rgba(192, 48, 60, 0.1);
+  --p-danger-line: rgba(192, 48, 60, 0.28);
+
+  --p-info: #0b69c7;
+  --p-info-hi: #08529c;
+  --p-info-ghost: rgba(11, 105, 199, 0.1);
+  --p-info-line: rgba(11, 105, 199, 0.28);
+
+  /* ── interaction states ──────────────────────────────────────────────────
+   * Mixed from slate and DARKENING the surface. The dark theme lightens; doing
+   * the same here would push a hovered row toward the white it already is. */
+  --p-hover: rgba(15, 23, 42, 0.04);
+  --p-active: rgba(15, 23, 42, 0.07);
+  --p-selected: rgba(15, 23, 42, 0.09);
+  --p-focus-ring: rgba(154, 91, 0, 0.6);
+  --p-disabled: #b6bec8;
+
+  /* Still white: the highlight simulates a light source above the element, and
+   * that doesn't move when the room gets bright. Stronger than dark's, because
+   * a 12% white sheen is invisible on a white fill. */
+  --p-sheen: rgba(255, 255, 255, 0.7);
+  --p-sheen-soft: rgba(255, 255, 255, 0.9);
+
+  /* Much weaker ink than dark, and slate rather than black: a 60%-black drop
+   * shadow on a white page reads as a smudge, not as elevation. */
+  --p-shadow-1: rgba(15, 23, 42, 0.13);
+  --p-shadow-2: rgba(15, 23, 42, 0.09);
+
+  /* ── categorical ─────────────────────────────────────────────────────────
+   * Same eight hues in the same order as dark — a series must keep its identity
+   * across a theme switch — taken down in lightness so each clears ~4.5:1 on
+   * white and stays distinguishable as a 2px chart stroke. */
+  --p-cat-1: #2c5fbf; /* blue */
+  --p-cat-2: #3f7d22; /* green */
+  --p-cat-3: #9a6a0b; /* amber */
+  --p-cat-4: #c03755; /* rose */
+  --p-cat-5: #6e43c0; /* violet */
+  --p-cat-6: #0e7490; /* cyan */
+  --p-cat-7: #b75415; /* orange */
+  --p-cat-8: #12707e; /* teal */
+
+  /* ── ordinal ramp (gauge / heat / severity) ─────────────────────────────
+   * Same five ordered steps as dark, deepened for white. The yellow middle is
+   * the one that must not be taken by formula — a light yellow is invisible on
+   * a white ground, so it becomes an olive/ochre that still reads as "middle".
+   */
+  --p-gauge-1: #197f3d;
+  --p-gauge-2: #5b8a12;
+  --p-gauge-3: #a07b06;
+  --p-gauge-4: #b7500f;
+  --p-gauge-5: #c02b34;
+
+  /* ── diff ────────────────────────────────────────────────────────────────
+   * Foregrounds match the semantics; the washes stay very weak because they sit
+   * behind code, where a heavy tint destroys syntax-color legibility — the
+   * failure mode is worse on light, where the wash has less room to hide. */
+  --p-diff-add: #1a7f37;
+  --p-diff-add-ghost: rgba(26, 127, 55, 0.12);
+  --p-diff-remove: #c0303c;
+  --p-diff-remove-ghost: rgba(192, 48, 60, 0.12);
+  --p-diff-change: #0b69c7;
+  --p-diff-change-ghost: rgba(11, 105, 199, 0.12);
+
+  /* ── syntax ──────────────────────────────────────────────────────────────
+   * Shared by Prism (transcript) and Monaco (file viewer) so a file looks the
+   * same in both. Roles map one-to-one onto the dark set; values are re-picked
+   * for white, not darkened by formula — string green and comment gray in
+   * particular go muddy under a naive shift. */
+  --p-syn-text: #1f2328;
+  --p-syn-comment: #6e7781;
+  --p-syn-punct: #57606a;
+  --p-syn-keyword: #6d28d9;
+  --p-syn-fn: #0550ae;
+  --p-syn-string: #0a6b3d;
+  --p-syn-number: #9a5b00;
+  --p-syn-const: #8250df;
+  --p-syn-tag: #c0303c;
+  --p-syn-prop: #6d28d9;
+  --p-syn-operator: #57606a;
+}

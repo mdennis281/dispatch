@@ -56,16 +56,16 @@ const components: Components = {
   ul: ({ children }) => <ul className="my-2 space-y-1 pl-4 [&>li]:list-disc marker:text-faint">{children}</ul>,
   ol: ({ children }) => <ol className="my-2 space-y-1 pl-4 [&>li]:list-decimal marker:text-faint">{children}</ol>,
   li: ({ children }) => <li className="pl-1 leading-[1.55]"><Linkify>{children}</Linkify></li>,
-  h1: ({ children }) => <h1 className="mt-3 mb-1.5 text-[15px] font-semibold text-primary"><Linkify>{children}</Linkify></h1>,
-  h2: ({ children }) => <h2 className="mt-3 mb-1.5 text-[14px] font-semibold text-primary"><Linkify>{children}</Linkify></h2>,
-  h3: ({ children }) => <h3 className="mt-2.5 mb-1 text-[13px] font-semibold text-primary"><Linkify>{children}</Linkify></h3>,
+  h1: ({ children }) => <h1 className="mt-3 mb-1.5 text-xl font-semibold text-primary"><Linkify>{children}</Linkify></h1>,
+  h2: ({ children }) => <h2 className="mt-3 mb-1.5 text-lg font-semibold text-primary"><Linkify>{children}</Linkify></h2>,
+  h3: ({ children }) => <h3 className="mt-2.5 mb-1 text-base font-semibold text-primary"><Linkify>{children}</Linkify></h3>,
   blockquote: ({ children }) => (
     <blockquote className="my-2 border-l-2 border-accent-line pl-3 text-secondary"><Linkify>{children}</Linkify></blockquote>
   ),
   hr: () => <hr className="my-3 border-line" />,
   table: ({ children }) => (
     <div className="my-2 overflow-x-auto cm-scroll">
-      <table className="w-full border-collapse text-[12px]">{children}</table>
+      <table className="w-full border-collapse text-sm">{children}</table>
     </div>
   ),
   th: ({ children }) => (
@@ -88,7 +88,7 @@ const components: Components = {
       const request = resolve ? resolveWholeRef(raw, resolve) : null;
       if (request) return <CodeRefChip label={raw.trim()} request={request} />;
       return (
-        <code className="rounded-[4px] border border-line-soft bg-white/[0.05] px-1 py-px cm-mono !text-[11.5px] text-accent-hi">
+        <code className="rounded-[4px] border border-line-soft bg-active px-1 py-px cm-mono !text-xs text-accent-hi">
           {children}
         </code>
       );
@@ -111,7 +111,7 @@ export function Markdown({
   resolve?: CodeRefResolver;
 }) {
   return (
-    <div className={cn("text-[13px] text-primary/95", className)}>
+    <div className={cn("text-base text-primary/95", className)}>
       <CodeRefContext.Provider value={resolve ?? null}>
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
           {children}

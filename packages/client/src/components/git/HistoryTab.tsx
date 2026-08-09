@@ -31,29 +31,29 @@ function CommitFileRow({
       title={file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
       className={cn(
         "flex w-full items-center gap-2 rounded-md py-1 pl-5 pr-2 text-left transition-colors",
-        active ? "bg-accent-ghost" : "hover:bg-white/[0.04]",
+        active ? "bg-accent-ghost" : "hover:bg-hover",
       )}
     >
       <span
-        className={cn("w-3 shrink-0 text-center cm-mono !text-[10px] font-bold", meta.className)}
+        className={cn("w-3 shrink-0 text-center cm-mono !text-2xs font-bold", meta.className)}
         title={meta.label}
       >
         {meta.letter}
       </span>
       <span className="min-w-0 flex-1 truncate">
-        <span className="cm-mono !text-[11px] text-secondary">{name}</span>
+        <span className="cm-mono !text-xs text-secondary">{name}</span>
         {dir && (
-          <span className="ml-1.5 cm-mono !text-[9.5px] text-faint">{midTruncate(dir, 24)}</span>
+          <span className="ml-1.5 cm-mono !text-2xs text-faint">{midTruncate(dir, 24)}</span>
         )}
       </span>
       {!file.binary && (
         <>
-          <span className="shrink-0 cm-mono !text-[10px] tabular-nums text-success">
+          <span className="shrink-0 cm-mono !text-2xs tabular-nums text-success">
             +{file.additions}
           </span>
           <span
             className={cn(
-              "shrink-0 cm-mono !text-[10px] tabular-nums",
+              "shrink-0 cm-mono !text-2xs tabular-nums",
               file.deletions > 0 ? "text-danger" : "text-faint",
             )}
           >
@@ -91,7 +91,7 @@ export function HistoryTab({
   }
   if (commits.length === 0) {
     return (
-      <p className="px-3 py-8 text-center text-[11.5px] text-faint">No commits yet.</p>
+      <p className="px-3 py-8 text-center text-xs text-faint">No commits yet.</p>
     );
   }
 
@@ -106,7 +106,7 @@ export function HistoryTab({
               onClick={() => onToggle(c.hash)}
               className={cn(
                 "flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
-                open ? "bg-white/[0.045]" : "hover:bg-white/[0.03]",
+                open ? "bg-hover" : "hover:bg-hover",
               )}
             >
               <span className="mt-[3px] shrink-0">
@@ -118,9 +118,9 @@ export function HistoryTab({
               </span>
               <GitCommitIcon className="mt-[1px] size-3.5 shrink-0 text-accent-hi" />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[12px] text-secondary">{c.subject}</span>
-                <span className="mt-px flex items-center gap-1.5 text-[10px] text-faint">
-                  <span className="cm-mono !text-[9.5px]">{c.shortHash}</span>
+                <span className="block truncate text-sm text-secondary">{c.subject}</span>
+                <span className="mt-px flex items-center gap-1.5 text-2xs text-faint">
+                  <span className="cm-mono !text-2xs">{c.shortHash}</span>
                   <span>·</span>
                   <span className="truncate">{c.author}</span>
                   <span>·</span>
@@ -129,7 +129,7 @@ export function HistoryTab({
                 {c.refs.length > 0 && (
                   <span className="mt-1 flex flex-wrap gap-1">
                     {c.refs.slice(0, 3).map((r) => (
-                      <Chip key={r} tone="accent" mono>
+                      <Chip key={r} tone="info" mono>
                         <Tag className="mr-1 inline size-2.5" />
                         {r.replace(/^HEAD -> /, "")}
                       </Chip>
@@ -142,12 +142,12 @@ export function HistoryTab({
             {open && (
               <div className="pb-1">
                 {!files ? (
-                  <div className="flex items-center gap-2 py-2 pl-7 text-[11px] text-faint">
+                  <div className="flex items-center gap-2 py-2 pl-7 text-xs text-faint">
                     <Spinner size={11} />
                     Loading files…
                   </div>
                 ) : files.length === 0 ? (
-                  <p className="py-1.5 pl-7 text-[11px] text-faint">
+                  <p className="py-1.5 pl-7 text-xs text-faint">
                     No file changes (merge or empty commit).
                   </p>
                 ) : (

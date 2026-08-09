@@ -215,7 +215,7 @@ export function RunIdentity({
   return (
     <span className={cn("inline-flex min-w-0 items-center gap-1.5", className)}>
       {showAgent && (
-        <Chip tone="accent" className="shrink-0">
+        <Chip tone="agent" className="shrink-0">
           {run.agentType}
         </Chip>
       )}

@@ -90,12 +90,12 @@ export function StopDispatch() {
         </span>
       </SectionLabel>
       <div className="rounded-md border border-line bg-inset/40 px-2.5 py-2">
-        <p className="text-[11px] leading-snug text-faint">
+        <p className="text-xs leading-snug text-faint">
           Shuts down the server, every agent session, and every sub-app it started.
           Closing the window doesn't do this — nothing else will.
         </p>
         {losses && (
-          <p className="mt-1.5 text-[11px] font-medium leading-snug text-warn">
+          <p className="mt-1.5 text-xs font-medium leading-snug text-warn">
             Right now, {losses}.
           </p>
         )}

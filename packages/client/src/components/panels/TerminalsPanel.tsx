@@ -51,7 +51,7 @@ function CommandInput({ terminal }: { terminal: TerminalInfo }) {
 
   return (
     <div className="flex items-center gap-1.5 border-t border-line-soft px-2 py-1.5">
-      <span className="select-none pl-1 cm-mono !text-[11px] text-accent-hi">$</span>
+      <span className="select-none pl-1 cm-mono !text-xs text-accent-hi">$</span>
       <input
         value={command}
         onChange={(e) => setCommand(e.target.value)}
@@ -62,7 +62,7 @@ function CommandInput({ terminal }: { terminal: TerminalInfo }) {
         disabled={busy}
         placeholder={busy ? "running…" : "Run a command…"}
         aria-label={`Run a command in ${terminal.name}`}
-        className="h-6 min-w-0 flex-1 rounded-md bg-transparent px-1 cm-mono !text-[11px] text-primary outline-none placeholder:text-faint disabled:opacity-60"
+        className="h-6 min-w-0 flex-1 rounded-md bg-transparent px-1 cm-mono !text-xs text-primary outline-none placeholder:text-faint disabled:opacity-60"
       />
       <IconButton size="sm" tip="Run" disabled={busy || !command.trim()} onClick={submit}>
         <CornerDownLeft />
@@ -96,8 +96,8 @@ function TerminalCard({ terminal }: { terminal: TerminalInfo }) {
           <TerminalSquare />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[12px] font-medium text-primary">{terminal.name}</span>
-          <span className="flex items-center gap-1.5 text-[10.5px] text-faint">
+          <span className="block truncate text-sm font-medium text-primary">{terminal.name}</span>
+          <span className="flex items-center gap-1.5 text-2xs text-faint">
             <StatusDot
               tone={terminal.busy ? "working" : live ? "success" : "muted"}
               pulse={terminal.busy}
@@ -120,9 +120,9 @@ function TerminalCard({ terminal }: { terminal: TerminalInfo }) {
         </IconButton>
       </div>
 
-      <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-[10.5px] text-faint">
+      <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-2xs text-faint">
         <FolderClosed className="size-3 shrink-0" />
-        <span className="cm-mono !text-[10.5px] truncate" title={terminal.cwd}>
+        <span className="cm-mono !text-2xs truncate" title={terminal.cwd}>
           {midTruncate(terminal.cwd, 44)}
         </span>
       </div>
@@ -130,7 +130,7 @@ function TerminalCard({ terminal }: { terminal: TerminalInfo }) {
       {lines.length > 0 && (
         <div ref={logRef} className="cm-scroll max-h-64 overflow-y-auto border-t border-line-soft bg-inset px-3 py-2">
           {lines.map((l, i) => (
-            <div key={i} className="py-px cm-mono !text-[10.5px] leading-relaxed">
+            <div key={i} className="py-px cm-mono !text-2xs leading-relaxed">
               {l.stream === "command" ? (
                 <span className="flex gap-1.5">
                   <span className="shrink-0 select-none text-accent-hi">$</span>
@@ -182,14 +182,14 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
     return (
       <div className="px-4 py-10 text-center">
         <TerminalSquare className="mx-auto mb-2 size-5 text-faint" />
-        <p className="text-[12px] text-muted">No terminals yet.</p>
-        <p className="mt-0.5 text-[11px] text-faint">
+        <p className="text-sm text-muted">No terminals yet.</p>
+        <p className="mt-0.5 text-xs text-faint">
           Persistent shells — cwd and env survive across commands. The agent opens
-          them with its <span className="cm-mono !text-[10.5px]">terminal</span> tool;
+          them with its <span className="cm-mono !text-2xs">terminal</span> tool;
           you can open one too.
         </p>
         <div className="mt-3 flex justify-center">
-          <Button size="xs" variant="subtle" leftIcon={<Plus />} disabled={opening} onClick={openShell}>
+          <Button size="sm" variant="subtle" leftIcon={<Plus />} disabled={opening} onClick={openShell}>
             New shell
           </Button>
         </div>
@@ -203,7 +203,7 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
         <TerminalCard key={t.id} terminal={t} />
       ))}
       <div className="flex justify-center pt-0.5">
-        <Button size="xs" variant="ghost" leftIcon={<Plus />} disabled={opening} onClick={openShell}>
+        <Button size="sm" variant="ghost" leftIcon={<Plus />} disabled={opening} onClick={openShell}>
           New shell
         </Button>
       </div>

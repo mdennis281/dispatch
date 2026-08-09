@@ -157,11 +157,11 @@ export function TaskLauncher({
               the sidebar puts on the chat this launches, so the two are
               recognizably the same thing. */}
           <Icon className="shrink-0 text-accent" />
-          <span className="shrink-0 whitespace-nowrap text-[11.5px] font-semibold text-primary">
+          <span className="shrink-0 whitespace-nowrap text-xs font-semibold text-primary">
             {meta.action}
           </span>
           {/* The blurb yields first: a wrapped heading reads as two headings. */}
-          <span className="ml-auto min-w-0 truncate text-[10.5px] text-faint" title={meta.blurb}>
+          <span className="ml-auto min-w-0 truncate text-2xs text-faint" title={meta.blurb}>
             {meta.blurb}
           </span>
         </div>
@@ -191,7 +191,7 @@ export function TaskLauncher({
             "leading-relaxed text-secondary placeholder:text-faint",
             // A dialog gives the description the room it deserves; inline, it's
             // one control among many and stays at the pane's type scale.
-            bare ? "text-[12.5px]" : "text-[11.5px]",
+            bare ? "text-base" : "text-xs",
             "focus:border-accent-line focus:outline-none disabled:opacity-60",
           )}
         />
@@ -202,14 +202,14 @@ export function TaskLauncher({
               <label
                 key={t.id}
                 title={t.hint}
-                className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted hover:text-secondary"
+                className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted hover:text-secondary"
               >
                 <input
                   type="checkbox"
                   checked={toggles[t.id] ?? t.default}
                   disabled={sending || !ready}
                   onChange={(e) => setToggles((prev) => ({ ...prev, [t.id]: e.target.checked }))}
-                  className="size-3 accent-[var(--accent)]"
+                  className="size-3 accent-[var(--p-accent)]"
                 />
                 {t.label}
               </label>
@@ -221,11 +221,11 @@ export function TaskLauncher({
 
         <div className="flex items-center gap-2">
           {blockedReason ? (
-            <span className="min-w-0 flex-1 text-[10.5px] leading-snug text-warn">
+            <span className="min-w-0 flex-1 text-2xs leading-snug text-warn">
               {blockedReason}
             </span>
           ) : (
-            <span className="min-w-0 flex-1 text-[10.5px] leading-snug text-faint">
+            <span className="min-w-0 flex-1 text-2xs leading-snug text-faint">
               Opens a chat here — it reads the repo first and you can steer it.
             </span>
           )}

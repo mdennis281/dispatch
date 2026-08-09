@@ -59,7 +59,7 @@ export function Modal({
       className="fixed inset-0 flex items-start justify-center overflow-y-auto p-6 sm:pt-[9vh]"
     >
       <div
-        className="fixed inset-0 bg-black/55 backdrop-blur-[2px]"
+        className="fixed inset-0 bg-scrim backdrop-blur-[2px]"
         onClick={onClose}
         aria-hidden
       />
@@ -79,9 +79,9 @@ export function Modal({
             </span>
           )}
           <div className="min-w-0 flex-1">
-            <h2 className="truncate text-[13px] font-semibold text-primary">{title}</h2>
+            <h2 className="truncate text-base font-semibold text-primary">{title}</h2>
             {description && (
-              <p className="mt-px truncate text-[11px] text-muted">{description}</p>
+              <p className="mt-px truncate text-xs text-muted">{description}</p>
             )}
           </div>
           <IconButton tip="Close" onClick={onClose}>
@@ -103,7 +103,7 @@ export function Modal({
 /* --------------------------------------------------------------- form kit */
 
 const controlCls =
-  "w-full rounded-md border border-line bg-inset px-2.5 py-[7px] text-[12.5px] text-primary " +
+  "w-full rounded-md border border-line bg-inset px-2.5 py-[7px] text-base text-primary " +
   "placeholder:text-faint outline-none transition-colors hover:border-line-strong focus:border-accent-line";
 
 export function Field({
@@ -122,9 +122,9 @@ export function Field({
   return (
     <label className={cn("block", className)}>
       <span className="mb-1 flex items-baseline gap-1.5">
-        <span className="text-[11px] font-medium text-secondary">{label}</span>
-        {required && <span className="text-[11px] text-danger">*</span>}
-        {hint && <span className="ml-auto text-[10.5px] text-faint">{hint}</span>}
+        <span className="text-xs font-medium text-secondary">{label}</span>
+        {required && <span className="text-xs text-danger">*</span>}
+        {hint && <span className="ml-auto text-2xs text-faint">{hint}</span>}
       </span>
       {children}
     </label>
@@ -136,7 +136,7 @@ export function TextInput({
   className,
   ...rest
 }: InputHTMLAttributes<HTMLInputElement> & { mono?: boolean }) {
-  return <input className={cn(controlCls, mono && "cm-mono !text-[11.5px]", className)} {...rest} />;
+  return <input className={cn(controlCls, mono && "cm-mono !text-xs", className)} {...rest} />;
 }
 
 export function TextArea({
@@ -153,7 +153,7 @@ export function TextArea({
 export function InlineError({ message }: { message?: string | null }) {
   if (!message) return null;
   return (
-    <div className="flex items-start gap-1.5 rounded-md border border-danger/30 bg-danger-ghost px-2.5 py-1.5 text-[11.5px] text-danger [&_svg]:mt-px [&_svg]:size-3.5 [&_svg]:shrink-0">
+    <div className="flex items-start gap-1.5 rounded-md border border-danger/30 bg-danger-ghost px-2.5 py-1.5 text-xs text-danger [&_svg]:mt-px [&_svg]:size-3.5 [&_svg]:shrink-0">
       <AlertCircle />
       <span className="min-w-0">{message}</span>
     </div>

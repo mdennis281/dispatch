@@ -133,11 +133,11 @@ export function WorkflowProfilePicker({
     <div className="rounded-md border border-line bg-panel-2/40">
       <div className="flex items-center gap-2 px-3 py-2 [&_svg]:size-3.5">
         <GitPullRequest className="shrink-0 text-muted" />
-        <span className="text-[12px] font-semibold text-primary">Workflow profile</span>
-        <Chip tone="accent" mono>
+        <span className="text-sm font-semibold text-primary">Workflow profile</span>
+        <Chip tone="info" mono>
           {active}
         </Chip>
-        <span className="ml-auto truncate text-[10.5px] text-faint">
+        <span className="ml-auto truncate text-2xs text-faint">
           how change ships in this repo
         </span>
       </div>
@@ -162,18 +162,18 @@ export function WorkflowProfilePicker({
                 <Icon className={selected ? "text-accent" : "text-muted"} />
                 <span
                   className={cn(
-                    "text-[11.5px] font-semibold",
+                    "text-xs font-semibold",
                     selected ? "text-accent" : "text-secondary",
                   )}
                 >
                   {opt.label}
                 </span>
               </div>
-              <p className="text-[10.5px] leading-snug text-faint">{opt.blurb}</p>
+              <p className="text-2xs leading-snug text-faint">{opt.blurb}</p>
               {selected && (
                 <ul className="mt-1.5 space-y-0.5 border-t border-line-soft pt-1.5">
                   {opt.effects.map((e) => (
-                    <li key={e} className="text-[10px] leading-snug text-muted">
+                    <li key={e} className="text-2xs leading-snug text-muted">
                       • {e}
                     </li>
                   ))}
@@ -202,14 +202,14 @@ export function WorkflowProfilePicker({
                 <GitMerge className={autoMerge ? "text-accent" : "text-muted"} />
                 <span
                   className={cn(
-                    "text-[11.5px] font-semibold",
+                    "text-xs font-semibold",
                     autoMerge ? "text-accent" : "text-secondary",
                   )}
                 >
                   Auto-merge
                 </span>
               </span>
-              <span className="mt-0.5 block text-[10.5px] leading-snug text-faint">
+              <span className="mt-0.5 block text-2xs leading-snug text-faint">
                 Agents land their own PRs with{" "}
                 <span className="cm-mono">mcp__manager__approve_pr</span> once CI is green and
                 review is clean — no waiting for a human to click merge. Off means ship and wait.
@@ -224,13 +224,13 @@ export function WorkflowProfilePicker({
                   "A `hold` label parks one PR without turning this off",
                   "The agent stands down whenever you say not to merge",
                 ].map((e) => (
-                  <li key={e} className="text-[10px] leading-snug text-muted">
+                  <li key={e} className="text-2xs leading-snug text-muted">
                     • {e}
                   </li>
                 ))}
               </ul>
               <div className="flex items-center gap-2 pt-0.5">
-                <span className="text-[10.5px] text-faint">Strategy</span>
+                <span className="text-2xs text-faint">Strategy</span>
                 <SegmentedControl
                   segments={MERGE_METHODS}
                   value={resolved.mergeMethod}
@@ -242,7 +242,7 @@ export function WorkflowProfilePicker({
         </div>
       )}
       {fromManifest && (
-        <p className="border-t border-line-soft px-3 py-1.5 text-[10.5px] text-faint">
+        <p className="border-t border-line-soft px-3 py-1.5 text-2xs text-faint">
           Saving writes <span className="cm-mono">workflow:</span> into this repo&rsquo;s{" "}
           <span className="cm-mono">.dispatch/project.yaml</span> — committable, and your comments
           and key order are preserved.

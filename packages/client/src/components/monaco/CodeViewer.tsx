@@ -187,7 +187,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
       <button
         aria-label="Close preview"
         onClick={close}
-        className="absolute inset-0 cursor-default bg-black/55 backdrop-blur-[2px] cm-anim-rise"
+        className="absolute inset-0 cursor-default bg-scrim backdrop-blur-[2px] cm-anim-rise"
       />
 
       <div className="relative flex h-[86vh] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-lg border border-line-strong bg-panel shadow-[var(--shadow-pop)] cm-anim-rise">
@@ -195,7 +195,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-3">
           <FileCode2 className="size-4 shrink-0 text-accent-hi" />
           <span
-            className="min-w-0 truncate cm-mono !text-[12px] text-primary"
+            className="min-w-0 truncate cm-mono !text-sm text-primary"
             title={`${worktreePath}/${relPath}`}
           >
             {midTruncate(relPath, 60)}
@@ -207,7 +207,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
           <div className="ml-auto flex items-center gap-2">
             {editable && (
               <Button
-                size="xs"
+                size="sm"
                 variant={dirty ? "primary" : "subtle"}
                 leftIcon={
                   saving ? <Spinner size={12} /> : savedTick ? <Check /> : <Save />
@@ -301,18 +301,18 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
         </div>
 
         {/* footer */}
-        <div className="flex h-8 shrink-0 items-center gap-3 border-t border-line px-3 text-[10.5px] text-faint">
+        <div className="flex h-8 shrink-0 items-center gap-3 border-t border-line px-3 text-2xs text-faint">
           <span className="uppercase tracking-[0.08em]">{language}</span>
           {working && !workingBinary && (
             <span className="tabular-nums">{fmtBytes(working.size)}</span>
           )}
           {effectiveMode === "diff" && (
             <span className="text-muted">
-              vs <span className="cm-mono !text-[10px] text-secondary">{base}</span>
+              vs <span className="cm-mono !text-2xs text-secondary">{base}</span>
             </span>
           )}
           {editable && (
-            <span className={cn("cm-mono !text-[10px]", dirty ? "text-warn" : "text-faint")}>
+            <span className={cn("cm-mono !text-2xs", dirty ? "text-warn" : "text-faint")}>
               {dirty ? "unsaved changes" : "saved"}
             </span>
           )}
@@ -349,9 +349,9 @@ function StateNote({
       <span className="mb-2 flex size-9 items-center justify-center rounded-md border border-line bg-panel-2 [&_svg]:size-4">
         {icon}
       </span>
-      <p className="text-[12.5px] font-medium text-secondary">{title}</p>
+      <p className="text-base font-medium text-secondary">{title}</p>
       {detail && (
-        <p className="mt-0.5 max-w-md cm-mono !text-[11px] text-faint break-words">{detail}</p>
+        <p className="mt-0.5 max-w-md cm-mono !text-xs text-faint break-words">{detail}</p>
       )}
     </div>
   );
@@ -367,8 +367,11 @@ function ImagePreview({ file, relPath }: { file: WorktreeFileContent; relPath: s
     <div
       className="flex h-full items-center justify-center overflow-auto p-6"
       style={{
+        // Transparency checkerboard. Token-driven so the squares stay one rung
+        // off the surface behind them; a fixed dark hex would turn into a black
+        // grid on a light theme and read as image content, not as "no pixels".
         backgroundImage:
-          "linear-gradient(45deg,#14181d 25%,transparent 25%),linear-gradient(-45deg,#14181d 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#14181d 75%),linear-gradient(-45deg,transparent 75%,#14181d 75%)",
+          "linear-gradient(45deg,var(--p-panel-2) 25%,transparent 25%),linear-gradient(-45deg,var(--p-panel-2) 25%,transparent 25%),linear-gradient(45deg,transparent 75%,var(--p-panel-2) 75%),linear-gradient(-45deg,transparent 75%,var(--p-panel-2) 75%)",
         backgroundSize: "18px 18px",
         backgroundPosition: "0 0,0 9px,9px -9px,-9px 0",
       }}

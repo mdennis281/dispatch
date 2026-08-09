@@ -1,0 +1,213 @@
+/*
+ * ═════════════════════════════════════════════════════════════════════════
+ * DARK PALETTE — the shipped default, and the STRUCTURAL source of truth.
+ *
+ * Every raw value the UI can paint with lives here as a `--p-*` variable.
+ * `index.css` maps them onto Tailwind's `--color-*` tokens exactly once, so a
+ * new theme is this file copied, re-valued, and given a different
+ * `[data-theme]` — no Tailwind config, no utility renames, no component edits.
+ *
+ * Two rules keep that promise:
+ *   1. This file declares NOTHING but `--p-*` custom properties. The moment a
+ *      palette starts writing real CSS rules, themes stop being interchangeable.
+ *   2. `light.css` declares the SAME key set, in the same order. A key that
+ *      exists here and not there is a token that silently falls back to the
+ *      previous theme's value when you switch at runtime.
+ *
+ * Selector note: `:root[data-theme="dark"]` (not a bare `:root`) so BOTH themes
+ * carry equal specificity and neither wins by file order — the attribute alone
+ * decides. See `index.html`'s pre-paint script for who sets it.
+ * ═════════════════════════════════════════════════════════════════════════
+ */
+:root[data-theme="dark"] {
+  /* ── brand ───────────────────────────────────────────────────────────────
+   * The mark's amber, theme-independent. It is duplicated in three places that
+   * cannot import CSS — `components/ui/DispatchMark.tsx`, `public/favicon.svg`
+   * and `scripts/generate-brand.mjs` — so it is copied here rather than shared:
+   * this token exists so UI chrome can *match* the mark, not so the mark can
+   * read it. Change one, change all four. */
+  --p-brand: #e5a33c;
+  --p-brand-plate: #14171b;
+
+  /* ── surfaces ────────────────────────────────────────────────────────────
+   * A near-black ladder, each rung ~1.5% lighter than the last. The steps are
+   * deliberately tiny: depth in this UI comes from hairlines, and a wide ladder
+   * would turn every nested panel into a visible gray staircase. */
+  --p-app: #0b0d10; /* the page behind everything */
+  --p-surface: #0e1114; /* rails, headers, chrome that frames content */
+  --p-panel: #111418; /* the default card/panel fill */
+  --p-panel-2: #14181d; /* a panel resting ON a panel; also inputs + chips */
+  --p-elevated: #171b21; /* menus, popovers — things that leave the flow */
+  --p-overlay: #1b2027; /* modals and command palettes, the topmost layer */
+  --p-inset: #0a0c0f; /* wells: code blocks, terminals, editor canvases */
+
+  /* Backdrops behind modal layers. Alpha is baked in rather than left to a
+   * `/opacity` utility because the scrim's job is to survive a theme flip: on
+   * light, dimming toward black is wrong and this becomes a cool slate wash. */
+  --p-scrim: rgba(0, 0, 0, 0.55);
+  --p-scrim-strong: rgba(0, 0, 0, 0.8); /* lightboxes, where content must vanish */
+
+  /* The user's own message bubble. Not a surface-ladder rung: it reads as
+   * "mine" by being lighter than anything else on screen, so it has to move
+   * independently of the ladder when the ladder is re-tuned. */
+  --p-bubble: rgba(255, 255, 255, 0.09);
+  --p-bubble-line: rgba(255, 255, 255, 0.1);
+
+  /* ── hairlines ───────────────────────────────────────────────────────────
+   * Alpha, never solid: a border has to sit correctly on whichever rung of the
+   * surface ladder it lands on, and a fixed gray only ever looks right on one. */
+  --p-line-soft: rgba(255, 255, 255, 0.045); /* internal dividers, low stakes */
+  --p-line: rgba(255, 255, 255, 0.07); /* the default border everywhere */
+  --p-line-strong: rgba(255, 255, 255, 0.11); /* hover, focus, emphasis */
+
+  /* The neutral these washes are mixed from, exposed on its own because canvas
+   * and editor code (Monaco) can't use rgba tokens — it has to append its own
+   * alpha to a solid hex. See `components/monaco/setup.ts`. */
+  --p-wash: #ffffff;
+
+  /* ── text ────────────────────────────────────────────────────────────────
+   * Four steps, each a real semantic rank rather than a lightness gradient:
+   * body / supporting / label / placeholder. */
+  --p-text-primary: #e6e8eb;
+  --p-text-secondary: #9aa1a9;
+  --p-text-muted: #6b7280;
+  --p-text-faint: #4b5563;
+
+  /* ── primary accent — brand amber ────────────────────────────────────────
+   * The UI accent IS the mark's amber. `-hi` is brighter (hover/emphasis) and
+   * `-dim` is a deeper, less shouty amber for large fills, where the full
+   * brightness would out-glow the content it frames. */
+  --p-accent: #e5a33c;
+  --p-accent-hi: #f5bb63;
+  --p-accent-dim: #b07e28;
+  --p-accent-ghost: rgba(229, 163, 60, 0.12); /* tinted row/chip backgrounds */
+  --p-accent-line: rgba(229, 163, 60, 0.34); /* accent borders + the focus ring */
+  /* Text/icons ON an accent fill. Amber is a LIGHT color at every usable
+   * brightness, so white-on-amber never clears 4.5:1 — the readable pairing is
+   * near-black, and every primary button depends on this being dark. */
+  --p-accent-fg: #1a1205;
+
+  /* ── secondary accent — violet ───────────────────────────────────────────
+   * Amber's complement-ish partner: far enough round the wheel that the two
+   * never read as the same signal. Reserved for secondary emphasis, selection,
+   * "info"-shaped affordances and agent/subagent chrome. NOT for primary CTAs —
+   * two things competing for "click me" is the bug this split exists to avoid. */
+  --p-accent-2: #a78bfa;
+  --p-accent-2-hi: #c4b2fd;
+  --p-accent-2-dim: #7c5ce0;
+  --p-accent-2-ghost: rgba(167, 139, 250, 0.13);
+  --p-accent-2-line: rgba(167, 139, 250, 0.34);
+  --p-accent-2-fg: #14091f;
+
+  /* ── semantics ───────────────────────────────────────────────────────────
+   * Muted on purpose — a transcript full of tool results would strobe with
+   * saturated status colors. Each carries base / -hi / -ghost / -line so a
+   * semantic surface can be built without inventing a new alpha at the callsite.
+   *
+   * WARN is the one that had to move. It used to be #d6a44b, which is within a
+   * few percent of the brand amber above — with the accent now amber, every
+   * warning read as "highlighted" instead of "careful". It is pushed to a burnt
+   * orange, sitting in the only gap left between the amber accent (hue ~36°)
+   * and the pink-leaning danger red (hue ~356°). */
+  --p-success: #3fb950;
+  --p-success-hi: #59d16a;
+  --p-success-ghost: rgba(63, 185, 80, 0.13);
+  --p-success-line: rgba(63, 185, 80, 0.32);
+
+  --p-warn: #ea7b3c;
+  --p-warn-hi: #f79a63;
+  --p-warn-ghost: rgba(234, 123, 60, 0.13);
+  --p-warn-line: rgba(234, 123, 60, 0.32);
+
+  --p-danger: #ec5f6a;
+  --p-danger-hi: #f4818a;
+  --p-danger-ghost: rgba(236, 95, 106, 0.13);
+  --p-danger-line: rgba(236, 95, 106, 0.32);
+
+  /* Info is blue rather than the violet secondary: violet already means
+   * "agent/selection" here, and a neutral informational notice must not be
+   * mistaken for something the user selected. */
+  --p-info: #58a6ff;
+  --p-info-hi: #7cbaff;
+  --p-info-ghost: rgba(88, 166, 255, 0.13);
+  --p-info-line: rgba(88, 166, 255, 0.32);
+
+  /* ── interaction states ──────────────────────────────────────────────────
+   * Neutral washes, not tints. A hovered row must not look accented — the
+   * accent means "this is the live/primary thing", and a hover that borrows it
+   * makes every list look like it has five active items. */
+  --p-hover: rgba(255, 255, 255, 0.035);
+  --p-active: rgba(255, 255, 255, 0.07); /* pressed, or a menu held open */
+  --p-selected: rgba(255, 255, 255, 0.09); /* keyboard cursor in a list */
+  --p-focus-ring: rgba(229, 163, 60, 0.55); /* louder than -line: it must win */
+  --p-disabled: #3a4049;
+
+  /* Inner top highlight on raised fills. White at low alpha in BOTH themes —
+   * it simulates a light source above the element, and light comes from above
+   * regardless of how dark the room is. */
+  --p-sheen: rgba(255, 255, 255, 0.12);
+  --p-sheen-soft: rgba(255, 255, 255, 0.035); /* the same trick on flat cards */
+
+  /* Shadow INKS, not shadows — `index.css` composes the offsets/blurs once so
+   * every popover keeps the same geometry across themes and only the ink moves.
+   * On dark it is near-opaque black; a light theme needs a different story. */
+  --p-shadow-1: rgba(0, 0, 0, 0.6);
+  --p-shadow-2: rgba(0, 0, 0, 0.5);
+
+  /* ── categorical (charts, agent avatars, graph/diff chrome) ──────────────
+   * Eight hues at roughly even spacing, all landed at similar lightness so no
+   * one series shouts. Ordered so ADJACENT indices are far apart in hue: a
+   * two-series chart gets blue/green, never blue/cyan. Distinct from the accent
+   * ramps by design — a chart series must never be mistaken for "the selected
+   * one". */
+  --p-cat-1: #7aa2f7; /* blue */
+  --p-cat-2: #9ece6a; /* green */
+  --p-cat-3: #e0af68; /* amber */
+  --p-cat-4: #f7768e; /* rose */
+  --p-cat-5: #bb9af7; /* violet */
+  --p-cat-6: #7dcfff; /* cyan */
+  --p-cat-7: #ff9e64; /* orange */
+  --p-cat-8: #41a6b5; /* teal */
+
+  /* ── ordinal ramp (gauge / heat / severity) ─────────────────────────────
+   * Five steps of "how much", green→red. Distinct from the categorical set
+   * above because the ORDER carries meaning here: swapping two of these is a
+   * lie, swapping two `cat-*` is a re-colour. Used by the effort gauge; the
+   * natural home for any future load/heat/pressure meter. */
+  --p-gauge-1: #22c55e;
+  --p-gauge-2: #a3e635;
+  --p-gauge-3: #eab308;
+  --p-gauge-4: #f97316;
+  --p-gauge-5: #ef4444;
+
+  /* ── diff ────────────────────────────────────────────────────────────────
+   * Green/red are near-universal for +/- and stay put; "change" is the info
+   * blue so a modified-not-added line is a third signal rather than a blend.
+   * The ghosts are the LINE washes — they sit under real text, so they are far
+   * weaker than the ghosts above, which only ever sit under a chip. */
+  --p-diff-add: #3fb950;
+  --p-diff-add-ghost: rgba(63, 185, 80, 0.14);
+  --p-diff-remove: #ec5f6a;
+  --p-diff-remove-ghost: rgba(236, 95, 106, 0.14);
+  --p-diff-change: #58a6ff;
+  --p-diff-change-ghost: rgba(88, 166, 255, 0.14);
+
+  /* ── syntax ──────────────────────────────────────────────────────────────
+   * Consumed by BOTH highlighters — Prism in the transcript
+   * (`components/chat/codeTheme.ts`) and Monaco in the file viewer
+   * (`components/monaco/setup.ts`) — which is the whole point of hoisting them:
+   * the same file must not change colors when you open it in the other pane.
+   * Keywords borrow the violet secondary so code chrome stays in the family
+   * without competing with the amber accent in surrounding UI. */
+  --p-syn-text: #c9d1d9;
+  --p-syn-comment: #5c6470;
+  --p-syn-punct: #8a929c;
+  --p-syn-keyword: #c4b2fd;
+  --p-syn-fn: #79b8ff;
+  --p-syn-string: #8ddb9b;
+  --p-syn-number: #e5b567;
+  --p-syn-const: #d7a0ff;
+  --p-syn-tag: #f0616d;
+  --p-syn-prop: #a78bfa;
+  --p-syn-operator: #8a929c;
+}

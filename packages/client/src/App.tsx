@@ -11,6 +11,8 @@ import { ProjectConfigView } from "./components/config/ProjectConfigView.js";
 import { NewProjectView } from "./components/project/NewProjectView.js";
 import { MemoryView } from "./components/memory/MemoryView.js";
 import { GitView } from "./components/git/GitView.js";
+import { SettingsPanel } from "./components/settings/SettingsPanel.js";
+import { ManageConfigDialog } from "./components/sidebar/ManageConfigDialog.js";
 import { Toasts } from "./components/Toasts.js";
 import { ShutdownScreen } from "./components/ShutdownScreen.js";
 import { useChats } from "./stores/chats.js";
@@ -23,8 +25,8 @@ function NoChat() {
       <span className="mb-3 flex size-11 items-center justify-center rounded-lg border border-line bg-panel-2 text-muted [&_svg]:size-5">
         <MessageSquareDashed />
       </span>
-      <p className="text-[13px] font-medium text-secondary">No chat selected</p>
-      <p className="mt-0.5 text-[11.5px] text-muted">Pick a chat from the sidebar or start a new one.</p>
+      <p className="text-base font-medium text-secondary">No chat selected</p>
+      <p className="mt-0.5 text-xs text-muted">Pick a chat from the sidebar or start a new one.</p>
     </div>
   );
 }
@@ -61,11 +63,16 @@ export default function App() {
           )}
         </main>
       </div>
+      {/* Overlays. Every one of these is open/closed by a single field in the
+          view store (see stores/view.ts) rather than by the three bespoke
+          window-event buses and two stray useStates this used to take. */}
       <CodeViewerHost />
       <AgentRunHost />
       <ProjectPRsView />
       <McpCatalogView />
       <ProjectConfigView />
+      <SettingsPanel />
+      <ManageConfigDialog />
       <Toasts />
       <ShutdownScreen />
     </div>

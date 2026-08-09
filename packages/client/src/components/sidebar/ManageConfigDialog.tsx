@@ -22,6 +22,7 @@ import { Chip } from "../ui/Chip.js";
 import { cn } from "../../lib/cn.js";
 import { api } from "../../lib/api.js";
 import { useProjects } from "../../stores/projects.js";
+import { useOverlay } from "../../stores/view.js";
 
 type Tab = "agents" | "modes";
 
@@ -115,7 +116,8 @@ async function refreshConfig(): Promise<void> {
   if (active) st.setActiveProject(active);
 }
 
-export function ManageConfigDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function ManageConfigDialog() {
+  const { open, close: onClose } = useOverlay("agents");
   const agents = useProjects((s) => s.agents);
   const modes = useProjects((s) => s.modes);
   const projects = useProjects((s) => s.projects);
@@ -243,7 +245,7 @@ export function ManageConfigDialog({ open, onClose }: { open: boolean; onClose: 
           <div className="flex w-[220px] shrink-0 flex-col border-r border-line bg-inset/50">
             <div className="cm-scroll min-h-0 flex-1 overflow-y-auto p-1.5">
               {rows.length === 0 && (
-                <p className="px-2 py-3 text-[11.5px] text-faint">
+                <p className="px-2 py-3 text-xs text-faint">
                   No {tab} yet. Create one →
                 </p>
               )}
@@ -256,13 +258,13 @@ export function ManageConfigDialog({ open, onClose }: { open: boolean; onClose: 
                   }}
                   className={cn(
                     "mb-0.5 flex w-full flex-col gap-1 rounded-md px-2 py-1.5 text-left transition-colors",
-                    form?.id === r.id ? "bg-accent-ghost/70" : "hover:bg-white/[0.04]",
+                    form?.id === r.id ? "bg-accent-ghost/70" : "hover:bg-hover",
                   )}
                 >
                   <span className="flex items-center gap-1.5">
                     <span
                       className={cn(
-                        "truncate text-[12px] font-medium",
+                        "truncate text-sm font-medium",
                         form?.id === r.id ? "text-primary" : "text-secondary",
                       )}
                     >
@@ -286,7 +288,7 @@ export function ManageConfigDialog({ open, onClose }: { open: boolean; onClose: 
                   setError(null);
                   setForm(blankForm());
                 }}
-                className="flex w-full items-center justify-center gap-1.5 rounded-md border border-line bg-panel-2 py-1.5 text-[11.5px] font-medium text-secondary transition-colors hover:border-line-strong hover:text-primary [&_svg]:size-3.5"
+                className="flex w-full items-center justify-center gap-1.5 rounded-md border border-line bg-panel-2 py-1.5 text-xs font-medium text-secondary transition-colors hover:border-line-strong hover:text-primary [&_svg]:size-3.5"
               >
                 <Plus />
                 New {tab === "agents" ? "agent" : "mode"}
@@ -301,10 +303,10 @@ export function ManageConfigDialog({ open, onClose }: { open: boolean; onClose: 
                 <span className="mb-2 flex size-9 items-center justify-center rounded-lg border border-line bg-panel-2 text-muted [&_svg]:size-4">
                   {tab === "agents" ? <Bot /> : <Blocks />}
                 </span>
-                <p className="text-[12px] text-secondary">
+                <p className="text-sm text-secondary">
                   Select {tab === "agents" ? "an agent" : "a mode"} to edit
                 </p>
-                <p className="mt-0.5 text-[11px] text-faint">or create a new one.</p>
+                <p className="mt-0.5 text-xs text-faint">or create a new one.</p>
               </div>
             ) : (
               <div className="flex h-full flex-col">

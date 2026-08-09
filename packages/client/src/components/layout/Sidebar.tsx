@@ -12,8 +12,6 @@ import {
   Circle,
   Trash2,
   Pencil,
-  Check,
-  X,
   Brain,
   GitBranch,
   type LucideIcon,
@@ -30,21 +28,21 @@ import { Spinner } from "../ui/Spinner.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { useProjects, useActiveProject } from "../../stores/projects.js";
 import { useChats, useProjectChats } from "../../stores/chats.js";
-import { useView } from "../../stores/view.js";
+import { useView, openOverlay } from "../../stores/view.js";
 import { useProjectMemories } from "../../stores/memory.js";
 import { useGit, useGitChangeCount } from "../../stores/git.js";
 import { useRunners } from "../../stores/runners.js";
 import { useAttention } from "../../stores/attention.js";
-import { actions, deleteChat } from "../../lib/actions.js";
+import { actions } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate, relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
-import { ManageConfigDialog } from "../sidebar/ManageConfigDialog.js";
-import { RenameChatDialog } from "../chat/RenameChatDialog.js";
+import { DeleteChatDialog } from "../chat/DeleteChatDialog.js";
+import { useChatRename } from "../chat/useChatRename.js";
 import { BranchWorktreePicker } from "../panels/BranchWorktreePicker.js";
 import {
   useLaunchTargets,
-  defaultBranch,
+  useLaunchBranch,
   launchSubApp,
   findRunner,
   type LaunchTarget,
@@ -105,10 +103,10 @@ function ProjectSelector({
             <FolderGit2 />
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-[12.5px] font-semibold text-primary">
+            <span className="block truncate text-base font-semibold text-primary">
               {active?.name ?? "No project"}
             </span>
-            <span className="block truncate cm-mono !text-[9.5px] text-faint">
+            <span className="block truncate cm-mono !text-2xs text-faint">
               {active ? midTruncate(active.repoPath, 30) : "—"}
             </span>
           </span>
@@ -119,7 +117,7 @@ function ProjectSelector({
       {(close) => (
         <div className="flex flex-col">
           {projects.length === 0 && (
-            <p className="px-2 py-1.5 text-[11.5px] text-faint">No projects yet.</p>
+            <p className="px-2 py-1.5 text-xs text-faint">No projects yet.</p>
           )}
           {projects.map((p) => (
             <MenuItem
@@ -196,10 +194,10 @@ function SubAppRow({
   };
 
   return (
-    <div className="group flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-white/[0.035]">
+    <div className="group flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-hover">
       <Icon className={cn("size-3.5 shrink-0", running ? "text-accent-hi" : "text-muted")} />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[12px] text-secondary group-hover:text-primary">
+        <span className="block truncate text-sm text-secondary group-hover:text-primary">
           {app.name}
         </span>
       </span>
@@ -256,25 +254,8 @@ function ChatRow({
   );
   const age = relTimeShort(activityAt, now);
   const PurposeIcon = purposeIcon(chat.purpose?.kind);
-  const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-
-  // Two-click inline confirm (trash → check/✕) so a stray click can't nuke a
-  // chat. On confirm: delete server-side, then purge the local stores + reselect
-  // (mirrors the header dialog path). A failure just resets so the user retries.
-  const doDelete = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await deleteChat(chat.id);
-      useAttention.getState().clearChat(chat.id);
-      useChats.getState().removeChat(chat.id);
-    } catch {
-      setBusy(false);
-      setConfirming(false);
-    }
-  };
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const rename = useChatRename(chat);
 
   return (
     <div className="group/row relative" data-flip-id={chat.id}>
@@ -283,7 +264,7 @@ function ChatRow({
         onClick={onClick}
         className={cn(
           "relative flex w-full items-center gap-2.5 rounded-md py-1.5 pl-2.5 pr-8 text-left transition-colors",
-          active ? "bg-accent-ghost/70" : "hover:bg-white/[0.04]",
+          active ? "bg-accent-ghost/70" : "hover:bg-hover",
         )}
       >
         {active && <span className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-accent" />}
@@ -308,7 +289,7 @@ function ChatRow({
         <span className="min-w-0 flex-1">
           <span
             className={cn(
-              "block truncate text-[12.5px]",
+              "block truncate text-base",
               active ? "font-semibold text-primary" : "text-secondary",
             )}
           >
@@ -316,57 +297,59 @@ function ChatRow({
                 what the eye scans a long sidebar FOR. See ui/TitleText. */}
             <TitleText title={chat.title} />
           </span>
-          <span className="mt-px block truncate text-[10.5px] text-faint">
+          <span className="mt-px block truncate text-2xs text-faint">
             {meta.label}
             <span className="text-faint/70"> · {age}</span>
           </span>
         </span>
       </button>
 
-      {/* right rail (sibling of the row button — never a nested button): the
-          needs-input dot by default, swapped for a hover-revealed delete that
-          expands to a check/✕ confirm. */}
-      <div className="absolute inset-y-0 right-1.5 flex items-center gap-0.5">
-        {confirming ? (
-          <>
-            <IconButton
-              size="sm"
-              tip="Confirm delete"
-              onClick={doDelete}
-              className="!text-danger hover:!bg-danger/15"
-            >
-              {busy ? <Spinner size={12} /> : <Check />}
-            </IconButton>
-            <IconButton size="sm" tip="Cancel" onClick={() => setConfirming(false)}>
-              <X />
-            </IconButton>
-          </>
-        ) : (
-          <>
-            {needsInput && (
-              <StatusDot tone="warn" pulse size={6} className="group-hover/row:hidden" />
-            )}
-            <IconButton
-              size="sm"
-              tip="Rename chat"
-              onClick={() => setRenaming(true)}
-              className="opacity-0 group-hover/row:opacity-100"
-            >
-              <Pencil />
-            </IconButton>
-            <IconButton
-              size="sm"
-              tip="Delete chat"
-              onClick={() => setConfirming(true)}
-              className="opacity-0 group-hover/row:opacity-100"
-            >
-              <Trash2 />
-            </IconButton>
-          </>
-        )}
-      </div>
+      {/* Rename edits the row IN PLACE — same interaction as the transcript
+          header, overlaid on the row so the list doesn't reflow mid-edit. It's
+          a sibling of the row button because an input nested inside a button is
+          invalid and swallows its own clicks. */}
+      {rename.editing && (
+        <div className="absolute inset-x-1 inset-y-0 flex items-center pl-[26px] pr-1">
+          <input
+            {...rename.inputProps}
+            aria-label="Rename chat"
+            className="w-full rounded-sm border border-accent-line bg-inset px-1.5 py-0.5 text-base font-semibold text-primary outline-none"
+          />
+        </div>
+      )}
 
-      <RenameChatDialog chatId={chat.id} open={renaming} onClose={() => setRenaming(false)} />
+      {/* right rail (sibling of the row button — never a nested button): the
+          needs-input dot by default, swapped for hover-revealed actions. */}
+      {!rename.editing && (
+        <div className="absolute inset-y-0 right-1.5 flex items-center gap-0.5">
+          {needsInput && (
+            <StatusDot tone="warn" pulse size={6} className="group-hover/row:hidden" />
+          )}
+          <IconButton
+            size="sm"
+            tip="Rename chat"
+            onClick={rename.start}
+            className="opacity-0 group-hover/row:opacity-100"
+          >
+            <Pencil />
+          </IconButton>
+          <IconButton
+            size="sm"
+            tip="Delete chat"
+            onClick={() => setConfirmDelete(true)}
+            className="opacity-0 group-hover/row:opacity-100"
+          >
+            <Trash2 />
+          </IconButton>
+        </div>
+      )}
+
+      <DeleteChatDialog
+        chatId={chat.id}
+        title={chat.title}
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+      />
     </div>
   );
 }
@@ -392,7 +375,7 @@ function NavButton({
     <button
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12px] font-medium transition-colors [&_svg]:size-3.5",
+        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium transition-colors [&_svg]:size-3.5",
         active
           ? "bg-accent-ghost text-primary"
           : "text-secondary hover:bg-panel-2/60 hover:text-primary",
@@ -401,7 +384,7 @@ function NavButton({
       <Icon className={active ? "text-accent" : "text-muted"} />
       <span className="flex-1 text-left">{label}</span>
       {count !== undefined && (
-        <span className="cm-mono !text-[9.5px] text-faint">{count}</span>
+        <span className="cm-mono !text-2xs text-faint">{count}</span>
       )}
     </button>
   );
@@ -473,18 +456,15 @@ export function Sidebar() {
     setActiveChatRaw(id);
   };
 
-  const [manageOpen, setManageOpen] = useState(false);
-
-  // Project-level launch target for the Apps section — same picker as the right
-  // panel, defaulting to the project's default (current) branch.
+  // Launch target for the Apps section. The SAME selection the right panel's
+  // Runner picker drives (see useLaunchBranch) — one project, one answer to
+  // "which branch does Run use?".
   const { targets } = useLaunchTargets(project?.id);
-  const [selectedBranch, setSelectedBranch] = useState<string | undefined>();
-  useEffect(() => {
-    if (!targets.some((t) => t.branch === selectedBranch)) {
-      setSelectedBranch(defaultBranch(targets, project?.repoPath));
-    }
-  }, [targets, selectedBranch, project?.repoPath]);
-  const selectedTarget = targets.find((t) => t.branch === selectedBranch);
+  const {
+    branch: selectedBranch,
+    setBranch: setSelectedBranch,
+    target: selectedTarget,
+  } = useLaunchBranch(project?.id, targets, project?.repoPath);
 
   // Shared clock so every chat row's "age" label ages together. 30s is plenty
   // for m/h/d/w granularity and keeps the sidebar idle-cheap.
@@ -535,7 +515,7 @@ export function Sidebar() {
             handing over visible beside it. See NewProjectView. */}
         <ProjectSelector
           onAddProject={() => setView("new-project")}
-          onManageConfig={() => setManageOpen(true)}
+          onManageConfig={() => openOverlay("agents")}
         />
       </div>
 
@@ -565,7 +545,7 @@ export function Sidebar() {
         {/* subApps */}
         <div className="mb-1 flex items-center gap-1.5 px-2.5 pb-1">
           <SectionLabel className="px-0">Apps</SectionLabel>
-          <span className="cm-mono !text-[9.5px] text-faint">{project?.subApps.length ?? 0}</span>
+          <span className="cm-mono !text-2xs text-faint">{project?.subApps.length ?? 0}</span>
           {project && project.subApps.length > 0 && (
             <div className="ml-auto">
               <BranchWorktreePicker
@@ -579,9 +559,9 @@ export function Sidebar() {
         </div>
         <div className="px-1.5">
           {!project ? (
-            <p className="px-2 py-1.5 text-[11px] text-faint">No project selected.</p>
+            <p className="px-2 py-1.5 text-xs text-faint">No project selected.</p>
           ) : project.subApps.length === 0 ? (
-            <p className="px-2 py-1.5 text-[11px] text-faint">No apps configured.</p>
+            <p className="px-2 py-1.5 text-xs text-faint">No apps configured.</p>
           ) : (
             project.subApps.map((app) => (
               <SubAppRow
@@ -597,16 +577,18 @@ export function Sidebar() {
 
         <div className="my-2.5 h-px bg-line-soft" />
 
-        {/* chats */}
+        {/* chats — no "+" here. It fired the exact same startNewChat as the
+            pinned footer button 400px below it, and two controls for one action
+            in one column is how a sidebar starts feeling like a toolbar. The
+            footer one wins: it's pinned, so it's reachable from any scroll
+            position, and it's labelled. */}
         <div className="mb-1 flex items-center justify-between px-2.5 pb-1">
           <SectionLabel className="px-0">Chats</SectionLabel>
-          <IconButton size="sm" tip="New chat" onClick={startNewChat} disabled={!project}>
-            <Plus />
-          </IconButton>
+          <span className="cm-mono !text-2xs text-faint">{chats.length || ""}</span>
         </div>
         <div ref={chatListRef} className="space-y-0.5 px-1.5">
           {chats.length === 0 ? (
-            <p className="px-2 py-1.5 text-[11px] text-faint">
+            <p className="px-2 py-1.5 text-xs text-faint">
               {project ? "No chats yet." : "Select a project to see its chats."}
             </p>
           ) : (
@@ -629,7 +611,7 @@ export function Sidebar() {
         <button
           onClick={startNewChat}
           disabled={!project}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-line bg-panel-2 py-1.5 text-[12px] font-medium text-secondary transition-colors hover:border-line-strong hover:text-primary disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5"
+          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-line bg-panel-2 py-1.5 text-sm font-medium text-secondary transition-colors hover:border-line-strong hover:text-primary disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5"
         >
           <Plus />
           New chat
@@ -638,14 +620,13 @@ export function Sidebar() {
             looking at, which is the first question when dev (4319) and the
             installed app (4318) disagree. */}
         <p
-          className="cm-mono mt-2 text-center !text-[9.5px] text-faint"
+          className="cm-mono mt-2 text-center !text-2xs text-faint"
           title="Build version (UTC) — vyyyy.mm.dd.sssss, where sssss is the seconds elapsed since UTC midnight"
         >
           {BUILD_VERSION}
         </p>
       </div>
 
-      <ManageConfigDialog open={manageOpen} onClose={() => setManageOpen(false)} />
     </aside>
   );
 }

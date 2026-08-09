@@ -56,9 +56,9 @@ export function Toasts() {
             {ICON[t.level]}
           </span>
           <div className="min-w-0 flex-1">
-            <p className="text-[12.5px] leading-snug text-primary">{t.text}</p>
+            <p className="text-base leading-snug text-primary">{t.text}</p>
             {t.detail && (
-              <p className="mt-0.5 break-words text-[11px] leading-snug text-muted">{t.detail}</p>
+              <p className="mt-0.5 break-words text-xs leading-snug text-muted">{t.detail}</p>
             )}
           </div>
           <button

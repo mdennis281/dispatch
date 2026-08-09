@@ -61,7 +61,7 @@ function runVisual(run: WorkflowRun | null): {
 /* ------------------------------------------------------------- dispatch form */
 
 const FIELD =
-  "h-7 w-full rounded-md border border-line bg-inset px-2 text-[11.5px] text-primary outline-none " +
+  "h-7 w-full rounded-md border border-line bg-inset px-2 text-xs text-primary outline-none " +
   "placeholder:text-faint focus:border-line-strong";
 
 /**
@@ -157,43 +157,43 @@ function DispatchDialog({
     <div className="flex flex-col gap-2.5 p-3">
       <div className="flex items-center gap-1.5">
         <Workflow className="size-3.5 text-muted" />
-        <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold text-primary">
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-primary">
           Run {workflowName}
         </span>
       </div>
 
       <div className="flex flex-col gap-1">
-        <label className="text-[10px] font-semibold uppercase tracking-[0.09em] text-faint">Branch</label>
+        <label className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">Branch</label>
         <input
           value={ref}
           onChange={(e) => setRef(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && submit()}
           placeholder={defaultRef}
           spellCheck={false}
-          className={cn(FIELD, "cm-mono !text-[11px]")}
+          className={cn(FIELD, "cm-mono !text-xs")}
         />
       </div>
 
       {inputs === null ? (
-        <div className="flex items-center gap-2 py-1 text-[11px] text-faint">
+        <div className="flex items-center gap-2 py-1 text-xs text-faint">
           <Spinner size={12} /> Loading inputs…
         </div>
       ) : (
         list.map((inp) => (
           <div key={inp.name} className="flex flex-col gap-1">
-            <label className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.09em] text-faint">
+            <label className="flex items-center gap-1 text-2xs font-semibold uppercase tracking-[0.09em] text-faint">
               <span className="normal-case tracking-normal text-secondary">{inp.name}</span>
               {inp.required && <span className="text-danger">*</span>}
             </label>
             {inp.description && (
-              <span className="-mt-0.5 text-[10px] leading-snug text-faint">{inp.description}</span>
+              <span className="-mt-0.5 text-2xs leading-snug text-faint">{inp.description}</span>
             )}
             {inp.type === "boolean" ? (
               <button
                 type="button"
                 onClick={() => setVal(inp.name, values[inp.name] === "true" ? "false" : "true")}
                 className={cn(
-                  "inline-flex h-7 w-fit items-center gap-1.5 rounded-md border px-2 text-[11.5px] transition-colors",
+                  "inline-flex h-6 w-fit items-center gap-1.5 rounded-md border px-2 text-xs transition-colors",
                   values[inp.name] === "true"
                     ? "border-accent-line bg-accent-ghost text-accent-hi"
                     : "border-line bg-inset text-secondary hover:border-line-strong",
@@ -230,11 +230,11 @@ function DispatchDialog({
       )}
 
       <div className="flex items-center gap-2 pt-0.5">
-        {hint && <span className="text-[10px] text-faint">{hint}</span>}
-        <Button size="xs" variant="ghost" className="ml-auto" onClick={onDone}>
+        {hint && <span className="text-2xs text-faint">{hint}</span>}
+        <Button size="sm" variant="ghost" className="ml-auto" onClick={onDone}>
           Cancel
         </Button>
-        <Button size="xs" variant="primary" leftIcon={<Send />} disabled={!ready} onClick={submit}>
+        <Button size="sm" variant="primary" leftIcon={<Send />} disabled={!ready} onClick={submit}>
           Run
         </Button>
       </div>
@@ -272,14 +272,14 @@ function WorkflowRow({
             href={href}
             target="_blank"
             rel="noopener noreferrer"
-            className="block truncate text-[11.5px] text-secondary hover:text-primary"
+            className="block truncate text-xs text-secondary hover:text-primary"
           >
             {workflow.name}
           </a>
         ) : (
-          <span className="block truncate text-[11.5px] text-secondary">{workflow.name}</span>
+          <span className="block truncate text-xs text-secondary">{workflow.name}</span>
         )}
-        <span className="flex items-center gap-1 text-[10px] text-faint">
+        <span className="flex items-center gap-1 text-2xs text-faint">
           <span className={v.color}>{v.label}</span>
           {lastRun?.headBranch && (
             <>
@@ -303,7 +303,7 @@ function WorkflowRow({
           <button
             onClick={toggle}
             aria-expanded={open}
-            className="inline-flex shrink-0 items-center gap-1 rounded-[5px] border border-line px-1.5 py-1 text-[10.5px] text-secondary transition-colors hover:border-line-strong hover:text-primary [&_svg]:size-3"
+            className="inline-flex shrink-0 items-center gap-1 rounded-[5px] border border-line px-1.5 py-1 text-2xs text-secondary transition-colors hover:border-line-strong hover:text-primary [&_svg]:size-3"
           >
             <Play />
             Run
@@ -332,7 +332,7 @@ function WorkflowRow({
 function RunRow({ run }: { run: WorkflowRun }) {
   const v = runVisual(run);
   const inner = (
-    <div className="flex items-center gap-2 py-1.5 text-[11.5px]">
+    <div className="flex items-center gap-2 py-1.5 text-xs">
       {v.spin ? <Spinner size={12} /> : <v.Icon className={cn("size-3.5", v.color)} />}
       <span className="min-w-0 flex-1 truncate text-secondary">{run.workflowName ?? run.name}</span>
       {run.event && (
@@ -340,11 +340,11 @@ function RunRow({ run }: { run: WorkflowRun }) {
           {run.event}
         </Chip>
       )}
-      <span className={cn("shrink-0 text-[10.5px]", v.color)}>{v.label}</span>
+      <span className={cn("shrink-0 text-2xs", v.color)}>{v.label}</span>
     </div>
   );
   return run.url && run.url !== "#" ? (
-    <a href={run.url} target="_blank" rel="noopener noreferrer" className="block hover:bg-white/[0.02]">
+    <a href={run.url} target="_blank" rel="noopener noreferrer" className="block hover:bg-hover">
       {inner}
     </a>
   ) : (
@@ -447,16 +447,16 @@ export function GithubActionsSection({ chat }: { chat: Chat }) {
               />
             ))
           ) : loading ? (
-            <div className="flex items-center gap-2 py-1.5 text-[11px] text-faint">
+            <div className="flex items-center gap-2 py-1.5 text-xs text-faint">
               <Spinner size={12} /> Loading workflows…
             </div>
           ) : (
-            <p className="py-1.5 text-[11px] text-faint">No workflows in this repo.</p>
+            <p className="py-1.5 text-xs text-faint">No workflows in this repo.</p>
           )
         ) : runs.length > 0 ? (
           runs.map((r) => <RunRow key={r.id} run={r} />)
         ) : (
-          <p className="py-1.5 text-[11px] text-faint">No recent runs.</p>
+          <p className="py-1.5 text-xs text-faint">No recent runs.</p>
         )}
       </div>
     </div>

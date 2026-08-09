@@ -70,7 +70,7 @@ export function ConfigSectionPane({
       <div>
         <div className="flex items-center gap-2 [&_svg]:size-4">
           <Icon className="shrink-0 text-accent" />
-          <h3 className="text-[13px] font-semibold text-primary">{section.label}</h3>
+          <h3 className="text-base font-semibold text-primary">{section.label}</h3>
           {/* Workflow isn't a list, so a count there would just read "0" forever. */}
           {section.countable !== false && (
             <Chip tone={items.length ? "accent" : "muted"} mono>
@@ -95,7 +95,7 @@ export function ConfigSectionPane({
             </Button>
           )}
         </div>
-        <p className="mt-1.5 text-[11.5px] leading-relaxed text-muted">{section.explainer}</p>
+        <p className="mt-1.5 text-xs leading-relaxed text-muted">{section.explainer}</p>
       </div>
 
       {children}
@@ -110,16 +110,16 @@ export function ConfigSectionPane({
             return (
               <li key={item.key} className="group flex items-center gap-2 px-3 py-2">
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[11.5px] font-medium text-secondary">
+                  <div className="truncate text-xs font-medium text-secondary">
                     {item.title}
                   </div>
                   {item.sub && (
-                    <div className="truncate text-[10.5px] text-faint">{item.sub}</div>
+                    <div className="truncate text-2xs text-faint">{item.sub}</div>
                   )}
                 </div>
                 {armed ? (
                   <>
-                    <span className="text-[10.5px] text-warn">Delete?</span>
+                    <span className="text-2xs text-warn">Delete?</span>
                     <Button variant="ghost" onClick={() => setConfirming(null)}>
                       Cancel
                     </Button>
@@ -164,7 +164,7 @@ export function ConfigSectionPane({
         section.id !== "workflow" && (
           <div className="rounded-md border border-dashed border-line px-3 py-5 text-center">
             <Icon className="mx-auto mb-1 size-4 text-faint" />
-            <p className="text-[11.5px] text-secondary">
+            <p className="text-xs text-secondary">
               No {section.noun}s in this project yet.
             </p>
             {/* The empty state is where the affordance matters most — this is
@@ -209,7 +209,7 @@ export function ConfigSectionPane({
       )}
 
       {section.id === "memory" && (
-        <p className="flex items-start gap-1.5 text-[10.5px] leading-snug text-faint [&_svg]:mt-px [&_svg]:size-3.5 [&_svg]:shrink-0">
+        <p className="flex items-start gap-1.5 text-2xs leading-snug text-faint [&_svg]:mt-px [&_svg]:size-3.5 [&_svg]:shrink-0">
           <FileCog />
           Memories are written by agents as they work — open the Memory view in the sidebar to
           read, edit or prune them.

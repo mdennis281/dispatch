@@ -63,6 +63,8 @@ export type { Toast, NoticeLevel } from "./notices.js";
 export { useUsage } from "./usage.js";
 export { useModels } from "./models.js";
 export { useSettings } from "./settings.js";
+export { useTheme, watchSystemTheme } from "./theme.js";
+export type { ThemePref, ResolvedTheme } from "./theme.js";
 
 /** Seed all stores from the offline fixture (call once at boot). */
 export function hydrateFromMock(): void {

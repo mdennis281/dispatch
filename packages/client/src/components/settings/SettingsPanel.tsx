@@ -6,8 +6,8 @@
  * merges + revalidates server-side. Theme applies to the document on save so the
  * change is reflected immediately (and re-reflected whenever the modal loads).
  */
-import { useCallback, useEffect, useState } from "react";
-import { SlidersHorizontal, Moon, Sun, Bell, Layers } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { SlidersHorizontal, Moon, Sun, Monitor, Bell, Layers } from "lucide-react";
 import { Modal, Field, TextInput, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
@@ -17,15 +17,11 @@ import { api, type AppSettings } from "../../lib/api.js";
 import { useProjects } from "../../stores/projects.js";
 import { useNotices } from "../../stores/notices.js";
 import { useSettings } from "../../stores/settings.js";
+import { useTheme, type ThemePref } from "../../stores/theme.js";
+import { useOverlay } from "../../stores/view.js";
 import { useBrowserNotify, notifyUnavailableReason } from "../../lib/browserNotify.js";
 import { StopDispatch } from "./StopDispatch.js";
 import { cn } from "../../lib/cn.js";
-
-/** Apply the persisted theme to the document (mirrors index.html `class="dark"`). */
-function applyTheme(theme: AppSettings["theme"]): void {
-  document.documentElement.classList.toggle("dark", theme !== "light");
-  document.documentElement.style.colorScheme = theme === "light" ? "light" : "dark";
-}
 
 /** A compact token-styled on/off switch (no primitive exists yet). */
 function Switch({
@@ -43,7 +39,7 @@ function Switch({
       role="switch"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className="flex items-center gap-2 text-[12px] font-medium text-secondary"
+      className="flex items-center gap-2 text-sm font-medium text-secondary"
     >
       <span
         className={cn(
@@ -80,7 +76,7 @@ function DesktopNotifications() {
   return (
     <div className="mb-3 rounded-md border border-line bg-inset/40 px-2.5 py-2">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-[12px] font-medium text-secondary">Desktop notifications</span>
+        <span className="text-sm font-medium text-secondary">Desktop notifications</span>
         {unavailable || permission === "unsupported" ? null : permission === "granted" ? (
           <Switch
             checked={enabled}
@@ -88,14 +84,14 @@ function DesktopNotifications() {
             label={enabled ? "On" : "Muted"}
           />
         ) : permission === "denied" ? (
-          <span className="text-[11px] text-warn">Blocked</span>
+          <span className="text-xs text-warn">Blocked</span>
         ) : (
-          <Button size="xs" onClick={() => void request()}>
+          <Button size="sm" onClick={() => void request()}>
             Enable
           </Button>
         )}
       </div>
-      <p className="mt-1 text-[11px] leading-snug text-faint">
+      <p className="mt-1 text-xs leading-snug text-faint">
         {unavailable ??
           (permission === "denied"
             ? "You blocked notifications for this origin — re-allow them in the browser's site settings, then reopen this panel."
@@ -107,19 +103,26 @@ function DesktopNotifications() {
 
 const DEFAULT_DRAFT: AppSettings = { theme: "dark", webhook: { enabled: false } };
 
-export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function SettingsPanel() {
+  const { open, close: onClose } = useOverlay("settings");
   const modes = useProjects((s) => s.modes);
   const pushToast = useNotices((s) => s.push);
+  const setTheme = useTheme((s) => s.setTheme);
 
   const [draft, setDraft] = useState<AppSettings>(DEFAULT_DRAFT);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // What the theme was when the modal opened, so cancelling can put it back —
+  // the picker applies LIVE (you cannot judge a palette from a word), which
+  // means abandoning the dialog would otherwise leave the app repainted.
+  const themeOnOpen = useRef<ThemePref>("dark");
 
   // (Re)load the live settings each time the modal opens.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    themeOnOpen.current = useTheme.getState().pref;
     setLoading(true);
     setError(null);
     api.settings
@@ -142,7 +145,10 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
           spawnChat: { autoApprove: s.spawnChat?.autoApprove ?? false },
         };
         setDraft(next);
-        applyTheme(next.theme);
+        // The server value is the cross-device truth; localStorage only ever
+        // held a pre-paint cache of it, so reconcile toward the server on load.
+        themeOnOpen.current = next.theme;
+        setTheme(next.theme);
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -156,6 +162,11 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
   }, [open]);
 
   const patch = useCallback((p: Partial<AppSettings>) => setDraft((d) => ({ ...d, ...p })), []);
+  // Every exit that isn't "Save" (Cancel, Esc, backdrop) undoes the live preview.
+  const cancel = useCallback(() => {
+    setTheme(themeOnOpen.current);
+    onClose();
+  }, [onClose, setTheme]);
   const patchWebhook = useCallback(
     (p: Partial<NonNullable<AppSettings["webhook"]>>) =>
       setDraft((d) => ({ ...d, webhook: { ...d.webhook, ...p } })),
@@ -188,7 +199,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
     };
     try {
       const saved = await api.settings.update(body);
-      applyTheme(saved.theme ?? body.theme);
+      setTheme(saved.theme ?? body.theme);
       // Push into the live store too: transcripts read this on every render and
       // would otherwise keep the boot-time value until a reload.
       useSettings.getState().apply(saved);
@@ -212,7 +223,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
   return (
     <Modal
       open={open}
-      onClose={onClose}
+      onClose={cancel}
       width={480}
       icon={<SlidersHorizontal />}
       title="Settings"
@@ -224,7 +235,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
               <InlineError message={error} />
             </div>
           )}
-          <Button variant="ghost" onClick={onClose} disabled={busy}>
+          <Button variant="ghost" onClick={cancel} disabled={busy}>
             Cancel
           </Button>
           <Button variant="primary" onClick={save} disabled={busy || loading}>
@@ -237,14 +248,18 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
         {/* appearance */}
         <div>
           <SectionLabel className="mb-1.5 px-0">Appearance</SectionLabel>
-          <Field label="Theme" hint="applies on save">
+          <Field label="Theme" hint="previews live, saved for all devices">
             <SegmentedControl
               size="md"
               value={draft.theme}
-              onChange={(v) => patch({ theme: v })}
+              onChange={(v) => {
+                patch({ theme: v });
+                setTheme(v);
+              }}
               segments={[
                 { value: "dark", label: "Dark", icon: <Moon /> },
                 { value: "light", label: "Light", icon: <Sun /> },
+                { value: "system", label: "System", icon: <Monitor /> },
               ]}
             />
           </Field>
@@ -267,8 +282,8 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
               that repo, and any single chat can override both. */}
           <div className="mt-3 flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[11px] font-medium text-secondary">Show sent context</div>
-              <p className="mt-0.5 text-[10.5px] leading-snug text-faint">
+              <div className="text-xs font-medium text-secondary">Show sent context</div>
+              <p className="mt-0.5 text-2xs leading-snug text-faint">
                 Reveal what Dispatch attaches to your turns on your behalf — surfaced
                 memories, repo snapshots. Rendering only; the agent receives it either way.
               </p>
@@ -285,10 +300,10 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
               A project's `.dispatch/project.yaml` can override it per repo. */}
           <div className="mt-3 flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[11px] font-medium text-secondary">
+              <div className="text-xs font-medium text-secondary">
                 Auto-approve spawned chats
               </div>
-              <p className="mt-0.5 text-[10.5px] leading-snug text-faint">
+              <p className="mt-0.5 text-2xs leading-snug text-faint">
                 Agents can start new chats with <span className="font-mono">spawn_chat</span>.
                 Off, every spawn waits on your approval; on, they start unattended.
               </p>
@@ -361,7 +376,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
               label={(ac.enabled ?? true) ? "Auto-compact on" : "Auto-compact off"}
             />
           </div>
-          <p className="mb-2 text-[11px] text-faint">
+          <p className="mb-2 text-xs text-faint">
             When a session's context window fills, summarize the conversation and continue
             automatically instead of erroring. Applies to new turns.
           </p>

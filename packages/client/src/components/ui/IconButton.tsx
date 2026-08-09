@@ -11,9 +11,10 @@ export interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>
   children: ReactNode;
 }
 
+// Square counterparts of Button's two heights — see the note there.
 const sizes: Record<Size, string> = {
   sm: "size-6 [&_svg]:size-3.5",
-  md: "size-7 [&_svg]:size-4",
+  md: "size-8 [&_svg]:size-4",
 };
 
 export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(
@@ -28,8 +29,8 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(
         className={cn(
           "inline-flex items-center justify-center rounded-sm border border-transparent " +
             "text-secondary transition-colors duration-150 ease-[var(--ease-out)] " +
-            "hover:bg-white/[0.06] hover:text-primary disabled:pointer-events-none disabled:opacity-40",
-          active && "bg-white/[0.07] text-primary",
+            "hover:bg-active hover:text-primary disabled:pointer-events-none disabled:opacity-40",
+          active && "bg-selected text-primary",
           sizes[size],
           className,
         )}

@@ -27,7 +27,7 @@ function ResultBody({ content }: { content: unknown }) {
 /** Trailing "…still loading the rest" hint under a clipped payload. */
 function ClippedNote({ bytes }: { bytes?: number }) {
   return (
-    <div className="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-faint">
+    <div className="mt-1.5 flex items-center gap-1.5 text-2xs text-faint">
       <Spinner size={9} />
       <span>Loading the full payload{bytes ? ` (${kb(bytes)})` : ""}…</span>
     </div>
@@ -128,23 +128,23 @@ export const ToolCallCard = memo(function ToolCallCard({
         <div className="flex items-center">
           <button
             onClick={toggle}
-            className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-white/[0.02]"
+            className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-hover"
           >
             <ChevronRight
               className={cn("size-3 shrink-0 text-faint transition-transform", open && "rotate-90")}
             />
-            <span className="shrink-0 text-[12px] font-semibold text-primary">
+            <span className="shrink-0 text-sm font-semibold text-primary">
               {toolLabel(use.name)}
             </span>
-            {mcp && <Chip tone="accent">MCP · {mcp.server}</Chip>}
+            {mcp && <Chip tone="agent">MCP · {mcp.server}</Chip>}
             {command && !open && (
-              <span className="min-w-0 truncate cm-mono !text-[11px] text-muted">{command}</span>
+              <span className="min-w-0 truncate cm-mono !text-xs text-muted">{command}</span>
             )}
             <span className="ml-auto flex shrink-0 items-center gap-2 pl-2">
               {/* A backgrounded call's own durationMs times the ACK, not the work. */}
               {(task?.durationMs ?? (backgrounded ? undefined : result?.durationMs)) !==
                 undefined && (
-                <span className="cm-mono !text-[10px] text-faint">
+                <span className="cm-mono !text-2xs text-faint">
                   {dur((task?.durationMs ?? result?.durationMs)!)}
                 </span>
               )}
@@ -155,7 +155,7 @@ export const ToolCallCard = memo(function ToolCallCard({
             <button
               onClick={() => openCodeViewer(fileTarget)}
               title={fileTarget.mode === "diff" ? "Open diff vs main" : "Open file"}
-              className="mr-1.5 inline-flex shrink-0 items-center gap-1 rounded-[5px] border border-transparent px-1.5 py-1 text-[11px] text-muted transition-colors hover:bg-white/[0.06] hover:text-primary [&_svg]:size-3.5"
+              className="mr-1.5 inline-flex shrink-0 items-center gap-1 rounded-[5px] border border-transparent px-1.5 py-1 text-xs text-muted transition-colors hover:bg-active hover:text-primary [&_svg]:size-3.5"
             >
               {fileTarget.mode === "diff" ? <FileDiff /> : <FileCode2 />}
               Open
@@ -174,7 +174,7 @@ export const ToolCallCard = memo(function ToolCallCard({
         {open && (
           <div className="cm-anim-rise space-y-2 border-t border-line-soft px-3 py-2.5">
             <div>
-              <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">
+              <div className="mb-1 text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
                 {plan ? "Plan" : command ? "Command" : "Arguments"}
               </div>
               {plan ? (
@@ -197,7 +197,7 @@ export const ToolCallCard = memo(function ToolCallCard({
             </div>
             {task?.summary && (
               <div>
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">
+                <div className="mb-1 text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
                   Background outcome
                   {task.toolUses !== undefined && (
                     <span className="ml-1.5 font-normal normal-case tracking-normal text-faint">
@@ -205,14 +205,14 @@ export const ToolCallCard = memo(function ToolCallCard({
                     </span>
                   )}
                 </div>
-                <p className="rounded-[5px] border border-line-soft bg-inset px-2.5 py-2 text-[11.5px] text-secondary">
+                <p className="rounded-[5px] border border-line-soft bg-inset px-2.5 py-2 text-xs text-secondary">
                   {task.summary}
                 </p>
               </div>
             )}
             {result && (
               <div>
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">
+                <div className="mb-1 text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
                   Result
                   {result.contentOmitted && result.contentBytes !== undefined && (
                     <span className="ml-1.5 font-normal normal-case tracking-normal text-faint">

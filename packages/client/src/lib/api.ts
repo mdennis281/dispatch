@@ -48,7 +48,8 @@ import type {
  * on write.
  */
 export interface AppSettings {
-  theme: "dark" | "light";
+  /** Kept in the same shape as `ThemePref` in stores/theme.ts. */
+  theme: "dark" | "light" | "system";
   defaultModeId?: string;
   webhook?: {
     kind?: "ntfy" | "pushover";

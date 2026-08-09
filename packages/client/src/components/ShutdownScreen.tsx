@@ -33,8 +33,8 @@ export function ShutdownScreen() {
       <span className="mb-3.5 flex size-12 items-center justify-center rounded-xl border border-line bg-panel-2 text-muted [&_svg]:size-5">
         <Power />
       </span>
-      <p className="text-[14px] font-medium text-primary">Dispatch has stopped</p>
-      <p className="mt-1 max-w-[420px] text-center text-[12px] leading-relaxed text-muted">
+      <p className="text-lg font-medium text-primary">Dispatch has stopped</p>
+      <p className="mt-1 max-w-[420px] text-center text-sm leading-relaxed text-muted">
         Every agent session and sub-app was shut down cleanly
         {reason ? ` (${reason})` : ""}. Nothing is running on this machine.
       </p>
@@ -43,9 +43,9 @@ export function ShutdownScreen() {
           Reconnect
         </Button>
       </div>
-      <p className="mt-3.5 text-[11px] text-faint">
+      <p className="mt-3.5 text-xs text-faint">
         Start it again from the Start-menu shortcut, or{" "}
-        <code className="cm-mono rounded bg-inset px-1 py-px text-[10.5px]">pnpm app</code> in
+        <code className="cm-mono rounded bg-inset px-1 py-px text-2xs">pnpm app</code> in
         the checkout — then hit Reconnect.
       </p>
     </div>

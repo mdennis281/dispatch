@@ -3,7 +3,6 @@ import {
   GitBranch,
   GitPullRequest,
   GitMerge,
-  Square,
   MoreHorizontal,
   Hash,
   ChevronDown,
@@ -14,7 +13,6 @@ import {
   Eye,
   EyeOff,
 } from "lucide-react";
-import { stripTitleMarks } from "@dispatch/shared";
 import type { AgentActivity, Chat, WorktreeInfo } from "@dispatch/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -22,21 +20,20 @@ import { Popover, MenuItem } from "../ui/Popover.js";
 import { Chip } from "../ui/Chip.js";
 import { StatusDot, statusMeta } from "../ui/StatusDot.js";
 import { TitleText } from "../ui/TitleText.js";
-import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
-import { Modal, InlineError } from "../sidebar/Modal.js";
 import { MessageList } from "./MessageList.js";
 import { StreamingTail } from "./StreamingTail.js";
 import { TodosStrip } from "./TodosStrip.js";
 import { Composer } from "./Composer.js";
+import { DeleteChatDialog } from "./DeleteChatDialog.js";
+import { useChatRename } from "./useChatRename.js";
 import { useChatMessages, useChatPage, useMessages } from "../../stores/messages.js";
 import { loadOlderMessages } from "../../stores/index.js";
 import { useChats } from "../../stores/chats.js";
-import { useAttention } from "../../stores/attention.js";
 import { useProjects } from "../../stores/projects.js";
 import { usePanels } from "../../stores/panels.js";
 import { worktreeMatchesChat, samePath } from "../panels/panelBus.js";
-import { actions, deleteChat } from "../../lib/actions.js";
+import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
 import {
@@ -99,8 +96,8 @@ function EmptyTranscript() {
       <span className="flex size-10 items-center justify-center rounded-lg border border-line bg-panel-2 text-muted [&_svg]:size-5">
         <MessagesSquare />
       </span>
-      <p className="text-[12.5px] text-secondary">No messages yet</p>
-      <p className="text-[11.5px] text-muted">Send a message below to start the turn.</p>
+      <p className="text-base text-secondary">No messages yet</p>
+      <p className="text-xs text-muted">Send a message below to start the turn.</p>
     </div>
   );
 }
@@ -130,46 +127,10 @@ export function ChatView({ chat }: { chat: Chat }) {
     void api.chats.update(chat.id, { showInjectedContext: next }).catch(() => {});
   }, [chat, injected.show]);
 
-  // Inline title rename (header) + delete confirmation dialog.
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState("");
+  // Inline title rename + delete confirmation, both shared with the sidebar row
+  // so a chat renames and deletes the same way wherever you reach for it.
+  const rename = useChatRename(chat);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
-
-  const startRename = () => {
-    // Edited as plain text: `**` in an input box reads as a typo, not as the
-    // accent it renders to (see ui/TitleText). Typing them back still works.
-    setTitleDraft(stripTitleMarks(chat.title));
-    setEditingTitle(true);
-  };
-  const commitRename = () => {
-    const next = titleDraft.trim();
-    setEditingTitle(false);
-    // No-op on empty / unchanged — don't churn the title or emit a needless turn.
-    if (!next || next === chat.title || next === stripTitleMarks(chat.title)) return;
-    actions.setTitle(chat.id, next);
-    // Optimistic: reflect the rename immediately; the server's chat-update reconciles.
-    useChats.getState().upsertChat({ ...chat, title: next });
-  };
-
-  const runDelete = async () => {
-    if (deleting) return;
-    setDeleting(true);
-    setDeleteError(null);
-    try {
-      await deleteChat(chat.id);
-      // Purge local state + move focus off the now-gone chat (deletion is REST-only,
-      // so there's no bus event to drive these client stores).
-      useAttention.getState().clearChat(chat.id);
-      useChats.getState().removeChat(chat.id);
-      setConfirmDelete(false);
-    } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDeleting(false);
-    }
-  };
 
   const meta = statusMeta(chat.status, prSettled);
   const running = chat.status === "running";
@@ -222,12 +183,11 @@ export function ChatView({ chat }: { chat: Chat }) {
   useEffect(() => {
     atBottomRef.current = true;
     setAtBottom(true);
-    setEditingTitle(false);
+    rename.cancel();
     setConfirmDelete(false);
-    setDeleteError(null);
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [chat.id]);
+  }, [chat.id, rename.cancel]);
 
   // New content: only auto-follow if the reader is already pinned to the bottom.
   useEffect(() => {
@@ -360,36 +320,23 @@ export function ChatView({ chat }: { chat: Chat }) {
           <StatusDot tone={meta.tone} pulse={meta.pulse} size={8} />
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              {editingTitle ? (
+              {rename.editing ? (
                 <input
-                  autoFocus
-                  value={titleDraft}
-                  onChange={(e) => setTitleDraft(e.target.value)}
-                  onBlur={commitRename}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      commitRename();
-                    } else if (e.key === "Escape") {
-                      e.preventDefault();
-                      setEditingTitle(false);
-                    }
-                  }}
-                  onFocus={(e) => e.currentTarget.select()}
+                  {...rename.inputProps}
                   aria-label="Rename chat"
-                  className="w-[min(60vw,420px)] rounded-sm border border-accent-line bg-inset px-1.5 py-0.5 text-[13.5px] font-semibold tracking-tight text-primary outline-none"
+                  className="w-[min(60vw,420px)] rounded-sm border border-accent-line bg-inset px-1.5 py-0.5 text-lg font-semibold tracking-tight text-primary outline-none"
                 />
               ) : (
                 <h1
-                  onDoubleClick={startRename}
+                  onDoubleClick={rename.start}
                   title="Double-click to rename"
-                  className="truncate text-[13.5px] font-semibold tracking-tight text-primary"
+                  className="truncate text-lg font-semibold tracking-tight text-primary"
                 >
                   <TitleText title={chat.title} />
                 </h1>
               )}
             </div>
-            <div className="flex items-center gap-1.5 text-[11px] text-muted">
+            <div className="flex items-center gap-1.5 text-xs text-muted">
               <span className={cn(running && "text-accent-hi")}>{meta.label}</span>
               {activity?.label && (
                 <>
@@ -400,10 +347,15 @@ export function ChatView({ chat }: { chat: Chat }) {
             </div>
           </div>
 
+          {/* No Stop here. It used to render alongside the composer's Stop, so
+              a running turn showed two identical interrupts 600px apart. The
+              composer keeps it: mid-turn that's where the eye already is, and
+              it's beside Send where the turn was started. The header says what
+              the turn IS doing; the composer is where you act on it. */}
           <div className="ml-auto flex items-center gap-1.5">
             {primaryBranch && (
               <Chip
-                tone={primaryMerged ? "accent" : "neutral"}
+                tone={primaryMerged ? "success" : "info"}
                 icon={primaryMerged ? <GitMerge /> : <GitBranch />}
                 mono
               >
@@ -418,7 +370,7 @@ export function ChatView({ chat }: { chat: Chat }) {
               </span>
             )}
             {pr && (
-              <Chip tone="accent" icon={<GitPullRequest />}>
+              <Chip tone="info" icon={<GitPullRequest />}>
                 #{pr.number}
               </Chip>
             )}
@@ -426,11 +378,6 @@ export function ChatView({ chat }: { chat: Chat }) {
               <Chip tone="muted" icon={<Hash />} mono className="hidden lg:inline-flex">
                 {chat.sessionId}
               </Chip>
-            )}
-            {running && (
-              <IconButton tip="Interrupt turn" onClick={() => actions.interrupt(chat.id)}>
-                <Square />
-              </IconButton>
             )}
             <Popover
               align="end"
@@ -447,7 +394,7 @@ export function ChatView({ chat }: { chat: Chat }) {
                   <MenuItem
                     icon={<Pencil />}
                     onClick={() => {
-                      startRename();
+                      rename.start();
                       close();
                     }}
                   >
@@ -468,7 +415,7 @@ export function ChatView({ chat }: { chat: Chat }) {
                       model got the same context either way. Toggling here
                       overrides the project/app default for THIS chat. */}
                   <MenuItem
-                    icon={injected.show ? <Eye className="text-accent" /> : <EyeOff />}
+                    icon={injected.show ? <Eye className="text-accent-2" /> : <EyeOff />}
                     hint={injected.source === "chat" ? "this chat" : injectedContextSourceLabel(injected.source)}
                     onClick={() => {
                       toggleInjected();
@@ -482,7 +429,6 @@ export function ChatView({ chat }: { chat: Chat }) {
                     icon={<Trash2 />}
                     className="!text-danger hover:!text-danger hover:bg-danger/10 [&_span]:text-danger"
                     onClick={() => {
-                      setDeleteError(null);
                       setConfirmDelete(true);
                       close();
                     }}
@@ -518,7 +464,7 @@ export function ChatView({ chat }: { chat: Chat }) {
                     <button
                       onClick={loadOlderNow}
                       disabled={loadingOlder}
-                      className="inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-[11px] text-faint transition-colors hover:border-line-strong hover:text-secondary disabled:cursor-default disabled:hover:border-line disabled:hover:text-faint"
+                      className="inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-xs text-faint transition-colors hover:border-line-strong hover:text-secondary disabled:cursor-default disabled:hover:border-line disabled:hover:text-faint"
                     >
                       {loadingOlder ? (
                         <>
@@ -550,7 +496,7 @@ export function ChatView({ chat }: { chat: Chat }) {
             onClick={() => scrollToBottom("smooth")}
             className={cn(
               "absolute bottom-3 left-1/2 inline-flex -translate-x-1/2 items-center gap-1.5",
-              "rounded-full border border-line-strong bg-overlay px-2.5 py-1 text-[11px] font-medium text-secondary",
+              "rounded-full border border-line-strong bg-overlay px-2.5 py-1 text-xs font-medium text-secondary",
               "shadow-[var(--shadow-pop)] transition-colors hover:text-primary cm-anim-rise [&_svg]:size-3.5",
             )}
           >
@@ -563,45 +509,12 @@ export function ChatView({ chat }: { chat: Chat }) {
       {/* composer */}
       <Composer chat={chat} agents={agents} modes={modes} />
 
-      <Modal
+      <DeleteChatDialog
+        chatId={chat.id}
+        title={chat.title}
         open={confirmDelete}
-        onClose={() => {
-          if (deleting) return;
-          setConfirmDelete(false);
-          setDeleteError(null);
-        }}
-        width={420}
-        icon={<Trash2 />}
-        title="Delete chat"
-        description={chat.title}
-        footer={
-          <>
-            {deleteError && (
-              <div className="mr-auto min-w-0 flex-1">
-                <InlineError message={deleteError} />
-              </div>
-            )}
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setConfirmDelete(false);
-                setDeleteError(null);
-              }}
-              disabled={deleting}
-            >
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={runDelete} disabled={deleting}>
-              {deleting ? "Deleting…" : "Delete chat"}
-            </Button>
-          </>
-        }
-      >
-        <p className="text-[12.5px] leading-relaxed text-secondary">
-          This permanently removes the transcript and stops any running turn.
-          This can&rsquo;t be undone.
-        </p>
-      </Modal>
+        onClose={() => setConfirmDelete(false)}
+      />
     </div>
   );
 }

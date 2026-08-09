@@ -3,22 +3,30 @@ import type { CSSProperties } from "react";
 /**
  * A Zed-flavoured Prism theme, hand-tuned to the app tokens. Exported as the
  * style-object shape react-syntax-highlighter expects (token class → CSS).
+ *
+ * Every colour is a `var()` rather than a hex. Two reasons, and the second is
+ * the important one:
+ *   - this object is built ONCE at module scope, so a hex here would survive a
+ *     theme switch and leave dark-mode syntax colours on a white code block;
+ *   - the same `--p-syn-*` tokens drive Monaco (`components/monaco/setup.ts`),
+ *     which is the only way a file keeps its colours when you open it in the
+ *     other pane.
  */
 type PrismStyle = Record<string, CSSProperties>;
 
 const c = {
   bg: "transparent",
-  text: "#c9d1d9",
-  comment: "#5c6470",
-  punct: "#8a929c",
-  keyword: "#7c8aff",
-  fn: "#79b8ff",
-  string: "#8ddb9b",
-  number: "#e5b567",
-  const: "#d7a0ff",
-  tag: "#f0616d",
-  prop: "#9aa5ff",
-  operator: "#8a929c",
+  text: "var(--p-syn-text)",
+  comment: "var(--p-syn-comment)",
+  punct: "var(--p-syn-punct)",
+  keyword: "var(--p-syn-keyword)",
+  fn: "var(--p-syn-fn)",
+  string: "var(--p-syn-string)",
+  number: "var(--p-syn-number)",
+  const: "var(--p-syn-const)",
+  tag: "var(--p-syn-tag)",
+  prop: "var(--p-syn-prop)",
+  operator: "var(--p-syn-operator)",
 };
 
 export const codeTheme: PrismStyle = {

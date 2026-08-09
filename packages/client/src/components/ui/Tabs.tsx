@@ -80,7 +80,7 @@ export function Tabs({ tabs, value, onChange, className, iconOnly, labelSlot }: 
             onFocus={() => setHovered(t.id)}
             onBlur={() => setHovered(null)}
             className={cn(
-              "group relative inline-flex h-9 items-center rounded-none text-[12px] font-medium " +
+              "group relative inline-flex h-9 items-center rounded-none text-sm font-medium " +
                 "transition-colors duration-150 ease-[var(--ease-out)]",
               collapsed ? "w-9 justify-center" : "gap-1.5 px-2.5",
               active ? "text-primary" : "text-muted hover:text-secondary",
@@ -137,7 +137,7 @@ export function Tabs({ tabs, value, onChange, className, iconOnly, labelSlot }: 
           accessible name, so announcing it again would just double up. */}
       <span
         aria-hidden
-        className="min-w-0 truncate pl-1.5 text-[12px] font-medium text-secondary transition-colors duration-150"
+        className="min-w-0 truncate pl-1.5 text-sm font-medium text-secondary transition-colors duration-150"
       >
         {named?.label}
       </span>

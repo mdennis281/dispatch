@@ -189,16 +189,16 @@ function checkVisual(check: CheckRun): { Icon: LucideIcon | null; spin: boolean;
 function CheckLine({ check }: { check: CheckRun }) {
   const { Icon, spin, color } = checkVisual(check);
   const inner = (
-    <div className="flex items-center gap-2 py-1 text-[11.5px]">
+    <div className="flex items-center gap-2 py-1 text-xs">
       {spin ? <Spinner size={12} /> : Icon && <Icon className={cn("size-3.5", color)} />}
       <span className="min-w-0 flex-1 truncate text-secondary">{check.name}</span>
-      <span className={cn("shrink-0 text-[10.5px]", color)}>
+      <span className={cn("shrink-0 text-2xs", color)}>
         {check.status !== "completed" ? "running" : (check.conclusion ?? "done")}
       </span>
     </div>
   );
   return check.url ? (
-    <a href={check.url} target="_blank" rel="noopener noreferrer" className="block hover:bg-white/[0.02]">
+    <a href={check.url} target="_blank" rel="noopener noreferrer" className="block hover:bg-hover">
       {inner}
     </a>
   ) : (
@@ -233,7 +233,7 @@ function ChecksSection({ checks }: { checks: CheckRun[] }) {
       <div className="flex items-center gap-2 border-t border-line-soft px-3 py-2">
         <CircleDot className="size-3.5 shrink-0 text-faint" />
         <SectionLabel className="px-0">Checks</SectionLabel>
-        <span className="text-[11px] text-faint">none reported yet</span>
+        <span className="text-xs text-faint">none reported yet</span>
       </div>
     );
   }
@@ -247,13 +247,13 @@ function ChecksSection({ checks }: { checks: CheckRun[] }) {
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-white/[0.02]"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-hover"
       >
         <ChevronRight
           className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")}
         />
         <SectionLabel className="px-0">Checks</SectionLabel>
-        <span className="flex items-center gap-2 text-[11px]">
+        <span className="flex items-center gap-2 text-xs">
           <CountPip n={summary.passed} Icon={Check} color="text-success" />
           <CountPip n={summary.pending} Icon={Clock} color="text-warn" />
           <CountPip n={summary.failed} Icon={X} color="text-danger" />
@@ -278,10 +278,10 @@ function ChecksSection({ checks }: { checks: CheckRun[] }) {
 
 function ThreadRow({ thread, onResolve, busy }: { thread: ReviewThread; onResolve: () => void; busy: boolean }) {
   return (
-    <div className="flex items-start gap-2 py-1.5 text-[11px]">
+    <div className="flex items-start gap-2 py-1.5 text-xs">
       <MessageSquare className="mt-0.5 size-3.5 shrink-0 text-warn" />
       <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-1.5 text-[10px] text-faint">
+        <span className="flex items-center gap-1.5 text-2xs text-faint">
           {thread.author && <span className="text-secondary">{thread.author}</span>}
           {thread.path && (
             <span className="cm-mono truncate">
@@ -293,7 +293,7 @@ function ThreadRow({ thread, onResolve, busy }: { thread: ReviewThread; onResolv
         </span>
         {thread.body && <span className="mt-0.5 block leading-snug text-secondary line-clamp-3">{thread.body}</span>}
       </span>
-      <Button size="xs" variant="ghost" disabled={busy} onClick={onResolve}>
+      <Button size="sm" variant="ghost" disabled={busy} onClick={onResolve}>
         {busy ? <Spinner size={11} /> : "Resolve"}
       </Button>
     </div>
@@ -307,7 +307,7 @@ function LabelsRow({ pr, chatId }: { pr: PRInfo; chatId: string }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5 border-t border-line-soft px-3 py-2">
       <Tag className="size-3 text-faint" />
-      {labels.length === 0 && <span className="text-[10.5px] text-faint">no labels</span>}
+      {labels.length === 0 && <span className="text-2xs text-faint">no labels</span>}
       {labels.map((l) => (
         <Chip key={l} tone={HOLD_LABELS.has(l) ? "warn" : "neutral"} className="group/label">
           {l}
@@ -327,7 +327,7 @@ function LabelsRow({ pr, chatId }: { pr: PRInfo; chatId: string }) {
         trigger={({ toggle }) => (
           <button
             onClick={toggle}
-            className="inline-flex items-center gap-0.5 rounded-[5px] border border-dashed border-line px-1.5 py-px text-[10.5px] text-faint hover:border-line-strong hover:text-secondary [&_svg]:size-3"
+            className="inline-flex items-center gap-0.5 rounded-[5px] border border-dashed border-line px-1.5 py-px text-2xs text-faint hover:border-line-strong hover:text-secondary [&_svg]:size-3"
           >
             <Plus />
             label
@@ -357,19 +357,19 @@ function AddLabelForm({ chatId, prNumber, onDone }: { chatId: string; prNumber: 
         onKeyDown={(e) => e.key === "Enter" && submit()}
         placeholder="hold"
         spellCheck={false}
-        className="h-7 w-full rounded-md border border-line bg-inset px-2 text-[11.5px] text-primary outline-none placeholder:text-faint focus:border-line-strong"
+        className="h-7 w-full rounded-md border border-line bg-inset px-2 text-xs text-primary outline-none placeholder:text-faint focus:border-line-strong"
       />
       <div className="flex items-center gap-1">
         {[...HOLD_LABELS].slice(0, 3).map((l) => (
           <button
             key={l}
             onClick={() => setLabel(l)}
-            className="rounded-[5px] border border-line px-1.5 py-px text-[10px] text-secondary hover:border-line-strong"
+            className="rounded-[5px] border border-line px-1.5 py-px text-2xs text-secondary hover:border-line-strong"
           >
             {l}
           </button>
         ))}
-        <Button size="xs" variant="primary" className="ml-auto" disabled={!label.trim()} onClick={submit}>
+        <Button size="sm" variant="primary" className="ml-auto" disabled={!label.trim()} onClick={submit}>
           Add
         </Button>
       </div>
@@ -414,13 +414,13 @@ function PrCard({
       >
         <Icon className={cn("size-3.5 shrink-0", pr.state === "merged" ? "text-accent-hi" : "text-success")} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[11.5px] text-secondary">{pr.title}</span>
-          <span className="cm-mono !text-[10px] text-faint">
+          <span className="block truncate text-xs text-secondary">{pr.title}</span>
+          <span className="cm-mono !text-2xs text-faint">
             #{pr.number} · {pr.updatedAt ? relTime(Date.parse(pr.updatedAt)) : ""}
           </span>
         </span>
-        <span className="shrink-0 tabular-nums text-[10.5px] text-success">+{pr.additions ?? 0}</span>
-        <span className="shrink-0 tabular-nums text-[10.5px] text-danger">−{pr.deletions ?? 0}</span>
+        <span className="shrink-0 tabular-nums text-2xs text-success">+{pr.additions ?? 0}</span>
+        <span className="shrink-0 tabular-nums text-2xs text-danger">−{pr.deletions ?? 0}</span>
       </a>
     );
   }
@@ -444,7 +444,7 @@ function PrCard({
             href={pr.url && pr.url !== "#" ? pr.url : undefined}
             target="_blank"
             rel="noopener noreferrer"
-            className="min-w-0 flex-1 text-[12.5px] font-medium leading-snug text-primary hover:text-accent-hi"
+            className="min-w-0 flex-1 text-base font-medium leading-snug text-primary hover:text-accent-hi"
           >
             {pr.title}
           </a>
@@ -454,7 +454,7 @@ function PrCard({
           <Chip tone="muted" mono>
             #{pr.number}
           </Chip>
-          <span className="cm-mono min-w-0 truncate !text-[10px] text-faint">
+          <span className="cm-mono min-w-0 truncate !text-2xs text-faint">
             {pr.branch} → {pr.baseBranch}
           </span>
         </div>
@@ -467,8 +467,8 @@ function PrCard({
           )}
           {merge && <Chip tone={merge.tone}>{merge.label}</Chip>}
           <span className="ml-auto flex shrink-0 items-center gap-1.5">
-            <span className="tabular-nums text-[10.5px] text-success">+{pr.additions ?? 0}</span>
-            <span className="tabular-nums text-[10.5px] text-danger">−{pr.deletions ?? 0}</span>
+            <span className="tabular-nums text-2xs text-success">+{pr.additions ?? 0}</span>
+            <span className="tabular-nums text-2xs text-danger">−{pr.deletions ?? 0}</span>
           </span>
         </div>
       </div>
@@ -481,7 +481,7 @@ function PrCard({
       {/* discussion: comment count + unresolved review threads */}
       {(commentCount > 0 || threads.length > 0) && (
         <div className="border-t border-line-soft px-3 py-2">
-          <div className="flex items-center gap-1.5 text-[11px]">
+          <div className="flex items-center gap-1.5 text-xs">
             <MessageSquare className="size-3.5 shrink-0 text-muted" />
             {commentCount > 0 && (
               <span className="text-secondary">
@@ -523,7 +523,7 @@ function PrCard({
       {/* actions */}
       <div className="flex items-center gap-1.5 border-t border-line-soft bg-inset/50 px-3 py-2">
         <Button
-          size="xs"
+          size="sm"
           variant="primary"
           leftIcon={busy === "merge" ? <Spinner size={12} /> : <GitMerge />}
           disabled={!isOpen || pr.isDraft || notMergeable}
@@ -534,7 +534,7 @@ function PrCard({
         </Button>
         {held ? (
           <Button
-            size="xs"
+            size="sm"
             variant="default"
             leftIcon={busy === "unhold" ? <Spinner size={12} /> : <Play />}
             disabled={!isOpen}
@@ -544,7 +544,7 @@ function PrCard({
           </Button>
         ) : (
           <Button
-            size="xs"
+            size="sm"
             variant="default"
             leftIcon={busy === "hold" ? <Spinner size={12} /> : <Pause />}
             disabled={!isOpen}
@@ -554,7 +554,7 @@ function PrCard({
           </Button>
         )}
         <Button
-          size="xs"
+          size="sm"
           variant="ghost"
           leftIcon={busy === "rerun" ? <Spinner size={12} /> : <RotateCw />}
           disabled={!hasFailed}
@@ -628,8 +628,8 @@ export function PRsPanel({ chat }: { chat: Chat }) {
       ) : (
         <div className="rounded-md border border-dashed border-line px-3 py-6 text-center">
           <GitPullRequest className="mx-auto mb-1.5 size-5 text-faint" />
-          <p className="text-[12px] text-muted">No open PR for this chat.</p>
-          <p className="mt-0.5 text-[11px] text-faint">
+          <p className="text-sm text-muted">No open PR for this chat.</p>
+          <p className="mt-0.5 text-xs text-faint">
             {hasWorktree ? "Ship the worktree to open one." : "Create a worktree first, then ship it."}
           </p>
           <Button

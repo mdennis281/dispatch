@@ -53,7 +53,7 @@ export const AssistantRow = memo(function AssistantRow({
       meta={
         <>
           {row.model && <Chip tone="muted" mono>{row.model}</Chip>}
-          {row.subagentType && <Chip tone="accent">{row.subagentType}</Chip>}
+          {row.subagentType && <Chip tone="agent">{row.subagentType}</Chip>}
         </>
       }
       gutter={
@@ -66,14 +66,14 @@ export const AssistantRow = memo(function AssistantRow({
         <div className="mb-2">
           <button
             onClick={() => setShowThinking((v) => !v)}
-            className="inline-flex items-center gap-1.5 rounded-[5px] px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-white/[0.05] hover:text-secondary [&_svg]:size-3"
+            className="inline-flex items-center gap-1.5 rounded-[5px] px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-active hover:text-secondary [&_svg]:size-3"
           >
             <Brain />
             <span>Thought for a moment</span>
             <ChevronRight className={cn("transition-transform", showThinking && "rotate-90")} />
           </button>
           {showThinking && (
-            <div className="mt-1 border-l-2 border-line pl-3 text-[12px] italic leading-[1.55] text-muted cm-anim-rise">
+            <div className="mt-1 border-l-2 border-line pl-3 text-sm italic leading-[1.55] text-muted cm-anim-rise">
               {row.thinking}
             </div>
           )}

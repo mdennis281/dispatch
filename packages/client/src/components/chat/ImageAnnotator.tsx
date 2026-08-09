@@ -27,16 +27,15 @@ import { cn } from "../../lib/cn.js";
 import { useDialogLayer } from "../../lib/layers.js";
 import { uploadChatImage } from "../../lib/actions.js";
 
-/* Linear/Zed design tokens (mirrored from index.css) — the imperative engines
-   render their own chrome, so we feed them the same hexes to stay on-palette. */
-const INSET = "#0a0c0f";
-const PANEL = "#111418";
-const PANEL_2 = "#14181d";
-const ELEVATED = "#171b21";
-const PRIMARY = "#e6e8eb";
-const ACCENT = "#7c8aff";
-const ACCENT_HI = "#9aa5ff";
-const DANGER = "#ec5f6a";
+/* markerjs2 and cropro build their own chrome imperatively and only accept
+   literal colour strings, so the palette has to be RESOLVED for them rather
+   than referenced. Read at open time, not at module load: these values used to
+   be a copy of index.css's hexes, which silently rotted whenever a token moved
+   and would now also be stuck on whichever theme happened to be active when the
+   chunk loaded. */
+function token(name: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
 
 type Mode = "annotate" | "crop";
 
@@ -177,15 +176,15 @@ export default function ImageAnnotator({
         ma.renderAtNaturalSize = true;
         ma.renderImageType = "image/png";
         const s = ma.uiStyleSettings;
-        s.canvasBackgroundColor = INSET;
-        s.toolbarBackgroundColor = PANEL;
-        s.toolbarBackgroundHoverColor = ELEVATED;
-        s.toolbarColor = PRIMARY;
-        s.toolboxBackgroundColor = PANEL_2;
-        s.toolboxColor = PRIMARY;
-        s.toolboxAccentColor = ACCENT;
-        s.selectButtonColor = ACCENT_HI;
-        s.deleteButtonColor = DANGER;
+        s.canvasBackgroundColor = token("--p-inset");
+        s.toolbarBackgroundColor = token("--p-panel");
+        s.toolbarBackgroundHoverColor = token("--p-elevated");
+        s.toolbarColor = token("--p-text-primary");
+        s.toolboxBackgroundColor = token("--p-panel-2");
+        s.toolboxColor = token("--p-text-primary");
+        s.toolboxAccentColor = token("--p-accent");
+        s.selectButtonColor = token("--p-accent-hi");
+        s.deleteButtonColor = token("--p-danger");
         s.undoButtonVisible = true;
         s.redoButtonVisible = true;
         s.clearButtonVisible = true;
@@ -205,13 +204,13 @@ export default function ImageAnnotator({
         ca.renderAtNaturalSize = true;
         ca.renderImageType = "image/png";
         const cs = ca.styles.settings;
-        cs.canvasBackgroundColor = INSET;
-        cs.toolbarBackgroundColor = PANEL;
-        cs.toolbarBackgroundHoverColor = ELEVATED;
-        cs.toolbarColor = PRIMARY;
-        cs.cropFrameColor = ACCENT;
-        cs.gripColor = ACCENT_HI;
-        cs.gripFillColor = ACCENT;
+        cs.canvasBackgroundColor = token("--p-inset");
+        cs.toolbarBackgroundColor = token("--p-panel");
+        cs.toolbarBackgroundHoverColor = token("--p-elevated");
+        cs.toolbarColor = token("--p-text-primary");
+        cs.cropFrameColor = token("--p-accent");
+        cs.gripColor = token("--p-accent-hi");
+        cs.gripFillColor = token("--p-accent");
         // CROPRO's render() is private — its own OK button fires this event.
         ca.addRenderEventListener((dataUrl: string) => {
           if (dataUrl) setWorkingSrc(dataUrl);
@@ -279,7 +278,7 @@ export default function ImageAnnotator({
   return createPortal(
     <div style={{ zIndex: z }} className="fixed inset-0 flex items-center justify-center p-4 sm:p-6">
       <div
-        className="fixed inset-0 bg-black/60 backdrop-blur-[2px]"
+        className="fixed inset-0 bg-scrim backdrop-blur-[2px]"
         onClick={() => !busy && onCancel()}
         aria-hidden
       />
@@ -298,10 +297,10 @@ export default function ImageAnnotator({
             {mode === "crop" ? <CropIcon /> : <Pencil />}
           </span>
           <div className="min-w-0 flex-1">
-            <h2 className="truncate text-[13px] font-semibold text-primary">
+            <h2 className="truncate text-base font-semibold text-primary">
               {mode === "crop" ? "Crop & rotate" : "Edit image"}
             </h2>
-            <p className="mt-px truncate text-[11px] text-muted">
+            <p className="mt-px truncate text-xs text-muted">
               {mode === "crop"
                 ? "Drag to crop, rotate/flip, then confirm with ✓"
                 : "Pen is ready — just drag. Other tools above, colour & width below."}
@@ -328,7 +327,7 @@ export default function ImageAnnotator({
             </div>
           ) : (
             <div className="flex items-center gap-1.5">
-              <span className="hidden items-center gap-1 text-[11px] text-faint sm:flex">
+              <span className="hidden items-center gap-1 text-xs text-faint sm:flex">
                 <RotateCcw className="size-3.5" /> confirm with ✓
               </span>
               <IconButton tip="Close editor" onClick={onCancel}>
@@ -339,7 +338,7 @@ export default function ImageAnnotator({
         </header>
 
         {error && (
-          <div className="flex items-center gap-1.5 bg-danger-ghost px-4 py-2 text-[11.5px] text-danger [&_svg]:size-3.5" role="alert">
+          <div className="flex items-center gap-1.5 bg-danger-ghost px-4 py-2 text-xs text-danger [&_svg]:size-3.5" role="alert">
             <ImageOff />
             {error}
           </div>

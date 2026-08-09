@@ -129,7 +129,7 @@ export function Tooltip({ label, side = "top", children, className }: TooltipPro
             role="tooltip"
             className={cn(
               "pointer-events-none fixed whitespace-nowrap rounded-sm border border-line-strong " +
-                "bg-overlay px-2 py-1 text-[11px] font-medium text-primary shadow-[var(--shadow-pop)] cm-anim-rise",
+                "bg-overlay px-2 py-1 text-xs font-medium text-primary shadow-[var(--shadow-pop)] cm-anim-rise",
               className,
             )}
             style={

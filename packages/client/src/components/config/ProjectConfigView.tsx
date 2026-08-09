@@ -20,8 +20,8 @@
  *     the format the loader actually accepts. Manifest-backed kinds (MCP
  *     servers, sub-apps) point at `project.yaml`, because that's where they live.
  *
- * Mounted once in App; opens on the `cm:open-project-config` window event
- * (command palette / top-bar affordance). Pure REST via the `useConfig` store,
+ * Mounted once in App; open state lives in the view store's `overlay` field
+ * (see stores/view.ts). Pure REST via the `useConfig` store,
  * fetched on open + on project change; live-updated by the `project-config-update`
  * WS event (a watcher edit, a scaffold, an import, or an authoring chat writing
  * a file all refresh it in place).
@@ -57,7 +57,7 @@ import { useProjectMemories } from "../../stores/memory.js";
 import { useNotices } from "../../stores/notices.js";
 import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
-import { OPEN_PROJECT_CONFIG_EVENT } from "./configViewBus.js";
+import { useOverlay } from "../../stores/view.js";
 import { WorkflowProfilePicker } from "./WorkflowProfilePicker.js";
 import { ConfigSectionPane } from "./ConfigSectionPane.js";
 import { sectionItems } from "./configItems.js";
@@ -69,13 +69,13 @@ function ErrorList({ errors }: { errors: ProjectConfigError[] }) {
   if (!errors.length) return null;
   return (
     <div className="rounded-md border border-danger/30 bg-danger-ghost px-3 py-2">
-      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-danger [&_svg]:size-3.5">
+      <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-danger [&_svg]:size-3.5">
         <TriangleAlert />
         {errors.length} load {errors.length === 1 ? "error" : "errors"}
       </div>
       <ul className="space-y-0.5">
         {errors.map((e, i) => (
-          <li key={i} className="text-[11px] leading-snug text-muted">
+          <li key={i} className="text-xs leading-snug text-muted">
             <span className="cm-mono text-danger/90">[{e.scope}]</span>{" "}
             {e.file ? <span className="cm-mono text-faint">{e.file}: </span> : null}
             {e.message}
@@ -112,7 +112,7 @@ function savedWorkflow(project: Project | null): WorkflowConfig {
 /* ------------------------------------------------------------------ overlay */
 
 export function ProjectConfigView() {
-  const [open, setOpen] = useState(false);
+  const { open, close: setClosed } = useOverlay("config");
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null);
   const projectId = project?.id ?? null;
   const { result, loading, error } = useProjectConfig(projectId);
@@ -144,12 +144,6 @@ export function ProjectConfigView() {
     const parts = src.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
     return parts[parts.length - 1] || CONFIG_DIR_NAME;
   }, [result?.sourceDir]);
-
-  useEffect(() => {
-    const onOpen = () => setOpen(true);
-    window.addEventListener(OPEN_PROJECT_CONFIG_EVENT, onOpen);
-    return () => window.removeEventListener(OPEN_PROJECT_CONFIG_EVENT, onOpen);
-  }, []);
 
   // Fetch on open / project change while open (the WS event keeps it fresh after).
   useEffect(() => {
@@ -201,7 +195,7 @@ export function ProjectConfigView() {
       return;
     }
     setDraft(null);
-    setOpen(false);
+    setClosed();
   }, [dirty]);
 
   // Open a config file in the editor. Saving there writes it back and the
@@ -305,11 +299,11 @@ export function ProjectConfigView() {
               <InlineError message={error} />
             </div>
           ) : dirty ? (
-            <span className="mr-auto truncate text-[10.5px] font-medium text-warn">
+            <span className="mr-auto truncate text-2xs font-medium text-warn">
               Unsaved changes
             </span>
           ) : (
-            <span className="mr-auto truncate text-[10.5px] text-faint" title={result?.sourceDir ?? ""}>
+            <span className="mr-auto truncate text-2xs text-faint" title={result?.sourceDir ?? ""}>
               {result?.sourceDir ?? "no .dispatch/ — using .data defaults"}
             </span>
           )}
@@ -372,10 +366,10 @@ export function ProjectConfigView() {
       {!projectId ? (
         <div className="rounded-md border border-dashed border-line px-3 py-10 text-center">
           <FolderGit2 className="mx-auto mb-1.5 size-5 text-faint" />
-          <p className="text-[12px] text-muted">No active project.</p>
+          <p className="text-sm text-muted">No active project.</p>
         </div>
       ) : loading && !result ? (
-        <div className="flex items-center justify-center gap-2 py-16 text-[12px] text-muted">
+        <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted">
           <Spinner size={14} /> Loading config…
         </div>
       ) : (
@@ -383,7 +377,7 @@ export function ProjectConfigView() {
           {confirmClose && (
             <div className="flex items-center gap-2 rounded-md border border-warn/40 bg-warn-ghost px-3 py-2">
               <TriangleAlert className="size-3.5 shrink-0 text-warn" />
-              <span className="min-w-0 flex-1 text-[11.5px] text-secondary">
+              <span className="min-w-0 flex-1 text-xs text-secondary">
                 You have unsaved workflow changes.
               </span>
               <Button variant="ghost" onClick={() => setConfirmClose(false)}>
@@ -393,7 +387,7 @@ export function ProjectConfigView() {
                 variant="ghost"
                 onClick={() => {
                   discard();
-                  setOpen(false);
+                  setClosed();
                 }}
               >
                 Discard &amp; close
@@ -402,7 +396,7 @@ export function ProjectConfigView() {
                 variant="primary"
                 leftIcon={saving ? <Spinner size={12} /> : <Save />}
                 disabled={saving}
-                onClick={() => void saveWorkflow().then(() => setOpen(false))}
+                onClick={() => void saveWorkflow().then(() => setClosed())}
               >
                 Save &amp; close
               </Button>
@@ -413,8 +407,8 @@ export function ProjectConfigView() {
           {!hasDir && !config && (
             <div className="rounded-md border border-dashed border-line px-3 py-4 text-center">
               <FileCog className="mx-auto mb-1.5 size-5 text-faint" />
-              <p className="text-[12px] text-secondary">No .dispatch/ in this repo.</p>
-              <p className="mx-auto mt-0.5 max-w-md text-[11px] text-faint">
+              <p className="text-sm text-secondary">No .dispatch/ in this repo.</p>
+              <p className="mx-auto mt-0.5 max-w-md text-xs text-faint">
                 The workflow profile below still applies. Scaffold a committable
                 <span className="cm-mono"> .dispatch/</span> to add instructions, agents, skills
                 and the rest — and to share them with the repo.
@@ -454,7 +448,7 @@ export function ProjectConfigView() {
                     )}
                   >
                     <Icon className={cn("shrink-0", selected ? "text-accent" : "text-muted")} />
-                    <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">
+                    <span className="min-w-0 flex-1 truncate text-xs font-medium">
                       {s.label}
                     </span>
                     {count !== null && (
@@ -482,7 +476,7 @@ export function ProjectConfigView() {
                 // The launcher already focused the spawned chat; getting out of
                 // the way is all that's left. A dirty workflow draft would be
                 // lost, so it holds the dialog open with its usual confirmation.
-                onLaunched={() => (dirty ? setConfirmClose(true) : setOpen(false))}
+                onLaunched={() => (dirty ? setConfirmClose(true) : setClosed())}
               >
                 {activeSection.id === "workflow" && project && (
                   <WorkflowProfilePicker

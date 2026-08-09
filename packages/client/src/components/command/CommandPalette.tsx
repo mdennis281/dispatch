@@ -37,11 +37,8 @@ import {
 import { actions } from "../../lib/actions.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
-import { useView } from "../../stores/view.js";
+import { useView, openOverlay } from "../../stores/view.js";
 import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
-import { requestOpenProjectPrs } from "../prs/projectPrsBus.js";
-import { requestOpenMcpCatalog } from "../mcp/mcpCatalogBus.js";
-import { requestOpenProjectConfig } from "../config/configViewBus.js";
 import { Kbd } from "../ui/Kbd.js";
 import { cn } from "../../lib/cn.js";
 import { LAYER } from "../../lib/layers.js";
@@ -106,11 +103,9 @@ function newChatAndFocus(projectId: string): void {
 export function CommandPalette({
   open,
   onOpenChange,
-  onOpenSettings,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onOpenSettings: () => void;
 }) {
   const projects = useProjects((s) => s.projects);
   const activeProjectId = useProjects((s) => s.activeProjectId);
@@ -170,7 +165,7 @@ export function CommandPalette({
         group: "Navigate",
         icon: <GitPullRequest />,
         keywords: "pr pull request github review merge hold board project all open",
-        run: () => requestOpenProjectPrs(),
+        run: () => openOverlay("prs"),
       });
       // MCP catalog — every tool endpoint (custom manager + external) for the project.
       list.push({
@@ -180,7 +175,7 @@ export function CommandPalette({
         group: "Navigate",
         icon: <Blocks />,
         keywords: "mcp tool endpoint schema server manager show visualize catalog",
-        run: () => requestOpenMcpCatalog(),
+        run: () => openOverlay("mcp"),
       });
       // Project config — the loaded `.dispatch/` (instructions/subApps/
       // MCP/agents/modes/memory) + reload / export / import.
@@ -191,7 +186,7 @@ export function CommandPalette({
         group: "Navigate",
         icon: <FileCog />,
         keywords: "config Dispatch manifest instructions subapps mcp agents modes memory export import cm scaffold reload",
-        run: () => requestOpenProjectConfig(),
+        run: () => openOverlay("config"),
       });
     }
 
@@ -252,7 +247,7 @@ export function CommandPalette({
       group: "Navigate",
       icon: <SlidersHorizontal />,
       keywords: "preferences theme webhook config gear notifications",
-      run: onOpenSettings,
+      run: () => openOverlay("settings"),
     });
 
     // "How do I quit this thing" is a top-level question, so it gets a top-level
@@ -265,7 +260,7 @@ export function CommandPalette({
       group: "Actions",
       icon: <Power />,
       keywords: "quit exit shutdown kill halt close server stop app",
-      run: onOpenSettings,
+      run: () => openOverlay("settings"),
     });
 
     // Not gated on an active project — this is how the FIRST one gets made, and
@@ -312,7 +307,7 @@ export function CommandPalette({
     }
 
     return list;
-  }, [projects, activeProjectId, chatsById, chatOrder, activeChatId, onOpenSettings]);
+  }, [projects, activeProjectId, chatsById, chatOrder, activeChatId]);
 
   const results = useMemo(() => {
     const scored: { cmd: Command; score: number; i: number }[] = [];
@@ -376,7 +371,7 @@ export function CommandPalette({
       style={{ zIndex: LAYER.palette }}
       className="fixed inset-0 flex items-start justify-center p-6 sm:pt-[12vh]"
     >
-      <div className="fixed inset-0 bg-black/55 backdrop-blur-[2px]" onClick={close} aria-hidden />
+      <div className="fixed inset-0 bg-scrim backdrop-blur-[2px]" onClick={close} aria-hidden />
       <div
         role="dialog"
         aria-modal="true"
@@ -397,7 +392,7 @@ export function CommandPalette({
               setActive(0);
             }}
             placeholder="Search or run a command…"
-            className="min-w-0 flex-1 bg-transparent text-[13.5px] text-primary placeholder:text-faint outline-none"
+            className="min-w-0 flex-1 bg-transparent text-lg text-primary placeholder:text-faint outline-none"
             spellCheck={false}
             autoComplete="off"
           />
@@ -406,7 +401,7 @@ export function CommandPalette({
 
         <div ref={listRef} className="cm-scroll max-h-[52vh] overflow-y-auto p-1.5">
           {results.length === 0 ? (
-            <div className="px-3 py-10 text-center text-[12.5px] text-muted">
+            <div className="px-3 py-10 text-center text-base text-muted">
               No commands match “{query}”.
             </div>
           ) : (
@@ -418,7 +413,7 @@ export function CommandPalette({
                 onMouseMove={() => setActive(idx)}
                 className={cn(
                   "flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition-colors",
-                  idx === active ? "bg-white/[0.07]" : "hover:bg-white/[0.04]",
+                  idx === active ? "bg-selected" : "hover:bg-hover",
                 )}
               >
                 <span
@@ -432,14 +427,14 @@ export function CommandPalette({
                   {cmd.icon}
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[12.5px] font-medium text-primary">
+                  <span className="block truncate text-base font-medium text-primary">
                     {cmd.title}
                   </span>
                   {cmd.subtitle && (
-                    <span className="block truncate text-[11px] text-muted">{cmd.subtitle}</span>
+                    <span className="block truncate text-xs text-muted">{cmd.subtitle}</span>
                   )}
                 </span>
-                <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-faint">
+                <span className="shrink-0 text-2xs font-medium uppercase tracking-wide text-faint">
                   {cmd.group}
                 </span>
               </button>
@@ -447,7 +442,7 @@ export function CommandPalette({
           )}
         </div>
 
-        <div className="flex items-center gap-3 px-3.5 py-2 cm-hairline-t text-[10.5px] text-faint">
+        <div className="flex items-center gap-3 px-3.5 py-2 cm-hairline-t text-2xs text-faint">
           <span className="flex items-center gap-1">
             <Kbd>
               <ArrowUp className="size-2.5" />

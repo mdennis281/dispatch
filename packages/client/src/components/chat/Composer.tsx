@@ -167,7 +167,7 @@ function DropOverlay({ intent, armed }: { intent: Exclude<DropIntent, null>; arm
     >
       <div
         className={cn(
-          "flex items-center gap-2 text-[12.5px] font-medium transition-colors",
+          "flex items-center gap-2 text-base font-medium transition-colors",
           armed ? "text-accent-hi" : "text-secondary",
           "[&_svg]:size-4",
         )}
@@ -175,7 +175,7 @@ function DropOverlay({ intent, armed }: { intent: Exclude<DropIntent, null>; arm
         {copy.icon}
         {copy.title}
       </div>
-      <div className="px-4 text-center text-[11px] text-faint">{copy.hint}</div>
+      <div className="px-4 text-center text-xs text-faint">{copy.hint}</div>
     </div>
   );
 }
@@ -720,7 +720,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           <Chip tone="accent" icon={<Layers />}>
             {queued} queued
           </Chip>
-          <span className="text-[11px] text-muted">
+          <span className="text-xs text-muted">
             steering {queued === 1 ? "message" : "messages"} will inject after the current turn
           </span>
         </div>
@@ -773,15 +773,15 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                     alt={img.alt ?? "attachment"}
                     className="size-full object-cover"
                   />
-                  <span className="absolute inset-0 flex items-center justify-center bg-black/50 text-primary opacity-0 transition-opacity group-hover/thumb:opacity-100 [&_svg]:size-3.5">
+                  <span className="absolute inset-0 flex items-center justify-center bg-scrim text-primary opacity-0 transition-opacity group-hover/thumb:opacity-100 [&_svg]:size-3.5">
                     <Pencil />
                   </span>
                 </button>
                 <div className="leading-tight">
-                  <div className="max-w-[120px] truncate text-[11px] text-secondary">
+                  <div className="max-w-[120px] truncate text-xs text-secondary">
                     {img.alt ?? filenameOf(img)}
                   </div>
-                  <div className="cm-mono !text-[9.5px] text-faint">
+                  <div className="cm-mono !text-2xs text-faint">
                     {img.width && img.height
                       ? `${img.width}×${img.height}`
                       : (img.mimeType ?? "image")}
@@ -802,14 +802,14 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                 className="flex items-center gap-2 rounded-md border border-line bg-inset py-1 pl-2 pr-3"
               >
                 <Spinner size={14} />
-                <span className="text-[11px] text-muted">uploading…</span>
+                <span className="text-xs text-muted">uploading…</span>
               </div>
             ))}
           </div>
         )}
 
         {error && (
-          <div className="px-3 pt-2 text-[11px] text-danger" role="alert">
+          <div className="px-3 pt-2 text-xs text-danger" role="alert">
             {error}
           </div>
         )}
@@ -818,7 +818,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             failures): the two are unrelated, and one must not clear the other. */}
         {dictation.error && (
           <div
-            className="flex items-start gap-2 px-3 pt-2 text-[11px] text-danger"
+            className="flex items-start gap-2 px-3 pt-2 text-xs text-danger"
             role="alert"
           >
             <span className="min-w-0 flex-1">{dictation.error}</span>
@@ -841,10 +841,10 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               outside the editor because TipTap owns that DOM; rendering into it
               would fight ProseMirror for the same nodes. */}
           {dictation.listening && (
-            <div className="mt-1.5 flex items-center gap-2 text-[11.5px] text-muted">
+            <div className="mt-1.5 flex items-center gap-2 text-xs text-muted">
               <span
                 aria-hidden
-                className="size-1.5 shrink-0 animate-pulse rounded-full bg-[var(--color-danger)]"
+                className="size-1.5 shrink-0 animate-pulse rounded-full bg-danger"
               />
               <span className="min-w-0 flex-1 truncate italic">
                 {dictation.interim || "Listening…"}
@@ -975,7 +975,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                   aria-expanded={open}
                   aria-label="More permission postures"
                   className={cn(
-                    "inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-[11.5px] " +
+                    "inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-xs " +
                       "font-medium transition-colors [&_svg]:size-3",
                     isPosture
                       ? "border-accent-line bg-accent-ghost text-accent-hi"
@@ -1008,7 +1008,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           >
             {(close) => (
               <div className="flex flex-col">
-                <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-faint">
+                <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
                   Permission posture
                 </div>
                 {postureOptions.map((o) => (
@@ -1069,16 +1069,18 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                   aria-expanded={open}
                   aria-label={currentAgent ? "Agent" : "Model"}
                   className={cn(
-                    "inline-flex h-7 items-center gap-1.5 rounded-md border text-[12px] " +
+                    "inline-flex h-6 items-center gap-1.5 rounded-md border text-sm " +
                       "font-medium transition-colors [&_svg]:size-3.5",
                     compact ? "justify-center px-1.5" : "px-2",
+                    // Violet, not amber: a custom agent is machine chrome, and
+                    // amber in this row means "live / yours" (see ui/Chip).
                     currentAgent
-                      ? "border-accent-line bg-accent-ghost text-accent-hi hover:border-accent-line"
+                      ? "border-accent-2-line bg-accent-2-ghost text-accent-2-hi hover:border-accent-2-line"
                       : "border-line bg-panel-2 text-secondary hover:border-line-strong hover:text-primary",
                     open && !currentAgent && "border-line-strong text-primary",
                   )}
                 >
-                  <span className={currentAgent ? "text-accent-hi" : "text-muted"}>
+                  <span className={currentAgent ? "text-accent-2-hi" : "text-muted"}>
                     {currentAgent ? <Bot /> : <Cpu />}
                   </span>
                   {!compact && (
@@ -1108,7 +1110,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           >
             {(close) => (
               <div className="flex flex-col">
-                <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-faint">
+                <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
                   Model
                 </div>
                 {models.map((m) => (
@@ -1132,7 +1134,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                 {scopedAgents.length > 0 && (
                   <>
                     <div className="my-1 h-px bg-line" />
-                    <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-faint">
+                    <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
                       Custom agent
                     </div>
                     {scopedAgents.map((a) => (
@@ -1177,7 +1179,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             >
               {() => (
                 <div className="flex flex-col">
-                  <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-faint">
+                  <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
                     Show in composer
                   </div>
                   {COMPOSER_CONTROLS.map((c) => (

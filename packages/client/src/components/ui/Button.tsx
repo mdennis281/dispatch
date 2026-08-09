@@ -1,8 +1,28 @@
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { cn } from "../../lib/cn.js";
 
-type Variant = "default" | "primary" | "subtle" | "ghost" | "danger";
-type Size = "xs" | "sm" | "md";
+/**
+ * `link` and `toggle` exist because the panels kept hand-rolling them. Before
+ * this, a "Cancel"/"Decline"/"pop out" text action was a raw `<button>` with a
+ * one-off `text-xs text-muted hover:text-primary` in each of a dozen files,
+ * and a pressed-state control was another `<button>` with its own idea of what
+ * "on" looks like. Both are now one word at the call site, which is what makes
+ * the no-raw-`<button>` ratchet a rule you can follow rather than one you have
+ * to fight. That ratchet is `ui/rawButtons.test.ts` — a test rather than a lint
+ * rule because this repo has no ESLint and CI runs vitest.
+ */
+type Variant = "default" | "primary" | "subtle" | "ghost" | "danger" | "link" | "toggle";
+/**
+ * TWO heights, not three.
+ *
+ * `xs`/`sm`/`md` were h-6/h-7/h-8 and every call site picked by feel, so the
+ * composer's own toolbar ran four different baselines in one 40px row (h-6
+ * posture, h-6/h-7 segmented, h-7 brain, h-8 Send) and nothing lined up. There
+ * are only two jobs here: dense chrome that packs into a toolbar or a row
+ * (`sm`, 24px) and a primary action you are meant to aim at (`md`, 32px).
+ * `IconButton`, `SegmentedControl` and `Select` use the same two numbers.
+ */
+type Size = "sm" | "md";
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
@@ -18,23 +38,37 @@ const base =
   "disabled:pointer-events-none disabled:opacity-45";
 
 const sizes: Record<Size, string> = {
-  xs: "h-6 px-2 text-[11px]",
-  sm: "h-7 px-2.5 text-[12px]",
-  md: "h-8 px-3 text-[12.5px]",
+  sm: "h-6 px-2 text-xs",
+  md: "h-8 px-3 text-base",
 };
 
 const variants: Record<Variant, string> = {
   default:
     "bg-panel-2 text-primary border border-line hover:bg-elevated hover:border-line-strong",
+  // `text-accent-fg`, never `text-white`: the accent is amber, and amber is a
+  // light colour at every brightness that still reads as amber — white on it
+  // never clears 4.5:1. The token is dark on the dark theme and light on the
+  // light one, which a literal colour here could not be.
   primary:
-    "bg-accent-dim/90 text-white border border-accent-line hover:bg-accent-dim " +
-    "shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]",
+    "bg-accent text-accent-fg border border-accent-line hover:bg-accent-hi " +
+    "shadow-[inset_0_1px_0_0_var(--p-sheen)]",
   subtle:
-    "bg-white/[0.03] text-secondary border border-transparent hover:bg-white/[0.06] hover:text-primary",
+    "bg-hover text-secondary border border-transparent hover:bg-active hover:text-primary",
   ghost:
-    "bg-transparent text-secondary border border-transparent hover:bg-white/[0.05] hover:text-primary",
+    "bg-transparent text-secondary border border-transparent hover:bg-active hover:text-primary",
   danger:
     "bg-danger-ghost text-danger border border-transparent hover:bg-danger/20",
+  // No box at all: a text action that must not compete with the real button
+  // beside it (Cancel, Decline, "pop out"). Height still comes from `size`, so
+  // it sits on the same baseline as the button it's declining.
+  link:
+    "bg-transparent text-muted border border-transparent px-1 hover:text-primary",
+  // A control whose meaning is on/off. Drive it with `aria-pressed`, not a
+  // className — the pressed look reads off the attribute, so the accessible
+  // state and the visible state cannot drift apart.
+  toggle:
+    "bg-transparent text-muted border border-transparent hover:text-secondary " +
+    "aria-pressed:bg-accent-ghost aria-pressed:text-accent-hi aria-pressed:border-accent-line",
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(

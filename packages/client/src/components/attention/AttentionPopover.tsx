@@ -40,7 +40,7 @@ function AttentionRow({ item, onGo }: { item: AttentionItem; onGo: () => void })
   return (
     <button
       onClick={onGo}
-      className="group flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-white/[0.05]"
+      className="group flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-active"
     >
       <span
         className={cn(
@@ -59,10 +59,10 @@ function AttentionRow({ item, onGo }: { item: AttentionItem; onGo: () => void })
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
           <StatusDot tone={dotTone} size={5} />
-          <span className="truncate text-[12px] font-medium text-primary">{chatTitle}</span>
-          <span className="cm-mono !text-[9.5px] text-faint">{relTime(item.createdAt)}</span>
+          <span className="truncate text-sm font-medium text-primary">{chatTitle}</span>
+          <span className="cm-mono !text-2xs text-faint">{relTime(item.createdAt)}</span>
         </span>
-        <span className="mt-0.5 block truncate text-[11.5px] text-secondary">{item.summary}</span>
+        <span className="mt-0.5 block truncate text-xs text-secondary">{item.summary}</span>
       </span>
       <ArrowRight className="mt-1.5 size-3.5 shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100" />
     </button>
@@ -84,7 +84,7 @@ export function AttentionPopover() {
           onClick={toggle}
           aria-expanded={open}
           className={cn(
-            "inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-[12px] font-medium transition-colors [&_svg]:size-3.5",
+            "inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-sm font-medium transition-colors [&_svg]:size-3.5",
             blocking > 0
               ? "border-warn/30 bg-warn-ghost text-warn hover:bg-warn/15"
               : "border-line bg-panel-2 text-secondary hover:text-primary",
@@ -100,12 +100,12 @@ export function AttentionPopover() {
       {(close) => (
         <div className="w-full">
           <div className="flex items-center justify-between px-3 py-2.5 cm-hairline-b">
-            <span className="text-[12px] font-semibold text-primary">Attention Queue</span>
+            <span className="text-sm font-semibold text-primary">Attention Queue</span>
             <Chip tone={blocking > 0 ? "warn" : "muted"}>{blocking} need you</Chip>
           </div>
           <div className="max-h-[380px] cm-scroll overflow-y-auto p-1.5">
             {items.length === 0 ? (
-              <div className="px-3 py-8 text-center text-[12px] text-muted">
+              <div className="px-3 py-8 text-center text-sm text-muted">
                 Nothing needs you right now.
               </div>
             ) : (

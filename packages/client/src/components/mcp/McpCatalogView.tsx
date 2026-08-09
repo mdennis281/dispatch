@@ -4,8 +4,8 @@
  * external/passthrough servers on the project's config, each tool shown with its
  * qualified name, description, and input-parameter schema.
  *
- * Mounted once in App; opens on the `cm:open-mcp-catalog` window event (command
- * palette / top-bar affordance). Left pane = server list (grouped Custom vs
+ * Mounted once in App; open state lives in the view store's `overlay` field
+ * (see stores/view.ts). Left pane = server list (grouped Custom vs
  * External, each with a status dot); right pane = the selected server's tools as
  * expandable endpoint cards (params table + raw JSON Schema toggle). Pure REST via
  * the `useMcp` store — fetched on open, on project change, and on Refresh.
@@ -38,7 +38,7 @@ import { useProjects } from "../../stores/projects.js";
 import { useMcp, useProjectMcp } from "../../stores/mcp.js";
 import { copyToClipboard } from "../panels/panelBus.js";
 import { cn } from "../../lib/cn.js";
-import { OPEN_MCP_CATALOG_EVENT } from "./mcpCatalogBus.js";
+import { useOverlay } from "../../stores/view.js";
 
 /* --------------------------------------------------------------- status */
 
@@ -74,11 +74,11 @@ function CopyButton({ text }: { text: string }) {
 
 function ParamsTable({ params }: { params: McpToolInfo["params"] }) {
   if (params.length === 0) {
-    return <p className="text-[11px] text-faint">No parameters.</p>;
+    return <p className="text-xs text-faint">No parameters.</p>;
   }
   return (
     <div className="overflow-hidden rounded-md border border-line-soft">
-      <div className="grid grid-cols-[1.2fr_0.9fr_auto] gap-x-3 bg-panel-2/60 px-2.5 py-1 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-faint">
+      <div className="grid grid-cols-[1.2fr_0.9fr_auto] gap-x-3 bg-panel-2/60 px-2.5 py-1 text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
         <span>Name</span>
         <span>Type</span>
         <span>Req</span>
@@ -89,15 +89,15 @@ function ParamsTable({ params }: { params: McpToolInfo["params"] }) {
           className="grid grid-cols-[1.2fr_0.9fr_auto] items-start gap-x-3 border-t border-line-soft px-2.5 py-1.5"
         >
           <span className="min-w-0">
-            <span className="block cm-mono !text-[11px] text-primary">{p.name}</span>
+            <span className="block cm-mono !text-xs text-primary">{p.name}</span>
             {p.description && (
-              <span className="mt-0.5 block text-[10.5px] leading-snug text-muted">
+              <span className="mt-0.5 block text-2xs leading-snug text-muted">
                 {p.description}
               </span>
             )}
           </span>
-          <span className="cm-mono !text-[10.5px] text-accent-hi">{p.type}</span>
-          <span className="text-[10.5px]">
+          <span className="cm-mono !text-2xs text-accent-hi">{p.type}</span>
+          <span className="text-2xs">
             {p.required ? (
               <span className="text-danger">yes</span>
             ) : (
@@ -135,11 +135,11 @@ function EndpointCard({ tool }: { tool: McpToolInfo }) {
           )}
           <Wrench className="size-3.5 shrink-0 text-muted" />
           <span className="min-w-0 flex-1">
-            <span className="block truncate cm-mono !text-[11.5px] font-medium text-primary">
+            <span className="block truncate cm-mono !text-xs font-medium text-primary">
               {tool.qualifiedName}
             </span>
             {tool.description && !open && (
-              <span className="block truncate text-[10.5px] text-faint">{tool.description}</span>
+              <span className="block truncate text-2xs text-faint">{tool.description}</span>
             )}
           </span>
         </button>
@@ -153,19 +153,19 @@ function EndpointCard({ tool }: { tool: McpToolInfo }) {
       {open && (
         <div className="space-y-2.5 border-t border-line-soft px-3 py-2.5">
           {tool.description && (
-            <p className="text-[11.5px] leading-relaxed text-secondary">{tool.description}</p>
+            <p className="text-xs leading-relaxed text-secondary">{tool.description}</p>
           )}
           <ParamsTable params={tool.params} />
           <div>
             <button
               onClick={() => setShowSchema((v) => !v)}
-              className="inline-flex items-center gap-1 text-[10.5px] font-medium text-muted transition-colors hover:text-secondary [&_svg]:size-3"
+              className="inline-flex items-center gap-1 text-2xs font-medium text-muted transition-colors hover:text-secondary [&_svg]:size-3"
             >
               <Code2 />
               {showSchema ? "Hide raw schema" : "Raw schema"}
             </button>
             {showSchema && (
-              <pre className="mt-1.5 max-h-72 overflow-auto rounded-md border border-line-soft bg-inset px-2.5 py-2 cm-mono !text-[10.5px] leading-relaxed text-secondary">
+              <pre className="mt-1.5 max-h-72 overflow-auto rounded-md border border-line-soft bg-inset px-2.5 py-2 cm-mono !text-2xs leading-relaxed text-secondary">
                 {JSON.stringify(tool.inputSchema, null, 2)}
               </pre>
             )}
@@ -195,20 +195,20 @@ function ServerButton({
         "flex w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left transition-colors",
         active
           ? "border-accent-line bg-accent-ghost"
-          : "border-transparent hover:bg-white/[0.04]",
+          : "border-transparent hover:bg-hover",
       )}
     >
       <StatusDot tone={meta.tone} size={7} />
       <span className="min-w-0 flex-1">
         <span
           className={cn(
-            "block truncate cm-mono !text-[11.5px] font-medium",
+            "block truncate cm-mono !text-xs font-medium",
             active ? "text-accent-hi" : "text-primary",
           )}
         >
           {server.name}
         </span>
-        <span className="block truncate text-[10px] text-faint">
+        <span className="block truncate text-2xs text-faint">
           {server.status === "ok"
             ? `${server.tools.length} tool${server.tools.length === 1 ? "" : "s"}`
             : meta.label}
@@ -234,7 +234,7 @@ function ServerGroup({
   if (servers.length === 0) return null;
   return (
     <div className="space-y-1">
-      <div className="flex items-center gap-1.5 px-1 pt-1 text-[9.5px] font-semibold uppercase tracking-[0.09em] text-faint [&_svg]:size-3">
+      <div className="flex items-center gap-1.5 px-1 pt-1 text-2xs font-semibold uppercase tracking-[0.09em] text-faint [&_svg]:size-3">
         {icon}
         {label}
       </div>
@@ -253,19 +253,12 @@ function ServerGroup({
 /* ------------------------------------------------------------------ overlay */
 
 export function McpCatalogView() {
-  const [open, setOpen] = useState(false);
+  const { open, close } = useOverlay("mcp");
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null);
   const projectId = project?.id ?? null;
   const { catalog, loading, error } = useProjectMcp(projectId);
 
   const [selected, setSelected] = useState<string | null>(null);
-
-  // Open on the app-wide event (command palette / top-bar affordance).
-  useEffect(() => {
-    const onOpen = () => setOpen(true);
-    window.addEventListener(OPEN_MCP_CATALOG_EVENT, onOpen);
-    return () => window.removeEventListener(OPEN_MCP_CATALOG_EVENT, onOpen);
-  }, []);
 
   const load = useCallback(
     (fresh?: boolean) => {
@@ -295,7 +288,7 @@ export function McpCatalogView() {
   return (
     <Modal
       open={open}
-      onClose={() => setOpen(false)}
+      onClose={close}
       width={920}
       icon={<Blocks />}
       title="MCP tools"
@@ -309,7 +302,7 @@ export function McpCatalogView() {
               <InlineError message={error} />
             </div>
           ) : (
-            <span className="mr-auto text-[11px] text-muted tabular-nums">
+            <span className="mr-auto text-xs text-muted tabular-nums">
               {loading && servers.length === 0
                 ? "Loading…"
                 : `${servers.length} server${servers.length === 1 ? "" : "s"} · ${toolCount} tool${
@@ -331,11 +324,11 @@ export function McpCatalogView() {
       {!projectId ? (
         <div className="rounded-md border border-dashed border-line px-3 py-10 text-center">
           <Blocks className="mx-auto mb-1.5 size-5 text-faint" />
-          <p className="text-[12px] text-muted">No active project.</p>
-          <p className="mt-0.5 text-[11px] text-faint">Pick a project to see its MCP tools.</p>
+          <p className="text-sm text-muted">No active project.</p>
+          <p className="mt-0.5 text-xs text-faint">Pick a project to see its MCP tools.</p>
         </div>
       ) : loading && servers.length === 0 ? (
-        <div className="flex items-center justify-center gap-2 py-16 text-[12px] text-muted">
+        <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted">
           <Spinner size={14} /> Probing MCP servers…
         </div>
       ) : (
@@ -361,16 +354,16 @@ export function McpCatalogView() {
               // up, so it's also where you find out how to wire one up. Both
               // supported paths write the same `.dispatch/project.yaml`.
               <div className="space-y-1 px-1 pt-1">
-                <p className="text-[10px] leading-snug text-faint">
+                <p className="text-2xs leading-snug text-faint">
                   No external MCP servers configured for this project.
                 </p>
-                <p className="text-[10px] leading-snug text-faint">
+                <p className="text-2xs leading-snug text-faint">
                   Add one from a terminal at the repo root:
                 </p>
-                <code className="block break-all rounded-md border border-line-soft bg-inset px-1.5 py-1 cm-mono !text-[10px] leading-snug text-secondary">
+                <code className="block break-all rounded-md border border-line-soft bg-inset px-1.5 py-1 cm-mono !text-2xs leading-snug text-secondary">
                   cm mcp add &lt;name&gt; -- &lt;command&gt;
                 </code>
-                <p className="text-[10px] leading-snug text-faint">
+                <p className="text-2xs leading-snug text-faint">
                   …or just ask an agent in this project to add it.
                 </p>
               </div>
@@ -380,19 +373,19 @@ export function McpCatalogView() {
           {/* right — the selected server's tools */}
           <div className="cm-scroll min-w-0 flex-1 overflow-y-auto">
             {!activeServer ? (
-              <div className="pt-16 text-center text-[12px] text-muted">Select a server.</div>
+              <div className="pt-16 text-center text-sm text-muted">Select a server.</div>
             ) : activeServer.status === "error" ? (
               <div className="rounded-md border border-danger/30 bg-danger-ghost px-3 py-8 text-center">
                 <CircleSlash className="mx-auto mb-1.5 size-5 text-danger" />
-                <p className="text-[12px] text-danger">Could not connect to “{activeServer.name}”.</p>
+                <p className="text-sm text-danger">Could not connect to “{activeServer.name}”.</p>
                 {activeServer.error && (
-                  <p className="mx-auto mt-1 max-w-md break-words text-[11px] text-muted">
+                  <p className="mx-auto mt-1 max-w-md break-words text-xs text-muted">
                     {activeServer.error}
                   </p>
                 )}
               </div>
             ) : activeServer.tools.length === 0 ? (
-              <div className="pt-16 text-center text-[12px] text-muted">
+              <div className="pt-16 text-center text-sm text-muted">
                 {activeServer.status === "unconfigured"
                   ? "This server has no transport configured."
                   : "This server exposes no tools."}
@@ -401,11 +394,11 @@ export function McpCatalogView() {
               <div className="space-y-2 pr-0.5">
                 {activeServer.transport && (
                   <div className="flex flex-wrap items-center gap-1.5 pb-0.5">
-                    <Chip tone="accent" mono>
+                    <Chip tone="info" mono>
                       {activeServer.transport.type}
                     </Chip>
                     {activeServer.transport.command && (
-                      <span className="cm-mono !text-[10px] text-faint">
+                      <span className="cm-mono !text-2xs text-faint">
                         {activeServer.transport.command}
                         {activeServer.transport.args?.length
                           ? ` ${activeServer.transport.args.join(" ")}`
@@ -413,7 +406,7 @@ export function McpCatalogView() {
                       </span>
                     )}
                     {activeServer.transport.url && (
-                      <span className="cm-mono !text-[10px] text-faint">
+                      <span className="cm-mono !text-2xs text-faint">
                         {activeServer.transport.url}
                       </span>
                     )}

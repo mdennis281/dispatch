@@ -33,19 +33,19 @@ export function ImageLightbox({
   return createPortal(
     <div
       style={{ zIndex: z }}
-      className="fixed inset-0 flex flex-col bg-black/80 backdrop-blur-[2px]"
+      className="fixed inset-0 flex flex-col bg-scrim-strong backdrop-blur-[2px]"
       onClick={onClose}
     >
       <header
         className="flex items-center gap-2 px-4 py-2.5 text-secondary"
         onClick={(e) => e.stopPropagation()}
       >
-        <span className="min-w-0 flex-1 truncate text-[12px] text-secondary">{name}</span>
-        {dims && <span className="cm-mono !text-[10.5px] text-faint">{dims}</span>}
+        <span className="min-w-0 flex-1 truncate text-sm text-secondary">{name}</span>
+        {dims && <span className="cm-mono !text-2xs text-faint">{dims}</span>}
         <a
           href={src}
           download={name}
-          className="flex size-7 items-center justify-center rounded-md text-muted transition-colors hover:bg-white/[0.06] hover:text-primary [&_svg]:size-4"
+          className="flex size-7 items-center justify-center rounded-md text-muted transition-colors hover:bg-active hover:text-primary [&_svg]:size-4"
           title="Download"
           aria-label="Download image"
         >

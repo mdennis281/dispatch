@@ -63,7 +63,7 @@ function CopyButton({ text }: { text: string }) {
           setTimeout(() => setDone(false), 2_000);
         });
       }}
-      className="rounded-[4px] p-1 text-faint transition-colors hover:bg-white/[0.06] hover:text-secondary [&_svg]:size-3"
+      className="rounded-[4px] p-1 text-faint transition-colors hover:bg-active hover:text-secondary [&_svg]:size-3"
     >
       {done ? <Check className="text-accent" /> : <Copy />}
     </button>
@@ -89,7 +89,7 @@ function BriefCard({ part }: { part: MessagePart }) {
           "overflow-hidden rounded-lg border border-accent-line/60 bg-accent-ghost/40",
           // A hairline of accent along the top edge, so the card reads as
           // "system" at a glance from across the transcript.
-          "shadow-[inset_0_1px_0_0_var(--color-accent-line)]",
+          "shadow-[inset_0_1px_0_0_var(--p-accent-line)]",
         )}
       >
         {/* The toggle and the copy button are siblings, not nested: a button
@@ -99,17 +99,17 @@ function BriefCard({ part }: { part: MessagePart }) {
             type="button"
             onClick={() => setOpen((o) => !o)}
             aria-expanded={open}
-            className="flex min-w-0 flex-1 items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors hover:bg-white/[0.03] [&_svg]:size-3"
+            className="flex min-w-0 flex-1 items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors hover:bg-hover [&_svg]:size-3"
           >
             <span className="text-faint">{open ? <ChevronDown /> : <ChevronRight />}</span>
             <Send className="shrink-0 text-accent" />
-            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.07em] text-accent">
+            <span className="shrink-0 text-2xs font-semibold uppercase tracking-[0.07em] text-accent">
               Dispatch → Claude
             </span>
-            <span className="min-w-0 truncate text-[11px] text-muted" title={part.label}>
+            <span className="min-w-0 truncate text-xs text-muted" title={part.label}>
               {part.label ?? "Instructions sent for you"}
             </span>
-            <span className="ml-auto shrink-0 cm-mono !text-[9.5px] text-faint">
+            <span className="ml-auto shrink-0 cm-mono !text-2xs text-faint">
               {sizeNote(part.text)}
             </span>
           </button>
@@ -120,7 +120,7 @@ function BriefCard({ part }: { part: MessagePart }) {
             {/* Rendered as markdown because it IS markdown — the headings, the
                 rule lists and the paths are exactly what you're scanning for,
                 and a wall of asterisks would defeat reading it at all. */}
-            <Markdown className="!text-[12px] !text-secondary">{part.text}</Markdown>
+            <Markdown className="!text-sm !text-secondary">{part.text}</Markdown>
           </div>
         )}
       </div>
@@ -148,20 +148,20 @@ function InjectedRow({ part }: { part: MessagePart }) {
         aria-expanded={open}
         className={cn(
           "flex w-full items-center gap-1.5 rounded-[5px] border border-dashed border-line-soft",
-          "px-2 py-1 text-left text-[10px] text-faint transition-colors",
-          "hover:border-line hover:bg-white/[0.03] hover:text-muted [&_svg]:size-3",
+          "px-2 py-1 text-left text-2xs text-faint transition-colors",
+          "hover:border-line hover:bg-hover hover:text-muted [&_svg]:size-3",
         )}
       >
         {open ? <ChevronDown /> : <ChevronRight />}
         <Sparkles className="shrink-0 opacity-70" />
         <span className="shrink-0 uppercase tracking-[0.06em]">attached by Dispatch</span>
         <span className="min-w-0 truncate">{part.label ?? "context"}</span>
-        <span className="ml-auto shrink-0 cm-mono !text-[9px] opacity-70">
+        <span className="ml-auto shrink-0 cm-mono !text-2xs opacity-70">
           {sizeNote(part.text)}
         </span>
       </button>
       {open && (
-        <pre className="cm-scroll cm-mono mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-dashed border-line-soft bg-inset px-2.5 py-2 !text-[10.5px] leading-[1.5] text-muted">
+        <pre className="cm-scroll cm-mono mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-dashed border-line-soft bg-inset px-2.5 py-2 !text-2xs leading-[1.5] text-muted">
           {part.text}
         </pre>
       )}
@@ -176,12 +176,12 @@ function SpokenPart({ part }: { part: MessagePart }) {
   return (
     <div className="mt-1.5 first:mt-0">
       {part.kind === "instructions" && part.label && (
-        <div className="mb-0.5 flex items-center justify-end gap-1 text-[10px] font-medium uppercase tracking-[0.07em] text-faint [&_svg]:size-3">
+        <div className="mb-0.5 flex items-center justify-end gap-1 text-2xs font-medium uppercase tracking-[0.07em] text-faint [&_svg]:size-3">
           <FileText />
           {part.label}
         </div>
       )}
-      <div className="inline-block max-w-full rounded-2xl rounded-tr-sm border border-white/10 bg-white/[0.09] px-3 py-1.5 text-left align-top text-[13px] leading-[1.6] text-white whitespace-pre-wrap">
+      <div className="inline-block max-w-full rounded-2xl rounded-tr-sm border border-bubble-line bg-bubble px-3 py-1.5 text-left align-top text-base leading-[1.6] text-primary whitespace-pre-wrap">
         {part.text}
       </div>
     </div>

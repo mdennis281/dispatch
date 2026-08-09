@@ -78,8 +78,8 @@ export function StashesTab({
     return (
       <div className="flex flex-1 flex-col items-center justify-center px-4 text-center">
         <Archive className="mb-2 size-5 text-faint" />
-        <p className="text-[12px] text-muted">No stashes.</p>
-        <p className="mt-0.5 text-[11px] text-faint">
+        <p className="text-sm text-muted">No stashes.</p>
+        <p className="mt-0.5 text-xs text-faint">
           Stash from the toolbar to park your working-tree changes.
         </p>
       </div>
@@ -106,9 +106,9 @@ export function StashesTab({
               </span>
               <Archive className="mt-[1px] size-3.5 shrink-0 text-accent-hi" />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[12px] text-secondary">{s.message}</span>
-                <span className="mt-px flex items-center gap-1.5 text-[10px] text-faint">
-                  <span className="cm-mono !text-[9.5px]">{s.ref}</span>
+                <span className="block truncate text-sm text-secondary">{s.message}</span>
+                <span className="mt-px flex items-center gap-1.5 text-2xs text-faint">
+                  <span className="cm-mono !text-2xs">{s.ref}</span>
                   {s.branch && (
                     <>
                       <span>·</span>
@@ -128,12 +128,12 @@ export function StashesTab({
             {open && (
               <div className="border-t border-line-soft">
                 {!files ? (
-                  <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-faint">
+                  <div className="flex items-center gap-2 px-3 py-2 text-xs text-faint">
                     <Spinner size={11} />
                     Loading files…
                   </div>
                 ) : files.length === 0 ? (
-                  <p className="px-3 py-2 text-[11px] text-faint">No file changes.</p>
+                  <p className="px-3 py-2 text-xs text-faint">No file changes.</p>
                 ) : (
                   <div className="p-1">
                     {files.map((f) => {
@@ -147,21 +147,21 @@ export function StashesTab({
                             "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
                             selection?.relPath === f.path && selection.rightRev === s.ref
                               ? "bg-accent-ghost"
-                              : "hover:bg-white/[0.04]",
+                              : "hover:bg-hover",
                           )}
                         >
                           <span
                             className={cn(
-                              "w-3 shrink-0 text-center cm-mono !text-[10px] font-bold",
+                              "w-3 shrink-0 text-center cm-mono !text-2xs font-bold",
                               meta.className,
                             )}
                           >
                             {meta.letter}
                           </span>
                           <span className="min-w-0 flex-1 truncate">
-                            <span className="cm-mono !text-[11px] text-secondary">{name}</span>
+                            <span className="cm-mono !text-xs text-secondary">{name}</span>
                             {dir && (
-                              <span className="ml-1.5 cm-mono !text-[9.5px] text-faint">
+                              <span className="ml-1.5 cm-mono !text-2xs text-faint">
                                 {midTruncate(dir, 24)}
                               </span>
                             )}
@@ -174,7 +174,7 @@ export function StashesTab({
 
                 <div className="flex items-center gap-1.5 border-t border-line-soft px-2 py-1.5">
                   <Button
-                    size="xs"
+                    size="sm"
                     variant="subtle"
                     leftIcon={<CornerDownLeft />}
                     disabled={!!busy}
@@ -183,7 +183,7 @@ export function StashesTab({
                     Apply
                   </Button>
                   <Button
-                    size="xs"
+                    size="sm"
                     variant="subtle"
                     leftIcon={<Check />}
                     disabled={!!busy}

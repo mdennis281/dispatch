@@ -6,6 +6,12 @@ export interface Segment<T extends string> {
   value: T;
   label: string;
   icon?: ReactNode;
+  /**
+   * Trailing slot, for a count that must stay visible while the segment is
+   * UNSELECTED — the whole reason a grouped strip is safe to collapse is that
+   * the group you can't see can still say it wants you.
+   */
+  badge?: ReactNode;
 }
 
 export interface SegmentedControlProps<T extends string> {
@@ -27,7 +33,9 @@ export function SegmentedControl<T extends string>({
   className,
   compact = false,
 }: SegmentedControlProps<T>) {
-  const h = size === "sm" ? "h-6" : "h-7";
+  // Button's two heights (see ui/Button), so a segmented control sits on the
+  // same baseline as the buttons beside it in a toolbar.
+  const h = size === "sm" ? "h-6" : "h-8";
   return (
     <div
       className={cn(
@@ -43,17 +51,18 @@ export function SegmentedControl<T extends string>({
             onClick={() => onChange(s.value)}
             aria-label={compact ? s.label : undefined}
             className={cn(
-              "inline-flex items-center gap-1 rounded-[5px] text-[11.5px] font-medium " +
+              "inline-flex items-center gap-1 rounded-[5px] text-xs font-medium " +
                 "transition-colors duration-150 ease-[var(--ease-out)] [&_svg]:size-3",
               compact ? "justify-center px-1.5" : "px-2",
               h,
               active
-                ? "bg-panel-2 text-primary shadow-[inset_0_1px_0_0_rgba(255,255,255,0.05)] border border-line"
+                ? "bg-panel-2 text-primary shadow-[inset_0_1px_0_0_var(--p-sheen-soft)] border border-line"
                 : "border border-transparent text-muted hover:text-secondary",
             )}
           >
             {s.icon}
             {!compact && s.label}
+            {s.badge}
           </button>
         );
         return compact ? (

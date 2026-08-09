@@ -8,6 +8,7 @@
  * behaviour (and branch tracking) stays identical.
  */
 import { useCallback, useEffect, useState } from "react";
+import { create } from "zustand";
 import type { BranchInfo, RunnerInstance } from "@dispatch/shared";
 import { api } from "../../lib/api.js";
 import { actions } from "../../lib/actions.js";
@@ -103,6 +104,83 @@ export function defaultBranch(
     if (byPath) return byPath.branch;
   }
   return (targets.find((t) => t.isCurrent) ?? targets[0])?.branch;
+}
+
+/**
+ * The selected launch branch, PER PROJECT and shared by every picker.
+ *
+ * The sidebar's Apps header and the right panel's Runner each held their own
+ * `useState` for this, seeded from different hints — so the two pickers could
+ * sit on screen at the same time showing different branches while claiming to
+ * answer the same question ("which branch does Run use?"). Whichever one you
+ * hadn't touched was lying.
+ *
+ * One value per project. `seed` only fills a slot that is still empty, so the
+ * first picker to mount supplies the default (the chat's worktree when there is
+ * one, else the project's current branch) and an explicit choice afterwards is
+ * never silently overwritten by another picker mounting.
+ */
+interface LaunchBranchStore {
+  byProject: Record<string, string>;
+  set: (projectId: string, branch: string) => void;
+  seed: (projectId: string, branch: string) => void;
+  clear: (projectId: string) => void;
+}
+
+const useLaunchBranchStore = create<LaunchBranchStore>((set) => ({
+  byProject: {},
+  set: (projectId, branch) =>
+    set((s) => ({ byProject: { ...s.byProject, [projectId]: branch } })),
+  seed: (projectId, branch) =>
+    set((s) =>
+      s.byProject[projectId] ? s : { byProject: { ...s.byProject, [projectId]: branch } },
+    ),
+  clear: (projectId) =>
+    set((s) => {
+      const { [projectId]: _gone, ...rest } = s.byProject;
+      return { byProject: rest };
+    }),
+}));
+
+/**
+ * `[branch, setBranch]` for a project's launch picker, plus the resolved target.
+ *
+ * `preferPath` is only a SEED hint (a chat's worktree, the project checkout) —
+ * it decides the default, never an existing choice. A stored branch that no
+ * longer exists (worktree removed, branch deleted) is dropped and re-seeded, so
+ * the picker can't point at something un-runnable.
+ */
+export function useLaunchBranch(
+  projectId: string | undefined,
+  targets: LaunchTarget[],
+  preferPath?: string,
+): {
+  branch: string | undefined;
+  setBranch: (branch: string) => void;
+  target: LaunchTarget | undefined;
+} {
+  const branch = useLaunchBranchStore((s) => (projectId ? s.byProject[projectId] : undefined));
+  const setStored = useLaunchBranchStore((s) => s.set);
+  const seed = useLaunchBranchStore((s) => s.seed);
+  const clear = useLaunchBranchStore((s) => s.clear);
+
+  useEffect(() => {
+    if (!projectId || targets.length === 0) return;
+    if (branch && targets.some((t) => t.branch === branch)) return;
+    const next = defaultBranch(targets, preferPath);
+    if (!next) return;
+    if (branch) clear(projectId);
+    seed(projectId, next);
+  }, [projectId, targets, branch, preferPath, seed, clear]);
+
+  const setBranch = useCallback(
+    (next: string) => {
+      if (projectId) setStored(projectId, next);
+    },
+    [projectId, setStored],
+  );
+
+  return { branch, setBranch, target: targets.find((t) => t.branch === branch) };
 }
 
 /** Start a subApp on a launch target (branch-tracked; bare branches resolve

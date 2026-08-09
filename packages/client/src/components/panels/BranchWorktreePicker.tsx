@@ -54,7 +54,7 @@ export function BranchWorktreePicker({
           aria-expanded={open}
           title={current ? `${current.branch} — ${KIND_TIP[current.kind]}` : "No branches"}
           className={cn(
-            "flex items-center gap-1 rounded-sm border border-line bg-inset px-1.5 py-0.5 cm-mono !text-[10.5px] text-secondary transition-colors hover:border-line-strong disabled:opacity-45",
+            "flex items-center gap-1 rounded-sm border border-line bg-inset px-1.5 py-0.5 cm-mono !text-2xs text-secondary transition-colors hover:border-line-strong disabled:opacity-45",
             open && "border-line-strong",
           )}
         >
@@ -109,14 +109,14 @@ function PickerList({
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search branches…"
           spellCheck={false}
-          className="w-full bg-transparent text-[11.5px] text-primary outline-none placeholder:text-faint"
+          className="w-full bg-transparent text-xs text-primary outline-none placeholder:text-faint"
         />
       </div>
 
       {/* list */}
       <div className="cm-scroll min-h-0 flex-1 overflow-y-auto p-1">
         {filtered.length === 0 ? (
-          <p className="px-2 py-2 text-[10.5px] text-faint">No branches match.</p>
+          <p className="px-2 py-2 text-2xs text-faint">No branches match.</p>
         ) : (
           filtered.map((t) => {
             const Icon = KIND_ICON[t.kind];
@@ -128,8 +128,8 @@ function PickerList({
                 onClick={() => onPick(t.branch)}
                 title={KIND_TIP[t.kind]}
                 className={cn(
-                  "flex w-full items-center gap-1.5 rounded-sm px-1.5 py-1 text-left transition-colors hover:bg-white/[0.05]",
-                  selected && "bg-white/[0.04]",
+                  "flex w-full items-center gap-1.5 rounded-sm px-1.5 py-1 text-left transition-colors hover:bg-active",
+                  selected && "bg-hover",
                 )}
               >
                 <Icon
@@ -138,12 +138,12 @@ function PickerList({
                     t.kind === "branch" ? "text-muted" : "text-accent-hi",
                   )}
                 />
-                <span className="min-w-0 flex-1 truncate cm-mono !text-[10.5px] text-secondary">
+                <span className="min-w-0 flex-1 truncate cm-mono !text-2xs text-secondary">
                   {t.branch}
                 </span>
                 {t.isDirty && <Dot className="size-3 shrink-0 text-warn" />}
                 {t.editedAt && (
-                  <span className="shrink-0 text-[9.5px] tabular-nums text-faint">
+                  <span className="shrink-0 text-2xs tabular-nums text-faint">
                     {relTimeShort(t.editedAt, now)}
                   </span>
                 )}

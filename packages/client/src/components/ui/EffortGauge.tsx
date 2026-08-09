@@ -14,13 +14,21 @@ import { cn } from "../../lib/cn.js";
 
 const LEVELS = EFFORT_OPTIONS.map((o) => o.value);
 
-/** Needle tint per level. The arc gets these as gradient stops, in this order. */
+/**
+ * Needle tint per level. The arc gets these as gradient stops, in this order.
+ *
+ * The palette's ORDINAL ramp, not the categorical set: the whole point of the
+ * gauge is that the colours are ranked, so they have to come from a scale whose
+ * order is part of its contract. Referencing the vars (rather than the hexes
+ * they used to be) is also what lets the needle re-tint on a light theme, where
+ * the raw yellow of `gauge-3` would be invisible against white chrome.
+ */
 const COLORS: Record<Effort, string> = {
-  low: "#22c55e",
-  medium: "#a3e635",
-  high: "#eab308",
-  xhigh: "#f97316",
-  max: "#ef4444",
+  low: "var(--p-gauge-1)",
+  medium: "var(--p-gauge-2)",
+  high: "var(--p-gauge-3)",
+  xhigh: "var(--p-gauge-4)",
+  max: "var(--p-gauge-5)",
 };
 
 // Drawn in a 24×24 box because that's lucide's, so this drops in wherever a
@@ -69,7 +77,10 @@ export function EffortGauge({ effort, className }: { effort: Effort; className?:
             <stop
               key={o.value}
               offset={`${(i / (LEVELS.length - 1)) * 100}%`}
-              stopColor={COLORS[o.value]}
+              // `style`, not the `stop-color` attribute: `var()` is only
+              // resolved when it arrives through CSS, and an SVG presentation
+              // ATTRIBUTE holding a var() is silently dropped (black stops).
+              style={{ stopColor: COLORS[o.value] }}
             />
           ))}
         </linearGradient>
@@ -108,12 +119,12 @@ export function EffortGauge({ effort, className }: { effort: Effort; className?:
           y1={CY}
           x2={CX}
           y2={CY - R + 3.5}
-          stroke={COLORS[effort]}
+          style={{ stroke: COLORS[effort] }}
           strokeWidth={1.75}
           strokeLinecap="round"
         />
       </g>
-      <circle cx={CX} cy={CY} r={1.5} fill={COLORS[effort]} />
+      <circle cx={CX} cy={CY} r={1.5} style={{ fill: COLORS[effort] }} />
     </svg>
   );
 }

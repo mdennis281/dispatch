@@ -65,7 +65,10 @@ import {
 
 /** Global app settings (config.json). Kept permissive by design. */
 export const AppSettingsSchema = z.object({
-  theme: z.enum(["dark", "light"]).default("dark"),
+  /** `system` defers to the browser's `prefers-color-scheme`; the client
+   *  resolves it and caches the result in localStorage so the first paint has
+   *  an answer before this endpoint can respond (see client stores/theme.ts). */
+  theme: z.enum(["dark", "light", "system"]).default("dark"),
   defaultModeId: z.string().optional(),
   webhook: z
     .object({
