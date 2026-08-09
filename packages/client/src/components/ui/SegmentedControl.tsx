@@ -6,6 +6,12 @@ export interface Segment<T extends string> {
   value: T;
   label: string;
   icon?: ReactNode;
+  /**
+   * Trailing slot, for a count that must stay visible while the segment is
+   * UNSELECTED — the whole reason a grouped strip is safe to collapse is that
+   * the group you can't see can still say it wants you.
+   */
+  badge?: ReactNode;
 }
 
 export interface SegmentedControlProps<T extends string> {
@@ -54,6 +60,7 @@ export function SegmentedControl<T extends string>({
           >
             {s.icon}
             {!compact && s.label}
+            {s.badge}
           </button>
         );
         return compact ? (

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { GitBranch, Bot, AppWindow, SquareTerminal, GitPullRequest } from "lucide-react";
+import { GitBranch, Bot, AppWindow, SquareTerminal, GitPullRequest, Ship, Play } from "lucide-react";
 import type { Chat } from "@dispatch/shared";
 import { Tabs, type TabDef } from "../ui/Tabs.js";
+import { SegmentedControl } from "../ui/SegmentedControl.js";
+import { Badge } from "../ui/Chip.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { WorktreesPanel } from "../panels/WorktreesPanel.js";
 import { AgentsPanel } from "../panels/AgentsPanel.js";
@@ -21,22 +23,42 @@ import {
 
 type PanelTab = FocusPanelTab;
 
+/**
+ * The five panels split cleanly in two, and the split is what buys their names
+ * back.
+ *
+ * Five labelled tabs need ~400px and the column is 360, so the strip had been
+ * collapsed to icon-only with a hover-driven label slot standing in for the
+ * vocabulary. That worked, but it meant the words "Terminals" and "Worktrees"
+ * appeared nowhere until you swept a mouse across the header.
+ *
+ * Grouping asks a question the panels already answer: "ship" is the state of
+ * your CHANGE (the worktree it lives in, the PR it became), "run" is the state
+ * of your PROCESSES (subagents, terminals, dev servers). Two or three labelled
+ * tabs per group fit the column with room to spare, and the group you aren't
+ * looking at keeps a rolled-up badge so nothing can go unnoticed behind it.
+ */
+type PanelGroup = "ship" | "run";
+
+const GROUP_OF: Record<PanelTab, PanelGroup> = {
+  worktrees: "ship",
+  prs: "ship",
+  agents: "run",
+  terminals: "run",
+  apps: "run",
+};
+
 export function RightPanel({ chat }: { chat: Chat }) {
   const [tab, setTab] = useState<PanelTab>("worktrees");
+  const group = GROUP_OF[tab];
 
-  // Let the command palette jump straight to a tab (Worktrees / Apps / Terminals / PRs / Memory).
+  // Let the command palette jump straight to a tab (Worktrees / Apps / Terminals / PRs / Agents).
+  // Selecting the tab is enough to select its group — the group is derived, so
+  // a deep link can't land on a tab whose group is hidden.
   useEffect(() => {
     const onFocus = (e: Event) => {
       const next = (e as CustomEvent<FocusPanelTab>).detail;
-      if (
-        next === "worktrees" ||
-        next === "agents" ||
-        next === "apps" ||
-        next === "terminals" ||
-        next === "prs"
-      ) {
-        setTab(next);
-      }
+      if (next in GROUP_OF) setTab(next);
     };
     window.addEventListener(FOCUS_PANEL_EVENT, onFocus);
     return () => window.removeEventListener(FOCUS_PANEL_EVENT, onFocus);
@@ -78,9 +100,13 @@ export function RightPanel({ chat }: { chat: Chat }) {
     void useProcesses.getState().scan(chat.projectId);
   }, [chat.projectId, runnerCount]);
 
-  const tabs: TabDef[] = [
+  const shipTabs: TabDef[] = [
     { id: "worktrees", label: "Worktrees", icon: <GitBranch />, count: wtCount },
+    { id: "prs", label: "PRs", icon: <GitPullRequest />, count: prOpen },
+  ];
+  const runTabs: TabDef[] = [
     { id: "agents", label: "Agents", icon: <Bot />, count: agentsLive },
+    { id: "terminals", label: "Terminals", icon: <SquareTerminal />, count: termCount },
     {
       id: "apps",
       label: "Apps",
@@ -94,24 +120,49 @@ export function RightPanel({ chat }: { chat: Chat }) {
           ? `Apps · ${runnerCount} running, ${orphanCount} orphan${orphanCount === 1 ? "" : "s"}`
           : undefined,
     },
-    { id: "terminals", label: "Terminals", icon: <SquareTerminal />, count: termCount },
-    { id: "prs", label: "PRs", icon: <GitPullRequest />, count: prOpen },
   ];
+
+  const shipCount = wtCount + prOpen;
+  const runCount = agentsLive + termCount + runnerCount + orphanCount;
+  const tabs = group === "ship" ? shipTabs : runTabs;
 
   return (
     <aside className="flex w-[360px] shrink-0 flex-col border-l border-line bg-surface">
-      <div className="flex h-12 shrink-0 items-center cm-hairline-b">
-        {/* Icon-only: five labelled tabs overflowed the 360px column, so the
-            later ones were unreachable. `labelSlot` buys the vocabulary back
-            inside the budget — the strip is 196px, the label sits in the 164px
-            the icons freed and names whichever tab the mouse is over. */}
-        <Tabs
-          iconOnly
-          labelSlot
-          tabs={tabs}
-          value={tab}
-          onChange={(id) => setTab(id as PanelTab)}
+      <div className="flex h-9 shrink-0 items-center px-2 pt-1.5">
+        <SegmentedControl
+          className="w-full [&>button]:flex-1"
+          segments={[
+            {
+              value: "ship",
+              label: "Ship",
+              icon: <Ship />,
+              // Only the group you're NOT on needs a badge; the one you're
+              // looking at is already showing its per-tab counts below.
+              badge:
+                group !== "ship" && shipCount > 0 ? (
+                  <span className="ml-1">
+                    <Badge count={shipCount} tone="warn" />
+                  </span>
+                ) : undefined,
+            },
+            {
+              value: "run",
+              label: "Run",
+              icon: <Play />,
+              badge:
+                group !== "run" && runCount > 0 ? (
+                  <span className="ml-1">
+                    <Badge count={runCount} tone="warn" />
+                  </span>
+                ) : undefined,
+            },
+          ]}
+          value={group}
+          onChange={(g) => setTab(g === "ship" ? "worktrees" : "agents")}
         />
+      </div>
+      <div className="flex h-9 shrink-0 items-center cm-hairline-b">
+        <Tabs tabs={tabs} value={tab} onChange={(id) => setTab(id as PanelTab)} />
       </div>
       <ScrollArea className="min-h-0 flex-1">
         {tab === "worktrees" && <WorktreesPanel chat={chat} />}

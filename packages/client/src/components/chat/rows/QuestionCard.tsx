@@ -472,23 +472,15 @@ export function QuestionCard({ row }: QuestionCardProps) {
                 {multi ? "Answer every question to continue" : "Pick an option or type an answer"}
               </span>
             )}
-            {reverting ? (
-              <button
-                disabled={busy}
-                onClick={() => setReverting(false)}
-                className="ml-auto text-[11px] text-muted transition-colors hover:text-primary disabled:opacity-50"
-              >
-                Cancel
-              </button>
-            ) : (
-              <button
-                disabled={busy}
-                onClick={decline}
-                className="ml-auto text-[11px] text-muted transition-colors hover:text-primary disabled:opacity-50"
-              >
-                Decline
-              </button>
-            )}
+            <Button
+              variant="link"
+              size="sm"
+              className="ml-auto"
+              disabled={busy}
+              onClick={reverting ? () => setReverting(false) : decline}
+            >
+              {reverting ? "Cancel" : "Decline"}
+            </Button>
           </div>
         )}
 

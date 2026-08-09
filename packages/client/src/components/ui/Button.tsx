@@ -1,7 +1,16 @@
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { cn } from "../../lib/cn.js";
 
-type Variant = "default" | "primary" | "subtle" | "ghost" | "danger";
+/**
+ * `link` and `toggle` exist because the panels kept hand-rolling them. Before
+ * this, a "Cancel"/"Decline"/"pop out" text action was a raw `<button>` with a
+ * one-off `text-[11px] text-muted hover:text-primary` in each of a dozen files,
+ * and a pressed-state control was another `<button>` with its own idea of what
+ * "on" looks like. Both are now one word at the call site, which is what makes
+ * the no-raw-`<button>` lint rule (see eslint.config.js) a rule you can follow
+ * rather than one you have to fight.
+ */
+type Variant = "default" | "primary" | "subtle" | "ghost" | "danger" | "link" | "toggle";
 type Size = "xs" | "sm" | "md";
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -39,6 +48,17 @@ const variants: Record<Variant, string> = {
     "bg-transparent text-secondary border border-transparent hover:bg-active hover:text-primary",
   danger:
     "bg-danger-ghost text-danger border border-transparent hover:bg-danger/20",
+  // No box at all: a text action that must not compete with the real button
+  // beside it (Cancel, Decline, "pop out"). Height still comes from `size`, so
+  // it sits on the same baseline as the button it's declining.
+  link:
+    "bg-transparent text-muted border border-transparent px-1 hover:text-primary",
+  // A control whose meaning is on/off. Drive it with `aria-pressed`, not a
+  // className — the pressed look reads off the attribute, so the accessible
+  // state and the visible state cannot drift apart.
+  toggle:
+    "bg-transparent text-muted border border-transparent hover:text-secondary " +
+    "aria-pressed:bg-accent-ghost aria-pressed:text-accent-hi aria-pressed:border-accent-line",
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
