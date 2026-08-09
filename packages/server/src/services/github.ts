@@ -1122,6 +1122,32 @@ export class GitHubService {
     this.emitNotice(`Resolved review thread`, "info", opts.chatId);
   }
 
+  /**
+   * Reply IN a review thread (not as a new top-level PR comment) via GraphQL.
+   *
+   * Exists because "answer the reviewer" and "answer the reviewer where they
+   * asked" are different things, and only the second one closes the loop:
+   * `addComment` posts to the PR conversation, leaving the inline thread looking
+   * untouched to both the reviewer and to `reviewThreads`. Paired with
+   * {@link resolveThread} by the `resolve_thread` tool, which is how an agent
+   * says what it did and marks it handled in one step.
+   */
+  async replyToThread(threadId: string, body: string, opts: OpCtx = {}): Promise<void> {
+    if (!threadId || typeof threadId !== "string") {
+      throw new Error("replyToThread: threadId required");
+    }
+    const mutation =
+      "mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(" +
+      "input:{pullRequestReviewThreadId:$id,body:$body}){comment{id}}}";
+    await this.gh([
+      "api", "graphql",
+      "-f", `query=${mutation}`,
+      "-f", `id=${threadId}`,
+      "-f", `body=${body}`,
+    ]);
+    this.emitNotice(`Replied to a review thread`, "info", opts.chatId);
+  }
+
   /** Post a comment on a PR. */
   async addComment(
     repo: string,

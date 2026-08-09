@@ -18,6 +18,7 @@ import {
   WAIT_CAP_SECONDS,
   PR_POLL_INTERVAL_MS,
   NO_CHECKS_GRACE_MS,
+  REVIEW_QUEUE_GRACE_MS,
   type ManagerMcpBroker,
   type ManagerMcpMemory,
   type ManagerMcpGitHub,
@@ -222,6 +223,12 @@ interface PollSnap {
   /** `undefined` → []; `null` → a transient read failure the watcher tolerates. */
   checks?: CheckRun[] | null;
   threads?: ReviewThread[] | null;
+  /**
+   * The reviewer queue. `undefined` → the binding has no `prReviewState` at all
+   * (an older/narrower GitHub surface), which must stay silent rather than
+   * reporting a stall it can't see. `null` → a failed read this poll.
+   */
+  review?: { requested: string[]; reported: Array<{ author: string; state: string }> } | null;
 }
 
 /**
@@ -244,6 +251,11 @@ function fakeGitHub(
     },
     prChecks: async () => (cur().checks === undefined ? [] : cur().checks!),
     reviewThreads: async () => (cur().threads === undefined ? [] : cur().threads!),
+    // Only bound when at least one snapshot scripts a queue, so the "no
+    // prReviewState on this binding" path is exercised by every other test.
+    ...(snaps.some((s) => s.review !== undefined)
+      ? { prReviewState: async () => cur().review ?? null }
+      : {}),
   };
 }
 
@@ -417,6 +429,140 @@ describe("manager-mcp — watch_pr", () => {
     const again = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 120 }, {});
     await vi.advanceTimersByTimeAsync(120_000);
     expect(resultText(await again)).not.toContain("no CI checks configured");
+  });
+
+  // The failure this whole signal exists for: round one lands, the agent pushes
+  // fixes, and GitHub has already cleared the reviewer's request — so the PR is
+  // not "awaiting review", it is stopped, and every further watch_pr call burns
+  // its full quiet window on a review nobody is going to write.
+  it("reports a STALLED reviewer queue instead of waiting on a review nobody owes", async () => {
+    // A still-running check keeps every other signal quiet, so the stall is the
+    // only thing that can end this watch.
+    const gh = fakeGitHub([
+      {
+        merge: OPEN,
+        checks: [RUNNING_BUILD],
+        threads: [],
+        review: {
+          requested: [],
+          reported: [{ author: "Copilot", state: "CHANGES_REQUESTED" }],
+        },
+      },
+    ]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+    await vi.advanceTimersByTimeAsync(REVIEW_QUEUE_GRACE_MS);
+    const res = await p;
+
+    expect(resultText(res)).toContain('"reviewStalled":true');
+    expect(resultText(res)).toContain('"type":"review-stalled"');
+    expect(resultText(res)).toContain("nobody is queued to review");
+    // It names who already reported, so the agent knows this is round two.
+    expect(resultText(res)).toContain("Copilot already changes requested");
+    // And it must NOT tell the agent to just watch again — that's the loop.
+    expect(resultText(res)).toContain("request_review");
+    expect(resultText(res)).toMatch(/Do NOT just call watch_pr again/);
+  });
+
+  it("says nobody has EVER reviewed when the queue is empty and no review exists", async () => {
+    const gh = fakeGitHub([
+      { merge: OPEN, checks: [RUNNING_BUILD], threads: [], review: { requested: [], reported: [] } },
+    ]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+    await vi.advanceTimersByTimeAsync(REVIEW_QUEUE_GRACE_MS);
+
+    expect(resultText(await p)).toContain("nobody has reviewed");
+  });
+
+  it("stays quiet while a reviewer IS on the hook", async () => {
+    const gh = fakeGitHub([
+      {
+        merge: OPEN,
+        checks: [PASS_BUILD],
+        threads: [],
+        review: { requested: ["Copilot"], reported: [] },
+      },
+    ]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const res = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+
+    // Green still reports; the queue is healthy, so no stall.
+    expect(resultText(res)).toContain('"reviewStalled":false');
+    expect(resultText(res)).not.toContain("review-stalled");
+  });
+
+  it("re-fires the stall for a LATER round, not just the first", async () => {
+    // The queue is a live variable here rather than a poll script, so the test
+    // can play the real sequence: stall → re-request → report → stall again.
+    let queue: { requested: string[]; reported: Array<{ author: string; state: string }> } = {
+      requested: [],
+      reported: [{ author: "Copilot", state: "APPROVED" }],
+    };
+    const gh: ManagerMcpGitHub = {
+      prMergeState: async () => OPEN,
+      prChecks: async () => [RUNNING_BUILD],
+      reviewThreads: async () => [],
+      prReviewState: async () => queue,
+    };
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const first = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+    await vi.advanceTimersByTimeAsync(REVIEW_QUEUE_GRACE_MS);
+    expect(resultText(await first)).toContain("review-stalled");
+
+    // The agent re-requests: somebody is on the hook, so waiting is right again
+    // and the stall must go quiet.
+    queue = { requested: ["Copilot"], reported: [] };
+    const second = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(resultText(await second)).toContain('"timedOut":true');
+
+    // They report, GitHub clears the request, and the PR is stopped all over
+    // again. A once-ever flag would go silent here — the same "waiting on a
+    // review nobody owes" bug, one round later.
+    queue = { requested: [], reported: [{ author: "Copilot", state: "COMMENTED" }] };
+    const third = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+    await vi.advanceTimersByTimeAsync(REVIEW_QUEUE_GRACE_MS);
+    expect(resultText(await third)).toContain("review-stalled");
+  });
+
+  it("does not call an empty queue stalled inside the grace window", async () => {
+    // A request takes a beat to register after create_pr asks for it.
+    const gh = fakeGitHub([
+      { merge: OPEN, checks: null, threads: null, review: { requested: [], reported: [] } },
+    ]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(resultText(await p)).toContain('"timedOut":true');
+  });
+
+  it("treats an unreadable reviewer queue as no news, never as a stall", async () => {
+    const gh = fakeGitHub([{ merge: OPEN, checks: null, threads: null, review: null }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+    await vi.advanceTimersByTimeAsync(1800_000);
+
+    expect(resultText(await p)).not.toContain("review-stalled");
+  });
+
+  it("prints each review comment's thread id so resolve_thread is one call away", async () => {
+    const gh = fakeGitHub([{ merge: OPEN, checks: [], threads: [THREAD_A] }]);
+    const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
+
+    const res = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+
+    // Replying-without-resolving was the habit; the id being invisible in the
+    // prose is what made the hand-rolled graphql alternative feel necessary.
+    expect(resultText(res)).toContain("thread: T_A");
+    expect(resultText(res)).toContain("resolve_thread");
   });
 
   it("does not mistake an unreadable checks call for a PR without checks", async () => {
@@ -613,6 +759,291 @@ describe("manager-mcp — watch_pr", () => {
   });
 });
 
+/* -------------------------------------------------- resolve_thread */
+
+/** A GitHub binding that records the thread actions it was asked to perform. */
+function fakeThreadGitHub(
+  opts: { replyThrows?: string; resolveThrows?: string } = {},
+): ManagerMcpGitHub & { replies: Array<[string, string]>; resolved: string[] } {
+  const replies: Array<[string, string]> = [];
+  const resolved: string[] = [];
+  return {
+    replies,
+    resolved,
+    prMergeState: async () => OPEN,
+    prChecks: async () => [],
+    reviewThreads: async () => [],
+    replyToThread: async (id, body) => {
+      if (opts.replyThrows) throw new Error(opts.replyThrows);
+      replies.push([id, body]);
+    },
+    resolveThread: async (id) => {
+      if (opts.resolveThrows) throw new Error(opts.resolveThrows);
+      resolved.push(id);
+    },
+  };
+}
+
+describe("manager-mcp — resolve_thread", () => {
+  let bus: EventBus;
+  beforeEach(() => {
+    bus = new EventBus();
+  });
+
+  it("replies then resolves, in that order", async () => {
+    const gh = fakeThreadGitHub();
+    const { resolveThread } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await resolveThread.handler(
+      { threadId: "T_A", reply: "Renamed it in 4f2a1c.", resolve: undefined },
+      {},
+    );
+
+    expect(res.isError).toBeFalsy();
+    expect(gh.replies).toEqual([["T_A", "Renamed it in 4f2a1c."]]);
+    expect(gh.resolved).toEqual(["T_A"]);
+    expect(resultText(res)).toContain("Resolved thread T_A");
+  });
+
+  it("resolves with no reply when none is given", async () => {
+    const gh = fakeThreadGitHub();
+    const { resolveThread } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    await resolveThread.handler({ threadId: "T_A", reply: undefined, resolve: undefined }, {});
+
+    expect(gh.replies).toEqual([]);
+    expect(gh.resolved).toEqual(["T_A"]);
+  });
+
+  it("can reply WITHOUT resolving, and says the thread still blocks", async () => {
+    const gh = fakeThreadGitHub();
+    const { resolveThread } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await resolveThread.handler(
+      { threadId: "T_A", reply: "Disagree — out of scope here.", resolve: false },
+      {},
+    );
+
+    expect(gh.replies).toHaveLength(1);
+    expect(gh.resolved).toEqual([]);
+    expect(resultText(res)).toContain("left it OPEN");
+    expect(resultText(res)).toContain("block the merge");
+  });
+
+  // Reply-first is deliberate: a resolve that lands with a failed reply closes
+  // the thread with no explanation, which is worse than not resolving at all.
+  it("does NOT resolve when the reply fails", async () => {
+    const gh = fakeThreadGitHub({ replyThrows: "gh: 403" });
+    const { resolveThread } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await resolveThread.handler(
+      { threadId: "T_A", reply: "fixed", resolve: undefined },
+      {},
+    );
+
+    expect(res.isError).toBe(true);
+    expect(gh.resolved).toEqual([]);
+    expect(resultText(res)).toContain("was NOT resolved");
+  });
+
+  it("says the reply landed even when the resolve fails", async () => {
+    const gh = fakeThreadGitHub({ resolveThrows: "gh: node not found" });
+    const { resolveThread } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await resolveThread.handler(
+      { threadId: "T_A", reply: "fixed", resolve: undefined },
+      {},
+    );
+
+    expect(res.isError).toBe(true);
+    expect(gh.replies).toHaveLength(1);
+    expect(resultText(res)).toContain("Replied, but could not resolve");
+  });
+
+  it("refuses a no-op (no reply and no resolve) and a missing threadId", async () => {
+    const gh = fakeThreadGitHub();
+    const { resolveThread } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const noop = await resolveThread.handler(
+      { threadId: "T_A", reply: undefined, resolve: false },
+      {},
+    );
+    expect(noop.isError).toBe(true);
+    expect(resultText(noop)).toContain("would do nothing");
+
+    const missing = await resolveThread.handler(
+      { threadId: "  ", reply: "x", resolve: undefined },
+      {},
+    );
+    expect(missing.isError).toBe(true);
+    expect(resultText(missing)).toContain("requires a threadId");
+    expect(gh.replies).toEqual([]);
+  });
+
+  // A narrower GitHub surface (one that can watch but not act) must not be
+  // offered the tool, and must not silently no-op if it somehow is called.
+  it("reports unavailable when the GitHub binding can't resolve threads", async () => {
+    const { resolveThread } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: fakeGitHub([{ merge: OPEN }]), // watch-only binding
+    });
+
+    const res = await resolveThread.handler(
+      { threadId: "T_A", reply: undefined, resolve: undefined },
+      {},
+    );
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("not available");
+  });
+});
+
+/* -------------------------------------------------- request_review */
+
+describe("manager-mcp — request_review", () => {
+  let bus: EventBus;
+  beforeEach(() => {
+    bus = new EventBus();
+  });
+
+  const ghWith = (
+    result: { requested: string[]; failed: Array<{ reviewer: string; error: string }> },
+    defaults: readonly string[] = ["copilot-pull-request-reviewer[bot]"],
+  ): ManagerMcpGitHub & { asked: Array<{ n: number; list: readonly string[] }> } => {
+    const asked: Array<{ n: number; list: readonly string[] }> = [];
+    return {
+      asked,
+      prMergeState: async () => OPEN,
+      prChecks: async () => [],
+      reviewThreads: async () => [],
+      defaultReviewers: defaults,
+      requestReviewers: async (n, list) => {
+        asked.push({ n, list });
+        return result;
+      },
+    };
+  };
+
+  it("defaults to the project's configured reviewers", async () => {
+    const gh = ghWith({ requested: ["copilot-pull-request-reviewer[bot]"], failed: [] });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler({ number: 83, reviewers: undefined, repo: undefined }, {});
+
+    expect(gh.asked).toEqual([{ n: 83, list: ["copilot-pull-request-reviewer[bot]"] }]);
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("Requested review on PR #83");
+    expect(resultText(res)).toContain("watch_pr");
+  });
+
+  it("uses an explicit reviewer list over the default", async () => {
+    const gh = ghWith({ requested: ["alice"], failed: [] });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    await requestReview.handler({ number: 83, reviewers: ["alice"], repo: undefined }, {});
+
+    expect(gh.asked[0]!.list).toEqual(["alice"]);
+  });
+
+  // An empty list is a config fault, not something to retry — saying so is what
+  // stops the re-request/re-watch loop on a project that asks nobody.
+  it("names the config when there is nobody to ask", async () => {
+    const gh = ghWith({ requested: [], failed: [] }, []);
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler({ number: 83, reviewers: undefined, repo: undefined }, {});
+
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("workflow.pr.reviewers");
+    expect(gh.asked).toEqual([]); // never even tried
+  });
+
+  it("reports a partial failure without claiming success", async () => {
+    const gh = ghWith({ requested: [], failed: [{ reviewer: "ghost", error: "Not Found" }] });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler({ number: 83, reviewers: ["ghost"], repo: undefined }, {});
+
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("Nobody could be asked");
+    expect(resultText(res)).toContain("Not Found");
+    expect(resultText(res)).toContain("retrying the same list will fail the same way");
+  });
+
+  it("validates the PR number and reports an unavailable binding", async () => {
+    const gh = ghWith({ requested: [], failed: [] });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+    const bad = await requestReview.handler({ number: -1, reviewers: undefined, repo: undefined }, {});
+    expect(bad.isError).toBe(true);
+    expect(resultText(bad)).toContain("positive integer");
+
+    const { requestReview: unbound } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+    });
+    const res = await unbound.handler({ number: 1, reviewers: undefined, repo: undefined }, {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("not available");
+  });
+});
+
 /* ------------------------------------------------------------ approve_pr */
 
 /** A ready-to-land PR; each test overrides just the field it's exercising. */
@@ -791,13 +1222,18 @@ describe("prLandingBlockers", () => {
     expect(blocked[0].detail).toMatch(/allowNoReview: true/);
   });
 
-  it("points at create_pr when nobody was ASKED but reviewers ARE configured", () => {
+  // The PR is already OPEN, so "re-open it through create_pr" was advice the
+  // agent could not take — create_pr refuses a branch that already has a PR. The
+  // actionable move is to ask again, because GitHub clears a reviewer's request
+  // once they report and fix commits don't re-queue them.
+  it("points at request_review when nobody was ASKED but reviewers ARE configured", () => {
     const b = prLandingBlockers(readyPr({ submittedReviews: [], requestedReviewers: [] }), {
       requireReview: true,
       reviewers: ["copilot-pull-request-reviewer[bot]"],
     });
     expect(b[0].detail).toMatch(/copilot-pull-request-reviewer/);
-    expect(b[0].detail).toMatch(/create_pr/);
+    expect(b[0].detail).toMatch(/request_review/);
+    expect(b[0].detail).not.toMatch(/create_pr/);
   });
 
   // The loop that actually happened: this project configured NO reviewers, so

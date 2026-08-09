@@ -334,8 +334,10 @@ export class PrReviewWatcher {
       `New activity on your PR #${ref.number}${ref.url ? ` (${ref.url})` : ""}: ` +
       `${reasons.join("; ")}.\n\n` +
       "Work this review round: call `mcp__manager__watch_pr` for the details, address " +
-      "what it reports, resolve the threads you actually fixed, and keep going until " +
-      "the PR lands.";
+      "what it reports, call `mcp__manager__resolve_thread` for each thread you actually " +
+      "fixed, and once your fixes are pushed call `mcp__manager__request_review` to put " +
+      "the reviewer back on the hook (submitting a review clears their request — new " +
+      "commits do NOT re-queue them). Keep going until the PR lands.";
     await this.resumeFn(chatId, prompt).catch((err: unknown) => {
       // Leave the badge standing — the human can still act on it.
       this.bus.publish({

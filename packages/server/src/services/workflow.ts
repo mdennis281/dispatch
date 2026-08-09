@@ -180,8 +180,11 @@ export function buildWorkflowDirective(
     if (ctx.github) {
       lines.push(
         `4. **Review** — then call \`mcp__manager__watch_pr\` **in a loop**: it returns the ` +
-          `instant a check fails or a review comment lands. Fix what it reports, resolve the ` +
-          `threads you actually fixed, and call it again until it returns \`done:true\`. Never ` +
+          `instant a check fails or a review comment lands. Fix what it reports, call ` +
+          `\`mcp__manager__resolve_thread\` on each thread you actually fixed (a reply alone ` +
+          `leaves it outstanding), push, then \`mcp__manager__request_review\` to re-queue ` +
+          `the reviewer — submitting a review clears their request and your new commits do ` +
+          `NOT bring them back. Call \`watch_pr\` again until it returns \`done:true\`. Never ` +
           `hand-roll a \`gh pr checks\` polling loop.`,
       );
     } else {
