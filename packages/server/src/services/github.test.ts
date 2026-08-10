@@ -89,39 +89,77 @@ describe("owner/repo validation", () => {
 /* -------------------------------------------------------------------- READ */
 
 describe("prReviewState — the reviewer queue", () => {
+  /** The GraphQL queue payload, plus the `gh pr view` reviews payload. */
+  const queueJson = (
+    nodes: Array<{ __typename: string; login?: string; slug?: string }>,
+  ) => ({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewRequests: { nodes: nodes.map((requestedReviewer) => ({ requestedReviewer })) },
+        },
+      },
+    },
+  });
+
   it("maps requested reviewers and submitted reviews", async () => {
     const { exec, calls, json } = makeExec();
-    json({
-      reviewRequests: [{ login: "copilot-pull-request-reviewer" }, { slug: "reviewers" }],
-      latestReviews: [{ author: { login: "alice" }, state: "changes_requested" }],
-    });
+    json(queueJson([{ __typename: "User", login: "alice" }, { __typename: "Team", slug: "core" }]));
+    json({ latestReviews: [{ author: { login: "alice" }, state: "changes_requested" }] });
     const gh = new GitHubService({ bus, exec });
 
     const state = await gh.prReviewState(REPO, 42);
 
-    expect(calls[0]!.args).toEqual([
-      "pr", "view", "42", "--repo", REPO, "--json", "reviewRequests,latestReviews",
+    // The queue goes through graphql; the reviews stay on `gh pr view`.
+    expect(calls[0]!.args.slice(0, 2)).toEqual(["api", "graphql"]);
+    expect(calls[1]!.args).toEqual([
+      "pr", "view", "42", "--repo", REPO, "--json", "latestReviews",
     ]);
     expect(state).toEqual({
-      requested: ["copilot-pull-request-reviewer", "reviewers"],
+      requested: ["alice", "core"],
       reported: [{ author: "alice", state: "CHANGES_REQUESTED" }],
     });
   });
 
-  // The distinction the stall signal rests on: a PR with nobody requested still
-  // answers with empty ARRAYS. Only a failed read yields nothing at all, and
-  // coercing that into "nobody is queued" is a false alarm, not a reading.
-  it("returns null when the read FAILS, not an empty queue", async () => {
-    const { exec, push } = makeExec();
-    push({ stdout: "", exitCode: 1, stderr: "gh: could not resolve to a PullRequest" });
+  // THE bug that stuck every chat: `gh pr view --json reviewRequests` silently
+  // omits bot reviewers, so Copilot — the reviewer this workflow runs on — read
+  // as "nobody is queued" while it was actively working, ~60s after every
+  // create_pr. Only GraphQL with an explicit Bot fragment sees it.
+  it("sees a BOT reviewer in the queue", async () => {
+    const { exec, calls, json } = makeExec();
+    json(queueJson([{ __typename: "Bot", login: "copilot-pull-request-reviewer" }]));
+    json({ latestReviews: [] });
     const gh = new GitHubService({ bus, exec });
 
-    expect(await gh.prReviewState(REPO, 42)).toBeNull();
+    const state = await gh.prReviewState(REPO, 42);
+
+    expect(state!.requested).toEqual(["copilot-pull-request-reviewer"]);
+    // The query must actually ask for the bot shape, or the node comes back
+    // login-less and is filtered away exactly as before.
+    const q = calls[0]!.args.join(" ");
+    expect(q).toContain("... on Bot{login}");
+    expect(q).toContain("... on Mannequin{login}");
+  });
+
+  // The distinction the stall signal rests on: a PR with nobody requested still
+  // answers with empty nodes. Only a failed read yields nothing at all, and
+  // coercing that into "nobody is queued" is a false alarm, not a reading.
+  it("returns null when either read FAILS, not an empty queue", async () => {
+    const { exec, push, json } = makeExec();
+    push({ stdout: "", exitCode: 1, stderr: "gh: could not resolve to a PullRequest" });
+    json({ latestReviews: [] });
+    expect(await new GitHubService({ bus, exec }).prReviewState(REPO, 42)).toBeNull();
+
+    const second = makeExec();
+    second.json(queueJson([]));
+    second.push({ stdout: "", exitCode: 1, stderr: "gh: boom" });
+    expect(await new GitHubService({ bus, exec: second.exec }).prReviewState(REPO, 42)).toBeNull();
   });
 
   it("reports a genuinely empty queue as empty arrays", async () => {
     const { exec, json } = makeExec();
-    json({ reviewRequests: [], latestReviews: [] });
+    json(queueJson([]));
+    json({ latestReviews: [] });
     const gh = new GitHubService({ bus, exec });
 
     expect(await gh.prReviewState(REPO, 42)).toEqual({ requested: [], reported: [] });

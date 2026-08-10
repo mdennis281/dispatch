@@ -242,6 +242,20 @@ interface RawThreadNode {
   line?: number | null;
   comments?: { nodes?: Array<{ author?: { login?: string } | null; body?: string }> };
 }
+/** `reviewRequests` via GraphQL — the only source that surfaces BOT reviewers. */
+interface RawGraphqlReviewRequests {
+  data?: {
+    repository?: {
+      pullRequest?: {
+        reviewRequests?: {
+          nodes?: Array<{
+            requestedReviewer?: { __typename?: string; login?: string; slug?: string } | null;
+          } | null>;
+        };
+      } | null;
+    } | null;
+  };
+}
 interface RawGraphqlThreads {
   data?: {
     repository?: {
@@ -989,26 +1003,68 @@ export class GitHubService {
    * empty lists, and the caller decides what that means.
    */
   async prReviewState(repo: string, prNumber: number): Promise<PrReviewState | null> {
-    const raw = await this.ghJson<{
-      reviewRequests?: Array<{ login?: string; name?: string; slug?: string } | string>;
-      latestReviews?: Array<{ author?: { login?: string } | null; state?: string }>;
-    }>(
-      [
-        "pr", "view", String(prNumber), "--repo", this.assertRepo(repo),
-        "--json", "reviewRequests,latestReviews",
-      ],
-      { allowFail: true },
-    );
+    const { owner, name } = this.splitRepo(repo);
+    // The queue comes from GraphQL, NOT `gh pr view --json reviewRequests`.
+    //
+    // `gh pr view --json reviewRequests` SILENTLY DROPS BOT REVIEWERS. Measured
+    // against a PR with a live, outstanding Copilot request:
+    //
+    //   graphql (fragments below) → [{__typename:"Bot", login:"copilot-…"}]
+    //   gh pr view --json reviewRequests → []
+    //   REST /pulls/N/requested_reviewers → {"users":[],"teams":[]}   (no bots key at all)
+    //
+    // Copilot is the reviewer this whole workflow runs on, so `requested` was
+    // ALWAYS empty — and `watch_pr` read that as "nobody is queued" roughly a
+    // minute after every `create_pr`, while Copilot was still working (it takes
+    // ~4 minutes to report). Every chat then re-requested, got another empty
+    // read, went to `approve_pr`, hit `no-review`, and escalated to a human
+    // override card. The whole cascade was this one field.
+    //
+    // The `Mannequin` fragment is here because GitHub has represented Copilot as
+    // both a Bot and a Mannequin depending on how the request was made; an
+    // unfragmented union member decodes to a login-less node and vanishes the
+    // same way.
+    const query =
+      "query($owner:String!,$repo:String!,$number:Int!)" +
+      "{repository(owner:$owner,name:$repo){pullRequest(number:$number){" +
+      "reviewRequests(first:100){nodes{requestedReviewer{__typename " +
+      "... on User{login} ... on Bot{login} ... on Mannequin{login} " +
+      "... on Team{slug}}}}}}}";
+    const [reqRaw, revRaw] = await Promise.all([
+      this.ghJson<RawGraphqlReviewRequests>(
+        [
+          "api", "graphql",
+          "-f", `query=${query}`,
+          "-f", `owner=${owner}`,
+          "-f", `repo=${name}`,
+          "-F", `number=${prNumber}`,
+        ],
+        { allowFail: true },
+      ),
+      // `latestReviews` stays on `gh pr view` — it reports bot reviews correctly,
+      // and its "supersede on re-request" semantics are what `approve_pr` wants.
+      this.ghJson<{
+        latestReviews?: Array<{ author?: { login?: string } | null; state?: string }>;
+      }>(
+        [
+          "pr", "view", String(prNumber), "--repo", this.assertRepo(repo),
+          "--json", "latestReviews",
+        ],
+        { allowFail: true },
+      ),
+    ]);
     // `allowFail` yields null ONLY when the read failed — a PR with nobody
-    // requested still answers `{"reviewRequests":[],"latestReviews":[]}`. Passing
-    // the failure off as an empty queue is indistinguishable from "nobody is
-    // queued", which is precisely the false alarm `watch_pr`'s stall signal must
-    // never raise. Callers treat null as "couldn't read", not as news.
-    if (!raw) return null;
-    const requested = (raw.reviewRequests ?? [])
-      .map((x) => (typeof x === "string" ? x : (x.login ?? x.slug ?? x.name ?? "")))
+    // requested still answers with empty nodes. Passing the failure off as an
+    // empty queue is indistinguishable from "nobody is queued", which is
+    // precisely the false alarm `watch_pr`'s stall signal must never raise.
+    // Callers treat null as "couldn't read", not as news.
+    if (!reqRaw || !revRaw) return null;
+    const requested = (
+      reqRaw.data?.repository?.pullRequest?.reviewRequests?.nodes ?? []
+    )
+      .map((n) => n?.requestedReviewer?.login ?? n?.requestedReviewer?.slug ?? "")
       .filter(Boolean);
-    const reported = (raw.latestReviews ?? [])
+    const reported = (revRaw.latestReviews ?? [])
       .map((x) => ({ author: x.author?.login ?? "", state: String(x.state ?? "").toUpperCase() }))
       .filter((x) => x.author);
     return { requested, reported };
