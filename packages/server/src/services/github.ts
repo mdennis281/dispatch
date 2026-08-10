@@ -244,6 +244,14 @@ interface RawThreadNode {
 }
 /** `reviewRequests` via GraphQL — the only source that surfaces BOT reviewers. */
 interface RawGraphqlReviewRequests {
+  /**
+   * GraphQL reports failures IN the payload. `gh api graphql` exits non-zero for
+   * these but still prints `{"errors":[…]}` on stdout, so under `allowFail` the
+   * body parses fine with NO `data` — and `data?.…nodes ?? []` would read as an
+   * empty reviewer queue. That is the false stall this whole file is about, so
+   * the errors have to be modelled rather than optimistically ignored.
+   */
+  errors?: unknown[];
   data?: {
     repository?: {
       pullRequest?: {
@@ -999,8 +1007,12 @@ export class GitHubService {
    *
    * `approve_pr` needs the distinction: an outstanding review REQUEST with no
    * submitted review means nobody has looked yet, which under `requireReview` is
-   * not "ready to land" — it's "not started". Best-effort; a failed read yields
-   * empty lists, and the caller decides what that means.
+   * not "ready to land" — it's "not started".
+   *
+   * Returns **null** when the state could not be read. NOT empty lists: callers
+   * (`watch_pr`'s stall signal, `approve_pr`'s review gate) rely on null meaning
+   * "unreadable", because an empty queue reported for a failed read is exactly
+   * the false stall that hung every chat.
    */
   async prReviewState(repo: string, prNumber: number): Promise<PrReviewState | null> {
     const { owner, name } = this.splitRepo(repo);
@@ -1053,14 +1065,16 @@ export class GitHubService {
         { allowFail: true },
       ),
     ]);
-    // `allowFail` yields null ONLY when the read failed — a PR with nobody
-    // requested still answers with empty nodes. Passing the failure off as an
+    // A PR with nobody requested still answers with empty NODES, so the only
+    // thing that may produce an empty queue here is a genuine read. Anything
+    // else — no output, a GraphQL `errors` payload, a missing `data` — is
+    // "couldn't read" and must come back as null: passing a failure off as an
     // empty queue is indistinguishable from "nobody is queued", which is
     // precisely the false alarm `watch_pr`'s stall signal must never raise.
-    // Callers treat null as "couldn't read", not as news.
     if (!reqRaw || !revRaw) return null;
+    if (reqRaw.errors?.length || !reqRaw.data) return null;
     const requested = (
-      reqRaw.data?.repository?.pullRequest?.reviewRequests?.nodes ?? []
+      reqRaw.data.repository?.pullRequest?.reviewRequests?.nodes ?? []
     )
       .map((n) => n?.requestedReviewer?.login ?? n?.requestedReviewer?.slug ?? "")
       .filter(Boolean);

@@ -156,6 +156,17 @@ describe("prReviewState — the reviewer queue", () => {
     expect(await new GitHubService({ bus, exec: second.exec }).prReviewState(REPO, 42)).toBeNull();
   });
 
+  // `gh api graphql` prints `{"errors":[…]}` on stdout and exits non-zero, so
+  // under allowFail the body parses cleanly with NO `data` — and `?? []` would
+  // read that as "nobody is queued". Same false stall, different door.
+  it("treats a GraphQL errors payload as unreadable, not as an empty queue", async () => {
+    const { exec, json } = makeExec();
+    json({ errors: [{ message: "Something went wrong while executing your query." }] });
+    json({ latestReviews: [] });
+
+    expect(await new GitHubService({ bus, exec }).prReviewState(REPO, 42)).toBeNull();
+  });
+
   it("reports a genuinely empty queue as empty arrays", async () => {
     const { exec, json } = makeExec();
     json(queueJson([]));
