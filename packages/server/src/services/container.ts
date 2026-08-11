@@ -174,7 +174,11 @@ export function createServices(
   // OS-level port/pid inspector + bulk kill: reaps orphaned dev-server
   // grandchildren the runner records lost track of (server restart, half-killed
   // tree) and surfaces what's actually squatting a project's ports.
-  const processes = overrides.processes ?? new ProcessService({ store });
+  // …and, via `terminals`, attributes a listener on ANY port to the chat whose
+  // shell started it — the only way an agent's own dev server on a port nobody
+  // declared is visible at all.
+  const processes =
+    overrides.processes ?? new ProcessService({ store, terminals });
   const broker =
     overrides.broker ??
     new SessionBroker({

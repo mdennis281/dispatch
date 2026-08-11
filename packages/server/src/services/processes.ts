@@ -13,6 +13,20 @@
  *
  * The scan/describe/kill primitives are injectable so tests never shell out; the
  * default wiring parses `netstat -ano` (Windows) or `lsof` (POSIX) via execa.
+ *
+ * ── Why a port scan alone was not enough ─────────────────────────────────────
+ * The candidate-port sweep can only find a process on a port we already know to
+ * look at: a declared sub-app base, plus a hop window. An agent that starts its
+ * own dev server on a port it invented is invisible to it. That is not
+ * hypothetical — one chat on `the-salesman` (declared base 5273) ran Vite and an
+ * npc-sim on 47820/47823/47830/47833/47840/47843 across four worktrees, none of
+ * which this scan would ever have looked at, and none of which the UI could kill.
+ *
+ * So there is a second, port-agnostic source of truth: ANCESTRY. Every shell
+ * TerminalService owns has a pid and a chatId, so a listener whose process
+ * descends from one of those shells is attributable to that chat no matter which
+ * port it picked. That makes the panel a real answer to "what is this chat still
+ * running?" instead of "what is on the ports we declared?".
  */
 import { execa } from "execa";
 import treeKill from "tree-kill";
@@ -31,12 +45,26 @@ export interface ProjectProcess {
   pid: number;
   /** Process image name (e.g. `node.exe`), best-effort. */
   name?: string;
-  /** True when this port belongs to an active Dispatch runner. */
+  /** True when Dispatch can account for this listener (runner OR chat shell). */
   tracked: boolean;
   runnerId?: string;
   subAppId?: string;
   branch?: string;
   worktreePath?: string;
+  /** How we know about it: an app runner, a chat's shell, or nothing at all. */
+  source: "runner" | "terminal" | "orphan";
+  /** Chat that owns the shell this descends from (`source: "terminal"`). */
+  chatId?: string;
+  chatTitle?: string;
+  /** Name of that shell, e.g. "server" — what to `terminal_output` against. */
+  terminalName?: string;
+}
+
+/** One row of the OS process table (pid → parent), for ancestry attribution. */
+export interface ProcRow {
+  pid: number;
+  ppid: number;
+  name?: string;
 }
 
 /** Result of a bulk kill: one entry per requested pid. */
@@ -52,12 +80,22 @@ export type ScanFn = () => Promise<PortListener[]>;
 export type DescribeFn = (pids: number[]) => Promise<Map<number, string>>;
 /** Tree-kills a process (all descendants) — Windows-safe. */
 export type KillTreeFn = (pid: number) => Promise<void>;
+/** Enumerates the whole process table as pid → parent pid. */
+export type ProcTableFn = () => Promise<ProcRow[]>;
+
+/** The slice of TerminalService this needs: live shells and who owns them. */
+export interface TerminalRoots {
+  livePids(): { chatId: string; name: string; terminalId: string; pid: number }[];
+}
 
 export interface ProcessDeps {
   store: Store;
   scan?: ScanFn;
   describe?: DescribeFn;
   killTree?: KillTreeFn;
+  procTable?: ProcTableFn;
+  /** Omitted → no chat attribution, just the legacy declared-port sweep. */
+  terminals?: TerminalRoots;
   /**
    * How far above each declared base port to look for a listener a tool may have
    * hopped to (Vite/Colyseus scan upward off a busy base). Defaults to the
@@ -68,6 +106,15 @@ export interface ProcessDeps {
 }
 
 const ACTIVE_STATUSES = new Set(["starting", "running", "stopping"]);
+
+/** A live chat shell, resolved to the chat that owns it. */
+interface ShellRoot {
+  chatId: string;
+  chatTitle?: string;
+  name: string;
+  terminalId: string;
+  pid: number;
+}
 
 /* -------------------------------------------------------------- default wiring */
 
@@ -156,6 +203,62 @@ const defaultDescribe: DescribeFn = async (pids) => {
   return map;
 };
 
+/**
+ * Parse `ProcessId,ParentProcessId,Name` CSV from PowerShell's `ConvertTo-Csv`.
+ * Header row and any quoting are tolerated; malformed rows are skipped.
+ */
+export function parseProcCsv(output: string): ProcRow[] {
+  const rows: ProcRow[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const cells = line.split(",").map((c) => c.trim().replace(/^"|"$/g, ""));
+    if (cells.length < 3) continue;
+    const pid = Number(cells[0]);
+    const ppid = Number(cells[1]);
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid) || pid <= 0) continue;
+    rows.push({ pid, ppid, name: cells[2] || undefined });
+  }
+  return rows;
+}
+
+/** Parse `ps -e -o pid=,ppid=,comm=` into pid → parent rows. */
+export function parsePsTable(output: string): ProcRow[] {
+  const rows: ProcRow[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m) continue;
+    rows.push({ pid: Number(m[1]), ppid: Number(m[2]), name: m[3] || undefined });
+  }
+  return rows;
+}
+
+/**
+ * The process table. Windows has no `ps`, and `wmic` is gone from current
+ * Windows 11 images, so this goes through CIM — the same source Task Manager
+ * reads. `-NoProfile` because a user profile that prints anything would land in
+ * the CSV.
+ */
+const defaultProcTable: ProcTableFn = async () => {
+  if (process.platform === "win32") {
+    const res = await execa(
+      "powershell.exe",
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Csv -NoTypeInformation",
+      ],
+      { reject: false, buffer: true, windowsHide: true },
+    );
+    return parseProcCsv(res.stdout ?? "");
+  }
+  const res = await execa("ps", ["-e", "-o", "pid=,ppid=,comm="], {
+    reject: false,
+    buffer: true,
+  });
+  return parsePsTable(res.stdout ?? "");
+};
+
 const defaultKillTree: KillTreeFn = (pid) =>
   new Promise((res, rej) =>
     treeKill(pid, "SIGTERM", (err) => (err ? rej(err) : res())),
@@ -169,6 +272,8 @@ export class ProcessService {
   private readonly describe: DescribeFn;
   private readonly killTree: KillTreeFn;
   private readonly portWindow: number;
+  private readonly procTable: ProcTableFn;
+  private readonly terminals?: TerminalRoots;
 
   constructor(deps: ProcessDeps) {
     this.store = deps.store;
@@ -176,17 +281,23 @@ export class ProcessService {
     this.describe = deps.describe ?? defaultDescribe;
     this.killTree = deps.killTree ?? defaultKillTree;
     this.portWindow = deps.portWindow ?? PORT_SCAN_RANGE;
+    this.procTable = deps.procTable ?? defaultProcTable;
+    this.terminals = deps.terminals;
   }
 
   /**
    * Every OS process LISTENING on a port that belongs to this project — its
-   * sub-apps' declared bases (plus a hop window) and any port an active runner
-   * allocated. Each row is flagged `tracked` (matches a live runner) or an orphan.
+   * sub-apps' declared bases (plus a hop window), any port an active runner
+   * allocated, and any port a process descended from one of this project's chat
+   * shells has taken, whether or not we would ever have thought to look there.
+   * Each row is flagged `tracked` (a runner or a chat shell accounts for it) or
+   * an orphan.
    */
   async listForProject(projectId: string): Promise<ProjectProcess[]> {
     const project = await this.store.getProject(projectId).catch(() => null);
     const runners = (await this.store.listRunners().catch(() => []))
       .filter((r) => r.projectId === projectId && ACTIVE_STATUSES.has(r.status));
+    const shells = await this.shellsForProject(projectId);
 
     // Candidate ports: declared bases + hop window, plus runner-allocated ports.
     const candidates = new Set<number>();
@@ -200,7 +311,7 @@ export class ProcessService {
         candidates.add(p);
       }
     }
-    if (candidates.size === 0) return [];
+    if (candidates.size === 0 && shells.length === 0) return [];
 
     // Port → the active runner that allocated it (grandchild pid ≠ runner.pid, so
     // match by PORT, which is the stable identity between record and OS).
@@ -211,8 +322,12 @@ export class ProcessService {
       }
     }
 
-    const listeners = (await this.scan().catch(() => [])).filter((l) =>
-      candidates.has(l.port),
+    // pid → the chat shell it descends from. Built only when this project has
+    // live shells, because it costs a full process-table read.
+    const owner = await this.ownersByPid(shells);
+
+    const listeners = (await this.scan().catch(() => [])).filter(
+      (l) => candidates.has(l.port) || owner.has(l.pid),
     );
     // Dedup (a port can appear on both IPv4 and IPv6) keyed by port+pid.
     const seen = new Set<string>();
@@ -230,18 +345,79 @@ export class ProcessService {
     return unique
       .map((l): ProjectProcess => {
         const runner = runnerByPort.get(l.port);
+        // A runner record is the stronger claim: it names the sub-app and the
+        // worktree. Shell ancestry only fires for what no runner explains.
+        const shell = runner ? undefined : owner.get(l.pid);
         return {
           port: l.port,
           pid: l.pid,
           name: names.get(l.pid),
-          tracked: !!runner,
+          tracked: !!runner || !!shell,
+          source: runner ? "runner" : shell ? "terminal" : "orphan",
           runnerId: runner?.id,
           subAppId: runner?.subAppId,
           branch: runner?.branch,
           worktreePath: runner?.worktreePath,
+          chatId: shell?.chatId,
+          chatTitle: shell?.chatTitle,
+          terminalName: shell?.name,
         };
       })
       .sort((a, b) => a.port - b.port || a.pid - b.pid);
+  }
+
+  /** Live chat shells belonging to this project, with their chat titles. */
+  private async shellsForProject(projectId: string): Promise<ShellRoot[]> {
+    const live = this.terminals?.livePids() ?? [];
+    if (live.length === 0) return [];
+    const out: ShellRoot[] = [];
+    // Chats are looked up one by one and cached per chatId: a chat can own
+    // several shells, and the cap is 8 per chat, so this is a handful of reads.
+    const chats = new Map<string, { projectId?: string; title?: string } | null>();
+    for (const s of live) {
+      if (!chats.has(s.chatId)) {
+        chats.set(s.chatId, await this.store.getChat(s.chatId).catch(() => null));
+      }
+      const chat = chats.get(s.chatId);
+      if (chat?.projectId !== projectId) continue;
+      out.push({ ...s, chatTitle: chat.title });
+    }
+    return out;
+  }
+
+  /**
+   * Map every descendant pid of every shell back to that shell.
+   *
+   * The shell itself is included: `powershell.exe` never listens, but a shell
+   * whose command REPLACED it (or a fake in a test) might, and a row we can
+   * attribute is always better than an orphan. Walks children iteratively —
+   * a pid table can contain cycles after pid reuse, and `visited` makes that a
+   * non-event rather than a hung request.
+   */
+  private async ownersByPid(shells: ShellRoot[]): Promise<Map<number, ShellRoot>> {
+    const owner = new Map<number, ShellRoot>();
+    if (shells.length === 0) return owner;
+
+    const table = await this.procTable().catch(() => [] as ProcRow[]);
+    const children = new Map<number, number[]>();
+    for (const row of table) {
+      const kids = children.get(row.ppid);
+      if (kids) kids.push(row.pid);
+      else children.set(row.ppid, [row.pid]);
+    }
+
+    for (const shell of shells) {
+      const queue = [shell.pid];
+      while (queue.length) {
+        const pid = queue.pop()!;
+        // First shell to claim a pid keeps it — two shells cannot legitimately
+        // share a descendant, and a pid-reuse cycle must not re-enter here.
+        if (owner.has(pid)) continue;
+        owner.set(pid, shell);
+        for (const kid of children.get(pid) ?? []) queue.push(kid);
+      }
+    }
+    return owner;
   }
 
   /** Tree-kill each pid (deduped). Best-effort per pid; never throws. */

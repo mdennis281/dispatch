@@ -158,13 +158,17 @@ export interface ManagerMcpTerminals {
     command: string;
     timeoutMs?: number;
     signal?: AbortSignal;
+    background?: boolean;
   }): Promise<{
     output: string;
     exitCode: number | null;
     cwd: string;
     error?: string;
     timedOut?: boolean;
+    backgrounded?: boolean;
   }>;
+  /** Recent output of a named shell — how a backgrounded command is read back. */
+  tail(args: { name: string; lines?: number }): { output: string; found: boolean };
 }
 
 /**
@@ -2265,7 +2269,14 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "and environment SURVIVE between calls (unlike Bash, which resets each time). " +
       "Reuse the same `name` to keep a cwd (e.g. `cd` once, then run builds from " +
       "there) or an env var across commands. Returns the command output, its exit " +
-      "code, and the terminal's current working directory.",
+      "code, and the terminal's current working directory. " +
+      "For anything that does NOT return on its own — a dev server, a watcher — pass " +
+      "`background: true` and give it its own `name`: the call returns immediately, " +
+      "the process is tracked against this chat (visible and killable in Ports & " +
+      "processes, reaped with the chat), and you read its output with terminal_output. " +
+      "This is the ONLY sanctioned way to start a long-running process: a " +
+      "Bash/PowerShell `run_in_background` is invisible to Dispatch and orphans onto " +
+      "its port when the session ends.",
     {
       name: z
         .string()
@@ -2275,6 +2286,13 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .number()
         .optional()
         .describe("Give up waiting after this long (the command keeps running)."),
+      background: z
+        .boolean()
+        .optional()
+        .describe(
+          "Start it and return immediately — for a server/watcher that never exits. " +
+            "Use a dedicated terminal name; this one stays busy until it stops.",
+        ),
     },
     async (args, extra): Promise<CallToolResult> => {
       if (!ctx.terminals) {
@@ -2290,12 +2308,50 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         command,
         timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : undefined,
         signal: extraSignal(extra) ?? ctx.signal,
+        background: args.background === true,
       });
+
+      if (res.backgrounded) {
+        return textResult(
+          `[${name}] started in the background (cwd=${res.cwd}). ` +
+            `Read its output with terminal_output({ name: "${name}" }). ` +
+            `It is tracked against this chat and stops when the chat is torn down.`,
+        );
+      }
 
       const header = `[${name}] cwd=${res.cwd} exit=${res.exitCode ?? "n/a"}`;
       const body = res.output ? `\n${res.output}` : "";
       const note = res.error ? `\n(${res.error})` : "";
       return textResult(`${header}${body}${note}`, !!res.error && !res.timedOut);
+    },
+  );
+
+  const terminalOutput = tool(
+    "terminal_output",
+    "Read the recent output of a named terminal — how you check on a command you " +
+      "started with `terminal({ background: true })` (did the dev server come up? " +
+      "what did the watcher print?). Returns the tail of that shell's output.",
+    {
+      name: z.string().describe("The terminal name to read."),
+      lines: z
+        .number()
+        .optional()
+        .describe("How many trailing lines to return (default 50)."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.terminals) {
+        return textResult("The terminal tool is not available in this session.", true);
+      }
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      if (!name) return textResult("terminal_output requires a non-empty name.", true);
+      const res = ctx.terminals.tail({
+        name,
+        lines: typeof args.lines === "number" ? args.lines : undefined,
+      });
+      if (!res.found) {
+        return textResult(`No terminal named '${name}' in this chat.`, true);
+      }
+      return textResult(res.output ? `[${name}]\n${res.output}` : `[${name}] (no output yet)`);
     },
   );
 
@@ -2849,6 +2905,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     createPr,
     approvePr,
     terminal,
+    terminalOutput,
     remember,
     recall,
     forget,
@@ -2878,6 +2935,7 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   create_pr: "prCreate",
   approve_pr: "prApproval",
   terminal: "terminals",
+  terminal_output: "terminals",
   remember: "memory",
   recall: "memory",
   forget: "memory",
@@ -2976,6 +3034,7 @@ export function createManagerMcpServer(
     createPr,
     approvePr,
     terminal,
+    terminalOutput,
     remember,
     recall,
     forget,
@@ -3003,7 +3062,7 @@ export function createManagerMcpServer(
     ...(ctx.prCreate ? [createPr] : []),
     // Only when the project opted into auto-merge — no binding, no way to merge.
     ...(ctx.prApproval ? [approvePr] : []),
-    ...(ctx.terminals ? [terminal] : []),
+    ...(ctx.terminals ? [terminal, terminalOutput] : []),
     ...(ctx.memory ? [remember, recall, forget] : []),
     ...(ctx.runner ? [runSubapp] : []),
     // Spawning a sibling chat needs a project to spawn INTO and a live session to

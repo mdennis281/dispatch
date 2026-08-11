@@ -83,12 +83,18 @@ export interface ProjectProcess {
   port: number;
   pid: number;
   name?: string;
-  /** True when this port belongs to an active Dispatch runner. */
+  /** True when a runner OR a chat's shell accounts for this listener. */
   tracked: boolean;
   runnerId?: string;
   subAppId?: string;
   branch?: string;
   worktreePath?: string;
+  /** How Dispatch knows about it: an app runner, a chat's shell, or not at all. */
+  source: "runner" | "terminal" | "orphan";
+  /** Chat whose shell started it (`source: "terminal"`). */
+  chatId?: string;
+  chatTitle?: string;
+  terminalName?: string;
 }
 
 /** Per-pid outcome of a bulk kill (mirrors server KillResult). */

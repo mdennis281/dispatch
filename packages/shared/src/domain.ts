@@ -458,6 +458,17 @@ export const TerminalInfoSchema = z.object({
   lastExitCode: z.number().int().nullable().optional(),
   createdAt: z.number().int(),
   updatedAt: z.number().int().optional(),
+  /**
+   * Set while a BACKGROUND command holds this shell — a dev server, a watcher.
+   * The distinction matters to a human reading the Terminals tab: a shell that
+   * has been `busy` for two hours is either wedged or is deliberately hosting a
+   * long-lived process, and only this field tells them which.
+   */
+  background: z
+    .object({ command: z.string(), since: z.number().int() })
+    .optional(),
+  /** OS pid of the shell process (absent in tests / after exit). */
+  pid: z.number().int().optional(),
 });
 export type TerminalInfo = z.infer<typeof TerminalInfoSchema>;
 
