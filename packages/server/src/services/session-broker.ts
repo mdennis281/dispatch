@@ -83,6 +83,7 @@ import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
 import { bundledSkills } from "./bundled-skills.js";
 import { buildWorkflowDirective, createWorkflowGuardHook, inspectCwd } from "./workflow.js";
+import { createBackgroundShellGuardHook } from "./shell-guard.js";
 import { AgentCwdTracker } from "./agent-cwd.js";
 import { claudeExecutableOption } from "./runtime.js";
 
@@ -173,7 +174,13 @@ export function buildManagerToolsDirective(caps: {
   if (caps.terminals) {
     lines.push(
       "- `mcp__manager__terminal` — a NAMED, persistent shell (cwd + env survive between " +
-        "calls) for multi-step command sequences, instead of re-`cd`-ing in Bash each time.",
+        "calls) for multi-step command sequences, instead of re-`cd`-ing in Bash each time. " +
+        "Pass `background: true` (with its own `name`) for anything that never returns on " +
+        "its own — a dev server, a watcher — and read it back with " +
+        "`mcp__manager__terminal_output`. That is the ONLY sanctioned way to start a " +
+        "long-running process: a Bash/PowerShell `run_in_background` spawns outside the " +
+        "server's process tree, so Dispatch can neither show it nor stop it, and it is " +
+        "left holding its port when this chat ends. The guard refuses that flag.",
     );
   }
   if (caps.memory) {
@@ -2897,6 +2904,36 @@ export class SessionBroker {
       ],
     };
 
+    // …and refuse `run_in_background`, which spawns outside the server's process
+    // tree and orphans onto its port when the session ends. Only where there IS
+    // somewhere to redirect to: no TerminalService, no tracked alternative, no
+    // guard. See services/shell-guard.ts for the incident.
+    if (this.terminals) {
+      options.hooks = {
+        ...options.hooks,
+        PreToolUse: [
+          ...(options.hooks?.PreToolUse ?? []),
+          {
+            hooks: [
+              createBackgroundShellGuardHook({
+                enabled: () => Boolean(this.terminals),
+                onBlocked: () => {
+                  this.bus.publish({
+                    type: "notice",
+                    chatId: session.chatId,
+                    level: "info",
+                    text:
+                      "Blocked a background shell — redirected to " +
+                      "mcp__manager__terminal({ background: true }), which is tracked.",
+                  });
+                },
+              }),
+            ],
+          },
+        ],
+      };
+    }
+
     // …and enforce the same contract. A PreToolUse hook (not `canUseTool`) so it
     // still fires under `bypassPermissions`, which is exactly when an unattended
     // agent is most likely to reach for `git push origin main`.
@@ -3013,6 +3050,8 @@ export class SessionBroker {
           ? {
               run: (a) =>
                 terminals.run({ chatId: session.chatId, cwd, ...a }),
+              tail: (a) =>
+                terminals.tail(session.chatId, a.name, a.lines),
             }
           : undefined,
         // Bind the memory runner to this session's project, so remember/recall/

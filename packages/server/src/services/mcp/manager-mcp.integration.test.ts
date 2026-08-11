@@ -293,11 +293,14 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
       chatId: "c1",
       bus,
       broker: nullBroker,
-      terminals: { run: (a) => svc.run({ chatId: "c1", cwd: "C:\\start", ...a }) },
+      terminals: {
+        run: (a) => svc.run({ chatId: "c1", cwd: "C:\\start", ...a }),
+        tail: (a) => svc.tail("c1", a.name, a.lines),
+      },
     });
 
     const r1 = await terminal.handler(
-      { name: "build", command: "cd C:\\Windows", timeoutMs: undefined },
+      { name: "build", command: "cd C:\\Windows", timeoutMs: undefined, background: undefined },
       {},
     );
     expect(r1.isError).toBeFalsy();
@@ -305,7 +308,7 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
 
     // Second command to the SAME name reuses the one shell — cwd persisted.
     const r2 = await terminal.handler(
-      { name: "build", command: "printout here", timeoutMs: undefined },
+      { name: "build", command: "printout here", timeoutMs: undefined, background: undefined },
       {},
     );
     expect(resultText(r2)).toContain("cwd=C:\\Windows");

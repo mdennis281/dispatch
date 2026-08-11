@@ -28,14 +28,25 @@ beforeEach(() => {
  *   - `printout TEXT` → emit TEXT on stdout
  *   - `printerr TEXT` → emit TEXT on stderr
  *   - `fail`          → next marker reports exit=3, $?=False
+ *   - `hang`          → swallow the next marker, i.e. a command that never
+ *                       returns (a dev server) — what `background` exists for
  * When a write contains the service's sentinel marker, it echoes the marker line
  * `<marker>|<exit>|<ok>|<cwd>` (exactly what TerminalService parses).
  */
 class FakeShell extends EventEmitter implements ShellProcess {
   cwd: string;
   killed = false;
+  /** Set by tests that exercise pid-based behaviour (tree-kill, attribution). */
+  pid?: number;
+  private hanging = false;
+  private seenMarker = "";
   private pendingExit: number | null = null;
   private pendingOk = "True";
+
+  /** The marker of the most recent command — lets a test replay a swallowed one. */
+  lastMarker(): string {
+    return this.seenMarker;
+  }
   readonly stdout = new EventEmitter();
   readonly stderr = new EventEmitter();
   readonly stdin: { write: (c: string) => void; end?: () => void };
@@ -73,8 +84,27 @@ class FakeShell extends EventEmitter implements ShellProcess {
         this.pendingOk = "False";
         continue;
       }
+      if (line === "hang") {
+        this.hanging = true;
+        continue;
+      }
+      // `serve TEXT` — prints TEXT and then never returns, i.e. a dev server
+      // announcing its port and settling in.
+      const serve = line.match(/^serve\s+(.+)$/);
+      if (serve) {
+        this.hanging = true;
+        this.stdout.emit("data", Buffer.from(serve[1] + "\n"));
+        continue;
+      }
       const marker = line.match(/CMTERM[A-Za-z0-9_-]+/);
       if (marker) {
+        this.seenMarker = marker[0];
+        // A command that never returns never reaches its probe, so the marker
+        // for it never prints. Swallow exactly one to model that.
+        if (this.hanging) {
+          this.hanging = false;
+          continue;
+        }
         const exit = this.pendingExit === null ? 0 : this.pendingExit;
         const ok = this.pendingOk;
         this.pendingExit = null;
@@ -105,7 +135,13 @@ function fakeSpawn(): { spawn: SpawnShell; shells: FakeShell[] } {
   return { spawn, shells };
 }
 
-function makeService(over: { maxPerChat?: number; spawn?: SpawnShell } = {}) {
+function makeService(
+  over: {
+    maxPerChat?: number;
+    spawn?: SpawnShell;
+    killTree?: (pid: number) => void;
+  } = {},
+) {
   let n = 0;
   const { spawn, shells } = over.spawn
     ? { spawn: over.spawn, shells: [] as FakeShell[] }
@@ -113,7 +149,7 @@ function makeService(over: { maxPerChat?: number; spawn?: SpawnShell } = {}) {
   const svc = new TerminalService({
     bus,
     maxPerChat: over.maxPerChat,
-    deps: { spawn, genId: () => `t${++n}`, now: () => 1000 },
+    deps: { spawn, genId: () => `t${++n}`, now: () => 1000, killTree: over.killTree },
   });
   return { svc, shells };
 }
@@ -364,5 +400,158 @@ describe("TerminalService — create", () => {
     svc.create("c1", "one", "C:\\r");
     svc.kill("c1::one");
     expect(svc.create("c1", "two", "C:\\r").terminal).toBeDefined();
+  });
+});
+
+/* --------------------------------------------------- background + teardown */
+
+describe("TerminalService — background commands", () => {
+  it("returns immediately for a command that never finishes", async () => {
+    const { svc } = makeService();
+    const res = await svc.run({
+      chatId: "c1",
+      name: "server",
+      command: "serve listening on 47820",
+      cwd: "C:\\repo",
+      background: true,
+    });
+    expect(res.backgrounded).toBe(true);
+    expect(res.error).toBeUndefined();
+    // The shell is still held by the command — that is the whole point.
+    expect(svc.listChat("c1")[0].background?.command).toBe("serve listening on 47820");
+  });
+
+  it("keeps streaming that command's output into the tail", async () => {
+    const { svc } = makeService();
+    await svc.run({
+      chatId: "c1",
+      name: "server",
+      command: "serve listening on 47820",
+      cwd: "C:\\repo",
+      background: true,
+    });
+    const tail = svc.tail("c1", "server");
+    expect(tail.found).toBe(true);
+    expect(tail.output).toContain("listening on 47820");
+  });
+
+  it("tail reports a name that was never opened", () => {
+    const { svc } = makeService();
+    expect(svc.tail("c1", "nope")).toEqual({ output: "", found: false });
+  });
+
+  it("refuses a second command on a shell a background one holds", async () => {
+    const { svc } = makeService();
+    await svc.run({
+      chatId: "c1",
+      name: "server",
+      command: "serve up",
+      cwd: "C:\\repo",
+      background: true,
+    });
+    // Queueing behind a dev server would hang until the 10-minute timeout, so
+    // this has to come back NOW, naming the occupied shell.
+    const res = await svc.run({
+      chatId: "c1",
+      name: "server",
+      command: "printout hi",
+      cwd: "C:\\repo",
+    });
+    expect(res.error).toMatch(/busy running a background command/i);
+    expect(res.error).toContain("serve up");
+  });
+
+  it("frees the shell when the background command finally exits", async () => {
+    const { svc, shells } = makeService();
+    await svc.run({
+      chatId: "c1",
+      name: "server",
+      command: "serve up",
+      cwd: "C:\\repo",
+      background: true,
+    });
+    // The real marker lands late — when the server is stopped. Replay it.
+    const marker = shells[0].lastMarker();
+    shells[0].stdout.emit("data", Buffer.from(`${marker}|0|True|C:\\repo\n`));
+    await new Promise((r) => setImmediate(r));
+
+    expect(svc.listChat("c1")[0].background).toBeUndefined();
+    const res = await svc.run({
+      chatId: "c1",
+      name: "server",
+      command: "printout hi",
+      cwd: "C:\\repo",
+    });
+    expect(res.output).toBe("hi");
+  });
+
+  it("a foreground run is unaffected (no background flag, no early return)", async () => {
+    const { svc } = makeService();
+    const res = await svc.run({
+      chatId: "c1",
+      name: "main",
+      command: "printout hello",
+      cwd: "C:\\repo",
+    });
+    expect(res.backgrounded).toBeUndefined();
+    expect(res.output).toBe("hello");
+  });
+});
+
+describe("TerminalService — kill reaps the whole tree", () => {
+  it("tree-kills by pid, not just the shell", () => {
+    const killed: number[] = [];
+    const { svc, shells } = makeService({ killTree: (pid) => killed.push(pid) });
+    svc.create("c1", "server", "C:\\repo");
+    shells[0].pid = 4242;
+
+    svc.kill("c1::server");
+    // Without this the shell dies and the dev server it started keeps the port.
+    expect(killed).toEqual([4242]);
+    expect(shells[0].killed).toBe(true);
+  });
+
+  it("still kills a shell that never got a pid", () => {
+    const killed: number[] = [];
+    const { svc, shells } = makeService({ killTree: (pid) => killed.push(pid) });
+    svc.create("c1", "server", "C:\\repo");
+    svc.kill("c1::server");
+    expect(killed).toEqual([]);
+    expect(shells[0].killed).toBe(true);
+  });
+
+  it("dispose tree-kills every shell", () => {
+    const killed: number[] = [];
+    const { svc, shells } = makeService({ killTree: (pid) => killed.push(pid) });
+    svc.create("c1", "a", "C:\\repo");
+    svc.create("c2", "b", "C:\\repo");
+    shells[0].pid = 11;
+    shells[1].pid = 22;
+    svc.dispose();
+    expect(killed.sort((a, b) => a - b)).toEqual([11, 22]);
+  });
+});
+
+describe("TerminalService — livePids", () => {
+  it("reports live shells with their chat, and drops the dead", () => {
+    const { svc, shells } = makeService();
+    svc.create("c1", "server", "C:\\repo");
+    svc.create("c2", "build", "C:\\repo");
+    shells[0].pid = 100;
+    shells[1].pid = 200;
+
+    expect(svc.livePids()).toEqual([
+      { chatId: "c1", name: "server", terminalId: "c1::server", pid: 100 },
+      { chatId: "c2", name: "build", terminalId: "c2::build", pid: 200 },
+    ]);
+
+    shells[1].kill();
+    expect(svc.livePids().map((p) => p.pid)).toEqual([100]);
+  });
+
+  it("omits a shell with no pid — there is nothing to attribute through", () => {
+    const { svc } = makeService();
+    svc.create("c1", "server", "C:\\repo");
+    expect(svc.livePids()).toEqual([]);
   });
 });

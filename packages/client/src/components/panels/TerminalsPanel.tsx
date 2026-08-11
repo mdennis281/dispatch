@@ -60,7 +60,13 @@ function CommandInput({ terminal }: { terminal: TerminalInfo }) {
         }}
         spellCheck={false}
         disabled={busy}
-        placeholder={busy ? "running…" : "Run a command…"}
+        placeholder={
+          terminal.background
+            ? "hosting a background command — use another shell"
+            : busy
+              ? "running…"
+              : "Run a command…"
+        }
         aria-label={`Run a command in ${terminal.name}`}
         className="h-6 min-w-0 flex-1 rounded-md bg-transparent px-1 cm-mono !text-xs text-primary outline-none placeholder:text-faint disabled:opacity-60"
       />
@@ -103,7 +109,16 @@ function TerminalCard({ terminal }: { terminal: TerminalInfo }) {
               pulse={terminal.busy}
               size={5}
             />
-            {terminal.busy ? "running…" : live ? "ready" : "exited"}
+            {/* A shell held by a dev server is busy FOREVER by design. Saying
+                "running…" for six hours reads as wedged; naming the command it
+                is hosting is the difference between a bug and a fact. */}
+            {terminal.background
+              ? `serving · ${terminal.background.command}`
+              : terminal.busy
+                ? "running…"
+                : live
+                  ? "ready"
+                  : "exited"}
           </span>
         </span>
         {terminal.lastExitCode !== undefined && terminal.lastExitCode !== null && (

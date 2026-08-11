@@ -26,8 +26,23 @@
  *
  * The shell spawn is injected (`deps.spawn`) so tests drive a scripted fake
  * process — no real PowerShell, fully deterministic.
+ *
+ * ── Background commands, and why they belong HERE ────────────────────────────
+ * A dev server can't run through the sentinel path: `vite --port …` never
+ * returns, so the marker never lands and that shell is wedged for the rest of
+ * the chat. Agents therefore reached for the harness's own
+ * `Bash/PowerShell{run_in_background:true}`, which spawns a grandchild of the
+ * `claude` subprocess that Dispatch has NO record of — invisible to the Ports &
+ * processes panel and orphaned when the session goes away. (One `the-salesman`
+ * chat left four Vite servers and four npc-sim servers on 478xx that way.)
+ *
+ * `run({background:true})` closes that hole: same named shell, same scrollback,
+ * but the call returns as soon as the command is WRITTEN instead of waiting for
+ * the marker. The shell stays registered, so its pid is a handle the panel can
+ * list, attribute to a chat, and tree-kill.
  */
 import { spawn as nodeSpawn } from "node:child_process";
+import treeKill from "tree-kill";
 import { nanoid } from "nanoid";
 import type { TerminalInfo } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
@@ -59,6 +74,14 @@ export interface ShellProcess {
   kill(signal?: string): void;
   on(event: "exit", listener: (code: number | null) => void): void;
   on(event: "error", listener: (err: Error) => void): void;
+  /**
+   * Present on a real child process; absent on the test fakes. It is the handle
+   * everything downstream hangs off — `ProcessService` walks the process table
+   * DOWN from it to attribute a stray listener to this chat, and `kill()` tree-
+   * kills it. Without it we could only kill the shell itself and would leave the
+   * dev server it started running (the exact orphan this service exists to stop).
+   */
+  pid?: number;
 }
 
 /** Factory for a shell process rooted at `cwd`. Defaults to piped PowerShell. */
@@ -74,10 +97,17 @@ export const defaultSpawnShell: SpawnShell = (cwd) =>
 
 /* ---------------------------------------------------------------------- deps */
 
+/** Tree-kills a process and every descendant (Windows-safe). */
+export type KillTreeFn = (pid: number) => void;
+
+/** Default: `tree-kill`, same primitive RunnerService and ProcessService use. */
+const defaultKillTree: KillTreeFn = (pid) => treeKill(pid, "SIGTERM", () => {});
+
 export interface TerminalServiceDeps {
   spawn?: SpawnShell;
   genId?: () => string;
   now?: () => number;
+  killTree?: KillTreeFn;
 }
 
 export interface TerminalServiceOptions {
@@ -106,6 +136,13 @@ export interface RunTerminalArgs {
   timeoutMs?: number;
   /** Cancels the wait (session abort) — the shell stays alive. */
   signal?: AbortSignal;
+  /**
+   * Start the command and return immediately, without waiting for it to finish.
+   * For things that never finish on purpose — a dev server, a watcher, a tail.
+   * Output keeps streaming into this terminal's scrollback (readable with
+   * `tail()`), and the shell stays busy until the command actually exits.
+   */
+  background?: boolean;
 }
 
 /** Result surfaced to the agent (and logged). */
@@ -116,6 +153,8 @@ export interface RunTerminalResult {
   /** Set when the run could not complete (cap hit / timeout / cancelled). */
   error?: string;
   timedOut?: boolean;
+  /** True when this returned early because `background` was requested. */
+  backgrounded?: boolean;
 }
 
 /* ------------------------------------------------------------------- markers */
@@ -127,6 +166,12 @@ const SENTINEL_PREFIX = "CMTERMSENTINEL_";
 
 /** Default per-command timeout (10 min) — a runaway build shouldn't wedge a run. */
 const DEFAULT_TIMEOUT_MS = 600_000;
+
+/** Shorten a command for a one-line error message. */
+function truncate(s: string, max: number): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
 
 /* ------------------------------------------------------------- internal state */
 
@@ -154,6 +199,8 @@ interface Terminal {
     resolve: (r: { exitCode: number | null; cwd: string }) => void;
     output: string[];
   };
+  /** Set while a `background` command holds this shell (see `run`). */
+  background?: { command: string; since: number };
 }
 
 /* =============================================================== TerminalService */
@@ -165,6 +212,7 @@ export class TerminalService {
   private readonly now: () => number;
   private readonly maxPerChat: number;
   private readonly scrollbackCap: number;
+  private readonly killTree: KillTreeFn;
 
   private readonly terminals = new Map<string, Terminal>();
 
@@ -173,6 +221,7 @@ export class TerminalService {
     this.spawn = opts.deps?.spawn ?? defaultSpawnShell;
     this.genId = opts.deps?.genId ?? (() => nanoid());
     this.now = opts.deps?.now ?? (() => Date.now());
+    this.killTree = opts.deps?.killTree ?? defaultKillTree;
     this.maxPerChat = Math.max(1, opts.maxPerChat ?? 8);
     this.scrollbackCap = Math.max(1, opts.scrollbackCap ?? 500);
   }
@@ -208,6 +257,23 @@ export class TerminalService {
         };
       }
       term = this.open(key, args.chatId, name, args.cwd ?? process.cwd());
+    }
+
+    // A background command owns its shell until it exits. Queueing behind it
+    // would silently hang the caller for as long as the dev server lives, so
+    // refuse immediately and say which name is occupied — the agent's next move
+    // is another terminal, not a ten-minute wait for a timeout.
+    if (term.background) {
+      const held = term.background.command;
+      return {
+        output: "",
+        exitCode: null,
+        cwd: term.cwd,
+        error:
+          `Terminal '${name}' is busy running a background command (${truncate(held, 60)}). ` +
+          `Use a different terminal name, read this one with terminal_output, ` +
+          `or stop it from the Terminals tab.`,
+      };
     }
 
     // Serialize behind any in-flight run on this terminal.
@@ -316,6 +382,7 @@ export class TerminalService {
         settled = true;
         for (const c of cleanups) c();
         term.pending = undefined;
+        term.background = undefined;
         term.busy = false;
         if (typeof r.exitCode === "number" || r.exitCode === null) {
           term.lastExitCode = r.exitCode;
@@ -335,21 +402,26 @@ export class TerminalService {
         },
       };
 
-      // Timeout: report partial output but keep the shell alive.
+      // Timeout: report partial output but keep the shell alive. A background
+      // command has no deadline — never finishing is the point — and both the
+      // timeout and the abort path below would clear `pending`/`background`,
+      // marking the shell free while a dev server is still holding it.
       const timeoutMs = args.timeoutMs && args.timeoutMs > 0 ? args.timeoutMs : DEFAULT_TIMEOUT_MS;
-      const timer = setTimeout(() => {
-        finish({
-          output: output.join("\n"),
-          exitCode: null,
-          cwd: term.cwd,
-          timedOut: true,
-          error: `Command timed out after ${timeoutMs}ms (still running in the background).`,
-        });
-      }, timeoutMs);
-      cleanups.push(() => clearTimeout(timer));
+      if (!args.background) {
+        const timer = setTimeout(() => {
+          finish({
+            output: output.join("\n"),
+            exitCode: null,
+            cwd: term.cwd,
+            timedOut: true,
+            error: `Command timed out after ${timeoutMs}ms (still running in the background).`,
+          });
+        }, timeoutMs);
+        cleanups.push(() => clearTimeout(timer));
+      }
 
       // Session abort → stop waiting (shell survives for the next turn).
-      const sig = args.signal;
+      const sig = args.background ? undefined : args.signal;
       if (sig) {
         if (sig.aborted) {
           finish({
@@ -387,6 +459,21 @@ export class TerminalService {
           exitCode: null,
           cwd: term.cwd,
           error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+
+      // Backgrounded: hand the caller back the shell NOW. `pending` deliberately
+      // stays armed — when the command does eventually exit, its marker lands,
+      // `finish` runs, and the terminal reports itself free again.
+      if (args.background) {
+        term.background = { command, since: this.now() };
+        this.publishUpdate(term);
+        resolve({
+          output: "",
+          exitCode: null,
+          cwd: term.cwd,
+          backgrounded: true,
         });
       }
     });
@@ -478,11 +565,7 @@ export class TerminalService {
     const term = this.terminals.get(terminalId);
     if (!term) return false;
     this.terminals.delete(terminalId);
-    try {
-      term.proc.kill();
-    } catch {
-      /* already dead */
-    }
+    this.killProc(term);
     this.bus.publish({ type: "terminal-closed", terminalId: term.id, chatId: term.chatId });
     return true;
   }
@@ -496,14 +579,34 @@ export class TerminalService {
 
   /** Kill every terminal (process teardown). */
   dispose(): void {
-    for (const term of this.terminals.values()) {
+    for (const term of this.terminals.values()) this.killProc(term);
+    this.terminals.clear();
+  }
+
+  /**
+   * Kill a shell AND everything it started.
+   *
+   * `proc.kill()` alone only reaps the powershell: a shell that launched a dev
+   * server leaves that server holding its port, which is precisely the orphan
+   * the Ports & processes panel was built to clean up after. So tree-kill by pid
+   * first (same primitive RunnerService uses) and keep `proc.kill()` as the
+   * fallback for a shell with no pid — every test fake, and any spawn that
+   * failed before the OS gave it one.
+   */
+  private killProc(term: Terminal): void {
+    const pid = term.proc.pid;
+    if (typeof pid === "number" && pid > 0) {
       try {
-        term.proc.kill();
+        this.killTree(pid);
       } catch {
-        /* ignore */
+        /* fall through to the direct kill */
       }
     }
-    this.terminals.clear();
+    try {
+      term.proc.kill();
+    } catch {
+      /* already dead */
+    }
   }
 
   /* -------------------------------------------------------- introspection */
@@ -521,6 +624,39 @@ export class TerminalService {
     return this.terminals.get(terminalId)?.scrollback.slice() ?? [];
   }
 
+  /**
+   * The last `lines` of a named shell's output — how the agent reads a command
+   * it backgrounded. Without this a background start would be write-only: the
+   * output goes to the Terminals tab, which the agent cannot see.
+   */
+  tail(chatId: string, name: string, lines = 50): { output: string; found: boolean } {
+    const term = this.terminals.get(TerminalService.key(chatId, name.trim() || "main"));
+    if (!term) return { output: "", found: false };
+    const n = Math.max(1, Math.min(lines, this.scrollbackCap));
+    const out = term.scrollback
+      .filter((l) => l.stream !== "command")
+      .slice(-n)
+      .map((l) => l.chunk)
+      .join("\n");
+    return { output: out, found: true };
+  }
+
+  /**
+   * Live shell pids, with the chat that owns them — the roots `ProcessService`
+   * walks DOWN from to attribute a listener on any port to a chat. A shell whose
+   * spawn never got a pid is simply absent (nothing to attribute through).
+   */
+  livePids(): { chatId: string; name: string; terminalId: string; pid: number }[] {
+    const out: { chatId: string; name: string; terminalId: string; pid: number }[] = [];
+    for (const t of this.terminals.values()) {
+      const pid = t.proc.pid;
+      if (t.status === "live" && typeof pid === "number" && pid > 0) {
+        out.push({ chatId: t.chatId, name: t.name, terminalId: t.id, pid });
+      }
+    }
+    return out;
+  }
+
   private view(t: Terminal): TerminalInfo {
     return {
       id: t.id,
@@ -533,6 +669,8 @@ export class TerminalService {
       lastExitCode: t.lastExitCode,
       createdAt: t.createdAt,
       updatedAt: t.updatedAt,
+      ...(t.background ? { background: t.background } : {}),
+      ...(typeof t.proc.pid === "number" ? { pid: t.proc.pid } : {}),
     };
   }
 

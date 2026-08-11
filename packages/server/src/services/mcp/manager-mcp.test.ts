@@ -2208,10 +2208,11 @@ describe("manager-mcp — terminal", () => {
           calls.push({ name, command });
           return { output: "build ok", exitCode: 0, cwd: "C:\\repo" };
         },
+        tail: () => ({ output: "", found: false }),
       },
     });
 
-    const res = await terminal.handler({ name: "build", command: "pnpm build", timeoutMs: undefined }, {});
+    const res = await terminal.handler({ name: "build", command: "pnpm build", timeoutMs: undefined, background: undefined }, {});
     expect(calls).toEqual([{ name: "build", command: "pnpm build" }]);
     expect(res.isError).toBeFalsy();
     expect(resultText(res)).toContain("[build]");
@@ -2232,16 +2233,17 @@ describe("manager-mcp — terminal", () => {
           cwd: "",
           error: "Terminal cap reached (8 shells for this chat).",
         }),
+        tail: () => ({ output: "", found: false }),
       },
     });
-    const res = await terminal.handler({ name: "x", command: "ls", timeoutMs: undefined }, {});
+    const res = await terminal.handler({ name: "x", command: "ls", timeoutMs: undefined, background: undefined }, {});
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("cap reached");
   });
 
   it("reports unavailable when no TerminalService is wired", async () => {
     const { terminal } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}) });
-    const res = await terminal.handler({ name: "x", command: "ls", timeoutMs: undefined }, {});
+    const res = await terminal.handler({ name: "x", command: "ls", timeoutMs: undefined, background: undefined }, {});
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("not available");
   });
@@ -2251,9 +2253,12 @@ describe("manager-mcp — terminal", () => {
       chatId: "c1",
       bus,
       broker: fakeBroker({}),
-      terminals: { run: async () => ({ output: "", exitCode: 0, cwd: "" }) },
+      terminals: {
+        run: async () => ({ output: "", exitCode: 0, cwd: "" }),
+        tail: () => ({ output: "", found: false }),
+      },
     });
-    const res = await terminal.handler({ name: "x", command: "   ", timeoutMs: undefined }, {});
+    const res = await terminal.handler({ name: "x", command: "   ", timeoutMs: undefined, background: undefined }, {});
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("requires a command");
   });

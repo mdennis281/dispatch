@@ -18,11 +18,13 @@ import { cn } from "../../lib/cn.js";
 
 /**
  * OS-level process inspector for a project: what's ACTUALLY listening on its
- * sub-apps' ports, cross-referenced with Dispatch's live runners. Untracked
- * listeners (orphans a server restart or half-killed tree left behind) are flagged
- * so you can reap them — individually or in bulk — even though the runner records
- * lost track of them. This is the escape hatch for "port already in use" when the
- * UI shows nothing running.
+ * sub-apps' ports, cross-referenced with Dispatch's live runners AND with the
+ * shells its chats own — a dev server an agent started on a port nobody declared
+ * shows up here labelled with the chat that started it, which is the only place
+ * it is visible at all. Untracked listeners (orphans a server restart or a
+ * half-killed tree left behind) are flagged so you can reap them — individually
+ * or in bulk — even though the runner records lost track of them. This is the
+ * escape hatch for "port already in use" when the UI shows nothing running.
  */
 export function ProcessesPanel({ projectId }: { projectId: string }) {
   const [open, setOpen] = useState(false);
@@ -134,14 +136,30 @@ export function ProcessesPanel({ projectId }: { projectId: string }) {
                       {p.subAppId && (
                         <span className="text-faint"> · {p.subAppId}</span>
                       )}
+                      {/* A chat's shell started this one: say WHOSE, because that
+                          is the actionable half — you stop it by stopping the
+                          chat's terminal, not by hunting the pid. */}
+                      {p.source === "terminal" && (
+                        <span className="text-faint">
+                          {" "}
+                          · {p.chatTitle ?? "chat"}
+                        </span>
+                      )}
                     </span>
                     <span className="flex items-center gap-1.5 cm-mono !text-2xs text-faint">
                       pid {p.pid}
                       {p.branch && <span className="truncate">· {p.branch}</span>}
+                      {p.terminalName && (
+                        <span className="truncate">· {p.terminalName}</span>
+                      )}
                     </span>
                   </span>
-                  <Chip tone={p.tracked ? "muted" : "warn"}>
-                    {p.tracked ? "tracked" : "orphan"}
+                  <Chip tone={p.source === "orphan" ? "warn" : "muted"}>
+                    {p.source === "runner"
+                      ? "tracked"
+                      : p.source === "terminal"
+                        ? "chat"
+                        : "orphan"}
                   </Chip>
                   <IconButton
                     size="sm"
