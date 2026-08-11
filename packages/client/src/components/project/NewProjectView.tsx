@@ -57,6 +57,7 @@ import { ManifestPreview } from "./ManifestPreview.js";
 import { api, type PathProbe } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
 import { useProjects } from "../../stores/projects.js";
+import { selectProject } from "../../stores/navigation.js";
 import { useNotices } from "../../stores/notices.js";
 import { useView } from "../../stores/view.js";
 import {
@@ -354,7 +355,7 @@ export function NewProjectView() {
           });
       createdRef.current = saved.id;
       useProjects.getState().upsertProject(saved);
-      useProjects.getState().setActiveProject(saved.id);
+      selectProject(saved.id);
       return saved.id;
     })();
     inFlightRef.current = run;

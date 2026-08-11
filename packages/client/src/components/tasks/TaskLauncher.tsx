@@ -30,10 +30,9 @@ import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
 import { taskIcon } from "../../lib/taskIcons.js";
 import { useTaskRunPrefs } from "../../lib/taskPrefs.js";
-import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
 import { useNotices } from "../../stores/notices.js";
-import { useView } from "../../stores/view.js";
+import { selectChat } from "../../stores/navigation.js";
 
 export interface TaskLauncherProps {
   taskId: AgentTaskId;
@@ -138,8 +137,7 @@ export function TaskLauncher({
       // Focus the chat AND switch to the chat surface: launching from Source
       // Control otherwise "does nothing" — the chat is active behind a view the
       // user isn't looking at.
-      useChats.getState().setActiveChat(out.chat.id);
-      useView.getState().setView("chat");
+      selectChat(out.chat.id);
       useNotices.getState().push({ level: "info", text: `Started “${out.chat.title}”` });
       onLaunched?.(out.chat.id);
     } catch (e) {

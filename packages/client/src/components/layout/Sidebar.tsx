@@ -29,6 +29,7 @@ import { ScrollArea } from "../ui/ScrollArea.js";
 import { useProjects, useActiveProject } from "../../stores/projects.js";
 import { useChats, useProjectChats } from "../../stores/chats.js";
 import { useView, openOverlay } from "../../stores/view.js";
+import { selectChat, selectProject } from "../../stores/navigation.js";
 import { useProjectMemories } from "../../stores/memory.js";
 import { useGit, useGitChangeCount } from "../../stores/git.js";
 import { useRunners } from "../../stores/runners.js";
@@ -83,7 +84,6 @@ function ProjectSelector({
 }) {
   const projects = useProjects((s) => s.projects);
   const active = useActiveProject();
-  const setActive = useProjects((s) => s.setActiveProject);
 
   return (
     <Popover
@@ -125,7 +125,7 @@ function ProjectSelector({
               icon={<FolderGit2 />}
               active={p.id === active?.id}
               onClick={() => {
-                setActive(p.id);
+                selectProject(p.id);
                 close();
               }}
             >
@@ -426,7 +426,7 @@ function createChatAndFocus(input: { projectId: string; modeId?: string }): void
     done = true;
     unsub();
     clearTimeout(timer);
-    useChats.getState().setActiveChat(id);
+    selectChat(id);
   };
   const unsub = useChats.subscribe((s) => {
     const fresh = s.order.find((id) => !before.has(id));
@@ -442,7 +442,6 @@ export function Sidebar() {
   const project = useActiveProject();
   const chats = useProjectChats(project?.id ?? null);
   const activeChatId = useChats((s) => s.activeChatId);
-  const setActiveChatRaw = useChats((s) => s.setActiveChat);
   const runners = useRunners((s) => s.byId);
   const attentionItems = useAttention((s) => s.items);
   const view = useView((s) => s.view);
@@ -464,11 +463,9 @@ export function Sidebar() {
     return () => clearInterval(t);
   }, [project?.repoPath, refreshGit]);
 
-  // Opening a chat always returns to the chat workspace (out of the Memory view).
-  const setActiveChat = (id: string) => {
-    setView("chat");
-    setActiveChatRaw(id);
-  };
+  // Opening a chat always returns to the chat workspace (out of the Memory view);
+  // selectChat does that, and keeps the project selection in step.
+  const setActiveChat = selectChat;
 
   // Launch target for the Apps section. The SAME selection the right panel's
   // Runner picker drives (see useLaunchBranch) — one project, one answer to
