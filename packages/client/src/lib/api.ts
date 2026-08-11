@@ -95,6 +95,8 @@ export interface ProjectProcess {
   chatId?: string;
   chatTitle?: string;
   terminalName?: string;
+  /** `${chatId}::${name}` — joins a row to its shell card in the Terminals tab. */
+  terminalId?: string;
 }
 
 /** Per-pid outcome of a bulk kill (mirrors server KillResult). */
@@ -475,11 +477,14 @@ export const api = {
      * `busy` flag (pushed over the WS the instant the shell starts) rather than
      * off this fetch.
      */
-    run: (chatId: string, name: string, command: string) =>
-      post<{ output: string; exitCode: number | null; cwd: string; error?: string }>(
-        "/api/terminals/run",
-        { chatId, name, command },
-      ),
+    run: (chatId: string, name: string, command: string, background = false) =>
+      post<{
+        output: string;
+        exitCode: number | null;
+        cwd: string;
+        error?: string;
+        backgrounded?: boolean;
+      }>("/api/terminals/run", { chatId, name, command, background }),
     kill: (id: string) => del<{ ok: true }>(`/api/terminals/${encodeURIComponent(id)}`),
   },
 

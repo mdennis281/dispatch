@@ -4,6 +4,8 @@ import {
   GitPullRequest,
   GitMerge,
   MoreHorizontal,
+  Activity,
+  Skull,
   Hash,
   Copy,
   ChevronDown,
@@ -35,6 +37,8 @@ import { useProjects } from "../../stores/projects.js";
 import { usePanels } from "../../stores/panels.js";
 import { worktreeMatchesChat, samePath } from "../panels/panelBus.js";
 import { useNotices } from "../../stores/notices.js";
+import { useChatProcessPids, useProcesses } from "../../stores/processes.js";
+import { openOverlay } from "../../stores/view.js";
 import { copyToClipboard } from "../../lib/clipboard.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
@@ -149,6 +153,35 @@ export function ChatView({ chat }: { chat: Chat }) {
   // so a chat renames and deletes the same way wherever you reach for it.
   const rename = useChatRename(chat);
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // What this chat still has running — its live shells plus every listener that
+  // descends from them. Read here so the menu can put the COUNT on the item:
+  // "kill the processes" with no number is a click nobody can calibrate.
+  const chatProcessPids = useChatProcessPids(chat.id, chat.projectId);
+  const killChatProcesses = useCallback(async () => {
+    if (!chatProcessPids.length) return;
+    try {
+      const results = await api.processes.kill(chat.projectId, chatProcessPids);
+      const failed = results.filter((r) => !r.ok);
+      pushToast(
+        failed.length
+          ? {
+              level: "error",
+              text: `Killed ${results.length - failed.length}/${results.length} processes`,
+              detail: failed.map((f) => `${f.pid}: ${f.error ?? "unknown"}`).join("\n"),
+            }
+          : { level: "info", text: `Killed ${results.length} process(es)` },
+      );
+    } catch (err) {
+      pushToast({
+        level: "error",
+        text: "Couldn't kill this chat's processes",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      void useProcesses.getState().scan(chat.projectId);
+    }
+  }, [chat.projectId, chatProcessPids, pushToast]);
 
   const meta = statusMeta(chat.status, prSettled);
   const running = chat.status === "running";
@@ -460,6 +493,38 @@ export function ChatView({ chat }: { chat: Chat }) {
                     }}
                   >
                     {injected.show ? "Hide sent context" : "Show sent context"}
+                  </MenuItem>
+                  <div className="my-1 h-px bg-line" />
+                  {/* A long chat can be holding several dev servers by now, on
+                      ports nothing else in the UI mentions. The roster is the
+                      safe door — it shows what would die before anything does —
+                      so the kill below is deliberately the second item, and it
+                      says how many so it is never a blind click. */}
+                  <MenuItem
+                    icon={<Activity />}
+                    hint={chatProcessPids.length ? String(chatProcessPids.length) : undefined}
+                    onClick={() => {
+                      openOverlay("processes");
+                      close();
+                    }}
+                  >
+                    Running processes…
+                  </MenuItem>
+                  <MenuItem
+                    icon={<Skull />}
+                    className={cn(
+                      chatProcessPids.length &&
+                        "!text-danger hover:!text-danger hover:bg-danger/10 [&_span]:text-danger",
+                    )}
+                    disabled={chatProcessPids.length === 0}
+                    onClick={() => {
+                      void killChatProcesses();
+                      close();
+                    }}
+                  >
+                    {chatProcessPids.length
+                      ? `Kill this chat's processes (${chatProcessPids.length})`
+                      : "No processes to kill"}
                   </MenuItem>
                   <div className="my-1 h-px bg-line" />
                   <MenuItem

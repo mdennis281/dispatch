@@ -27,7 +27,13 @@ export type AppView = "chat" | "memory" | "git" | "new-project";
  * also the fix for the old bug where two of these could be stacked on top of
  * each other with no way to tell which Esc would dismiss.
  */
-export type AppOverlay = "prs" | "mcp" | "config" | "settings" | "agents";
+export type AppOverlay =
+  | "prs"
+  | "mcp"
+  | "config"
+  | "settings"
+  | "agents"
+  | "processes";
 
 interface ViewStore {
   view: AppView;

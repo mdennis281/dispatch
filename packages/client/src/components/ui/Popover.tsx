@@ -214,6 +214,7 @@ export function MenuItem({
   hint,
   title,
   className,
+  disabled,
 }: {
   icon?: ReactNode;
   children: ReactNode;
@@ -223,15 +224,24 @@ export function MenuItem({
   /** Native tooltip for detail too long to sit inline (e.g. a model's blurb). */
   title?: string;
   className?: string;
+  /**
+   * Greys the item out and stops the click. For an action that exists but has
+   * nothing to act on right now — "Kill this chat's processes" with none
+   * running. Hiding it instead would make the menu's shape flicker between
+   * openings, which is worse to aim at than a dimmed row.
+   */
+  disabled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
       title={title}
+      disabled={disabled}
       className={cn(
         "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-secondary " +
           "transition-colors hover:bg-active hover:text-primary",
         active && "text-primary",
+        disabled && "pointer-events-none opacity-40",
         className,
       )}
     >

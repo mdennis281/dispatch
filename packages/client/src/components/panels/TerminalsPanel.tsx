@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { TerminalSquare, FolderClosed, Plus, X, CornerDownLeft } from "lucide-react";
+import { TerminalSquare, FolderClosed, Plus, X, CornerDownLeft, Activity } from "lucide-react";
 import type { Chat, TerminalInfo } from "@dispatch/shared";
 import { useTerminals, nextShellName, type TerminalLine } from "../../stores/terminals.js";
 import { api } from "../../lib/api.js";
@@ -9,6 +9,7 @@ import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate } from "../../lib/format.js";
+import { useProcesses, useTerminalPorts } from "../../stores/processes.js";
 
 const EMPTY_LINES: TerminalLine[] = [];
 
@@ -38,13 +39,19 @@ function useScrollbackFetch(id: string, hasLines: boolean): void {
  */
 function CommandInput({ terminal }: { terminal: TerminalInfo }) {
   const [command, setCommand] = useState("");
+  // Whether the next command is a thing that FINISHES or a thing that runs until
+  // stopped. Not inferred from the command text: "is this a server?" isn't
+  // decidable from a command line (`vitest --watch` is, `vitest` isn't), and
+  // guessing wrong either wedges the shell or detaches something you wanted to
+  // wait for. So it's an explicit toggle, sticky per shell.
+  const [background, setBackground] = useState(false);
   const busy = Boolean(terminal.busy);
 
   const submit = () => {
     const c = command.trim();
     if (!c || busy) return;
     setCommand("");
-    void api.terminals.run(terminal.chatId, terminal.name, c).catch(() => {
+    void api.terminals.run(terminal.chatId, terminal.name, c, background).catch(() => {
       /* the failure shows up as stderr in the stream; nothing to add here */
     });
   };
@@ -70,6 +77,19 @@ function CommandInput({ terminal }: { terminal: TerminalInfo }) {
         aria-label={`Run a command in ${terminal.name}`}
         className="h-6 min-w-0 flex-1 rounded-md bg-transparent px-1 cm-mono !text-xs text-primary outline-none placeholder:text-faint disabled:opacity-60"
       />
+      <Button
+        size="sm"
+        variant={background ? "toggle" : "ghost"}
+        title={
+          background
+            ? "Background: returns immediately, output keeps streaming here"
+            : "Run in the background (dev server, watcher)"
+        }
+        className="!h-5 !px-1.5 cm-mono !text-2xs"
+        onClick={() => setBackground((v) => !v)}
+      >
+        bg
+      </Button>
       <IconButton size="sm" tip="Run" disabled={busy || !command.trim()} onClick={submit}>
         <CornerDownLeft />
       </IconButton>
@@ -77,11 +97,22 @@ function CommandInput({ terminal }: { terminal: TerminalInfo }) {
   );
 }
 
-function TerminalCard({ terminal }: { terminal: TerminalInfo }) {
+function TerminalCard({
+  terminal,
+  projectId,
+}: {
+  terminal: TerminalInfo;
+  projectId: string;
+}) {
   const lines = useTerminals((s) => s.lines[terminal.id] ?? EMPTY_LINES);
   useScrollbackFetch(terminal.id, lines.length > 0);
 
   const live = terminal.status === "live";
+  const ports = useTerminalPorts(projectId, terminal.id);
+  const killPort = async (pid: number) => {
+    await api.processes.kill(projectId, [pid]).catch(() => []);
+    void useProcesses.getState().scan(projectId);
+  };
 
   // Follow the tail as output streams in.
   const logRef = useRef<HTMLDivElement>(null);
@@ -141,6 +172,29 @@ function TerminalCard({ terminal }: { terminal: TerminalInfo }) {
           {midTruncate(terminal.cwd, 44)}
         </span>
       </div>
+
+      {/* What this shell is actually holding. A background dev server is
+          invisible from the transcript and from the shell's own output once it
+          settles — the port is the only durable evidence it's still up, and it
+          is the thing you came here to kill. */}
+      {ports.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-line-soft px-3 py-1.5">
+          <Activity className="size-3 shrink-0 text-muted" />
+          {ports.map((p) => (
+            <Button
+              key={`${p.port}:${p.pid}`}
+              size="sm"
+              variant="ghost"
+              title={`${p.name ?? "process"} · pid ${p.pid} — click to kill (tree)`}
+              onClick={() => void killPort(p.pid)}
+              className="group !h-5 !px-1.5 cm-mono !text-2xs !text-success hover:!text-danger"
+            >
+              <span className="group-hover:hidden">:{p.port}</span>
+              <span className="hidden group-hover:inline">kill :{p.port}</span>
+            </Button>
+          ))}
+        </div>
+      )}
 
       {lines.length > 0 && (
         <div ref={logRef} className="cm-scroll max-h-64 overflow-y-auto border-t border-line-soft bg-inset px-3 py-2">
@@ -215,7 +269,7 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
   return (
     <div className="space-y-2.5 p-3">
       {mine.map((t) => (
-        <TerminalCard key={t.id} terminal={t} />
+        <TerminalCard key={t.id} terminal={t} projectId={chat.projectId} />
       ))}
       <div className="flex justify-center pt-0.5">
         <Button size="sm" variant="ghost" leftIcon={<Plus />} disabled={opening} onClick={openShell}>

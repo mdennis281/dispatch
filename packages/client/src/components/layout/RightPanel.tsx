@@ -77,6 +77,12 @@ export function RightPanel({ chat }: { chat: Chat }) {
   const termCount = useTerminals(
     (s) => s.order.map((id) => s.byId[id]!).filter((t) => t?.chatId === chat.id && t.status === "live").length,
   );
+  // Counted separately from `termCount` because a background command starts in a
+  // shell that ALREADY exists — the shell count doesn't move, but a port is about
+  // to appear. This is the edge that has to trigger the rescan below.
+  const bgCount = useTerminals(
+    (s) => s.order.map((id) => s.byId[id]!).filter((t) => t?.chatId === chat.id && t.background).length,
+  );
   const chatPrNumbers = new Set(chat.prs.map((p) => p.number));
   const prOpen = usePanels((s) => s.prs.filter((p) => p.state === "open" && chatPrNumbers.has(p.number)).length);
 
@@ -95,10 +101,14 @@ export function RightPanel({ chat }: { chat: Chat }) {
   // so run it here, where the panel's visibility can't gate it. Not a poll: the
   // triggers are a project switch and a runner start/stop, which is exactly when
   // an orphan appears or is reaped.
+  // …and re-scan when a shell appears or goes away, because a chat's own dev
+  // server is now a row too: the Terminals cards render the ports attributed to
+  // each shell, and without this trigger a server started mid-session would show
+  // no port until something unrelated happened to rescan.
   const orphanCount = useOrphanCount(chat.projectId);
   useEffect(() => {
     void useProcesses.getState().scan(chat.projectId);
-  }, [chat.projectId, runnerCount]);
+  }, [chat.projectId, runnerCount, termCount, bgCount]);
 
   const shipTabs: TabDef[] = [
     { id: "worktrees", label: "Worktrees", icon: <GitBranch />, count: wtCount },

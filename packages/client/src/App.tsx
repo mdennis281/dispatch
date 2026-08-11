@@ -6,6 +6,7 @@ import { ChatView } from "./components/chat/ChatView.js";
 import { CodeViewerHost } from "./components/monaco/index.js";
 import { AgentRunHost } from "./components/agents/AgentRunHost.js";
 import { ProjectPRsView } from "./components/prs/ProjectPRsView.js";
+import { ProcessesOverlay } from "./components/panels/ProcessesOverlay.js";
 import { McpCatalogView } from "./components/mcp/McpCatalogView.js";
 import { ProjectConfigView } from "./components/config/ProjectConfigView.js";
 import { NewProjectView } from "./components/project/NewProjectView.js";
@@ -69,6 +70,7 @@ export default function App() {
       <CodeViewerHost />
       <AgentRunHost />
       <ProjectPRsView />
+      <ProcessesOverlay />
       <McpCatalogView />
       <ProjectConfigView />
       <SettingsPanel />

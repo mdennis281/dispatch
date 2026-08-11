@@ -66,7 +66,19 @@ export function registerTerminalRoutes(app: FastifyInstance): void {
   );
 
   app.post<{
-    Body: { chatId?: string; name?: string; command?: string; timeoutMs?: number };
+    Body: {
+      chatId?: string;
+      name?: string;
+      command?: string;
+      timeoutMs?: number;
+      /**
+       * Same escape hatch the agent's `terminal` tool has. Without it the panel's
+       * command line could only run things that FINISH: a human typing `pnpm dev`
+       * here would wedge that shell until the timeout, which is the exact trap
+       * the background mode was added to remove.
+       */
+      background?: boolean;
+    };
   }>("/api/terminals/run", async (req, reply) => {
     const resolved = await resolveCwd(app, req.body?.chatId);
     if ("error" in resolved) return reply.code(resolved.code).send({ error: resolved.error });
@@ -81,6 +93,7 @@ export function registerTerminalRoutes(app: FastifyInstance): void {
       command,
       cwd: resolved.cwd,
       timeoutMs: typeof req.body?.timeoutMs === "number" ? req.body.timeoutMs : undefined,
+      background: req.body?.background === true,
     });
   });
 
