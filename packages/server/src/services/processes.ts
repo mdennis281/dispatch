@@ -263,13 +263,20 @@ const defaultProcTable: ProcTableFn = async () => {
   return parsePsTable(res.stdout ?? "");
 };
 
-/** Signal 0: no signal is sent, it just asks whether the pid is addressable. */
-const defaultAlive = (pid: number): boolean => {
+/**
+ * Signal 0: no signal is sent, it just asks whether the pid is addressable.
+ *
+ * `EPERM` means the process EXISTS but this user may not signal it — reporting
+ * that as dead would turn a kill that genuinely failed into a reported success,
+ * which is the one answer this probe must never give. Only `ESRCH` ("no such
+ * process") and anything else unrecognized count as gone.
+ */
+export const defaultAlive = (pid: number): boolean => {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "EPERM";
   }
 };
 
@@ -460,19 +467,43 @@ export class ProcessService {
     if (unique.length === 0) return [];
 
     const covered = unique.length > 1 ? await this.coveredByAncestor(unique) : new Set<number>();
+    const results = new Map<number, KillResult>();
 
-    return Promise.all(
-      unique.map(async (pid): Promise<KillResult> => {
-        if (covered.has(pid)) return { pid, ok: true };
-        try {
-          await this.killTree(pid);
-          return { pid, ok: true };
-        } catch (err) {
-          if (!this.alive(pid)) return { pid, ok: true };
-          return { pid, ok: false, error: err instanceof Error ? err.message : String(err) };
+    // The roots first: everything the caller asked for that nothing else in the
+    // set contains.
+    await Promise.all(
+      unique
+        .filter((pid) => !covered.has(pid))
+        .map(async (pid) => results.set(pid, await this.killOne(pid))),
+    );
+
+    // Then verify the covered ones actually went with their ancestor. Assuming
+    // they did would report ok for a process still holding its port whenever the
+    // ancestor's kill failed (permissions, a transient OS error) — the failure
+    // would vanish from the toast AND the row. If one survived, kill it directly.
+    await Promise.all(
+      [...covered].map(async (pid) => {
+        if (!this.alive(pid)) {
+          results.set(pid, { pid, ok: true });
+          return;
         }
+        results.set(pid, await this.killOne(pid));
       }),
     );
+
+    // Reported in the order asked for, so a caller can zip results to input.
+    return unique.map((pid) => results.get(pid) ?? { pid, ok: false, error: "not attempted" });
+  }
+
+  /** One tree-kill, where "it's already gone" is the success it looks like. */
+  private async killOne(pid: number): Promise<KillResult> {
+    try {
+      await this.killTree(pid);
+      return { pid, ok: true };
+    } catch (err) {
+      if (!this.alive(pid)) return { pid, ok: true };
+      return { pid, ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /** Which of `pids` descend from another pid in the same set. */

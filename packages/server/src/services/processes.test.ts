@@ -10,6 +10,7 @@ import {
   parseTasklist,
   parseProcCsv,
   parsePsTable,
+  defaultAlive,
   type PortListener,
 } from "./processes.js";
 
@@ -63,6 +64,27 @@ describe("parseTasklist", () => {
     );
     expect(map.get(12345)).toBe("node.exe");
     expect(map.get(6789)).toBe("com.docker.backend.exe");
+  });
+});
+
+describe("defaultAlive (the real probe)", () => {
+  it("says this process is alive", () => {
+    expect(defaultAlive(process.pid)).toBe(true);
+  });
+
+  it("says a pid that cannot exist is not", () => {
+    // 2^31-ish: above every platform's pid_max, so it is never assigned.
+    expect(defaultAlive(2_147_483_600)).toBe(false);
+  });
+
+  it("treats EPERM as ALIVE — the process exists, we just may not signal it", () => {
+    // pid 1 is init/System: present on every platform, and not ours to signal.
+    // Whatever the OS says, the answer must not be "dead" (that would turn a
+    // failed kill into a reported success). On Windows pid 1 doesn't resolve, so
+    // only assert the EPERM branch where it actually applies.
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      expect(defaultAlive(1)).toBe(true);
+    }
   });
 });
 
@@ -377,6 +399,31 @@ describe("ProcessService.listForProject", () => {
     expect(killed).toEqual([500]);
     expect(res).toEqual([
       { pid: 500, ok: true },
+      { pid: 900, ok: true },
+    ]);
+  });
+
+  it("kills a covered pid itself when the ancestor's kill didn't get it", async () => {
+    // The ancestor kill failed (permissions, transient OS error) and the child
+    // is still holding its port. Reporting ok because an ancestor was ASKED to
+    // die would hide the failure from both the toast and the row.
+    const killed: number[] = [];
+    const svc = new ProcessService({
+      store,
+      killTree: async (pid) => {
+        killed.push(pid);
+        if (pid === 500) throw new Error("access denied");
+      },
+      alive: (pid) => !killed.includes(pid) || pid === 500,
+      procTable: async () => [
+        { pid: 500, ppid: 1 },
+        { pid: 900, ppid: 500 },
+      ],
+    });
+    const res = await svc.killPids([500, 900]);
+    expect(killed).toEqual([500, 900]); // 900 retried directly
+    expect(res).toEqual([
+      { pid: 500, ok: false, error: "access denied" },
       { pid: 900, ok: true },
     ]);
   });
