@@ -7,7 +7,10 @@ import type { Chat, Project, WsServerEvent } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { WorktreeService } from "./worktree.js";
-import { WorktreeDetector } from "./worktree-detector.js";
+import {
+  WorktreeDetector,
+  parseEnterWorktreeResult,
+} from "./worktree-detector.js";
 
 /* -------------------------------------------------- real temp git repo fixture */
 
@@ -554,5 +557,234 @@ describe("WorktreeDetector history-based heal (bug: persisted mis-attribution)",
     expect(a!.worktrees).toHaveLength(1);
     expect(a!.worktrees[0].replace(/\\/g, "/")).toContain("feat-mine");
     expect(pMine).toBeTruthy();
+  });
+});
+
+/* ------------------------------------------------ harness EnterWorktree tool */
+
+/**
+ * Create a worktree the way the HARNESS's `EnterWorktree` does: under
+ * `<repo>/.claude/worktrees/<name>` on branch `worktree-<name>`. No shell
+ * command is involved — which is the whole point: command parsing sees nothing.
+ */
+async function harnessAddsWorktree(name: string): Promise<string> {
+  const p = join(repo, ".claude", "worktrees", name);
+  await git(repo, "worktree", "add", "-b", `worktree-${name}`, p);
+  return p;
+}
+
+/** Publish the `EnterWorktree` tool_use (+ optional result) rows on the bus. */
+function agentEntersWorktree(
+  chatId: string,
+  input: { name?: string; path?: string },
+  result?: string,
+): void {
+  const n = toolSeq++;
+  const toolUseId = `tuid-${n}`;
+  bus.publish({
+    type: "chat-message",
+    chatId,
+    message: {
+      kind: "tool_use",
+      id: `tu-${n}`,
+      chatId,
+      ts: 1_000 + n,
+      toolUseId,
+      name: "EnterWorktree",
+      input,
+    },
+  });
+  if (result !== undefined) {
+    bus.publish({
+      type: "chat-message",
+      chatId,
+      message: {
+        kind: "tool_result",
+        id: `tr-${n}`,
+        chatId,
+        ts: 1_001 + n,
+        toolUseId,
+        ok: true,
+        content: result,
+      },
+    });
+  }
+}
+
+describe("WorktreeDetector EnterWorktree (bug: only appeared once a PR existed)", () => {
+  it("attaches a worktree the harness tool created, with no PR and no command", async () => {
+    await store.saveChat(mkChat());
+    await detector.start();
+
+    const p = await harnessAddsWorktree("my-task");
+    agentEntersWorktree("chatA", { name: "my-task" });
+
+    const res = await detector.detectForChat("chatA");
+    expect(res.attached).toHaveLength(1);
+    const a = await store.getChat("chatA");
+    expect(a!.worktrees.map((x) => x.replace(/\\/g, "/"))).toEqual([
+      p.replace(/\\/g, "/"),
+    ]);
+    const wu = worktreeUpdates().find((e) => e.chatId === "chatA");
+    expect(wu!.worktree.branch).toBe("worktree-my-task");
+  });
+
+  it("attaches from the tool RESULT when the call named nothing", async () => {
+    await store.saveChat(mkChat());
+    await detector.start();
+
+    const p = await harnessAddsWorktree("generated-name");
+    // No `name`/`path` input at all — the harness picked one, and only the
+    // result says which.
+    agentEntersWorktree(
+      "chatA",
+      {},
+      `Created worktree at ${p} on branch worktree-generated-name. The session is now working in the worktree.`,
+    );
+
+    const res = await detector.detectForChat("chatA");
+    expect(res.attached).toHaveLength(1);
+    expect(res.attached[0].replace(/\\/g, "/")).toContain("generated-name");
+  });
+
+  it("attaches when the agent ENTERS an existing worktree by path", async () => {
+    await store.saveChat(mkChat());
+    await detector.start();
+
+    const p = await harnessAddsWorktree("entered");
+    agentEntersWorktree("chatA", { path: p });
+
+    const res = await detector.detectForChat("chatA");
+    expect(res.attached).toHaveLength(1);
+    expect(res.attached[0].replace(/\\/g, "/")).toContain("entered");
+  });
+
+  it("shows up MID-TURN via the poll loop, not just at turn end", async () => {
+    await store.saveChat(mkChat());
+    const fast = new WorktreeDetector({
+      store,
+      bus,
+      worktrees,
+      pollIntervalMs: 20,
+    });
+    try {
+      await fast.start();
+      // Turn starts and stays running (Bypass mode): status never returns to idle.
+      bus.publish({ type: "chat-status", chatId: "chatA", status: "running" });
+      await fast.drain();
+
+      await harnessAddsWorktree("midturn");
+      agentEntersWorktree("chatA", { name: "midturn" });
+
+      // Let the interval fire on its own — no idle/done, no manual pass.
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        const c = await store.getChat("chatA");
+        if ((c?.worktrees.length ?? 0) >= 1) break;
+        if (Date.now() > deadline) throw new Error("poll interval never attached");
+        await fast.drain();
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      const a = await store.getChat("chatA");
+      expect(a!.worktrees).toHaveLength(1);
+      expect(a!.worktrees[0].replace(/\\/g, "/")).toContain("midturn");
+    } finally {
+      fast.stop();
+      await fast.drain();
+    }
+  });
+
+  it("does NOT let a chat that merely entered another chat's worktree steal it", async () => {
+    await store.saveChat(mkChat({ id: "chatA" }));
+    await store.saveChat(mkChat({ id: "chatB" }));
+    await detector.start();
+
+    // chatA CREATED it by command; chatB only switched into it afterwards.
+    const p = await agentCreatesWorktree("chatA", "feat/owned");
+    agentEntersWorktree("chatB", { path: p });
+
+    await detector.detectForChat("chatB");
+    const a = await store.getChat("chatA");
+    const b = await store.getChat("chatB");
+    expect(a!.worktrees).toHaveLength(1);
+    expect(b!.worktrees).toEqual([]);
+  });
+
+  it("gives a shared worktree to the EARLIEST claimant", async () => {
+    await store.saveChat(mkChat({ id: "chatA" }));
+    await store.saveChat(mkChat({ id: "chatB" }));
+    await detector.start();
+
+    const p = await harnessAddsWorktree("shared");
+    agentEntersWorktree("chatA", { path: p }); // published first ⇒ earlier ts
+    agentEntersWorktree("chatB", { path: p });
+
+    await detector.detectForChat("chatB");
+    const a = await store.getChat("chatA");
+    const b = await store.getChat("chatB");
+    expect(a!.worktrees).toHaveLength(1);
+    expect(b!.worktrees).toEqual([]);
+  });
+
+  it("heals from PERSISTED EnterWorktree rows after a restart", async () => {
+    await harnessAddsWorktree("persisted");
+    await store.saveChat(mkChat({ id: "chatA", worktrees: [] }));
+    await store.appendMessage({
+      kind: "tool_use",
+      id: "m-enter",
+      chatId: "chatA",
+      ts: 1_000,
+      toolUseId: "tu-enter",
+      name: "EnterWorktree",
+      input: { name: "persisted" },
+    });
+
+    const fresh = new WorktreeDetector({ store, bus, worktrees });
+    try {
+      await fresh.start();
+      await fresh.drain();
+    } finally {
+      fresh.stop();
+    }
+
+    const a = await store.getChat("chatA");
+    expect(a!.worktrees).toHaveLength(1);
+    expect(a!.worktrees[0].replace(/\\/g, "/")).toContain("persisted");
+  });
+});
+
+describe("parseEnterWorktreeResult", () => {
+  it("reads the path and branch out of the create message", () => {
+    expect(
+      parseEnterWorktreeResult(
+        "Created worktree at C:\\Users\\m\\p\\.claude\\worktrees\\a-b on branch worktree-a-b. The session is now working in the worktree.",
+      ),
+    ).toEqual({
+      path: "C:\\Users\\m\\p\\.claude\\worktrees\\a-b",
+      branch: "worktree-a-b",
+    });
+  });
+
+  it("handles a worktree path containing spaces", () => {
+    expect(
+      parseEnterWorktreeResult("Created worktree at /my dir/wt/x on branch feat/y."),
+    ).toEqual({ path: "/my dir/wt/x", branch: "feat/y" });
+  });
+
+  it("falls back to the path when no branch is named", () => {
+    expect(parseEnterWorktreeResult("Entered worktree at /tmp/wt/x.")).toEqual({
+      path: "/tmp/wt/x",
+    });
+  });
+
+  it("reads block-shaped content and ignores unrelated text", () => {
+    expect(
+      parseEnterWorktreeResult([
+        { type: "text", text: "Created worktree at /a/b on branch c." },
+      ]),
+    ).toEqual({ path: "/a/b", branch: "c" });
+    expect(parseEnterWorktreeResult("nothing to see")).toBeUndefined();
+    expect(parseEnterWorktreeResult(undefined)).toBeUndefined();
   });
 });

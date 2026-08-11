@@ -4,7 +4,8 @@
  *
  * Worktrees in this system are made BY THE AGENT: inside a turn it runs
  * `pnpm worktree <branch>` / `git worktree add …` via Bash (cwd = the project's
- * repoPath), NOT by the user through the manager, and a single chat turn may
+ * repoPath) or calls the harness's own `EnterWorktree` tool, NOT by the user
+ * through the manager, and a single chat turn may
  * create SEVERAL. Nothing on the wire announces them, so the manager has to
  * DISCOVER them: we list the project's live `git worktree list --porcelain`,
  * diff it against the set we've already accounted for, and attribute any
@@ -22,6 +23,17 @@
  * PATH, then a chat whose persisted `prs[]` carries the branch, then an existing
  * unambiguous attribution — never overriding a stronger signal). A branch with
  * no owner is LEFT UNATTACHED rather than dumped on an arbitrary chat.
+ *
+ * ENTERWORKTREE (bug fix). The harness's `EnterWorktree` tool creates the tree
+ * ITSELF — there is no shell command to parse, so command-based detection saw
+ * NOTHING and the worktree stayed unattached until some later signal landed. In
+ * practice that was tier 3, the PR: which is exactly why an agent's worktree
+ * only showed up in the sidebar once it opened one. We now claim by PATH from
+ * the tool call — its `path` input (entering an existing tree), its `name` input
+ * (→ `<repo>/.claude/worktrees/<name>`), and the path its RESULT reports
+ * ("Created worktree at <path> on branch <branch>"). Earliest claimant wins, and
+ * a real create-command still outranks a claim, so a chat that merely switched
+ * into another agent's tree cannot steal it from its creator.
  *
  * SELF-HEALING REWRITE (bug fix). Every reconcile (startup heal + each poll +
  * turn-complete) REWRITES each chat's `worktrees[]` to EXACTLY the live worktrees
@@ -104,6 +116,52 @@ function canonPath(p: string): string {
   return process.platform === "win32" ? r.toLowerCase() : r;
 }
 
+/** Fold `key → ts` into a nested map, keeping the EARLIEST ts for the key. */
+function earliest(
+  outer: Map<string, Map<string, number>>,
+  id: string,
+  key: string,
+  ts: number,
+): void {
+  let inner = outer.get(id);
+  if (!inner) {
+    inner = new Map<string, number>();
+    outer.set(id, inner);
+  }
+  const prev = inner.get(key);
+  if (prev === undefined || ts < prev) inner.set(key, ts);
+}
+
+/**
+ * Pull the worktree path out of an `EnterWorktree` tool result, whose text reads
+ * "Created worktree at <path> on branch <branch>. …". The path may contain
+ * spaces, so it's matched non-greedily up to the " on branch " separator; the
+ * second form covers a result that names a path but no branch.
+ */
+export function parseEnterWorktreeResult(
+  content: unknown,
+): { path: string; branch?: string } | undefined {
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .map((c) =>
+              typeof c === "string"
+                ? c
+                : typeof (c as { text?: unknown })?.text === "string"
+                  ? (c as { text: string }).text
+                  : "",
+            )
+            .join("\n")
+        : "";
+  if (!text) return undefined;
+  const withBranch = /worktree at (.+?) on branch ([^\s.]+)/.exec(text);
+  if (withBranch) return { path: withBranch[1], branch: withBranch[2] };
+  const bare = /worktree at (.+?)(?:[.]\s|[.]?$|\n)/.exec(text);
+  return bare ? { path: bare[1].trim() } : undefined;
+}
+
 export class WorktreeDetector {
   private readonly store: Store;
   private readonly bus: EventBus;
@@ -119,6 +177,16 @@ export class WorktreeDetector {
   private readonly chatBranches = new Map<string, Map<string, number>>();
   /** chatId → canonical worktree paths its history referenced (fallback attribution). */
   private readonly chatPathRefs = new Map<string, Set<string>>();
+  /** chatId → (canonical worktree path → earliest ts it CLAIMED via `EnterWorktree`). */
+  private readonly chatWorktreePaths = new Map<string, Map<string, number>>();
+  /** chatId → (`EnterWorktree` name → earliest ts), resolved against repoPath at reconcile. */
+  private readonly chatWorktreeNames = new Map<string, Map<string, number>>();
+  /**
+   * toolUseId → chat that issued an `EnterWorktree`, so its RESULT (which names
+   * the created path outright) can be attributed. The result row carries no
+   * `name`, so the pending call is the only link back to the tool.
+   */
+  private readonly pendingEnters = new Map<string, string>();
   /** Chats whose persisted transcript has already been scanned for create-commands. */
   private readonly historyLoaded = new Set<string>();
   /** Chats whose session is currently active (drives polling). */
@@ -232,6 +300,25 @@ export class WorktreeDetector {
   }
 
   private onMessage(chatId: string, message: ChatMessage): void {
+    // `EnterWorktree` creates the tree with no shell command to parse — claim it
+    // by path from the call, and again from its result (which reports the path
+    // the harness actually chose). Both arrive mid-turn, so the ~4s poll picks
+    // the worktree up live rather than at turn end.
+    if (message.kind === "tool_use" && message.name === "EnterWorktree") {
+      this.pendingEnters.set(message.toolUseId, chatId);
+      this.recordEnterWorktree(chatId, message.input, message.ts ?? this.now());
+      return;
+    }
+    if (message.kind === "tool_result") {
+      const owner = this.pendingEnters.get(message.toolUseId);
+      if (!owner) return;
+      this.pendingEnters.delete(message.toolUseId);
+      const hit = parseEnterWorktreeResult(message.content);
+      if (hit) {
+        this.recordWorktreePath(owner, hit.path, message.ts ?? this.now());
+      }
+      return;
+    }
     if (message.kind !== "tool_use") return;
     const command = message.input?.command;
     if (typeof command !== "string" || !command) return;
@@ -261,6 +348,29 @@ export class WorktreeDetector {
       const prev = map.get(branch);
       if (prev === undefined || ts < prev) map.set(branch, ts);
     }
+  }
+
+  /** Fold one `EnterWorktree` INPUT into the chat's claims (path form or name form). */
+  private recordEnterWorktree(
+    chatId: string,
+    input: Record<string, unknown> | undefined,
+    ts: number,
+  ): void {
+    const path = typeof input?.path === "string" ? input.path.trim() : "";
+    if (path) {
+      this.recordWorktreePath(chatId, path, ts);
+      return;
+    }
+    // The `name` form is only resolvable against the project's repoPath, which we
+    // don't have on the bus — keep the raw name and resolve it in `buildBranchOwners`.
+    const name = typeof input?.name === "string" ? input.name.trim() : "";
+    if (name) earliest(this.chatWorktreeNames, chatId, name, ts);
+  }
+
+  /** Fold an absolute worktree path claim into the chat's claims (earliest wins). */
+  private recordWorktreePath(chatId: string, path: string, ts: number): void {
+    if (!path) return;
+    earliest(this.chatWorktreePaths, chatId, canonPath(path), ts);
   }
 
   /* ------------------------------------------------------------ polling */
@@ -403,7 +513,21 @@ export class WorktreeDetector {
     const rootCanon = canonPath(
       resolve(project.repoPath, project.worktreeRoot),
     );
+    // `EnterWorktree` calls we've seen but whose result row hasn't come up yet.
+    // Scoped to this scan (messages are in order) — the live map is for the bus.
+    const openEnters = new Set<string>();
     for (const m of messages) {
+      if (m.kind === "tool_use" && m.name === "EnterWorktree") {
+        openEnters.add(m.toolUseId);
+        this.recordEnterWorktree(chatId, m.input, m.ts ?? this.now());
+        continue;
+      }
+      if (m.kind === "tool_result") {
+        if (!openEnters.delete(m.toolUseId)) continue;
+        const hit = parseEnterWorktreeResult(m.content);
+        if (hit) this.recordWorktreePath(chatId, hit.path, m.ts ?? this.now());
+        continue;
+      }
       if (m.kind !== "tool_use") continue;
       const command = (m.input as { command?: unknown } | undefined)?.command;
       if (typeof command !== "string" || !command) continue;
@@ -491,7 +615,7 @@ export class WorktreeDetector {
     // Rebuild each chat's create-history once (empty in memory after a restart).
     for (const c of projectChats) await this.ensureHistoryLoaded(project, c.id);
 
-    const owners = this.buildBranchOwners(projectChats, [
+    const owners = this.buildBranchOwners(project, projectChats, [
       ...infoByCanon.values(),
     ]);
 
@@ -549,19 +673,43 @@ export class WorktreeDetector {
    * Build the authoritative `branch → owning-chatId` map for a project from each
    * chat's OWN signals, in priority order:
    *   1. Create-command (history + live tool_use) — EARLIEST creator wins a tie.
-   *   2. A chat whose history referenced the worktree PATH (`cd <path>` …).
-   *   3. A chat whose persisted `prs[]` carries a PR on that branch.
-   *   4. An existing, UNAMBIGUOUS attribution (covers manager-created worktrees
-   *      with no transcript signal) — only reached when 1–3 are silent, so it can
+   *   2. An `EnterWorktree` claim on the worktree PATH — earliest claimant wins.
+   *      Ranked below 1 so switching into another agent's tree can't take it from
+   *      whoever's command created it.
+   *   3. A chat whose history referenced the worktree PATH (`cd <path>` …).
+   *   4. A chat whose persisted `prs[]` carries a PR on that branch.
+   *   5. An existing, UNAMBIGUOUS attribution (covers manager-created worktrees
+   *      with no transcript signal) — only reached when 1–4 are silent, so it can
    *      never override a real creator and re-introduce the mis-attribution bug.
    * A branch no chat claims is absent from the map → left unattached.
    */
   private buildBranchOwners(
+    project: Project,
     projectChats: Chat[],
     infos: WorktreeInfo[],
   ): Map<string, string> {
     const owners = new Map<string, string>();
     const projectChatIds = new Set(projectChats.map((c) => c.id));
+
+    // Resolve every `EnterWorktree` claim to a canonical path now that we have a
+    // repoPath: chatId → (canonical path → earliest claim ts). The `name` form
+    // lands in `<repo>/.claude/worktrees/<name>`, which is where the harness cuts it.
+    const claims = new Map<string, Map<string, number>>();
+    for (const chatId of new Set([
+      ...this.chatWorktreePaths.keys(),
+      ...this.chatWorktreeNames.keys(),
+    ])) {
+      if (!projectChatIds.has(chatId)) continue;
+      for (const [cp, ts] of this.chatWorktreePaths.get(chatId) ?? []) {
+        earliest(claims, chatId, cp, ts);
+      }
+      for (const [name, ts] of this.chatWorktreeNames.get(chatId) ?? []) {
+        const cp = canonPath(
+          resolve(project.repoPath, ".claude", "worktrees", name),
+        );
+        earliest(claims, chatId, cp, ts);
+      }
+    }
 
     // Existing attribution: canonPath → chatId, but only when a single chat claims
     // it (an ambiguous path is dropped from the tier-4 fallback).
@@ -596,8 +744,23 @@ export class WorktreeDetector {
         continue;
       }
 
-      // 2. A chat whose history referenced this worktree path.
       const cp = canonPath(info.path);
+
+      // 2. Earliest `EnterWorktree` claim on this exact path.
+      let claimChat: string | undefined;
+      let claimTs = Number.POSITIVE_INFINITY;
+      for (const [chatId, paths] of claims) {
+        const ts = paths.get(cp);
+        if (ts === undefined || ts >= claimTs) continue;
+        claimTs = ts;
+        claimChat = chatId;
+      }
+      if (claimChat) {
+        owners.set(info.branch, claimChat);
+        continue;
+      }
+
+      // 3. A chat whose history referenced this worktree path.
       const pathRef = projectChats.find((c) =>
         this.chatPathRefs.get(c.id)?.has(cp),
       );
@@ -606,7 +769,7 @@ export class WorktreeDetector {
         continue;
       }
 
-      // 3. A chat with a persisted PR on this branch.
+      // 4. A chat with a persisted PR on this branch.
       const prOwner = projectChats.find((c) =>
         (c.prs ?? []).some((r) => r.branch === info.branch),
       );
@@ -615,7 +778,7 @@ export class WorktreeDetector {
         continue;
       }
 
-      // 4. Preserve an existing, unambiguous attribution.
+      // 5. Preserve an existing, unambiguous attribution.
       if (!ambiguous.has(cp) && currentOwner.has(cp)) {
         owners.set(info.branch, currentOwner.get(cp)!);
       }
