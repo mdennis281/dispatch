@@ -1,5 +1,8 @@
+import { useMemo } from "react";
 import { create } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 import { api, type ProjectProcess } from "../lib/api.js";
+import { useTerminals } from "./terminals.js";
 
 /**
  * OS port scan results, per project — hoisted out of ProcessesPanel so the
@@ -23,6 +26,8 @@ interface ProcessesStore {
 }
 
 const EMPTY: ProjectProcess[] = [];
+/** Stable empty result — a fresh `[]` from a selector re-renders every tick. */
+const EMPTY_PIDS: number[] = [];
 
 /** Coalesces the scans fired by a project switch and a panel expand in the same tick. */
 const inFlight = new Map<string, Promise<void>>();
@@ -65,6 +70,60 @@ export const useProcesses = create<ProcessesStore>((set) => ({
 /** One project's scanned listeners (stable reference — safe as a selector result). */
 export function useProjectProcesses(projectId: string): ProjectProcess[] {
   return useProcesses((s) => s.byProject[projectId] ?? EMPTY);
+}
+
+/** The listeners attributed to ONE shell — what that terminal card is holding. */
+export function useTerminalPorts(
+  projectId: string | undefined,
+  terminalId: string,
+): ProjectProcess[] {
+  return useProcesses(
+    useShallow((s) =>
+      projectId
+        ? (s.byProject[projectId] ?? EMPTY).filter((r) => r.terminalId === terminalId)
+        : EMPTY,
+    ),
+  );
+}
+
+/**
+ * Everything ONE chat is running: the pids of its live shells plus the pids of
+ * every listener attributed to them.
+ *
+ * Both halves are needed. A shell that has just started `pnpm dev` holds no port
+ * yet but is very much running something, and a Vite that hopped two ports is
+ * only reachable through the shell it descends from. Killing the shell pid
+ * tree-kills the rest, but the listener pids are included anyway: a runner-
+ * started process re-parented by a restart would otherwise survive a kill that
+ * claimed to clear the chat.
+ */
+export function useChatProcessPids(
+  chatId: string,
+  projectId: string | undefined,
+): number[] {
+  // `useShallow` on both: these selectors build a new array every call, and a
+  // fresh reference each time is a re-render on every unrelated store write.
+  const fromPorts = useProcesses(
+    useShallow((s) =>
+      projectId
+        ? (s.byProject[projectId] ?? EMPTY)
+            .filter((r) => r.chatId === chatId)
+            .map((r) => r.pid)
+        : EMPTY_PIDS,
+    ),
+  );
+  const fromShells = useTerminals(
+    useShallow((s) =>
+      Object.values(s.byId)
+        .filter((t) => t.chatId === chatId && t.status === "live")
+        .map((t) => t.pid)
+        .filter((p): p is number => typeof p === "number"),
+    ),
+  );
+  return useMemo(
+    () => [...new Set([...fromShells, ...fromPorts])],
+    [fromShells, fromPorts],
+  );
 }
 
 /** Listeners nothing owns: the count worth surfacing before anything is expanded. */

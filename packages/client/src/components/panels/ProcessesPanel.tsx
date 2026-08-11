@@ -7,6 +7,7 @@ import {
   ChevronRight,
   ChevronDown,
   AlertTriangle,
+  Maximize2,
 } from "lucide-react";
 import { api } from "../../lib/api.js";
 import { useProcesses, useProjectProcesses } from "../../stores/processes.js";
@@ -15,6 +16,7 @@ import { Chip } from "../ui/Chip.js";
 import { IconButton } from "../ui/IconButton.js";
 import { SectionLabel } from "../ui/Panel.js";
 import { cn } from "../../lib/cn.js";
+import { openOverlay } from "../../stores/view.js";
 
 /**
  * OS-level process inspector for a project: what's ACTUALLY listening on its
@@ -100,6 +102,18 @@ export function ProcessesPanel({ projectId }: { projectId: string }) {
             </Chip>
           )}
         </button>
+        {/* The full roster, grouped by the chat that started each process. This
+            panel answers "what is on my ports"; that one answers "what is this
+            chat still running", which is the question people actually arrive
+            with — so it needs a door from here rather than only from the chat
+            menu. */}
+        <IconButton
+          size="sm"
+          tip="Open the full process roster"
+          onClick={() => openOverlay("processes")}
+        >
+          <Maximize2 />
+        </IconButton>
         {open && (
           <IconButton size="sm" tip="Rescan ports" onClick={() => void refresh()}>
             <RefreshCw className={cn(loading && "animate-spin")} />

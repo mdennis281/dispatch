@@ -58,6 +58,8 @@ export interface ProjectProcess {
   chatTitle?: string;
   /** Name of that shell, e.g. "server" — what to `terminal_output` against. */
   terminalName?: string;
+  /** `${chatId}::${name}` — the join key the Terminals panel matches cards on. */
+  terminalId?: string;
 }
 
 /** One row of the OS process table (pid → parent), for ancestry attribution. */
@@ -94,6 +96,8 @@ export interface ProcessDeps {
   describe?: DescribeFn;
   killTree?: KillTreeFn;
   procTable?: ProcTableFn;
+  /** Is this pid still running? Defaults to a signal-0 probe. */
+  alive?: (pid: number) => boolean;
   /** Omitted → no chat attribution, just the legacy declared-port sweep. */
   terminals?: TerminalRoots;
   /**
@@ -259,6 +263,16 @@ const defaultProcTable: ProcTableFn = async () => {
   return parsePsTable(res.stdout ?? "");
 };
 
+/** Signal 0: no signal is sent, it just asks whether the pid is addressable. */
+const defaultAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const defaultKillTree: KillTreeFn = (pid) =>
   new Promise((res, rej) =>
     treeKill(pid, "SIGTERM", (err) => (err ? rej(err) : res())),
@@ -274,6 +288,7 @@ export class ProcessService {
   private readonly portWindow: number;
   private readonly procTable: ProcTableFn;
   private readonly terminals?: TerminalRoots;
+  private readonly alive: (pid: number) => boolean;
 
   constructor(deps: ProcessDeps) {
     this.store = deps.store;
@@ -283,6 +298,7 @@ export class ProcessService {
     this.portWindow = deps.portWindow ?? PORT_SCAN_RANGE;
     this.procTable = deps.procTable ?? defaultProcTable;
     this.terminals = deps.terminals;
+    this.alive = deps.alive ?? defaultAlive;
   }
 
   /**
@@ -361,6 +377,7 @@ export class ProcessService {
           chatId: shell?.chatId,
           chatTitle: shell?.chatTitle,
           terminalName: shell?.name,
+          terminalId: shell?.terminalId,
         };
       })
       .sort((a, b) => a.port - b.port || a.pid - b.pid);
@@ -420,18 +437,70 @@ export class ProcessService {
     return owner;
   }
 
-  /** Tree-kill each pid (deduped). Best-effort per pid; never throws. */
+  /**
+   * Tree-kill each pid (deduped). Best-effort per pid; never throws.
+   *
+   * Two things stop this reporting failures for work that actually succeeded:
+   *
+   * 1. DESCENDANTS ARE PRUNED. A "kill this chat" set contains a shell AND the
+   *    dev server under it. Tree-killing both in parallel is a race: the first
+   *    takes the second down with it, and the loser's `taskkill /T` then fails
+   *    with "there is no running instance of the task" — a red error toast for a
+   *    completely successful kill (observed: "Killed 1/2 processes", with both
+   *    processes gone). A pid whose ancestor is also being killed is covered by
+   *    that kill, so it is never issued and is reported ok.
+   * 2. A KILL THAT FINDS NOTHING IS A SUCCESS. If the tree-kill errors but the
+   *    pid is gone afterwards, the outcome we were asked for holds — the process
+   *    may simply have exited on its own between the scan and the click. Checked
+   *    by probing liveness rather than by matching the error text, which is
+   *    localized and differs per platform.
+   */
   async killPids(pids: number[]): Promise<KillResult[]> {
     const unique = [...new Set(pids.filter((p) => Number.isInteger(p) && p > 0))];
+    if (unique.length === 0) return [];
+
+    const covered = unique.length > 1 ? await this.coveredByAncestor(unique) : new Set<number>();
+
     return Promise.all(
       unique.map(async (pid): Promise<KillResult> => {
+        if (covered.has(pid)) return { pid, ok: true };
         try {
           await this.killTree(pid);
           return { pid, ok: true };
         } catch (err) {
+          if (!this.alive(pid)) return { pid, ok: true };
           return { pid, ok: false, error: err instanceof Error ? err.message : String(err) };
         }
       }),
     );
+  }
+
+  /** Which of `pids` descend from another pid in the same set. */
+  private async coveredByAncestor(pids: number[]): Promise<Set<number>> {
+    const table = await this.procTable().catch(() => [] as ProcRow[]);
+    if (table.length === 0) return new Set();
+    const parent = new Map(table.map((r) => [r.pid, r.ppid]));
+    const wanted = new Set(pids);
+    const covered = new Set<number>();
+    for (const pid of pids) {
+      // Walk up; `seen` bounds a pid-reuse cycle (same hazard as `ownersByPid`).
+      const seen = new Set<number>([pid]);
+      let cur = parent.get(pid);
+      while (cur !== undefined && cur > 0 && !seen.has(cur)) {
+        if (wanted.has(cur)) {
+          covered.add(pid);
+          break;
+        }
+        seen.add(cur);
+        cur = parent.get(cur);
+      }
+    }
+    // A cycle makes every member "descend from" another member, which would
+    // prune the whole set and kill NOTHING — silently, with every row reported
+    // ok. Covering everything is never a valid answer: if it happens, distrust
+    // the table and issue every kill. The `alive` re-check absorbs any resulting
+    // race. (A test drives the two-pid cycle that found this.)
+    if (covered.size === pids.length) return new Set();
+    return covered;
   }
 }

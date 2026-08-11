@@ -213,6 +213,7 @@ describe("ProcessService.listForProject", () => {
       chatId: "chatA",
       chatTitle: "Game Performance Lag Regression",
       terminalName: "server",
+      terminalId: "chatA::server",
     });
   });
 
@@ -346,6 +347,7 @@ describe("ProcessService.listForProject", () => {
         if (pid === 500) throw new Error("boom");
         killed.push(pid);
       },
+      alive: () => true, // the failed kill really did leave it running
     });
     const res = await svc.killPids([100, 100, 500]); // dedup + one failure
     expect(killed).toEqual([100]);
@@ -353,5 +355,77 @@ describe("ProcessService.listForProject", () => {
       { pid: 100, ok: true },
       { pid: 500, ok: false, error: "boom" },
     ]);
+  });
+
+  it("never issues a kill for a pid its own ancestor's kill already covers", async () => {
+    // The "kill this chat" set is a shell plus the dev server under it. Killing
+    // both in parallel races — the tree-kill that lands second reports failure
+    // for a process the first already reaped ("Killed 1/2", both gone).
+    const killed: number[] = [];
+    const svc = new ProcessService({
+      store,
+      killTree: async (pid) => {
+        killed.push(pid);
+      },
+      procTable: async () => [
+        { pid: 500, ppid: 1 }, // the shell
+        { pid: 800, ppid: 500 }, // a wrapper
+        { pid: 900, ppid: 800 }, // the listener
+      ],
+    });
+    const res = await svc.killPids([500, 900]);
+    expect(killed).toEqual([500]);
+    expect(res).toEqual([
+      { pid: 500, ok: true },
+      { pid: 900, ok: true },
+    ]);
+  });
+
+  it("still kills siblings that no other pid in the set covers", async () => {
+    const killed: number[] = [];
+    const svc = new ProcessService({
+      store,
+      killTree: async (pid) => {
+        killed.push(pid);
+      },
+      procTable: async () => [
+        { pid: 500, ppid: 1 },
+        { pid: 900, ppid: 1 },
+      ],
+    });
+    await svc.killPids([500, 900]);
+    expect(killed.sort((a, b) => a - b)).toEqual([500, 900]);
+  });
+
+  it("reports a kill that errored but left nothing running as a success", async () => {
+    // The process exited on its own between the scan and the click. The outcome
+    // we were asked for holds, so a red error would be a lie.
+    const svc = new ProcessService({
+      store,
+      killTree: async () => {
+        throw new Error("There is no running instance of the task.");
+      },
+      alive: () => false,
+    });
+    expect(await svc.killPids([404])).toEqual([{ pid: 404, ok: true }]);
+  });
+
+  it("survives a cycle while pruning covered pids", async () => {
+    const killed: number[] = [];
+    const svc = new ProcessService({
+      store,
+      killTree: async (pid) => {
+        killed.push(pid);
+      },
+      procTable: async () => [
+        { pid: 500, ppid: 900 },
+        { pid: 900, ppid: 500 },
+      ],
+    });
+    // Mutually "descended": whichever is judged first covers the other. What
+    // matters is that it terminates and kills at least one.
+    const res = await svc.killPids([500, 900]);
+    expect(res.every((r) => r.ok)).toBe(true);
+    expect(killed.length).toBeGreaterThanOrEqual(1);
   });
 });
