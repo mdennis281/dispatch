@@ -16,24 +16,38 @@ import { ManageConfigDialog } from "./components/sidebar/ManageConfigDialog.js";
 import { Toasts } from "./components/Toasts.js";
 import { ShutdownScreen } from "./components/ShutdownScreen.js";
 import { useChats } from "./stores/chats.js";
+import { useProjects, useActiveProject } from "./stores/projects.js";
+import { visibleChat } from "./stores/navigation.js";
 import { useView } from "./stores/view.js";
 
-/** Empty state when no chat is selected. */
+/**
+ * Empty state when no chat is open — including right after a project switch,
+ * which closes the previous project's chat rather than leaving it on screen
+ * beside the new project's sidebar.
+ */
 function NoChat() {
+  const project = useActiveProject();
   return (
     <div className="flex h-full flex-1 flex-col items-center justify-center bg-app text-center">
       <span className="mb-3 flex size-11 items-center justify-center rounded-lg border border-line bg-panel-2 text-muted [&_svg]:size-5">
         <MessageSquareDashed />
       </span>
       <p className="text-base font-medium text-secondary">No chat selected</p>
-      <p className="mt-0.5 text-xs text-muted">Pick a chat from the sidebar or start a new one.</p>
+      <p className="mt-0.5 text-xs text-muted">
+        {project
+          ? `Pick a chat from the sidebar, or start a new one in ${project.name}.`
+          : "Pick a project from the sidebar to get started."}
+      </p>
     </div>
   );
 }
 
 export default function App() {
-  const activeChatId = useChats((s) => s.activeChatId);
-  const chat = useChats((s) => (activeChatId ? s.byId[activeChatId] : undefined));
+  const activeProjectId = useProjects((s) => s.activeProjectId);
+  // Only ever the active project's own chat — see visibleChat. Anything else
+  // (another project's chat, an id that hasn't hydrated) falls through to the
+  // empty state.
+  const chat = useChats((s) => visibleChat(s, activeProjectId));
   const view = useView((s) => s.view);
   // Project setup is the one surface that isn't ABOUT the active project — it's
   // how a project comes to exist — so it takes the whole window under the top

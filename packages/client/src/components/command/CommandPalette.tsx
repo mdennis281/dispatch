@@ -37,6 +37,7 @@ import {
 import { actions } from "../../lib/actions.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
+import { selectChat, selectProject } from "../../stores/navigation.js";
 import { useView, openOverlay } from "../../stores/view.js";
 import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
 import { Kbd } from "../ui/Kbd.js";
@@ -91,7 +92,7 @@ function newChatAndFocus(projectId: string): void {
       done = true;
       unsub();
       clearTimeout(timer);
-      useChats.getState().setActiveChat(fresh);
+      selectChat(fresh);
     }
   });
   const timer = setTimeout(() => {
@@ -284,7 +285,7 @@ export function CommandPalette({
         group: "Projects",
         icon: <FolderGit2 />,
         keywords: `project repo ${p.repoPath ?? ""}`,
-        run: () => useProjects.getState().setActiveProject(p.id),
+        run: () => selectProject(p.id),
       });
     }
 
@@ -299,10 +300,7 @@ export function CommandPalette({
         group: "Chats",
         icon: <MessageSquare />,
         keywords: `chat ${proj?.name ?? ""}`,
-        run: () => {
-          if (c.projectId !== activeProjectId) useProjects.getState().setActiveProject(c.projectId);
-          useChats.getState().setActiveChat(c.id);
-        },
+        run: () => selectChat(c.id),
       });
     }
 

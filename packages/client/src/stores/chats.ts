@@ -27,7 +27,14 @@ interface ChatsStore {
    */
   lastActivity: Record<string, number>;
 
-  setActiveChat: (id: string) => void;
+  /**
+   * Open a chat, or `null` for "nothing open" (the empty state).
+   *
+   * Prefer {@link selectChat} / {@link selectProject} from `stores/navigation.ts`
+   * over calling this directly: a chat is only ever viewable inside its OWN
+   * project, and those keep the two selections in step.
+   */
+  setActiveChat: (id: string | null) => void;
   hydrate: (chats: Chat[]) => void;
   upsertChat: (chat: Chat) => void;
   /** Advance a chat's last-activity clock (coalesced so bursty chunks don't churn). */
@@ -109,13 +116,12 @@ export const useChats = create<ChatsStore>((set) => ({
       const lastActivity = { ...s.lastActivity };
       delete lastActivity[chatId];
       const order = s.order.filter((id) => id !== chatId);
-      // Keep a selection alive: prefer another chat in the same project, else any
-      // remaining chat, else nothing.
+      // Keep a selection alive, but only WITHIN the deleted chat's project —
+      // falling through to any remaining chat used to open one from a project
+      // the user isn't looking at. Nothing left in it → the empty state.
       const activeChatId =
         s.activeChatId === chatId
-          ? (order.find((id) => byId[id]?.projectId === removed.projectId) ??
-             order[0] ??
-             null)
+          ? (order.find((id) => byId[id]?.projectId === removed.projectId) ?? null)
           : s.activeChatId;
       return { byId, order, activity, queued, prSettled, lastActivity, activeChatId };
     });
@@ -132,15 +138,26 @@ export const useChats = create<ChatsStore>((set) => ({
     })),
 }));
 
+/**
+ * Chats belonging to a project, most-recent activity first. `null` means "no
+ * project in focus", which yields every chat (the picker-less case) — pass a
+ * real id to get a project-scoped list.
+ *
+ * Pure so the sidebar selector and the navigation invariants share one
+ * definition of "this project's chats, newest first".
+ */
+export function chatsForProject(
+  s: Pick<ChatsStore, "order" | "byId" | "lastActivity">,
+  projectId: string | null,
+): Chat[] {
+  const at = (c: Chat) => s.lastActivity[c.id] ?? c.updatedAt ?? c.createdAt;
+  return s.order
+    .map((id) => s.byId[id]!)
+    .filter((c): c is Chat => !!c && (!projectId || c.projectId === projectId))
+    .sort((a, b) => at(b) - at(a));
+}
+
 /** Selector: chats for a project, ordered by most-recent activity first. */
 export function useProjectChats(projectId: string | null): Chat[] {
-  return useChats(
-    useShallow((s) => {
-      const at = (c: Chat) => s.lastActivity[c.id] ?? c.updatedAt ?? c.createdAt;
-      return s.order
-        .map((id) => s.byId[id]!)
-        .filter((c): c is Chat => !!c && (!projectId || c.projectId === projectId))
-        .sort((a, b) => at(b) - at(a));
-    }),
-  );
+  return useChats(useShallow((s) => chatsForProject(s, projectId)));
 }

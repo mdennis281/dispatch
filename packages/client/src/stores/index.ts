@@ -15,6 +15,7 @@ import { notifyAttention, closeAttentionNotification } from "../lib/browserNotif
 import { useConnection } from "./connection.js";
 import { useProjects } from "./projects.js";
 import { useChats } from "./chats.js";
+import { reconcileActiveChat } from "./navigation.js";
 import { useMessages } from "./messages.js";
 import { useAttention } from "./attention.js";
 import { useRunners } from "./runners.js";
@@ -385,6 +386,10 @@ export async function hydrateFromServer(): Promise<boolean> {
   if (prevChat && chats.some((c) => c.id === prevChat)) {
     useChats.getState().setActiveChat(prevChat);
   }
+  // The two hydrates above pick their selections from independent lists
+  // (`projects[0]` and the globally-most-recent chat), so on a first load they
+  // can land in different projects. Snap the chat back into the focused project.
+  reconcileActiveChat();
 
   const activeProject = useProjects.getState().activeProjectId;
   if (activeProject) void loadProjectPanels(activeProject);
@@ -583,9 +588,12 @@ export function startLiveData(): void {
   let lastChat = useChats.getState().activeChatId;
   liveDisposers.push(
     useChats.subscribe((s) => {
-      if (s.activeChatId && s.activeChatId !== lastChat) {
+      // Track the CLEARED state too (a project switch closes the open chat):
+      // otherwise `lastChat` stays pinned to the chat we just closed, and
+      // re-opening it doesn't re-fetch a transcript the LRU may have evicted.
+      if (s.activeChatId !== lastChat) {
         lastChat = s.activeChatId;
-        void ensureChatMessages(s.activeChatId);
+        if (s.activeChatId) void ensureChatMessages(s.activeChatId);
       }
     }),
   );

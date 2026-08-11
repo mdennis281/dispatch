@@ -9,7 +9,7 @@
  * free-form) simply settle the transcript at its latest message.
  */
 import type { AttentionItem } from "@dispatch/shared";
-import { useChats } from "../../stores/chats.js";
+import { selectChat } from "../../stores/navigation.js";
 
 const RETRIES = 12;
 const INTERVAL_MS = 150;
@@ -50,12 +50,16 @@ function scrollToCard(id: string, triesLeft: number): void {
  * Select a chat and bring its pending card into focus. Safe to call before the
  * transcript has loaded — the scroll retries until the card mounts.
  *
+ * Goes through {@link selectChat}, so an item raised by a chat in ANOTHER
+ * project switches projects first: the queue is global, but a chat is only
+ * viewable inside its own project's window.
+ *
  * Takes the two fields rather than the item because a click on a *desktop
  * notification* arrives from the service worker as plain postMessage data, not
  * as a live `AttentionItem` (the item may even have been resolved by then).
  */
 export function focusAttentionTarget(chatId: string, permissionRequestId?: string): void {
-  useChats.getState().setActiveChat(chatId);
+  selectChat(chatId);
   if (!permissionRequestId) {
     window.setTimeout(scrollTranscriptToBottom, INTERVAL_MS);
     return;
