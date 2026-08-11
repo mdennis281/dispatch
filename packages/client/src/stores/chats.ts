@@ -152,7 +152,10 @@ export function chatsForProject(
 ): Chat[] {
   const at = (c: Chat) => s.lastActivity[c.id] ?? c.updatedAt ?? c.createdAt;
   return s.order
-    .map((id) => s.byId[id]!)
+    // No `!` here: `order` legitimately outruns `byId` for an instant during a
+    // removal, and the type guard below is what drops those — asserting them
+    // away would just hide the next real one.
+    .map((id): Chat | undefined => s.byId[id])
     .filter((c): c is Chat => !!c && (!projectId || c.projectId === projectId))
     .sort((a, b) => at(b) - at(a));
 }
