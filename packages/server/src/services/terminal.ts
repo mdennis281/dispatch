@@ -263,24 +263,34 @@ export class TerminalService {
     // would silently hang the caller for as long as the dev server lives, so
     // refuse immediately and say which name is occupied — the agent's next move
     // is another terminal, not a ten-minute wait for a timeout.
-    if (term.background) {
-      const held = term.background.command;
-      return {
-        output: "",
-        exitCode: null,
-        cwd: term.cwd,
-        error:
-          `Terminal '${name}' is busy running a background command (${truncate(held, 60)}). ` +
-          `Use a different terminal name, read this one with terminal_output, ` +
-          `or stop it from the Terminals tab.`,
-      };
-    }
+    const held = this.backgroundBusy(term, name);
+    if (held) return held;
 
-    // Serialize behind any in-flight run on this terminal.
+    // Serialize behind any in-flight run on this terminal…
     const gate = term.queue.catch(() => {});
-    const run = gate.then(() => this.exec(term!, args));
+    // …and re-check AFTER the gate. Two calls can arrive before either has run:
+    // the second passes the check above (the first hasn't written its command
+    // yet, so `background` is still unset), then waits, and the first — which
+    // resolves as soon as it is written — leaves the shell held. Without this
+    // second look the queued caller falls into `exec` behind a dev server and
+    // hangs for the full timeout, which is the exact failure this guards.
+    const run = gate.then(() => this.backgroundBusy(term!, name) ?? this.exec(term!, args));
     term.queue = run.catch(() => {});
     return run;
+  }
+
+  /** The refusal for a shell a background command holds, or null if it's free. */
+  private backgroundBusy(term: Terminal, name: string): RunTerminalResult | null {
+    if (!term.background) return null;
+    return {
+      output: "",
+      exitCode: null,
+      cwd: term.cwd,
+      error:
+        `Terminal '${name}' is busy running a background command ` +
+        `(${truncate(term.background.command, 60)}). Use a different terminal name, ` +
+        `read this one with terminal_output, or stop it from the Terminals tab.`,
+    };
   }
 
   /** True when this chat already holds `maxPerChat` LIVE shells. */

@@ -461,6 +461,25 @@ describe("TerminalService — background commands", () => {
     expect(res.error).toContain("serve up");
   });
 
+  it("refuses a command that was already QUEUED when the background one started", async () => {
+    const { svc } = makeService();
+    // Both calls are made before either has written anything, so the second
+    // passes the pre-queue check and only finds the shell held after the gate.
+    // Falling through to exec here would hang it behind the server for the full
+    // 10-minute timeout — the very thing this feature exists to avoid.
+    const [, second] = await Promise.all([
+      svc.run({
+        chatId: "c1",
+        name: "server",
+        command: "serve up",
+        cwd: "C:\\repo",
+        background: true,
+      }),
+      svc.run({ chatId: "c1", name: "server", command: "printout hi", cwd: "C:\\repo" }),
+    ]);
+    expect(second.error).toMatch(/busy running a background command/i);
+  });
+
   it("frees the shell when the background command finally exits", async () => {
     const { svc, shells } = makeService();
     await svc.run({
