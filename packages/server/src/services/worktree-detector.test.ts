@@ -727,6 +727,29 @@ describe("WorktreeDetector EnterWorktree (bug: only appeared once a PR existed)"
     expect(b!.worktrees).toEqual([]);
   });
 
+  it("ignores a name that would escape the worktrees dir, and a relative path", async () => {
+    await store.saveChat(mkChat());
+    await detector.start();
+
+    // Both worktrees are real and on disk — only the CLAIMS are malformed, so a
+    // pass that honored them would attribute a tree this chat never touched.
+    const p = await harnessAddsWorktree("legit");
+    await agentAddsWorktree("feat/elsewhere");
+    agentEntersWorktree("chatA", { name: `../../worktrees/feat-elsewhere` });
+    agentEntersWorktree("chatA", { path: "relative/wt/legit" });
+
+    const res = await detector.detectForChat("chatA");
+    expect(res.attached).toEqual([]);
+    expect((await store.getChat("chatA"))!.worktrees).toEqual([]);
+
+    // The same chat's WELL-FORMED claim still lands.
+    agentEntersWorktree("chatA", { path: p });
+    await detector.detectForChat("chatA");
+    const a = await store.getChat("chatA");
+    expect(a!.worktrees).toHaveLength(1);
+    expect(a!.worktrees[0].replace(/\\/g, "/")).toContain("legit");
+  });
+
   it("heals from PERSISTED EnterWorktree rows after a restart", async () => {
     await harnessAddsWorktree("persisted");
     await store.saveChat(mkChat({ id: "chatA", worktrees: [] }));
@@ -763,6 +786,19 @@ describe("parseEnterWorktreeResult", () => {
     ).toEqual({
       path: "C:\\Users\\m\\p\\.claude\\worktrees\\a-b",
       branch: "worktree-a-b",
+    });
+  });
+
+  it("keeps dots that belong to the branch name", () => {
+    expect(
+      parseEnterWorktreeResult(
+        "Created worktree at /wt/r on branch release/v1.2.3. The session is now working in the worktree.",
+      ),
+    ).toEqual({ path: "/wt/r", branch: "release/v1.2.3" });
+    // No trailing punctuation at all.
+    expect(parseEnterWorktreeResult("Created worktree at /wt/r on branch dev")).toEqual({
+      path: "/wt/r",
+      branch: "dev",
     });
   });
 

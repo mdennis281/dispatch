@@ -67,7 +67,7 @@
  * agent can create/switch worktrees itself; the detector only observes and
  * attributes.
  */
-import { resolve } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 import type {
   Chat,
   ChatMessage,
@@ -156,7 +156,12 @@ export function parseEnterWorktreeResult(
             .join("\n")
         : "";
   if (!text) return undefined;
-  const withBranch = /worktree at (.+?) on branch ([^\s.]+)/.exec(text);
+  // The branch runs to the sentence terminator, NOT to the first dot — a dot is
+  // legal in a branch name (`release/v1.2.3`), so only a `.` that ends the
+  // sentence (followed by space or end) closes it.
+  const withBranch = /worktree at (.+?) on branch (\S+?)(?=\.(?:\s|$)|\s|$)/.exec(
+    text,
+  );
   if (withBranch) return { path: withBranch[1], branch: withBranch[2] };
   const bare = /worktree at (.+?)(?:[.]\s|[.]?$|\n)/.exec(text);
   return bare ? { path: bare[1].trim() } : undefined;
@@ -367,9 +372,15 @@ export class WorktreeDetector {
     if (name) earliest(this.chatWorktreeNames, chatId, name, ts);
   }
 
-  /** Fold an absolute worktree path claim into the chat's claims (earliest wins). */
+  /**
+   * Fold an absolute worktree path claim into the chat's claims (earliest wins).
+   * A RELATIVE path is dropped rather than guessed at: `canonPath` resolves
+   * against the server process's cwd, which is not the repo, so resolving one
+   * would either match nothing or match the wrong tree. The client ignores a
+   * relative `EnterWorktree.path` for the same reason (see `runLocation.ts`).
+   */
   private recordWorktreePath(chatId: string, path: string, ts: number): void {
-    if (!path) return;
+    if (!path || !isAbsolute(path)) return;
     earliest(this.chatWorktreePaths, chatId, canonPath(path), ts);
   }
 
@@ -694,6 +705,11 @@ export class WorktreeDetector {
     // Resolve every `EnterWorktree` claim to a canonical path now that we have a
     // repoPath: chatId → (canonical path → earliest claim ts). The `name` form
     // lands in `<repo>/.claude/worktrees/<name>`, which is where the harness cuts it.
+    // A name may legally contain `/` (the harness allows nested segments), so we
+    // don't reject separators — we resolve and require the result to stay UNDER
+    // the worktrees dir, which drops a `..` that would escape it and claim an
+    // arbitrary path elsewhere on disk.
+    const wtDir = canonPath(resolve(project.repoPath, ".claude", "worktrees"));
     const claims = new Map<string, Map<string, number>>();
     for (const chatId of new Set([
       ...this.chatWorktreePaths.keys(),
@@ -704,9 +720,8 @@ export class WorktreeDetector {
         earliest(claims, chatId, cp, ts);
       }
       for (const [name, ts] of this.chatWorktreeNames.get(chatId) ?? []) {
-        const cp = canonPath(
-          resolve(project.repoPath, ".claude", "worktrees", name),
-        );
+        const cp = canonPath(resolve(wtDir, name));
+        if (!cp.startsWith(wtDir + sep)) continue;
         earliest(claims, chatId, cp, ts);
       }
     }
