@@ -2305,7 +2305,43 @@ function fakeMemory(): ManagerMcpMemory & { data: Map<string, ProjectMemory> } {
       };
     },
     forget: async (name) => data.delete(slug(name)),
-    findSimilar: async (candidate) => {
+    read: async (name) => data.get(slug(name)) ?? null,
+    inventory: async (opts) => {
+      const live = new Set(data.keys());
+      const linksOf = new Map<string, string[]>(
+        [...data.values()].map((m) => [
+          m.name,
+          [...m.body.matchAll(/\[\[([^\]]+)\]\]/g)]
+            .map((x) => slug(x[1] ?? ""))
+            .filter((t) => live.has(t) && t !== m.name),
+        ]),
+      );
+      return [...data.values()]
+        .filter((m) => !opts?.type || m.type === opts.type)
+        .filter((m) => !opts?.prefix || m.name.startsWith(opts.prefix))
+        .filter((m) => !opts?.names?.length || opts.names.map(slug).includes(m.name))
+        .map((m) => ({
+          ...m,
+          chars: m.body.length,
+          surfaced: 0,
+          recalled: 0,
+          links: linksOf.get(m.name) ?? [],
+          backlinks: [...linksOf.entries()]
+            .filter(([, targets]) => targets.includes(m.name))
+            .map(([from]) => from),
+        }));
+    },
+    grep: async (opts) => {
+      const re = new RegExp(
+        opts.regex ? opts.pattern : opts.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+        opts.caseSensitive ? "" : "i",
+      );
+      const matches = [...data.values()]
+        .filter((m) => re.test(m.body))
+        .map((m) => ({ name: m.name, type: m.type, field: "body" as const, line: 1, text: m.body }));
+      return { matches, truncated: false, timedOut: false, scanned: data.size };
+    },
+    findSimilar: async (candidate, opts) => {
       const slugName = slug(candidate.name);
       const cand = {
         name: slugName,
@@ -2315,8 +2351,9 @@ function fakeMemory(): ManagerMcpMemory & { data: Map<string, ProjectMemory> } {
       return [...data.values()]
         .filter((m) => m.name !== slugName)
         .map((m) => ({ m, similarity: memorySimilarity(cand, m) }))
-        .filter((s) => s.similarity >= 0.35)
+        .filter((s) => s.similarity >= (opts?.threshold ?? 0.35))
         .sort((a, b) => b.similarity - a.similarity)
+        .slice(0, opts?.limit ?? 3)
         .map((s) => ({
           name: s.m.name,
           description: s.m.description,
@@ -2324,6 +2361,24 @@ function fakeMemory(): ManagerMcpMemory & { data: Map<string, ProjectMemory> } {
         }));
     },
   };
+}
+
+/**
+ * The manager tools keyed by their WIRE name (`memory_list`), not the factory's
+ * variable name. The curation tools are exercised by the name an agent actually
+ * calls, so a rename that breaks the tool can't pass because the local binding
+ * still resolves.
+ */
+type LooseTool = {
+  name: string;
+  handler: (args: Record<string, unknown>, extra: unknown) => Promise<CallToolResult>;
+};
+
+function toolsByName(memory: ManagerMcpMemory): Record<string, LooseTool> {
+  const tools = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), memory });
+  return Object.fromEntries(
+    Object.values(tools).map((t) => [t.name, t as unknown as LooseTool]),
+  );
 }
 
 describe("manager-mcp — memory tools", () => {
@@ -2438,6 +2493,204 @@ describe("manager-mcp — memory tools", () => {
     expect(text).toContain("may duplicate");
     expect(text).toContain("consumable-wheel-ui");
     expect(mem.data.has("consumable-wheel-controls")).toBe(true);
+  });
+
+  it("memory_list reports the curation signals, honours filters, and sorts", async () => {
+    const mem = fakeMemory();
+    await mem.remember({
+      name: "hub",
+      description: "the central fact",
+      type: "project",
+      body: "points at [[spoke]]",
+    });
+    await mem.remember({ name: "spoke", description: "pointed at", type: "reference", body: "s" });
+    const { memory_list: list } = toolsByName(mem);
+
+    const all = await list.handler({}, {});
+    const text = resultText(all);
+    expect(text).toContain("2 memories");
+    expect(text).toContain("never retrieved");
+    expect(text).toContain("→ spoke"); // hub's outbound link
+    expect(text).toContain("← hub"); // spoke's backlink
+
+    const filtered = resultText(await list.handler({ type: "reference" }, {}));
+    expect(filtered).toContain("spoke");
+    expect(filtered).not.toContain("`hub`");
+
+    // Biggest first — the "what is this store spending its context on" view.
+    const bySize = resultText(await list.handler({ sort: "size" }, {}));
+    expect(bySize.indexOf("`hub`")).toBeLessThan(bySize.indexOf("`spoke`"));
+  });
+
+  it("memory_list bounds even the plain listing of a very large store", async () => {
+    const mem = fakeMemory();
+    for (let i = 0; i < 400; i++) {
+      await mem.remember({
+        name: `fact-${i}`,
+        description: "d".repeat(300),
+        type: "project",
+        body: "b",
+      });
+    }
+    const { memory_list: list } = toolsByName(mem);
+    const text = resultText(await list.handler({ limit: 400 }, {}));
+    expect(text.length).toBeLessThan(30000);
+    expect(text).toContain("omitted to stay within the size limit");
+  });
+
+  it("memory_list bounds its output when bodies are requested", async () => {
+    const mem = fakeMemory();
+    for (let i = 0; i < 10; i++) {
+      await mem.remember({
+        name: `big-${i}`,
+        description: `d${i}`,
+        type: "project",
+        body: "x".repeat(20000),
+      });
+    }
+    const { memory_list: list } = toolsByName(mem);
+    const text = resultText(await list.handler({ includeBody: true }, {}));
+    expect(text.length).toBeLessThan(30000);
+    expect(text).toMatch(/truncated .* more chars|omitted to stay within/);
+  });
+
+  it("memory_search groups hits by memory and says when it truncated", async () => {
+    const mem = fakeMemory();
+    await mem.remember({
+      name: "taskkill-orphans",
+      description: "d",
+      type: "feedback",
+      body: "never taskkill the server",
+    });
+    await mem.remember({ name: "other", description: "d", type: "project", body: "unrelated" });
+    const { memory_search: search } = toolsByName(mem);
+
+    const hit = resultText(await search.handler({ pattern: "taskkill" }, {}));
+    expect(hit).toContain("1 hit(s) in 1 memory");
+    expect(hit).toContain("taskkill-orphans");
+
+    const miss = resultText(await search.handler({ pattern: "nothing-here" }, {}));
+    expect(miss).toContain("No memory matches");
+  });
+
+  it("memory_search flags a timed-out scan as PARTIAL, not as the whole answer", async () => {
+    const mem = fakeMemory();
+    await mem.remember({ name: "a", description: "d", type: "project", body: "match" });
+    const slow: ManagerMcpMemory = {
+      ...mem,
+      grep: async () => ({
+        matches: [{ name: "a", type: "project" as const, field: "body" as const, line: 1, text: "match" }],
+        truncated: true,
+        timedOut: true,
+        scanned: 1,
+      }),
+    };
+    const { memory_search: search } = toolsByName(slow);
+    const text = resultText(await search.handler({ pattern: "match", regex: true }, {}));
+    // Exhaustiveness is this tool's entire value — a partial result that reads
+    // complete is worse than an error.
+    expect(text).toContain("PARTIAL");
+    expect(text).not.toContain("raise `limit`");
+  });
+
+  it("memory_similar sweeps wider when asked, and needs something to compare", async () => {
+    const mem = fakeMemory();
+    await mem.remember({
+      name: "pfsense-wan-flap",
+      description: "pfSense WAN speed duplex autoselect link flap",
+      type: "project",
+      body: "b",
+    });
+    await mem.remember({
+      name: "pfsense-wan-autoselect",
+      description: "pfSense WAN autoselect duplex speed causes a link flap",
+      type: "project",
+      body: "b",
+    });
+    const { memory_similar: similar } = toolsByName(mem);
+
+    const byName = resultText(await similar.handler({ name: "pfsense-wan-flap" }, {}));
+    expect(byName).toContain("pfsense-wan-autoselect");
+    expect(byName).toContain("% similar");
+
+    // Free text compares against all three fields — see the tool's note on why.
+    const byText = resultText(
+      await similar.handler({ text: "pfSense WAN autoselect duplex link flap", threshold: 0.25 }, {}),
+    );
+    expect(byText).toContain("pfsense-wan");
+
+    const unknown = await similar.handler({ name: "ghost" }, {});
+    expect(unknown.isError).toBe(true);
+    const neither = await similar.handler({}, {});
+    expect(neither.isError).toBe(true);
+    expect(resultText(neither)).toContain("either a `name` or some `text`");
+  });
+
+  it("memory_history reports an unavailable history as an answer, not an error", async () => {
+    const mem = fakeMemory();
+    const withHistory = {
+      ...mem,
+      history: async () => ({
+        available: false,
+        reason: "this project's memory lives in the runtime store",
+        commits: [],
+      }),
+    };
+    const { memory_history: history } = toolsByName(withHistory);
+    const res = await history.handler({}, {});
+    // An agent that reads this as a failure retries; it must read as a fact.
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("runtime store");
+  });
+
+  it("memory_history renders commits and drops the generated index from the file list", async () => {
+    const mem = fakeMemory();
+    const withHistory = {
+      ...mem,
+      history: async () => ({
+        available: true,
+        commits: [
+          {
+            sha: "abc1234def",
+            date: "2026-08-01T10:00:00Z",
+            author: "Michael",
+            subject: "chore(memory): update two memories",
+            files: [
+              { name: "deploy-runbook", kind: "modified" as const },
+              { name: "old-fact", kind: "deleted" as const },
+              // MEMORY.md changes on EVERY memory commit, so listing it would
+              // make each line read as if the index were the interesting change.
+              { name: "MEMORY", kind: "modified" as const },
+            ],
+          },
+        ],
+      }),
+    };
+    const { memory_history: history } = toolsByName(withHistory);
+    const text = resultText(await history.handler({}, {}));
+    expect(text).toContain("2026-08-01");
+    expect(text).toContain("abc1234d");
+    expect(text).toContain("deleted old-fact");
+    expect(text).not.toContain("MEMORY");
+  });
+
+  it("each curation tool degrades cleanly when its backing surface is missing", async () => {
+    // `findSimilar`/`inventory`/`grep`/`history` are all optional on the
+    // interface, so a session on older wiring must get a readable message
+    // rather than a crash inside the handler.
+    const bare: ManagerMcpMemory = {
+      remember: async () => {
+        throw new Error("unused");
+      },
+      recall: async () => ({ index: "", matches: [] }),
+      forget: async () => false,
+    };
+    const tools = toolsByName(bare);
+    for (const name of ["memory_list", "memory_search", "memory_history", "memory_similar"]) {
+      const res = await tools[name]!.handler({ pattern: "x", name: "y" }, {});
+      expect(res.isError, name).toBe(true);
+      expect(resultText(res), name).toContain("not available in this session");
+    }
   });
 
   it("remember does not nudge for a genuinely distinct fact", async () => {

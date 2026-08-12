@@ -474,23 +474,52 @@ function jaccard(a: Set<string>, b: Set<string>): number {
 }
 
 /** The text fields that define a memory's identity, for similarity comparison. */
-interface MemoryText {
+export interface MemoryText {
   name: string;
   description: string;
   body: string;
 }
 
+/** A memory's identity fields, pre-tokenized once for repeated comparison. */
+export interface MemoryTokens {
+  name: Set<string>;
+  description: Set<string>;
+  body: Set<string>;
+}
+
 /**
- * Blended similarity of two memories in [0,1] — the "are these the same fact?"
- * signal behind the remember dedup nudge. Name and description carry the intent
- * (a duplicate usually shares the feature word + a reworded one-liner), so they
- * dominate; the body is noisy at length and only lightly weighted.
+ * Pre-tokenize a memory's identity fields. Hoisted out of {@link memorySimilarity}
+ * because clustering a whole store compares every memory against every other one:
+ * at 140 memories that's ~10k pairs, and tokenizing both sides per pair re-splits
+ * the same (up to multi-KB) bodies tens of thousands of times. Tokenize once,
+ * compare many.
  */
+export function memoryTokens(m: MemoryText): MemoryTokens {
+  return {
+    name: new Set(tokenize(m.name)),
+    description: new Set(tokenize(m.description)),
+    body: new Set(tokenize(m.body)),
+  };
+}
+
+/**
+ * Blended similarity of two PRE-TOKENIZED memories in [0,1] — the "are these the
+ * same fact?" signal behind the remember dedup nudge and the consolidation
+ * clustering. Name and description carry the intent (a duplicate usually shares
+ * the feature word + a reworded one-liner), so they dominate; the body is noisy
+ * at length and only lightly weighted.
+ */
+export function similarityOfTokens(a: MemoryTokens, b: MemoryTokens): number {
+  return (
+    0.45 * jaccard(a.name, b.name) +
+    0.4 * jaccard(a.description, b.description) +
+    0.15 * jaccard(a.body, b.body)
+  );
+}
+
+/** {@link similarityOfTokens} over raw text — the one-shot convenience form. */
 export function memorySimilarity(a: MemoryText, b: MemoryText): number {
-  const nameSim = jaccard(new Set(tokenize(a.name)), new Set(tokenize(b.name)));
-  const descSim = jaccard(new Set(tokenize(a.description)), new Set(tokenize(b.description)));
-  const bodySim = jaccard(new Set(tokenize(a.body)), new Set(tokenize(b.body)));
-  return 0.45 * nameSim + 0.4 * descSim + 0.15 * bodySim;
+  return similarityOfTokens(memoryTokens(a), memoryTokens(b));
 }
 
 /** A pre-existing memory that closely resembles a remember candidate. */
@@ -500,6 +529,83 @@ export interface SimilarMemory {
   type: MemoryType;
   /** Blended similarity in [0,1] (rounded to 2 dp). */
   similarity: number;
+}
+
+/* ------------------------------------------------------------- curation views */
+
+/**
+ * One row of the curation inventory — a memory plus every signal that bears on
+ * "should this still be here?". The Memory panel and the consolidation task both
+ * read this instead of stitching {@link MemoryService.list} against
+ * {@link MemoryStatsStore} themselves.
+ */
+export interface MemoryInventoryEntry extends ProjectMemory {
+  /**
+   * Body length in CHARACTERS — what this fact costs when it's injected.
+   * Deliberately not "bytes": this is `body.length`, so it counts UTF-16 code
+   * units, and a store full of `→`/`≈`/emoji would report fewer than its real
+   * UTF-8 byte count. Characters are the honest unit here anyway, since what
+   * this feeds is a context budget rather than a disk one.
+   */
+  chars: number;
+  /** Times auto-surfaced into a turn. */
+  surfaced: number;
+  /** Times returned by an explicit recall (the strong "was needed" signal). */
+  recalled: number;
+  /** Last access (epoch ms), or undefined when it's never been retrieved. */
+  lastAccessedAt?: number;
+  /** `[[wikilink]]` targets in this body that resolve to a real memory. */
+  links: string[];
+  /**
+   * Names of memories whose body links HERE. The signal that stops a
+   * consolidation from quietly breaking the graph: deleting a memory three
+   * others point at means redirecting those three, not just removing a file.
+   */
+  backlinks: string[];
+}
+
+/** One hit from {@link MemoryService.grep} — where the literal text appears. */
+export interface MemoryGrepMatch {
+  name: string;
+  type: MemoryType;
+  /** Which field matched. */
+  field: "name" | "description" | "body";
+  /** 1-based line number within the body; omitted for name/description hits. */
+  line?: number;
+  /** The matching line, clamped to {@link GREP_LINE_MAX}. */
+  text: string;
+}
+
+/** Longest match line returned by {@link MemoryService.grep}. */
+const GREP_LINE_MAX = 240;
+/** Longest pattern grep accepts. */
+const GREP_PATTERN_MAX = 200;
+
+/**
+ * Wall-clock budget for one {@link MemoryService.grep} scan.
+ *
+ * A literal search over a few hundred memories is single-digit milliseconds, so
+ * anything near this ceiling is a regex behaving badly. Checked between lines,
+ * which bounds the realistic accidental failure — a pattern that backtracks
+ * mildly on every one of a few thousand lines and turns a search into a
+ * multi-second event-loop stall.
+ *
+ * It does NOT bound a truly catastrophic pattern (`(a+)+$` and friends), where a
+ * SINGLE line can spin longer than any between-lines check will ever notice.
+ * Nothing in pure JS does: the regex engine can't be interrupted, so the only
+ * complete fixes are a linear-time engine (RE2 — a native addon, and this
+ * project is careful about Windows build friction) or running the scan in a
+ * terminable worker. Both are disproportionate here: `regex: true` is opt-in,
+ * the caller is this machine's own agent — which can already run arbitrary
+ * shell — and the worst case is a local server that needs restarting, not a
+ * reachable denial of service. Revisit if memory search ever becomes
+ * multi-tenant or reachable from outside the box.
+ */
+const GREP_TIME_BUDGET_MS = 2_000;
+
+/** Clamp a grep match line so one long line can't dominate the result. */
+function clip(text: string): string {
+  return text.length <= GREP_LINE_MAX ? text : `${text.slice(0, GREP_LINE_MAX)}…`;
 }
 
 /**
@@ -771,6 +877,192 @@ export class MemoryService {
         type: s.m.type,
         similarity: Math.round(s.similarity * 100) / 100,
       }));
+  }
+
+  /**
+   * The curation inventory: every memory with the signals that decide whether it
+   * still earns its place — size, age, how often it's actually been retrieved,
+   * and how it's wired into the `[[link]]` graph in BOTH directions.
+   *
+   * This is the read behind a consolidation pass. `list` alone can't answer "is
+   * anything pointing at this?" or "has this ever been used?", which are exactly
+   * the two questions that separate a stale fact from a load-bearing one.
+   *
+   * Filters narrow which rows come back; backlinks are always computed over the
+   * WHOLE project, because a link from a filtered-out memory still counts.
+   */
+  async inventory(
+    projectId: string,
+    opts: { type?: MemoryType; prefix?: string; names?: readonly string[] } = {},
+  ): Promise<MemoryInventoryEntry[]> {
+    const pid = this.safeProjectId(projectId);
+    const all = await this.list(pid);
+    const stats = await this.stats.get(pid).catch(() => ({}) as Record<string, MemoryStat>);
+    const live = new Set(all.map((m) => m.name));
+
+    // One pass over every body builds both directions of the graph, so a filtered
+    // query still reports links from memories the filter excluded.
+    const linksOf = new Map<string, string[]>();
+    const backlinks = new Map<string, string[]>();
+    for (const m of all) {
+      const targets = extractLinks(m.body).filter((t) => live.has(t) && t !== m.name);
+      linksOf.set(m.name, targets);
+      for (const t of targets) {
+        const list = backlinks.get(t);
+        if (list) list.push(m.name);
+        else backlinks.set(t, [m.name]);
+      }
+    }
+
+    const prefix = opts.prefix?.trim().toLowerCase();
+    const wanted = opts.names?.length
+      ? new Set(opts.names.map((n) => slugifyMemoryName(n)).filter(Boolean))
+      : null;
+
+    return all
+      .filter((m) => !opts.type || m.type === opts.type)
+      .filter((m) => !prefix || m.name.startsWith(prefix))
+      .filter((m) => !wanted || wanted.has(m.name))
+      .map((m) => {
+        const s = stats[m.name];
+        return {
+          ...m,
+          chars: m.body.length,
+          surfaced: s?.surfaced ?? 0,
+          recalled: s?.recalled ?? 0,
+          ...(s?.lastAccessedAt ? { lastAccessedAt: s.lastAccessedAt } : {}),
+          links: linksOf.get(m.name) ?? [],
+          backlinks: backlinks.get(m.name) ?? [],
+        };
+      });
+  }
+
+  /**
+   * LITERAL (or regex) search across a project's memories — the exact-match
+   * counterpart to {@link search}.
+   *
+   * `search`/`recall` are fuzzy and RANKED: they answer "what's most relevant to
+   * this topic", which is right when an agent needs the best fact and wrong when
+   * a curator needs every occurrence. "Which memories still mention `taskkill`?"
+   * has one correct answer — all of them — and a relevance ranking that returns
+   * the best six is actively misleading for a consolidation pass.
+   *
+   * Returns one match per line, so a hit reads as evidence rather than as a
+   * whole body to re-read. Bounded by `limit`; `truncated` says whether more
+   * existed. A malformed regex is an Error, not silently zero matches.
+   */
+  async grep(
+    projectId: string,
+    opts: {
+      pattern: string;
+      /** Treat the pattern as a JS regex rather than a literal substring. */
+      regex?: boolean;
+      /**
+       * Default false — curation searches are case-insensitive in practice.
+       * Named the same way the `memory_search` tool names it: this used to be
+       * `ignoreCase` with the tool inverting it, and two names for one flag with
+       * opposite polarity is exactly the kind of thing that reads fine until
+       * someone has to reason about a default.
+       */
+      caseSensitive?: boolean;
+      /** Restrict to one field; default searches all three. */
+      field?: "name" | "description" | "body";
+      limit?: number;
+    },
+  ): Promise<{
+    matches: MemoryGrepMatch[];
+    truncated: boolean;
+    /** The scan hit {@link GREP_TIME_BUDGET_MS} and stopped early. */
+    timedOut: boolean;
+    scanned: number;
+  }> {
+    const pattern = String(opts.pattern ?? "");
+    if (!pattern.trim()) throw new Error("grep requires a non-empty pattern");
+    if (pattern.length > GREP_PATTERN_MAX) {
+      throw new Error(`pattern is too long (max ${GREP_PATTERN_MAX} chars)`);
+    }
+    const flags = opts.caseSensitive ? "g" : "gi";
+    // A literal search is the default because a curator types `taskkill`, not
+    // `taskkill` escaped — and an unescaped `.` or `(` in a literal search
+    // silently matching everything is the worse failure.
+    const source = opts.regex ? pattern : pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    let re: RegExp;
+    try {
+      re = new RegExp(source, flags);
+    } catch (err) {
+      throw new Error(`invalid regex: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    /** Fresh per test — a `g` regex carries `lastIndex` between calls. */
+    const hits = (text: string): boolean => {
+      re.lastIndex = 0;
+      return re.test(text);
+    };
+
+    const limit = Math.max(1, Math.min(500, opts.limit ?? 100));
+    const all = await this.list(projectId);
+    const matches: MemoryGrepMatch[] = [];
+    let truncated = false;
+    const deadline = this.now() + GREP_TIME_BUDGET_MS;
+    let timedOut = false;
+
+    // Every hit goes through one gate, so the budget is checked BEFORE the push
+    // rather than after: a name and a description hit on the same memory used to
+    // sail past a limit that only the body loop enforced, and the result
+    // overshot by two while still claiming to respect `limit`.
+    const take = (hit: MemoryGrepMatch): boolean => {
+      if (matches.length >= limit) {
+        truncated = true;
+        return false;
+      }
+      matches.push(hit);
+      return true;
+    };
+
+    outer: for (const m of all) {
+      if (this.now() > deadline) {
+        timedOut = true;
+        break;
+      }
+      const want = (f: "name" | "description" | "body") => !opts.field || opts.field === f;
+      if (want("name") && hits(m.name)) {
+        if (!take({ name: m.name, type: m.type, field: "name", text: m.name })) break outer;
+      }
+      if (want("description") && m.description && hits(m.description)) {
+        const hit: MemoryGrepMatch = {
+          name: m.name,
+          type: m.type,
+          field: "description",
+          text: clip(m.description),
+        };
+        if (!take(hit)) break outer;
+      }
+      if (want("body")) {
+        const lines = m.body.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          // Per LINE, not just per memory: one 3000-line body is where a mildly
+          // backtracking pattern actually burns its seconds.
+          if ((i & 0x3f) === 0 && this.now() > deadline) {
+            timedOut = true;
+            break outer;
+          }
+          const line = lines[i] ?? "";
+          if (!hits(line)) continue;
+          const hit: MemoryGrepMatch = {
+            name: m.name,
+            type: m.type,
+            field: "body",
+            line: i + 1,
+            text: clip(line.trim()),
+          };
+          if (!take(hit)) break outer;
+        }
+      }
+    }
+    // A timeout is reported as truncation, never as success: a caller that
+    // reads a partial scan as "these are all the mentions" then deletes the
+    // memory whose mention it never reached.
+    if (timedOut) truncated = true;
+    return { matches, truncated, timedOut, scanned: all.length };
   }
 
   /**

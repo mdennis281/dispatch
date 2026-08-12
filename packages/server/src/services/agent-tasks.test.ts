@@ -12,6 +12,8 @@ import {
   type ProjectConfig,
 } from "@dispatch/shared";
 import { buildTaskParts, launchAgentTask } from "./agent-tasks.js";
+import { shardMemories } from "./memory-shard.js";
+import type { MemoryInventoryEntry } from "./memory.js";
 import type { Services } from "./container.js";
 
 /** A loaded config with the DEFAULT dir names. */
@@ -363,10 +365,166 @@ describe("the catalog is complete enough to render a launcher", () => {
   });
 });
 
+/* ------------------------------------------------------ memory consolidation */
+
+/** An inventory row with the shape the consolidation briefing reads. */
+function row(
+  name: string,
+  over: Partial<MemoryInventoryEntry> = {},
+): MemoryInventoryEntry {
+  return {
+    projectId: "p1",
+    name,
+    description: `what ${name} is about`,
+    type: "project",
+    body: `the body of ${name}`,
+    file: `${name}.md`,
+    chars: 20,
+    surfaced: 0,
+    recalled: 0,
+    links: [],
+    backlinks: [],
+    ...over,
+  };
+}
+
+/** A store big enough to shard, with one obvious duplicate pair inside it. */
+function memoryStore(): MemoryInventoryEntry[] {
+  const filler = Array.from({ length: 40 }, (_, i) =>
+    row(`topic${i}-fact`, { description: `zeta${i} kappa${i} omicron${i} lambda${i}` }),
+  );
+  return [
+    ...filler,
+    row("pfsense-wan-flap", {
+      description: "pfSense WAN speed duplex autoselect causes link flap",
+    }),
+    row("pfsense-wan-autoselect-flap", {
+      description: "pfSense WAN autoselect duplex speed causes a link flap",
+    }),
+  ];
+}
+
+const memoryParts = (
+  over: Partial<Parameters<typeof buildTaskParts>[0]> = {},
+  memoryOver: Partial<NonNullable<Parameters<typeof buildTaskParts>[0]["memory"]>> = {},
+) => {
+  const rows = memoryOver.rows ?? memoryStore();
+  return parts("memory:consolidate", {
+    instructions: "",
+    memory: {
+      rows,
+      shards: shardMemories(rows),
+      ruleCount: 0,
+      committed: true,
+      ...memoryOver,
+    },
+    ...over,
+  });
+};
+
+const memoryBrief = (
+  over: Partial<Parameters<typeof buildTaskParts>[0]> = {},
+  memoryOver: Partial<NonNullable<Parameters<typeof buildTaskParts>[0]["memory"]>> = {},
+) => memoryParts(over, memoryOver).find((p) => p.kind === "brief")!.text;
+
+describe("buildTaskParts — memory consolidation", () => {
+  it("names every memory exactly once across the shards it hands out", () => {
+    const rows = memoryStore();
+    const brief = memoryBrief({}, { rows, shards: shardMemories(rows) });
+    for (const m of rows) {
+      // An agent that is never given a name never audits it, and nothing in the
+      // run reports the omission — so coverage is asserted here, not assumed.
+      expect(brief.split(m.name).length - 1, m.name).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("flags the suspected duplicate pair and puts both in the same shard", () => {
+    const brief = memoryBrief();
+    expect(brief).toContain("likely the same fact");
+    expect(brief).toMatch(/pfsense-wan-(autoselect-)?flap ≈ pfsense-wan-(autoselect-)?flap/);
+  });
+
+  it("tells the orchestrator to fan out read-only subagents and apply centrally", () => {
+    const brief = memoryBrief();
+    expect(brief).toContain("Spawn one subagent per shard");
+    expect(brief).toMatch(/READ-ONLY/);
+    expect(brief).toMatch(/must not call `remember` or `forget`/);
+    expect(brief).toContain("cross-shard pass");
+  });
+
+  it("guards the failure that costs the most — deleting what's merely unused", () => {
+    const brief = memoryBrief();
+    expect(brief).toMatch(/"Never retrieved" means look harder, not delete/);
+    expect(brief).toMatch(/backlinks before you delete or rename/);
+  });
+
+  it("switches to report-only when the human turned off apply", () => {
+    const applied = memoryBrief({ params: { apply: true } });
+    expect(applied).toContain("**Applying**");
+    expect(applied).toMatch(/Write the survivor FIRST/);
+
+    const dry = memoryBrief({ params: { apply: false } });
+    expect(dry).toContain("**Report only**");
+    expect(dry).toMatch(/Do not call `remember` or `forget`/);
+    expect(dry).not.toContain("**Applying**");
+  });
+
+  it("drops the repo-verification instruction when verification is off", () => {
+    expect(memoryBrief({ params: { verify: true } })).toMatch(/VERIFY each claim against the repo/);
+    const off = memoryBrief({ params: { verify: false } });
+    expect(off).toMatch(/Do NOT go verify claims against the repo/);
+    expect(off).not.toMatch(/VERIFY each claim/);
+  });
+
+  it("says standing rules are out of scope when they were excluded", () => {
+    const excluded = memoryBrief({ params: { includeRules: false } }, { ruleCount: 4 });
+    expect(excluded).toMatch(/4 standing rules .* are OUT of scope/s);
+
+    const included = memoryBrief({ params: { includeRules: true } }, { ruleCount: 4 });
+    expect(included).toMatch(/Be conservative with the 4 standing rules/);
+  });
+
+  it("doesn't send the agent after git history a project can't have", () => {
+    expect(memoryBrief({}, { committed: true })).toMatch(/`memory_history` \(git history/);
+    const uncommitted = memoryBrief({}, { committed: false });
+    expect(uncommitted).toMatch(/probably unavailable here/);
+    expect(uncommitted).toMatch(/writes land on disk\s+only/);
+  });
+
+  it("attaches the pre-pass inventory as context, with each row's curation signals", () => {
+    const rows = [
+      row("stale-fact", { updatedAt: Date.UTC(2026, 0, 15), chars: 900 }),
+      row("used-fact", { recalled: 3, surfaced: 7, links: ["stale-fact"] }),
+    ];
+    const context = memoryParts({}, { rows, shards: shardMemories(rows) }).find(
+      (p) => p.kind === "context",
+    );
+    expect(context?.label).toContain("2 facts in scope");
+    expect(context?.text).toContain("2026-01-15");
+    expect(context?.text).toContain("never retrieved");
+    expect(context?.text).toContain("3r/7s");
+  });
+
+  it("degrades to a coherent brief when the store is empty", () => {
+    // A launch against an unreadable/empty store must still open a usable chat.
+    const out = memoryParts({}, { rows: [], shards: [] });
+    expect(out.some((p) => p.kind === "context")).toBe(false);
+    const brief = out.find((p) => p.kind === "brief")!.text;
+    expect(brief).toContain("0 recorded facts in scope");
+    expect(brief).toContain("**Fan out — 0 shards**");
+  });
+});
+
 /* ------------------------------------------------------------------ launch */
 
 /** Minimal Services double: enough for createChat + ensureSession + send. */
-function services(over: { status?: GitStatus | null; project?: Record<string, unknown> } = {}) {
+function services(
+  over: {
+    status?: GitStatus | null;
+    project?: Record<string, unknown>;
+    memory?: MemoryInventoryEntry[];
+  } = {},
+) {
   const saved: Chat[] = [];
   const sent: { chatId: string; text: string; parts?: unknown }[] = [];
   const store = {
@@ -383,6 +541,7 @@ function services(over: { status?: GitStatus | null; project?: Record<string, un
     bus: { publish: () => {} },
     projectConfig: { get: () => ({ config: config() }), reload: async () => null },
     git: { status: async () => over.status ?? null },
+    memory: { inventory: async () => over.memory ?? [] },
     broker: {
       has: () => true,
       sendMessage: async (chatId: string, text: string, opts?: { parts?: unknown }) => {
@@ -473,5 +632,45 @@ describe("launchAgentTask", () => {
     expect(sent[0]!.parts).toEqual(out!.parts);
     // The chat's purpose IS the task id — that's what the sidebar icon reads.
     expect(out!.chat.purpose?.kind).toBe("config:skills");
+  });
+
+  it("titles a consolidation by the scale of the store it's chewing on", async () => {
+    const { svc } = services({ memory: memoryStore() });
+    const out = await launchAgentTask(svc, { projectId: "p1", taskId: "memory:consolidate" });
+    expect(out?.chat.title).toMatch(/^\*\*memory\*\*: 42 facts, \d+ shards$/);
+    expect(out?.chat.purpose?.label).toMatch(/^Consolidating 42 durable facts across \d+ agents$/);
+  });
+
+  it("excludes standing rules from the shards when the toggle is off", async () => {
+    const store = [
+      ...memoryStore(),
+      row("prefers-terse-replies", { type: "user" }),
+      row("always-run-check-first", { type: "feedback" }),
+    ];
+    const { svc } = services({ memory: store });
+
+    const scoped = await launchAgentTask(svc, {
+      projectId: "p1",
+      taskId: "memory:consolidate",
+      params: { includeRules: false },
+    });
+    // Scoping happens BEFORE the briefing is composed, so an excluded rule is
+    // never named at all — a much stronger guarantee than asking nicely.
+    expect(scoped!.prompt).not.toContain("prefers-terse-replies");
+    expect(scoped!.prompt).toContain("2 standing rules");
+
+    const full = await launchAgentTask(svc, {
+      projectId: "p1",
+      taskId: "memory:consolidate",
+      params: { includeRules: true },
+    });
+    expect(full!.prompt).toContain("prefers-terse-replies");
+  });
+
+  it("still opens a usable chat when the project has no memory at all", async () => {
+    const { svc } = services({ memory: [] });
+    const out = await launchAgentTask(svc, { projectId: "p1", taskId: "memory:consolidate" });
+    expect(out?.chat.title).toBe("**memory**");
+    expect(out?.chat.purpose?.label).toBe("Consolidating this project's durable memory");
   });
 });

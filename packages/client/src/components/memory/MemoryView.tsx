@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Brain, Plus, Pencil, Trash2, Search, X } from "lucide-react";
+import { Brain, Plus, Pencil, Trash2, Search, Sparkles, X } from "lucide-react";
 import type { ProjectMemory } from "@dispatch/shared";
+import { TaskLauncherDialog } from "../tasks/TaskLauncherDialog.js";
 import { useMemory, useProjectMemories } from "../../stores/memory.js";
 import { loadProjectMemory } from "../../stores/index.js";
 import { useActiveProject } from "../../stores/projects.js";
@@ -159,6 +160,7 @@ export function MemoryView() {
   const [selectedName, setSelectedName] = useState<string | null>(null);
   // null = viewing; "new" = create; a memory = edit.
   const [form, setForm] = useState<"new" | ProjectMemory | null>(null);
+  const [consolidating, setConsolidating] = useState(false);
 
   useEffect(() => {
     if (projectId && !loaded) void loadProjectMemory(projectId);
@@ -169,6 +171,7 @@ export function MemoryView() {
     setQuery("");
     setSelectedName(null);
     setForm(null);
+    setConsolidating(false);
   }, [projectId]);
 
   const ranked = useMemo(() => {
@@ -216,6 +219,20 @@ export function MemoryView() {
           <Brain className="size-4 text-muted" />
           <span className="flex-1 text-base font-semibold text-primary">Memory</span>
           <span className="cm-mono !text-2xs text-faint">{memories.length}</span>
+          {/* Curation lives next to the count, because the count IS the reason
+              you reach for it — a store worth consolidating announces itself.
+              Hidden rather than disabled below two memories: a disabled
+              IconButton has `pointer-events-none`, so its tooltip never fires
+              and the affordance would be a mute grey square. */}
+          {memories.length >= 2 && (
+            <IconButton
+              size="sm"
+              tip="Consolidate memory — audit, merge duplicates, retire what's stale"
+              onClick={() => setConsolidating(true)}
+            >
+              <Sparkles />
+            </IconButton>
+          )}
           <IconButton size="sm" tip="New memory" onClick={() => setForm("new")}>
             <Plus />
           </IconButton>
@@ -290,14 +307,31 @@ export function MemoryView() {
             <p className="mt-0.5 text-xs text-faint">
               Durable facts agents record (or you add) live here, independent of any chat.
             </p>
-            <div className="mt-3">
+            <div className="mt-3 flex items-center gap-2">
               <Button size="sm" variant="subtle" leftIcon={<Plus />} onClick={() => setForm("new")}>
                 New memory
               </Button>
+              {memories.length >= 2 && (
+                <Button
+                  size="sm"
+                  variant="subtle"
+                  leftIcon={<Sparkles />}
+                  onClick={() => setConsolidating(true)}
+                >
+                  Consolidate
+                </Button>
+              )}
             </div>
           </div>
         )}
       </div>
+
+      <TaskLauncherDialog
+        taskId="memory:consolidate"
+        projectId={projectId}
+        open={consolidating}
+        onClose={() => setConsolidating(false)}
+      />
     </div>
   );
 }

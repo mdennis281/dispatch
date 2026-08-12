@@ -36,6 +36,7 @@ export const AGENT_TASK_IDS = [
   "config:mcp",
   "config:subApps",
   "git:commit-sweep",
+  "memory:consolidate",
 ] as const;
 
 export const AgentTaskIdSchema = z.enum(AGENT_TASK_IDS);
@@ -225,6 +226,45 @@ export const AGENT_TASKS: Record<AgentTaskId, AgentTaskMeta> = {
         id: "includeUntracked",
         label: "Include untracked files",
         hint: "off = only files git already tracks",
+        default: true,
+      },
+    ],
+  },
+  "memory:consolidate": {
+    id: "memory:consolidate",
+    action: "Consolidate memory",
+    noun: "memory consolidation",
+    icon: "Brain",
+    // "memory: 141 facts, 9 shards" — the prefix wants the category, the count
+    // is what tells you which run this was when you scroll back to it.
+    titlePrefix: "memory",
+    blurb:
+      "Audits every recorded fact in parallel — merges the duplicates, retires what's stale, " +
+      "and checks the rest against the repo.",
+    placeholder:
+      "optional — e.g. the steam-* facts are mostly superseded by the netcode rewrite, be " +
+      "aggressive there; leave anything about the release ritual alone",
+    // A consolidation decides what a project's agents will and won't be told for
+    // months, and a wrong merge silently deletes the rationale a fact existed
+    // for. It gets the deeper default, same reasoning as the sweep.
+    defaultEffort: "high",
+    toggles: [
+      {
+        id: "apply",
+        label: "Apply the changes",
+        hint: "off = report what it would do without writing anything",
+        default: true,
+      },
+      {
+        id: "verify",
+        label: "Verify against the repo",
+        hint: "check each claim still matches the code before keeping it",
+        default: true,
+      },
+      {
+        id: "includeRules",
+        label: "Include standing rules",
+        hint: "off = audit only project/reference facts, never user preferences or feedback",
         default: true,
       },
     ],

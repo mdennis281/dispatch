@@ -80,6 +80,8 @@ import {
 } from "@dispatch/shared";
 import type { EventBus } from "../../bus.js";
 import { clampBody } from "../memory.js";
+import type { MemoryGrepMatch, MemoryInventoryEntry } from "../memory.js";
+import type { MemoryHistoryResult } from "../memory-history.js";
 
 /** Hard ceiling on a single `wait` (also the default `wait_for_chat` timeout). */
 export const WAIT_CAP_SECONDS = 3600;
@@ -195,11 +197,41 @@ export interface ManagerMcpMemory {
    * the session's project by the broker. Best-effort; may be omitted on older
    * wiring, so callers must treat it as optional.
    */
-  findSimilar?(candidate: {
-    name: string;
-    description?: string;
-    body?: string;
-  }): Promise<Array<{ name: string; description: string; similarity: number }>>;
+  findSimilar?(
+    candidate: { name: string; description?: string; body?: string },
+    /** Widen/narrow the sweep. Omitted → the dedup nudge's own defaults. */
+    opts?: { threshold?: number; limit?: number },
+  ): Promise<Array<{ name: string; description: string; similarity: number }>>;
+  /**
+   * The CURATION half of the memory surface, backing `memory_list` /
+   * `memory_search` / `memory_history`. Separate from remember/recall/forget
+   * because those answer "what should I know right now" (fuzzy, ranked, bounded)
+   * while these answer "what is in this store and does it still belong"
+   * (exhaustive, exact, with the age and usage signals attached).
+   *
+   * All optional so older wiring — and every existing test stub — keeps working;
+   * a missing one reports itself unavailable rather than breaking the tool.
+   */
+  inventory?(opts: {
+    type?: "user" | "feedback" | "project" | "reference";
+    prefix?: string;
+    names?: readonly string[];
+  }): Promise<MemoryInventoryEntry[]>;
+  grep?(opts: {
+    pattern: string;
+    regex?: boolean;
+    caseSensitive?: boolean;
+    field?: "name" | "description" | "body";
+    limit?: number;
+  }): Promise<{
+    matches: MemoryGrepMatch[];
+    truncated: boolean;
+    timedOut?: boolean;
+    scanned: number;
+  }>;
+  /** One memory by exact name — no ranking, no near-misses. */
+  read?(name: string): Promise<ProjectMemory | null>;
+  history?(opts: { name?: string; limit?: number }): Promise<MemoryHistoryResult>;
 }
 
 /** Merge/close-state view of a PR the `watch_pr` tool polls on. */
@@ -965,6 +997,61 @@ function extraSignal(extra: unknown): AbortSignal | undefined {
 
 function textResult(text: string, isError = false): CallToolResult {
   return { content: [{ type: "text", text }], isError };
+}
+
+/* --------------------------------------------------- memory inventory rendering */
+
+/**
+ * The curation signals for one memory, on one line: what it costs, when it was
+ * last written, whether anything has ever retrieved it, and who links to it.
+ *
+ * `never retrieved` is called out explicitly rather than shown as `0/0` because
+ * it's the single most load-bearing signal in the whole row — and the one most
+ * easily misread as "delete me". It isn't: the telemetry only counts accesses
+ * since the stats file existed, so a never-retrieved memory is a CANDIDATE for
+ * review, not a verdict.
+ */
+function inventoryLine(m: MemoryInventoryEntry): string {
+  const bits = [`${m.type}`, `${m.chars} chars`];
+  if (m.updatedAt) bits.push(new Date(m.updatedAt).toISOString().slice(0, 10));
+  bits.push(
+    m.surfaced === 0 && m.recalled === 0
+      ? "never retrieved"
+      : `${m.recalled} recalled / ${m.surfaced} surfaced`,
+  );
+  if (m.links.length) bits.push(`→ ${m.links.join(" ")}`);
+  if (m.backlinks.length) bits.push(`← ${m.backlinks.join(" ")}`);
+  return bits.join(" · ");
+}
+
+/** Order an inventory by the axis the caller is curating along. */
+function sortInventory(
+  rows: readonly MemoryInventoryEntry[],
+  sort: "name" | "recent" | "oldest" | "size" | "unused",
+): MemoryInventoryEntry[] {
+  const byName = (a: MemoryInventoryEntry, b: MemoryInventoryEntry) =>
+    a.name.localeCompare(b.name);
+  const out = [...rows];
+  switch (sort) {
+    case "recent":
+      return out.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || byName(a, b));
+    case "oldest":
+      // Undated files are the OLDEST thing in the store — they predate the
+      // `updatedAt` frontmatter entirely — so they sort first, not last.
+      return out.sort(
+        (a, b) => (a.updatedAt ?? 0) - (b.updatedAt ?? 0) || byName(a, b),
+      );
+    case "size":
+      return out.sort((a, b) => b.chars - a.chars || byName(a, b));
+    case "unused": {
+      // Same weighting as the ranking tie-break: an explicit recall is worth
+      // more than a proactive surface, so least-useful-first means least of both.
+      const score = (m: MemoryInventoryEntry) => m.recalled * 2 + m.surfaced;
+      return out.sort((a, b) => score(a) - score(b) || (a.updatedAt ?? 0) - (b.updatedAt ?? 0) || byName(a, b));
+    }
+    default:
+      return out.sort(byName);
+  }
 }
 
 /**
@@ -2524,6 +2611,317 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
+  /* ------------------------------------------------------- memory curation
+   * `recall` is built for an agent mid-task: fuzzy, ranked, and deliberately
+   * bounded to the few facts most relevant right now. That is exactly wrong for
+   * curating the store, where the questions are exhaustive rather than
+   * best-effort — "show me all 141 with their age and usage", "which ones still
+   * mention `taskkill`", "when was this written and what else was retired". Each
+   * of those has ONE correct answer, and a relevance ranking that returns the
+   * best six actively hides it. Hence a separate read surface. */
+
+  const memoryList = tool(
+    "memory_list",
+    "Inventory this project's durable memories with the signals that decide whether " +
+      "each still belongs: size, last write, how often it's actually been retrieved, " +
+      "and its `[[link]]` neighbours in both directions. Unlike `recall` this is " +
+      "EXHAUSTIVE and unranked — use it to audit or curate the store, not to look up " +
+      "a fact. `sort: 'unused'` surfaces prune candidates; `sort: 'oldest'` surfaces " +
+      "what may have gone stale.",
+    {
+      type: MemoryTypeSchema.optional().describe(
+        "Restrict to one kind: user | feedback | project | reference.",
+      ),
+      prefix: z
+        .string()
+        .optional()
+        .describe("Only names starting with this, e.g. 'steam' for the steam-* area."),
+      names: z
+        .array(z.string())
+        .optional()
+        .describe("Only these exact memories — the way to read a known set in one call."),
+      sort: z
+        .enum(["name", "recent", "oldest", "size", "unused"])
+        .optional()
+        .describe(
+          "name (default) | recent (newest first) | oldest | size (biggest first) | " +
+            "unused (never-recalled and least-used first).",
+        ),
+      includeBody: z
+        .boolean()
+        .optional()
+        .describe("Include each full body. Costly over a whole store — pair with names/prefix."),
+      limit: z.number().int().positive().optional().describe("Max rows (default 200)."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.memory?.inventory) {
+        return textResult("Memory inventory is not available in this session.", true);
+      }
+      try {
+        const rows = await ctx.memory.inventory({
+          ...(args.type ? { type: args.type } : {}),
+          ...(args.prefix ? { prefix: args.prefix } : {}),
+          ...(args.names?.length ? { names: args.names } : {}),
+        });
+        if (!rows.length) return textResult("No memories match that filter.");
+
+        const sorted = sortInventory(rows, args.sort ?? "name");
+        const limit = Math.max(1, Math.min(500, args.limit ?? 200));
+        const shown = sorted.slice(0, limit);
+        const header =
+          `${rows.length} memor${rows.length === 1 ? "y" : "ies"}` +
+          (shown.length < sorted.length ? ` (showing ${shown.length})` : "") +
+          `, sorted by ${args.sort ?? "name"}:`;
+
+        if (args.includeBody) {
+          // Budgeted the same way `recall` is — a whole store with bodies would
+          // blow the tool-result cap, and a silent clip reads as "that's all".
+          const MAX_TOTAL = 24000;
+          const sections: string[] = [];
+          const omitted: string[] = [];
+          let budget = MAX_TOTAL;
+          for (const m of shown) {
+            const section = `### ${m.name} (${m.type})\n${inventoryLine(m)}\n${
+              m.description
+            }\n\n${clampBody(m.body, 4000)}`;
+            if (section.length <= budget) {
+              sections.push(section);
+              budget -= section.length;
+            } else omitted.push(m.name);
+          }
+          const tail = omitted.length
+            ? `\n\n---\n\n_${omitted.length} body/bodies omitted to stay within the size ` +
+              `limit: ${omitted.join(", ")}. Narrow with names/prefix._`
+            : "";
+          return textResult(`${header}\n\n${sections.join("\n\n---\n\n")}${tail}`);
+        }
+
+        // Even one line per memory adds up: a 300-fact store with long
+        // descriptions and dense link lists clears the tool-result cap on its
+        // own, and a listing that silently stops reads as "that's the store".
+        const MAX_TOTAL = 24000;
+        const lines: string[] = [];
+        let budget = MAX_TOTAL;
+        let dropped = 0;
+        for (const m of shown) {
+          const line = `- \`${m.name}\` — ${inventoryLine(m)}\n  ${m.description}`;
+          if (line.length > budget) {
+            dropped = shown.length - lines.length;
+            break;
+          }
+          lines.push(line);
+          budget -= line.length;
+        }
+        const tail = dropped
+          ? `\n\n_${dropped} more row(s) omitted to stay within the size limit. ` +
+            "Narrow with `type`/`prefix`, or page with `limit`._"
+          : "";
+        return textResult(`${header}\n\n${lines.join("\n")}${tail}`);
+      } catch (err) {
+        return textResult(
+          `Could not list memory: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const memorySearch = tool(
+    "memory_search",
+    "Find EVERY memory containing a literal string (or regex) — the exact-match " +
+      "counterpart to `recall`'s fuzzy ranking. Returns one hit per matching line " +
+      "with its location, so you get evidence rather than whole bodies. Use it when " +
+      "the question is 'which memories still mention X' and a partial answer would " +
+      "be wrong: auditing a renamed API, a retired tool, a path that moved.",
+    {
+      pattern: z.string().describe("Literal substring by default; a JS regex with regex: true."),
+      regex: z.boolean().optional().describe("Treat the pattern as a regular expression."),
+      caseSensitive: z.boolean().optional().describe("Default false — matching ignores case."),
+      field: z
+        .enum(["name", "description", "body"])
+        .optional()
+        .describe("Restrict to one field; default searches all three."),
+      limit: z.number().int().positive().optional().describe("Max hits (default 100)."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.memory?.grep) {
+        return textResult("Memory search is not available in this session.", true);
+      }
+      try {
+        const { matches, truncated, timedOut, scanned } = await ctx.memory.grep({
+          pattern: args.pattern,
+          ...(args.regex === undefined ? {} : { regex: args.regex }),
+          ...(args.caseSensitive === undefined ? {} : { caseSensitive: args.caseSensitive }),
+          ...(args.field ? { field: args.field } : {}),
+          ...(args.limit === undefined ? {} : { limit: args.limit }),
+        });
+        if (!matches.length) {
+          return textResult(`No memory matches ${JSON.stringify(args.pattern)} (${scanned} scanned).`);
+        }
+        // Grouped by memory: the useful reading is "these 4 facts mention it",
+        // not a flat list where one memory's six lines look like six memories.
+        const byName = new Map<string, MemoryGrepMatch[]>();
+        for (const m of matches) {
+          const list = byName.get(m.name);
+          if (list) list.push(m);
+          else byName.set(m.name, [m]);
+        }
+        const blocks = [...byName.entries()].map(([name, hits]) => {
+          const type = hits[0]?.type ?? "project";
+          const lines = hits.map(
+            (h) => `  ${h.field}${h.line ? `:${h.line}` : ""} — ${h.text}`,
+          );
+          return `\`${name}\` (${type})\n${lines.join("\n")}`;
+        });
+        // A timed-out scan is NOT a complete answer, and this tool's whole
+        // value is that its answer is exhaustive — so say which kind of
+        // incomplete it is rather than letting it read as "that's all of them".
+        const tail = timedOut
+          ? "\n\n_⚠ The scan hit its time budget and stopped early — this is a PARTIAL " +
+            "result. A `regex: true` pattern that backtracks is the usual cause; a literal " +
+            "search over this store should be instant._"
+          : truncated
+            ? "\n\n_Result truncated — raise `limit` or narrow the pattern._"
+            : "";
+        return textResult(
+          `${matches.length} hit(s) in ${byName.size} memor${byName.size === 1 ? "y" : "ies"} ` +
+            `(${scanned} scanned):\n\n${blocks.join("\n\n")}${tail}`,
+        );
+      } catch (err) {
+        return textResult(
+          `Could not search memory: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const memoryHistory = tool(
+    "memory_history",
+    "Read the git history of this project's memory: when a fact was first written, " +
+      "how often it's been rewritten since, and — with no `name` — which memories " +
+      "were DELETED and when. Check this before retiring a fact (was it just " +
+      "written?) and before adding one (was it deliberately retired already?). A " +
+      "memory's `updatedAt` only tells you the last write; this tells you the shape " +
+      "of the argument behind it.",
+    {
+      name: z
+        .string()
+        .optional()
+        .describe("One memory's history (follows renames). Omit for the whole memory dir."),
+      limit: z.number().int().positive().optional().describe("Max commits (default 20)."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.memory?.history) {
+        return textResult("Memory history is not available in this session.", true);
+      }
+      try {
+        const res: MemoryHistoryResult = await ctx.memory.history({
+          ...(args.name ? { name: args.name } : {}),
+          ...(args.limit === undefined ? {} : { limit: args.limit }),
+        });
+        if (!res.available) {
+          return textResult(`No memory history available: ${res.reason ?? "unknown reason"}`);
+        }
+        if (!res.commits.length) {
+          return textResult(res.reason ?? "No commits touch this memory yet.");
+        }
+        const lines = res.commits.map((c) => {
+          const when = c.date.slice(0, 10) || c.date;
+          const head = `${when}  ${c.sha.slice(0, 8)}  ${c.subject}`;
+          if (!c.files.length) return head;
+          const files = c.files
+            .filter((f) => f.name !== "MEMORY") // the generated index churns every commit
+            .map((f) => (f.from ? `${f.kind} ${f.from}→${f.name}` : `${f.kind} ${f.name}`));
+          return files.length ? `${head}\n    ${files.join(", ")}` : head;
+        });
+        const scope = args.name ? `\`${args.name}\`` : "the memory dir";
+        return textResult(`${res.commits.length} commit(s) touching ${scope}:\n\n${lines.join("\n")}`);
+      } catch (err) {
+        return textResult(
+          `Could not read memory history: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const memorySimilar = tool(
+    "memory_similar",
+    "Find memories that look like the SAME FACT as a given one (or as a passage of " +
+      "text) — the duplicate detector behind the `remember` nudge, callable " +
+      "directly. Scores blended name/description/body overlap. Use it to confirm a " +
+      "suspected duplicate before merging, and to sweep for near-duplicates a " +
+      "keyword search would miss because the two copies share no vocabulary in " +
+      "their names.",
+    {
+      name: z.string().optional().describe("Compare against this existing memory."),
+      text: z
+        .string()
+        .optional()
+        .describe("Compare against arbitrary text instead (e.g. a draft you're about to save)."),
+      threshold: z
+        .number()
+        .optional()
+        .describe("Minimum similarity 0–1. Default 0.35; drop to ~0.25 to sweep wider."),
+      limit: z.number().int().positive().optional().describe("Max matches (default 5)."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.memory?.findSimilar) {
+        return textResult("Memory similarity is not available in this session.", true);
+      }
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      const text = typeof args.text === "string" ? args.text.trim() : "";
+      if (!name && !text) {
+        return textResult("memory_similar needs either a `name` or some `text`.", true);
+      }
+      try {
+        let candidate: { name: string; description?: string; body?: string };
+        if (name) {
+          const existing = await ctx.memory.read?.(name);
+          if (!existing) return textResult(`No memory named "${name}".`, true);
+          candidate = {
+            name: existing.name,
+            description: existing.description,
+            body: existing.body,
+          };
+        } else {
+          // A free-text probe has no name/description of its own, and the blend
+          // weights name at 0.45 — leaving those empty would cap every score at
+          // 0.55 and hide real duplicates under any sane threshold. Comparing the
+          // text against all three fields is the honest reading of "how much does
+          // this passage overlap with that memory".
+          candidate = { name: text, description: text, body: text };
+        }
+        const threshold = typeof args.threshold === "number" ? args.threshold : 0.35;
+        const limit = Math.max(1, args.limit ?? 5);
+        const matches = await ctx.memory.findSimilar(candidate, { threshold, limit });
+        // Belt and braces: an implementation that ignores the opts (the interface
+        // allows it) must not silently return the 3 defaults as if they were the
+        // answer to a wider sweep.
+        const kept = matches.filter((m) => m.similarity >= threshold).slice(0, limit);
+        if (!kept.length) {
+          return textResult(
+            `Nothing resembles ${name ? `"${name}"` : "that text"} at or above ${threshold}.`,
+          );
+        }
+        const lines = kept.map(
+          (m) => `- \`${m.name}\` (${Math.round(m.similarity * 100)}% similar) — ${m.description}`,
+        );
+        return textResult(
+          `${kept.length} possible duplicate(s) of ${name ? `\`${name}\`` : "that text"}:\n\n` +
+            `${lines.join("\n")}\n\n_Similarity is a lexical signal, not a verdict — read both ` +
+            "bodies before merging._",
+        );
+      } catch (err) {
+        return textResult(
+          `Could not compare memory: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
   const spawnChat = tool(
     "spawn_chat",
     "Start a NEW Dispatch chat to carry work that shouldn't ride in yours — a long " +
@@ -2909,6 +3307,10 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     remember,
     recall,
     forget,
+    memoryList,
+    memorySearch,
+    memoryHistory,
+    memorySimilar,
     runSubapp,
     spawnChat,
     mcpList,
@@ -2939,6 +3341,10 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   remember: "memory",
   recall: "memory",
   forget: "memory",
+  memory_list: "memory",
+  memory_search: "memory",
+  memory_history: "memory",
+  memory_similar: "memory",
   run_subapp: "runner",
   spawn_chat: "chats",
   mcp_list: "mcpConfig",
@@ -3038,6 +3444,10 @@ export function createManagerMcpServer(
     remember,
     recall,
     forget,
+    memoryList,
+    memorySearch,
+    memoryHistory,
+    memorySimilar,
     runSubapp,
     spawnChat,
     mcpList,
@@ -3063,7 +3473,11 @@ export function createManagerMcpServer(
     // Only when the project opted into auto-merge — no binding, no way to merge.
     ...(ctx.prApproval ? [approvePr] : []),
     ...(ctx.terminals ? [terminal, terminalOutput] : []),
-    ...(ctx.memory ? [remember, recall, forget] : []),
+    // The write surface plus the curation reads — all bound to the same project,
+    // so a session either has memory or it doesn't.
+    ...(ctx.memory
+      ? [remember, recall, forget, memoryList, memorySearch, memoryHistory, memorySimilar]
+      : []),
     ...(ctx.runner ? [runSubapp] : []),
     // Spawning a sibling chat needs a project to spawn INTO and a live session to
     // route the consent prompt through; both are bound together or not at all.

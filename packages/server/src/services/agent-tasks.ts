@@ -39,6 +39,7 @@ import {
   composeMessageText,
   projectToManifest,
   renderManifestYaml,
+  resolveWorkflow,
   taskTitlePrefix,
   withTitlePrefix,
   type AgentTaskId,
@@ -51,6 +52,8 @@ import {
   type ProjectConfig,
 } from "@dispatch/shared";
 import type { Services } from "./container.js";
+import type { MemoryInventoryEntry } from "./memory.js";
+import { shardMemories, type MemoryShard } from "./memory-shard.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
 
 /* ------------------------------------------------------------- config dirs */
@@ -500,6 +503,274 @@ function worktreeSnapshot(status: GitStatus): string | null {
   return [head, "", ...sections].join("\n");
 }
 
+/* ----------------------------------------------------- memory consolidation */
+
+/**
+ * The consolidation briefing: audit a project's whole durable-memory store,
+ * merge what's duplicated, retire what's wrong, and leave the rest verifiable.
+ *
+ * Memory accumulates monotonically by design — `remember` is cheap, deliberately
+ * so, and the dedup nudge on write is a hint an agent may ignore. After a few
+ * months a real store is 140 facts of which a third are the same three facts
+ * written five different ways, and the cost lands on every single session: the
+ * standing-rules tier is injected in full, and the auto-surface picks between
+ * near-identical candidates on lexical noise.
+ *
+ * The failure modes this is written against, in the order they actually happen:
+ *
+ *   1. One agent reads all 140 and "consolidates" from a context where it can no
+ *      longer remember the first forty. Hence the fan-out, and hence shards cut
+ *      by CONTENT similarity (see services/memory-shard.ts) so a duplicate pair
+ *      is always visible to one agent rather than split across two.
+ *   2. Deleting what's merely UNUSED. Access telemetry is young and only counts
+ *      retrievals since it shipped; "never recalled" is a prompt to look, not a
+ *      verdict. Deletion is for facts that are wrong, superseded, or duplicated.
+ *   3. Merging by topic instead of by fact. Two memories about the same
+ *      subsystem are not one memory, and a merge that concatenates them produces
+ *      something too long to inject and too vague to act on.
+ *   4. Losing the WHY. The rationale line is the most valuable part of a
+ *      feedback memory and the first thing a summarizer drops.
+ *   5. Breaking the `[[link]]` graph — deleting or renaming a memory that three
+ *      others point at, leaving three dangling references nobody notices.
+ *   6. Subagents writing concurrently. They audit; the orchestrator applies. One
+ *      writer means one auditable plan and no interleaved partial merges.
+ */
+function memoryConsolidateBriefText(input: {
+  total: number;
+  shards: MemoryShard[];
+  apply: boolean;
+  verify: boolean;
+  includeRules: boolean;
+  ruleCount: number;
+  /** Memory here is committed by the workflow profile → history is readable. */
+  committed: boolean;
+}): string {
+  const { total, shards, apply, verify, includeRules, ruleCount, committed } = input;
+  const dupeGroups = shards.reduce((n, s) => n + s.duplicates.length, 0);
+
+  const lines = [
+    `Audit and consolidate this project's durable memory — ${total} recorded ` +
+      `${total === 1 ? "fact" : "facts"} in scope.`,
+    "",
+    "**Why this matters** — every one of these is injected or offered to every session in " +
+      "this project. A duplicate doesn't just waste context: it makes the auto-surface pick " +
+      "between near-identical candidates on lexical noise, so the WORSE copy of a fact wins " +
+      "half the time. A stale fact is worse still — agents act on it.",
+    "",
+    "**Your tools** — `mcp__manager__memory_list` (inventory with size, age, retrieval " +
+      "counts and `[[link]]` neighbours in both directions), `memory_search` (exhaustive " +
+      "literal/regex search — use this, not `recall`, when a partial answer would be " +
+      "wrong), `memory_similar` (near-duplicate detection), " +
+      (committed
+        ? "`memory_history` (git history: when a fact was written, how often it's been " +
+          "rewritten, and which facts were deliberately RETIRED)"
+        : "`memory_history` (probably unavailable here — this project's memory isn't " +
+          "committed, so there may be no history to read; check once, don't keep trying)") +
+      ", and `remember` / `forget` to apply.",
+    "",
+  ];
+
+  /* ------------------------------------------------------------- the fan-out */
+
+  lines.push(
+    `**Fan out — ${shards.length} ${shards.length === 1 ? "shard" : "shards"}**`,
+    "",
+    "Spawn one subagent per shard with the Agent tool, IN PARALLEL (all of them in a " +
+      "single message — one Agent call per shard). The shards below are cut by content " +
+      "similarity, not alphabetically, so any two memories that look like the same fact " +
+      "are in the SAME shard and one agent can see both. Don't re-cut them.",
+    "",
+    "Each subagent is READ-ONLY. It must not call `remember` or `forget` — it reports " +
+      "verdicts and you apply them. Concurrent writers here produce interleaved partial " +
+      "merges and a plan nobody can review.",
+    "",
+    "Give each subagent its shard's memory names, the judging rules below, and this " +
+      "contract — one verdict per memory in its shard:",
+    "",
+    "```",
+    "<name> — KEEP | EDIT | MERGE→<survivor> | DELETE",
+    "  why: <one line of evidence — a file path, a commit, a contradicting memory>",
+    "  edit: <the replacement description/body, for EDIT and for a MERGE survivor>",
+    "```",
+    "",
+  );
+
+  for (const s of shards) {
+    lines.push(`Shard ${s.index}/${shards.length} — ${s.label} (${s.names.length}):`);
+    lines.push(`  ${s.names.join(", ")}`);
+    for (const g of s.duplicates) {
+      lines.push(`  ⚠ likely the same fact: ${g.join(" ≈ ")}`);
+    }
+    lines.push("");
+  }
+
+  /* -------------------------------------------------------------- the rules */
+
+  lines.push(
+    "**How to judge each memory**",
+    "",
+    "- DELETE is for a fact that is WRONG, SUPERSEDED by the current code, or fully " +
+      "contained in another memory. It is NOT for a fact that merely hasn't been used: " +
+      "retrieval counts only started when that telemetry shipped, and a rarely-needed fact " +
+      "that saves an hour when it IS needed is exactly what this store is for. " +
+      "\"Never retrieved\" means look harder, not delete.",
+    "- MERGE only when two memories state the SAME fact. Two facts about one subsystem are " +
+      "two facts; concatenating them yields something too long to inject and too vague to " +
+      "act on. If you can't state the merged fact in one sentence, don't merge.",
+    "- When merging, the survivor keeps the name most likely to be linked or searched for, " +
+      "and inherits the UNION of the specifics — every path, flag, error string and " +
+      "reproduction the copies carried between them. A merge that loses a detail is a " +
+      "deletion wearing a merge's clothes.",
+    "- Keep the **Why:** line. The rationale is the most valuable part of a feedback memory " +
+      "and the first thing a summarizer drops. Same for \"How to apply\".",
+    "- Check `[[link]]` backlinks before you delete or rename (`memory_list` reports them). " +
+      "If other memories point at this one, either keep the name or fix every inbound link " +
+      "as part of the change — a dangling `[[link]]` is invisible until it isn't.",
+    "- EDIT — not DELETE — when a fact is right but stale in its details, over-long, or " +
+      "buried under a description that doesn't say what it's for. The description is the " +
+      "retrieval signal; a vague one means the fact never surfaces when it's needed.",
+  );
+
+  if (verify) {
+    lines.push(
+      "- VERIFY each claim against the repo before keeping it. A memory that names a file, " +
+        "function, flag, port or command is checkable — go check. Read the code, run " +
+        "`git log` on what it describes. A fact that no longer matches the code is stale " +
+        "even if it's beautifully written, and this is the one part of the job that " +
+        "genuinely requires reading the repo rather than reading the memory.",
+    );
+  } else {
+    lines.push(
+      "- Do NOT go verify claims against the repo — I've asked for a memory-only pass. " +
+        "Judge duplication, contradiction between memories, and clarity. Flag anything you " +
+        "suspect is stale rather than acting on the suspicion.",
+    );
+  }
+
+  if (!includeRules) {
+    lines.push(
+      `- The ${ruleCount} standing ${ruleCount === 1 ? "rule" : "rules"} (\`user\` and ` +
+        "`feedback` memories) are OUT of scope for this pass. Don't audit them, don't merge " +
+        "them, don't touch them — they aren't in the shards above.",
+    );
+  } else if (ruleCount) {
+    lines.push(
+      `- Be conservative with the ${ruleCount} standing ${ruleCount === 1 ? "rule" : "rules"} ` +
+        "(`user` and `feedback`). Those are the human's own preferences and corrections, not " +
+        "your observations about the code, and you can't verify one against the repo. Merge " +
+        "a rule only when two are unmistakably the same instruction; never delete one for " +
+        "being stale unless the code it refers to is provably gone.",
+    );
+  }
+
+  /* -------------------------------------------------------- the cross pass */
+
+  lines.push(
+    "",
+    "**When the subagents come back — the cross-shard pass**",
+    "",
+    "Sharding guarantees that obvious duplicates were visible to one agent. It does NOT " +
+      "catch two facts that resemble each other below the clustering bar — usually the same " +
+      "lesson written months apart in different vocabulary. So before you apply anything: " +
+      "run `memory_similar` with `threshold: 0.25` on each proposed survivor, and reconcile " +
+      "any hit that lands in a different shard yourself.",
+    "",
+    "Also reconcile CONTRADICTIONS the shards couldn't see: two memories that state " +
+      "incompatible things about the same subsystem. When you find one, the newer fact " +
+      "usually wins — check `memory_history` before assuming that.",
+    "",
+  );
+
+  /* ------------------------------------------------------------- apply/report */
+
+  if (apply) {
+    lines.push(
+      "**Applying**",
+      "",
+      "- YOU apply, not the subagents, and only after the cross-shard pass — so the whole " +
+        "plan is decided before the first write.",
+      "- Show me the plan first: one line per change (`merge a + b → c`, `delete d — " +
+        "superseded by e`, `edit f — description didn't say what it was for`), grouped by " +
+        "kind, with counts. Then apply it without waiting — I'll stop you if it's wrong.",
+      "- Write the survivor FIRST (`remember` with the merged body), then `forget` the " +
+        "copies. That order means an interruption leaves a duplicate, which is harmless; " +
+        "the other order loses the fact.",
+      "- Don't touch anything a subagent marked KEEP. A quiet rewrite of a fact nobody " +
+        "flagged is the change I have no way to review.",
+      committed
+        ? "- Each write lands as a `chore(memory)` commit automatically — you don't need to " +
+          "commit anything, and you should not `git add` the memory dir yourself."
+        : "- Memory here isn't committed by the workflow profile, so the writes land on disk " +
+          "only. Don't commit them yourself.",
+    );
+  } else {
+    lines.push(
+      "**Report only**",
+      "",
+      "- I've asked for the plan, NOT the changes. Do not call `remember` or `forget`, and " +
+        "do not edit anything under the memory dir.",
+      "- Give me the full plan: one line per proposed change with its evidence, grouped by " +
+        "kind. Make it concrete enough that I can approve it and have you execute it in a " +
+        "follow-up message.",
+    );
+  }
+
+  lines.push(
+    "",
+    "Finish with the numbers — how many kept, merged, edited, deleted, and what the store " +
+      "went from and to — then anything you deliberately left alone and why. If a whole area " +
+      "turned out to be fine, say so; that's a useful result, not a failed pass.",
+  );
+
+  if (dupeGroups) {
+    lines.push(
+      "",
+      `(${dupeGroups} suspected-duplicate ${dupeGroups === 1 ? "group is" : "groups are"} ` +
+        "flagged in the shards above. That's a lexical signal, not a verdict — read both " +
+        "bodies before merging.)",
+    );
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * The inventory attached to a consolidation as context: every memory in scope,
+ * one row each, with the signals that decide whether it stays.
+ *
+ * The agent will call `memory_list` too. This is here so the first turn is
+ * already grounded in the shape of the store — and so the transcript records
+ * what the store looked like BEFORE the pass, which is the only way to read the
+ * consolidation's decisions back once the duplicates are gone.
+ */
+function memoryInventoryText(rows: readonly MemoryInventoryEntry[], max = 250): string {
+  const shown = rows.slice(0, max);
+  const lines = shown.map((m) => {
+    const age = m.updatedAt ? new Date(m.updatedAt).toISOString().slice(0, 10) : "undated";
+    const use =
+      m.surfaced === 0 && m.recalled === 0 ? "never retrieved" : `${m.recalled}r/${m.surfaced}s`;
+    const graph = [
+      m.links.length ? `→${m.links.length}` : "",
+      m.backlinks.length ? `←${m.backlinks.length}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return (
+      `${m.name}  [${m.type}, ${m.chars} chars, ${age}, ${use}${graph ? `, ${graph}` : ""}]\n` +
+      `    ${m.description || "(no description)"}`
+    );
+  });
+  if (rows.length > shown.length) {
+    lines.push(`… and ${rows.length - shown.length} more (read them with memory_list)`);
+  }
+  return [
+    "name  [type, body length in chars, last write, retrievals, link degree]",
+    "    description",
+    "",
+    ...lines,
+  ].join("\n");
+}
+
 /* ----------------------------------------------------------------- assembly */
 
 /** Everything a task's briefing can draw on, resolved before composition. */
@@ -516,6 +787,20 @@ interface BriefContext {
   fresh?: boolean;
   /** Project setup only: the manifest as it is ON DISK (see `readSavedManifest`). */
   savedManifest?: { text: string; adopted: boolean };
+  /** Memory consolidation only: the store to audit, already filtered to scope. */
+  memory?: MemoryConsolidationContext;
+}
+
+/** Everything a consolidation briefing needs about the store it's auditing. */
+interface MemoryConsolidationContext {
+  /** The rows in scope (rules excluded when the human turned them off). */
+  rows: MemoryInventoryEntry[];
+  /** How the work fans out — one shard per subagent. */
+  shards: MemoryShard[];
+  /** Standing rules (`user` + `feedback`) in the store, in scope or not. */
+  ruleCount: number;
+  /** This project's profile commits memory → `memory_history` has something to read. */
+  committed: boolean;
 }
 
 const boolParam = (params: Record<string, unknown>, id: string, fallback: boolean): boolean =>
@@ -540,6 +825,23 @@ export function buildTaskParts(ctx: BriefContext): MessagePart[] {
         status: ctx.status,
         push: boolParam(ctx.params, "push", false),
         includeUntracked: boolParam(ctx.params, "includeUntracked", true),
+      }),
+    });
+  } else if (ctx.taskId === "memory:consolidate") {
+    const mem = ctx.memory;
+    parts.push({
+      kind: "brief",
+      label: `Memory consolidation — ${mem?.rows.length ?? 0} facts, ${
+        mem?.shards.length ?? 0
+      } shards`,
+      text: memoryConsolidateBriefText({
+        total: mem?.rows.length ?? 0,
+        shards: mem?.shards ?? [],
+        apply: boolParam(ctx.params, "apply", true),
+        verify: boolParam(ctx.params, "verify", true),
+        includeRules: boolParam(ctx.params, "includeRules", true),
+        ruleCount: mem?.ruleCount ?? 0,
+        committed: mem?.committed ?? false,
       }),
     });
   } else if (ctx.taskId === "project:setup") {
@@ -582,6 +884,14 @@ export function buildTaskParts(ctx: BriefContext): MessagePart[] {
     });
   }
 
+  if (ctx.taskId === "memory:consolidate" && ctx.memory?.rows.length) {
+    parts.push({
+      kind: "context",
+      label: `Memory at launch — ${ctx.memory.rows.length} facts in scope`,
+      text: memoryInventoryText(ctx.memory.rows),
+    });
+  }
+
   if (ctx.taskId === "git:commit-sweep" && ctx.status) {
     const snapshot = worktreeSnapshot(ctx.status);
     if (snapshot) {
@@ -599,6 +909,49 @@ export function buildTaskParts(ctx: BriefContext): MessagePart[] {
   }
 
   return parts;
+}
+
+/**
+ * Resolve the store a consolidation is about to audit, and cut it into shards.
+ *
+ * The scope filter is applied HERE rather than left to the briefing, so the
+ * shards, the attached inventory and the instructions can't disagree about what
+ * is in scope: with standing rules turned off, the agent never even sees their
+ * names, which is a much stronger guarantee than asking it not to touch them.
+ *
+ * Degrades rather than fails — an unreadable store yields an empty context and
+ * a briefing that says so, which is a chat the human can act on. A failed launch
+ * is not.
+ */
+async function readMemoryContext(
+  services: Services,
+  projectId: string,
+  project: Project,
+  params: Record<string, unknown>,
+): Promise<MemoryConsolidationContext> {
+  const empty: MemoryConsolidationContext = {
+    rows: [],
+    shards: [],
+    ruleCount: 0,
+    committed: false,
+  };
+  const all = await services.memory.inventory(projectId).catch(() => []);
+  if (!all.length) return empty;
+
+  const ruleCount = all.filter((m) => m.type === "user" || m.type === "feedback").length;
+  const includeRules = typeof params.includeRules === "boolean" ? params.includeRules : true;
+  const rows = includeRules
+    ? all
+    : all.filter((m) => m.type === "project" || m.type === "reference");
+
+  return {
+    rows,
+    shards: shardMemories(rows),
+    ruleCount,
+    // `memory: "commit"` is what makes MemoryCommitter land each write as a real
+    // commit, which is the only reason `memory_history` has anything to read.
+    committed: resolveWorkflow(project).memory === "commit",
+  };
 }
 
 /* ------------------------------------------------------------------ launch */
@@ -653,6 +1006,10 @@ export async function launchAgentTask(
   const fresh = input.taskId === "project:setup" ? await isFreshRepo(repoPath) : false;
   const savedManifest =
     input.taskId === "project:setup" ? await readSavedManifest(config, project) : undefined;
+  const memory =
+    input.taskId === "memory:consolidate"
+      ? await readMemoryContext(services, input.projectId, project, params)
+      : undefined;
 
   const parts = buildTaskParts({
     taskId: input.taskId,
@@ -664,6 +1021,7 @@ export async function launchAgentTask(
     project,
     fresh,
     savedManifest,
+    memory,
   });
   const prompt = composeMessageText(parts);
 
@@ -679,11 +1037,16 @@ export async function launchAgentTask(
         ? summarize(instructions)
         : input.taskId === "project:setup"
           ? project.name
-          : sweepSubject(status),
+          : input.taskId === "memory:consolidate"
+            ? consolidateSubject(memory)
+            : sweepSubject(status),
     ),
     effort: input.effort ?? meta.defaultEffort,
     model: input.model ?? meta.defaultModel,
-    purpose: { kind: input.taskId, label: taskLabel(input.taskId, status, project) },
+    purpose: {
+      kind: input.taskId,
+      label: taskLabel(input.taskId, status, project, memory),
+    },
   });
 
   await ensureSession(services, chat.id);
@@ -692,10 +1055,23 @@ export async function launchAgentTask(
 }
 
 /** The sidebar's one-line "what is this chat off doing". */
-function taskLabel(taskId: AgentTaskId, status: GitStatus | null, project?: Project): string {
+function taskLabel(
+  taskId: AgentTaskId,
+  status: GitStatus | null,
+  project?: Project,
+  memory?: MemoryConsolidationContext,
+): string {
   const meta = AGENT_TASKS[taskId];
   if (taskId === "project:setup") {
     return project ? `Setting up ${project.name}` : "Setting this project up";
+  }
+  if (taskId === "memory:consolidate") {
+    const n = memory?.rows.length ?? 0;
+    return n
+      ? `Consolidating ${n} durable ${n === 1 ? "fact" : "facts"} across ${
+          memory?.shards.length ?? 0
+        } agents`
+      : "Consolidating this project's durable memory";
   }
   if (taskId !== "git:commit-sweep") {
     return `Writing a ${meta.noun} for this project's config`;
@@ -703,6 +1079,14 @@ function taskLabel(taskId: AgentTaskId, status: GitStatus | null, project?: Proj
   return status?.branch
     ? `Grouping the working tree into commits on ${status.branch}`
     : "Grouping the working tree into commits";
+}
+
+/** The title's subject for a consolidation — the scale of what it's chewing on. */
+function consolidateSubject(memory: MemoryConsolidationContext | undefined): string {
+  const n = memory?.rows.length ?? 0;
+  if (!n) return "";
+  const shards = memory?.shards.length ?? 0;
+  return `${n} ${n === 1 ? "fact" : "facts"}${shards > 1 ? `, ${shards} shards` : ""}`;
 }
 
 /**
