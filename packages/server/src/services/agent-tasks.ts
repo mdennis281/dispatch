@@ -756,7 +756,7 @@ function memoryInventoryText(rows: readonly MemoryInventoryEntry[], max = 250): 
       .filter(Boolean)
       .join(" ");
     return (
-      `${m.name}  [${m.type}, ${m.bytes}c, ${age}, ${use}${graph ? `, ${graph}` : ""}]\n` +
+      `${m.name}  [${m.type}, ${m.chars} chars, ${age}, ${use}${graph ? `, ${graph}` : ""}]\n` +
       `    ${m.description || "(no description)"}`
     );
   });
@@ -764,7 +764,7 @@ function memoryInventoryText(rows: readonly MemoryInventoryEntry[], max = 250): 
     lines.push(`… and ${rows.length - shown.length} more (read them with memory_list)`);
   }
   return [
-    "name  [type, body size, last write, retrievals, link degree]",
+    "name  [type, body length in chars, last write, retrievals, link degree]",
     "    description",
     "",
     ...lines,

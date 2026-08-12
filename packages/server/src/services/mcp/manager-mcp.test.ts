@@ -2322,7 +2322,7 @@ function fakeMemory(): ManagerMcpMemory & { data: Map<string, ProjectMemory> } {
         .filter((m) => !opts?.names?.length || opts.names.map(slug).includes(m.name))
         .map((m) => ({
           ...m,
-          bytes: m.body.length,
+          chars: m.body.length,
           surfaced: 0,
           recalled: 0,
           links: linksOf.get(m.name) ?? [],
@@ -2334,12 +2334,12 @@ function fakeMemory(): ManagerMcpMemory & { data: Map<string, ProjectMemory> } {
     grep: async (opts) => {
       const re = new RegExp(
         opts.regex ? opts.pattern : opts.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
-        opts.ignoreCase === false ? "" : "i",
+        opts.caseSensitive ? "" : "i",
       );
       const matches = [...data.values()]
         .filter((m) => re.test(m.body))
         .map((m) => ({ name: m.name, type: m.type, field: "body" as const, line: 1, text: m.body }));
-      return { matches, truncated: false, scanned: data.size };
+      return { matches, truncated: false, timedOut: false, scanned: data.size };
     },
     findSimilar: async (candidate, opts) => {
       const slugName = slug(candidate.name);
@@ -2571,6 +2571,26 @@ describe("manager-mcp — memory tools", () => {
 
     const miss = resultText(await search.handler({ pattern: "nothing-here" }, {}));
     expect(miss).toContain("No memory matches");
+  });
+
+  it("memory_search flags a timed-out scan as PARTIAL, not as the whole answer", async () => {
+    const mem = fakeMemory();
+    await mem.remember({ name: "a", description: "d", type: "project", body: "match" });
+    const slow: ManagerMcpMemory = {
+      ...mem,
+      grep: async () => ({
+        matches: [{ name: "a", type: "project" as const, field: "body" as const, line: 1, text: "match" }],
+        truncated: true,
+        timedOut: true,
+        scanned: 1,
+      }),
+    };
+    const { memory_search: search } = toolsByName(slow);
+    const text = resultText(await search.handler({ pattern: "match", regex: true }, {}));
+    // Exhaustiveness is this tool's entire value — a partial result that reads
+    // complete is worse than an error.
+    expect(text).toContain("PARTIAL");
+    expect(text).not.toContain("raise `limit`");
   });
 
   it("memory_similar sweeps wider when asked, and needs something to compare", async () => {

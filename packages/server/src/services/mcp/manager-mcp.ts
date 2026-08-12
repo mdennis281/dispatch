@@ -220,10 +220,15 @@ export interface ManagerMcpMemory {
   grep?(opts: {
     pattern: string;
     regex?: boolean;
-    ignoreCase?: boolean;
+    caseSensitive?: boolean;
     field?: "name" | "description" | "body";
     limit?: number;
-  }): Promise<{ matches: MemoryGrepMatch[]; truncated: boolean; scanned: number }>;
+  }): Promise<{
+    matches: MemoryGrepMatch[];
+    truncated: boolean;
+    timedOut?: boolean;
+    scanned: number;
+  }>;
   /** One memory by exact name — no ranking, no near-misses. */
   read?(name: string): Promise<ProjectMemory | null>;
   history?(opts: { name?: string; limit?: number }): Promise<MemoryHistoryResult>;
@@ -1007,7 +1012,7 @@ function textResult(text: string, isError = false): CallToolResult {
  * review, not a verdict.
  */
 function inventoryLine(m: MemoryInventoryEntry): string {
-  const bits = [`${m.type}`, `${m.bytes}c`];
+  const bits = [`${m.type}`, `${m.chars} chars`];
   if (m.updatedAt) bits.push(new Date(m.updatedAt).toISOString().slice(0, 10));
   bits.push(
     m.surfaced === 0 && m.recalled === 0
@@ -1037,7 +1042,7 @@ function sortInventory(
         (a, b) => (a.updatedAt ?? 0) - (b.updatedAt ?? 0) || byName(a, b),
       );
     case "size":
-      return out.sort((a, b) => b.bytes - a.bytes || byName(a, b));
+      return out.sort((a, b) => b.chars - a.chars || byName(a, b));
     case "unused": {
       // Same weighting as the ranking tie-break: an explicit recall is worth
       // more than a proactive surface, so least-useful-first means least of both.
@@ -2743,10 +2748,10 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         return textResult("Memory search is not available in this session.", true);
       }
       try {
-        const { matches, truncated, scanned } = await ctx.memory.grep({
+        const { matches, truncated, timedOut, scanned } = await ctx.memory.grep({
           pattern: args.pattern,
           ...(args.regex === undefined ? {} : { regex: args.regex }),
-          ...(args.caseSensitive === undefined ? {} : { ignoreCase: !args.caseSensitive }),
+          ...(args.caseSensitive === undefined ? {} : { caseSensitive: args.caseSensitive }),
           ...(args.field ? { field: args.field } : {}),
           ...(args.limit === undefined ? {} : { limit: args.limit }),
         });
@@ -2768,7 +2773,16 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           );
           return `\`${name}\` (${type})\n${lines.join("\n")}`;
         });
-        const tail = truncated ? "\n\n_Result truncated — raise `limit` or narrow the pattern._" : "";
+        // A timed-out scan is NOT a complete answer, and this tool's whole
+        // value is that its answer is exhaustive — so say which kind of
+        // incomplete it is rather than letting it read as "that's all of them".
+        const tail = timedOut
+          ? "\n\n_⚠ The scan hit its time budget and stopped early — this is a PARTIAL " +
+            "result. A `regex: true` pattern that backtracks is the usual cause; a literal " +
+            "search over this store should be instant._"
+          : truncated
+            ? "\n\n_Result truncated — raise `limit` or narrow the pattern._"
+            : "";
         return textResult(
           `${matches.length} hit(s) in ${byName.size} memor${byName.size === 1 ? "y" : "ies"} ` +
             `(${scanned} scanned):\n\n${blocks.join("\n\n")}${tail}`,

@@ -540,8 +540,14 @@ export interface SimilarMemory {
  * {@link MemoryStatsStore} themselves.
  */
 export interface MemoryInventoryEntry extends ProjectMemory {
-  /** Body size in characters — what this fact COSTS when it's injected. */
-  bytes: number;
+  /**
+   * Body length in CHARACTERS — what this fact costs when it's injected.
+   * Deliberately not "bytes": this is `body.length`, so it counts UTF-16 code
+   * units, and a store full of `→`/`≈`/emoji would report fewer than its real
+   * UTF-8 byte count. Characters are the honest unit here anyway, since what
+   * this feeds is a context budget rather than a disk one.
+   */
+  chars: number;
   /** Times auto-surfaced into a turn. */
   surfaced: number;
   /** Times returned by an explicit recall (the strong "was needed" signal). */
@@ -572,8 +578,30 @@ export interface MemoryGrepMatch {
 
 /** Longest match line returned by {@link MemoryService.grep}. */
 const GREP_LINE_MAX = 240;
-/** Longest pattern grep accepts — a guard against pathological regexes. */
+/** Longest pattern grep accepts. */
 const GREP_PATTERN_MAX = 200;
+
+/**
+ * Wall-clock budget for one {@link MemoryService.grep} scan.
+ *
+ * A literal search over a few hundred memories is single-digit milliseconds, so
+ * anything near this ceiling is a regex behaving badly. Checked between lines,
+ * which bounds the realistic accidental failure — a pattern that backtracks
+ * mildly on every one of a few thousand lines and turns a search into a
+ * multi-second event-loop stall.
+ *
+ * It does NOT bound a truly catastrophic pattern (`(a+)+$` and friends), where a
+ * SINGLE line can spin longer than any between-lines check will ever notice.
+ * Nothing in pure JS does: the regex engine can't be interrupted, so the only
+ * complete fixes are a linear-time engine (RE2 — a native addon, and this
+ * project is careful about Windows build friction) or running the scan in a
+ * terminable worker. Both are disproportionate here: `regex: true` is opt-in,
+ * the caller is this machine's own agent — which can already run arbitrary
+ * shell — and the worst case is a local server that needs restarting, not a
+ * reachable denial of service. Revisit if memory search ever becomes
+ * multi-tenant or reachable from outside the box.
+ */
+const GREP_TIME_BUDGET_MS = 2_000;
 
 /** Clamp a grep match line so one long line can't dominate the result. */
 function clip(text: string): string {
@@ -899,7 +927,7 @@ export class MemoryService {
         const s = stats[m.name];
         return {
           ...m,
-          bytes: m.body.length,
+          chars: m.body.length,
           surfaced: s?.surfaced ?? 0,
           recalled: s?.recalled ?? 0,
           ...(s?.lastAccessedAt ? { lastAccessedAt: s.lastAccessedAt } : {}),
@@ -929,19 +957,31 @@ export class MemoryService {
       pattern: string;
       /** Treat the pattern as a JS regex rather than a literal substring. */
       regex?: boolean;
-      /** Default true — curation searches are case-insensitive in practice. */
-      ignoreCase?: boolean;
+      /**
+       * Default false — curation searches are case-insensitive in practice.
+       * Named the same way the `memory_search` tool names it: this used to be
+       * `ignoreCase` with the tool inverting it, and two names for one flag with
+       * opposite polarity is exactly the kind of thing that reads fine until
+       * someone has to reason about a default.
+       */
+      caseSensitive?: boolean;
       /** Restrict to one field; default searches all three. */
       field?: "name" | "description" | "body";
       limit?: number;
     },
-  ): Promise<{ matches: MemoryGrepMatch[]; truncated: boolean; scanned: number }> {
+  ): Promise<{
+    matches: MemoryGrepMatch[];
+    truncated: boolean;
+    /** The scan hit {@link GREP_TIME_BUDGET_MS} and stopped early. */
+    timedOut: boolean;
+    scanned: number;
+  }> {
     const pattern = String(opts.pattern ?? "");
     if (!pattern.trim()) throw new Error("grep requires a non-empty pattern");
     if (pattern.length > GREP_PATTERN_MAX) {
       throw new Error(`pattern is too long (max ${GREP_PATTERN_MAX} chars)`);
     }
-    const flags = opts.ignoreCase === false ? "g" : "gi";
+    const flags = opts.caseSensitive ? "g" : "gi";
     // A literal search is the default because a curator types `taskkill`, not
     // `taskkill` escaped — and an unescaped `.` or `(` in a literal search
     // silently matching everything is the worse failure.
@@ -962,6 +1002,8 @@ export class MemoryService {
     const all = await this.list(projectId);
     const matches: MemoryGrepMatch[] = [];
     let truncated = false;
+    const deadline = this.now() + GREP_TIME_BUDGET_MS;
+    let timedOut = false;
 
     // Every hit goes through one gate, so the budget is checked BEFORE the push
     // rather than after: a name and a description hit on the same memory used to
@@ -977,6 +1019,10 @@ export class MemoryService {
     };
 
     outer: for (const m of all) {
+      if (this.now() > deadline) {
+        timedOut = true;
+        break;
+      }
       const want = (f: "name" | "description" | "body") => !opts.field || opts.field === f;
       if (want("name") && hits(m.name)) {
         if (!take({ name: m.name, type: m.type, field: "name", text: m.name })) break outer;
@@ -993,6 +1039,12 @@ export class MemoryService {
       if (want("body")) {
         const lines = m.body.split("\n");
         for (let i = 0; i < lines.length; i++) {
+          // Per LINE, not just per memory: one 3000-line body is where a mildly
+          // backtracking pattern actually burns its seconds.
+          if ((i & 0x3f) === 0 && this.now() > deadline) {
+            timedOut = true;
+            break outer;
+          }
           const line = lines[i] ?? "";
           if (!hits(line)) continue;
           const hit: MemoryGrepMatch = {
@@ -1006,7 +1058,11 @@ export class MemoryService {
         }
       }
     }
-    return { matches, truncated, scanned: all.length };
+    // A timeout is reported as truncation, never as success: a caller that
+    // reads a partial scan as "these are all the mentions" then deletes the
+    // memory whose mention it never reached.
+    if (timedOut) truncated = true;
+    return { matches, truncated, timedOut, scanned: all.length };
   }
 
   /**

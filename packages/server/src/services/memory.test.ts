@@ -675,7 +675,7 @@ describe("MemoryService — inventory (the curation view)", () => {
     expect(hub.links).toEqual(["spoke"]);
     expect(hub.backlinks).toEqual([]);
     expect(spoke.backlinks).toEqual(["hub"]);
-    expect(hub.bytes).toBe(hub.body.length);
+    expect(hub.chars).toBe(hub.body.length);
     // Nothing has been retrieved yet.
     expect(spoke).toMatchObject({ surfaced: 0, recalled: 0 });
     expect(spoke.lastAccessedAt).toBeUndefined();
@@ -761,7 +761,7 @@ describe("MemoryService — grep (exhaustive literal search)", () => {
   });
 
   it("honours caseSensitive and a field restriction", async () => {
-    const cased = await memory.grep("p1", { pattern: "Taskkill", ignoreCase: false });
+    const cased = await memory.grep("p1", { pattern: "Taskkill", caseSensitive: true });
     expect(cased.matches.map((m) => m.field)).toEqual(["body"]);
 
     const bodyOnly = await memory.grep("p1", { pattern: "taskkill", field: "body" });
@@ -782,10 +782,35 @@ describe("MemoryService — grep (exhaustive literal search)", () => {
     expect(truncated).toBe(true);
   });
 
-  it("rejects an empty pattern and an invalid regex", async () => {
+  it("rejects an empty pattern, an over-long one, and an invalid regex", async () => {
     await expect(memory.grep("p1", { pattern: "   " })).rejects.toThrow(/non-empty/);
+    await expect(memory.grep("p1", { pattern: "x".repeat(201) })).rejects.toThrow(/too long/);
     await expect(memory.grep("p1", { pattern: "(unclosed", regex: true })).rejects.toThrow(
       /invalid regex/,
     );
+  });
+
+  it("stops at its time budget and reports the result as partial, not complete", async () => {
+    // The injected clock jumps past the deadline on its first read, so the scan
+    // gives up immediately. What matters is that it does NOT come back looking
+    // like a clean empty result — a caller that reads a timed-out scan as "no
+    // memory mentions this" deletes the one that did.
+    let t = 0;
+    const impatient = new MemoryService({ store, bus, now: () => (t += 10_000) });
+    await impatient.write("p1", {
+      name: "x",
+      description: "d",
+      type: "project",
+      body: "mentions taskkill",
+    });
+    const res = await impatient.grep("p1", { pattern: "taskkill" });
+    expect(res.timedOut).toBe(true);
+    expect(res.truncated).toBe(true);
+  });
+
+  it("does not time out on an ordinary scan", async () => {
+    const res = await memory.grep("p1", { pattern: "taskkill" });
+    expect(res.timedOut).toBe(false);
+    expect(res.truncated).toBe(false);
   });
 });

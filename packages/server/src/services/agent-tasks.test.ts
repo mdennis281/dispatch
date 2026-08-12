@@ -379,7 +379,7 @@ function row(
     type: "project",
     body: `the body of ${name}`,
     file: `${name}.md`,
-    bytes: 20,
+    chars: 20,
     surfaced: 0,
     recalled: 0,
     links: [],
@@ -493,7 +493,7 @@ describe("buildTaskParts — memory consolidation", () => {
 
   it("attaches the pre-pass inventory as context, with each row's curation signals", () => {
     const rows = [
-      row("stale-fact", { updatedAt: Date.UTC(2026, 0, 15), bytes: 900 }),
+      row("stale-fact", { updatedAt: Date.UTC(2026, 0, 15), chars: 900 }),
       row("used-fact", { recalled: 3, surfaced: 7, links: ["stale-fact"] }),
     ];
     const context = memoryParts({}, { rows, shards: shardMemories(rows) }).find(
