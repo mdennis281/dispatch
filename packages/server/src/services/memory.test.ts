@@ -650,3 +650,142 @@ describe("MemoryService — .dispatch/ config dir source of truth", () => {
     expect((await cfgMemory.read("cfg", "a"))?.body).toBe("REPO A");
   });
 });
+
+describe("MemoryService — inventory (the curation view)", () => {
+  it("reports size, retrieval counts and the link graph in BOTH directions", async () => {
+    await memory.write("p1", {
+      name: "hub",
+      description: "the central fact",
+      type: "project",
+      body: "points at [[spoke]] and at [[ghost]] which does not exist",
+    });
+    await memory.write("p1", {
+      name: "spoke",
+      description: "the pointed-at fact",
+      type: "project",
+      body: "no links here",
+    });
+
+    const rows = await memory.inventory("p1");
+    const hub = rows.find((m) => m.name === "hub")!;
+    const spoke = rows.find((m) => m.name === "spoke")!;
+
+    // A link to a memory that doesn't exist is not a link — it's a typo, and
+    // counting it would make the graph look healthier than it is.
+    expect(hub.links).toEqual(["spoke"]);
+    expect(hub.backlinks).toEqual([]);
+    expect(spoke.backlinks).toEqual(["hub"]);
+    expect(hub.bytes).toBe(hub.body.length);
+    // Nothing has been retrieved yet.
+    expect(spoke).toMatchObject({ surfaced: 0, recalled: 0 });
+    expect(spoke.lastAccessedAt).toBeUndefined();
+  });
+
+  it("counts a recall against the memories it returned", async () => {
+    await memory.write("p1", {
+      name: "deploy-runbook",
+      description: "how we ship to prod",
+      type: "project",
+      body: "run pnpm ship",
+    });
+    await memory.recall("p1", "deploy runbook");
+
+    const [row] = await memory.inventory("p1");
+    expect(row!.recalled).toBe(1);
+    expect(row!.lastAccessedAt).toBeGreaterThan(0);
+  });
+
+  it("filters by type/prefix/names but computes backlinks over the WHOLE store", async () => {
+    await memory.write("p1", {
+      name: "steam-a",
+      description: "a",
+      type: "project",
+      body: "[[other-b]]",
+    });
+    await memory.write("p1", { name: "steam-c", description: "c", type: "reference", body: "" });
+    await memory.write("p1", { name: "other-b", description: "b", type: "project", body: "" });
+
+    expect((await memory.inventory("p1", { prefix: "steam" })).map((m) => m.name)).toEqual([
+      "steam-a",
+      "steam-c",
+    ]);
+    expect((await memory.inventory("p1", { type: "reference" })).map((m) => m.name)).toEqual([
+      "steam-c",
+    ]);
+    // Names are slugified, so a human-typed name still resolves.
+    expect((await memory.inventory("p1", { names: ["Steam A"] })).map((m) => m.name)).toEqual([
+      "steam-a",
+    ]);
+
+    // `steam-a` is filtered OUT of this query, but the link it holds still has
+    // to count when you ask about its target — otherwise a filtered inventory
+    // reports a memory as safe to delete when something points at it.
+    const [b] = await memory.inventory("p1", { names: ["other-b"] });
+    expect(b!.backlinks).toEqual(["steam-a"]);
+  });
+
+  it("is empty for a project with no memories", async () => {
+    expect(await memory.inventory("empty")).toEqual([]);
+  });
+});
+
+describe("MemoryService — grep (exhaustive literal search)", () => {
+  beforeEach(async () => {
+    await memory.write("p1", {
+      name: "taskkill-orphans-subapps",
+      description: "Never taskkill the server",
+      type: "feedback",
+      body:
+        "Windows maps SIGTERM to TerminateProcess.\n" +
+        "Use pnpm app:stop instead.\n" +
+        "Taskkill orphans every subApp.",
+    });
+    await memory.write("p1", {
+      name: "publish-refuses-while-up",
+      description: "app:publish builds in place",
+      type: "project",
+      body: "It refuses to run while the app is up.",
+    });
+  });
+
+  it("finds EVERY line mentioning a string, across all fields, case-insensitively", async () => {
+    const { matches, scanned } = await memory.grep("p1", { pattern: "taskkill" });
+    expect(scanned).toBe(2);
+    // name, description AND the body line — every occurrence, not the best one.
+    expect(matches.map((m) => `${m.field}${m.line ? `:${m.line}` : ""}`)).toEqual([
+      "name",
+      "description",
+      "body:3",
+    ]);
+    expect(matches.every((m) => m.name === "taskkill-orphans-subapps")).toBe(true);
+  });
+
+  it("honours caseSensitive and a field restriction", async () => {
+    const cased = await memory.grep("p1", { pattern: "Taskkill", ignoreCase: false });
+    expect(cased.matches.map((m) => m.field)).toEqual(["body"]);
+
+    const bodyOnly = await memory.grep("p1", { pattern: "taskkill", field: "body" });
+    expect(bodyOnly.matches).toHaveLength(1);
+  });
+
+  it("treats the pattern as a LITERAL by default — an unescaped regex char matches nothing", async () => {
+    // The whole point: a curator types `app:stop`, `.env`, `foo(bar)`, and a
+    // silently-regex `.` matching any character is the wrong kind of helpful.
+    expect((await memory.grep("p1", { pattern: "app:st.p" })).matches).toHaveLength(0);
+    expect((await memory.grep("p1", { pattern: "app:stop" })).matches).toHaveLength(1);
+    expect((await memory.grep("p1", { pattern: "app:st.p", regex: true })).matches).toHaveLength(1);
+  });
+
+  it("reports truncation rather than silently returning a partial answer", async () => {
+    const { matches, truncated } = await memory.grep("p1", { pattern: "e", limit: 2 });
+    expect(matches).toHaveLength(2);
+    expect(truncated).toBe(true);
+  });
+
+  it("rejects an empty pattern and an invalid regex", async () => {
+    await expect(memory.grep("p1", { pattern: "   " })).rejects.toThrow(/non-empty/);
+    await expect(memory.grep("p1", { pattern: "(unclosed", regex: true })).rejects.toThrow(
+      /invalid regex/,
+    );
+  });
+});

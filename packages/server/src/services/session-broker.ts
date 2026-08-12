@@ -64,6 +64,7 @@ import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import type { TerminalService } from "./terminal.js";
 import type { MemoryService } from "./memory.js";
+import type { MemoryHistoryService } from "./memory-history.js";
 import type { GitHubService } from "./github.js";
 import type { RunnerService } from "./runner.js";
 import type { WorktreeService } from "./worktree.js";
@@ -187,6 +188,11 @@ export function buildManagerToolsDirective(caps: {
     lines.push(
       "- `mcp__manager__remember` / `recall` / `forget` — durable project memory that " +
         "carries facts across chats; record anything a future session would need re-told.",
+      "- `mcp__manager__memory_list` / `memory_search` / `memory_history` / " +
+        "`memory_similar` — the CURATION reads over that same memory, for when you need " +
+        "an exhaustive answer rather than the most relevant one: the full inventory with " +
+        "age and usage, every literal mention of a string, a fact's commit history " +
+        "(including what was deliberately retired), and its near-duplicates.",
     );
   }
   if (caps.runner) {
@@ -557,6 +563,9 @@ export interface SessionBrokerOptions {
   terminals?: TerminalService;
   /** Per-project agent memory: injected at start + exposed as `mcp__manager__remember|recall|forget`. */
   memory?: MemoryService;
+  /** Git history of the memory dir: backs `mcp__manager__memory_history`. Optional —
+   *  without it that one tool reports itself unavailable and the rest still work. */
+  memoryHistory?: MemoryHistoryService;
   /** GitHub control plane: backs `mcp__manager__watch_pr`'s checks/threads/merge polls. */
   github?: GitHubService;
   /** SubApp runner: backs `mcp__manager__run_subapp` (launch apps + get a URL). */
@@ -1121,6 +1130,7 @@ export class SessionBroker {
   private readonly cap: number;
   private readonly terminals?: TerminalService;
   private readonly memory?: MemoryService;
+  private readonly memoryHistory?: MemoryHistoryService;
   private readonly github?: GitHubService;
   private readonly runner?: RunnerService;
   private readonly worktrees?: WorktreeService;
@@ -1161,6 +1171,7 @@ export class SessionBroker {
     this.cap = Math.max(1, opts.maxActiveSessions ?? 6);
     this.terminals = opts.terminals;
     this.memory = opts.memory;
+    this.memoryHistory = opts.memoryHistory;
     this.github = opts.github;
     this.runner = opts.runner;
     this.worktrees = opts.worktrees;
@@ -3024,6 +3035,7 @@ export class SessionBroker {
     // in-flight wait on stop/fork.
     const terminals = this.terminals;
     const memory = this.memory;
+    const memoryHistory = this.memoryHistory;
     const github = this.github;
     const runner = this.runner;
     const worktrees = this.worktrees;
@@ -3062,7 +3074,16 @@ export class SessionBroker {
                 remember: (input) => memory.write(projectId, input),
                 recall: (query, opts) => memory.recall(projectId, query, opts),
                 forget: (name) => memory.delete(projectId, name),
-                findSimilar: (candidate) => memory.findSimilar(projectId, candidate),
+                findSimilar: (candidate, opts) =>
+                  memory.findSimilar(projectId, candidate, opts),
+                // The curation half: inventory, exact search, and commit history.
+                // Bound the same way — the agent names the fact, never the project.
+                inventory: (opts) => memory.inventory(projectId, opts),
+                grep: (opts) => memory.grep(projectId, opts),
+                read: (name) => memory.read(projectId, name),
+                history: memoryHistory
+                  ? (opts) => memoryHistory.forProject(projectId, opts)
+                  : undefined,
               }
             : undefined,
         // Bind the PR watcher to this session's default cwd. `prMergeState` lets

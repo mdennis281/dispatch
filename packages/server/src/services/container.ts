@@ -21,6 +21,7 @@ import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
 import { MemoryService } from "./memory.js";
 import { MemoryCommitter } from "./memory-committer.js";
+import { MemoryHistoryService } from "./memory-history.js";
 import { ProjectConfigService } from "./project-config.js";
 import { ProjectConfigArchive } from "./project-config-archive.js";
 import { makeFakeQuery } from "./fake-sdk.js";
@@ -54,6 +55,7 @@ export interface ServiceOverrides {
   terminals?: TerminalService;
   memory?: MemoryService;
   memoryCommitter?: MemoryCommitter;
+  memoryHistory?: MemoryHistoryService;
   projectConfig?: ProjectConfigService;
   projectConfigArchive?: ProjectConfigArchive;
   title?: TitleService;
@@ -81,6 +83,8 @@ export interface Services extends ServiceBase {
   memory: MemoryService;
   /** Lands memory writes as commits on the primary checkout (profile-driven). */
   memoryCommitter: MemoryCommitter;
+  /** Reads those commits back — when each fact was written, and what was retired. */
+  memoryHistory: MemoryHistoryService;
   projectConfig: ProjectConfigService;
   projectConfigArchive: ProjectConfigArchive;
   title: TitleService;
@@ -153,6 +157,11 @@ export function createServices(
   const memoryCommitter =
     overrides.memoryCommitter ??
     new MemoryCommitter({ store, bus, projectConfig, trunkSync: lazyTrunkSync });
+  // Reads those commits back: when a fact was written, how often it's been
+  // rewritten, and which facts were deliberately RETIRED — the context a
+  // consolidation pass needs before it decides what to delete.
+  const memoryHistory =
+    overrides.memoryHistory ?? new MemoryHistoryService({ store, projectConfig });
   // Export/import a project's `.dispatch/` as a portable `.dispatch` zip, and
   // scaffold a fresh one from the `.data` record. Reads the config dir, (re)watches
   // + reloads through `projectConfig` so an import/scaffold takes effect live.
@@ -187,6 +196,7 @@ export function createServices(
       maxActiveSessions: config.maxActiveSessions,
       terminals,
       memory,
+      memoryHistory,
       github,
       runner,
       worktrees,
@@ -325,6 +335,7 @@ export function createServices(
     terminals,
     memory,
     memoryCommitter,
+    memoryHistory,
     projectConfig,
     projectConfigArchive,
     title,
