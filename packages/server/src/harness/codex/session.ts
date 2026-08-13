@@ -75,6 +75,15 @@ export class CodexSession implements HarnessSession {
   private readonly release: () => void;
   private readonly genId: () => string;
   private readonly decoder: CodexStreamDecoder;
+  /** One decoder per native child thread; their streams interleave with root. */
+  private readonly childDecoders = new Map<string, CodexStreamDecoder>();
+  /** Child thread → the neutral Agent tool that spawned it. */
+  private readonly childContexts = new Map<
+    string,
+    { parentToolUseId: string; subagentType: string }
+  >();
+  /** Latest spawn item per sender, used when the activity marker names the child first. */
+  private readonly pendingSpawns = new Map<string, string>();
   private readonly opts: CodexSessionOpts;
 
   private threadId?: string;
@@ -262,6 +271,7 @@ export class CodexSession implements HarnessSession {
   /* --------------------------------------------------- inbound stream */
 
   private onNotification(frame: RpcFrame): void {
+    this.observeCollaboration(frame);
     const events = this.decoder.decode(frame);
 
     // Track the active turn so steering and interrupt can name it.
@@ -287,6 +297,118 @@ export class CodexSession implements HarnessSession {
     }
   }
 
+  /**
+   * Discover native child threads from collaboration items/activity markers.
+   *
+   * App-server sends every thread over the shared connection, but RPC routing
+   * is deliberately per-thread. Registering here—synchronously while handling
+   * the spawn frame—means the child's next notification is no longer dropped.
+   */
+  private observeCollaboration(frame: RpcFrame): void {
+    if (frame.method !== "item/started" && frame.method !== "item/completed") return;
+    const params = (frame.params ?? {}) as Record<string, unknown>;
+    const senderThreadId = typeof params.threadId === "string" ? params.threadId : this.threadId;
+    const item = params.item as Record<string, unknown> | undefined;
+    if (!item || !senderThreadId) return;
+
+    if (item.type === "collabAgentToolCall" && item.tool === "spawnAgent") {
+      const toolUseId = String(item.id ?? this.genId());
+      this.pendingSpawns.set(senderThreadId, toolUseId);
+      for (const childId of this.receiverThreadIds(item)) {
+        this.subscribeChild(childId, toolUseId);
+      }
+      return;
+    }
+
+    if (item.type === "subAgentActivity") {
+      const childId = typeof item.agentThreadId === "string" ? item.agentThreadId : undefined;
+      if (!childId) return;
+      const toolUseId =
+        this.childContexts.get(childId)?.parentToolUseId ?? this.pendingSpawns.get(senderThreadId);
+      if (!toolUseId) return;
+      const path = typeof item.agentPath === "string" ? item.agentPath : "";
+      const label = path.split("/").filter(Boolean).at(-1) || "codex";
+      this.subscribeChild(childId, toolUseId, label);
+    }
+  }
+
+  private receiverThreadIds(item: Record<string, unknown>): string[] {
+    return Array.isArray(item.receiverThreadIds)
+      ? item.receiverThreadIds.filter((id): id is string => typeof id === "string")
+      : [];
+  }
+
+  /** Attach one native child thread to its spawning neutral Agent row. */
+  private subscribeChild(threadId: string, parentToolUseId: string, subagentType = "codex"): void {
+    const existing = this.childContexts.get(threadId);
+    if (existing) {
+      existing.parentToolUseId = parentToolUseId;
+      existing.subagentType = subagentType === "codex" ? existing.subagentType : subagentType;
+      return;
+    }
+    this.childContexts.set(threadId, { parentToolUseId, subagentType });
+    this.childDecoders.set(threadId, new CodexStreamDecoder({ genId: this.genId }));
+    this.unsubscribes.push(
+      this.conn.onThread(threadId, (frame) => this.onChildNotification(threadId, frame)),
+      this.conn.onRequest(threadId, (req) =>
+        this.onServerRequest(req, this.childContexts.get(threadId)?.parentToolUseId),
+      ),
+    );
+  }
+
+  /** Child-thread events become tagged transcript rows, never root turn state. */
+  private onChildNotification(threadId: string, frame: RpcFrame): void {
+    this.observeCollaboration(frame);
+    const decoder = this.childDecoders.get(threadId);
+    const context = this.childContexts.get(threadId);
+    if (!decoder || !context) return;
+
+    for (const event of decoder.decode(frame)) {
+      switch (event.type) {
+        // Claude also suppresses subagent partials: one root stream buffer cannot
+        // safely host concurrent child deltas. Finalized rows retain the text.
+        case "delta":
+        case "usage":
+        case "compacted":
+        case "init":
+          break;
+        case "assistant":
+        case "tool-use":
+        case "tool-result":
+          this.emit({
+            ...event,
+            parentToolUseId: context.parentToolUseId,
+            subagentType: context.subagentType,
+          });
+          break;
+        case "turn-end":
+          // A child turn ending settles only that run. Passing it through would
+          // falsely end the root chat turn in SessionBroker.
+          this.emit({
+            type: "task-notification",
+            taskId: threadId,
+            toolUseId: context.parentToolUseId,
+            status: event.ok
+              ? "completed"
+              : event.subtype === "interrupted"
+                ? "stopped"
+                : "failed",
+            summary: event.result,
+            durationMs: event.durationMs,
+          });
+          break;
+        case "notice":
+          this.emit({ ...event, text: `${context.subagentType}: ${event.text}` });
+          break;
+        case "permission-request":
+        case "question-request":
+        case "task-notification":
+          this.emit(event);
+          break;
+      }
+    }
+  }
+
   /** Interrupt a command that started despite violating the workflow contract. */
   private guardStartedItem(frame: RpcFrame): void {
     const guard = this.spec.toolGuard;
@@ -302,24 +424,24 @@ export class CodexSession implements HarnessSession {
 
   /* -------------------------------------------------- inbound requests */
 
-  private onServerRequest(req: ServerRequest): void {
+  private onServerRequest(req: ServerRequest, parentToolUseId?: string): void {
     switch (req.method) {
       case "item/commandExecution/requestApproval":
         return this.askPermission(req, "Bash", {
           command: String(req.params.command ?? ""),
           ...(typeof req.params.cwd === "string" ? { cwd: req.params.cwd } : {}),
-        });
+        }, parentToolUseId);
 
       case "item/fileChange/requestApproval":
         return this.askPermission(req, "Edit", {
           ...(typeof req.params.grantRoot === "string" ? { file_path: req.params.grantRoot } : {}),
-        });
+        }, parentToolUseId);
 
       case "item/permissions/requestApproval":
-        return this.askPermissionEscalation(req);
+        return this.askPermissionEscalation(req, parentToolUseId);
 
       case "item/tool/requestUserInput":
-        return this.askQuestions(req);
+        return this.askQuestions(req, parentToolUseId);
 
       case "mcpServer/elicitation/request":
         // An MCP server asking the user to fill a form. Dispatch has no surface
@@ -335,7 +457,12 @@ export class CodexSession implements HarnessSession {
   }
 
   /** Surface an approval as a permission card. */
-  private askPermission(req: ServerRequest, toolName: string, input: Record<string, unknown>): void {
+  private askPermission(
+    req: ServerRequest,
+    toolName: string,
+    input: Record<string, unknown>,
+    parentToolUseId?: string,
+  ): void {
     // The guard's first (and reliable) enforcement point.
     const denial = this.spec.toolGuard?.(toolName, input);
     if (denial) {
@@ -356,6 +483,7 @@ export class CodexSession implements HarnessSession {
       input,
       reason: typeof req.params.reason === "string" ? req.params.reason : undefined,
       target: typeof input.command === "string" ? input.command : (input.file_path as string | undefined),
+      parentToolUseId,
     });
   }
 
@@ -365,7 +493,7 @@ export class CodexSession implements HarnessSession {
    * Codex's response has no "decline" variant — it expects a granted profile —
    * so a denial is expressed as an RPC error, which Codex treats as refusal.
    */
-  private askPermissionEscalation(req: ServerRequest): void {
+  private askPermissionEscalation(req: ServerRequest, parentToolUseId?: string): void {
     const requestId = this.genId();
     const requested = req.params.permissions;
     this.pendingAsks.set(requestId, {
@@ -381,11 +509,12 @@ export class CodexSession implements HarnessSession {
       toolName: "Permissions",
       input: (requested ?? {}) as Record<string, unknown>,
       reason: typeof req.params.reason === "string" ? req.params.reason : "Codex is requesting wider access.",
+      parentToolUseId,
     });
   }
 
   /** Surface `requestUserInput` as a question card. */
-  private askQuestions(req: ServerRequest): void {
+  private askQuestions(req: ServerRequest, parentToolUseId?: string): void {
     const questions = questionsOf(req.params);
     const requestId = this.genId();
     this.pendingAsks.set(requestId, {
@@ -399,7 +528,7 @@ export class CodexSession implements HarnessSession {
         this.conn.respond(req.id, { answers: payload });
       },
     });
-    this.emit({ type: "question-request", requestId, questions });
+    this.emit({ type: "question-request", requestId, questions, parentToolUseId });
   }
 
   resolvePermission(requestId: string, resolution: HarnessPermissionResolution): void {

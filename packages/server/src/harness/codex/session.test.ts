@@ -11,8 +11,8 @@ import type { HarnessEvent, HarnessSessionSpec } from "../types.js";
 function fakeConn() {
   const calls: { method: string; params: Record<string, unknown> }[] = [];
   const responses: { id: number | string; result?: unknown; error?: string }[] = [];
-  let notify: ((f: RpcFrame) => void) | undefined;
-  let onReq: ((r: ServerRequest) => void) | undefined;
+  const notifications = new Map<string, (f: RpcFrame) => void>();
+  const requests = new Map<string, (r: ServerRequest) => void>();
   const replies = new Map<string, unknown>();
 
   const conn = {
@@ -26,13 +26,13 @@ function fakeConn() {
       if (method === "turn/start") return { turn: { id: "turn-1" } };
       return {};
     },
-    onThread: (_id: string, l: (f: RpcFrame) => void) => {
-      notify = l;
-      return () => (notify = undefined);
+    onThread: (id: string, l: (f: RpcFrame) => void) => {
+      notifications.set(id, l);
+      return () => notifications.delete(id);
     },
-    onRequest: (_id: string, h: (r: ServerRequest) => void) => {
-      onReq = h;
-      return () => (onReq = undefined);
+    onRequest: (id: string, h: (r: ServerRequest) => void) => {
+      requests.set(id, h);
+      return () => requests.delete(id);
     },
     respond: (id: number | string, result: unknown) => responses.push({ id, result }),
     respondError: (id: number | string, error: string) => responses.push({ id, error }),
@@ -43,8 +43,14 @@ function fakeConn() {
     calls,
     responses,
     reply: (method: string, value: unknown) => replies.set(method, value),
-    push: (method: string, params: Record<string, unknown>) => notify?.({ method, params }),
-    request: (r: ServerRequest) => onReq?.(r),
+    push: (method: string, params: Record<string, unknown>) => {
+      const id = typeof params.threadId === "string" ? params.threadId : "thread-1";
+      notifications.get(id)?.({ method, params });
+    },
+    request: (r: ServerRequest) => {
+      const id = typeof r.params.threadId === "string" ? r.params.threadId : "thread-1";
+      requests.get(id)?.(r);
+    },
     /** Let queued microtasks run. */
     tick: () => new Promise((r) => setTimeout(r, 0)),
   };
@@ -173,6 +179,106 @@ describe("CodexSession lifecycle", () => {
     session.send({ text: "second" });
     await fake.tick();
     expect(fake.calls.at(-1)).toMatchObject({ method: "turn/start" });
+  });
+
+  it("folds a spawned Codex child thread into a neutral Agent run", async () => {
+    const { session, fake } = makeSession();
+    session.send({ text: "delegate this" });
+    const iterator = session.events[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({ type: "init" });
+
+    const spawn = {
+      type: "collabAgentToolCall",
+      id: "spawn-1",
+      tool: "spawnAgent",
+      status: "inProgress",
+      senderThreadId: "thread-1",
+      receiverThreadIds: ["child-1"],
+      prompt: "Audit the renderer in detail",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      agentsStates: {},
+    };
+    fake.push("item/started", { threadId: "thread-1", turnId: "turn-1", item: spawn });
+    fake.push("item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { ...spawn, status: "completed", agentsStates: { "child-1": { status: "running" } } },
+    });
+    fake.push("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        type: "subAgentActivity",
+        id: "activity-1",
+        kind: "started",
+        agentThreadId: "child-1",
+        agentPath: "/root/audit_renderer",
+      },
+    });
+    fake.push("item/completed", {
+      threadId: "child-1",
+      turnId: "child-turn",
+      item: { type: "agentMessage", id: "child-msg", text: "I found the mismatch." },
+    });
+    fake.push("item/started", {
+      threadId: "child-1",
+      turnId: "child-turn",
+      item: { type: "commandExecution", id: "child-cmd", command: "git status", cwd: "/repo" },
+    });
+    fake.push("item/completed", {
+      threadId: "child-1",
+      turnId: "child-turn",
+      item: {
+        type: "commandExecution",
+        id: "child-cmd",
+        command: "git status",
+        cwd: "/repo",
+        status: "completed",
+        exitCode: 0,
+        aggregatedOutput: "clean",
+      },
+    });
+    fake.push("turn/completed", {
+      threadId: "child-1",
+      turn: { id: "child-turn", status: "completed", items: [] },
+    });
+
+    const events: HarnessEvent[] = [];
+    for (let i = 0; i < 6; i++) events.push((await iterator.next()).value!);
+    expect(events[0]).toMatchObject({
+      type: "tool-use",
+      toolUseId: "spawn-1",
+      name: "Agent",
+      input: { prompt: "Audit the renderer in detail" },
+    });
+    expect(events[1]).toMatchObject({
+      type: "tool-result",
+      toolUseId: "spawn-1",
+      content: expect.stringContaining("agentId: child-1"),
+    });
+    expect(events[2]).toMatchObject({
+      type: "assistant",
+      id: "child-msg",
+      parentToolUseId: "spawn-1",
+      subagentType: "audit_renderer",
+    });
+    expect(events[3]).toMatchObject({
+      type: "tool-use",
+      toolUseId: "child-cmd",
+      parentToolUseId: "spawn-1",
+    });
+    expect(events[4]).toMatchObject({
+      type: "tool-result",
+      toolUseId: "child-cmd",
+      parentToolUseId: "spawn-1",
+    });
+    expect(events[5]).toMatchObject({
+      type: "task-notification",
+      taskId: "child-1",
+      toolUseId: "spawn-1",
+      status: "completed",
+    });
   });
 
   it("attaches images as the right input kind", async () => {

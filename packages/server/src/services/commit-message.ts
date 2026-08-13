@@ -174,7 +174,7 @@ function collectText(msg: SDKMessage, acc: { text: string; result: string }): vo
 
 /**
  * Deterministic in-process stand-in gated by `DISPATCH_FAKE_SDK=1` (mirrors
- * `makeFakeTitleQuery`) so E2E never spawns a `claude` subprocess for a commit
+ * `makeFakeTitleGenerator`) so E2E never spawns a `claude` subprocess for a commit
  * message. Derives a subject from the first changed path in the diff.
  */
 export function makeFakeCommitQuery(): CommitQueryFn {

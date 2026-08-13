@@ -102,6 +102,7 @@ describe("SessionBroker neutral harness path", () => {
       runtime: () => ({ kind: "codex", source: "installed", available: true }),
       listModels: async () => [],
       readLimits: async () => null,
+      generateText: async () => "title",
       createSession: (_spec: HarnessSessionSpec) => session,
     };
     broker = new SessionBroker({

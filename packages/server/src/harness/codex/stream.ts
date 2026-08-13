@@ -61,6 +61,8 @@ export class CodexStreamDecoder {
   private readonly reasoning = new Map<string, string>();
   /** Item ids we have already emitted a tool-use for. */
   private readonly startedTools = new Set<string>();
+  /** Whether this runtime exposes structured collaboration items. */
+  private sawStructuredCollaboration = false;
 
   constructor(opts: CodexStreamDecoderOpts) {
     this.genId = opts.genId;
@@ -149,20 +151,29 @@ export class CodexStreamDecoder {
       case "fileChange":
       case "mcpToolCall":
       case "dynamicToolCall":
+      case "collabAgentToolCall":
       case "webSearch": {
+        if (item.type === "collabAgentToolCall") this.sawStructuredCollaboration = true;
         const call = this.toolCallOf(item);
         if (!call) return [];
         this.startedTools.add(id);
         return [{ type: "tool-use", toolUseId: id, ...call }];
       }
       case "subAgentActivity":
-        return [
-          {
-            type: "notice",
-            level: "info",
-            text: `Subagent ${String(item.kind ?? "activity")} (${String(item.agentPath ?? "")})`.trim(),
-          },
-        ];
+        // The detailed run comes from `collabAgentToolCall` plus the child
+        // thread stream. This marker carries only started/interacted/path; a
+        // notice beside the real run card is duplicate, lower-fidelity noise.
+        // Older app-server builds emitted only this marker, so retain their
+        // previous notice rather than making those agents disappear entirely.
+        return this.sawStructuredCollaboration
+          ? []
+          : [
+              {
+                type: "notice",
+                level: "info",
+                text: `Subagent ${String(item.kind ?? "activity")} (${String(item.agentPath ?? "")})`.trim(),
+              },
+            ];
       case "contextCompaction":
         return [{ type: "compacted" }];
       default:
@@ -197,7 +208,9 @@ export class CodexStreamDecoder {
       case "fileChange":
       case "mcpToolCall":
       case "dynamicToolCall":
+      case "collabAgentToolCall":
       case "webSearch": {
+        if (item.type === "collabAgentToolCall") this.sawStructuredCollaboration = true;
         const out: HarnessEvent[] = [];
         // A tool that completed without a `started` (fast paths, replayed
         // history) still needs its call row, or the result has nothing to
@@ -239,6 +252,7 @@ export class CodexStreamDecoder {
       if (typeof code === "number") return code === 0;
     }
     if (item.type === "dynamicToolCall" && typeof item.success === "boolean") return item.success;
+    if (item.type === "collabAgentToolCall") return item.status !== "failed";
     if (item.type === "mcpToolCall" && item.error) return false;
     return true;
   }
@@ -297,6 +311,43 @@ export class CodexStreamDecoder {
           input: (item.arguments ?? {}) as Record<string, unknown>,
         };
       }
+      case "collabAgentToolCall": {
+        const tool = String(item.tool ?? "");
+        const receivers = Array.isArray(item.receiverThreadIds)
+          ? item.receiverThreadIds.filter((id): id is string => typeof id === "string")
+          : [];
+        const prompt = typeof item.prompt === "string" ? item.prompt : "";
+        if (tool === "spawnAgent") {
+          return {
+            // `Agent` is already the provider-neutral spawn vocabulary consumed
+            // by SubagentCard/AgentsPanel. The child thread gets attached to
+            // this toolUseId by CodexSession.
+            name: "Agent",
+            input: {
+              description: firstLine(prompt),
+              prompt,
+              ...(typeof item.model === "string" ? { model: item.model } : {}),
+              ...(typeof item.reasoningEffort === "string"
+                ? { effort: item.reasoningEffort }
+                : {}),
+              ...(receivers.length ? { agent_ids: receivers } : {}),
+            },
+          };
+        }
+        const names: Record<string, string> = {
+          sendInput: "SendMessage",
+          resumeAgent: "AgentResume",
+          wait: "TaskOutput",
+          closeAgent: "TaskStop",
+        };
+        return {
+          name: names[tool] ?? "AgentControl",
+          input: {
+            ...(prompt ? { prompt } : {}),
+            ...(receivers.length ? { agent_ids: receivers } : {}),
+          },
+        };
+      }
       case "webSearch":
         return {
           name: "WebSearch",
@@ -323,6 +374,26 @@ export class CodexStreamDecoder {
       }
       case "dynamicToolCall":
         return item.contentItems ?? "";
+      case "collabAgentToolCall": {
+        const receivers = Array.isArray(item.receiverThreadIds)
+          ? item.receiverThreadIds.filter((id): id is string => typeof id === "string")
+          : [];
+        const states = (item.agentsStates ?? {}) as Record<
+          string,
+          { status?: unknown; message?: unknown }
+        >;
+        const details = Object.entries(states).map(([id, state]) => {
+          const status = typeof state.status === "string" ? state.status : "unknown";
+          const message = typeof state.message === "string" && state.message ? ` — ${state.message}` : "";
+          return `${id}: ${status}${message}`;
+        });
+        // The async-run fold recognizes this launch acknowledgement and later
+        // correlates the child turn's task-notification by agentId.
+        if (item.tool === "spawnAgent" && receivers.length) {
+          return [`agentId: ${receivers[0]}`, ...details].join("\n");
+        }
+        return details.join("\n") || receivers.join("\n");
+      }
       default:
         return "";
     }

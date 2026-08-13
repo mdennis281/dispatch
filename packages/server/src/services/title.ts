@@ -3,42 +3,32 @@
  *
  * After a chat's FIRST turn completes (wired in the container off the `result`
  * transcript row) we generate a short title (aim ~35 chars) from the opening
- * user message via a ONE-SHOT Agent SDK `query()` on the cheapest model
- * (`claude-haiku-4-5`), with `settingSources: []` + `maxTurns: 1` so it never
- * loads repo settings / MCP and never turns into a real agent loop. The result
- * is sanitized to a short title, saved to `chat.title`, and broadcast via
- * `chat-update`. Everything is fire-and-forget: any failure leaves the chat on
- * its default "New chat" title.
+ * user message via the chat harness's stateless `generateText()` seam. The
+ * provider adapter chooses its economical model and native no-tools/no-history
+ * posture; this service only sanitizes the answer, saves `chat.title`, and
+ * broadcasts `chat-update`. Everything is fire-and-forget: any failure leaves
+ * the chat on its default "New chat" title.
  *
  * `regenerate(chatId)` re-runs the same generator from the chat's recent USER
  * messages (ignoring the default-title gate) so a user can force a fresh title.
  * Both flows read ONLY user messages — assistant output never seeds a title.
  *
- * Each generation spawns a `claude` subprocess, so the failure mode that
- * actually bit was contention, not the model: finish a few turns at once and
- * several title queries race the real chats' own spawns, every one of them
- * blows a short deadline, and the user gets a row of "Title generation skipped
- * (Operation aborted)" notices — the SDK's message for OUR timeout firing. So
- * generations are gated to {@link TITLE_CONCURRENCY} at a time, get a wall-clock
- * budget a cold Windows spawn can actually fit in, and retry before giving up.
- * A notice is emitted only once the whole budget is spent.
+ * Each generation may still start native provider work, so generations are
+ * gated to {@link TITLE_CONCURRENCY} at a time, get a wall-clock budget a cold
+ * Windows runtime can fit in, and retry before giving up. A notice is emitted
+ * only once the whole budget is spent.
  *
- * The `query` fn, `now` and `sleep` are injectable so tests script a fake stream
- * without a `claude` subprocess, the network, or real backoff waits.
+ * The generator, `now` and `sleep` are injectable so tests run without a native
+ * provider, the network, or real backoff waits.
  */
-import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
-import type { Options, Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { stripTitleMarks, titlePrefixOf, withTitlePrefix } from "@dispatch/shared";
 import type { Chat, ChatMessage } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
-import { claudeExecutableOption } from "./runtime.js";
+import type { HarnessRegistry } from "../harness/index.js";
 
 /** The default title a chat is born with — the gate for auto-generation. */
 export const DEFAULT_CHAT_TITLE = "New chat";
-
-/** Cheapest model — titles never justify Opus/Sonnet spend. */
-export const TITLE_MODEL = "claude-haiku-4-5";
 
 /**
  * Max wall-clock ONE attempt may take before we abandon it. Generous on
@@ -55,22 +45,19 @@ const TITLE_ATTEMPTS = 3;
 const TITLE_RETRY_DELAY_MS = [2_000, 6_000];
 
 /**
- * How many title queries may be in flight across ALL chats. Each is a `claude`
- * subprocess; letting eight fire at once is how they starve each other into the
- * timeout. Queued generations don't start their clock until they run.
+ * How many title queries may be in flight across ALL chats. Queued generations
+ * don't start their clock until they run.
  */
 const TITLE_CONCURRENCY = 2;
 
-/** The subset of the SDK `query` signature this service calls (single-shot). */
-export type TitleQueryFn = (params: {
-  prompt: string;
-  options?: Options;
-}) => Query;
+/** Provider-neutral one-shot generation hook (injectable for tests/E2E). */
+export type TitleGenerateFn = (chat: Chat, prompt: string, timeoutMs: number) => Promise<string>;
 
 export interface TitleServiceOptions {
   store: Store;
   bus: EventBus;
-  query?: TitleQueryFn;
+  harnesses?: Pick<HarnessRegistry, "resolve">;
+  generateText?: TitleGenerateFn;
   now?: () => number;
   /** Backoff waiter — tests pass a no-op so retries don't cost real seconds. */
   sleep?: (ms: number) => Promise<void>;
@@ -103,23 +90,6 @@ function sanitizeTitle(raw: string): string {
     t = t.trim();
   }
   return t;
-}
-
-/** Pull the assistant/result text out of a one-shot query stream. */
-function collectText(msg: SDKMessage, acc: { text: string; result: string }): void {
-  const m = msg as unknown as Record<string, unknown> & { type?: string };
-  if (m.type === "assistant") {
-    const content = (m.message as { content?: unknown } | undefined)?.content;
-    if (Array.isArray(content)) {
-      for (const b of content) {
-        if (b && typeof b === "object" && (b as { type?: string }).type === "text") {
-          acc.text += String((b as { text?: unknown }).text ?? "");
-        }
-      }
-    }
-  } else if (m.type === "result" && typeof (m as { result?: unknown }).result === "string") {
-    acc.result = (m as { result: string }).result;
-  }
 }
 
 /**
@@ -190,7 +160,7 @@ function titlePrompt(source: string): string {
 export class TitleService {
   private readonly store: Store;
   private readonly bus: EventBus;
-  private readonly query: TitleQueryFn;
+  private readonly generateText: TitleGenerateFn;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   /**
@@ -206,7 +176,17 @@ export class TitleService {
   constructor(opts: TitleServiceOptions) {
     this.store = opts.store;
     this.bus = opts.bus;
-    this.query = opts.query ?? (sdkQuery as unknown as TitleQueryFn);
+    if (opts.generateText) this.generateText = opts.generateText;
+    else if (opts.harnesses) {
+      this.generateText = (chat, prompt, timeoutMs) =>
+        opts.harnesses!.resolve(chat.harness).harness.generateText({
+          prompt,
+          purpose: "title",
+          timeoutMs,
+        });
+    } else {
+      throw new Error("TitleService requires harnesses or generateText");
+    }
     this.now = opts.now ?? (() => Date.now());
     this.sleep =
       opts.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -302,7 +282,7 @@ export class TitleService {
         // Marks are ours to add, never the model's: a stray `**…**` in generated
         // prose would accent an arbitrary word and read as a category that isn't
         // one. Only the prefix below may emphasize.
-        const generated = stripTitleMarks(sanitizeTitle(await this.gated(prompt)));
+        const generated = stripTitleMarks(sanitizeTitle(await this.gated(chatId, prompt)));
         // An empty answer is as useless as a thrown one, and just as likely to
         // be a truncated stream — worth another attempt rather than a silent
         // no-op that leaves the chat on "New chat".
@@ -337,11 +317,11 @@ export class TitleService {
   }
 
   /** Run a query under the global concurrency gate. */
-  private async gated(prompt: string): Promise<string> {
+  private async gated(chatId: string, prompt: string): Promise<string> {
     if (this.slots > 0) this.slots--;
     else await new Promise<void>((resolve) => this.slotWaiters.push(resolve));
     try {
-      return await this.runQuery(prompt);
+      return await this.runQuery(chatId, prompt);
     } finally {
       const next = this.slotWaiters.shift();
       // Hand the slot straight to the next waiter rather than releasing it —
@@ -351,61 +331,22 @@ export class TitleService {
     }
   }
 
-  private async runQuery(prompt: string): Promise<string> {
-    const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), TITLE_TIMEOUT_MS);
-    const acc = { text: "", result: "" };
-    try {
-      const q = this.query({
-        prompt,
-        options: {
-          model: TITLE_MODEL,
-          settingSources: [],
-          maxTurns: 1,
-          abortController: abort,
-          ...claudeExecutableOption(),
-        },
-      });
-      for await (const msg of q) collectText(msg, acc);
-    } catch (err) {
-      // The SDK reports OUR abort as a bare "Operation aborted", which reads as
-      // if something cancelled the chat. Name the actual cause — but only when
-      // we're the ones who aborted; a partial answer still beats an error.
-      if (abort.signal.aborted) {
-        const text = acc.text.trim() || acc.result.trim();
-        if (text) return text;
-        throw new Error(`timed out after ${Math.round(TITLE_TIMEOUT_MS / 1000)}s`);
-      }
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
-    return acc.text.trim() || acc.result.trim();
+  private async runQuery(chatId: string, prompt: string): Promise<string> {
+    const chat = await this.store.getChat(chatId);
+    if (!chat) throw new Error("chat no longer exists");
+    return this.generateText(chat, prompt, TITLE_TIMEOUT_MS);
   }
 }
 
 /**
- * A deterministic, in-process stand-in for the one-shot title query, gated by
- * `DISPATCH_FAKE_SDK=1` (see container.ts) so E2E never spawns a `claude` subprocess
- * for titles. Derives a short title from the prompt's seed line.
+ * A deterministic, in-process stand-in for provider text generation, gated by
+ * `DISPATCH_FAKE_SDK=1` (see container.ts). Derives a short title from the
+ * prompt's seed line.
  */
-export function makeFakeTitleQuery(): TitleQueryFn {
-  return ({ prompt }) => {
-    async function* gen(): AsyncGenerator<unknown, void> {
-      const lines = prompt.split("\n").map((l) => l.trim()).filter(Boolean);
-      const seed = lines.length ? lines[lines.length - 1]! : "New Chat";
-      const title = seed.split(/\s+/).slice(0, 4).join(" ") || "New Chat";
-      yield {
-        type: "assistant",
-        message: { role: "assistant", content: [{ type: "text", text: title }] },
-      };
-      yield { type: "result", subtype: "success", is_error: false, result: title };
-    }
-    const g = gen() as unknown as Record<string, unknown>;
-    g.interrupt = async () => {};
-    g.setModel = async () => {};
-    g.setPermissionMode = async () => {};
-    g.setMaxThinkingTokens = async () => {};
-    return g as unknown as Query;
+export function makeFakeTitleGenerator(): TitleGenerateFn {
+  return async (_chat, prompt) => {
+    const lines = prompt.split("\n").map((l) => l.trim()).filter(Boolean);
+    const seed = lines.length ? lines[lines.length - 1]! : DEFAULT_CHAT_TITLE;
+    return seed.split(/\s+/).slice(0, 4).join(" ") || DEFAULT_CHAT_TITLE;
   };
 }
