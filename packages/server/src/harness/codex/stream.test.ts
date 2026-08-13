@@ -161,6 +161,106 @@ describe("CodexStreamDecoder — tools", () => {
     );
     expect(out.at(-1)).toMatchObject({ ok: false });
   });
+
+  it("maps a collaboration spawn to the neutral Agent vocabulary", () => {
+    const d = decoder();
+    const spawn = {
+      type: "collabAgentToolCall",
+      id: "spawn-1",
+      tool: "spawnAgent",
+      status: "inProgress",
+      receiverThreadIds: ["child-1"],
+      prompt: "Audit the renderer",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      agentsStates: {},
+    };
+    expect(d.decode(note("item/started", item(spawn)))[0]).toMatchObject({
+      type: "tool-use",
+      toolUseId: "spawn-1",
+      name: "Agent",
+      input: {
+        description: "Audit the renderer",
+        prompt: "Audit the renderer",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        agent_ids: ["child-1"],
+      },
+    });
+    expect(
+      d.decode(
+        note(
+          "item/completed",
+          item({
+            ...spawn,
+            status: "completed",
+            agentsStates: { "child-1": { status: "running", message: null } },
+          }),
+        ),
+      )[0],
+    ).toMatchObject({
+      type: "tool-result",
+      toolUseId: "spawn-1",
+      ok: true,
+      content: expect.stringContaining("agentId: child-1"),
+    });
+  });
+
+  it("suppresses low-detail activity notices once run events own the UI", () => {
+    const d = decoder();
+    d.decode(
+      note(
+        "item/started",
+        item({
+          type: "collabAgentToolCall",
+          id: "spawn-1",
+          tool: "spawnAgent",
+          status: "inProgress",
+          receiverThreadIds: ["child-1"],
+          prompt: "Audit the renderer",
+          agentsStates: {},
+        }),
+      ),
+    );
+    expect(
+      d.decode(
+        note(
+          "item/started",
+          item({
+            type: "subAgentActivity",
+            id: "a1",
+            kind: "started",
+            agentThreadId: "child-1",
+            agentPath: "/root/audit",
+          }),
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps the legacy activity notice when structured collaboration is unavailable", () => {
+    const d = decoder();
+    expect(
+      d.decode(
+        note(
+          "item/started",
+          item({
+            type: "subAgentActivity",
+            id: "a1",
+            kind: "started",
+            agentThreadId: "child-1",
+            agentPath: "/root/audit",
+          }),
+        ),
+      ),
+    ).toEqual([
+      {
+        type: "notice",
+        level: "info",
+        text: "Subagent started (/root/audit)",
+      },
+    ]);
+  });
 });
 
 describe("CodexStreamDecoder — plan", () => {
