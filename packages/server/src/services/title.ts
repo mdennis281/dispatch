@@ -346,7 +346,7 @@ export class TitleService {
 export function makeFakeTitleGenerator(): TitleGenerateFn {
   return async (_chat, prompt) => {
     const lines = prompt.split("\n").map((l) => l.trim()).filter(Boolean);
-    const seed = lines.length ? lines[lines.length - 1]! : "New Chat";
-    return seed.split(/\s+/).slice(0, 4).join(" ") || "New Chat";
+    const seed = lines.length ? lines[lines.length - 1]! : DEFAULT_CHAT_TITLE;
+    return seed.split(/\s+/).slice(0, 4).join(" ") || DEFAULT_CHAT_TITLE;
   };
 }
