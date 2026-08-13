@@ -27,6 +27,7 @@ on:
 # to merge — a check that could rewrite the repo is a poor thing to gate on.
 permissions:
   contents: read
+  pull-requests: read
 
 # Agents push several times a minute. Without this, a PR costs one run per push
 # and the badge is perpetually reporting a commit nobody is looking at any more.
