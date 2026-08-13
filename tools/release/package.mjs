@@ -18,7 +18,9 @@ function parseArgs(argv) {
     else throw new Error(`unknown argument: ${arg}`);
   }
   if (!out.out || !out.tag || !out.sha) {
-    throw new Error("usage: package.mjs --out <dir> --tag <vX.Y.Z> --sha <commit>");
+    throw new Error(
+      "usage: package.mjs --out <dir> --tag <vX.Y.Z|vyyyy.mm.dd.sssss> --sha <commit>",
+    );
   }
   if (!semverTag.test(out.tag) && !buildStampTag.test(out.tag)) {
     throw new Error(`release tag must be semver- or build-stamp-shaped (received ${out.tag})`);

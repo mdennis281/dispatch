@@ -46,6 +46,7 @@ jobs:
             "import { buildVersion } from './packages/shared/dist/version.js'; console.log(buildVersion(new Date(process.argv[1])))" \
             "$COMMIT_TIME")"
           echo "BUILD_VERSION=$BUILD_VERSION" >> "$GITHUB_ENV"
+          echo "DISPATCH_BUILD_VERSION=$BUILD_VERSION" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=v$BUILD_VERSION" >> "$GITHUB_ENV"
           echo "Publishing Dispatch v$BUILD_VERSION from $GITHUB_SHA"
 
