@@ -112,6 +112,7 @@ function buildCorrection(
 function Marker({ checked, multi }: { checked: boolean; multi: boolean }) {
   return (
     <span
+      data-marker=""
       className={cn(
         "mt-px flex size-4 shrink-0 items-center justify-center border [&_svg]:size-3",
         multi ? "rounded-[4px]" : "rounded-full",
@@ -447,13 +448,26 @@ export function QuestionCard({ row }: QuestionCardProps) {
                   {q.options.length > 0 ? (
                     <div
                       onMouseDown={(e) => {
-                        // Focus the field wherever on the row you press — but let
-                        // a press on the input itself place the caret normally.
+                        if (busy) return;
+                        // The marker is the UNCHECK. On a multi-select, dropping
+                        // the custom answer out of the set must not mean deleting
+                        // the text you'd want back — and the listed options each
+                        // uncheck by clicking them again, so this row needs the
+                        // same move. Delegated off the row, since a nested
+                        // button element can't live inside a clickable row.
+                        if (customSel && (e.target as HTMLElement).closest("[data-marker]")) {
+                          e.preventDefault();
+                          setCustom((c) => ({ ...c, [qi]: false }));
+                          return;
+                        }
+                        // Otherwise the whole row is the field: focus it wherever
+                        // you press, but let a press on the input itself place
+                        // the caret normally.
                         if (e.target !== customRefs.current[qi]) {
                           e.preventDefault();
                           customRefs.current[qi]?.focus();
                         }
-                        if (!busy) pickCustom(qi, !q.multiSelect);
+                        pickCustom(qi, !q.multiSelect);
                       }}
                       className={cn(
                         "flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 transition-colors",
