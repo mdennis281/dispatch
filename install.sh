@@ -35,4 +35,8 @@ if [ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]; then
 else
   curl -fsSL "$installer_url" -o "$installer_path"
 fi
+# Leave a possibly-installed app/ working directory before the atomic swap.
+# POSIX permits renaming a process's cwd, but Git Bash on Windows does not.
+export DISPATCH_INSTALL_CWD="$PWD"
+cd "${TMPDIR:-/tmp}"
 node "$installer_path" "$@"

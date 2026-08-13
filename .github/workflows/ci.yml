@@ -239,3 +239,6 @@ jobs:
           src/services/runner.test.ts
           src/routes/fs.test.ts
           src/services/mcp/manager-mcp.integration.test.ts
+
+      - name: Test release installer (Windows)
+        run: node --test tools/install.test.mjs
