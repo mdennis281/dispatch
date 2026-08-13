@@ -5,6 +5,8 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const semverTag = /^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const buildStampTag = /^v\d{4}\.\d{2}\.\d{2}\.\d{5}$/;
 
 function parseArgs(argv) {
   const out = {};
@@ -18,8 +20,8 @@ function parseArgs(argv) {
   if (!out.out || !out.tag || !out.sha) {
     throw new Error("usage: package.mjs --out <dir> --tag <vX.Y.Z> --sha <commit>");
   }
-  if (!/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(out.tag)) {
-    throw new Error(`release tag must be semver-shaped (received ${out.tag})`);
+  if (!semverTag.test(out.tag) && !buildStampTag.test(out.tag)) {
+    throw new Error(`release tag must be semver- or build-stamp-shaped (received ${out.tag})`);
   }
   if (!/^[a-f0-9]{40}$/i.test(out.sha)) throw new Error(`invalid commit sha: ${out.sha}`);
   return out;
@@ -91,7 +93,13 @@ writeFileSync(
 
 const packageJsonPath = join(output, "package.json");
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
-packageJson.version = args.tag.slice(1).split("+")[0];
+const releaseVersion = args.tag.slice(1).split("+")[0];
+// npm versions must have exactly three numeric components, while Dispatch's
+// public build stamp has four. Keep the payload package semver-valid; the
+// release manifest remains the source of truth for the user-visible version.
+packageJson.version = buildStampTag.test(args.tag)
+  ? `0.0.0-build-${releaseVersion.replaceAll(".", "-")}`
+  : releaseVersion;
 packageJson.scripts = {
   start: "pnpm --filter @dispatch/server start",
   dispatch: "node packages/cli/dist/index.js",
@@ -106,7 +114,7 @@ writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
 writeFileSync(
   join(output, "release-manifest.json"),
   `${JSON.stringify({
-    version: packageJson.version,
+    version: releaseVersion,
     tag: args.tag,
     sha: args.sha,
     builtAt: new Date().toISOString(),

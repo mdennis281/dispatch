@@ -38,9 +38,13 @@ installs runtime dependencies, and starts Dispatch at
 `http://127.0.0.1:4318`. Run the same command again to update. Existing chats and
 configuration live outside the app payload and survive updates.
 
-Use `--version v1.2.3`, `--no-start`, `--no-shortcut`, or `--target <path>` when
-running a downloaded copy of the script. Set `GITHUB_TOKEN` while the repository
-is private.
+Every successful build of `main` is automatically tagged and published using the
+UTC build version displayed in the app (`vyyyy.mm.dd.sssss`). Re-running the
+release workflow for the same commit safely refreshes that release's assets.
+
+Use `--version v2026.08.13.12345`, `--no-start`, `--no-shortcut`, or
+`--target <path>` when running a downloaded copy of the script. Set
+`GITHUB_TOKEN` while the repository is private.
 
 ## Develop from source
 
