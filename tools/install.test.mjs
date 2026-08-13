@@ -37,15 +37,15 @@ test("renameWithRetry waits out transient Windows file locks", async () => {
 });
 
 test("renameWithRetry does not hide non-locking filesystem errors", async () => {
-  const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+  const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
   await assert.rejects(
     renameWithRetry("app", "backup", {
       attempts: 4,
       rename() {
-        throw denied;
+        throw missing;
       },
     }),
-    (error) => error === denied,
+    (error) => error === missing,
   );
 });
 

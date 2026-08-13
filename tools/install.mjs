@@ -251,7 +251,7 @@ export async function renameWithRetry(
       rename(source, destination);
       return;
     } catch (error) {
-      const retryable = ["EPERM", "EBUSY", "ENOTEMPTY"].includes(error?.code);
+      const retryable = ["EPERM", "EACCES", "EBUSY", "ENOTEMPTY"].includes(error?.code);
       if (!retryable || attempt >= attempts) {
         if (retryable) {
           throw new Error(
