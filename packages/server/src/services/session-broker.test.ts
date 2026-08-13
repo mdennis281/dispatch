@@ -1111,6 +1111,37 @@ describe("SessionBroker — tool_result images (screenshot-to-UI)", () => {
     expect(persisted && "images" in persisted ? persisted.images?.length : 0).toBe(1);
   });
 
+  it.each([
+    [
+      "a direct Codex MCP image block",
+      [{ type: "image", data: PNG_1PX, mimeType: "image/png" }],
+    ],
+    [
+      "a Codex CallToolResult serialized into text",
+      [{ type: "text", text: JSON.stringify({ content: [{ type: "image", data: PNG_1PX, mimeType: "image/png" }] }) }],
+    ],
+  ])("persists %s instead of displaying its base64", async (_label, content) => {
+    const { fn } = makeFakeQuery((_t) => [
+      toolUseMsg("mcp__sim__sim_render", { format: "png" }, "tool-1"),
+      toolResultMsg("tool-1", content),
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "render the scene");
+    await idleP;
+
+    const rows = await store.readMessages("c1");
+    const row = rows.find((r) => r.kind === "tool_result");
+    if (!row || row.kind !== "tool_result") throw new Error("expected tool_result row");
+    expect(row.images).toHaveLength(1);
+    expect(row.images![0]!.mimeType).toBe("image/png");
+    expect(JSON.stringify(row.content)).not.toContain(PNG_1PX);
+  });
+
   it("leaves an image-free tool_result untouched (no images key)", async () => {
     const { fn } = makeFakeQuery((_t) => [
       toolUseMsg("Bash", { command: "ls" }, "tool-1"),
