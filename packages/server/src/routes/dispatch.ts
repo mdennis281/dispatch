@@ -19,6 +19,7 @@ import type {
   ChatPurpose,
   Project,
   Effort,
+  HarnessKind,
   ImageRef,
   WorktreeInfo,
 } from "@dispatch/shared";
@@ -47,6 +48,8 @@ export interface CreateChatInput {
   modeId?: string;
   agentId?: string;
   effort?: Effort;
+  /** Runtime override; otherwise project → app → built-in default. */
+  harness?: HarnessKind;
   /**
    * SDK model id to pin on the new chat. Omitted leaves it unpinned, which is
    * NOT the same as pinning today's default: an unpinned chat keeps tracking
@@ -70,15 +73,22 @@ export async function createChat(
   if (!project) throw new Error(`project "${input.projectId}" not found`);
 
   const settings = await store.getSettings().catch(() => null);
+  const harness = input.harness ?? project.harness ?? settings?.harness?.defaultHarness ?? "claude";
+  const harnessDefaults = settings?.harness?.defaults?.[harness];
   const now = Date.now();
   const chat: Chat = {
     id: nanoid(),
     projectId: input.projectId,
     title: input.title?.trim() || "New chat",
     modeId: input.modeId ?? settings?.defaultModeId ?? "default",
-    agentId: input.agentId,
-    effort: input.effort ?? "medium",
-    ...(input.model ? { model: input.model } : {}),
+    agentId: (services.harnesses?.find(harness)?.capabilities.subagents ?? harness === "claude")
+      ? input.agentId
+      : undefined,
+    harness,
+    effort: input.effort ?? harnessDefaults?.effort ?? "medium",
+    ...((input.model ?? harnessDefaults?.model)
+      ? { model: input.model ?? harnessDefaults?.model }
+      : {}),
     worktrees: [],
     prs: [],
     status: "idle",
@@ -355,6 +365,10 @@ export async function dispatchClientAction(
       case "set-model":
         await ensureSession(services, action.chatId);
         await broker.setModel(action.chatId, action.model);
+        return;
+
+      case "set-harness":
+        await broker.setHarness(action.chatId, action.harness);
         return;
 
       case "regenerate-title":

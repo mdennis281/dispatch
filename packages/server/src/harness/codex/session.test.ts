@@ -193,6 +193,67 @@ describe("CodexSession lifecycle", () => {
       { type: "text", text: "look", text_elements: [] },
     ]);
   });
+
+  it("projects MCP servers, manager auth, and context limits into thread config", async () => {
+    const { session, fake } = makeSession({
+      contextTokenLimit: 180_000,
+      mcpServers: {
+        files: { type: "stdio", command: "node", args: ["server.mjs"], env: { A: "1" } },
+        remote: { type: "http", url: "https://example.com/mcp", headers: { "X-Test": "yes" } },
+      },
+      managerMcp: {
+        transport: "http",
+        url: "http://127.0.0.1:4319/api/mcp/manager",
+        token: "secret",
+        tokenEnvVar: "DISPATCH_MANAGER_MCP_TOKEN",
+      },
+    });
+    session.send({ text: "go" });
+    await fake.tick();
+
+    expect(fake.calls[0]).toMatchObject({
+      method: "thread/start",
+      params: {
+        config: {
+          model_auto_compact_token_limit: 180_000,
+          mcp_servers: {
+            files: { command: "node", args: ["server.mjs"], env: { A: "1" } },
+            remote: { url: "https://example.com/mcp", http_headers: { "X-Test": "yes" } },
+            manager: {
+              url: "http://127.0.0.1:4319/api/mcp/manager",
+              http_headers: { Authorization: "Bearer secret" },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("uses current thread settings RPCs for live model, effort, and posture changes", async () => {
+    const { session, fake } = makeSession();
+    session.send({ text: "go" });
+    await fake.tick();
+    await session.setModel("gpt-next");
+    await session.setEffort("high");
+    await session.setPermissionMode("bypassPermissions");
+
+    expect(fake.calls).toContainEqual({
+      method: "thread/settings/update",
+      params: { threadId: "thread-1", model: "gpt-next" },
+    });
+    expect(fake.calls).toContainEqual({
+      method: "thread/settings/update",
+      params: { threadId: "thread-1", effort: "high" },
+    });
+    expect(fake.calls).toContainEqual({
+      method: "thread/settings/update",
+      params: {
+        threadId: "thread-1",
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "dangerFullAccess" },
+      },
+    });
+  });
 });
 
 describe("CodexSession approvals", () => {

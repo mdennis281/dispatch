@@ -234,6 +234,8 @@ export interface HarnessSessionSpec {
   autoCompact?: boolean;
   /** Compaction reserve window, when the host pins one. */
   autoCompactWindow?: number;
+  /** App-level ceiling for model context retained by one chat. */
+  contextTokenLimit?: number;
   /** Aborts the session. */
   abortSignal?: AbortSignal;
 }

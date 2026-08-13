@@ -246,7 +246,7 @@ export function TaskLauncher({
             disabled={!canLaunch}
             onClick={() => void launch()}
           >
-            {sending ? "Starting…" : (submitLabel ?? "Have Claude do it")}
+            {sending ? "Starting…" : (submitLabel ?? "Have the agent do it")}
           </Button>
         </div>
       </div>

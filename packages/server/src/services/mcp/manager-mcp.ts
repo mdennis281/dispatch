@@ -3484,9 +3484,23 @@ export function createManagerMcpServer(
     ...(ctx.chats ? [spawnChat] : []),
     ...(ctx.mcpConfig ? [mcpList, mcpAdd, mcpRemove] : []),
   ];
-  return createSdkMcpServer({
+  const server = createSdkMcpServer({
     name: "manager",
     version: "1.0.0",
     tools,
   });
+  // Non-enumerable host metadata. The Claude SDK only sees the ordinary MCP
+  // config, while the harness broker can recover the SAME live context and put
+  // it behind ManagerMcpBridge for Codex. This avoids duplicating the manager
+  // tool wiring (terminals, memory, GitHub, runners, spawn consent) per runtime.
+  Object.defineProperty(server, MANAGER_CONTEXT, { value: ctx });
+  return server;
+}
+
+const MANAGER_CONTEXT = Symbol("dispatch.managerMcpContext");
+
+/** Recover the live context attached by {@link createManagerMcpServer}. */
+export function managerMcpContextOf(value: unknown): ManagerMcpContext | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return (value as { [MANAGER_CONTEXT]?: ManagerMcpContext })[MANAGER_CONTEXT];
 }

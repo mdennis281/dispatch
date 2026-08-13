@@ -1,10 +1,17 @@
 import { create } from "zustand";
-import { FALLBACK_MODELS, type ModelOption } from "@dispatch/shared";
+import {
+  FALLBACK_MODELS,
+  fallbackModels,
+  type HarnessKind,
+  type ModelOption,
+} from "@dispatch/shared";
 
 interface ModelsStore {
   /** Selectable session models for the composer's model picker. */
   models: ModelOption[];
-  setModels: (models: ModelOption[]) => void;
+  activeHarness: HarnessKind;
+  byHarness: Partial<Record<HarnessKind, ModelOption[]>>;
+  setModels: (models: ModelOption[], harness?: HarnessKind) => void;
 }
 
 /**
@@ -16,5 +23,15 @@ interface ModelsStore {
  */
 export const useModels = create<ModelsStore>((set) => ({
   models: FALLBACK_MODELS,
-  setModels: (models) => set({ models: models.length ? models : FALLBACK_MODELS }),
+  activeHarness: "claude",
+  byHarness: { claude: FALLBACK_MODELS },
+  setModels: (models, harness = "claude") =>
+    set((state) => {
+      const next = models.length ? models : fallbackModels(harness);
+      return {
+        models: next,
+        activeHarness: harness,
+        byHarness: { ...state.byHarness, [harness]: next },
+      };
+    }),
 }));

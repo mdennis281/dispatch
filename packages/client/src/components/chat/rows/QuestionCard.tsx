@@ -8,6 +8,7 @@ import { cn } from "../../../lib/cn.js";
 import { actions } from "../../../lib/actions.js";
 import { useChats } from "../../../stores/chats.js";
 import { attentionCardId } from "../../attention/focus.js";
+import { harnessLabel } from "../../../lib/harness.js";
 
 interface QuestionOption {
   id: string;
@@ -51,7 +52,7 @@ function parseOne(first: Record<string, unknown>, input: Record<string, unknown>
   return {
     header: str(first.header) ?? str(first.title),
     question:
-      str(first.question) ?? str(first.prompt) ?? str(first.text) ?? "Claude has a question.",
+      str(first.question) ?? str(first.prompt) ?? str(first.text) ?? "The agent has a question.",
     options: parseOptions(first, input),
     multiSelect: first.multiSelect === true || first.multiselect === true,
   };
@@ -159,6 +160,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
   const multi = questions.length > 1;
 
   const chatStatus = useChats((s) => s.byId[row.chatId]?.status);
+  const provider = harnessLabel(useChats((s) => s.byId[row.chatId]?.harness));
 
   // Re-answering a resolved question: the card goes interactive again, but the
   // answer leaves as a message rather than a (long-gone) permission result.
@@ -343,15 +345,15 @@ export function QuestionCard({ row }: QuestionCardProps) {
           <span className="text-base text-primary">
             {multi ? (
               <>
-                Claude has some <span className="font-semibold text-accent-hi">questions</span>
+                {provider} has some <span className="font-semibold text-accent-hi">questions</span>
               </>
             ) : questions[0]?.header ? (
               <>
-                Claude asks — <span className="font-semibold text-accent-hi">{questions[0].header}</span>
+                {provider} asks — <span className="font-semibold text-accent-hi">{questions[0].header}</span>
               </>
             ) : (
               <>
-                Claude has a <span className="font-semibold text-accent-hi">question</span>
+                {provider} has a <span className="font-semibold text-accent-hi">question</span>
               </>
             )}
           </span>

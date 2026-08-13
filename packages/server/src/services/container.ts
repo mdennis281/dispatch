@@ -41,6 +41,8 @@ import { ResumeScheduler } from "./resume-scheduler.js";
 import { TrunkSyncService } from "./trunk-sync.js";
 import { PrReviewWatcher } from "./pr-review-watcher.js";
 import { FileIndexService } from "./file-index.js";
+import { HarnessRegistry } from "../harness/index.js";
+import { ManagerMcpBridge } from "./mcp/manager-http.js";
 
 /** The shared base every service hangs off. */
 export interface ServiceBase {
@@ -51,6 +53,8 @@ export interface ServiceBase {
 
 /** Injectable service overrides (tests supply fakes; prod omits them). */
 export interface ServiceOverrides {
+  harnesses?: HarnessRegistry;
+  managerMcp?: ManagerMcpBridge;
   broker?: SessionBroker;
   terminals?: TerminalService;
   memory?: MemoryService;
@@ -78,6 +82,10 @@ export interface ServiceOverrides {
 
 /** Everything the routes/WS layer needs, wired to one bus + store. */
 export interface Services extends ServiceBase {
+  /** Installed agent runtimes and their capability/model catalogues. */
+  harnesses: HarnessRegistry;
+  /** HTTP front door used by runtimes that cannot consume in-process MCP. */
+  managerMcp: ManagerMcpBridge;
   broker: SessionBroker;
   terminals: TerminalService;
   memory: MemoryService;
@@ -119,6 +127,9 @@ export function createServices(
   overrides: ServiceOverrides = {},
 ): Services {
   const { config, store, bus } = base;
+  const harnesses = overrides.harnesses ?? new HarnessRegistry();
+  const managerMcp =
+    overrides.managerMcp ?? new ManagerMcpBridge(`http://127.0.0.1:${config.port}`);
 
   // `DISPATCH_FAKE_SDK=1` swaps the real Agent-SDK `query()` for a deterministic
   // in-process echo (E2E only) — no `claude` subprocess, no auth/network. Prod
@@ -203,6 +214,8 @@ export function createServices(
       // Self-contained `.dispatch/` config: authored agents/modes/
       // instructions (source of truth) resolved config-first, `.data` fallback.
       projectConfig,
+      harnesses,
+      managerMcp,
       deps: brokerDeps,
     });
   const title =
@@ -331,6 +344,8 @@ export function createServices(
     config,
     store,
     bus,
+    harnesses,
+    managerMcp,
     broker,
     terminals,
     memory,
@@ -477,6 +492,7 @@ export function createServices(
       await resume.drain().catch(() => {});
       await runner.stopAll().catch(() => {});
       await broker.dispose().catch(() => {});
+      await harnesses.dispose().catch(() => {});
       // Kill any lingering persistent shells after the broker unwinds.
       terminals.dispose();
     },

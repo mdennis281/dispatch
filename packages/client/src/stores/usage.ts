@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { UsageSnapshot } from "@dispatch/shared";
+import type { HarnessKind, UsageSnapshot } from "@dispatch/shared";
 import { api } from "../lib/api.js";
 
 interface UsageStore {
@@ -9,10 +9,11 @@ interface UsageStore {
   refreshing: boolean;
   /** True once an initial load has been attempted (drives first-paint state). */
   loaded: boolean;
+  harness: HarnessKind;
   /** Apply a snapshot from a REST load or a `usage-update` bus event. */
   set: (usage: UsageSnapshot) => void;
   /** Initial fetch (called once when the meter mounts). */
-  load: () => Promise<void>;
+  load: (harness?: HarnessKind) => Promise<void>;
   /** Force a server-side refresh (the dropdown's refresh button). */
   refresh: () => Promise<void>;
 }
@@ -22,13 +23,21 @@ export const useUsage = create<UsageStore>((set, get) => ({
   usage: null,
   refreshing: false,
   loaded: false,
+  harness: "claude",
 
-  set: (usage) => set({ usage, loaded: true }),
+  set: (usage) =>
+    set((state) =>
+      usage.provider && usage.provider !== state.harness
+        ? state
+        : { usage, loaded: true },
+    ),
 
-  load: async () => {
+  load: async (requestedHarness) => {
     try {
-      const usage = await api.usage.get();
-      set({ usage, loaded: true });
+      const settings = requestedHarness ? null : await api.settings.get().catch(() => null);
+      const harness = requestedHarness ?? settings?.harness?.defaultHarness ?? "claude";
+      const usage = await api.usage.get(harness);
+      set({ usage, harness, loaded: true });
     } catch {
       // Best-effort: leave the meter hidden until a bus event or retry lands.
       set({ loaded: true });
@@ -39,7 +48,7 @@ export const useUsage = create<UsageStore>((set, get) => ({
     if (get().refreshing) return;
     set({ refreshing: true });
     try {
-      const usage = await api.usage.refresh();
+      const usage = await api.usage.refresh(get().harness);
       set({ usage, loaded: true });
     } catch {
       /* keep the last snapshot; the button just stops spinning */

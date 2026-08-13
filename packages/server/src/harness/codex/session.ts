@@ -49,6 +49,12 @@ interface PendingAsk {
   answerQuestions?: (answers: HarnessQuestionAnswer[]) => void;
 }
 
+function sandboxPolicy(sandbox: "read-only" | "workspace-write" | "danger-full-access") {
+  if (sandbox === "danger-full-access") return { type: "dangerFullAccess" as const };
+  if (sandbox === "read-only") return { type: "readOnly" as const };
+  return { type: "workspaceWrite" as const };
+}
+
 export interface CodexSessionOpts {
   spec: HarnessSessionSpec;
   conn: CodexConnection;
@@ -152,13 +158,14 @@ export class CodexSession implements HarnessSession {
   /** Open (or resume/fork) the thread, then drain whatever is queued. */
   private async open(): Promise<void> {
     const posture = toCodexPosture(this.spec.permissionMode);
+    const config = this.threadConfig();
     const base = {
       cwd: this.spec.cwd,
       approvalPolicy: posture.approvalPolicy,
       sandbox: posture.sandbox,
       model: this.model,
       developerInstructions: toDeveloperInstructions(this.spec.systemPromptAppends),
-      ...(this.opts.threadConfig ? { config: this.opts.threadConfig } : {}),
+      ...(Object.keys(config).length ? { config } : {}),
     };
 
     let result: { thread?: { id?: string }; model?: string };
@@ -223,10 +230,14 @@ export class CodexSession implements HarnessSession {
     }
 
     const supported = this.opts.supportedEfforts?.(this.model) ?? [];
+    const posture = toCodexPosture(this.spec.permissionMode);
     const res = await this.conn.call<{ turn?: { id?: string } }>("turn/start", {
       threadId: this.threadId,
       input,
       effort: clampEffort(this.effort, supported),
+      model: this.model,
+      approvalPolicy: posture.approvalPolicy,
+      sandboxPolicy: sandboxPolicy(posture.sandbox),
     });
     this.turnId = res.turn?.id;
   }
@@ -428,10 +439,10 @@ export class CodexSession implements HarnessSession {
     if (!this.threadId) return;
     const posture = toCodexPosture(mode);
     try {
-      await this.conn.call("thread/metadata/update", {
+      await this.conn.call("thread/settings/update", {
         threadId: this.threadId,
         approvalPolicy: posture.approvalPolicy,
-        sandbox: posture.sandbox,
+        sandboxPolicy: sandboxPolicy(posture.sandbox),
       });
     } catch {
       // Older app servers don't accept posture here; the next turn carries it.
@@ -440,10 +451,20 @@ export class CodexSession implements HarnessSession {
 
   async setModel(model: string): Promise<void> {
     this.model = model;
+    if (this.threadId) {
+      await this.conn.call("thread/settings/update", { threadId: this.threadId, model });
+    }
   }
 
   async setEffort(effort: Effort): Promise<void> {
     this.effort = effort;
+    if (this.threadId) {
+      const supported = this.opts.supportedEfforts?.(this.model) ?? [];
+      await this.conn.call("thread/settings/update", {
+        threadId: this.threadId,
+        effort: clampEffort(effort, supported),
+      });
+    }
   }
 
   async compact(): Promise<void> {
@@ -453,6 +474,43 @@ export class CodexSession implements HarnessSession {
 
   async contextWindow(): Promise<number | undefined> {
     return this.decoder.contextWindow;
+  }
+
+  /** Translate Dispatch MCP/config vocabulary to Codex's config.toml keys. */
+  private threadConfig(): Record<string, unknown> {
+    const configured = { ...(this.opts.threadConfig ?? {}) };
+    const servers: Record<string, Record<string, unknown>> = {};
+    for (const [name, raw] of Object.entries(this.spec.mcpServers)) {
+      if (raw.url) {
+        servers[name] = {
+          url: raw.url,
+          ...(raw.headers ? { http_headers: raw.headers } : {}),
+        };
+      } else if (raw.command) {
+        servers[name] = {
+          command: raw.command,
+          ...(raw.args ? { args: raw.args } : {}),
+          ...(raw.cwd ? { cwd: raw.cwd } : {}),
+          ...(raw.env ? { env: raw.env } : {}),
+        };
+      }
+    }
+    if (this.spec.managerMcp?.transport === "http") {
+      servers.manager = {
+        url: this.spec.managerMcp.url,
+        http_headers: { Authorization: `Bearer ${this.spec.managerMcp.token}` },
+      };
+    }
+    if (Object.keys(servers).length) {
+      configured.mcp_servers = {
+        ...((configured.mcp_servers as Record<string, unknown> | undefined) ?? {}),
+        ...servers,
+      };
+    }
+    if (this.spec.autoCompact !== false && this.spec.contextTokenLimit) {
+      configured.model_auto_compact_token_limit = this.spec.contextTokenLimit;
+    }
+    return configured;
   }
 
   private fail(err: unknown): void {

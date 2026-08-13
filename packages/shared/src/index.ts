@@ -4,6 +4,7 @@
  * from its schema so validation and typing can never drift.
  */
 export * from "./common.js";
+export * from "./runtime-config.js";
 export * from "./domain.js";
 export * from "./git.js";
 export * from "./project-config.js";

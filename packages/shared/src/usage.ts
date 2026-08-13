@@ -31,6 +31,10 @@ export const UsageSnapshotSchema = z.object({
   stale: z.boolean().optional(),
   /** Coarse failure reason: "unauthenticated" | "rate_limited" | "unavailable" | message. */
   error: z.string().optional(),
+  provider: z.enum(["claude", "codex"]).optional(),
+  primaryLabel: z.string().optional(),
+  secondaryLabel: z.string().optional(),
+  planType: z.string().optional(),
 });
 export type UsageSnapshot = z.infer<typeof UsageSnapshotSchema>;
 

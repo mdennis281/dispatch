@@ -17,6 +17,8 @@ import { Markdown } from "../Markdown.js";
 import { cn } from "../../../lib/cn.js";
 import { dur } from "../../../lib/format.js";
 import { useTypewriter } from "../../../lib/useTypewriter.js";
+import { useChats } from "../../../stores/chats.js";
+import { harnessLabel } from "../../../lib/harness.js";
 
 /** The live "agent is working" row shown while a turn streams (no text yet). */
 export function WorkingRow({ label }: { label?: string }) {
@@ -41,14 +43,15 @@ export function WorkingRow({ label }: { label?: string }) {
  * streamed markdown with a trailing typing pulse; falls back to a "Thinking…"
  * shimmer while only the thinking channel has arrived.
  */
-export function StreamingRow({ text, thinking }: { text: string; thinking?: string }) {
+export function StreamingRow({ chatId, text, thinking }: { chatId: string; text: string; thinking?: string }) {
+  const provider = harnessLabel(useChats((s) => s.byId[chatId]?.harness));
   // Reveal the live buffer letter-by-letter, adaptive to the arrival speed —
   // a subtle trail that never gates the actual stream (see useTypewriter).
   const shown = useTypewriter(text);
   return (
     <RowShell
       tint="assistant"
-      who="Claude"
+      who={provider}
       gutter={
         <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent-hi ring-1 ring-accent-line [&_svg]:size-3.5">
           <Sparkles />

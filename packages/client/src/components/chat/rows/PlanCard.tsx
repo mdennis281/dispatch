@@ -9,6 +9,8 @@ import { cn } from "../../../lib/cn.js";
 import { safeJson } from "../../../lib/format.js";
 import { actions } from "../../../lib/actions.js";
 import { attentionCardId } from "../../attention/focus.js";
+import { useChats } from "../../../stores/chats.js";
+import { harnessLabel } from "../../../lib/harness.js";
 
 /** One pre-approval the plan asks for up front (`{ tool, prompt }`). */
 export interface AllowedPrompt {
@@ -123,6 +125,7 @@ export interface PlanCardProps {
  * optional feedback, which the agent receives as the denial message).
  */
 export function PlanCard({ row }: PlanCardProps) {
+  const provider = harnessLabel(useChats((s) => s.byId[row.chatId]?.harness));
   const parsed = parsePlan(row.input);
   const pending = row.decision === "pending";
   const [answered, setAnswered] = useState(false);
@@ -165,7 +168,7 @@ export function PlanCard({ row }: PlanCardProps) {
       >
         <div className="flex items-center gap-2 px-3 py-2">
           <span className="text-base text-primary">
-            Claude finished <span className="font-semibold text-accent-hi">planning</span>
+            {provider} finished <span className="font-semibold text-accent-hi">planning</span>
           </span>
           {pending ? (
             <Chip tone={busy ? "muted" : "accent"} className="ml-auto">
@@ -194,7 +197,7 @@ export function PlanCard({ row }: PlanCardProps) {
               value={feedback}
               onChange={(e) => setFeedback(e.target.value)}
               disabled={busy}
-              placeholder="What to change (optional) — sent to Claude if you keep planning"
+              placeholder={`What to change (optional) — sent to ${provider} if you keep planning`}
               className="h-7 w-full rounded-md border border-line bg-panel-2 px-2 text-sm text-primary placeholder:text-faint focus:border-line-strong focus:outline-none"
             />
             <div className="flex items-center gap-1.5">

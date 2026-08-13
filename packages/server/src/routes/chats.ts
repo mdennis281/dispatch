@@ -45,6 +45,8 @@ export function registerChatRoutes(app: FastifyInstance): void {
         modeId: typeof body.modeId === "string" ? body.modeId : undefined,
         agentId: typeof body.agentId === "string" ? body.agentId : undefined,
         effort: body.effort as never,
+        harness: body.harness as never,
+        model: typeof body.model === "string" ? body.model : undefined,
       });
       return reply.code(201).send(chat);
     } catch (err) {

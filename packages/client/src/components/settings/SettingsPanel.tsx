@@ -7,13 +7,15 @@
  * change is reflected immediately (and re-reflected whenever the modal loads).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { SlidersHorizontal, Moon, Sun, Monitor, Bell, Layers } from "lucide-react";
+import { SlidersHorizontal, Moon, Sun, Monitor, Bell, Layers, Cpu } from "lucide-react";
 import { Modal, Field, TextInput, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { Select, type SelectOption } from "../ui/Select.js";
 import { SectionLabel } from "../ui/Panel.js";
-import { api, type AppSettings } from "../../lib/api.js";
+import { api, type AppSettings, type HarnessInfo } from "../../lib/api.js";
+import type { Effort, HarnessKind, ModelOption } from "@dispatch/shared";
+import { EFFORT_OPTIONS } from "../../lib/efforts.js";
 import { useProjects } from "../../stores/projects.js";
 import { useNotices } from "../../stores/notices.js";
 import { useSettings } from "../../stores/settings.js";
@@ -101,7 +103,11 @@ function DesktopNotifications() {
   );
 }
 
-const DEFAULT_DRAFT: AppSettings = { theme: "dark", webhook: { enabled: false } };
+const DEFAULT_DRAFT: AppSettings = {
+  theme: "dark",
+  webhook: { enabled: false },
+  harness: { defaultHarness: "claude", defaults: {} },
+};
 
 export function SettingsPanel() {
   const { open, close: onClose } = useOverlay("settings");
@@ -113,6 +119,8 @@ export function SettingsPanel() {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [harnesses, setHarnesses] = useState<HarnessInfo[]>([]);
+  const [catalogs, setCatalogs] = useState<Partial<Record<HarnessKind, ModelOption[]>>>({});
   // What the theme was when the modal opened, so cancelling can put it back —
   // the picker applies LIVE (you cannot judge a palette from a word), which
   // means abandoning the dialog would otherwise leave the app repainted.
@@ -143,6 +151,11 @@ export function SettingsPanel() {
           },
           showInjectedContext: s.showInjectedContext ?? false,
           spawnChat: { autoApprove: s.spawnChat?.autoApprove ?? false },
+          harness: {
+            defaultHarness: s.harness?.defaultHarness ?? "claude",
+            defaults: s.harness?.defaults ?? {},
+            contextLimits: s.harness?.contextLimits ?? {},
+          },
         };
         setDraft(next);
         // The server value is the cross-device truth; localStorage only ever
@@ -156,6 +169,13 @@ export function SettingsPanel() {
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
+    void api.harnesses.list().then(setHarnesses).catch(() => setHarnesses([]));
+    for (const kind of ["claude", "codex"] as const) {
+      void api.models
+        .list(kind)
+        .then((models) => setCatalogs((current) => ({ ...current, [kind]: models })))
+        .catch(() => {});
+    }
     return () => {
       cancelled = true;
     };
@@ -177,6 +197,36 @@ export function SettingsPanel() {
       setDraft((d) => ({ ...d, autoCompact: { ...d.autoCompact, ...p } })),
     [],
   );
+  const patchHarness = useCallback(
+    (p: Partial<NonNullable<AppSettings["harness"]>>) =>
+      setDraft((d) => ({ ...d, harness: { ...d.harness, ...p } })),
+    [],
+  );
+  const patchHarnessDefault = useCallback(
+    (kind: HarnessKind, p: { model?: string; effort?: Effort }) =>
+      setDraft((d) => ({
+        ...d,
+        harness: {
+          ...d.harness,
+          defaults: {
+            ...d.harness?.defaults,
+            [kind]: { ...d.harness?.defaults?.[kind], ...p },
+          },
+        },
+      })),
+    [],
+  );
+  const patchContextLimits = useCallback(
+    (p: Partial<NonNullable<NonNullable<AppSettings["harness"]>["contextLimits"]>>) =>
+      setDraft((d) => ({
+        ...d,
+        harness: {
+          ...d.harness,
+          contextLimits: { ...d.harness?.contextLimits, ...p },
+        },
+      })),
+    [],
+  );
 
   async function save() {
     if (busy) return;
@@ -196,6 +246,14 @@ export function SettingsPanel() {
       },
       showInjectedContext: draft.showInjectedContext ?? false,
       spawnChat: { autoApprove: draft.spawnChat?.autoApprove ?? false },
+      harness: {
+        defaultHarness: draft.harness?.defaultHarness ?? "claude",
+        defaults: draft.harness?.defaults ?? {},
+        contextLimits: {
+          perChatTokens: draft.harness?.contextLimits?.perChatTokens || undefined,
+          overallTokens: draft.harness?.contextLimits?.overallTokens || undefined,
+        },
+      },
     };
     try {
       const saved = await api.settings.update(body);
@@ -219,6 +277,17 @@ export function SettingsPanel() {
 
   const wh = draft.webhook ?? {};
   const ac = draft.autoCompact ?? {};
+  const harnessSettings = draft.harness ?? {};
+  const harnessOptions: SelectOption<HarnessKind>[] = (["claude", "codex"] as const).map(
+    (kind) => {
+      const runtime = harnesses.find((h) => h.kind === kind)?.runtime;
+      return {
+        value: kind,
+        label: kind === "claude" ? "Claude Code" : "Codex",
+        hint: runtime?.available ? runtime.version ?? runtime.source : "not installed",
+      };
+    },
+  );
 
   return (
     <Modal
@@ -268,6 +337,15 @@ export function SettingsPanel() {
         {/* defaults */}
         <div>
           <SectionLabel className="mb-1.5 px-0">Defaults</SectionLabel>
+          <Field label="Default provider" hint="new projects and chats inherit this">
+            <Select
+              width={280}
+              align="start"
+              value={harnessSettings.defaultHarness ?? "claude"}
+              onChange={(value) => patchHarness({ defaultHarness: value })}
+              options={harnessOptions}
+            />
+          </Field>
           <Field label="Default mode" hint="new chats start here">
             <Select
               width={240}
@@ -277,6 +355,50 @@ export function SettingsPanel() {
               options={modeOptions}
             />
           </Field>
+
+          <div className="mt-3 space-y-2">
+            {(["claude", "codex"] as const).map((kind) => {
+              const defaults = harnessSettings.defaults?.[kind] ?? {};
+              const efforts =
+                harnesses.find((h) => h.kind === kind)?.capabilities.efforts ??
+                EFFORT_OPTIONS.map((o) => o.value);
+              const modelOptions: SelectOption<string>[] = [
+                { value: "", label: "Provider default", hint: "unpinned" },
+                ...(catalogs[kind] ?? []).map((m) => ({
+                  value: m.value,
+                  label: m.label,
+                  hint: m.hint,
+                })),
+              ];
+              return (
+                <div key={kind} className="rounded-md border border-line bg-inset/40 p-2.5">
+                  <div className="mb-2 flex items-center gap-1.5 text-xs font-medium capitalize text-secondary [&_svg]:size-3.5">
+                    <Cpu /> {kind}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Field label="Model">
+                      <Select
+                        width={210}
+                        className="w-full"
+                        value={defaults.model ?? ""}
+                        onChange={(model) => patchHarnessDefault(kind, { model: model || undefined })}
+                        options={modelOptions}
+                      />
+                    </Field>
+                    <Field label="Effort">
+                      <Select
+                        width={180}
+                        className="w-full"
+                        value={defaults.effort ?? "medium"}
+                        onChange={(effort) => patchHarnessDefault(kind, { effort })}
+                        options={EFFORT_OPTIONS.filter((o) => efforts.includes(o.value))}
+                      />
+                    </Field>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
           {/* The bottom of the chat → project → app → off chain. A project's
               `.dispatch/project.yaml` can override it for everyone working in
               that repo, and any single chat can override both. */}
@@ -380,6 +502,40 @@ export function SettingsPanel() {
             When a session's context window fills, summarize the conversation and continue
             automatically instead of erroring. Applies to new turns.
           </p>
+          <div className="mb-3 grid grid-cols-2 gap-2">
+            <Field label="Per-chat limit" hint="tokens; blank = model limit">
+              <TextInput
+                mono
+                inputMode="numeric"
+                value={
+                  harnessSettings.contextLimits?.perChatTokens != null
+                    ? String(harnessSettings.contextLimits.perChatTokens)
+                    : ""
+                }
+                onChange={(e) => {
+                  const n = parseInt(e.target.value.replace(/[^\d]/g, ""), 10);
+                  patchContextLimits({ perChatTokens: Number.isFinite(n) ? n : undefined });
+                }}
+                placeholder="e.g. 180000"
+              />
+            </Field>
+            <Field label="Overall limit" hint="active chats combined">
+              <TextInput
+                mono
+                inputMode="numeric"
+                value={
+                  harnessSettings.contextLimits?.overallTokens != null
+                    ? String(harnessSettings.contextLimits.overallTokens)
+                    : ""
+                }
+                onChange={(e) => {
+                  const n = parseInt(e.target.value.replace(/[^\d]/g, ""), 10);
+                  patchContextLimits({ overallTokens: Number.isFinite(n) ? n : undefined });
+                }}
+                placeholder="e.g. 600000"
+              />
+            </Field>
+          </div>
           <div
             className={cn(
               "transition-opacity",

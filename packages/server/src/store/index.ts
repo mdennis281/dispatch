@@ -55,6 +55,7 @@ import {
   CheckpointSchema,
   type Checkpoint,
 } from "@dispatch/shared";
+import { HarnessSettingsSchema } from "@dispatch/shared";
 import {
   KeyedMutex,
   readJson,
@@ -70,6 +71,8 @@ export const AppSettingsSchema = z.object({
    *  an answer before this endpoint can respond (see client stores/theme.ts). */
   theme: z.enum(["dark", "light", "system"]).default("dark"),
   defaultModeId: z.string().optional(),
+  /** App-wide runtime selection, per-runtime defaults, and context budgets. */
+  harness: HarnessSettingsSchema.optional(),
   webhook: z
     .object({
       kind: z.enum(["ntfy", "pushover"]).optional(),

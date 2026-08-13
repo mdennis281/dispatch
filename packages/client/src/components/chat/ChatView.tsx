@@ -15,8 +15,9 @@ import {
   Trash2,
   Eye,
   EyeOff,
+  ArrowRightLeft,
 } from "lucide-react";
-import type { AgentActivity, Chat, WorktreeInfo } from "@dispatch/shared";
+import type { AgentActivity, Chat, HarnessKind, WorktreeInfo } from "@dispatch/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
@@ -29,10 +30,13 @@ import { StreamingTail } from "./StreamingTail.js";
 import { TodosStrip } from "./TodosStrip.js";
 import { Composer } from "./Composer.js";
 import { DeleteChatDialog } from "./DeleteChatDialog.js";
+import { Modal } from "../sidebar/Modal.js";
+import { Button } from "../ui/Button.js";
 import { useChatRename } from "./useChatRename.js";
 import { useChatMessages, useChatPage, useMessages } from "../../stores/messages.js";
 import { loadOlderMessages } from "../../stores/index.js";
 import { useChats } from "../../stores/chats.js";
+import { useHarnesses } from "../../stores/harnesses.js";
 import { useProjects } from "../../stores/projects.js";
 import { usePanels } from "../../stores/panels.js";
 import { worktreeMatchesChat, samePath } from "../panels/panelBus.js";
@@ -43,6 +47,7 @@ import { copyToClipboard } from "../../lib/clipboard.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
+import { harnessLabel } from "../../lib/harness.js";
 import {
   useInjectedContext,
   injectedContextSourceLabel,
@@ -153,6 +158,27 @@ export function ChatView({ chat }: { chat: Chat }) {
   // so a chat renames and deletes the same way wherever you reach for it.
   const rename = useChatRename(chat);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmMove, setConfirmMove] = useState<HarnessKind | null>(null);
+  const currentHarness = chat.harness ?? "claude";
+  const moveTarget: HarnessKind = currentHarness === "claude" ? "codex" : "claude";
+  const moveRuntime = useHarnesses((s) =>
+    s.harnesses.find((candidate) => candidate.kind === moveTarget),
+  );
+  const moveAvailable = moveRuntime?.runtime.available !== false;
+
+  const moveChat = useCallback(() => {
+    if (!confirmMove) return;
+    useChats.getState().upsertChat({
+      ...chat,
+      harness: confirmMove,
+      sessionId: undefined,
+      model: undefined,
+      agentId: confirmMove === "codex" ? undefined : chat.agentId,
+      status: "idle",
+    });
+    actions.setHarness(chat.id, confirmMove);
+    setConfirmMove(null);
+  }, [chat, confirmMove]);
 
   // What this chat still has running — its live shells plus every listener that
   // descends from them. Read here so the menu can put the COUNT on the item:
@@ -236,6 +262,7 @@ export function ChatView({ chat }: { chat: Chat }) {
     setAtBottom(true);
     rename.cancel();
     setConfirmDelete(false);
+    setConfirmMove(null);
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [chat.id, rename.cancel]);
@@ -456,6 +483,22 @@ export function ChatView({ chat }: { chat: Chat }) {
                     Regenerate title
                   </MenuItem>
                   <div className="my-1 h-px bg-line" />
+                  <MenuItem
+                    icon={<ArrowRightLeft />}
+                    disabled={!moveAvailable}
+                    title={
+                      moveAvailable
+                        ? "Keeps this transcript and hands recent context to the new provider"
+                        : `${harnessLabel(moveTarget)} is not installed`
+                    }
+                    onClick={() => {
+                      setConfirmMove(moveTarget);
+                      close();
+                    }}
+                  >
+                    Move chat to {harnessLabel(moveTarget)}…
+                  </MenuItem>
+                  <div className="my-1 h-px bg-line" />
                   {/* The ids used to ride in the header as a chip, which cost a
                       permanent slice of the title bar to show a string nobody
                       reads — only copies. Here they cost nothing until wanted. */}
@@ -486,7 +529,11 @@ export function ChatView({ chat }: { chat: Chat }) {
                       overrides the project/app default for THIS chat. */}
                   <MenuItem
                     icon={injected.show ? <Eye className="text-accent-2" /> : <EyeOff />}
-                    hint={injected.source === "chat" ? "this chat" : injectedContextSourceLabel(injected.source)}
+                    title={`Context visibility is set by ${
+                      injected.source === "chat"
+                        ? "this chat"
+                        : injectedContextSourceLabel(injected.source)
+                    }`}
                     onClick={() => {
                       toggleInjected();
                       close();
@@ -502,7 +549,11 @@ export function ChatView({ chat }: { chat: Chat }) {
                       says how many so it is never a blind click. */}
                   <MenuItem
                     icon={<Activity />}
-                    hint={chatProcessPids.length ? String(chatProcessPids.length) : undefined}
+                    title={
+                      chatProcessPids.length
+                        ? `${chatProcessPids.length} running process${chatProcessPids.length === 1 ? "" : "es"}`
+                        : "No running processes"
+                    }
                     onClick={() => {
                       openOverlay("processes");
                       close();
@@ -617,6 +668,36 @@ export function ChatView({ chat }: { chat: Chat }) {
         open={confirmDelete}
         onClose={() => setConfirmDelete(false)}
       />
+
+      <Modal
+        open={confirmMove !== null}
+        onClose={() => setConfirmMove(null)}
+        width={440}
+        icon={<ArrowRightLeft />}
+        title={`Move chat to ${harnessLabel(confirmMove ?? moveTarget)}`}
+        description={chat.title}
+        footer={
+          <>
+            <Button className="ml-auto" variant="ghost" onClick={() => setConfirmMove(null)}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={moveChat}>
+              Move to {harnessLabel(confirmMove ?? moveTarget)}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3 text-base leading-relaxed text-secondary">
+          <p>
+            Dispatch keeps the complete chat transcript. On your next message,
+            {" "}{harnessLabel(confirmMove ?? moveTarget)} receives the recent conversation as a handoff.
+          </p>
+          <p className="text-sm text-muted">
+            The current native session cannot move between providers. A running turn will stop,
+            and open processes stay attached to this Dispatch chat.
+          </p>
+        </div>
+      </Modal>
     </div>
   );
 }

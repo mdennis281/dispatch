@@ -14,6 +14,7 @@
  */
 import type {
   Effort,
+  HarnessKind,
   ImageRef,
   PermissionDecision,
 } from "@dispatch/shared";
@@ -42,6 +43,8 @@ export const actions = {
     modeId?: string;
     agentId?: string;
     effort?: Effort;
+    harness?: HarnessKind;
+    model?: string;
   }): void {
     ws.send({ type: "create-chat", ...input });
   },
@@ -145,6 +148,10 @@ export const actions = {
   /** Switch the model backing the chat's session (applies live + persists). */
   setModel(chatId: string, model: string): void {
     ws.send({ type: "set-model", chatId, model });
+  },
+  /** Continue this transcript on another runtime through a neutral handoff. */
+  setHarness(chatId: string, harness: HarnessKind): void {
+    ws.send({ type: "set-harness", chatId, harness });
   },
 
   /* ---------------------------------------------------------------- title */

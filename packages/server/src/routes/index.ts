@@ -13,6 +13,7 @@ import { registerAssetRoutes } from "./assets.js";
 import { registerAgentRoutes } from "./agents.js";
 import { registerModeRoutes } from "./modes.js";
 import { registerModelRoutes } from "./models.js";
+import { registerManagerMcpRoute } from "./manager-mcp.js";
 import { registerMemoryRoutes } from "./memory.js";
 import { registerMcpRoutes } from "./mcp.js";
 import { registerWorktreeRoutes } from "./worktrees.js";
@@ -37,6 +38,7 @@ export function registerRoutes(app: FastifyInstance): void {
   registerAgentRoutes(app);
   registerModeRoutes(app);
   registerModelRoutes(app);
+  registerManagerMcpRoute(app);
   registerMemoryRoutes(app);
   registerMcpRoutes(app);
   registerWorktreeRoutes(app);

@@ -9,6 +9,7 @@ import {
   ChatStatusSchema,
   AgentActivitySchema,
   EffortSchema,
+  HarnessKindSchema,
   ImageRefSchema,
   PermissionDecisionSchema,
 } from "./common.js";
@@ -303,6 +304,8 @@ export const CreateChatActionSchema = z.object({
   modeId: z.string().optional(),
   agentId: z.string().optional(),
   effort: EffortSchema.optional(),
+  harness: HarnessKindSchema.optional(),
+  model: z.string().optional(),
 });
 
 /** Subscribe / unsubscribe a socket to a chat's fine-grained stream. */
@@ -410,6 +413,13 @@ export const SetModelActionSchema = z.object({
   chatId: z.string(),
   /** SDK model id, e.g. "claude-opus-4-8" / "claude-sonnet-4-6" / "claude-haiku-4-5". */
   model: z.string(),
+});
+
+/** Move an existing transcript to another runtime through a neutral handoff. */
+export const SetHarnessActionSchema = z.object({
+  type: z.literal("set-harness"),
+  chatId: z.string(),
+  harness: HarnessKindSchema,
 });
 
 /** (Re)generate the chat's AI title from its recent messages. */
@@ -534,6 +544,7 @@ export const WsClientActionSchema = z.discriminatedUnion("type", [
   SetAgentActionSchema,
   SetEffortActionSchema,
   SetModelActionSchema,
+  SetHarnessActionSchema,
   RegenerateTitleActionSchema,
   SetTitleActionSchema,
   InterruptActionSchema,
