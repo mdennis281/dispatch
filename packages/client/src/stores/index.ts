@@ -29,6 +29,7 @@ import { useNotices } from "./notices.js";
 import { useUsage } from "./usage.js";
 import { useModels } from "./models.js";
 import { useSettings } from "./settings.js";
+import { useHarnesses } from "./harnesses.js";
 
 import {
   MOCK_PROJECTS,
@@ -64,6 +65,7 @@ export type { Toast, NoticeLevel } from "./notices.js";
 export { useUsage } from "./usage.js";
 export { useModels } from "./models.js";
 export { useSettings } from "./settings.js";
+export { useHarnesses } from "./harnesses.js";
 export { useTheme, watchSystemTheme } from "./theme.js";
 export type { ThemePref, ResolvedTheme } from "./theme.js";
 
@@ -358,15 +360,25 @@ export async function hydrateFromServer(): Promise<boolean> {
   // fetch above because that read spawns a short-lived probe subprocess and must
   // never block the app — the store keeps its fallback seed on failure.
   void api.models
+    .list("claude")
+    .then((m) => useModels.getState().setModels(m, "claude"))
+    .catch(() => {});
+  void api.harnesses
     .list()
-    .then((m) => useModels.getState().setModels(m))
+    .then((h) => useHarnesses.getState().setHarnesses(h))
     .catch(() => {});
   // Same treatment for the app settings the transcript consults (the
   // injected-context default): best-effort, never gating, and it falls back to
   // "off" — which is also what the setting defaults to server-side.
   void api.settings
     .get()
-    .then((s) => useSettings.getState().apply(s))
+    .then((s) => {
+      useSettings.getState().apply(s);
+      const harness = s.harness?.defaultHarness ?? "claude";
+      return api.models
+        .list(harness)
+        .then((models) => useModels.getState().setModels(models, harness));
+    })
     .catch(() => {});
   useChats.getState().hydrate(chats);
   useAttention.getState().hydrate(attention);

@@ -1,0 +1,169 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type {
+  Harness,
+  HarnessEvent,
+  HarnessInput,
+  HarnessPermissionResolution,
+  HarnessQuestionAnswer,
+  HarnessSession,
+  HarnessSessionSpec,
+} from "../harness/types.js";
+import { HarnessRegistry } from "../harness/index.js";
+import { Store } from "../store/index.js";
+import { EventBus } from "../bus.js";
+import { SessionBroker } from "./session-broker.js";
+
+class FakeHarnessSession implements HarnessSession {
+  private queue: HarnessEvent[] = [];
+  private wake?: () => void;
+  private ended = false;
+  private initialized = false;
+  readonly sent: HarnessInput[] = [];
+
+  get events(): AsyncIterable<HarnessEvent> {
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next: async (): Promise<IteratorResult<HarnessEvent>> => {
+          while (!this.queue.length && !this.ended) {
+            await new Promise<void>((resolve) => (this.wake = resolve));
+          }
+          const value = this.queue.shift();
+          return value ? { value, done: false } : { value: undefined as never, done: true };
+        },
+      }),
+    };
+  }
+
+  send(input: HarnessInput): void {
+    this.sent.push(input);
+    if (!this.initialized) {
+      this.initialized = true;
+      this.push({ type: "init", sessionId: "codex-thread-1", model: "gpt-test" });
+    }
+    this.push(
+      { type: "delta", id: "assistant-1", channel: "text", delta: "hello" },
+      { type: "assistant", id: "assistant-1", text: "hello", model: "gpt-test" },
+      { type: "usage", contextTokens: 42, contextWindow: 1_000 },
+      { type: "turn-end", ok: true, subtype: "success", result: "hello" },
+    );
+  }
+
+  private push(...events: HarnessEvent[]) {
+    this.queue.push(...events);
+    this.wake?.();
+    this.wake = undefined;
+  }
+
+  pending() { return 0; }
+  async interrupt() {}
+  async setPermissionMode() {}
+  async setModel() {}
+  async setEffort() {}
+  async compact() {}
+  resolvePermission(_id: string, _resolution: HarnessPermissionResolution) {}
+  resolveQuestion(_id: string, _answers: HarnessQuestionAnswer[]) {}
+  async contextWindow() { return 1_000; }
+  async dispose() {
+    this.ended = true;
+    this.wake?.();
+  }
+}
+
+describe("SessionBroker neutral harness path", () => {
+  let dir: string;
+  let store: Store;
+  let broker: SessionBroker;
+  let session: FakeHarnessSession;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "dispatch-harness-broker-"));
+    store = new Store(dir);
+    await store.init();
+    session = new FakeHarnessSession();
+    const codex: Harness = {
+      kind: "codex",
+      capabilities: {
+        toolPermissions: false,
+        questions: true,
+        subagents: false,
+        skills: true,
+        compaction: true,
+        fork: true,
+        usageLimits: true,
+        liveModelSwitch: true,
+        livePermissionSwitch: true,
+        efforts: ["low", "medium", "high"],
+        preToolGuard: false,
+        managerTransport: "http",
+      },
+      runtime: () => ({ kind: "codex", source: "installed", available: true }),
+      listModels: async () => [],
+      readLimits: async () => null,
+      createSession: (_spec: HarnessSessionSpec) => session,
+    };
+    broker = new SessionBroker({
+      store,
+      bus: new EventBus(),
+      harnesses: new HarnessRegistry({ harnesses: { codex } }),
+    });
+  });
+
+  afterEach(async () => {
+    await broker.dispose();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("persists neutral Codex events and keeps the native thread id", async () => {
+    const chat = await store.saveChat({
+      id: "chat-1",
+      projectId: "project-1",
+      title: "Codex",
+      modeId: "plan",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "say hello");
+    await broker.waitFor(chat.id, "idle");
+
+    expect(session.sent[0]).toMatchObject({ text: "say hello", effort: "low" });
+    expect((await store.getChat(chat.id))?.sessionId).toBe("codex-thread-1");
+    expect((await store.readMessages(chat.id)).map((row) => row.kind)).toEqual([
+      "user",
+      "system",
+      "assistant",
+      "result",
+    ]);
+  });
+
+  it("switches providers without reusing an incompatible native session", async () => {
+    const chat = await store.saveChat({
+      id: "chat-2",
+      projectId: "project-1",
+      title: "Switch me",
+      modeId: "auto",
+      effort: "medium",
+      harness: "codex",
+      sessionId: "codex-thread-old",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.setHarness(chat.id, "claude");
+
+    const saved = await store.getChat(chat.id);
+    expect(saved).toMatchObject({
+      harness: "claude",
+      harnessHandoff: { from: "codex", to: "claude" },
+      status: "idle",
+    });
+    expect(saved?.sessionId).toBeUndefined();
+  });
+});

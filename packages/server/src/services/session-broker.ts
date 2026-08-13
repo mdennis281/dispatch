@@ -58,8 +58,14 @@ import type {
   ResolvedWorkflow,
   WorkflowMergeMethod,
   PRRef,
+  HarnessKind,
 } from "@dispatch/shared";
-import { EffortSchema, resolveWorkflow } from "@dispatch/shared";
+import {
+  DEFAULT_HARNESS,
+  EffortSchema,
+  classifyWorkflowViolation,
+  resolveWorkflow,
+} from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import type { TerminalService } from "./terminal.js";
@@ -87,6 +93,16 @@ import { buildWorkflowDirective, createWorkflowGuardHook, inspectCwd } from "./w
 import { createBackgroundShellGuardHook } from "./shell-guard.js";
 import { AgentCwdTracker } from "./agent-cwd.js";
 import { claudeExecutableOption } from "./runtime.js";
+import type {
+  HarnessEvent,
+  HarnessQuestion,
+  HarnessQuestionAnswer,
+  HarnessSession,
+  HarnessSessionSpec,
+} from "../harness/types.js";
+import type { HarnessRegistry } from "../harness/index.js";
+import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
+import { managerMcpContextOf } from "./mcp/manager-mcp.js";
 
 /**
  * The always-injected "prefer the manager tools" directive. Lists only the
@@ -575,6 +591,10 @@ export interface SessionBrokerOptions {
   /** Self-contained `.dispatch/` config: source of truth for authored
    *  agents/modes/instructions (config wins over `.data` on id collision). */
   projectConfig?: BrokerProjectConfig;
+  /** Provider registry used by chats whose harness is not the legacy Claude path. */
+  harnesses?: HarnessRegistry;
+  /** HTTP front door for Dispatch's manager MCP tools (required by Codex). */
+  managerMcp?: ManagerMcpBridge;
   /**
    * Called when a turn ends in ERROR, with the SDK's message. The broker doesn't
    * interpret it — the ResumeScheduler decides whether it was a usage limit and
@@ -680,6 +700,15 @@ function parseMcpServer(name: string): string | undefined {
   const rest = name.slice("mcp__".length);
   const i = rest.indexOf("__");
   return i >= 0 ? rest.slice(0, i) : rest;
+}
+
+function safeHandoffJson(value: unknown): string {
+  try {
+    const text = JSON.stringify(value);
+    return text.length > 4_000 ? `${text.slice(0, 4_000)}…` : text;
+  } catch {
+    return String(value);
+  }
 }
 
 /**
@@ -997,7 +1026,10 @@ interface OutboxItem {
 }
 
 interface PendingPermission {
-  resolve: (r: PermissionResult) => void;
+  resolve?: (r: PermissionResult) => void;
+  /** Neutral adapter that owns this ask (Codex); absent for the Claude SDK. */
+  harnessSession?: HarnessSession;
+  questions?: HarnessQuestion[];
   toolName: string;
   input: Record<string, unknown>;
   request: PermissionRequest;
@@ -1012,6 +1044,7 @@ interface LiveSession {
   modeId: string;
   agentId?: string;
   effort: Effort;
+  harnessKind: HarnessKind;
   /**
    * Effort the session's own agent definition pins, when it pins one. The main
    * loop then runs at THIS level rather than `effort` (which stays the chat's
@@ -1068,6 +1101,8 @@ interface LiveSession {
   started: boolean;
   input?: InputChannel;
   query?: Query;
+  harnessSession?: HarnessSession;
+  managerGrant?: ManagerMcpGrant;
   abortController?: AbortController;
   runLoop?: Promise<void>;
   outbox: OutboxItem[];
@@ -1107,6 +1142,8 @@ interface LiveSession {
   turn: number;
   idleAttentionId?: string;
   stopping: boolean;
+  /** Teardown is a provider migration; settle quietly instead of as session done. */
+  switching?: boolean;
   /** One-shot resume/fork config consumed at the next query start. */
   resumeSessionId?: string;
   forkAtUuid?: string;
@@ -1135,6 +1172,8 @@ export class SessionBroker {
   private readonly runner?: RunnerService;
   private readonly worktrees?: WorktreeService;
   private readonly projectConfig?: BrokerProjectConfig;
+  private readonly harnesses?: HarnessRegistry;
+  private readonly managerMcp?: ManagerMcpBridge;
   /** Settable after construction — the scheduler is built after the broker. */
   onTurnError?: (chatId: string, reason: string | undefined) => void;
   /**
@@ -1176,6 +1215,8 @@ export class SessionBroker {
     this.runner = opts.runner;
     this.worktrees = opts.worktrees;
     this.projectConfig = opts.projectConfig;
+    this.harnesses = opts.harnesses;
+    this.managerMcp = opts.managerMcp;
     this.onTurnError = opts.onTurnError;
     this.query = opts.deps?.query ?? (sdkQuery as unknown as QueryFn);
     this.genId = opts.deps?.genId ?? (() => nanoid());
@@ -1196,6 +1237,7 @@ export class SessionBroker {
         modeId: chat.modeId,
         agentId: chat.agentId,
         effort: chat.effort,
+        harnessKind: chat.harness ?? DEFAULT_HARNESS,
         effortByThread: new Map(),
         threadOfTool: new Map(),
         sessionId: chat.sessionId,
@@ -1399,12 +1441,35 @@ export class SessionBroker {
       if (!pending) continue;
       session.pendingPermissions.delete(requestId);
 
-      const result: PermissionResult =
-        resolution.decision === "allow"
-          ? { behavior: "allow", updatedInput: resolution.updatedInput ?? pending.input }
-          : { behavior: "deny", message: resolution.message ?? "Denied by user." };
-      pending.resolve(result);
+      if (pending.harnessSession) {
+        pending.harnessSession.resolvePermission(requestId, resolution);
+      } else {
+        const result: PermissionResult =
+          resolution.decision === "allow"
+            ? { behavior: "allow", updatedInput: resolution.updatedInput ?? pending.input }
+            : { behavior: "deny", message: resolution.message ?? "Denied by user." };
+        pending.resolve?.(result);
+      }
 
+      this.recordResolvedPermission(
+        session,
+        requestId,
+        pending,
+        resolution.decision,
+        resolution.message,
+      );
+      return true;
+    }
+    return false;
+  }
+
+  private recordResolvedPermission(
+    session: LiveSession,
+    requestId: string,
+    pending: PendingPermission,
+    decision: PermissionDecision,
+    message?: string,
+  ): void {
       void this.emit(session, {
         kind: "permission",
         id: this.genId(),
@@ -1414,17 +1479,17 @@ export class SessionBroker {
         requestId,
         toolName: pending.toolName,
         input: pending.input,
-        decision: resolution.decision,
+        decision,
         displayName: pending.request.displayName,
         title: pending.request.title,
         description: pending.request.description,
-        message: resolution.message,
+        message,
       });
       this.bus.publish({
         type: "permission-resolved",
         chatId: session.chatId,
         requestId,
-        decision: resolution.decision,
+        decision,
       });
       this.bus.publish({
         type: "attention-resolve",
@@ -1434,12 +1499,9 @@ export class SessionBroker {
 
       if (session.pendingPermissions.size === 0 && session.status === "awaiting-input") {
         this.setStatus(session, "running", {
-          state: resolution.decision === "allow" ? "tool" : "responding",
+          state: decision === "allow" ? "tool" : "responding",
         });
       }
-      return true;
-    }
-    return false;
   }
 
   /**
@@ -1467,6 +1529,28 @@ export class SessionBroker {
     for (const session of this.sessions.values()) {
       const pending = session.pendingPermissions.get(requestId);
       if (!pending) continue;
+      if (pending.harnessSession && pending.questions) {
+        const submitted = answer.answers?.length
+          ? answer.answers
+          : [{ questionIndex: 0, optionId: answer.optionId, answer: answer.answer, notes: answer.notes }];
+        const answers: HarnessQuestionAnswer[] = submitted.flatMap((item) => {
+          const question = pending.questions?.[item.questionIndex];
+          const selected = item.answer ?? item.optionId;
+          const values =
+            question?.multiSelect && item.answer
+              ? item.answer.split(",").map((value) => value.trim()).filter(Boolean)
+              : selected
+                ? [selected]
+                : [];
+          return question && values.length
+            ? [{ questionId: question.id, selected: values, notes: item.notes }]
+            : [];
+        });
+        session.pendingPermissions.delete(requestId);
+        pending.harnessSession.resolveQuestion(requestId, answers);
+        this.recordResolvedPermission(session, requestId, pending, "allow", answer.answer);
+        return true;
+      }
       const { updatedInput, message } = buildQuestionAnswer(pending.input, answer);
       return this.resolvePermission(requestId, {
         decision: "allow",
@@ -1510,9 +1594,9 @@ export class SessionBroker {
   /** Interrupt the running turn (streaming-input only). */
   async interrupt(chatId: string): Promise<boolean> {
     const session = this.sessions.get(chatId);
-    if (!session?.query) return false;
+    if (!session?.query && !session?.harnessSession) return false;
     try {
-      await session.query.interrupt();
+      await (session.harnessSession?.interrupt() ?? session.query!.interrupt());
       // Interrupting abandons any tool blocked on a permission answer; clear the
       // pending prompts (+ their cards / attention items) so they don't strand.
       this.drainPendingPermissions(session, "Interrupted.");
@@ -1534,6 +1618,16 @@ export class SessionBroker {
     const session = this.mustGet(chatId);
     session.modeId = modeId;
     const mode = await this.resolvePermissionMode(modeId);
+    if (session.harnessSession) {
+      await session.harnessSession.setPermissionMode(mode).catch((err) => {
+        this.bus.publish({
+          type: "error",
+          chatId,
+          message: "setMode failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
     if (session.query) {
       try {
         await session.query.setPermissionMode(mode);
@@ -1554,6 +1648,16 @@ export class SessionBroker {
   async setEffort(chatId: string, effort: Effort): Promise<void> {
     const session = this.mustGet(chatId);
     this.applyEffort(session, effort);
+    if (session.harnessSession) {
+      void session.harnessSession.setEffort(effort).catch((err) => {
+        this.bus.publish({
+          type: "error",
+          chatId,
+          message: "setEffort failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
     void this.patchChat(chatId, { effort });
   }
 
@@ -1575,6 +1679,16 @@ export class SessionBroker {
     const next = model.trim() || undefined;
     session.modelOverride = next;
     session.model = next; // reflect the choice on subsequent transcript rows
+    if (session.harnessSession && next) {
+      await session.harnessSession.setModel(next).catch((err) => {
+        this.bus.publish({
+          type: "error",
+          chatId,
+          message: "setModel failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
     if (session.query) {
       try {
         await session.query.setModel(next);
@@ -1594,6 +1708,51 @@ export class SessionBroker {
   }
 
   /**
+   * Move a Dispatch chat to another runtime. Native session ids cannot cross
+   * providers, so the new provider starts a fresh native session and receives a
+   * bounded, provider-neutral transcript handoff on its first turn.
+   */
+  async setHarness(chatId: string, harness: HarnessKind): Promise<void> {
+    const chat = await this.store.getChat(chatId);
+    if (!chat) throw new Error(`chat "${chatId}" not found`);
+    const previous = chat.harness ?? DEFAULT_HARNESS;
+    if (previous === harness) return;
+
+    const existing = this.sessions.get(chatId);
+    if (existing) {
+      existing.switching = true;
+      await this.stop(chatId);
+      this.sessions.delete(chatId);
+    }
+
+    const settings = await this.store.getSettings().catch(() => undefined);
+    const defaults = settings?.harness?.defaults?.[harness];
+    const updated: Chat = {
+      ...chat,
+      harness,
+      harnessHandoff: { from: previous, to: harness, at: this.now() },
+      sessionId: undefined,
+      agentId: this.harnesses?.find(harness)?.capabilities.subagents
+        ? chat.agentId
+        : undefined,
+      model: defaults?.model,
+      effort: defaults?.effort ?? chat.effort,
+      status: "idle",
+      updatedAt: this.now(),
+    };
+    const saved = await this.store.saveChat(updated);
+    const project = await this.store.getProject(saved.projectId).catch(() => null);
+    this.create(saved, project, saved.worktrees[0]);
+    this.bus.publish({ type: "chat-update", chat: saved });
+    this.bus.publish({
+      type: "notice",
+      chatId,
+      level: "info",
+      text: `Switched from ${previous} to ${harness}. The next turn will receive a transcript handoff.`,
+    });
+  }
+
+  /**
    * The live context-window breakdown for a chat — the SDK's `getContextUsage()`
    * control: total/max tokens, percentage, model, and per-category token counts
    * (system prompt, tools, MCP tools, memory files, messages…). Powers the meter
@@ -1602,6 +1761,13 @@ export class SessionBroker {
    */
   async getContextUsage(chatId: string): Promise<ContextUsage | null> {
     const session = this.sessions.get(chatId);
+    if (session?.harnessSession) {
+      const maxTokens = await session.harnessSession.contextWindow().catch(() => undefined);
+      if (maxTokens) session.contextWindow = maxTokens;
+      return maxTokens
+        ? ({ totalTokens: session.lastContextTokens ?? 0, maxTokens } as ContextUsage)
+        : null;
+    }
     const q = session?.query;
     if (!q?.getContextUsage) return null;
     try {
@@ -1637,8 +1803,11 @@ export class SessionBroker {
       level: "info",
       text: "Compacting context…",
     });
-    session.outbox.push({ id: this.genId(), text: "/compact", priority: "next" });
-    this.schedule(session);
+    if (session.harnessSession) void session.harnessSession.compact();
+    else {
+      session.outbox.push({ id: this.genId(), text: "/compact", priority: "next" });
+      this.schedule(session);
+    }
   }
 
   /**
@@ -1667,8 +1836,24 @@ export class SessionBroker {
       level: "info",
       text: "Cleared the model's context (transcript kept).",
     });
-    session.outbox.push({ id: this.genId(), text: "/clear", priority: "next" });
-    this.schedule(session);
+    if (session.harnessSession) {
+      // Codex has native compaction but no in-thread `/clear`: retire the native
+      // thread and let the next user message create a fresh one. Dispatch's
+      // transcript remains the durable conversation record.
+      const live = session.harnessSession;
+      session.switching = true;
+      session.harnessSession = undefined;
+      session.started = false;
+      session.sessionId = undefined;
+      session.managerGrant?.revoke();
+      session.managerGrant = undefined;
+      void live.dispose();
+      void this.patchChat(chatId, { sessionId: undefined });
+      this.onTurnEnd(session);
+    } else {
+      session.outbox.push({ id: this.genId(), text: "/clear", priority: "next" });
+      this.schedule(session);
+    }
   }
 
   /**
@@ -1704,7 +1889,17 @@ export class SessionBroker {
     session.outbox = [];
     this.queueOrder = this.queueOrder.filter((x) => x !== chatId);
 
-    if (session.started && session.input) {
+    if (session.started && session.harnessSession) {
+      session.stopping = true;
+      try {
+        await session.harnessSession.dispose();
+      } catch {
+        /* ignore */
+      }
+      await this.awaitLoop(session.runLoop, STOP_TIMEOUT_MS);
+      session.managerGrant?.revoke();
+      session.managerGrant = undefined;
+    } else if (session.started && session.input) {
       session.stopping = true;
       try {
         session.input.close();
@@ -1735,7 +1930,13 @@ export class SessionBroker {
     // Abandon any in-flight permission prompt (+ its card / attention item); the
     // forked turn starts fresh, so a stranded "allow?" would never resolve.
     this.drainPendingPermissions(session, "Session forked.");
-    if (session.started && session.input) {
+    if (session.started && session.harnessSession) {
+      session.stopping = true;
+      await session.harnessSession.dispose().catch(() => {});
+      await this.awaitLoop(session.runLoop, STOP_TIMEOUT_MS);
+      session.managerGrant?.revoke();
+      session.managerGrant = undefined;
+    } else if (session.started && session.input) {
       session.stopping = true;
       try {
         session.input.close();
@@ -1875,6 +2076,11 @@ export class SessionBroker {
   }
 
   private async startQuery(session: LiveSession): Promise<void> {
+    if (!(await this.withinOverallContextBudget(session))) return;
+    if (session.harnessKind !== "claude") {
+      await this.startHarnessSession(session);
+      return;
+    }
     session.input = new InputChannel();
     session.abortController = new AbortController();
     session.started = true;
@@ -1901,9 +2107,140 @@ export class SessionBroker {
   }
 
   private flushOutbox(session: LiveSession): void {
+    if (session.harnessSession) {
+      for (const item of session.outbox) {
+        session.harnessSession.send({
+          text: item.memoryContext ? `${item.memoryContext}\n\n${item.text}` : item.text,
+          images: item.images,
+          priority: item.priority,
+          effort: session.effort,
+        });
+      }
+      session.outbox = [];
+      return;
+    }
     if (!session.input) return;
     for (const item of session.outbox) session.input.push(this.toSdkUserMessage(item));
     session.outbox = [];
+  }
+
+  /** Start a non-legacy provider through the neutral harness seam. */
+  private async startHarnessSession(session: LiveSession): Promise<void> {
+    if (!this.harnesses) {
+      this.onError(session, new Error("Harness registry is not configured."));
+      return;
+    }
+    session.abortController = new AbortController();
+    session.started = true;
+
+    try {
+      // Reuse the policy/config assembly that has years of Claude-specific edge
+      // cases, then project only its neutral pieces into the provider adapter.
+      const options = await this.buildOptions(session);
+      const resolved = this.harnesses.resolve(session.harnessKind);
+      if (resolved.fellBack) {
+        this.bus.publish({
+          type: "notice",
+          chatId: session.chatId,
+          level: "warn",
+          text: `${session.harnessKind} is unavailable; using ${resolved.harness.kind}.`,
+        });
+        session.harnessKind = resolved.harness.kind;
+        void this.patchChat(session.chatId, { harness: resolved.harness.kind });
+      }
+
+      const allMcp = (options.mcpServers ?? {}) as Record<string, unknown>;
+      const managerConfig = allMcp.manager;
+      const mcpServers = Object.fromEntries(
+        Object.entries(allMcp).filter(([name]) => name !== "manager"),
+      ) as Record<string, McpServerConfig>;
+
+      let managerMcp: HarnessSessionSpec["managerMcp"];
+      if (resolved.harness.capabilities.managerTransport === "in-process" && managerConfig) {
+        managerMcp = { transport: "in-process", server: managerConfig };
+      } else if (resolved.harness.capabilities.managerTransport === "http") {
+        const context = managerMcpContextOf(managerConfig);
+        if (context && this.managerMcp) {
+          session.managerGrant?.revoke();
+          const grant = this.managerMcp.mint(session.chatId, () => context);
+          session.managerGrant = grant;
+          managerMcp = {
+            transport: "http",
+            url: grant.url,
+            token: grant.token,
+            tokenEnvVar: grant.tokenEnvVar,
+          };
+        }
+      }
+
+      const prompt = options.systemPrompt as { append?: string } | undefined;
+      const selectedAgent = options.agent ? options.agents?.[options.agent] : undefined;
+      const appSettings = await this.store.getSettings().catch(() => undefined);
+      const contextTokenLimit = appSettings?.harness?.contextLimits?.perChatTokens;
+      const spec: HarnessSessionSpec = {
+        cwd: options.cwd,
+        permissionMode: options.permissionMode ?? "default",
+        effort: session.effort,
+        model: session.modelOverride,
+        systemPromptAppends: prompt?.append ? [prompt.append] : [],
+        agent: selectedAgent
+          ? {
+              id: options.agent!,
+              description: selectedAgent.description,
+              prompt: selectedAgent.prompt,
+              tools: selectedAgent.tools,
+              disallowedTools: selectedAgent.disallowedTools,
+              model: selectedAgent.model,
+              permissionMode: selectedAgent.permissionMode,
+              effort: selectedAgent.effort as Effort | undefined,
+            }
+          : undefined,
+        mcpServers,
+        managerMcp,
+        skills: (session.materializedSkillDirs ?? []).map((dir) => ({
+          dir,
+          name: dir.split(/[\\/]/).pop() ?? dir,
+        })),
+        resumeSessionId: session.resumeSessionId,
+        forkAtId: session.forkAtUuid,
+        fork: session.fork,
+        autoCompact: appSettings?.autoCompact?.enabled ?? true,
+        autoCompactWindow: appSettings?.autoCompact?.window,
+        contextTokenLimit,
+        abortSignal: session.abortController.signal,
+        toolGuard: (toolName, input) => {
+          if (toolName !== "Bash" || session.workflow?.guard === "off") return null;
+          const command = typeof input.command === "string" ? input.command : "";
+          const violation = classifyWorkflowViolation(command, {
+            defaultBranch: session.trunk ?? "main",
+            currentBranch: session.branch ?? null,
+            inWorktree: Boolean(session.inWorktree),
+            autoMerge: session.workflow?.autoMerge === "on-green",
+            requirePr: Boolean(session.workflow?.requirePr),
+          });
+          if (!violation) return null;
+          const blocked = session.workflow?.guard === "deny";
+          this.bus.publish({
+            type: "notice",
+            chatId: session.chatId,
+            level: blocked ? "warn" : "info",
+            text: `${blocked ? "Blocked" : "Workflow warning"}: ${violation.reason}`,
+          });
+          return blocked ? violation.reason : null;
+        },
+      };
+
+      session.harnessSession = resolved.harness.createSession(spec);
+      session.resumeSessionId = undefined;
+      session.forkAtUuid = undefined;
+      session.fork = false;
+      this.flushOutbox(session);
+      session.runLoop = this.consumeHarness(session);
+    } catch (err) {
+      session.managerGrant?.revoke();
+      session.managerGrant = undefined;
+      this.onError(session, err);
+    }
   }
 
   private pump(): void {
@@ -1919,7 +2256,231 @@ export class SessionBroker {
     }
   }
 
+  /**
+   * Keep concurrently-running chats inside the app-level aggregate context
+   * budget. Idle chats retain their native sessions but do not consume an active
+   * execution slot; queued work is retried whenever another turn settles.
+   */
+  private async withinOverallContextBudget(session: LiveSession): Promise<boolean> {
+    const settings = await this.store.getSettings().catch(() => undefined);
+    const limit = settings?.harness?.contextLimits?.overallTokens;
+    if (!limit) return true;
+    const perChatLimit = settings?.harness?.contextLimits?.perChatTokens;
+    const active = [...this.sessions.values()]
+      .filter((candidate) => candidate.chatId !== session.chatId && this.isActive(candidate))
+      .reduce(
+        (sum, candidate) =>
+          sum + (candidate.lastContextTokens ?? candidate.contextWindow ?? perChatLimit ?? 200_000),
+        0,
+      );
+    if (active < limit) return true;
+    session.started = false;
+    if (!this.queueOrder.includes(session.chatId)) this.queueOrder.push(session.chatId);
+    this.setStatus(session, "queued");
+    this.bus.publish({
+      type: "notice",
+      chatId: session.chatId,
+      level: "info",
+      text: `Waiting for context budget (${active.toLocaleString()} / ${limit.toLocaleString()} tokens in active chats).`,
+    });
+    return false;
+  }
+
   /* ---------------------------------------------------------- consume */
+
+  private async consumeHarness(session: LiveSession): Promise<void> {
+    const live = session.harnessSession;
+    if (!live) return;
+    try {
+      for await (const event of live.events) await this.handleHarnessEvent(session, event);
+      this.onDone(session);
+    } catch (err) {
+      this.onError(session, err);
+    }
+  }
+
+  /** Neutral provider events → Dispatch's persisted transcript and live wire. */
+  private async handleHarnessEvent(session: LiveSession, event: HarnessEvent): Promise<void> {
+    const base = {
+      id: this.genId(),
+      chatId: session.chatId,
+      ts: this.now(),
+      turn: session.turn,
+      sessionId: session.sessionId,
+    };
+    switch (event.type) {
+      case "init":
+        session.sessionId = event.sessionId;
+        session.model = event.model ?? session.model;
+        session.contextWindow = event.contextWindow ?? session.contextWindow;
+        await this.patchChat(session.chatId, {
+          sessionId: event.sessionId,
+          model: session.model,
+          harness: session.harnessKind,
+          harnessHandoff: undefined,
+        });
+        await this.emit(session, {
+          ...base,
+          sessionId: event.sessionId,
+          kind: "system",
+          subtype: "init",
+          data: {
+            harness: session.harnessKind,
+            model: event.model,
+            permissionMode: event.permissionMode,
+            tools: event.tools,
+            mcpServers: event.mcpServers,
+          },
+        });
+        return;
+      case "delta":
+        session.streamAssistantId = event.id;
+        this.bus.publish({
+          type: "message-chunk",
+          chatId: session.chatId,
+          messageId: event.id,
+          delta: event.delta,
+          channel: event.channel,
+        });
+        return;
+      case "assistant":
+        session.streamAssistantId = undefined;
+        this.setStatus(session, "running", { state: "responding", label: "responding" });
+        await this.emit(session, {
+          ...base,
+          id: event.id,
+          kind: "assistant",
+          text: event.text,
+          thinking: event.thinking,
+          model: event.model ?? session.model,
+          uuid: event.uuid,
+          parentToolUseId: event.parentToolUseId,
+          subagentType: event.subagentType,
+          effort: event.effort ?? session.effort,
+        });
+        return;
+      case "tool-use":
+        this.setStatus(session, "running", {
+          state: "tool",
+          label: `running ${event.name}`,
+          toolName: event.name,
+          target: deriveTarget(event.input),
+        });
+        await this.emit(session, {
+          ...base,
+          kind: "tool_use",
+          toolUseId: event.toolUseId,
+          name: event.name,
+          input: event.input,
+          server: event.server ?? parseMcpServer(event.name),
+          parentToolUseId: event.parentToolUseId,
+          subagentType: event.subagentType,
+          effort: event.effort ?? session.effort,
+          uuid: event.uuid,
+        });
+        return;
+      case "tool-result": {
+        const persisted = await this.persistContentImages(session, event.content);
+        await this.emit(session, {
+          ...base,
+          kind: "tool_result",
+          toolUseId: event.toolUseId,
+          ok: event.ok,
+          isError: event.ok ? undefined : true,
+          content: persisted.content,
+          images: persisted.images.length ? persisted.images : undefined,
+          parentToolUseId: event.parentToolUseId,
+          subagentType: event.subagentType,
+        });
+        return;
+      }
+      case "permission-request":
+        this.registerHarnessPermission(session, event.requestId, event.toolName, event.input, {
+          description: event.reason,
+        });
+        return;
+      case "question-request": {
+        const input = {
+          questions: event.questions.map((q) => ({
+            id: q.id,
+            header: q.header,
+            question: q.question,
+            multiSelect: q.multiSelect,
+            allowOther: q.allowOther,
+            options: q.options.map((o) => ({ id: o.label, ...o })),
+          })),
+        };
+        this.registerHarnessPermission(
+          session,
+          event.requestId,
+          "AskUserQuestion",
+          input,
+          {},
+          event.questions,
+        );
+        return;
+      }
+      case "task-notification":
+        await this.emit(session, {
+          ...base,
+          kind: "task_status",
+          taskId: event.taskId,
+          toolUseId: event.toolUseId,
+          status: event.status,
+          summary: event.summary,
+          totalTokens: event.totalTokens,
+          toolUses: event.toolUses,
+          durationMs: event.durationMs,
+        });
+        return;
+      case "usage":
+        session.lastContextTokens = event.contextTokens ?? session.lastContextTokens;
+        session.contextWindow = event.contextWindow ?? session.contextWindow;
+        return;
+      case "notice":
+        this.bus.publish({
+          type: "notice",
+          chatId: session.chatId,
+          level: event.level,
+          text: event.text,
+        });
+        await this.emit(session, { ...base, kind: "notice", level: event.level, text: event.text });
+        return;
+      case "compacted":
+        await this.emit(session, {
+          ...base,
+          kind: "system",
+          subtype: "compact",
+          text: "Context compacted.",
+        });
+        return;
+      case "turn-end":
+        session.lastContextTokens = event.contextTokens ?? session.lastContextTokens;
+        session.contextWindow = event.contextWindow ?? session.contextWindow;
+        await this.emit(session, {
+          ...base,
+          kind: "result",
+          subtype: event.subtype,
+          isError: !event.ok,
+          numTurns: event.numTurns,
+          durationMs: event.durationMs,
+          result: event.result,
+          usage: event.usage,
+          contextTokens: session.lastContextTokens,
+          contextWindow: session.contextWindow,
+          costUsd: event.costUsd,
+        });
+        session.turn += 1;
+        if (!event.ok) this.onTurnError?.(session.chatId, event.result ?? event.limit?.reason);
+        if ((session.harnessSession?.pending() ?? 0) > 0 || session.outbox.length > 0) {
+          this.setStatus(session, "running", { state: "thinking" });
+          this.flushOutbox(session);
+        } else {
+          this.onTurnEnd(session);
+        }
+        return;
+    }
+  }
 
   private async consume(session: LiveSession): Promise<void> {
     const q = session.query;
@@ -1944,7 +2505,7 @@ export class SessionBroker {
           const sid = (m as { session_id?: string }).session_id;
           if (sid && sid !== session.sessionId) {
             session.sessionId = sid;
-            void this.patchChat(session.chatId, { sessionId: sid });
+            void this.patchChat(session.chatId, { sessionId: sid, harnessHandoff: undefined });
           }
           session.model = (m as { model?: string }).model;
           await this.emit(session, {
@@ -2207,6 +2768,17 @@ export class SessionBroker {
         // Relearn the window off-loop for the next turn's row (cheap; the model
         // — hence window — can shift mid-session on a switch or fallback).
         void this.refreshContextWindow(session);
+        const limits = await this.store.getSettings().catch(() => undefined);
+        const perChatLimit = limits?.harness?.contextLimits?.perChatTokens;
+        if (
+          !isError &&
+          (limits?.autoCompact?.enabled ?? true) &&
+          perChatLimit &&
+          (session.lastContextTokens ?? 0) >= perChatLimit
+        ) {
+          session.outbox.push({ id: this.genId(), text: "/compact", priority: "next" });
+          this.flushOutbox(session);
+        }
         // Chained turn buffered? Stay running; otherwise the turn is complete.
         if (session.input && session.input.pending() > 0) {
           this.setStatus(session, "running", { state: "thinking" });
@@ -2283,6 +2855,56 @@ export class SessionBroker {
   }
 
   /* --------------------------------------------------------- permission */
+
+  private registerHarnessPermission(
+    session: LiveSession,
+    requestId: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    opts: { title?: string; displayName?: string; description?: string },
+    questions?: HarnessQuestion[],
+  ): void {
+    const request: PermissionRequest = {
+      id: requestId,
+      chatId: session.chatId,
+      toolName,
+      input,
+      displayName: opts.displayName,
+      title: opts.title,
+      description: opts.description,
+      createdAt: this.now(),
+    };
+    const attentionId = `att-perm-${requestId}`;
+    const isQuestion = toolName === "AskUserQuestion";
+    const summary = isQuestion ? questionSummary(input) : (opts.title ?? `Permission: ${toolName}`);
+
+    session.pendingPermissions.set(requestId, {
+      harnessSession: session.harnessSession,
+      questions,
+      toolName,
+      input,
+      request,
+      attentionId,
+    });
+    this.setStatus(session, "awaiting-input", {
+      state: "awaiting",
+      label: isQuestion ? summary : (opts.title ?? `Allow ${toolName}?`),
+      toolName,
+    });
+    this.bus.publish({ type: "permission-request", chatId: session.chatId, request });
+    this.bus.publish({
+      type: "attention-add",
+      item: {
+        id: attentionId,
+        chatId: session.chatId,
+        kind: isQuestion ? "question" : "permission",
+        summary,
+        projectId: session.projectId || undefined,
+        permissionRequestId: requestId,
+        createdAt: this.now(),
+      },
+    });
+  }
 
   private handlePermission(
     session: LiveSession,
@@ -2445,7 +3067,10 @@ export class SessionBroker {
 
   /** Steering messages submitted but not yet consumed by the SDK (outbox + input). */
   private queuedCount(session: LiveSession): number {
-    return session.outbox.length + (session.input?.pending() ?? 0);
+    return (
+      session.outbox.length +
+      (session.harnessSession?.pending() ?? session.input?.pending() ?? 0)
+    );
   }
 
   private onTurnEnd(session: LiveSession): void {
@@ -2472,9 +3097,19 @@ export class SessionBroker {
     session.started = false;
     session.query = undefined;
     session.input = undefined;
+    session.harnessSession = undefined;
+    session.managerGrant?.revoke();
+    session.managerGrant = undefined;
     session.stopping = false;
     this.cleanupSkills(session);
     this.resolveIdleAttention(session);
+    if (session.switching) {
+      session.switching = false;
+      this.setStatus(session, "idle", { state: "idle" });
+      this.queueOrder = this.queueOrder.filter((x) => x !== session.chatId);
+      this.pump();
+      return;
+    }
     this.setStatus(session, "done", { state: "idle" });
     this.bus.publish({
       type: "attention-add",
@@ -2495,6 +3130,9 @@ export class SessionBroker {
     session.started = false;
     session.query = undefined;
     session.input = undefined;
+    session.harnessSession = undefined;
+    session.managerGrant?.revoke();
+    session.managerGrant = undefined;
     // A crash after a completed turn leaves a live "Turn complete" item; clear it.
     this.resolveIdleAttention(session);
     this.drainPendingPermissions(session, "Session ended.");
@@ -2538,7 +3176,11 @@ export class SessionBroker {
    */
   private drainPendingPermissions(session: LiveSession, message: string): void {
     for (const [requestId, p] of session.pendingPermissions) {
-      p.resolve({ behavior: "deny", message });
+      if (p.harnessSession) {
+        p.harnessSession.resolvePermission(requestId, { decision: "deny", message });
+      } else {
+        p.resolve?.({ behavior: "deny", message });
+      }
       this.bus.publish({
         type: "permission-resolved",
         chatId: session.chatId,
@@ -2860,6 +3502,8 @@ export class SessionBroker {
     const canCreatePr = Boolean(this.github) && workflow.requirePr;
 
     const appends: string[] = [];
+    const handoff = await this.buildHarnessHandoff(session.chatId);
+    if (handoff) appends.push(handoff);
     // Lead with the manager-tools directive so EVERY session (any project)
     // discovers the `mcp__manager__*` tools it has and is steered to prefer them
     // over hand-rolled shell equivalents (the #1 way agents waste effort here).
@@ -3261,7 +3905,11 @@ export class SessionBroker {
       const skills = [...projectSkills, ...bundledSkills()];
       if (skills.length) {
         try {
-          session.materializedSkillDirs = await materializeSkills(cwd, skills);
+          session.materializedSkillDirs = await materializeSkills(
+            cwd,
+            skills,
+            session.harnessKind === "codex" ? ".agents" : ".claude",
+          );
         } catch {
           /* best-effort: a copy failure must never block a turn from starting */
         }
@@ -3276,6 +3924,51 @@ export class SessionBroker {
       options.resume = session.resumeSessionId;
     }
     return options;
+  }
+
+  /** Build the portable context used when a chat changes native runtimes. */
+  private async buildHarnessHandoff(chatId: string): Promise<string | undefined> {
+    const chat = await this.store.getChat(chatId).catch(() => null);
+    if (!chat?.harnessHandoff) return undefined;
+    const rows = await this.store.readMessages(chatId, { limit: 240 }).catch(() => []);
+    const rendered = rows
+      .filter((row) => row.ts <= chat.harnessHandoff!.at)
+      .flatMap((row): string[] => {
+      switch (row.kind) {
+        case "user":
+          return row.text ? [`USER: ${row.text}`] : [];
+        case "assistant":
+          return row.text ? [`ASSISTANT: ${row.text}`] : [];
+        case "tool_use":
+          return [`TOOL CALL ${row.name}: ${safeHandoffJson(row.input)}`];
+        case "tool_result":
+          return [`TOOL RESULT ${row.toolUseId} (${row.ok ? "ok" : "error"}): ${safeHandoffJson(row.content)}`];
+        case "notice":
+          return [`DISPATCH NOTICE: ${row.text}`];
+        default:
+          return [];
+      }
+      });
+    const budget = 60_000;
+    const kept: string[] = [];
+    let size = 0;
+    for (let i = rendered.length - 1; i >= 0; i -= 1) {
+      const line = rendered[i]!;
+      if (size + line.length > budget) break;
+      kept.unshift(line);
+      size += line.length;
+    }
+    return [
+      "# Provider handoff",
+      `This Dispatch chat previously ran on ${chat.harnessHandoff.from} and now runs on ${chat.harnessHandoff.to}.`,
+      "The transcript below is historical context, not a claim that old tool processes or approvals remain live. Continue the same user task and verify mutable state before acting.",
+      kept.length < rendered.length ? "(Older transcript entries were omitted to fit the handoff budget.)" : "",
+      "",
+      ...kept,
+      "# End provider handoff",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
   }
 
   /** Remove ONLY the skill dirs we materialized for this session's query (never a

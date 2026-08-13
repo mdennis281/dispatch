@@ -322,6 +322,18 @@ export const ChatSchema = z.object({
    * predates harness selection, i.e. Claude.
    */
   harness: HarnessKindSchema.optional(),
+  /**
+   * Last runtime migration. A migrated chat starts a fresh native session and
+   * receives a bounded neutral transcript handoff; native session ids are never
+   * reused across providers.
+   */
+  harnessHandoff: z
+    .object({
+      from: HarnessKindSchema,
+      to: HarnessKindSchema,
+      at: z.number().int(),
+    })
+    .optional(),
   /** Runtime session id captured from the init event (for resume/fork). */
   sessionId: z.string().optional(),
   agentId: z.string().optional(),

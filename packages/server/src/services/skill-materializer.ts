@@ -23,8 +23,8 @@ import { existsSync } from "node:fs";
 import type { SkillConfig } from "@dispatch/shared";
 
 /** The effective skills directory the SDK discovers under a session cwd. */
-export function skillsTargetDir(cwd: string): string {
-  return join(cwd, ".claude", "skills");
+export function skillsTargetDir(cwd: string, providerDir: ".claude" | ".agents" = ".claude"): string {
+  return join(cwd, providerDir, "skills");
 }
 
 /**
@@ -35,9 +35,10 @@ export function skillsTargetDir(cwd: string): string {
 export async function materializeSkills(
   cwd: string,
   skills: SkillConfig[],
+  providerDir: ".claude" | ".agents" = ".claude",
 ): Promise<string[]> {
   if (!skills.length) return [];
-  const base = skillsTargetDir(cwd);
+  const base = skillsTargetDir(cwd, providerDir);
   const created: string[] = [];
   for (const skill of skills) {
     const target = join(base, skill.dir);

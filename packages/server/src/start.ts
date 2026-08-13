@@ -60,6 +60,12 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
   installShutdown(app);
 
   await app.listen({ port: config.port, host: config.host });
+  const address = app.server.address();
+  const listeningPort = typeof address === "object" && address ? address.port : config.port;
+  const managerHost = WILDCARD.has(config.host) ? "127.0.0.1" : config.host;
+  app.services.managerMcp.setOrigin(
+    `http://${managerHost.includes(":") ? `[${managerHost}]` : managerHost}:${listeningPort}`,
+  );
   const url = localUrl();
   // eslint-disable-next-line no-console
   console.log(
@@ -68,6 +74,14 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
       `)` +
       (dev ? "  — SPA + HMR served here" : ""),
   );
+  for (const runtime of app.services.harnesses.runtimes()) {
+    if (runtime.kind === "claude") continue;
+    // eslint-disable-next-line no-console
+    console.log(
+      `[dispatch] ${runtime.kind} runtime ${runtime.version ?? "unknown"} (${runtime.source})` +
+        (runtime.path ? ` — ${runtime.path}` : ""),
+    );
+  }
   if (WILDCARD.has(config.host)) {
     const lan = lanUrls();
     // eslint-disable-next-line no-console

@@ -39,6 +39,8 @@ import type {
   WorkflowConfig,
   LaunchAgentTaskInput,
   MessagePart,
+  HarnessKind,
+  Effort,
 } from "@dispatch/shared";
 
 /**
@@ -75,6 +77,28 @@ export interface AppSettings {
    */
   spawnChat?: {
     autoApprove?: boolean;
+  };
+  harness?: {
+    defaultHarness?: HarnessKind;
+    defaults?: Partial<Record<HarnessKind, { model?: string; effort?: Effort }>>;
+    contextLimits?: {
+      perChatTokens?: number;
+      overallTokens?: number;
+    };
+  };
+}
+
+export interface HarnessInfo {
+  kind: HarnessKind;
+  runtime: { path?: string; version?: string; source: string; available: boolean };
+  capabilities: {
+    efforts: Effort[];
+    compaction: boolean;
+    fork: boolean;
+    questions: boolean;
+    liveModelSwitch: boolean;
+    livePermissionSwitch: boolean;
+    [key: string]: unknown;
   };
 }
 
@@ -340,7 +364,11 @@ export const api = {
 
   /* available session models (live from the Claude Code runtime, or static fallback) */
   models: {
-    list: () => get<ModelOption[]>("/api/models"),
+    list: (harness: HarnessKind = "claude") =>
+      get<ModelOption[]>(`/api/models?harness=${encodeURIComponent(harness)}`),
+  },
+  harnesses: {
+    list: () => get<HarnessInfo[]>("/api/harnesses"),
   },
 
   /* self-contained `.dispatch/` project config */
@@ -653,9 +681,11 @@ export const api = {
 
   /* subscription usage (5h + weekly) for the header meter */
   usage: {
-    get: () => get<UsageSnapshot>("/api/usage"),
+    get: (harness: HarnessKind = "claude") =>
+      get<UsageSnapshot>(`/api/usage?harness=${encodeURIComponent(harness)}`),
     /** Force a fresh fetch now (the "refresh" button). */
-    refresh: () => post<UsageSnapshot>("/api/usage/refresh"),
+    refresh: (harness: HarnessKind = "claude") =>
+      post<UsageSnapshot>(`/api/usage/refresh?harness=${encodeURIComponent(harness)}`),
   },
 };
 

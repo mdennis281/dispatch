@@ -39,7 +39,7 @@ export function StreamingTail({ chatId, running, workingLabel, onGrow }: Streami
   return (
     <>
       {streamRows.map((s) => (
-        <StreamingRow key={`stream-${s.messageId}`} text={s.text} thinking={s.thinking} />
+        <StreamingRow key={`stream-${s.messageId}`} chatId={chatId} text={s.text} thinking={s.thinking} />
       ))}
       {showWorking && <WorkingRow label={workingLabel} />}
     </>

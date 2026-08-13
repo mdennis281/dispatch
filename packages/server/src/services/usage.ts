@@ -200,6 +200,9 @@ export class UsageService {
         fiveHour: toWindow(data.five_hour),
         sevenDay: toWindow(data.seven_day),
         fetchedAt: this.now(),
+        provider: "claude",
+        primaryLabel: "5-hour session",
+        secondaryLabel: "Weekly",
       });
     } catch {
       return this.commit(this.errorSnapshot("unavailable"));
@@ -217,6 +220,9 @@ export class UsageService {
       fetchedAt: this.now(),
       stale: true,
       error,
+      provider: "claude",
+      primaryLabel: "5-hour session",
+      secondaryLabel: "Weekly",
     };
   }
 

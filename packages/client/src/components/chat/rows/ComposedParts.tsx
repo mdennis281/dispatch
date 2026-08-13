@@ -42,6 +42,8 @@ import type { MessagePart } from "@dispatch/shared";
 import { Markdown } from "../Markdown.js";
 import { cn } from "../../../lib/cn.js";
 import { useInjectedContext } from "../../../lib/injectedContext.js";
+import { useChats } from "../../../stores/chats.js";
+import { harnessLabel } from "../../../lib/harness.js";
 
 /** Compact size note for a block, so "how much was injected" is visible. */
 function sizeNote(text: string): string {
@@ -80,7 +82,7 @@ function CopyButton({ text }: { text: string }) {
  * your own sentence floating free of the rules it was sent under. Collapsing is
  * one click for when you've read it and want the chat back.
  */
-function BriefCard({ part }: { part: MessagePart }) {
+function BriefCard({ part, provider }: { part: MessagePart; provider: string }) {
   const [open, setOpen] = useState(true);
   return (
     <div className="mt-2 w-full text-left first:mt-0">
@@ -104,7 +106,7 @@ function BriefCard({ part }: { part: MessagePart }) {
             <span className="text-faint">{open ? <ChevronDown /> : <ChevronRight />}</span>
             <Send className="shrink-0 text-accent" />
             <span className="shrink-0 text-2xs font-semibold uppercase tracking-[0.07em] text-accent">
-              Dispatch → Claude
+              Dispatch → {provider}
             </span>
             <span className="min-w-0 truncate text-xs text-muted" title={part.label}>
               {part.label ?? "Instructions sent for you"}
@@ -190,12 +192,13 @@ function SpokenPart({ part }: { part: MessagePart }) {
 
 export function ComposedParts({ chatId, parts }: { chatId: string; parts: MessagePart[] }) {
   const injected = useInjectedContext(chatId);
+  const provider = harnessLabel(useChats((s) => s.byId[chatId]?.harness));
   const visible = parts.filter((p) => p.kind !== "context" || injected.show);
   return (
     <div className="flex flex-col items-end">
       {visible.map((part, i) => {
         const key = `${part.kind}:${i}`;
-        if (part.kind === "brief") return <BriefCard key={key} part={part} />;
+        if (part.kind === "brief") return <BriefCard key={key} part={part} provider={provider} />;
         if (part.kind === "context") return <InjectedRow key={key} part={part} />;
         return <SpokenPart key={key} part={part} />;
       })}

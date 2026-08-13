@@ -60,6 +60,7 @@ import { Popover, MenuItem } from "../ui/Popover.js";
 import { cn } from "../../lib/cn.js";
 import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
+import { useHarnesses } from "../../stores/harnesses.js";
 import { actions, uploadChatImage, assetUrl } from "../../lib/actions.js";
 import { useEffectiveEffort } from "../../lib/effectiveEffort.js";
 import { EFFORT_OPTIONS } from "../../lib/efforts.js";
@@ -139,7 +140,7 @@ const DROP_COPY: Record<Exclude<DropIntent, null>, { icon: ReactNode; title: str
     path: {
       icon: <FileCode2 />,
       title: "Drop to insert the file path",
-      hint: "Claude reads the file itself — nothing is uploaded",
+      hint: "The agent reads the file itself — nothing is uploaded",
     },
     lookup: {
       icon: <FileSearch />,
@@ -235,6 +236,9 @@ function typingElsewhere(editorDom: Element): boolean {
 /** The chat composer: TipTap input + attachments + effort/mode/agent + send/steer. */
 export function Composer({ chat, agents, modes }: ComposerProps) {
   const upsertChat = useChats((s) => s.upsertChat);
+  const harness = chat.harness ?? "claude";
+  const harnesses = useHarnesses((s) => s.harnesses);
+  const capabilities = harnesses.find((h) => h.kind === harness)?.capabilities;
 
   // Attachments come back from the saved draft (see lib/composerDrafts), so a
   // reload or a chat switch keeps them exactly as the text does.
@@ -264,10 +268,23 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // still selects the runtime's "opus[1m]" row — and a genuinely unknown id
   // falls back to labelling with its raw string.
   const models = useModels((s) => s.models);
-  const modelLabelOf = (m: string) => findModel(models, m)?.label ?? m;
+  const effortOptions = capabilities?.efforts?.length
+    ? EFFORT_OPTIONS.filter((o) => capabilities.efforts.includes(o.value))
+    : EFFORT_OPTIONS;
+  const modelLabelOf = (m: string) =>
+    (m ? findModel(models, m)?.label ?? m : models[0]?.label) ?? "Provider default";
   // The row the picker should mark as selected: matched by identity, since
   // several rows can resolve to the same underlying model.
   const selectedModel = chat.agentId ? undefined : findModel(models, model);
+
+  useEffect(() => {
+    const cached = useModels.getState().byHarness[harness];
+    if (cached?.length) useModels.getState().setModels(cached, harness);
+    void api.models
+      .list(harness)
+      .then((next) => useModels.getState().setModels(next, harness))
+      .catch(() => {});
+  }, [harness]);
   // What the main loop is REALLY thinking at, off the transcript's newest
   // main-loop row (the picker below only knows what was asked for).
   const effectiveEffort = useEffectiveEffort(chat.id);
@@ -323,7 +340,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
       StarterKit.configure({ heading: false }),
       Placeholder.configure({
         placeholder:
-          "Message Claude — ⌘↵ to send, ⇧↵ for newline. Paste an image to attach, drop a file for its path.",
+          "Message agent — ⌘↵ to send, ⇧↵ for newline. Paste an image to attach, drop a file for its path.",
       }),
     ],
     content: "",
@@ -1036,7 +1053,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           {visible.effort && (
             <>
               <Select
-                options={EFFORT_OPTIONS}
+                options={effortOptions}
                 value={chat.effort}
                 onChange={setEffort}
                 leftIcon={<EffortGauge effort={chat.effort} />}
@@ -1111,7 +1128,39 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             {(close) => (
               <div className="flex flex-col">
                 <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
-                  Model
+                  Provider
+                </div>
+                {harnesses.map((candidate) => (
+                  <MenuItem
+                    key={candidate.kind}
+                    icon={<Cpu />}
+                    active={candidate.kind === harness}
+                    disabled={!candidate.runtime.available}
+                    hint={candidate.runtime.available ? candidate.runtime.version : "not installed"}
+                    onClick={() => {
+                      if (!candidate.runtime.available || candidate.kind === harness) return;
+                      modelByChat.delete(chat.id);
+                      setModelState("");
+                      upsertChat({
+                        ...chat,
+                        harness: candidate.kind,
+                        sessionId: undefined,
+                        model: undefined,
+                        status: "idle",
+                      });
+                      actions.setHarness(chat.id, candidate.kind);
+                      close();
+                    }}
+                  >
+                    <span className="flex items-center gap-2 capitalize">
+                      {candidate.kind}
+                      {candidate.kind === harness && <Check className="size-3 text-accent" />}
+                    </span>
+                  </MenuItem>
+                ))}
+                <div className="my-1 h-px bg-line" />
+                <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
+                  Model · {harness}
                 </div>
                 {models.map((m) => (
                   <MenuItem
@@ -1131,7 +1180,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                     </span>
                   </MenuItem>
                 ))}
-                {scopedAgents.length > 0 && (
+                {capabilities?.subagents !== false && scopedAgents.length > 0 && (
                   <>
                     <div className="my-1 h-px bg-line" />
                     <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">

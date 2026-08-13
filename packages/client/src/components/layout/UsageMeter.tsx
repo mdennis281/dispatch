@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { RotateCw, Gauge } from "lucide-react";
 import type { UsageWindow } from "@dispatch/shared";
 import { useUsage } from "../../stores/usage.js";
+import { useChats } from "../../stores/chats.js";
 import { untilShort, relTime } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
 import { LAYER } from "../../lib/layers.js";
@@ -59,6 +60,9 @@ export function UsageMeter() {
   const refreshing = useUsage((s) => s.refreshing);
   const load = useUsage((s) => s.load);
   const refresh = useUsage((s) => s.refresh);
+  const activeHarness = useChats((s) =>
+    s.activeChatId ? s.byId[s.activeChatId]?.harness : undefined,
+  );
 
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
@@ -68,8 +72,8 @@ export function UsageMeter() {
 
   // Lazy initial load; live `usage-update` events keep it fresh thereafter.
   useEffect(() => {
-    void load();
-  }, [load]);
+    void load(activeHarness ?? undefined);
+  }, [load, activeHarness]);
 
   // While open, keep the panel glued to the trigger and countdowns ticking.
   useEffect(() => {
@@ -104,7 +108,7 @@ export function UsageMeter() {
 
   // Trigger shows the 5-hour window (falls back to weekly if only that exists).
   const primary = usage.fiveHour ?? usage.sevenDay!;
-  const primaryLabel = usage.fiveHour ? "5h" : "7d";
+  const primaryLabel = usage.provider === "codex" ? "usage" : usage.fiveHour ? "5h" : "7d";
   const t = tone(primary.percent);
 
   return (
@@ -112,7 +116,7 @@ export function UsageMeter() {
       <button
         ref={btnRef}
         onClick={openNow}
-        aria-label="Claude usage"
+        aria-label={`${usage.provider === "codex" ? "Codex" : "Claude"} usage`}
         className={cn(
           "flex items-center gap-1.5 rounded-md border border-line bg-panel-2/60 px-2 py-1",
           "transition-colors hover:border-line-strong",
@@ -146,13 +150,14 @@ export function UsageMeter() {
             <div className="flex items-center gap-1.5 border-b border-line px-3 py-2">
               <Gauge className="size-3.5 text-muted" />
               <span className="text-xs font-semibold tracking-tight text-primary">
-                Claude usage
+                {usage.provider === "codex" ? "Codex" : "Claude"} usage
+                {usage.planType && <span className="text-faint"> · {usage.planType}</span>}
               </span>
             </div>
 
             <div className="divide-y divide-line-soft">
-              <WindowRow label="5-hour session" win={usage.fiveHour} now={now} />
-              <WindowRow label="Weekly" win={usage.sevenDay} now={now} />
+              <WindowRow label={usage.primaryLabel ?? "5-hour session"} win={usage.fiveHour} now={now} />
+              <WindowRow label={usage.secondaryLabel ?? "Weekly"} win={usage.sevenDay} now={now} />
             </div>
 
             <div className="flex items-center justify-between gap-2 border-t border-line px-3 py-1.5">
