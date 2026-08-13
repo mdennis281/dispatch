@@ -2819,7 +2819,11 @@ export class SessionBroker {
     for (const raw of content) {
       const block = raw as Record<string, unknown> | null;
       if (!block || typeof block !== "object" || block.type !== "image") {
-        if (block?.type === "text" && typeof block.text === "string") {
+        if (
+          block?.type === "text" &&
+          typeof block.text === "string" &&
+          block.text.trimStart().startsWith("{")
+        ) {
           try {
             const parsed = JSON.parse(block.text) as Record<string, unknown>;
             if (parsed && Array.isArray(parsed.content)) {
