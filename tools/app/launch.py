@@ -43,6 +43,7 @@ import socket
 import subprocess
 import sys
 import time
+import webbrowser
 from pathlib import Path
 
 # ---------------------------------------------------------------- paths
@@ -356,11 +357,12 @@ def open_window(url: str) -> None:
     try:
         from pwa_launcher import open_pwa
     except ImportError:
-        raise SystemExit(
-            "pwa-launcher is not installed - the window can't be opened.\n"
-            "  pip install pwa-launcher\n"
-            f"  (the server is up; you can also just browse to {url})"
-        )
+        # Release installs intentionally require only Python itself. A dedicated
+        # PWA window is nicer, but the standard-library browser fallback keeps a
+        # Start-menu/PATH launcher useful on every supported platform.
+        if not webbrowser.open(url):
+            print(f"Dispatch is running; open {url}", file=sys.stderr)
+        return
 
     from pwa_launcher import ChromiumNotFoundError
 
@@ -371,10 +373,8 @@ def open_window(url: str) -> None:
         # every time.
         open_pwa(url, user_data_dir=desktop_root() / "browser-profile")
     except ChromiumNotFoundError:
-        raise SystemExit(
-            "No Chromium-based browser found (Chrome, Edge, Brave, Vivaldi...).\n"
-            f"  Install one, or browse to {url} yourself."
-        )
+        if not webbrowser.open(url):
+            print(f"Dispatch is running; open {url}", file=sys.stderr)
 
 
 def stop(paths: Paths) -> int:

@@ -1,11 +1,13 @@
 # Running Dispatch
 
-A local control plane for Claude Code agents. Runs entirely on your machine and uses your
-**Claude subscription** (no API key). All state lives in `./.data` (JSON/JSONL, git-ignored).
+A local control plane for Claude Code and Codex agents. It runs entirely on your machine
+and reuses the provider CLI sessions already authenticated there; no provider key belongs
+in this repository. Development state lives in `./.data` (JSON/JSONL, git-ignored), while
+release installs keep state under the platform user-data directory.
 
 ## Prerequisites
 - Node ≥ 20, pnpm, git, `gh` (authenticated), Docker (only for subApps that need it).
-- Logged in to Claude Code (`claude`) — the Agent SDK reuses that subscription.
+- Logged in to Claude Code (`claude`) and/or Codex (`codex`).
 
 ## Use it (single port — simplest)
 ```
@@ -580,7 +582,7 @@ and is never deleted — it's the only copy of the thing that broke.
 | Var | Default | Meaning |
 |---|---|---|
 | `DISPATCH_PORT` | `4319` (installed app: `4318`) | HTTP + WebSocket port |
-| `DISPATCH_HOST` | `0.0.0.0` | bind address — see [Host mode](#host-mode) |
+| `DISPATCH_HOST` | `127.0.0.1` | bind address — see [Host mode](#host-mode) |
 | `DISPATCH_DATA_DIR` | `./.data` | state dir — chats, checkpoints, runners |
 | `DISPATCH_CONFIG_DIR` | = `DISPATCH_DATA_DIR` | config dir — settings, projects, agents, modes |
 | `DISPATCH_MAX_ACTIVE_SESSIONS` | `6` | max concurrently-active chats |
@@ -594,9 +596,9 @@ Leaving `DISPATCH_CONFIG_DIR` unset gives the original single-root layout, byte 
 
 ## Host mode
 
-Dispatch binds **every interface** by default, so the same control plane is reachable from
-a phone or another laptop while the agents keep running on the box that owns the repos.
-Boot prints both addresses:
+Dispatch binds to **loopback by default**. To reach the same control plane from a phone or
+another laptop while the agents keep running on the box that owns the repos, explicitly
+set `DISPATCH_HOST=0.0.0.0`. In that mode boot prints both addresses:
 
 ```
 [dispatch] listening on http://127.0.0.1:4318  (data: …)
@@ -607,8 +609,8 @@ Two things to know:
 
 - **There is no authentication.** Anything that can reach the port can start a chat and
   approve a tool call, which means running commands as you. That's fine behind your own
-  NAT and wrong on a network you don't control — set `DISPATCH_HOST=127.0.0.1` there and
-  you're back to loopback-only.
+  NAT and wrong on a network you don't control. Remove the override (or set
+  `DISPATCH_HOST=127.0.0.1`) to return to loopback-only.
 - **Only `localhost` gets the browser features.** Chromium treats `http://localhost` as a
   secure context and a LAN IP as insecure, so over `http://192.168.x.x` there is no
   service worker, no install prompt and no notifications — the API is withheld entirely.

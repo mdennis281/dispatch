@@ -37,6 +37,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # Gitleaks scans commits, not merely the checked-out files, so the full
+      # history is load-bearing here. A shallow checkout gives false confidence.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan tracked history with Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
   # ---------------------------------------------------------------------------
   # THE GATE. Everything — build, typecheck, all 1226 tests — on the self-hosted
   # Linux runner (`dispatch-runner`, an 8GB/4-core Proxmox guest). Free, so it
@@ -103,6 +120,15 @@ jobs:
       # first, always.
       - name: Build
         run: pnpm build
+
+      - name: Verify release payload
+        run: |
+          node tools/release/package.mjs \
+            --out .artifacts/ci-release \
+            --tag v0.0.0 \
+            --sha "${{ github.sha }}"
+          pnpm -C .artifacts/ci-release install --prod --frozen-lockfile --config.confirmModulesPurge=false
+          node --input-type=module --eval "await import('./.artifacts/ci-release/packages/shared/dist/index.js')"
 
       # The root had no aggregate typecheck, so all four packages' `typecheck`
       # scripts went unrun by any single command. `pnpm typecheck` (added to the

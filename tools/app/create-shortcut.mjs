@@ -85,7 +85,8 @@ function findPythonw() {
 
 const python = findPythonw();
 
-// Warn early rather than let the shortcut fail silently on first click.
+// A dedicated PWA window is optional; launch.py falls back to the default
+// browser when this small helper package is not installed.
 try {
   execFileSync(python.replace(/pythonw\.exe$/i, "python.exe"), ["-c", "import pwa_launcher"], {
     stdio: "ignore",
@@ -93,8 +94,8 @@ try {
 } catch {
   console.log(
     "note: `pwa_launcher` isn't importable by this interpreter.\n" +
-      "      The shortcut will start the server but can't open the app window.\n" +
-      "      Fix with:  pip install pwa-launcher\n",
+      "      The shortcut will open Dispatch in your default browser instead.\n" +
+      "      Optional dedicated-window support: pip install pwa-launcher\n",
   );
 }
 
