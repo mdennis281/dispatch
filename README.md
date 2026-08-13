@@ -2,18 +2,16 @@
 
 [![CI](https://github.com/mdennis281/dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/mdennis281/dispatch/actions/workflows/ci.yml)
 
-Dispatch is a local control plane for running Claude Code and Codex across
-multiple repositories, chats, worktrees, and pull requests. It keeps the work
-on your machine while giving long-running coding agents a focused desktop UI.
+I built this to get the most out of my AI subscriptions. Im not saying it's the best agent CLI harness out there, but it's the best for how I build projects.
 
 ## What it does
 
-- Runs concurrent, steerable agent chats with inline permissions and questions.
-- Creates isolated Git worktrees and tracks each chat's changes and processes.
-- Shows diffs, terminals, sub-apps, pull requests, CI, and review state together.
-- Supports project-scoped agents, skills, MCP servers, workflow policy, and memory.
-- Stores chats and configuration locally; provider authentication stays in the
-  provider's own CLI credential store.
+- Runs concurrent, steerable agent chats with all the bells and whistles you've grown used to.
+- Supports custom, project-level MCPs, Skills, Modes, Agents & Instructions.
+- Cutting-edge chat interface.
+- Robust, per-project memory system.
+- Elegant Github integration with various CICD workflow presets (worktrees recommended).
+- AI assisted project-level custom MCP builder
 
 ## Install the latest release
 
