@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { MessageCircleQuestion, CornerDownLeft, Check, Undo2 } from "lucide-react";
 import type { PermissionRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
@@ -105,6 +105,25 @@ function buildCorrection(
   return out.join("\n");
 }
 
+/**
+ * The radio/checkbox dot. Shared so the custom-answer row is visibly the same
+ * KIND of thing as the listed options — if it drew its own marker they'd drift.
+ */
+function Marker({ checked, multi }: { checked: boolean; multi: boolean }) {
+  return (
+    <span
+      data-marker=""
+      className={cn(
+        "mt-px flex size-4 shrink-0 items-center justify-center border [&_svg]:size-3",
+        multi ? "rounded-[4px]" : "rounded-full",
+        checked ? "border-accent-line bg-accent text-accent-fg" : "border-line-strong text-transparent",
+      )}
+    >
+      <Check />
+    </span>
+  );
+}
+
 type OneAnswer = {
   questionIndex: number;
   optionId?: string;
@@ -153,6 +172,12 @@ export function QuestionCard({ row }: QuestionCardProps) {
   // collide. Free text is likewise per-question.
   const [selected, setSelected] = useState<Record<number, string[]>>({});
   const [freeText, setFreeText] = useState<Record<number, string>>({});
+  // The custom answer is a CHOICE, not a side channel: it has its own radio in
+  // the option list and this is its selected state. Text alone no longer wins —
+  // typing while an option was checked used to silently override it, which read
+  // as the click being ignored.
+  const [custom, setCustom] = useState<Record<number, boolean>>({});
+  const customRefs = useRef<Record<number, HTMLInputElement | null>>({});
   // Extra instructions carried WITH the chosen option (as opposed to freeText,
   // which replaces it).
   const [notes, setNotes] = useState<Record<number, string>>({});
@@ -212,6 +237,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
     }
     setSelected({});
     setFreeText({});
+    setCustom({});
     setNotes({});
     setAnswered(false);
     setCorrected(false);
@@ -229,34 +255,45 @@ export function QuestionCard({ row }: QuestionCardProps) {
     actions.declineQuestion(row.chatId, row.requestId);
   };
 
-  const toggle = (qi: number, id: string, single: boolean) =>
+  const toggle = (qi: number, id: string, single: boolean) => {
+    // On a pick-one question the custom row is just another radio, so choosing a
+    // listed option unchecks it — the typed text stays put in case they come back.
+    if (single) setCustom((c) => (c[qi] ? { ...c, [qi]: false } : c));
     setSelected((s) => {
       const cur = s[qi] ?? [];
       if (single) return { ...s, [qi]: cur.includes(id) ? [] : [id] };
       return { ...s, [qi]: cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id] };
     });
+  };
+
+  /** Check the custom row — from its radio, its label, or the caret landing in it. */
+  const pickCustom = (qi: number, single: boolean) => {
+    if (single) setSelected((s) => (s[qi]?.length ? { ...s, [qi]: [] } : s));
+    setCustom((c) => (c[qi] ? c : { ...c, [qi]: true }));
+  };
 
   const noteFor = (qi: number) => (notes[qi] ?? "").trim() || undefined;
 
   /**
-   * The chosen answer for one question. Free text wins over selected options
-   * (it's an alternative answer); notes ride along with either, since they
-   * qualify the choice rather than replace it.
+   * The chosen answer for one question — whatever is CHECKED, custom included.
+   * On a pick-one question exactly one of them can be, so there's nothing to
+   * arbitrate; on a multi-select the custom text joins the chosen labels.
+   * Notes ride along with either, since they qualify the choice rather than
+   * replace it.
    */
   const valueFor = (qi: number): OneAnswer | null => {
     const nt = noteFor(qi);
     const ft = (freeText[qi] ?? "").trim();
-    if (ft) return { questionIndex: qi, answer: ft, notes: nt };
-    const sel = selected[qi] ?? [];
-    if (sel.length) {
-      return {
-        questionIndex: qi,
-        answer: sel.map((id) => labelOf(qi, id)).join(", "),
-        optionId: sel[0],
-        notes: nt,
-      };
+    // No options offered at all — the text field IS the question, and there's no
+    // radio in front of it to check.
+    if (!questions[qi]?.options.length) {
+      return ft ? { questionIndex: qi, answer: ft, notes: nt } : null;
     }
-    return null;
+    const sel = selected[qi] ?? [];
+    const parts = sel.map((id) => labelOf(qi, id));
+    if (custom[qi] && ft) parts.push(ft);
+    if (!parts.length) return null;
+    return { questionIndex: qi, answer: parts.join(", "), optionId: sel[0], notes: nt };
   };
 
   const answeredCount = questions.filter((_, qi) => valueFor(qi) !== null).length;
@@ -344,7 +381,11 @@ export function QuestionCard({ row }: QuestionCardProps) {
 
         {questions.map((q, qi) => {
           const sel = selected[qi] ?? [];
-          const overridden = (freeText[qi] ?? "").trim().length > 0;
+          // Checked only once there's something to send: an empty custom row is
+          // not an answer (valueFor agrees), so it must not draw a filled radio
+          // next to a Submit that stays disabled.
+          const customSel = (custom[qi] ?? false) && (freeText[qi] ?? "").trim().length > 0;
+          const picked = sel.length + (customSel ? 1 : 0);
           return (
             <div key={qi}>
               <div className="border-t border-line-soft px-3 py-2">
@@ -363,8 +404,8 @@ export function QuestionCard({ row }: QuestionCardProps) {
                 {pending && q.options.length > 0 && (
                   <p className="mt-1 text-xs text-muted">
                     {q.multiSelect ? "Select all that apply" : "Select one"}
-                    {q.multiSelect && sel.length > 0 && (
-                      <span className="text-accent-hi"> · {sel.length} selected</span>
+                    {q.multiSelect && picked > 0 && (
+                      <span className="text-accent-hi"> · {picked} selected</span>
                     )}
                   </p>
                 )}
@@ -385,23 +426,9 @@ export function QuestionCard({ row }: QuestionCardProps) {
                           isSel
                             ? "border-accent-line bg-accent-ghost text-primary"
                             : "border-line bg-panel-2 text-secondary hover:border-line-strong hover:text-primary",
-                          // A typed custom answer replaces the options entirely
-                          // (see valueFor), so they stop looking live rather
-                          // than silently losing to the text field below.
-                          overridden && "opacity-45",
                         )}
                       >
-                        <span
-                          className={cn(
-                            "mt-px flex size-4 shrink-0 items-center justify-center border [&_svg]:size-3",
-                            q.multiSelect ? "rounded-[4px]" : "rounded-full",
-                            isSel
-                              ? "border-accent-line bg-accent text-accent-fg"
-                              : "border-line-strong text-transparent",
-                          )}
-                        >
-                          <Check />
-                        </span>
+                        <Marker checked={isSel} multi={q.multiSelect} />
                         <span className="min-w-0 flex-1">
                           <span className="block text-sm font-medium">{o.label}</span>
                           {o.description && (
@@ -412,27 +439,90 @@ export function QuestionCard({ row }: QuestionCardProps) {
                     );
                   })}
 
-                  {/* Qualifiers, BELOW the choices: both are optional refinements
-                      of the answer above them, and nothing here submits, so
-                      there's no longer a reason to hoist them in front of the
-                      options. Free text replaces the selection; notes ride
-                      along with it. */}
-                  <input
-                    value={freeText[qi] ?? ""}
-                    onChange={(e) => setFreeText((s) => ({ ...s, [qi]: e.target.value }))}
-                    disabled={busy}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && allAnswered) {
-                        e.preventDefault();
-                        submitAll();
-                      }
-                    }}
-                    placeholder={q.options.length ? "…or type a custom answer" : "Type your answer"}
-                    className={cn(
-                      "mt-1 h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-sm text-primary",
-                      "placeholder:text-faint focus:border-line-strong focus:outline-none",
-                    )}
-                  />
+                  {/* The custom answer is the LAST OPTION, not a field beside
+                      them: same row shape, same marker, and checking it unchecks
+                      the rest. It used to be a bare input that silently beat any
+                      option you'd already clicked — the option stayed visibly
+                      selected while the typed text won, so the click looked
+                      ignored. A radio you can see settles which one is going. */}
+                  {q.options.length > 0 ? (
+                    <div
+                      onMouseDown={(e) => {
+                        if (busy) return;
+                        // The marker is the UNCHECK. On a multi-select, dropping
+                        // the custom answer out of the set must not mean deleting
+                        // the text you'd want back — and the listed options each
+                        // uncheck by clicking them again, so this row needs the
+                        // same move. Delegated off the row, since a nested
+                        // button element can't live inside a clickable row.
+                        if (customSel && (e.target as HTMLElement).closest("[data-marker]")) {
+                          e.preventDefault();
+                          setCustom((c) => ({ ...c, [qi]: false }));
+                          return;
+                        }
+                        // Otherwise the whole row is the field: focus it wherever
+                        // you press, but let a press on the input itself place
+                        // the caret normally.
+                        if (e.target !== customRefs.current[qi]) {
+                          e.preventDefault();
+                          customRefs.current[qi]?.focus();
+                        }
+                        pickCustom(qi, !q.multiSelect);
+                      }}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 transition-colors",
+                        customSel
+                          ? "border-accent-line bg-accent-ghost"
+                          : "border-line bg-panel-2 hover:border-line-strong",
+                        busy && "opacity-45",
+                      )}
+                    >
+                      <Marker checked={customSel} multi={q.multiSelect} />
+                      <input
+                        ref={(el) => {
+                          customRefs.current[qi] = el;
+                        }}
+                        value={freeText[qi] ?? ""}
+                        onChange={(e) => {
+                          setFreeText((s) => ({ ...s, [qi]: e.target.value }));
+                          if (e.target.value.trim()) pickCustom(qi, !q.multiSelect);
+                        }}
+                        onFocus={() => pickCustom(qi, !q.multiSelect)}
+                        disabled={busy}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && allAnswered) {
+                            e.preventDefault();
+                            submitAll();
+                          }
+                        }}
+                        placeholder="Type a custom answer"
+                        className={cn(
+                          "min-w-0 flex-1 bg-transparent text-sm font-medium text-primary",
+                          "placeholder:font-normal placeholder:text-faint focus:outline-none",
+                        )}
+                      />
+                    </div>
+                  ) : (
+                    <input
+                      value={freeText[qi] ?? ""}
+                      onChange={(e) => setFreeText((s) => ({ ...s, [qi]: e.target.value }))}
+                      disabled={busy}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && allAnswered) {
+                          e.preventDefault();
+                          submitAll();
+                        }
+                      }}
+                      placeholder="Type your answer"
+                      className={cn(
+                        "h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-sm text-primary",
+                        "placeholder:text-faint focus:border-line-strong focus:outline-none",
+                      )}
+                    />
+                  )}
+
+                  {/* Notes stay a qualifier, below every choice: they ride WITH
+                      whichever option is checked rather than being one. */}
                   <input
                     value={notes[qi] ?? ""}
                     onChange={(e) => setNotes((s) => ({ ...s, [qi]: e.target.value }))}
@@ -445,7 +535,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
                     }}
                     placeholder="Notes (optional) — sent with your answer"
                     className={cn(
-                      "h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-sm text-primary",
+                      "mt-1 h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-sm text-primary",
                       "placeholder:text-faint focus:border-line-strong focus:outline-none",
                     )}
                   />
