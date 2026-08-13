@@ -17,7 +17,7 @@ on your machine while giving long-running coding agents a focused desktop UI.
 
 ## Install the latest release
 
-Prerequisites: Node.js 20+, Python 3, and at least one authenticated agent CLI
+Prerequisites: Node.js 20+, Python 3.10+, and at least one authenticated agent CLI
 (`claude` or `codex`). Git and GitHub CLI are needed for Git/PR features, but a
 Git clone of Dispatch is not.
 

@@ -223,9 +223,9 @@ function run(command, args, options = {}) {
   return String(result.stdout || "").trim();
 }
 
-function commandWorks(command, prefix = []) {
+function commandWorks(command, args = ["--version"]) {
   try {
-    run(command, [...prefix, "--version"], { quiet: true });
+    run(command, args, { quiet: true });
     return true;
   } catch {
     return false;
@@ -234,8 +234,8 @@ function commandWorks(command, prefix = []) {
 
 function pnpmCommand() {
   if (commandWorks("pnpm")) return { command: "pnpm", prefix: [] };
-  if (commandWorks("corepack", ["pnpm"])) return { command: "corepack", prefix: ["pnpm"] };
-  if (commandWorks("npx", ["--yes", `pnpm@${PNPM_VERSION}`])) {
+  if (commandWorks("corepack", ["pnpm", "--version"])) return { command: "corepack", prefix: ["pnpm"] };
+  if (commandWorks("npx", ["--yes", `pnpm@${PNPM_VERSION}`, "--version"])) {
     return { command: "npx", prefix: ["--yes", `pnpm@${PNPM_VERSION}`] };
   }
   throw new Error(`pnpm is unavailable; install pnpm ${PNPM_VERSION} and retry`);
@@ -255,9 +255,10 @@ function installDependencies(payload, pnpm) {
   );
 }
 
-function verifyPayload(payload) {
+export function verifyPayload(payload, { importRuntime = true } = {}) {
   const missing = REQUIRED_PAYLOAD.filter((path) => !existsSync(join(payload, path)));
   if (missing.length) throw new Error(`release payload is incomplete:\n  ${missing.join("\n  ")}`);
+  if (!importRuntime) return;
   run(
     process.execPath,
     ["--input-type=module", "--eval", "await import('./packages/shared/dist/index.js')"],
@@ -270,11 +271,17 @@ function findPython() {
     ? [["py", ["-3"]], ["python", []], ["python3", []]]
     : [["python3", []], ["python", []]];
   for (const [command, prefix] of candidates) {
-    if (commandWorks(command, [...prefix, "-c", "import sys; print(sys.version_info[:2])"])) {
+    if (
+      commandWorks(command, [
+        ...prefix,
+        "-c",
+        "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)",
+      ])
+    ) {
       return { command, prefix };
     }
   }
-  throw new Error("Python 3 is required by the Dispatch launcher but was not found on PATH");
+  throw new Error("Python 3.10+ is required by the Dispatch launcher but was not found on PATH");
 }
 
 function launch(python, launcher, args = []) {
@@ -360,7 +367,10 @@ async function main() {
     mkdirSync(stage, { recursive: true });
     try {
       run("tar", ["-xzf", archivePath, "-C", stage]);
-      verifyPayload(stage);
+      // The archive deliberately has no node_modules yet. At this point verify
+      // structure only; importing shared would turn a valid clean install into
+      // a false failure because zod/yaml have not been installed.
+      verifyPayload(stage, { importRuntime: false });
       const pnpm = pnpmCommand();
       console.log("installing runtime dependencies...");
       installDependencies(stage, pnpm);
