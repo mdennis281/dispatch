@@ -2803,13 +2803,11 @@ export class SessionBroker {
   /**
    * Scan a tool_result's `content` for image blocks the agent received, persist
    * any inline base64 image to the chat's assets dir, and return the resulting
-   * ImageRefs plus a sanitized copy of the content. The bulky base64 payload is
-   * stripped from the persisted block (replaced with a lightweight `asset` ref)
-   * so the JSONL transcript stays small and the text/JSON result view never
-   * dumps megabytes. A remote `url` image source becomes an ImageRef pointing at
-   * the URL and passes through untouched. Kept general: ANY MCP that returns
-   * image content blocks (Claude-in-Chrome screenshots and beyond) renders
-   * inline with no per-tool wiring.
+   * ImageRefs plus a sanitized copy of the content. Claude supplies image bytes
+   * under `source`; Codex MCP results use top-level `data` + `mimeType`, and can
+   * occasionally serialize the whole CallToolResult into a text block. Handle
+   * all three so provider boundaries never turn a screenshot into a megabyte of
+   * base64 in the transcript.
    */
   private async persistContentImages(
     session: LiveSession,
@@ -2821,17 +2819,40 @@ export class SessionBroker {
     for (const raw of content) {
       const block = raw as Record<string, unknown> | null;
       if (!block || typeof block !== "object" || block.type !== "image") {
+        if (block?.type === "text" && typeof block.text === "string") {
+          try {
+            const parsed = JSON.parse(block.text) as Record<string, unknown>;
+            if (parsed && Array.isArray(parsed.content)) {
+              const nested = await this.persistContentImages(session, parsed.content);
+              if (nested.images.length) {
+                images.push(...nested.images);
+                out.push({ ...block, text: JSON.stringify({ ...parsed, content: nested.content }) });
+                continue;
+              }
+            }
+          } catch {
+            // Ordinary text (including non-result JSON) stays byte-for-byte intact.
+          }
+        }
         out.push(raw);
         continue;
       }
       const source = block.source as Record<string, unknown> | undefined;
       const srcType = source ? String(source.type ?? "") : "";
-      if (srcType === "base64" && typeof source?.data === "string") {
+      const directData = typeof block.data === "string" ? block.data : undefined;
+      const base64 = srcType === "base64" ? source?.data : directData;
+      if (typeof base64 === "string") {
         const mime =
-          typeof source.media_type === "string" ? source.media_type : "image/png";
+          typeof source?.media_type === "string"
+            ? source.media_type
+            : typeof block.mimeType === "string"
+              ? block.mimeType
+              : typeof block.mime_type === "string"
+                ? block.mime_type
+                : "image/png";
         try {
           const name = `${this.genId()}${extFromMediaType(mime)}`;
-          const buf = Buffer.from(source.data, "base64");
+          const buf = Buffer.from(base64, "base64");
           const relPath = await this.store.writeChatAsset(session.chatId, name, buf);
           images.push({ id: this.genId(), path: relPath, mimeType: mime });
           out.push({ type: "image", media_type: mime, asset: relPath });

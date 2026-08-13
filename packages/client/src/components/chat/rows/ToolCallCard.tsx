@@ -1,12 +1,14 @@
-import { memo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { ChevronRight, Check, X, FileDiff, FileCode2, Square, Moon } from "lucide-react";
 import type { ToolUseRow, ToolResultRow, TaskStatusRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { toolIcon } from "../toolIcon.js";
 import { ImageThumb } from "./ImageThumb.js";
+import { ImageLightbox } from "./ImageLightbox.js";
 import { PlanBody, parsePlan } from "./PlanCard.js";
 import { ackTaskId } from "../../../lib/subagentRuns.js";
 import { Chip } from "../../ui/Chip.js";
+import { Button } from "../../ui/Button.js";
 import { Spinner } from "../../ui/Spinner.js";
 import { cn } from "../../../lib/cn.js";
 import { parseMcpName, toolLabel, dur, safeJson, kb } from "../../../lib/format.js";
@@ -14,14 +16,51 @@ import { hydrateFullRows } from "../../../stores/index.js";
 import { useChats } from "../../../stores/chats.js";
 import { usePanels } from "../../../stores/panels.js";
 import { toolFileTarget, openCodeViewer } from "../../monaco/index.js";
+import { parseInlineResultImages } from "../../../lib/resultImages.js";
 
 /** Render a tool result payload (string as mono block, object as JSON). */
 function ResultBody({ content }: { content: unknown }) {
+  const parsed = useMemo(() => parseInlineResultImages(content), [content]);
+  const [zoomed, setZoomed] = useState<number | null>(null);
   if (content === undefined || content === null) {
     return <span className="text-faint">— no output —</span>;
   }
-  const text = typeof content === "string" ? content : safeJson(content);
-  return <pre className="whitespace-pre-wrap break-words cm-mono text-secondary">{text}</pre>;
+  const text = typeof parsed.content === "string" ? parsed.content : safeJson(parsed.content);
+  return (
+    <>
+      {parsed.images.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-2">
+          {parsed.images.map((image, index) => {
+            const src = `data:${image.mimeType};base64,${image.data}`;
+            return (
+              <Button
+                key={index}
+                type="button"
+                variant="ghost"
+                onClick={() => setZoomed(index)}
+                className="!h-auto !p-0 overflow-hidden rounded-md border border-line bg-inset outline-none focus-visible:ring-1 focus-visible:ring-accent-line"
+                title="Click to enlarge"
+              >
+                <img
+                  src={src}
+                  alt={`Tool result image ${index + 1}`}
+                  className="block max-h-52 max-w-[240px] object-contain"
+                />
+              </Button>
+            );
+          })}
+        </div>
+      )}
+      <pre className="whitespace-pre-wrap break-words cm-mono text-secondary">{text}</pre>
+      {zoomed !== null && parsed.images[zoomed] && (
+        <ImageLightbox
+          src={`data:${parsed.images[zoomed].mimeType};base64,${parsed.images[zoomed].data}`}
+          name={`Tool result image ${zoomed + 1}`}
+          onClose={() => setZoomed(null)}
+        />
+      )}
+    </>
+  );
 }
 
 /** Trailing "…still loading the rest" hint under a clipped payload. */
