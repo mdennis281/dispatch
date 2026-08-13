@@ -306,7 +306,11 @@ describe("CodexStreamDecoder — usage, turns and errors", () => {
       note("thread/tokenUsage/updated", {
         threadId: "t",
         turnId: "t1",
-        tokenUsage: { total: { totalTokens: 20663 }, last: {}, modelContextWindow: 258400 },
+        tokenUsage: {
+          total: { totalTokens: 61_360_395 },
+          last: { totalTokens: 20663 },
+          modelContextWindow: 258400,
+        },
       }),
     );
     expect(out).toEqual([{ type: "usage", contextTokens: 20663, contextWindow: 258400 }]);
