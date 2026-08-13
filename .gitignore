@@ -8,6 +8,23 @@ dist/
 .agents/
 .claude
 
+# Local credentials and machine-specific overrides. Commit an explicit
+# `*.example` template when the project needs to document one of these.
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials*.json
+secrets*.json
+.npmrc.local
+.netrc
+
 # `.dispatch/` IS committed. The manifest declares sub-apps whose commands point
 # at files in THIS repo, so config and code have to move together — keeping it
 # out of git meant a sub-app could go live referencing a script that hadn't
@@ -31,3 +48,13 @@ packages/client/public/icons/
 # few MB of PNGs per run. The harness itself (tools/verify) is committed.
 .verify-shots/
 .verify-data/
+
+# Compiler and test-runner caches are reproducible output, not source.
+*.tsbuildinfo
+**/test-results/
+**/playwright-report/
+__pycache__/
+*.py[cod]
+
+# One-off local captures. Curated product images belong under docs/assets/.
+.artifacts/

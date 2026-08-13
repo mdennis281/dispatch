@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.0.0",
-  "description": "Dispatch React SPA — the Linear/Zed cockpit (served by @dispatch/server).",
+  "description": "Dispatch React PWA, served by @dispatch/server.",
   "scripts": {
     "dev": "vite",
     "build": "node scripts/generate-brand.mjs && vite build",

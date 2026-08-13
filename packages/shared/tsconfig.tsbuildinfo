@@ -1,1 +1,0 @@
-{"root":["./src/common.ts","./src/domain.ts","./src/env-expand.ts","./src/git.ts","./src/index.ts","./src/limits.ts","./src/mcp.ts","./src/messages.ts","./src/project-config.ts","./src/usage.ts","./src/wire.ts","./src/workflow.ts"],"version":"5.9.3"}
