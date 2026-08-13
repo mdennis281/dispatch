@@ -119,7 +119,7 @@ type AgentDefinition = {
 };
 ```
 
-## CONFIRMED by Phase 0 spikes (see `packages/server/spikes/`)
+## Confirmed during the original SDK evaluation
 
 - **Subscription auth headless: WORKS.** `query()` runs on `~/.claude/.credentials.json` with
   no `ANTHROPIC_API_KEY` — init message reports `apiKeySource: 'none'`, model

@@ -1,17 +1,78 @@
 # Dispatch
 
-A local control plane for Claude Code agents: rich, concurrent multi-chat sessions,
-git-worktree orchestration, a per-worktree subApp runner, and GitHub PR/Actions
-visibility — built on the Claude Agent SDK. Runs entirely on your machine.
+[![CI](https://github.com/mdennis281/dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/mdennis281/dispatch/actions/workflows/ci.yml)
 
-- **Chat is the crown jewel:** streaming, images, effort control, custom agents/modes with
-  their own instructions + permissions, mid-run steering, beautiful MCP call cards,
-  per-message code+conversation rollback, and an embedded Monaco preview/diff.
-- **Workhorse concurrency:** 3+ chats running at once per project, with a global Attention
-  Queue that tells you exactly which chat needs your input.
-- **Projects → subApps:** one repo, many runnable subApps (e.g. game, metrics-server,
-  studio-director), each launchable per branch/worktree on offset ports — with live logs
-  and a ports/orphan reaper for the dev servers that outlive their runner.
+Dispatch is a local control plane for running Claude Code and Codex across
+multiple repositories, chats, worktrees, and pull requests. It keeps the work
+on your machine while giving long-running coding agents a focused desktop UI.
 
-See **[RUNNING.md](./RUNNING.md)** for setup, the UI walkthrough, and how to declare and
-spin up dev-mode processes (subApps).
+## What it does
+
+- Runs concurrent, steerable agent chats with inline permissions and questions.
+- Creates isolated Git worktrees and tracks each chat's changes and processes.
+- Shows diffs, terminals, sub-apps, pull requests, CI, and review state together.
+- Supports project-scoped agents, skills, MCP servers, workflow policy, and memory.
+- Stores chats and configuration locally; provider authentication stays in the
+  provider's own CLI credential store.
+
+## Install the latest release
+
+Prerequisites: Node.js 20+, Python 3.10+, and at least one authenticated agent CLI
+(`claude` or `codex`). Git and GitHub CLI are needed for Git/PR features, but a
+Git clone of Dispatch is not.
+
+Windows PowerShell:
+
+```powershell
+irm https://github.com/mdennis281/dispatch/releases/latest/download/install.ps1 | iex
+```
+
+macOS or Linux:
+
+```sh
+curl -fsSL https://github.com/mdennis281/dispatch/releases/latest/download/install.sh | sh
+```
+
+The bootstrap downloads the latest GitHub Release, verifies its SHA-256 checksum,
+installs runtime dependencies, and starts Dispatch at
+`http://127.0.0.1:4318`. Run the same command again to update. Existing chats and
+configuration live outside the app payload and survive updates.
+
+Use `--version v1.2.3`, `--no-start`, `--no-shortcut`, or `--target <path>` when
+running a downloaded copy of the script. Set `GITHUB_TOKEN` while the repository
+is private.
+
+## Develop from source
+
+```sh
+git clone https://github.com/mdennis281/dispatch.git
+cd dispatch
+corepack pnpm install --frozen-lockfile
+pnpm build
+pnpm test
+pnpm dev
+```
+
+The development server uses `http://127.0.0.1:4319`, so it can run beside the
+installed release on port 4318. See [RUNNING.md](./RUNNING.md) for the full
+developer and operator guide.
+
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `packages/client` | React/Vite desktop PWA |
+| `packages/server` | Fastify API, agent runtimes, Git/worktree orchestration |
+| `packages/shared` | Shared schemas and wire/domain types |
+| `packages/cli` | Project configuration CLI |
+| `tools/app` | Installed-app launcher and developer publishing tools |
+| `tools/release` | Reproducible GitHub Release packaging |
+
+## Security
+
+Dispatch binds to loopback by default. Host mode (`DISPATCH_HOST=0.0.0.0`) has no
+application authentication and should only be used on a trusted network. See
+[SECURITY.md](./SECURITY.md) for credential handling and reporting guidance.
+
+The onboarding and in-app release update work is mapped in
+[docs/ROADMAP.md](./docs/ROADMAP.md).

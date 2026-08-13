@@ -4,7 +4,6 @@
   "type": "module",
   "version": "0.0.0",
   "scripts": {
-    "spike": "tsx spikes/sdk-smoke.ts",
     "dev": "tsx watch --tsconfig tsconfig.dev.json --clear-screen=false --ignore \"**/client/**\" src/dev.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
