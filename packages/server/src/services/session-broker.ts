@@ -3098,7 +3098,6 @@ export class SessionBroker {
     session.query = undefined;
     session.input = undefined;
     session.harnessSession = undefined;
-    session.harnessSession = undefined;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     session.stopping = false;

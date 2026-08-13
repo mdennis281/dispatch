@@ -24,6 +24,7 @@ import { useOverlay } from "../../stores/view.js";
 import { useBrowserNotify, notifyUnavailableReason } from "../../lib/browserNotify.js";
 import { StopDispatch } from "./StopDispatch.js";
 import { cn } from "../../lib/cn.js";
+import { positiveTokenLimit } from "../../lib/harness.js";
 
 /** A compact token-styled on/off switch (no primitive exists yet). */
 function Switch({
@@ -250,8 +251,8 @@ export function SettingsPanel() {
         defaultHarness: draft.harness?.defaultHarness ?? "claude",
         defaults: draft.harness?.defaults ?? {},
         contextLimits: {
-          perChatTokens: draft.harness?.contextLimits?.perChatTokens || undefined,
-          overallTokens: draft.harness?.contextLimits?.overallTokens || undefined,
+          perChatTokens: positiveTokenLimit(draft.harness?.contextLimits?.perChatTokens),
+          overallTokens: positiveTokenLimit(draft.harness?.contextLimits?.overallTokens),
         },
       },
     };
