@@ -57,12 +57,27 @@ for (const relative of files) {
   cpSync(source, target, { recursive: true });
 }
 
-// The release needs only the runtime workspaces. The prebuilt client is static
-// data; excluding its package avoids installing React/Monaco on the end user's
-// machine when the browser bundle already contains them.
+// The release needs only the runtime workspaces. Preserve every policy authored
+// below `packages:` (allowBuilds, minimumReleaseAgeExclude, and future additions)
+// so frozen release installs are governed by the same lockfile rules as source.
+// The prebuilt client is static data; excluding its package avoids installing
+// React/Monaco when the browser bundle already contains them.
+const sourceWorkspace = readFileSync(join(repoRoot, "pnpm-workspace.yaml"), "utf8");
+const releasePackages =
+  "packages:\n" +
+  "  - 'packages/server'\n" +
+  "  - 'packages/shared'\n" +
+  "  - 'packages/cli'\n";
+const releaseWorkspace = sourceWorkspace.replace(
+  /^packages:\s*\r?\n(?:\s+-[^\r\n]*\r?\n)+/,
+  releasePackages,
+);
+if (releaseWorkspace === sourceWorkspace) {
+  throw new Error("pnpm-workspace.yaml has an unrecognised packages block");
+}
 writeFileSync(
   join(output, "pnpm-workspace.yaml"),
-  `packages:\n  - 'packages/server'\n  - 'packages/shared'\n  - 'packages/cli'\nallowBuilds:\n  esbuild: true\n`,
+  releaseWorkspace,
 );
 
 const packageJsonPath = join(output, "package.json");

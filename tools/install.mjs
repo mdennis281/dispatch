@@ -9,6 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  createWriteStream,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -18,6 +19,8 @@ import {
 } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
 import { dirname, join, parse, resolve } from "node:path";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 const DEFAULT_REPO = "mdennis281/dispatch";
 const PNPM_VERSION = "11.5.0";
@@ -150,9 +153,21 @@ async function resolveRelease(repo, requestedVersion) {
 }
 
 async function download(url, path) {
-  const bytes = Buffer.from(await (await fetchOk(url, { headers: { Accept: "application/octet-stream" } })).arrayBuffer());
-  writeFileSync(path, bytes);
-  return bytes;
+  const response = await fetchOk(url, { headers: { Accept: "application/octet-stream" } });
+  if (!response.body) throw new Error(`GitHub returned an empty body for ${url}`);
+  const hash = createHash("sha256");
+  const hashAndPass = new Transform({
+    transform(chunk, _encoding, callback) {
+      hash.update(chunk);
+      callback(null, chunk);
+    },
+  });
+  await pipeline(
+    Readable.fromWeb(response.body),
+    hashAndPass,
+    createWriteStream(path, { flags: "wx" }),
+  );
+  return hash.digest("hex");
 }
 
 function checksumFor(text, filename) {
@@ -312,13 +327,15 @@ async function main() {
   const scratch = join(tmpdir(), `dispatch-download-${randomUUID()}`);
   mkdirSync(scratch, { recursive: true });
   try {
-    const checksumText = (await download(selected.checksums.browser_download_url, join(scratch, "SHA256SUMS"))).toString("utf8");
-    const archiveBytes = await download(selected.archive.browser_download_url, join(scratch, filename));
+    const checksumPath = join(scratch, "SHA256SUMS");
+    await download(selected.checksums.browser_download_url, checksumPath);
+    const checksumText = readFileSync(checksumPath, "utf8");
+    const archivePath = join(scratch, filename);
+    const actual = await download(selected.archive.browser_download_url, archivePath);
     const expected = checksumFor(checksumText, filename);
-    const actual = createHash("sha256").update(archiveBytes).digest("hex");
     if (actual !== expected) throw new Error(`checksum mismatch for ${filename}`);
     console.log(`verified: sha256 ${actual}`);
-    inspectArchive(join(scratch, filename));
+    inspectArchive(archivePath);
     if (args.dryRun) {
       console.log("dry run complete; the installed app was not changed.");
       return;
@@ -329,7 +346,7 @@ async function main() {
     safeRemove(stage, root);
     mkdirSync(stage, { recursive: true });
     try {
-      run("tar", ["-xzf", join(scratch, filename), "-C", stage]);
+      run("tar", ["-xzf", archivePath, "-C", stage]);
       verifyPayload(stage);
       const pnpm = pnpmCommand();
       console.log("installing runtime dependencies...");

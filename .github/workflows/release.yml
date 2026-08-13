@@ -64,6 +64,7 @@ jobs:
           release/SHA256SUMS
           install.ps1
           install.sh
+          tools/install.mjs
           --verify-tag
           --generate-notes
           --title "Dispatch ${{ github.ref_name }}"

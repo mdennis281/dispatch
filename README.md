@@ -24,13 +24,13 @@ Git clone of Dispatch is not.
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/mdennis281/dispatch/main/install.ps1 | iex
+irm https://github.com/mdennis281/dispatch/releases/latest/download/install.ps1 | iex
 ```
 
 macOS or Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mdennis281/dispatch/main/install.sh | sh
+curl -fsSL https://github.com/mdennis281/dispatch/releases/latest/download/install.sh | sh
 ```
 
 The bootstrap downloads the latest GitHub Release, verifies its SHA-256 checksum,

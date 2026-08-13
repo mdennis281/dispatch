@@ -6,7 +6,26 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-installer_url="${DISPATCH_INSTALLER_URL:-https://raw.githubusercontent.com/mdennis281/dispatch/main/tools/install.mjs}"
+release_tag=""
+expect_version=0
+for arg in "$@"; do
+  if [ "$expect_version" -eq 1 ]; then
+    release_tag="$arg"
+    break
+  fi
+  if [ "$arg" = "--version" ]; then expect_version=1; fi
+done
+if [ -n "$release_tag" ] && [ "${release_tag#v}" = "$release_tag" ]; then
+  release_tag="v$release_tag"
+fi
+
+if [ -n "${DISPATCH_INSTALLER_URL:-}" ]; then
+  installer_url="$DISPATCH_INSTALLER_URL"
+elif [ -n "$release_tag" ]; then
+  installer_url="https://github.com/mdennis281/dispatch/releases/download/$release_tag/install.mjs"
+else
+  installer_url="https://github.com/mdennis281/dispatch/releases/latest/download/install.mjs"
+fi
 installer_path="$(mktemp "${TMPDIR:-/tmp}/dispatch-installer.XXXXXX.mjs")"
 trap 'rm -f "$installer_path"' EXIT HUP INT TERM
 
