@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Assemble the minimal, platform-neutral payload published in a GitHub Release. */
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -27,6 +27,15 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 const output = resolve(args.out);
+const generatedRoots = [join(repoRoot, ".artifacts"), join(repoRoot, "release")];
+const isGeneratedOutput = generatedRoots.some(
+  (root) => output === root || output.startsWith(`${root}${sep}`),
+);
+if (!isGeneratedOutput) {
+  throw new Error(
+    `refusing to replace --out outside ${generatedRoots.join(" or ")}: ${output}`,
+  );
+}
 rmSync(output, { recursive: true, force: true });
 mkdirSync(output, { recursive: true });
 
