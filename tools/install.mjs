@@ -21,6 +21,7 @@ import { homedir, platform, tmpdir } from "node:os";
 import { dirname, join, parse, resolve } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_REPO = "mdennis281/dispatch";
 const PNPM_VERSION = "11.5.0";
@@ -178,7 +179,7 @@ function checksumFor(text, filename) {
   throw new Error(`SHA256SUMS has no entry for ${filename}`);
 }
 
-function inspectArchive(path) {
+export function inspectArchive(path) {
   const listing = run("tar", ["-tzf", path], { quiet: true });
   for (const raw of listing.split(/\r?\n/).filter(Boolean)) {
     const normalized = raw.replace(/\\/g, "/");
@@ -189,6 +190,18 @@ function inspectArchive(path) {
       parts.includes("..")
     ) {
       throw new Error(`release archive contains an unsafe path: ${raw}`);
+    }
+  }
+
+  // A lexical path check is not enough: `link -> ../outside` followed by
+  // `link/file` can redirect a later extraction outside stage/. Release
+  // payloads need only ordinary files and directories, so reject every other
+  // tar entry type before extraction (symlink, hardlink, device, FIFO, etc.).
+  const verboseListing = run("tar", ["-tvzf", path], { quiet: true });
+  for (const line of verboseListing.split(/\r?\n/).filter(Boolean)) {
+    const kind = line[0];
+    if (kind !== "-" && kind !== "d") {
+      throw new Error(`release archive contains an unsupported link/device entry: ${line}`);
     }
   }
 }
@@ -460,7 +473,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(`\nDispatch install failed: ${error.message}`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`\nDispatch install failed: ${error.message}`);
+    process.exitCode = 1;
+  });
+}
