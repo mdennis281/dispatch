@@ -394,6 +394,9 @@ describe("ProcessService.listForProject", () => {
         { pid: 800, ppid: 500 }, // a wrapper
         { pid: 900, ppid: 800 }, // the listener
       ],
+      // The ancestor tree-kill reaped the descendant. Do not let a coincidental
+      // real OS process with this fake test PID make the assertion machine-dependent.
+      alive: () => false,
     });
     const res = await svc.killPids([500, 900]);
     expect(killed).toEqual([500]);
