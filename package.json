@@ -11,7 +11,7 @@
     "build": "pnpm -r build",
     "start": "pnpm --filter @dispatch/server start",
     "dev": "pnpm --filter @dispatch/server dev",
-    "test": "pnpm --filter @dispatch/shared exec vitest run && pnpm --filter @dispatch/cli exec vitest run && pnpm --filter @dispatch/server exec vitest run",
+    "test": "pnpm --filter @dispatch/shared exec vitest run && pnpm --filter @dispatch/cli exec vitest run && pnpm --filter @dispatch/server exec vitest run && node --test tools/install.test.mjs",
     "typecheck": "pnpm -r typecheck",
     "verify": "node tools/verify/shot.mjs",
     "dispatch": "node packages/cli/dist/index.js",

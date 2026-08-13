@@ -21,6 +21,7 @@ import { homedir, platform, tmpdir } from "node:os";
 import { dirname, join, parse, resolve } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_REPO = "mdennis281/dispatch";
@@ -92,8 +93,8 @@ function assertNode() {
   }
 }
 
-function desktopRoot(override) {
-  if (override) return resolve(override);
+export function desktopRoot(override) {
+  if (override) return resolve(process.env.DISPATCH_INSTALL_CWD || process.cwd(), override);
   if (process.env.DISPATCH_HOME) return resolve(process.env.DISPATCH_HOME);
   const base =
     process.env.LOCALAPPDATA ||
@@ -206,14 +207,26 @@ export function inspectArchive(path) {
   }
 }
 
-function run(command, args, options = {}) {
+export function run(command, args, options = {}) {
   if (!options.quiet) console.log(`  $ ${command} ${args.join(" ")}`);
-  const result = spawnSync(command, args, {
+  const useShell = platform() === "win32" && /^(pnpm|npx|corepack)$/.test(command);
+  // Node 24+ warns when an argv array is combined with `shell: true` because
+  // arbitrary arguments would be concatenated without escaping. Every shell
+  // invocation here is an internal, fixed pnpm probe/install command, so pass
+  // one command string and no separate argv array. Other commands still bypass
+  // the shell entirely.
+  const shellTokens = [command, ...args];
+  if (useShell && shellTokens.some((token) => !/^[A-Za-z0-9@._=+-]+$/.test(token))) {
+    throw new Error(`refusing unsafe package-manager shell argument: ${args.join(" ")}`);
+  }
+  const executable = useShell ? shellTokens.join(" ") : command;
+  const commandArgs = useShell ? [] : args;
+  const result = spawnSync(executable, commandArgs, {
     cwd: options.cwd,
     env: process.env,
     encoding: "utf8",
     stdio: options.quiet ? "pipe" : "inherit",
-    shell: platform() === "win32" && /^(pnpm|npx|corepack)$/.test(command),
+    shell: useShell,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -221,6 +234,36 @@ function run(command, args, options = {}) {
     throw new Error(`${command} exited ${result.status}${detail}`);
   }
   return String(result.stdout || "").trim();
+}
+
+export async function renameWithRetry(
+  source,
+  destination,
+  {
+    attempts = platform() === "win32" ? 41 : 1,
+    delayMs = 250,
+    rename = renameSync,
+    wait = delay,
+  } = {},
+) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      rename(source, destination);
+      return;
+    } catch (error) {
+      const retryable = ["EPERM", "EACCES", "EBUSY", "ENOTEMPTY"].includes(error?.code);
+      if (!retryable || attempt >= attempts) {
+        if (retryable) {
+          throw new Error(
+            `${error.message}\nWindows still has the installed app open. Close terminals whose current directory is inside ${source}, then retry.`,
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+      await wait(delayMs);
+    }
+  }
 }
 
 function commandWorks(command, args = ["--version"]) {
@@ -388,13 +431,18 @@ async function main() {
       const stampPath = join(root, "current.json");
       const previousStamp = existsSync(stampPath) ? readFileSync(stampPath) : null;
       let movedOld = false;
+      let movedStage = false;
       try {
         if (existsSync(app)) {
           mkdirSync(dirname(backup), { recursive: true });
-          renameSync(app, backup);
+          // Antivirus and a just-exited supervisor can retain Windows handles
+          // briefly after shutdown. Retrying the atomic rename avoids turning
+          // that ordinary teardown lag into a failed update.
+          await renameWithRetry(app, backup);
           movedOld = true;
         }
-        renameSync(stage, app);
+        await renameWithRetry(stage, app);
+        movedStage = true;
 
         // pnpm's Windows junctions contain absolute paths. Re-run the cheap,
         // already-warm install after the rename so they point at app/, not stage/.
@@ -451,9 +499,9 @@ async function main() {
                 try { launch(python, failedLauncher, ["--stop", "--target", root]); } catch {}
               }
               const failed = join(root, "backups", `failed-${selected.release.tag_name}-${Date.now()}`);
-              renameSync(app, failed);
+              await renameWithRetry(app, failed);
             }
-            renameSync(backup, app);
+            await renameWithRetry(backup, app);
             if (previousStamp) writeFileSync(stampPath, previousStamp);
             else rmSync(stampPath, { force: true });
             if (args.start) {
@@ -465,9 +513,12 @@ async function main() {
         } else if (!movedOld) {
           if (previousStamp) writeFileSync(stampPath, previousStamp);
           else rmSync(stampPath, { force: true });
-          if (existsSync(app)) {
+          // If moving the existing app failed, it is still the good installed
+          // payload. Do not mislabel it as a failed new release or mask the
+          // original error with a second rename of the same locked directory.
+          if (movedStage && existsSync(app)) {
             mkdirSync(join(root, "backups"), { recursive: true });
-            renameSync(
+            await renameWithRetry(
               app,
               join(root, "backups", `failed-${selected.release.tag_name}-${Date.now()}`),
             );
