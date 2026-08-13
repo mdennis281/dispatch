@@ -250,6 +250,22 @@ export interface HarnessInput {
   effort?: Effort;
 }
 
+/**
+ * A small, stateless text request owned by a harness.
+ *
+ * This is deliberately separate from {@link HarnessSession}: incidental app
+ * features such as chat titles need one answer, not a persisted/resumable
+ * agent with project tools. Each provider can choose its economical model and
+ * the native way to suppress settings, tools, and history.
+ */
+export interface HarnessTextRequest {
+  prompt: string;
+  /** Lets an adapter choose a purpose-appropriate model and runtime posture. */
+  purpose: "title";
+  /** Wall-clock budget for the complete native request. */
+  timeoutMs?: number;
+}
+
 /* -------------------------------------------------------------- session out */
 
 /** The session handshake — emitted once the runtime is live. */
@@ -496,6 +512,8 @@ export interface Harness {
   listModels(opts?: { refresh?: boolean }): Promise<ModelOption[]>;
   /** Account usage state, or null when this harness can't report it. */
   readLimits(): Promise<HarnessLimits | null>;
+  /** Run a stateless one-shot text request without opening a chat session. */
+  generateText(request: HarnessTextRequest): Promise<string>;
   /** Open a session (lazily — nothing spawns until the first send). */
   createSession(spec: HarnessSessionSpec): HarnessSession;
   /** Release any shared process this harness holds. */

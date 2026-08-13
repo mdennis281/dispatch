@@ -2,11 +2,12 @@ import { describe, it, expect, vi } from "vitest";
 import type { Chat, ChatMessage, WsServerEvent } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
+import type { HarnessRegistry } from "../harness/index.js";
 import {
   TitleService,
-  makeFakeTitleQuery,
+  makeFakeTitleGenerator,
   DEFAULT_CHAT_TITLE,
-  type TitleQueryFn,
+  type TitleGenerateFn,
 } from "./title.js";
 
 /* --------------------------------------------------------------- fixtures */
@@ -51,38 +52,24 @@ function makeStore(initial: Chat | null, messages: ChatMessage[]) {
   return { store, saves };
 }
 
-/** A service wired to a real bus (capturing events) + the given query. */
+/** A service wired to a real bus (capturing events) + the given generator. */
 function make(
   initial: Chat | null,
   messages: ChatMessage[],
-  query: TitleQueryFn = makeFakeTitleQuery(),
+  generateText: TitleGenerateFn = makeFakeTitleGenerator(),
 ) {
   const bus = new EventBus();
   const events: WsServerEvent[] = [];
   bus.subscribe((e) => events.push(e));
   const { store, saves } = makeStore(initial, messages);
   // `sleep` is a no-op: retry backoff is real seconds we don't want to spend.
-  const svc = new TitleService({ store, bus, query, now: () => 42, sleep: async () => {} });
+  const svc = new TitleService({ store, bus, generateText, now: () => 42, sleep: async () => {} });
   return { svc, saves, events };
 }
 
-/** A query that yields `text` as a one-shot stream. */
-function fixedQuery(text: string): TitleQueryFn {
-  return () => {
-    async function* gen(): AsyncGenerator<unknown, void> {
-      yield {
-        type: "assistant",
-        message: { role: "assistant", content: [{ type: "text", text }] },
-      };
-      yield { type: "result", subtype: "success", is_error: false, result: text };
-    }
-    const g = gen() as unknown as Record<string, unknown>;
-    g.interrupt = async () => {};
-    g.setModel = async () => {};
-    g.setPermissionMode = async () => {};
-    g.setMaxThinkingTokens = async () => {};
-    return g as never;
-  };
+/** A generator that returns fixed one-shot text. */
+function fixedGenerator(text: string): TitleGenerateFn {
+  return async () => text;
 }
 
 /* ------------------------------------------------------------------ tests */
@@ -113,6 +100,30 @@ describe("TitleService.maybeGenerateInitialTitle", () => {
     await svc.maybeGenerateInitialTitle("c1");
     expect(saves).toHaveLength(0);
   });
+
+  it("routes generation through the owning chat's harness", async () => {
+    const current = { ...chat(DEFAULT_CHAT_TITLE), harness: "codex" as const };
+    const { store, saves } = makeStore(current, [user("inspect child agents")]);
+    const generateText = vi.fn(async () => "Codex Agent Detail");
+    const resolve = vi.fn(() => ({
+      harness: { generateText },
+      fellBack: false,
+    }));
+    const svc = new TitleService({
+      store,
+      bus: new EventBus(),
+      harnesses: { resolve } as unknown as Pick<HarnessRegistry, "resolve">,
+      sleep: async () => {},
+    });
+
+    await svc.maybeGenerateInitialTitle("c1");
+
+    expect(resolve).toHaveBeenCalledWith("codex");
+    expect(generateText).toHaveBeenCalledWith(
+      expect.objectContaining({ purpose: "title", prompt: expect.any(String) }),
+    );
+    expect(saves[0]?.title).toBe("Codex Agent Detail");
+  });
 });
 
 describe("TitleService.regenerate", () => {
@@ -139,7 +150,7 @@ describe("TitleService.regenerate", () => {
 
 describe("TitleService error handling", () => {
   it("swallows a query failure: no throw, no save, emits a best-effort notice", async () => {
-    const throwing: TitleQueryFn = () => {
+    const throwing: TitleGenerateFn = async () => {
       throw new Error("sdk exploded");
     };
     const { svc, saves, events } = make(
@@ -156,23 +167,23 @@ describe("TitleService error handling", () => {
   });
 
   it("dedupes concurrent generations onto a single query", async () => {
-    const query = vi.fn(makeFakeTitleQuery());
-    const { svc } = make(chat(DEFAULT_CHAT_TITLE), [user("dedupe me")], query);
+    const generateText = vi.fn(makeFakeTitleGenerator());
+    const { svc } = make(chat(DEFAULT_CHAT_TITLE), [user("dedupe me")], generateText);
     await Promise.all([
       svc.maybeGenerateInitialTitle("c1"),
       svc.maybeGenerateInitialTitle("c1"),
     ]);
-    expect(query).toHaveBeenCalledTimes(1);
+    expect(generateText).toHaveBeenCalledTimes(1);
   });
 
   it("retries a transient failure instead of surrendering the title", async () => {
     // The failure this exists for: a `claude` spawn that lost a race to a real
     // turn's spawn and blew our deadline. The next attempt usually wins.
-    const ok = makeFakeTitleQuery();
+    const ok = makeFakeTitleGenerator();
     let calls = 0;
-    const flaky: TitleQueryFn = (params) => {
+    const flaky: TitleGenerateFn = (chat, prompt, timeoutMs) => {
       if (++calls === 1) throw new Error("Operation aborted");
-      return ok(params);
+      return ok(chat, prompt, timeoutMs);
     };
     const { svc, saves, events } = make(
       chat(DEFAULT_CHAT_TITLE),
@@ -189,9 +200,10 @@ describe("TitleService error handling", () => {
   });
 
   it("retries an empty answer rather than silently leaving the default title", async () => {
-    const ok = makeFakeTitleQuery();
+    const ok = makeFakeTitleGenerator();
     let calls = 0;
-    const blank: TitleQueryFn = (params) => (++calls === 1 ? fixedQuery("")(params) : ok(params));
+    const blank: TitleGenerateFn = (chat, prompt, timeoutMs) =>
+      ++calls === 1 ? fixedGenerator("")(chat, prompt, timeoutMs) : ok(chat, prompt, timeoutMs);
     const { svc, saves } = make(chat(DEFAULT_CHAT_TITLE), [user("name this chat")], blank);
 
     await svc.maybeGenerateInitialTitle("c1");
@@ -201,7 +213,7 @@ describe("TitleService error handling", () => {
   });
 
   it("notices only once the whole retry budget is spent", async () => {
-    const throwing: TitleQueryFn = () => {
+    const throwing: TitleGenerateFn = async () => {
       throw new Error("sdk exploded");
     };
     const { svc, events } = make(chat(DEFAULT_CHAT_TITLE), [user("hi")], throwing);
@@ -228,7 +240,12 @@ describe("TitleService — races", () => {
     const bus = new EventBus();
     const saved: unknown[] = [];
     bus.subscribe((e) => e.type === "chat-update" && saved.push(e));
-    const svc = new TitleService({ store, bus, query: makeFakeTitleQuery(), sleep: async () => {} });
+    const svc = new TitleService({
+      store,
+      bus,
+      generateText: makeFakeTitleGenerator(),
+      sleep: async () => {},
+    });
 
     await svc.maybeGenerateInitialTitle("c1");
 
@@ -240,24 +257,13 @@ describe("TitleService — contention", () => {
   it("caps concurrent queries so title spawns can't starve each other", async () => {
     let live = 0;
     let peak = 0;
-    const gated: TitleQueryFn = () => {
-      async function* gen(): AsyncGenerator<unknown, void> {
-        live++;
-        peak = Math.max(peak, live);
-        // Yield to the loop so every started query overlaps the others.
-        await new Promise((r) => setTimeout(r, 0));
-        yield {
-          type: "assistant",
-          message: { role: "assistant", content: [{ type: "text", text: "A Title" }] },
-        };
-        live--;
-      }
-      const g = gen() as unknown as Record<string, unknown>;
-      g.interrupt = async () => {};
-      g.setModel = async () => {};
-      g.setPermissionMode = async () => {};
-      g.setMaxThinkingTokens = async () => {};
-      return g as never;
+    const gated: TitleGenerateFn = async () => {
+      live++;
+      peak = Math.max(peak, live);
+      // Yield to the loop so every started query overlaps the others.
+      await new Promise((r) => setTimeout(r, 0));
+      live--;
+      return "A Title";
     };
     // One service, six DIFFERENT chats finishing at once — per-chat dedupe does
     // nothing here, which is exactly the case that produced the abort storm.
@@ -267,7 +273,7 @@ describe("TitleService — contention", () => {
       readMessages: async () => [user("do the thing")],
       saveChat: async (c: Chat) => c,
     } as unknown as Store;
-    const svc = new TitleService({ store, bus, query: gated, sleep: async () => {} });
+    const svc = new TitleService({ store, bus, generateText: gated, sleep: async () => {} });
 
     await Promise.all(
       Array.from({ length: 6 }, (_, i) => svc.maybeGenerateInitialTitle(`c${i}`)),
@@ -279,21 +285,10 @@ describe("TitleService — contention", () => {
   it("runs a user's regenerate that collided with an automatic run", async () => {
     // Dropping it is why "clicked Regenerate title, nothing happened".
     let calls = 0;
-    const slow: TitleQueryFn = () => {
-      async function* gen(): AsyncGenerator<unknown, void> {
-        calls++;
-        await new Promise((r) => setTimeout(r, 5));
-        yield {
-          type: "assistant",
-          message: { role: "assistant", content: [{ type: "text", text: `Title ${calls}` }] },
-        };
-      }
-      const g = gen() as unknown as Record<string, unknown>;
-      g.interrupt = async () => {};
-      g.setModel = async () => {};
-      g.setPermissionMode = async () => {};
-      g.setMaxThinkingTokens = async () => {};
-      return g as never;
+    const slow: TitleGenerateFn = async () => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 5));
+      return `Title ${calls}`;
     };
     const { svc, saves } = make(chat(DEFAULT_CHAT_TITLE), [user("rename me")], slow);
 
@@ -405,7 +400,7 @@ describe("TitleService.regenerate — title prefixes", () => {
     const { svc, saves } = make(
       chat("**sweep**: 12 files"),
       [user("fix the flake")],
-      fixedQuery("Fix **the** flake"),
+      fixedGenerator("Fix **the** flake"),
     );
 
     await svc.regenerate("c1");

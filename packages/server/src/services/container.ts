@@ -25,7 +25,7 @@ import { MemoryHistoryService } from "./memory-history.js";
 import { ProjectConfigService } from "./project-config.js";
 import { ProjectConfigArchive } from "./project-config-archive.js";
 import { makeFakeQuery } from "./fake-sdk.js";
-import { TitleService, makeFakeTitleQuery } from "./title.js";
+import { TitleService, makeFakeTitleGenerator } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
 import { WorktreeService } from "./worktree.js";
 import { WorktreeDetector } from "./worktree-detector.js";
@@ -223,8 +223,9 @@ export function createServices(
     new TitleService({
       store,
       bus,
-      query:
-        process.env.DISPATCH_FAKE_SDK === "1" ? makeFakeTitleQuery() : undefined,
+      harnesses,
+      generateText:
+        process.env.DISPATCH_FAKE_SDK === "1" ? makeFakeTitleGenerator() : undefined,
     });
   const checkpoints =
     overrides.checkpoints ?? new CheckpointService({ store, bus });

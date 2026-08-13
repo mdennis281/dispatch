@@ -23,6 +23,7 @@ import type {
   HarnessRuntimeInfo,
   HarnessSession,
   HarnessSessionSpec,
+  HarnessTextRequest,
 } from "../types.js";
 import { codexRuntime } from "./runtime.js";
 import { acquireCodexConnection, type CodexConnection } from "./rpc.js";
@@ -171,6 +172,77 @@ export class CodexHarness implements Harness {
       return this.limitsCache ?? null;
     } finally {
       held?.release();
+    }
+  }
+
+  async generateText(request: HarnessTextRequest): Promise<string> {
+    // Provider-owned model choice is the point of this seam: TitleService does
+    // not need to know that Codex has concrete ids while Claude has aliases.
+    const models = await this.listModels();
+    const model = models.find((m) => m.hint === "fast")?.value;
+    const held = this.connect();
+    let threadId: string | undefined;
+    let off: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const opened = await held.conn.call<{ thread?: { id?: string } }>("thread/start", {
+        model,
+        approvalPolicy: "never",
+        sandbox: "read-only",
+        // A title must not appear in the user's Codex history or inherit a
+        // project's agent instructions. It is a completion, not a chat.
+        ephemeral: true,
+        environments: [],
+        dynamicTools: [],
+        baseInstructions:
+          "Return only the requested text. Do not use tools, inspect files, or explain your answer.",
+      });
+      threadId = opened.thread?.id;
+      if (!threadId) throw new Error("codex returned a title thread with no id");
+
+      let text = "";
+      const completed = new Promise<string>((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`timed out after ${Math.round((request.timeoutMs ?? 60_000) / 1000)}s`)),
+          request.timeoutMs ?? 60_000,
+        );
+        off = held.conn.onThread(threadId!, (frame) => {
+          const params = (frame.params ?? {}) as Record<string, unknown>;
+          if (frame.method === "item/completed") {
+            const item = params.item as Record<string, unknown> | undefined;
+            if (item?.type === "agentMessage" && typeof item.text === "string") text += item.text;
+          } else if (frame.method === "turn/completed") {
+            const turn = params.turn as Record<string, unknown> | undefined;
+            const status = String(turn?.status ?? "completed");
+            if (status === "completed") resolve(text.trim());
+            else {
+              const error = turn?.error as { message?: unknown } | undefined;
+              reject(new Error(typeof error?.message === "string" ? error.message : status));
+            }
+          } else if (frame.method === "error" && !params.willRetry) {
+            const error = params.error as { message?: unknown } | undefined;
+            reject(new Error(typeof error?.message === "string" ? error.message : "Codex error"));
+          }
+        });
+      });
+
+      await held.conn.call("turn/start", {
+        threadId,
+        input: [{ type: "text", text: request.prompt, text_elements: [] }],
+        model,
+        effort: "low",
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "readOnly" },
+        environments: [],
+      });
+      return await completed;
+    } finally {
+      if (timer) clearTimeout(timer);
+      off?.();
+      if (threadId) {
+        await held.conn.call("thread/unsubscribe", { threadId }).catch(() => {});
+      }
+      held.release();
     }
   }
 

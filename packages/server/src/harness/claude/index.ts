@@ -13,8 +13,10 @@
  * until…" card for Claude and a live meter for Codex, instead of an empty meter
  * for both.
  */
+import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { listAvailableModels } from "../../services/models.js";
-import { claudeRuntime } from "../../services/runtime.js";
+import { claudeExecutableOption, claudeRuntime } from "../../services/runtime.js";
 import { parseSessionLimit, type ModelOption } from "@dispatch/shared";
 import type {
   Harness,
@@ -24,6 +26,7 @@ import type {
   HarnessRuntimeInfo,
   HarnessSession,
   HarnessSessionSpec,
+  HarnessTextRequest,
 } from "../types.js";
 import { ClaudeSession, type QueryFn } from "./session.js";
 
@@ -49,6 +52,9 @@ export interface ClaudeHarnessOpts {
   query?: QueryFn;
   genId?: () => string;
 }
+
+/** Titles never justify spending a full-size Claude model. */
+const CLAUDE_TITLE_MODEL = "claude-haiku-4-5";
 
 export class ClaudeHarness implements Harness {
   readonly kind = "claude" as const;
@@ -80,6 +86,51 @@ export class ClaudeHarness implements Harness {
 
   async readLimits(): Promise<HarnessLimits | null> {
     return null;
+  }
+
+  async generateText(request: HarnessTextRequest): Promise<string> {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), request.timeoutMs ?? 60_000);
+    const query = this.opts.query ?? sdkQuery;
+    let text = "";
+    let result = "";
+    try {
+      const stream = query({
+        prompt: request.prompt,
+        options: {
+          model: CLAUDE_TITLE_MODEL,
+          settingSources: [],
+          maxTurns: 1,
+          abortController: abort,
+          ...claudeExecutableOption(),
+        },
+      });
+      for await (const raw of stream) {
+        const msg = raw as SDKMessage & Record<string, unknown>;
+        if (msg.type === "assistant") {
+          const content = (msg as unknown as { message?: { content?: unknown } }).message?.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block && typeof block === "object" && (block as { type?: string }).type === "text") {
+                text += String((block as { text?: unknown }).text ?? "");
+              }
+            }
+          }
+        } else if (msg.type === "result" && typeof msg.result === "string") {
+          result = msg.result;
+        }
+      }
+    } catch (err) {
+      const partial = text.trim() || result.trim();
+      if (partial) return partial;
+      if (abort.signal.aborted) {
+        throw new Error(`timed out after ${Math.round((request.timeoutMs ?? 60_000) / 1000)}s`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+    return text.trim() || result.trim();
   }
 
   createSession(spec: HarnessSessionSpec): HarnessSession {
