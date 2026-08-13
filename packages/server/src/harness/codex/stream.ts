@@ -434,10 +434,12 @@ export class CodexStreamDecoder {
   private onTokenUsage(p: Record<string, unknown>): HarnessEvent[] {
     const usage = p.tokenUsage as Record<string, unknown> | undefined;
     if (!usage) return [];
-    const total = usage.total as Record<string, unknown> | undefined;
+    const last = usage.last as Record<string, unknown> | undefined;
     const window = usage.modelContextWindow;
     if (typeof window === "number") this.contextWindow = window;
-    const tokens = total?.totalTokens;
+    // `total` is cumulative across every request in the thread and can grow to
+    // millions; only `last` describes the request currently occupying context.
+    const tokens = last?.totalTokens;
     if (typeof tokens === "number") this.lastContextTokens = tokens;
     return [
       {
