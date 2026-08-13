@@ -159,7 +159,11 @@ describe("SessionBroker neutral harness path", () => {
 
     broker.create(chat, null, join(dir, "repo"));
     await broker.sendMessage(chat.id, "inspect this", {
-      images: [{ id: "image-1", path, mimeType: "image/png" }],
+      images: [
+        { id: "image-1", path, mimeType: "image/png" },
+        { id: "image-2", path: "docs/repo-relative.png", mimeType: "image/png" },
+        { id: "image-3", path: "assets/..", mimeType: "image/png" },
+      ],
     });
     await broker.waitFor(chat.id, "idle");
 
@@ -169,6 +173,8 @@ describe("SessionBroker neutral harness path", () => {
         path: join(store.chatAssetsDir(chat.id), "shot.png"),
         mimeType: "image/png",
       },
+      { id: "image-2", path: "docs/repo-relative.png", mimeType: "image/png" },
+      { id: "image-3", path: "assets/..", mimeType: "image/png" },
     ]);
   });
 

@@ -25,7 +25,7 @@
  * subprocess or network.
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
-import { basename, isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import type {
   Options,
   Query,
@@ -1435,13 +1435,15 @@ export class SessionBroker {
     return out;
   }
 
-  /** Give local harnesses the real on-disk path while persisted refs stay portable. */
+  /** Resolve only Store's portable `assets/<name>` refs; other relative paths belong to the harness cwd. */
   private resolveHarnessImages(chatId: string, images?: ImageRef[]): ImageRef[] | undefined {
-    return images?.map((img) =>
-      /^(https?:|data:)/.test(img.path) || isAbsolute(img.path)
+    return images?.map((img) => {
+      const match = /^assets[\\/]([^\\/]+)$/.exec(img.path);
+      const name = match?.[1];
+      return !name || name === "." || name === ".."
         ? img
-        : { ...img, path: join(this.store.chatAssetsDir(chatId), basename(img.path)) },
-    );
+        : { ...img, path: join(this.store.chatAssetsDir(chatId), name) };
+    });
   }
 
   /** Answer a permission request; resolves the blocked `canUseTool` promise. */
