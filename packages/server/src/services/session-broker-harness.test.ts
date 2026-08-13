@@ -143,6 +143,41 @@ describe("SessionBroker neutral harness path", () => {
     ]);
   });
 
+  it("resolves chat-relative image refs before sending them to Codex", async () => {
+    const chat = await store.saveChat({
+      id: "chat-image",
+      projectId: "project-1",
+      title: "Codex image",
+      modeId: "plan",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    const path = await store.writeChatAsset(chat.id, "shot.png", Buffer.from("image"));
+
+    broker.create(chat, null, join(dir, "repo"));
+    await broker.sendMessage(chat.id, "inspect this", {
+      images: [
+        { id: "image-1", path, mimeType: "image/png" },
+        { id: "image-2", path: "docs/repo-relative.png", mimeType: "image/png" },
+        { id: "image-3", path: "assets/..", mimeType: "image/png" },
+      ],
+    });
+    await broker.waitFor(chat.id, "idle");
+
+    expect(session.sent[0]?.images).toEqual([
+      {
+        id: "image-1",
+        path: join(store.chatAssetsDir(chat.id), "shot.png"),
+        mimeType: "image/png",
+      },
+      { id: "image-2", path: "docs/repo-relative.png", mimeType: "image/png" },
+      { id: "image-3", path: "assets/..", mimeType: "image/png" },
+    ]);
+  });
+
   it("switches providers without reusing an incompatible native session", async () => {
     const chat = await store.saveChat({
       id: "chat-2",

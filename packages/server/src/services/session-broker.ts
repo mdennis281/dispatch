@@ -25,6 +25,7 @@
  * subprocess or network.
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
+import { join } from "node:path";
 import type {
   Options,
   Query,
@@ -1434,6 +1435,17 @@ export class SessionBroker {
     return out;
   }
 
+  /** Resolve only Store's portable `assets/<name>` refs; other relative paths belong to the harness cwd. */
+  private resolveHarnessImages(chatId: string, images?: ImageRef[]): ImageRef[] | undefined {
+    return images?.map((img) => {
+      const match = /^assets[\\/]([^\\/]+)$/.exec(img.path);
+      const name = match?.[1];
+      return !name || name === "." || name === ".."
+        ? img
+        : { ...img, path: join(this.store.chatAssetsDir(chatId), name) };
+    });
+  }
+
   /** Answer a permission request; resolves the blocked `canUseTool` promise. */
   resolvePermission(requestId: string, resolution: PermissionResolution): boolean {
     for (const session of this.sessions.values()) {
@@ -2111,7 +2123,7 @@ export class SessionBroker {
       for (const item of session.outbox) {
         session.harnessSession.send({
           text: item.memoryContext ? `${item.memoryContext}\n\n${item.text}` : item.text,
-          images: item.images,
+          images: this.resolveHarnessImages(session.chatId, item.images),
           priority: item.priority,
           effort: session.effort,
         });
