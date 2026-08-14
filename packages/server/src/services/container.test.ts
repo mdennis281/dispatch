@@ -3,7 +3,11 @@ import type { WsServerEvent } from "@dispatch/shared";
 import type { ServerConfig } from "../config.js";
 import type { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
-import { createServices, type ServiceOverrides } from "./container.js";
+import {
+  createServices,
+  recoverInterruptedChatStatuses,
+  type ServiceOverrides,
+} from "./container.js";
 
 /**
  * A stub whose every accessed member is an async no-op function, EXCEPT the
@@ -21,6 +25,25 @@ function stub<T = unknown>(extra: Record<string, unknown> = {}): T {
 }
 
 describe("createServices().start() resilience", () => {
+  it("marks live statuses left by a killed process as errors on restart", async () => {
+    const patchChat = vi.fn(async () => null);
+    const store = stub<Store>({
+      listChats: async () => [
+        { id: "running", status: "running" },
+        { id: "waiting", status: "waiting" },
+        { id: "idle", status: "idle" },
+        { id: "done", status: "done" },
+      ],
+      patchChat,
+    });
+
+    await recoverInterruptedChatStatuses(store);
+
+    expect(patchChat).toHaveBeenCalledTimes(2);
+    expect(patchChat).toHaveBeenCalledWith("running", { status: "error" });
+    expect(patchChat).toHaveBeenCalledWith("waiting", { status: "error" });
+  });
+
   it("still wires the AI-title trigger when a best-effort service throws on start", async () => {
     const bus = new EventBus();
     const maybeGenerateInitialTitle = vi.fn(async () => {});

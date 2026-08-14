@@ -122,6 +122,26 @@ export interface Services extends ServiceBase {
   dispose(): Promise<void>;
 }
 
+/**
+ * A hard process exit cannot run broker.dispose(), so any persisted live state
+ * on the next boot represents an interrupted agent. Preserve completed/idle
+ * colors, but turn orphaned running/waiting/queued records red.
+ */
+export async function recoverInterruptedChatStatuses(store: Store): Promise<void> {
+  const chats = (await store.listChats()) ?? [];
+  await Promise.all(
+    chats
+      .filter(
+        (chat) =>
+          chat.status === "running" ||
+          chat.status === "waiting" ||
+          chat.status === "queued" ||
+          chat.status === "awaiting-input",
+      )
+      .map((chat) => store.patchChat(chat.id, { status: "error" })),
+  );
+}
+
 export function createServices(
   base: ServiceBase,
   overrides: ServiceOverrides = {},
@@ -299,7 +319,9 @@ export function createServices(
       // `watch_pr`); it gets the badge and nothing more.
       isBusy: (chatId) => {
         const status = broker.getStatus(chatId);
-        return status === "running" || status === "awaiting-input";
+        return (
+          status === "running" || status === "waiting" || status === "awaiting-input"
+        );
       },
     });
   // `create_pr` pre-seeds the watcher so the first sweep after a PR opens can't
@@ -372,6 +394,12 @@ export function createServices(
     prReviewWatcher,
 
     async start(): Promise<void> {
+      // This runs before clients hydrate. Graceful shutdowns have already
+      // persisted `done`; only a killed/crashed process leaves a live status.
+      await recoverInterruptedChatStatuses(store).catch((err) => {
+        console.error("[Dispatch] chat status recovery failed (continuing):", err);
+      });
+
       // One-time transparent memory migration: when a project has (or gains) a
       // `.dispatch/` config, copy any legacy `.data` memories into the
       // repo `memory/` source of truth. Subscribed BEFORE `projectConfig.start()`

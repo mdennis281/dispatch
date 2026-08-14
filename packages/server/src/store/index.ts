@@ -391,6 +391,21 @@ export class Store {
     );
     return validated;
   }
+
+  /**
+   * Merge a partial record while holding the chat file's lock. Status changes
+   * race with title/session metadata during a live turn; a get-then-save pair
+   * outside this lock can let either whole-file rewrite erase the other.
+   */
+  async patchChat(id: string, patch: Partial<Chat>): Promise<Chat | null> {
+    return this.mutex.run(`chat:${id}`, async () => {
+      const current = await this.readEntity(this.chatFile(id), ChatSchema);
+      if (!current) return null;
+      const validated = ChatSchema.parse({ ...current, ...patch, id });
+      await writeJsonAtomic(this.chatFile(id), validated);
+      return validated;
+    });
+  }
   async deleteChat(id: string): Promise<void> {
     await this.mutex.run(`chat:${id}`, () =>
       rm(this.chatDir(id), { recursive: true, force: true }),

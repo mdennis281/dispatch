@@ -63,6 +63,15 @@ describe("Store projects/chats CRUD", () => {
     expect(await store.listChats()).toHaveLength(1);
   });
 
+  it("patches a chat atomically without changing unrelated metadata", async () => {
+    await store.saveChat({ ...chat("c1", "p1"), title: "Keep me", updatedAt: 123 });
+
+    const saved = await store.patchChat("c1", { status: "waiting" });
+
+    expect(saved).toMatchObject({ title: "Keep me", status: "waiting", updatedAt: 123 });
+    expect(await store.patchChat("missing", { status: "error" })).toBeNull();
+  });
+
   it("reports updatedAt as last TRANSCRIPT activity, not last chat-record write", async () => {
     // A chat record written long ago; appending rows never rewrites chat.json,
     // so without the mtime fold the sidebar would sort this by its stale stamp.

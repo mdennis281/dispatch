@@ -201,8 +201,11 @@ export function QuestionCard({ row }: QuestionCardProps) {
       // No `answered` latch here: clearing `reverting` closes the card in the
       // same batch, so `pending` goes false and re-entry is already blocked.
       const text = buildCorrection(questions, answers, row.message, declined);
-      if (chatStatus === "running") actions.steer(row.chatId, text, "next");
-      else actions.sendMessage(row.chatId, { text });
+      if (chatStatus === "running" || chatStatus === "waiting") {
+        actions.steer(row.chatId, text, "next");
+      } else {
+        actions.sendMessage(row.chatId, { text });
+      }
       setReverting(false);
       setCorrected(true);
       return;
@@ -234,7 +237,11 @@ export function QuestionCard({ row }: QuestionCardProps) {
       return;
     }
     setConfirmRevert(false);
-    if (chatStatus === "running" || chatStatus === "awaiting-input") {
+    if (
+      chatStatus === "running" ||
+      chatStatus === "waiting" ||
+      chatStatus === "awaiting-input"
+    ) {
       actions.interrupt(row.chatId);
     }
     setSelected({});

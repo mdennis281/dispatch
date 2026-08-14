@@ -40,8 +40,10 @@ export const ChatStatusSchema = z.enum([
   "idle",
   "queued",
   "running",
+  "waiting",
   "awaiting-input",
   "done",
+  "failed",
   "error",
 ]);
 export type ChatStatus = z.infer<typeof ChatStatusSchema>;

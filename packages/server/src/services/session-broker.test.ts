@@ -9,6 +9,7 @@ import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
 import {
   SessionBroker,
   EFFORT_THINKING_TOKENS,
+  statusForTool,
   type QueryFn,
 } from "./session-broker.js";
 import { MemoryService } from "./memory.js";
@@ -328,6 +329,66 @@ function nextPermissionId(): Promise<string> {
     });
   });
 }
+
+describe("chat status persistence", () => {
+  it("enumerates terminal and subagent waits separately from ordinary tools", () => {
+    expect(statusForTool("Bash")).toBe("waiting");
+    expect(statusForTool("Task")).toBe("waiting");
+    expect(statusForTool("collaboration.wait_agent")).toBe("waiting");
+    expect(
+      statusForTool("functions.exec", { source: "await tools.mcp__manager__terminal({})" }),
+    ).toBe("waiting");
+    expect(statusForTool("Read")).toBe("running");
+  });
+
+  it("persists terminal status changes through the chat record", async () => {
+    const { fn } = makeFakeQuery(() => [
+      toolUseMsg("Bash", { command: "git status" }),
+      toolResultMsg("tool-1", "clean"),
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "check");
+    await idleP;
+
+    const statuses = events
+      .filter((e): e is Extract<WsServerEvent, { type: "chat-status" }> => e.type === "chat-status")
+      .map((e) => e.status);
+    expect(statuses).toContain("waiting");
+
+    await broker.stop("c1");
+    await broker.dispose();
+    expect((await store.getChat("c1"))?.status).toBe("done");
+  });
+
+  it("keeps an unsuccessful turn red until the next turn starts", async () => {
+    const { fn } = makeFakeQuery((text) =>
+      text === "fail"
+        ? [{ ...resultMsg("error"), is_error: true, result: "boom" }]
+        : [assistantText("recovered"), resultMsg()],
+    );
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const failedP = broker.waitFor("c1", "failed");
+    await broker.sendMessage("c1", "fail");
+    await failedP;
+    for (let i = 0; i < 50 && (await store.getChat("c1"))?.status !== "failed"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect((await store.getChat("c1"))?.status).toBe("failed");
+
+    const runningP = broker.waitFor("c1", "running");
+    await broker.sendMessage("c1", "again");
+    await runningP;
+    expect(broker.getStatus("c1")).toBe("running");
+  });
+});
 
 function waitForResults(chatId: string, n: number, ms = 3000): Promise<void> {
   return new Promise((resolve, reject) => {
