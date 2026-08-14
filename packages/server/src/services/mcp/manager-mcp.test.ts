@@ -55,6 +55,7 @@ function fakeBroker(states: Record<string, ChatStatus>): ManagerMcpBroker {
     getContextUsage: async () => null,
     compact: () => {},
     markPrWatched: () => {},
+    askUser: async () => ({ status: "declined" }),
   };
 }
 
@@ -68,6 +69,76 @@ function statusLabels(): string[] {
     .filter((e): e is Extract<WsServerEvent, { type: "chat-status" }> => e.type === "chat-status")
     .map((e) => e.activity?.label ?? "");
 }
+
+/* ---------------------------------------------------------------- ask_user */
+
+describe("manager-mcp — ask_user", () => {
+  const questions = [
+    {
+      header: "Scope",
+      question: "Which surfaces should be protected?",
+      multiSelect: true,
+      options: [
+        { label: "REST", description: "Protect API requests." },
+        { label: "WebSocket", description: "Protect the event stream." },
+      ],
+    },
+  ];
+
+  it("passes radio / multi-select questions to the bound chat and returns answers", async () => {
+    let call: { chatId: string; questions: typeof questions } | undefined;
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({ c1: "running" }),
+      askUser: async (chatId, asked) => {
+        call = { chatId, questions: asked as typeof questions };
+        return {
+          status: "answered",
+          answers: { "Which surfaces should be protected?": "REST, WebSocket" },
+        };
+      },
+    };
+    const { askUser } = createManagerTools({ chatId: "c1", bus, broker });
+
+    const res = await askUser.handler({ questions }, {});
+
+    expect(call).toEqual({ chatId: "c1", questions });
+    expect(resultText(res)).toContain("REST, WebSocket");
+    expect(res.isError).toBeFalsy();
+  });
+
+  it("treats a decline as a final non-error response", async () => {
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({ c1: "running" }),
+      askUser: async () => ({ status: "declined", message: "Not now." }),
+    };
+    const { askUser } = createManagerTools({ chatId: "c1", bus, broker });
+
+    const res = await askUser.handler({ questions }, {});
+
+    expect(resultText(res)).toContain("declined");
+    expect(resultText(res)).toContain("Not now.");
+    expect(res.isError).toBeFalsy();
+  });
+
+  it("does not describe an unavailable question channel as a human decline", async () => {
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({ c1: "running" }),
+      askUser: async () => ({
+        status: "unavailable",
+        message: "No live session is available to ask through.",
+      }),
+    };
+    const { askUser } = createManagerTools({ chatId: "c1", bus, broker });
+
+    const res = await askUser.handler({ questions }, {});
+    const text = resultText(res);
+
+    expect(text).toContain("could not be shown");
+    expect(text).toContain("No live session");
+    expect(text).not.toContain("declined");
+    expect(res.isError).toBeFalsy();
+  });
+});
 
 /* -------------------------------------------------------------------- wait */
 

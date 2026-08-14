@@ -115,6 +115,20 @@ export const NO_CHECKS_GRACE_MS = 60_000;
  */
 export const REVIEW_QUEUE_GRACE_MS = 60_000;
 
+/** One structured question the manager MCP can put in front of the human. */
+export interface ManagerAskQuestion {
+  header: string;
+  question: string;
+  multiSelect?: boolean;
+  options: { label: string; description?: string }[];
+}
+
+/** The human's response to a manager-originated question card. */
+export type ManagerAskResult =
+  | { status: "answered"; answers: Record<string, string> }
+  | { status: "declined"; message?: string }
+  | { status: "unavailable"; message: string };
+
 /**
  * Check conclusions that count as a FAILING check for `watch_pr` — the ones an
  * agent must react to (a red build, a required check it must satisfy). `neutral`,
@@ -147,6 +161,8 @@ export interface ManagerMcpBroker {
   compact(chatId: string): void;
   /** Flag that a `watch_pr` on this chat hit a terminal PR state (drives the green "PR done" dot). */
   markPrWatched(chatId: string): void;
+  /** Ask the human through Dispatch's radio / multi-select question card. */
+  askUser(chatId: string, questions: ManagerAskQuestion[]): Promise<ManagerAskResult>;
 }
 
 /**
@@ -1383,6 +1399,63 @@ export function createManagerTools(ctx: ManagerMcpContext) {
   // the life of this session's MCP server, so it survives the agent's repeated
   // watch_pr calls and never re-reports a check/comment it already handed over.
   const watchState = new Map<string, WatchPrState>();
+
+  const askUser = tool(
+    "ask_user",
+    "Ask the human one to three structured questions and wait for their answer. " +
+      "Use this when a choice materially changes the work and cannot be inferred. " +
+      "Each question can be single-select (radio) or multi-select (checkbox); the UI " +
+      "also offers a free-form answer. A decline is a final answer, not a reason to retry.",
+    {
+      questions: z
+        .array(
+          z.object({
+            header: z
+              .string()
+              .min(1)
+              .max(24)
+              .describe("Short label shown above the question."),
+            question: z.string().min(1).describe("The question shown to the human."),
+            multiSelect: z
+              .boolean()
+              .optional()
+              .describe("True for checkboxes; false or omitted for radio buttons."),
+            options: z
+              .array(
+                z.object({
+                  label: z.string().min(1).describe("Short choice label."),
+                  description: z
+                    .string()
+                    .optional()
+                    .describe("One sentence explaining the choice or tradeoff."),
+                }),
+              )
+              .min(2)
+              .max(5)
+              .describe("Two to five choices. Dispatch also adds a free-form option."),
+          }),
+        )
+        .min(1)
+        .max(3)
+        .describe("One to three questions presented in one card."),
+    },
+    async ({ questions }): Promise<CallToolResult> => {
+      const result = await ctx.broker.askUser(ctx.chatId, questions);
+      if (result.status === "unavailable") {
+        return textResult(
+          `The question could not be shown to the human. ${result.message}\n` +
+            JSON.stringify(result),
+        );
+      }
+      if (result.status === "declined") {
+        return textResult(
+          `The human declined to answer.${result.message ? ` ${result.message}` : ""}\n` +
+            JSON.stringify(result),
+        );
+      }
+      return textResult(`The human answered:\n${JSON.stringify(result.answers, null, 2)}`);
+    },
+  );
 
   const wait = tool(
     "wait",
@@ -3293,6 +3366,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
   );
 
   return {
+    askUser,
     wait,
     waitForChat,
     contextUsage,
@@ -3389,6 +3463,7 @@ const NOOP_DESCRIPTOR_CTX = {
     getContextUsage: async () => null,
     compact: () => {},
     markPrWatched: () => {},
+    askUser: async () => ({ status: "declined" as const }),
   } as ManagerMcpBroker,
 } satisfies ManagerMcpContext;
 
@@ -3430,6 +3505,7 @@ export function createManagerMcpServer(
   ctx: ManagerMcpContext,
 ): McpSdkServerConfigWithInstance {
   const {
+    askUser,
     wait,
     waitForChat,
     contextUsage,
@@ -3457,6 +3533,7 @@ export function createManagerMcpServer(
   // Each tool is only meaningful when its backing service is wired in; omit the
   // dead ones so the agent isn't offered a tool it can't use.
   const tools = [
+    askUser,
     wait,
     waitForChat,
     contextUsage,

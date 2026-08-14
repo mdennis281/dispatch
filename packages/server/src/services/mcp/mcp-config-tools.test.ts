@@ -29,6 +29,7 @@ const broker: ManagerMcpBroker = {
   getContextUsage: async () => null,
   compact: () => {},
   markPrWatched: () => {},
+  askUser: async () => ({ status: "declined" }),
 };
 
 function ctx(mcpConfig?: ManagerMcpConfig) {

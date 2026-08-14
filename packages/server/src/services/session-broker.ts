@@ -78,6 +78,8 @@ import type { WorktreeService } from "./worktree.js";
 import {
   createManagerMcpServer,
   overrideConsentPrompt,
+  type ManagerAskQuestion,
+  type ManagerAskResult,
   type ManagerMcpGitHub,
   type ManagerMcpPrApproval,
   type ManagerMcpPrCreate,
@@ -140,6 +142,9 @@ export function buildManagerToolsDirective(caps: {
     "- `mcp__manager__compact_context` — compact your own context in place when it's " +
       "filling up (past ~80%) and you have more work to do; the session continues " +
       "from a summarized, smaller window.",
+    "- `mcp__manager__ask_user` — ask one to three structured questions through " +
+      "Dispatch's radio or multi-select question card. Use it whenever an unanswered " +
+      "choice materially changes the work; it is available in every chat mode.",
   ];
   if (caps.github) {
     lines.push(
@@ -839,7 +844,10 @@ function questionSummary(input: Record<string, unknown>): string {
  * Tools that run their OWN human gate and must therefore not be prompted for at
  * the `canUseTool` layer as well (see {@link SessionBroker.handlePermission}).
  */
-const SELF_GATED_TOOLS: ReadonlySet<string> = new Set(["mcp__manager__spawn_chat"]);
+const SELF_GATED_TOOLS: ReadonlySet<string> = new Set([
+  "mcp__manager__ask_user",
+  "mcp__manager__spawn_chat",
+]);
 
 /** Shorten text for a prompt card, marking that it was cut. */
 function truncate(text: string, max: number): string {
@@ -3057,6 +3065,36 @@ export class SessionBroker {
         attentionId,
       });
     });
+  }
+
+  /**
+   * Put a manager-MCP question through the same pending-card path as the native
+   * harness question tools. Keeping this on the broker means Claude's in-process
+   * server and Codex's HTTP bridge get byte-identical question/attention state.
+   */
+  async askUser(chatId: string, questions: ManagerAskQuestion[]): Promise<ManagerAskResult> {
+    const session = this.sessions.get(chatId);
+    if (!session) {
+      return { status: "unavailable", message: "No live session is available to ask through." };
+    }
+    const result = await this.handlePermission(
+      session,
+      "AskUserQuestion",
+      { questions },
+      { displayName: "Question" },
+    );
+    if (result.behavior !== "allow") {
+      return { status: "declined", message: result.message };
+    }
+    const raw = result.updatedInput?.answers;
+    const answers = raw && typeof raw === "object" && !Array.isArray(raw)
+      ? Object.fromEntries(
+          Object.entries(raw).filter((entry): entry is [string, string] =>
+            typeof entry[1] === "string"
+          ),
+        )
+      : {};
+    return { status: "answered", answers };
   }
 
   /**

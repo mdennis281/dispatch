@@ -73,6 +73,7 @@ function StateMark({ state }: { state: ToolDetailState }) {
 }
 
 function promptFor(tool: string, category: DispatchToolCategory): string {
+  if (tool === "ask_user") return "ask";
   if (tool === "wait") return "sleep";
   if (tool === "recall") return "recall";
   if (tool === "remember") return "remember";

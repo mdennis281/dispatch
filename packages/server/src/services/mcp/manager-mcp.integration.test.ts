@@ -53,6 +53,7 @@ const nullBroker: ManagerMcpBroker = {
   getContextUsage: async () => null,
   compact: () => {},
   markPrWatched: () => {},
+  askUser: async () => ({ status: "declined" }),
 };
 
 function chatFor(id: string, projectId = "p1"): Chat {

@@ -665,6 +665,94 @@ describe("SessionBroker — permissions", () => {
     await idleP;
   });
 
+  it("lets the manager MCP ask through the same radio / multi-select question channel", async () => {
+    const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const questions = [
+      {
+        header: "Surfaces",
+        question: "Which surfaces should auth protect?",
+        multiSelect: true,
+        options: [{ label: "REST" }, { label: "WebSocket" }],
+      },
+    ];
+
+    const reqP = nextPermissionId();
+    const answerP = broker.askUser("c1", questions);
+    const reqId = await reqP;
+
+    const request = events.find(
+      (e): e is Extract<WsServerEvent, { type: "permission-request" }> =>
+        e.type === "permission-request" && e.request.id === reqId,
+    );
+    expect(request?.request.toolName).toBe("AskUserQuestion");
+    expect(request?.request.input).toEqual({ questions });
+    expect(
+      events.some(
+        (e) =>
+          e.type === "attention-add" &&
+          e.item.permissionRequestId === reqId &&
+          e.item.kind === "question",
+      ),
+    ).toBe(true);
+
+    broker.answerQuestion(reqId, {
+      answers: [
+        {
+          questionIndex: 0,
+          optionId: "REST",
+          answer: "REST, WebSocket",
+          notes: "Both entry points matter.",
+        },
+      ],
+    });
+
+    await expect(answerP).resolves.toEqual({
+      status: "answered",
+      answers: {
+        "Which surfaces should auth protect?":
+          "REST, WebSocket — additional instructions: Both entry points matter.",
+      },
+    });
+  });
+
+  it("settles a manager MCP question as declined when the human declines", async () => {
+    const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const reqP = nextPermissionId();
+    const answerP = broker.askUser("c1", [
+      {
+        header: "Proceed",
+        question: "Should I continue?",
+        options: [{ label: "Yes" }, { label: "No" }],
+      },
+    ]);
+    const reqId = await reqP;
+    broker.declineQuestion(reqId, "Not now.");
+
+    await expect(answerP).resolves.toEqual({ status: "declined", message: "Not now." });
+  });
+
+  it("reports the manager question channel as unavailable without a live session", async () => {
+    const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+
+    await expect(
+      broker.askUser("nobody", [
+        {
+          header: "Proceed",
+          question: "Continue?",
+          options: [{ label: "Yes" }, { label: "No" }],
+        },
+      ]),
+    ).resolves.toEqual({
+      status: "unavailable",
+      message: "No live session is available to ask through.",
+    });
+  });
+
   it("surfaces AskUserQuestion as a question card and feeds the answer back via canUseTool", async () => {
     // The real SDK nested input shape: { questions: [{ question, header, options, multiSelect }] }.
     const input = {
@@ -2272,6 +2360,33 @@ describe("SessionBroker — spawn_chat consent", () => {
     await idleP;
 
     expect(verdict).toEqual({ behavior: "allow", updatedInput: { prompt: "go" } });
+    expect(events.some((e) => e.type === "permission-request")).toBe(false);
+  });
+
+  it("lets manager ask_user reach its own question card without a generic permission prompt", async () => {
+    let verdict: unknown;
+    const input = {
+      questions: [
+        {
+          header: "Choice",
+          question: "Pick one?",
+          options: [{ label: "A" }, { label: "B" }],
+        },
+      ],
+    };
+    const { fn } = makeFakeQuery(async (_t, ctl) => {
+      verdict = await ctl.canUseTool!("mcp__manager__ask_user", input, {});
+      return [assistantText("hi"), resultMsg()];
+    });
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "ask me");
+    await idleP;
+
+    expect(verdict).toEqual({ behavior: "allow", updatedInput: input });
     expect(events.some((e) => e.type === "permission-request")).toBe(false);
   });
 
