@@ -700,7 +700,7 @@ const STOP_TIMEOUT_MS = 5_000;
  */
 export function statusForTool(name: string, input?: Record<string, unknown>): ChatStatus {
   const normalized = name.toLowerCase().replace(/[.:/]/g, "_");
-  const encodedInput = input ? JSON.stringify(input).toLowerCase() : "";
+  const encodedInput = input ? safeHandoffJson(input).toLowerCase() : "";
   const terminal =
     normalized === "bash" ||
     normalized === "shell_command" ||

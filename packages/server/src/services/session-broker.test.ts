@@ -338,6 +338,10 @@ describe("chat status persistence", () => {
     expect(
       statusForTool("functions.exec", { source: "await tools.mcp__manager__terminal({})" }),
     ).toBe("waiting");
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(() => statusForTool("functions.exec", circular)).not.toThrow();
+    expect(() => statusForTool("functions.exec", { value: 1n })).not.toThrow();
     expect(statusForTool("Read")).toBe("running");
   });
 
