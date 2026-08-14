@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MessageCircleQuestion, CornerDownLeft, Check, Undo2 } from "lucide-react";
 import { composeMessageText, type MessagePart, type PermissionRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
@@ -188,8 +188,37 @@ export function QuestionCard({ row }: QuestionCardProps) {
   const [answered, setAnswered] = useState(false);
   const busy = pending && answered;
 
+  const timeoutSeconds =
+    typeof row.input.timeoutSeconds === "number" ? row.input.timeoutSeconds : undefined;
+  const activity = useRef<{ lastSent: number; timer?: ReturnType<typeof setTimeout> }>({
+    lastSent: 0,
+  });
+
+  useEffect(
+    () => () => {
+      if (activity.current.timer) clearTimeout(activity.current.timer);
+    },
+    [],
+  );
+
   const touch = () => {
-    if (resolvedPending) actions.questionActivity(row.chatId, row.requestId);
+    if (!resolvedPending || !timeoutSeconds) return;
+    // Send immediately when the interval has elapsed, then one trailing refresh
+    // for activity inside it. Half the configured timeout keeps even the 1s
+    // minimum alive while capping continuous typing at two frames per second.
+    const intervalMs = Math.max(100, Math.min(1_000, (timeoutSeconds * 1_000) / 2));
+    const elapsed = Date.now() - activity.current.lastSent;
+    const sendActivity = () => {
+      actions.questionActivity(row.chatId, row.requestId);
+      activity.current.lastSent = Date.now();
+      activity.current.timer = undefined;
+    };
+    if (activity.current.lastSent === 0 || elapsed >= intervalMs) {
+      if (activity.current.timer) clearTimeout(activity.current.timer);
+      sendActivity();
+    } else if (!activity.current.timer) {
+      activity.current.timer = setTimeout(sendActivity, intervalMs - elapsed);
+    }
   };
 
   const labelOf = (qi: number, id: string) =>

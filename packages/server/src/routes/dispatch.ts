@@ -13,15 +13,16 @@
  */
 import { nanoid } from "nanoid";
 import { resolve as resolvePath } from "node:path";
-import type {
-  WsClientAction,
-  Chat,
-  ChatPurpose,
-  Project,
-  Effort,
-  HarnessKind,
-  ImageRef,
-  WorktreeInfo,
+import {
+  composeMessageText,
+  type WsClientAction,
+  type Chat,
+  type ChatPurpose,
+  type Project,
+  type Effort,
+  type HarnessKind,
+  type ImageRef,
+  type WorktreeInfo,
 } from "@dispatch/shared";
 import { COPILOT_LOGIN } from "../services/github.js";
 import type { Services } from "../services/container.js";
@@ -280,12 +281,16 @@ export async function dispatchClientAction(
 
       case "send-message":
         await ensureSession(services, action.chatId);
-        await broker.sendMessage(action.chatId, action.text ?? "", {
-          priority: action.priority,
-          images: action.images as ImageRef[] | undefined,
-          parts: action.parts,
-          effort: action.effort,
-        });
+        await broker.sendMessage(
+          action.chatId,
+          action.text ?? (action.parts ? composeMessageText(action.parts) : ""),
+          {
+            priority: action.priority,
+            images: action.images as ImageRef[] | undefined,
+            parts: action.parts,
+            effort: action.effort,
+          },
+        );
         return;
 
       case "steer":
@@ -336,7 +341,7 @@ export async function dispatchClientAction(
       case "question-activity":
         // Best-effort heartbeat. Native harness questions have no configured
         // timer, while manager questions reset theirs on every interaction.
-        broker.touchQuestion(action.requestId);
+        broker.touchQuestion(action.chatId, action.requestId);
         return;
 
       case "decline-question": {

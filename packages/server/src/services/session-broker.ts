@@ -1619,14 +1619,12 @@ export class SessionBroker {
   }
 
   /** Reset a manager ask_user inactivity timeout after a card interaction. */
-  touchQuestion(requestId: string): boolean {
-    for (const session of this.sessions.values()) {
-      const pending = session.pendingPermissions.get(requestId);
-      if (!pending || pending.toolName !== "AskUserQuestion") continue;
-      this.armQuestionTimeout(session, requestId, pending);
-      return true;
-    }
-    return false;
+  touchQuestion(chatId: string, requestId: string): boolean {
+    const session = this.sessions.get(chatId);
+    const pending = session?.pendingPermissions.get(requestId);
+    if (!session || !pending || pending.toolName !== "AskUserQuestion") return false;
+    this.armQuestionTimeout(session, requestId, pending);
+    return true;
   }
 
   /**

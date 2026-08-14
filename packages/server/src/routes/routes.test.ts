@@ -642,13 +642,17 @@ describe("routes — WebSocket", () => {
     await ws.waitFor((e) => e.type === "hello");
 
     const parts = [{ kind: "instructions" as const, label: "Re-answer", text: "hello" }];
-    ws.send({ type: "send-message", chatId, text: "**Re-answer**\n\nhello", parts });
+    ws.send({ type: "send-message", chatId, parts });
 
     const user = await ws.waitFor(
       (e) => e.type === "chat-message" && e.chatId === chatId && e.message.kind === "user",
     );
-    expect(user.type === "chat-message" && user.message.kind === "user" && user.message.parts)
-      .toEqual(parts);
+    expect(user.type === "chat-message" && user.message.kind === "user" && user.message.parts).toEqual(
+      parts,
+    );
+    expect(user.type === "chat-message" && user.message.kind === "user" && user.message.text).toBe(
+      "**Re-answer**\n\nhello",
+    );
 
     const asst = await ws.waitFor(
       (e) => e.type === "chat-message" && e.chatId === chatId && e.message.kind === "assistant",

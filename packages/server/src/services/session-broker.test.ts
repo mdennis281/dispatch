@@ -761,7 +761,8 @@ describe("SessionBroker — permissions", () => {
       });
 
       await vi.advanceTimersByTimeAsync(20_000);
-      expect(broker.touchQuestion(reqId)).toBe(true);
+      expect(broker.touchQuestion("other", reqId)).toBe(false);
+      expect(broker.touchQuestion("c1", reqId)).toBe(true);
       await vi.advanceTimersByTimeAsync(20_000);
       expect(settled).toBe(false);
 
