@@ -136,10 +136,12 @@ export const DispatchToolCard = memo(function DispatchToolCard({
   use,
   result,
   task,
+  embedded = false,
 }: {
   use: ToolUseRow;
   result?: ToolResultRow;
   task?: TaskStatusRow;
+  embedded?: boolean;
 }) {
   const [detailOpen, setDetailOpen] = useState(false);
   const presentation = toolPresentation(use);
@@ -205,20 +207,26 @@ export const DispatchToolCard = memo(function DispatchToolCard({
 
   return (
     <RowShell
+      className={cn(embedded && "!gap-0 !p-0 [&>div:first-child]:hidden")}
       gutter={
         <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent-hi ring-1 ring-accent-line [&_svg]:size-3.5">
           {categoryIcon(presentation.category)}
         </span>
       }
     >
-      <div className="overflow-hidden rounded-md border border-line bg-panel-2/60">
-        <div className="flex h-8 items-center gap-2 px-2.5">
+      <div
+        className={cn(
+          "overflow-hidden rounded-md border border-line bg-panel-2/60",
+          embedded && "!rounded-none !border-0 !bg-transparent",
+        )}
+      >
+        {!embedded && <div className="flex h-8 items-center gap-2 px-2.5">
           <span className="text-sm font-semibold text-primary">{cardTitle}</span>
           {presentation.subject && <Chip tone="info" mono>{presentation.subject}</Chip>}
           <span className="ml-auto">
             <Chip tone={tone} icon={<StateMark state={state} />}>{statusLabel}</Chip>
           </span>
-        </div>
+        </div>}
         {progress !== null && (
           <div className="h-0.5 bg-line-soft">
             <div
@@ -230,7 +238,12 @@ export const DispatchToolCard = memo(function DispatchToolCard({
             />
           </div>
         )}
-        <div className="group/exchange border-t border-line-soft py-0.5 transition-colors hover:bg-hover/20">
+        <div
+          className={cn(
+            "group/exchange py-0.5 transition-colors hover:bg-hover/20",
+            !embedded && "border-t border-line-soft",
+          )}
+        >
           {sleep ? (
             <Button
               type="button"

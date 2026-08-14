@@ -188,7 +188,7 @@ export interface TranscriptShellItem {
 
 export type TranscriptItem = TranscriptRowItem | TranscriptShellItem;
 
-/** Group adjacent handled shell calls while leaving every other row untouched. */
+/** Group adjacent terminal-style calls while leaving every unhandled row untouched. */
 export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   let shell: ToolUseRow[] | null = null;
@@ -202,7 +202,7 @@ export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
     // Results and task statuses are folded into their owning command. They do
     // not interrupt a run of commands, just as they did not create visible rows.
     if (row.kind === "tool_result" || row.kind === "task_status") continue;
-    if (row.kind === "tool_use" && toolPresentation(row)?.kind === "shell") {
+    if (row.kind === "tool_use" && toolPresentation(row) !== null) {
       (shell ??= []).push(row);
       continue;
     }

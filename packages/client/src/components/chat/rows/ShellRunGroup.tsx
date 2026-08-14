@@ -4,6 +4,7 @@ import type { TaskStatusRow, ToolResultRow, ToolUseRow } from "@dispatch/shared"
 import { RowShell } from "./RowShell.js";
 import { InlineCode } from "../CodeBlock.js";
 import { ToolDetailModal, type ToolDetailState } from "../ToolDetailModal.js";
+import { DispatchToolCard } from "./DispatchToolCard.js";
 import { Chip } from "../../ui/Chip.js";
 import { Button } from "../../ui/Button.js";
 import { Spinner } from "../../ui/Spinner.js";
@@ -155,8 +156,7 @@ export const ShellRunGroup = memo(function ShellRunGroup({
     }).filter((language): language is "bash" | "powershell" => Boolean(language)))],
     [entries],
   );
-  const lastPresentation = toolPresentation(entries[entries.length - 1]!.use);
-  const activeLanguage = lastPresentation?.kind === "shell" ? lastPresentation.language : "bash";
+  const activeLanguage = languages[languages.length - 1] ?? "bash";
   const headerLabel = languages.length === 1 ? shellLabel(activeLanguage) : "Shell";
 
   return (
@@ -180,8 +180,21 @@ export const ShellRunGroup = memo(function ShellRunGroup({
           <span className="ml-auto"><Chip tone={summary.tone} icon={summary.icon}>{summary.label}</Chip></span>
         </div>
         <div>
-          {entries.map((entry) => <ShellCommandPair key={entry.use.id} entry={entry} />)}
-          {active && (
+          {entries.map((entry) => {
+            const presentation = toolPresentation(entry.use);
+            return presentation?.kind === "dispatch" ? (
+              <DispatchToolCard
+                key={entry.use.id}
+                embedded
+                use={entry.use}
+                result={entry.result}
+                task={entry.task}
+              />
+            ) : (
+              <ShellCommandPair key={entry.use.id} entry={entry} />
+            );
+          })}
+          {active && languages.length > 0 && (
             <div className="flex h-7 items-center px-2.5 cm-mono !text-xs" aria-label="Active shell prompt">
               <span className="mr-2 font-semibold text-accent-hi">{shellLabel(activeLanguage, true)} &gt;</span>
               {summary.label === "running" ? (

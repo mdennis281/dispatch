@@ -58,6 +58,15 @@ describe("groupTranscriptRows", () => {
     expect(grouped[0]).toMatchObject({ kind: "shell", rows: [a, b] });
   });
 
+  it("keeps first-party MCP exchanges inside the same terminal run", () => {
+    const shell = tool("Bash", { command: "pwd" }, "shell");
+    const recall = tool("mcp__manager__recall", { query: "terminal UI" }, "recall");
+    const remember = tool("mcp__manager__remember", { name: "terminal-ui" }, "remember");
+    const grouped = groupTranscriptRows([shell, recall, remember]);
+    expect(grouped).toHaveLength(1);
+    expect(grouped[0]).toMatchObject({ kind: "shell", rows: [shell, recall, remember] });
+  });
+
   it("keeps an unhandled tool on the existing row path", () => {
     const unknown = tool("Read", { file_path: "README.md" });
     expect(groupTranscriptRows([unknown])).toEqual([{ kind: "row", row: unknown }]);
