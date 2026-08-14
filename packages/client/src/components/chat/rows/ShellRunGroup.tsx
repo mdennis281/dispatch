@@ -71,13 +71,13 @@ function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
   return (
     <div
       data-row-id={entry.use.id}
-      className="group/pair py-0.5 transition-colors duration-150 hover:bg-hover/20"
+      className="group/pair transition-colors duration-150 hover:bg-hover/20"
     >
       <Button
         type="button"
         variant="ghost"
         onClick={inspect}
-        className="group/send !flex !h-7 w-full min-w-0 justify-start gap-0 !rounded-none !border-0 px-2.5 text-left !font-normal hover:!bg-transparent active:translate-y-0"
+        className="group/send !flex !h-6 w-full min-w-0 justify-start gap-0 !rounded-none !border-0 px-2.5 text-left !font-normal hover:!bg-transparent active:translate-y-0"
       >
         <span className="mr-2 shrink-0 cm-mono !text-xs font-semibold text-accent-hi">
           {shellLabel(presentation.language, true)} &gt;
@@ -93,10 +93,10 @@ function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
         type="button"
         variant="ghost"
         onClick={inspect}
-        className="group/receipt !grid !h-auto min-h-0 w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 !whitespace-normal !rounded-none !border-0 px-2.5 py-1 text-left !font-normal text-muted hover:!bg-transparent hover:text-secondary active:translate-y-0"
+        className="group/receipt !grid !h-auto min-h-0 w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 !whitespace-normal !rounded-none !border-0 px-2.5 py-0.5 text-left !font-normal text-muted hover:!bg-transparent hover:text-secondary active:translate-y-0"
       >
         {state === "running" ? (
-          <span className="flex items-center gap-1.5 whitespace-pre-wrap cm-mono !text-2xs italic leading-[1.45] text-faint">
+          <span className="flex items-center gap-1.5 whitespace-pre-wrap cm-mono !text-2xs italic leading-[1.35] text-faint">
             {output}
             <Spinner size={9} className="shrink-0" />
           </span>
@@ -105,7 +105,7 @@ function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
             text={output}
             lines={2}
             className={cn(
-              "whitespace-pre-wrap cm-mono !text-2xs leading-[1.45] opacity-75 transition-[color,opacity] duration-150 group-hover/receipt:text-primary group-hover/receipt:opacity-100 group-focus/receipt:text-primary group-focus/receipt:opacity-100",
+              "whitespace-pre-wrap cm-mono !text-2xs leading-[1.35] opacity-75 transition-[color,opacity] duration-150 group-hover/receipt:text-primary group-hover/receipt:opacity-100 group-focus/receipt:text-primary group-focus/receipt:opacity-100",
               state === "failed" && "text-danger",
             )}
           />

@@ -240,7 +240,7 @@ export const DispatchToolCard = memo(function DispatchToolCard({
         )}
         <div
           className={cn(
-            "group/exchange py-0.5 transition-colors hover:bg-hover/20",
+            "group/exchange transition-colors hover:bg-hover/20",
             !embedded && "border-t border-line-soft",
           )}
         >
@@ -249,7 +249,7 @@ export const DispatchToolCard = memo(function DispatchToolCard({
               type="button"
               variant="ghost"
               onClick={inspect}
-              className="group/sleep !flex !h-8 w-full min-w-0 justify-start !rounded-none !border-0 px-2.5 text-left !font-normal hover:!bg-transparent active:translate-y-0"
+              className="group/sleep !flex !h-6 w-full min-w-0 justify-start !rounded-none !border-0 px-2.5 text-left !font-normal hover:!bg-transparent active:translate-y-0"
             >
               <span className={cn("mr-2 shrink-0 cm-mono !text-xs font-semibold", promptClass)}>
                 {prompt} &gt;
@@ -265,7 +265,7 @@ export const DispatchToolCard = memo(function DispatchToolCard({
                 type="button"
                 variant="ghost"
                 onClick={inspect}
-                className="group/send !flex !h-7 w-full min-w-0 justify-start !rounded-none !border-0 px-2.5 text-left !font-normal hover:!bg-transparent active:translate-y-0"
+                className="group/send !flex !h-6 w-full min-w-0 justify-start !rounded-none !border-0 px-2.5 text-left !font-normal hover:!bg-transparent active:translate-y-0"
               >
                 <span className={cn("mr-2 shrink-0 cm-mono !text-xs font-semibold", promptClass)}>
                   {prompt} &gt;
@@ -280,13 +280,13 @@ export const DispatchToolCard = memo(function DispatchToolCard({
                 type="button"
                 variant="ghost"
                 onClick={inspect}
-                className="group/receipt !grid !h-auto min-h-0 w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 !whitespace-normal !rounded-none !border-0 px-2.5 py-1 text-left !font-normal hover:!bg-transparent active:translate-y-0"
+                className="group/receipt !grid !h-auto min-h-0 w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 !whitespace-normal !rounded-none !border-0 px-2.5 py-0.5 text-left !font-normal hover:!bg-transparent active:translate-y-0"
               >
                 <OverflowTooltip
                   text={response}
                   lines={2}
                   className={cn(
-                    "whitespace-pre-wrap text-xs leading-[1.45] text-muted opacity-75 transition-[color,filter,opacity] group-hover/receipt:brightness-125 group-hover/receipt:text-primary group-hover/receipt:opacity-100",
+                    "whitespace-pre-wrap text-xs leading-[1.35] text-muted opacity-75 transition-[color,filter,opacity] group-hover/receipt:brightness-125 group-hover/receipt:text-primary group-hover/receipt:opacity-100",
                     state === "running" && "italic text-faint",
                     state === "failed" && "text-danger",
                   )}
