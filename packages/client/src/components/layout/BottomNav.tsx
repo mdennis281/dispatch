@@ -130,6 +130,12 @@ function SheetRow({
 function useTextEntryFocused(): boolean {
   const [typing, setTyping] = useState(false);
   useEffect(() => {
+    // Only on touch. The standdown exists solely to dodge a SOFT keyboard, so
+    // on a fine pointer it is all cost and no benefit: focus a field in a
+    // narrow desktop window and the nav would vanish with nothing covering it.
+    // That also makes the phone layout honest to test by resizing a browser.
+    if (!matchMedia("(pointer: coarse)").matches) return;
+
     const isTextEntry = (el: EventTarget | null): boolean =>
       el instanceof HTMLElement &&
       (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);

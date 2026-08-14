@@ -432,6 +432,29 @@
   .cm-touch-reveal {
     opacity: 1;
   }
+
+  /*
+   * 16px on every text field, on touch only.
+   *
+   * iOS zooms the page when you focus a field whose computed font-size is under
+   * 16px, and our scale tops out at 15 (`--text-xl`) — so EVERY input in the app
+   * zoomed on tap, then left you scrolled sideways in a viewport you never asked
+   * to magnify. The viewport meta is not a fix: Safari has ignored
+   * `user-scalable=no` and `maximum-scale` since iOS 10, on purpose, so the font
+   * size is the only lever that actually exists.
+   *
+   * Deliberately not a Tailwind step: as a bare rule it catches the composer's
+   * contenteditable, `Modal`'s shared `controlCls`, and every one-off input
+   * together, and `typeScale.test.ts` stays green because no `text-[16px]` is
+   * introduced. Pinch-zoom is untouched — this removes the UNREQUESTED zoom
+   * only.
+   */
+  input:not([type="checkbox"]):not([type="radio"]),
+  textarea,
+  select,
+  [contenteditable="true"] {
+    font-size: 16px;
+  }
 }
 
 /*
