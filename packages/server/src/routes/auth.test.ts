@@ -358,6 +358,22 @@ describe("optional authentication", () => {
     await instance.close();
   });
 
+  it("serves bodyless posts that still carry a JSON content type", async () => {
+    const { instance } = await app();
+    const owner = await bootstrap(instance);
+    const headers = { authorization: `Bearer ${owner.body.accessToken}`,
+      "content-type": "application/json", ...sessionHeaders };
+    const begin = await instance.inject({ method: "POST", url: "/api/auth/totp/begin", headers });
+    expect(begin.statusCode).toBe(200);
+    expect(begin.json()).toMatchObject({ secret: expect.any(String), uri: expect.stringContaining("otpauth://") });
+    const options = await instance.inject({ method: "POST", url: "/api/auth/passkeys/register/options", headers });
+    expect(options.statusCode).toBe(200);
+    const malformed = await instance.inject({ method: "POST", url: "/api/auth/totp/confirm",
+      headers, payload: "{not json" });
+    expect(malformed.statusCode).toBe(400);
+    await instance.close();
+  });
+
   it("turning auth off revokes sessions but preserves the owner for later re-enable", async () => {
     const { instance } = await app();
     const ua = "Mozilla/5.0 Chrome/126.0 Windows NT 10.0";

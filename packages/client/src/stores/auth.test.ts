@@ -38,6 +38,18 @@ describe("auth bootstrap state", () => {
     expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("x-dispatch-session")).toBe("refresh");
   });
 
+  it("declares a JSON body only when it sends one, so bodyless posts survive Fastify", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await authPost("/api/auth/totp/begin");
+    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("content-type")).toBeNull();
+    expect(headers.get("x-dispatch-session")).toBe("refresh");
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBeUndefined();
+    await authPost("/api/auth/totp/confirm", { code: "123456" });
+    expect(new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get("content-type")).toBe("application/json");
+  });
+
   it("single-flights same-tab refresh when requests fail together", async () => {
     useAuth.setState({ ready: true, accessToken: null, user: null,
       status: { enabled: true, configured: true, firstRunDismissed: true, user: null } });

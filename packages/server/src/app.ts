@@ -84,6 +84,17 @@ export async function buildApp(
   // for base64 (~+34%) + JSON wrapping. Fastify's 1 MiB default would 413 any
   // real screenshot/photo before the handler's own size check ever ran.
   const app = Fastify({ logger: false, bodyLimit: 16 * 1024 * 1024 });
+  // Fastify's stock JSON parser answers a bodyless POST that still carries
+  // `content-type: application/json` with FST_ERR_CTP_EMPTY_JSON_BODY (400)
+  // before any handler runs. Browsers and fetch wrappers send exactly that, and
+  // it silently broke every bodyless auth endpoint (TOTP setup, passkey
+  // enrollment, invites, logout, disable). An empty body is simply no body.
+  app.addContentTypeParser<string>("application/json", { parseAs: "string" }, (_req, body, done) => {
+    if (body.trim() === "") return done(null, undefined);
+    try { done(null, JSON.parse(body) as unknown); }
+    catch { done(Object.assign(new Error("Invalid JSON body."), { statusCode: 400 })); }
+  });
+
   app.decorate("cm", { config, store, bus } satisfies CmContext);
   app.decorate("services", services);
   app.decorate("auth", auth);
