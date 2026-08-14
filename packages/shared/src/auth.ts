@@ -45,6 +45,12 @@ export interface AuthSecurityOverview {
   passkeys: Array<{ id: string; name: string; createdAt: number; lastUsedAt?: number }>;
 }
 
+/** A pending authenticator enrollment: the key to type, and the URI to scan. */
+export interface AuthTotpSetup {
+  secret: string;
+  uri: string;
+}
+
 export interface AuthSetupCode {
   code: string;
   url: string;

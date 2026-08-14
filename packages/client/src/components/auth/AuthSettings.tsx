@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Copy, KeyRound, LogOut, Plus, Shield, Trash2 } from "lucide-react";
 import { startRegistration } from "@simplewebauthn/browser";
-import type { AuthSecurityOverview, AuthSessionResponse, AuthSetupCode, AuthUserSummary } from "@dispatch/shared";
+import type { AuthSecurityOverview, AuthSessionResponse, AuthSetupCode, AuthTotpSetup, AuthUserSummary } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { Field, InlineError, TextInput } from "../sidebar/Modal.js";
 import { SectionLabel } from "../ui/Panel.js";
+import { TotpQr } from "./TotpQr.js";
 import { authDelete, authPost, authPut, sessionFetch, useAuth } from "../../stores/auth.js";
 
 async function get<T>(path: string): Promise<T> {
@@ -54,7 +55,7 @@ export function AuthSettings() {
   const [setupLink, setSetupLink] = useState<AuthSetupCode | null>(null);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
-  const [totp, setTotp] = useState<{ secret: string; uri: string } | null>(null);
+  const [totp, setTotp] = useState<AuthTotpSetup | null>(null);
   const [totpCode, setTotpCode] = useState("");
   const [resetTarget, setResetTarget] = useState<AuthUserSummary | null>(null);
   const [resetPassword, setResetPassword] = useState("");
@@ -125,8 +126,16 @@ export function AuthSettings() {
       </div>
 
       <div className="rounded-lg border border-line p-3">
-        <div className="flex items-center justify-between"><div><p className="text-xs font-medium text-secondary">Authenticator app (TOTP)</p><p className="text-2xs text-faint">Optional second factor for password login</p></div>{!security?.user.totpEnabled && <Button onClick={guard(async () => setTotp(await authPost("/api/auth/totp/begin")))}>Set up</Button>}</div>
-        {totp && <div className="mt-2 space-y-2 rounded bg-inset p-2"><p className="break-all font-mono text-2xs text-muted">{totp.secret}</p><TextInput inputMode="numeric" placeholder="6-digit code" value={totpCode} onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))} /><Button onClick={guard(async () => { await authPost("/api/auth/totp/confirm", { code: totpCode }); setTotp(null); setTotpCode(""); await reload(); })}>Confirm</Button></div>}
+        <div className="flex items-center justify-between"><div><p className="text-xs font-medium text-secondary">Authenticator app (TOTP)</p><p className="text-2xs text-faint">Optional second factor for password login</p></div>{!security?.user.totpEnabled && !totp && <Button onClick={guard(async () => setTotp(await authPost<AuthTotpSetup>("/api/auth/totp/begin")))}>Set up</Button>}</div>
+        {totp && <div className="mt-2 flex gap-3 rounded bg-inset p-2">
+          <TotpQr uri={totp.uri} className="size-32 shrink-0 rounded" />
+          <div className="min-w-0 flex-1 space-y-2">
+            <p className="text-2xs leading-relaxed text-muted">Scan with your authenticator app, or enter this key by hand:</p>
+            <p className="break-all font-mono text-2xs text-secondary">{totp.secret}</p>
+            <TextInput inputMode="numeric" placeholder="6-digit code" value={totpCode} onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))} />
+            <Button onClick={guard(async () => { await authPost("/api/auth/totp/confirm", { code: totpCode }); setTotp(null); setTotpCode(""); await reload(); })}>Confirm</Button>
+          </div>
+        </div>}
         {security?.user.totpEnabled && <Button className="mt-2" variant="danger" onClick={guard(async () => { await authDelete("/api/auth/totp", { password: currentPassword }); await reload(); })}>Disable using current password</Button>}
       </div>
 
