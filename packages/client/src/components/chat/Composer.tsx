@@ -61,7 +61,9 @@ import { cn } from "../../lib/cn.js";
 import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
 import { useHarnesses } from "../../stores/harnesses.js";
-import { actions, uploadChatImage, assetUrl } from "../../lib/actions.js";
+import { actions, uploadChatImage } from "../../lib/actions.js";
+import { useAssetSrc } from "../../lib/assetSrc.js";
+import { AssetImage } from "../ui/AssetImage.js";
 import { useEffectiveEffort } from "../../lib/effectiveEffort.js";
 import { EFFORT_OPTIONS } from "../../lib/efforts.js";
 import {
@@ -244,6 +246,9 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // reload or a chat switch keeps them exactly as the text does.
   const [attachments, setAttachments] = useState<ImageRef[]>(() => loadDraft(chat.id).images);
   const [editing, setEditing] = useState<ImageRef | null>(null);
+  // The annotator takes a URL, so the asset has to be resolved to a renderable
+  // one first — the raw endpoint is bearer-authenticated (see lib/assetSrc.ts).
+  const editingSrc = useAssetSrc(chat.id, editing).src;
   const [uploading, setUploading] = useState(0);
   // Queued/steering count is server truth (chat-status.queued): it clears the
   // instant the agent consumes the message, not only when the whole turn ends.
@@ -785,11 +790,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                   aria-label="Edit image"
                   className="group/thumb relative size-8 shrink-0 overflow-hidden rounded-[5px] border border-line-soft"
                 >
-                  <img
-                    src={assetUrl(chat.id, img)}
-                    alt={img.alt ?? "attachment"}
-                    className="size-full object-cover"
-                  />
+                  <AssetImage chatId={chat.id} img={img} className="size-full object-cover" />
                   <span className="absolute inset-0 flex items-center justify-center bg-scrim text-primary opacity-0 transition-opacity group-hover/thumb:opacity-100 [&_svg]:size-3.5">
                     <Pencil />
                   </span>
@@ -1308,12 +1309,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         />
       )}
 
-      {editing && (
+      {editing && editingSrc && (
         <Suspense fallback={null}>
           <ImageAnnotator
             key={editing.id}
             chatId={chat.id}
-            src={assetUrl(chat.id, editing)}
+            src={editingSrc}
             alt={editing.alt}
             onCancel={() => setEditing(null)}
             onApply={(next) => applyEdit(editing, next)}

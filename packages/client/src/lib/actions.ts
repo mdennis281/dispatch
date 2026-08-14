@@ -318,7 +318,8 @@ export function deleteChat(chatId: string): Promise<void> {
 }
 
 // Re-export the read helpers features use for Monaco so they import from one place.
-export { assetUrl } from "./api.js";
+// (`assetUrl` is deliberately NOT re-exported: it is not a usable `<img src>` —
+// see lib/assetSrc.ts.)
 export type { WorktreeFileContent, ServerWorktreeDiff, ServerFileDiff } from "./api.js";
 
 /** Read a worktree file (working tree, or at `ref` for the base side of a diff). */

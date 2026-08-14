@@ -55,14 +55,35 @@ async function refreshSession(retryConflict = true) {
   return refreshInFlight;
 }
 
-async function authenticatedFetch(request) {
+/**
+ * `new Request(request, { headers })` inherits the original's mode, and a
+ * `no-cors` request — which is what the browser issues for EVERY same-origin
+ * subresource, `<img src="/api/…">` included — silently drops any header that
+ * isn't CORS-safelisted. `authorization` is not, so the token never reaches the
+ * wire and the request comes back 401. Re-issue such a GET in `same-origin`
+ * mode, where the header survives.
+ */
+function withToken(request) {
   const headers = new Headers(request.headers);
   if (accessToken) headers.set("authorization", `Bearer ${accessToken}`);
-  let response = await fetch(new Request(request, { headers }));
+  if (request.mode === "no-cors" && request.method === "GET") {
+    return fetch(request.url, {
+      headers,
+      method: "GET",
+      mode: "same-origin",
+      credentials: "same-origin",
+      cache: request.cache,
+      redirect: request.redirect,
+    });
+  }
+  return fetch(new Request(request, { headers }));
+}
+
+async function authenticatedFetch(request) {
+  let response = await withToken(request);
   const path = new URL(request.url).pathname;
   if (response.status === 401 && !path.startsWith("/api/auth/") && await refreshSession()) {
-    headers.set("authorization", `Bearer ${accessToken}`);
-    response = await fetch(new Request(request, { headers }));
+    response = await withToken(request);
   }
   return response;
 }
