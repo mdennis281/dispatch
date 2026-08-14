@@ -4,17 +4,8 @@ import { startAuthentication } from "@simplewebauthn/browser";
 import type { AuthSessionResponse, AuthStatus } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { Field, InlineError, TextInput } from "../sidebar/Modal.js";
-import { useAuth } from "../../stores/auth.js";
+import { authPost, useAuth } from "../../stores/auth.js";
 import { startLiveApp } from "../../lib/live.js";
-
-async function publicPost<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(path, { method: "POST", credentials: "same-origin",
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body) });
-  const json = await response.json().catch(() => ({})) as { error?: string };
-  if (!response.ok) throw new Error(json.error ?? "Unable to continue");
-  return json as T;
-}
 
 function enter(session: AuthSessionResponse): void {
   useAuth.getState().applySession(session);
@@ -48,7 +39,7 @@ function Login() {
     event.preventDefault(); setBusy(true); setError(null);
     try {
       const path = redeem ? "/api/auth/setup/redeem" : "/api/auth/login";
-      const session = await publicPost<AuthSessionResponse>(path, redeem
+      const session = await authPost<AuthSessionResponse>(path, redeem
         ? { code: setup, username, password }
         : { username, password, totp: totp || undefined });
       if (redeem) history.replaceState(null, "", location.pathname);
@@ -60,9 +51,9 @@ function Login() {
   async function passkey() {
     setBusy(true); setError(null);
     try {
-      const begin = await publicPost<{ id: string; options: Parameters<typeof startAuthentication>[0]["optionsJSON"] }>("/api/auth/passkeys/login/options");
+      const begin = await authPost<{ id: string; options: Parameters<typeof startAuthentication>[0]["optionsJSON"] }>("/api/auth/passkeys/login/options");
       const response = await startAuthentication({ optionsJSON: begin.options });
-      enter(await publicPost<AuthSessionResponse>("/api/auth/passkeys/login/verify", { id: begin.id, response }));
+      enter(await authPost<AuthSessionResponse>("/api/auth/passkeys/login/verify", { id: begin.id, response }));
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   }
@@ -93,13 +84,13 @@ function FirstRun({ status }: { status: AuthStatus }) {
   async function dismiss() {
     setBusy(true);
     try {
-      await publicPost("/api/auth/first-run/dismiss");
+      await authPost("/api/auth/first-run/dismiss");
       useAuth.getState().applyStatus({ ...status, firstRunDismissed: true });
     } finally { setBusy(false); }
   }
   async function submit(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError(null);
-    try { enter(await publicPost<AuthSessionResponse>("/api/auth/bootstrap", { username, displayName, password, canonicalUrl })); }
+    try { enter(await authPost<AuthSessionResponse>("/api/auth/bootstrap", { username, displayName, password, canonicalUrl })); }
     catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   }

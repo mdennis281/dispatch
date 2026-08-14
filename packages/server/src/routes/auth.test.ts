@@ -210,6 +210,9 @@ describe("optional authentication", () => {
     const stored = await readFile(join(dir, "auth.json"), "utf8");
     expect(stored).toContain("$argon2id$");
     expect(stored).not.toContain("correct horse battery staple");
+    expect(session.cookie).toContain("HttpOnly");
+    expect(session.cookie).toContain("SameSite=Strict");
+    expect(session.cookie).not.toContain("Secure");
     expect((await instance.inject({ url: "/api/projects" })).statusCode).toBe(401);
     expect((await instance.inject({ url: "/ws" })).statusCode).toBe(401);
     expect((await instance.inject({ method: "POST", url: "/api/runners", payload: {} })).statusCode).toBe(401);

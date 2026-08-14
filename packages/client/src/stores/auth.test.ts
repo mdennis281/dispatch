@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { initializeAuth, sessionFetch, useAuth } from "./auth.js";
+import { authPost, initializeAuth, sessionFetch, useAuth } from "./auth.js";
 
 describe("auth bootstrap state", () => {
   beforeEach(() => {
@@ -29,6 +29,13 @@ describe("auth bootstrap state", () => {
     await initializeAuth();
     expect(useAuth.getState().accessToken).toBe("memory-only");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ headers: { "x-dispatch-session": "refresh" } });
+  });
+
+  it("adds the non-simple CSRF header to public authentication posts", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await authPost("/api/auth/login", { username: "owner", password: "password" });
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("x-dispatch-session")).toBe("refresh");
   });
 
   it("single-flights same-tab refresh when requests fail together", async () => {

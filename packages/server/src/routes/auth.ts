@@ -17,11 +17,16 @@ function cookie(req: FastifyRequest, name: string): string | undefined {
   return undefined;
 }
 
-function setRefresh(reply: FastifyReply, value: string): void {
-  reply.header("set-cookie", `${REFRESH_COOKIE}=${encodeURIComponent(value)}; Path=/api/auth; HttpOnly; Secure; SameSite=Strict; Max-Age=${90 * 24 * 60 * 60}`);
+function secureAttribute(req: FastifyRequest): string {
+  // Installed Dispatch is HTTP on loopback/LAN by default. TLS deployments
+  // still receive Secure when Fastify sees HTTPS directly or via a trusted proxy.
+  return req.protocol === "https" ? "; Secure" : "";
 }
-function clearRefresh(reply: FastifyReply): void {
-  reply.header("set-cookie", `${REFRESH_COOKIE}=; Path=/api/auth; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
+function setRefresh(req: FastifyRequest, reply: FastifyReply, value: string): void {
+  reply.header("set-cookie", `${REFRESH_COOKIE}=${encodeURIComponent(value)}; Path=/api/auth; HttpOnly; SameSite=Strict; Max-Age=${90 * 24 * 60 * 60}${secureAttribute(req)}`);
+}
+function clearRefresh(req: FastifyRequest, reply: FastifyReply): void {
+  reply.header("set-cookie", `${REFRESH_COOKIE}=; Path=/api/auth; HttpOnly; SameSite=Strict; Max-Age=0${secureAttribute(req)}`);
 }
 function meta(req: FastifyRequest) {
   return { ua: req.headers["user-agent"] ?? "", ip: req.ip };
@@ -53,37 +58,37 @@ export function registerAuthRoutes(app: FastifyInstance): void {
   app.post("/api/auth/bootstrap", (req, reply) => run(async () => {
     sessionRequest(req);
     const result = await auth.bootstrap(req.body as Parameters<typeof auth.bootstrap>[0], meta(req));
-    setRefresh(reply, result.refreshToken); return result.session;
+    setRefresh(req, reply, result.refreshToken); return result.session;
   }, reply));
   app.post("/api/auth/login", (req, reply) => run(async () => {
     sessionRequest(req);
     const result = await auth.login(req.body as Parameters<typeof auth.login>[0], meta(req));
-    setRefresh(reply, result.refreshToken); return result.session;
+    setRefresh(req, reply, result.refreshToken); return result.session;
   }, reply));
   app.post("/api/auth/enable", (req, reply) => run(async () => {
     sessionRequest(req);
     const result = await auth.enableWithPassword(req.body as Parameters<typeof auth.enableWithPassword>[0], meta(req));
-    setRefresh(reply, result.refreshToken); return result.session;
+    setRefresh(req, reply, result.refreshToken); return result.session;
   }, reply));
   app.post("/api/auth/refresh", (req, reply) => run(async () => {
     sessionRequest(req);
     const result = await auth.refresh(cookie(req, REFRESH_COOKIE), meta(req));
-    setRefresh(reply, result.refreshToken); return result.session;
+    setRefresh(req, reply, result.refreshToken); return result.session;
   }, reply));
   app.post("/api/auth/setup/redeem", (req, reply) => run(async () => {
     sessionRequest(req);
     const result = await auth.redeemSetupCode(req.body as Parameters<typeof auth.redeemSetupCode>[0], meta(req));
-    setRefresh(reply, result.refreshToken); return result.session;
+    setRefresh(req, reply, result.refreshToken); return result.session;
   }, reply));
   app.post("/api/auth/passkeys/login/options", (req, reply) => run(() => auth.authenticationOptions(meta(req)), reply));
   app.post("/api/auth/passkeys/login/verify", (req, reply) => run(async () => {
     sessionRequest(req);
     const result = await auth.verifyAuthentication(req.body as { id: string; response: AuthenticationResponseJSON }, meta(req));
-    setRefresh(reply, result.refreshToken); return result.session;
+    setRefresh(req, reply, result.refreshToken); return result.session;
   }, reply));
 
   app.post("/api/auth/logout", (req, reply) => run(async () => {
-    sessionRequest(req); await auth.logout(identity(req).sessionId); clearRefresh(reply); return { ok: true };
+    sessionRequest(req); await auth.logout(identity(req).sessionId); clearRefresh(req, reply); return { ok: true };
   }, reply));
   app.post("/api/auth/ws-ticket", (req, reply) => run(async () => ({ ticket: await auth.wsTicket(identity(req)) }), reply));
   app.get("/api/auth/security", (req, reply) => run(() => auth.security(identity(req)), reply));
@@ -120,6 +125,6 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     await auth.ownerDeleteUser(identity(req), (req.params as { id: string }).id); return { ok: true };
   }, reply));
   app.post("/api/auth/disable", (req, reply) => run(async () => {
-    await auth.disable(identity(req)); clearRefresh(reply); return { ok: true };
+    await auth.disable(identity(req)); clearRefresh(req, reply); return { ok: true };
   }, reply));
 }
