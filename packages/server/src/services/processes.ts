@@ -122,7 +122,7 @@ interface ShellRoot {
 
 /* -------------------------------------------------------------- default wiring */
 
-/** Parse `netstat -ano -p TCP` (Windows) into LISTENING port→pid pairs. */
+/** Parse `netstat -ano` (Windows) into LISTENING port→pid pairs. */
 export function parseNetstat(output: string): PortListener[] {
   const out: PortListener[] = [];
   for (const raw of output.split(/\r?\n/)) {
@@ -160,7 +160,11 @@ export function parseLsof(output: string): PortListener[] {
 
 const defaultScan: ScanFn = async () => {
   if (process.platform === "win32") {
-    const res = await execa("netstat", ["-ano", "-p", "TCP"], {
+    // `-p TCP` is IPv4-only on Windows. Vite commonly binds localhost as the
+    // IPv6-only `[::1]`, which made a live dev server invisible to the roster.
+    // With no protocol filter netstat returns both TCP families plus UDP; UDP
+    // has no LISTENING state, so the parser's state check excludes those rows.
+    const res = await execa("netstat", ["-ano"], {
       reject: false,
       buffer: true,
     });
