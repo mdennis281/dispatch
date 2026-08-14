@@ -736,6 +736,23 @@ describe("SessionBroker — permissions", () => {
     await expect(answerP).resolves.toEqual({ status: "declined", message: "Not now." });
   });
 
+  it("reports the manager question channel as unavailable without a live session", async () => {
+    const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+
+    await expect(
+      broker.askUser("nobody", [
+        {
+          header: "Proceed",
+          question: "Continue?",
+          options: [{ label: "Yes" }, { label: "No" }],
+        },
+      ]),
+    ).resolves.toEqual({
+      status: "unavailable",
+      message: "No live session is available to ask through.",
+    });
+  });
+
   it("surfaces AskUserQuestion as a question card and feeds the answer back via canUseTool", async () => {
     // The real SDK nested input shape: { questions: [{ question, header, options, multiSelect }] }.
     const input = {

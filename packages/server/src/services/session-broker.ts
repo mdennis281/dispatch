@@ -3075,7 +3075,7 @@ export class SessionBroker {
   async askUser(chatId: string, questions: ManagerAskQuestion[]): Promise<ManagerAskResult> {
     const session = this.sessions.get(chatId);
     if (!session) {
-      return { status: "declined", message: "no live session to ask through" };
+      return { status: "unavailable", message: "No live session is available to ask through." };
     }
     const result = await this.handlePermission(
       session,

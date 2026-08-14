@@ -126,7 +126,8 @@ export interface ManagerAskQuestion {
 /** The human's response to a manager-originated question card. */
 export type ManagerAskResult =
   | { status: "answered"; answers: Record<string, string> }
-  | { status: "declined"; message?: string };
+  | { status: "declined"; message?: string }
+  | { status: "unavailable"; message: string };
 
 /**
  * Check conclusions that count as a FAILING check for `watch_pr` — the ones an
@@ -1440,6 +1441,12 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
     async ({ questions }): Promise<CallToolResult> => {
       const result = await ctx.broker.askUser(ctx.chatId, questions);
+      if (result.status === "unavailable") {
+        return textResult(
+          `The question could not be shown to the human. ${result.message}\n` +
+            JSON.stringify(result),
+        );
+      }
       if (result.status === "declined") {
         return textResult(
           `The human declined to answer.${result.message ? ` ${result.message}` : ""}\n` +

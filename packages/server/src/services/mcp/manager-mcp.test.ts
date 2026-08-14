@@ -119,6 +119,25 @@ describe("manager-mcp — ask_user", () => {
     expect(resultText(res)).toContain("Not now.");
     expect(res.isError).toBeFalsy();
   });
+
+  it("does not describe an unavailable question channel as a human decline", async () => {
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({ c1: "running" }),
+      askUser: async () => ({
+        status: "unavailable",
+        message: "No live session is available to ask through.",
+      }),
+    };
+    const { askUser } = createManagerTools({ chatId: "c1", bus, broker });
+
+    const res = await askUser.handler({ questions }, {});
+    const text = resultText(res);
+
+    expect(text).toContain("could not be shown");
+    expect(text).toContain("No live session");
+    expect(text).not.toContain("declined");
+    expect(res.isError).toBeFalsy();
+  });
 });
 
 /* -------------------------------------------------------------------- wait */
