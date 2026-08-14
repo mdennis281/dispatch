@@ -27,6 +27,7 @@ import { cn } from "../../lib/cn.js";
 import { positiveTokenLimit } from "../../lib/harness.js";
 import { SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
 import { ShellFilterPanel } from "../chat/ShellFilterPanel.js";
+import { AuthSettings } from "../auth/AuthSettings.js";
 
 /** A compact token-styled on/off switch (no primitive exists yet). */
 function Switch({
@@ -320,6 +321,7 @@ export function SettingsPanel() {
       }
     >
       <div className="space-y-4">
+        <AuthSettings />
         {/* appearance */}
         <div>
           <SectionLabel className="mb-1.5 px-0">Appearance</SectionLabel>

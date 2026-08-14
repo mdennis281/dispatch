@@ -22,6 +22,7 @@ import {
 } from "./services/container.js";
 import { registerRoutes } from "./routes/index.js";
 import { healthReport } from "./health.js";
+import { AuthService, type RequestIdentity } from "./services/auth.js";
 
 /** Wired context shared across routes/services via `app.cm`. */
 export interface CmContext {
@@ -34,6 +35,7 @@ declare module "fastify" {
   interface FastifyInstance {
     cm: CmContext;
     services: Services;
+    auth: AuthService;
     /**
      * Begin a graceful shutdown. Decorated by `installShutdown`, which the
      * ENTRYPOINT wires — never `buildApp` — so it is genuinely absent in tests
@@ -41,6 +43,9 @@ declare module "fastify" {
      * rather than pretending when it's missing.
      */
     requestShutdown?: (reason: string) => Promise<void>;
+  }
+  interface FastifyRequest {
+    authIdentity?: RequestIdentity;
   }
 }
 
@@ -72,6 +77,7 @@ export async function buildApp(
 
   const services =
     opts.services ?? createServices({ config, store, bus }, opts.serviceOverrides);
+  const auth = new AuthService(store);
 
   // Base64/data-URL image uploads (POST /api/chats/:id/assets) ride the JSON body,
   // so the body cap must clear the route's MAX_UPLOAD_BYTES (12 MiB) with headroom
@@ -80,6 +86,34 @@ export async function buildApp(
   const app = Fastify({ logger: false, bodyLimit: 16 * 1024 * 1024 });
   app.decorate("cm", { config, store, bus } satisfies CmContext);
   app.decorate("services", services);
+  app.decorate("auth", auth);
+
+  // A single gate covers every current and future API route. Missing auth
+  // settings resolve to disabled, preserving pre-auth installs byte-for-byte.
+  app.addHook("onRequest", async (req, reply) => {
+    if (!(await auth.enabled())) return;
+    const path = req.url.split("?", 1)[0]!;
+    if (path === "/api/health" || path === "/api/auth/status" ||
+        path === "/api/auth/login" || path === "/api/auth/refresh" ||
+        path === "/api/auth/enable" || path === "/api/auth/setup/redeem" ||
+        path === "/api/auth/passkeys/login/options" || path === "/api/auth/passkeys/login/verify" ||
+        // The manager bridge has its own per-chat, ephemeral bearer grants. A
+        // browser JWT cannot replace those without breaking tool isolation.
+        path === "/api/mcp/manager") return;
+    if (path === "/ws") {
+      const ticket = new URL(req.url, "http://dispatch.local").searchParams.get("ticket") ?? undefined;
+      const found = await auth.authenticateWs(ticket);
+      if (!found) return reply.code(401).send({ error: "Authentication required." });
+      req.authIdentity = found;
+      return;
+    }
+    if (!path.startsWith("/api/")) return;
+    const header = req.headers.authorization;
+    const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
+    const found = await auth.authenticateAccess(token);
+    if (!found) return reply.code(401).send({ error: "Authentication required." });
+    req.authIdentity = found;
+  });
 
   await app.register(fastifyWebsocket);
 

@@ -24,7 +24,7 @@ interface SocketLike {
 }
 
 export function registerWsRoutes(app: FastifyInstance): void {
-  app.get("/ws", { websocket: true }, (rawSocket, _req) => {
+  app.get("/ws", { websocket: true }, (rawSocket, req) => {
     const socket = rawSocket as unknown as SocketLike;
     const { bus } = app.services;
 
@@ -41,6 +41,26 @@ export function registerWsRoutes(app: FastifyInstance): void {
 
     // Fan every bus event out to this socket (multiplexed, client routes by chatId).
     const unsub = bus.subscribe((evt) => send(evt));
+    const unsubRevocation = req.authIdentity
+      ? app.auth.onSessionRevoked((id) => {
+          if (id === req.authIdentity?.sessionId) socket.close(4401, "session revoked");
+        })
+      : () => {};
+    // Identity credentials live in shared config while session families are
+    // per instance. Polling the small stamped auth snapshot ensures a delete or
+    // credential reset in stable closes the same user's dev socket promptly.
+    const identityTimer = setInterval(() => {
+      const check = req.authIdentity
+        ? app.auth.identityStillValid(req.authIdentity)
+        : app.auth.enabled().then((enabled) => !enabled);
+      void check.then((valid) => {
+        if (!valid) socket.close(4401, "authentication changed");
+      }).catch(() => socket.close(1011, "identity check failed"));
+    }, 1_000);
+    const cleanup = () => {
+      unsub(); unsubRevocation();
+      clearInterval(identityTimer);
+    };
 
     socket.on("message", (raw: unknown) => {
       let json: unknown;
@@ -62,7 +82,7 @@ export function registerWsRoutes(app: FastifyInstance): void {
       void dispatchClientAction(app.services, parsed.data);
     });
 
-    socket.on("close", () => unsub());
-    socket.on("error", () => unsub());
+    socket.on("close", cleanup);
+    socket.on("error", cleanup);
   });
 }

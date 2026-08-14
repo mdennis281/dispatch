@@ -16,10 +16,31 @@ change; the existing history is audited before publication.
 
 ## Network exposure
 
-The default bind address is `127.0.0.1`. Setting `DISPATCH_HOST=0.0.0.0` exposes a
-control plane that can run commands as your user and currently has no application
-authentication. Enable it only on a network you trust; never expose it directly
-to the public internet.
+The development/default server bind address is `127.0.0.1`. The installed launcher
+explicitly binds `0.0.0.0` so Dispatch is reachable from the LAN (including
+`<lan-ip>:4318`), while its health probe and PWA URL stay on
+`127.0.0.1`. This exposes a control plane that can run commands as your user. Authentication is optional and
+defaults off for backward compatibility; configure the bootstrap owner in
+Settings before exposing Dispatch outside a trusted network. Non-local passkeys
+require HTTPS and a stable canonical hostname.
+
+Passwords use salted Argon2id hashes. Browser sessions use short-lived in-memory
+access tokens and rotating HttpOnly refresh cookies; refresh-token families are
+bound to a normalized browser/device signature. Accounts and credentials are
+shared configuration, while high-write session state remains per Dispatch
+instance. Sessions authorize only a stable internal user ID; password, passkey,
+TOTP, and future external-provider links resolve to that ID without putting
+provider-specific claims into the authorization layer.
+
+If the bootstrap owner is fully locked out, stop Dispatch and reset it locally:
+
+```sh
+printf '%s' 'a-new-long-password' | dispatch auth reset-owner \
+  --config-dir /path/to/config --data-dir /path/to/data --password-stdin \
+  --confirm-stopped
+```
+
+The password is accepted only on stdin, never in argv or an environment variable.
 
 ## Reporting a vulnerability
 

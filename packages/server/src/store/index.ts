@@ -119,6 +119,18 @@ export const AppSettingsSchema = z.object({
       autoApprove: z.boolean().default(false),
     })
     .optional(),
+  /**
+   * Authentication is deliberately optional. Existing config.json files have no
+   * auth key, and that absence MUST keep an upgraded installation open.
+   */
+  auth: z
+    .object({
+      enabled: z.boolean().default(false),
+      firstRunDismissed: z.boolean().default(false),
+      canonicalUrl: z.string().url().optional(),
+      rpId: z.string().min(1).optional(),
+    })
+    .optional(),
 });
 export type AppSettings = z.infer<typeof AppSettingsSchema>;
 
@@ -167,6 +179,7 @@ function parseMessageLines(lines: string[]): ChatMessage[] {
 export class Store {
   private readonly mutex = new KeyedMutex();
   private readonly configDir: string;
+  private freshInstall = true;
 
   /**
    * @param dataDir   STATE root (chats, checkpoints, runners) — per-instance.
@@ -236,9 +249,34 @@ export class Store {
   private settingsFile() {
     return join(this.configDir, "config.json");
   }
+  /** Stable auth identities and their provider credentials share the config root. */
+  authFile() {
+    return join(this.configDir, "auth.json");
+  }
+  /** Refresh families are high-write and must never be shared by two processes. */
+  authSessionsFile() {
+    return join(this.dataDir, "auth-sessions.json");
+  }
+  /** Live-process marker used to make offline owner recovery fail closed. */
+  authRecoveryLockFile() {
+    return join(this.dataDir, "auth-recovery.lock");
+  }
 
   /** Create both roots' trees. Idempotent; call once at boot. */
   async init(): Promise<void> {
+    // Capture this before seedDefaultsIfEmpty creates the standard project and
+    // modes. Auth uses it to show first-run setup only to genuinely new data,
+    // never as a surprise blocker after upgrading an existing installation.
+    const existing = async (dir: string): Promise<boolean> => {
+      try { return (await readdir(dir)).length > 0; } catch { return false; }
+    };
+    // Any legacy file at either exact root proves this is an upgrade. Looking
+    // only in today's entity directories misclassified old roots containing
+    // just runners.json/checkpoints.json and showed them a first-run overlay.
+    const dataHadContent = await existing(this.dataDir);
+    const sameRoot = resolve(this.dataDir) === resolve(this.configDir);
+    const configHadContent = sameRoot ? dataHadContent : await existing(this.configDir);
+    this.freshInstall = !dataHadContent && !configHadContent;
     await mkdir(this.dataDir, { recursive: true });
     await mkdir(this.configDir, { recursive: true });
     await Promise.all([
@@ -247,6 +285,11 @@ export class Store {
       mkdir(this.modesDir(), { recursive: true }),
       mkdir(this.chatsDir(), { recursive: true }),
     ]);
+  }
+
+  /** Snapshot taken before boot-time seeding; stable for this process lifetime. */
+  isFreshInstall(): boolean {
+    return this.freshInstall;
   }
 
   /* -------------------------------------------------- generic helpers */

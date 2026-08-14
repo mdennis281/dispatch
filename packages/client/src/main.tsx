@@ -2,7 +2,6 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.js";
 import {
-  startLiveData,
   hydrateFromMock,
   useConnection,
   useChats,
@@ -13,6 +12,9 @@ import { capturePwaInstall } from "./lib/pwaInstall.js";
 import { focusAttentionTarget } from "./components/attention/focus.js";
 import { watchSystemTheme } from "./stores/theme.js";
 import "./index.css";
+import { initializeAuth, useAuth } from "./stores/auth.js";
+import type { AuthSessionResponse } from "@dispatch/shared";
+import { startLiveApp } from "./lib/live.js";
 
 // The palette itself was applied by the inline script in index.html (before the
 // first paint); this only subscribes to later OS changes, which matters solely
@@ -26,8 +28,12 @@ const isLogWindow = new URLSearchParams(location.search).has("logs");
 // Wire the reactive data spine (active chat → transcript, active project → panels)
 // then open the WS. The backend's `hello` triggers the REST hydrate, so live data
 // flows into the stores the moment we connect; a reconnect resyncs automatically.
-startLiveData();
-ws.connect();
+void initializeAuth().then(() => {
+  const status = useAuth.getState().status;
+  if (!status?.enabled || useAuth.getState().user) {
+    startLiveApp();
+  }
+});
 
 // Dev-only fallback: if no backend ever opens the socket, seed the offline mock
 // so the shell still renders (design work / screenshots). A real `hello` replaces
@@ -68,6 +74,11 @@ if (!isLogWindow) {
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.addEventListener("message", (e) => {
       const d = e.data as { type?: string; chatId?: string; permissionRequestId?: string };
+      if (d?.type === "auth-session") {
+        useAuth.getState().applySession(e.data.session as AuthSessionResponse);
+        ws.connect();
+        return;
+      }
       if (d?.type === "attention-focus" && d.chatId) {
         focusAttentionTarget(d.chatId, d.permissionRequestId);
       }

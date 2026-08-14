@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -15,6 +16,14 @@ test("relative targets keep the bootstrap caller's working directory", () => {
     if (before === undefined) delete process.env.DISPATCH_INSTALL_CWD;
     else process.env.DISPATCH_INSTALL_CWD = before;
   }
+});
+
+test("the installed supervisor enables LAN host mode while keeping its local probe URL", async () => {
+  // build-payload.mjs copies this launcher into every staging payload, and the
+  // upgrader deliberately drives the freshly-swapped payload's copy.
+  const launcher = await readFile(new URL("./app/launch.py", import.meta.url), "utf8");
+  assert.match(launcher, /"DISPATCH_HOST": "0\.0\.0\.0"/);
+  assert.match(launcher, /url = f"http:\/\/127\.0\.0\.1:\{port\}"/);
 });
 
 test("renameWithRetry waits out transient Windows file locks", async () => {

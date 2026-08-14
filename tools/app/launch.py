@@ -211,6 +211,10 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
         # available on Windows. Without it this supervisor has no polite verb.
         "DISPATCH_IPC": "1",
         "DISPATCH_PORT": str(port),
+        # Installed Dispatch is intentionally reachable on the LAN. Health
+        # probes and the PWA URL below stay loopback so localhost remains the
+        # secure browser origin; dev/default server launches remain unchanged.
+        "DISPATCH_HOST": "0.0.0.0",
         "DISPATCH_DATA_DIR": str(paths.data_dir),
         "DISPATCH_CONFIG_DIR": str(paths.config_dir),
     }

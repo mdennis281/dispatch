@@ -38,10 +38,9 @@ const DEFAULT_PORT = 4319;
  * control plane from another device while agents keep running on this box, but
  * it must be an explicit choice because:
  *
- *  1. **There is no auth.** Anything that can reach this port can start a chat,
- *     approve a tool call, and therefore run commands as you. That's fine on a
- *     home LAN behind NAT and NOT fine on a network you don't control. Set
- *     `DISPATCH_HOST=0.0.0.0` only on a network you trust.
+ *  1. **Auth defaults off.** Until the owner enables it in Settings, anything
+ *     that can reach this port can start a chat and run commands as you. Set a
+ *     wildcard host only on a trusted network or after configuring auth.
  *  2. **A LAN origin is not a secure context.** `http://<lan-ip>:4318` gets no
  *     service worker, no install prompt and no Notification API from Chromium —
  *     only `http://localhost` and HTTPS do. The client degrades honestly (see

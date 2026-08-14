@@ -36,7 +36,8 @@ curl -fsSL https://github.com/mdennis281/dispatch/releases/latest/download/insta
 
 The bootstrap downloads the latest GitHub Release, verifies its SHA-256 checksum,
 installs runtime dependencies, and starts Dispatch at
-`http://127.0.0.1:4318`. Run the same command again to update. Existing chats and
+`http://127.0.0.1:4318` (also reachable at `http://<lan-ip>:4318`). Run the same
+command again to update. Existing chats and
 configuration live outside the app payload and survive updates.
 
 Every successful build of `main` is automatically tagged and published using the
@@ -75,8 +76,10 @@ developer and operator guide.
 
 ## Security
 
-Dispatch binds to loopback by default. Host mode (`DISPATCH_HOST=0.0.0.0`) has no
-application authentication and should only be used on a trusted network. See
+Development and direct server launches bind to loopback by default; the installed
+launcher explicitly uses host mode for LAN access. Optional authentication is off after an
+upgrade and can be configured in Settings; enable it before exposing the installed
+app outside a trusted network. See
 [SECURITY.md](./SECURITY.md) for credential handling and reporting guidance.
 
 The onboarding and in-app release update work is mapped in
