@@ -281,6 +281,52 @@ describe("CodexSession lifecycle", () => {
     });
   });
 
+  it("folds activity-only Codex children into a neutral Agent run", async () => {
+    const { session, fake } = makeSession();
+    session.send({ text: "delegate this" });
+    const iterator = session.events[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({ type: "init" });
+
+    fake.push("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        type: "subAgentActivity",
+        id: "activity-1",
+        kind: "started",
+        agentThreadId: "child-legacy",
+        agentPath: "/root/implement_modular_auth",
+      },
+    });
+    fake.push("item/completed", {
+      threadId: "child-legacy",
+      turnId: "child-turn",
+      item: { type: "agentMessage", id: "child-msg", text: "Working on auth." },
+    });
+    fake.push("turn/completed", {
+      threadId: "child-legacy",
+      turn: { id: "child-turn", status: "completed", items: [] },
+    });
+
+    expect((await iterator.next()).value).toMatchObject({
+      type: "tool-use",
+      toolUseId: "codex-agent:child-legacy",
+      name: "Agent",
+      input: { agentType: "implement_modular_auth" },
+    });
+    expect((await iterator.next()).value).toMatchObject({
+      type: "assistant",
+      parentToolUseId: "codex-agent:child-legacy",
+      subagentType: "implement_modular_auth",
+    });
+    expect((await iterator.next()).value).toMatchObject({
+      type: "task-notification",
+      taskId: "child-legacy",
+      toolUseId: "codex-agent:child-legacy",
+      status: "completed",
+    });
+  });
+
   it("attaches images as the right input kind", async () => {
     const { session, fake } = makeSession();
     session.send({
