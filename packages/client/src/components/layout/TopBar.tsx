@@ -24,8 +24,14 @@ export function TopBar() {
 
   const [paletteOpen, setPaletteOpen] = useState(false);
 
+  // `min-h-11` rather than `h-11`, plus `cm-safe-t`: with `viewport-fit=cover`
+  // and a black-translucent status bar (see index.html) the installed PWA draws
+  // under the clock, so the inset has to be added ON TOP of the bar's 44px — a
+  // fixed `h-11` would have carved the padding out of it and left the controls
+  // half under the notch. Nothing in here is taller than 44px, so off an inset
+  // display (`env()` = 0) the box is still exactly 44.
   return (
-    <header className="flex h-11 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
+    <header className="flex min-h-11 shrink-0 items-center gap-3 border-b border-line bg-surface px-3 cm-safe-t">
       {/* mark — the real app icon, not a stand-in glyph: the thing in the
           top-left should be the thing you launched, matching the tab favicon
           and the taskbar icon exactly (see ui/DispatchMark). */}

@@ -59,7 +59,13 @@ export default function App() {
 
   return (
     <AuthGate>
-      <div className="flex h-screen w-screen flex-col overflow-hidden bg-app text-primary antialiased">
+      {/* `100dvh`, not `100vh`. On mobile Safari `vh` is pinned to the LARGEST
+          viewport (URL bar retracted), so a `h-screen` app column is taller than
+          the window whenever the bar is showing — and since this column is
+          `overflow-hidden` with the composer at its bottom, the difference isn't
+          a scroll, it's the composer being cut off the bottom of the screen.
+          `dvh` tracks the live viewport. */}
+      <div className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-app text-primary antialiased">
       <TopBar />
       <div className="flex min-h-0 flex-1">
         {!fullBleed && <Sidebar />}
