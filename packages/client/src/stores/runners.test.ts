@@ -27,6 +27,18 @@ describe("belongsToChat", () => {
     expect(belongsToChat(runner({ projectId: "p1" }), "c1", "p1")).toBe(true);
   });
 
+  it("drops stopped project-level history instead of repeating it in every chat", () => {
+    expect(
+      belongsToChat(runner({ projectId: "p1", status: "stopped" }), "c1", "p1"),
+    ).toBe(false);
+  });
+
+  it("keeps a stopping project-level runner visible until it is actually gone", () => {
+    expect(
+      belongsToChat(runner({ projectId: "p1", status: "stopping" }), "c1", "p1"),
+    ).toBe(true);
+  });
+
   it("drops a project-level runner from ANOTHER project", () => {
     expect(belongsToChat(runner({ projectId: "p2" }), "c1", "p1")).toBe(false);
   });

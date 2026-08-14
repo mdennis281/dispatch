@@ -58,9 +58,10 @@ export const useRunners = create<RunnersStore>((set) => ({
  * even Stop were unreachable for a subApp the user had just started from the
  * sidebar two seconds earlier.
  *
- * Hence: this chat's own runners PLUS the project-level ones. A runner owned by
- * a DIFFERENT chat stays out — it already has a panel of its own, and pulling
- * it in here would turn every chat's Apps tab into the same global list.
+ * Hence: this chat's own runners PLUS ACTIVE project-level ones. Completed
+ * project-level history belongs to the project, not every chat: including it
+ * made each Apps tab accumulate the same long roster of stopped processes. A
+ * runner owned by a DIFFERENT chat stays out — it has a panel of its own.
  */
 export function belongsToChat(
   r: RunnerInstance,
@@ -68,7 +69,9 @@ export function belongsToChat(
   projectId: string | undefined,
 ): boolean {
   if (r.chatId) return r.chatId === chatId;
-  return !!projectId && r.projectId === projectId;
+  const active =
+    r.status === "starting" || r.status === "running" || r.status === "stopping";
+  return active && !!projectId && r.projectId === projectId;
 }
 
 /** Selector: runners scoped to a chat (right-panel "Apps"). */

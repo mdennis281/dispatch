@@ -23,6 +23,7 @@ describe("parseNetstat", () => {
         "  Proto  Local Address          Foreign Address        State           PID",
         "  TCP    0.0.0.0:5173           0.0.0.0:0              LISTENING       12345",
         "  TCP    [::]:5173              [::]:0                 LISTENING       12345",
+        "  TCP    [::1]:5175             [::]:0                 LISTENING       54321",
         "  TCP    127.0.0.1:2567         0.0.0.0:0              LISTENING       6789",
         "  TCP    10.0.0.2:54000         10.0.0.3:443           ESTABLISHED     999",
       ].join("\r\n"),
@@ -30,6 +31,7 @@ describe("parseNetstat", () => {
     expect(out).toEqual([
       { port: 5173, pid: 12345 },
       { port: 5173, pid: 12345 },
+      { port: 5175, pid: 54321 },
       { port: 2567, pid: 6789 },
     ]);
   });
