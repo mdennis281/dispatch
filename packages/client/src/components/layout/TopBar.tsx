@@ -9,6 +9,7 @@ import { StatusDot, type DotTone } from "../ui/StatusDot.js";
 import { DispatchMark } from "../ui/DispatchMark.js";
 import { useConnection, type ConnState } from "../../stores/connection.js";
 import { openOverlay } from "../../stores/view.js";
+import { useLayout } from "../../stores/layout.js";
 import { cn } from "../../lib/cn.js";
 
 const CONN_META: Record<ConnState, { tone: DotTone; label: string; pulse: boolean; text: string }> = {
@@ -23,6 +24,12 @@ export function TopBar() {
   const c = CONN_META[conn];
 
   const [paletteOpen, setPaletteOpen] = useState(false);
+
+  // At phone width the bar has ~390px minus the safe insets to spend, and it was
+  // spending 620 — so everything that repeats information goes. What's left is
+  // what nothing else in the shell says: the mark, whether we're connected, the
+  // palette, and usage.
+  const compact = useLayout((s) => s.mode) === "sm";
 
   // `min-h-11` rather than `h-11`, plus `cm-safe-t`: with `viewport-fit=cover`
   // and a black-translucent status bar (see index.html) the installed PWA draws
@@ -44,14 +51,30 @@ export function TopBar() {
         {/* No version here. `v0.1` was a hardcoded stand-in that never moved and
             said nothing about the bundle you're running; the sidebar's build
             stamp does, so a second, permanently-wrong number next to the logo is
-            worse than none. */}
-        <span className="text-base font-semibold tracking-tight text-primary">Dispatch</span>
+            worse than none.
+
+            The wordmark drops on a phone: the mark beside it is the same brand,
+            at a glance, in a quarter of the width — and on a home-screen PWA the
+            app's name is already under the icon you tapped. */}
+        {!compact && (
+          <span className="text-base font-semibold tracking-tight text-primary">Dispatch</span>
+        )}
       </div>
 
-      {/* connection */}
-      <div className="flex items-center gap-1.5 rounded-md border border-line bg-panel-2/60 px-2 py-1">
+      {/* connection — the dot alone on a phone. `CONN_META` already carries the
+          tone, so the label is a second encoding of the same fact, and it's the
+          one that costs 90px. `title`/`aria-label` keep the word available to a
+          long-press and to a screen reader. */}
+      <div
+        className={cn(
+          "flex items-center gap-1.5",
+          !compact && "rounded-md border border-line bg-panel-2/60 px-2 py-1",
+        )}
+        title={compact ? c.label : undefined}
+        aria-label={compact ? c.label : undefined}
+      >
         <StatusDot tone={c.tone} pulse={c.pulse} size={6} />
-        <span className={cn("text-xs font-medium", c.text)}>{c.label}</span>
+        {!compact && <span className={cn("text-xs font-medium", c.text)}>{c.label}</span>}
       </div>
 
       {/* Command palette — ONE affordance, not three. This box used to sit
@@ -77,21 +100,30 @@ export function TopBar() {
         </IconButton>
       </div>
 
+      {/* The four overlay buttons and the attention queue move into the bottom
+          nav's ⋯ More sheet on a phone — see layout/BottomNav. They are the
+          right things to cut here because every one of them is a destination
+          you visit occasionally, and a sheet is a better place for seven
+          occasional destinations than a row of unlabelled 24px icons. */}
       <div className="ml-auto flex items-center gap-1.5">
         <UsageMeter />
-        <AttentionPopover />
-        <IconButton tip="Project config" onClick={() => openOverlay("config")}>
-          <FileCog />
-        </IconButton>
-        <IconButton tip="MCP tools" onClick={() => openOverlay("mcp")}>
-          <Blocks />
-        </IconButton>
-        <IconButton tip="Open pull requests" onClick={() => openOverlay("prs")}>
-          <GitPullRequest />
-        </IconButton>
-        <IconButton tip="Settings" onClick={() => openOverlay("settings")}>
-          <Settings />
-        </IconButton>
+        {!compact && (
+          <>
+            <AttentionPopover />
+            <IconButton tip="Project config" onClick={() => openOverlay("config")}>
+              <FileCog />
+            </IconButton>
+            <IconButton tip="MCP tools" onClick={() => openOverlay("mcp")}>
+              <Blocks />
+            </IconButton>
+            <IconButton tip="Open pull requests" onClick={() => openOverlay("prs")}>
+              <GitPullRequest />
+            </IconButton>
+            <IconButton tip="Settings" onClick={() => openOverlay("settings")}>
+              <Settings />
+            </IconButton>
+          </>
+        )}
       </div>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
