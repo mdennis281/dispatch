@@ -16,6 +16,7 @@ import type {
   AuthSessionResponse,
   AuthSessionSummary,
   AuthSetupCode,
+  AuthTotpSetup,
   AuthStatus,
   AuthUserSummary,
 } from "@dispatch/shared";
@@ -828,7 +829,7 @@ export class AuthService {
     await this.persistAuth();
   }
 
-  async beginTotp(identity: RequestIdentity): Promise<{ secret: string; uri: string }> {
+  async beginTotp(identity: RequestIdentity): Promise<AuthTotpSetup> {
     const data = await this.load();
     const user = data.users.find((u) => u.id === identity.user.id)!;
     const secret = toBase32(randomBytes(20));

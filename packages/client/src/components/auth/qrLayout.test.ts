@@ -9,7 +9,7 @@ function raster(layout: ReturnType<typeof qrLayout>, scale: number) {
   const width = layout.size * scale;
   const pixels = new Uint8ClampedArray(width * width * 4).fill(255);
   for (let y = 0; y < layout.dark.length; y++) {
-    for (let x = 0; x < layout.dark.length; x++) {
+    for (let x = 0; x < layout.dark[y]!.length; x++) {
       if (!layout.dark[y]![x]) continue;
       for (let dy = 0; dy < scale; dy++) {
         for (let dx = 0; dx < scale; dx++) {
@@ -36,8 +36,10 @@ describe("TOTP setup QR", () => {
     const modules = layout.dark.flat().filter(Boolean).length;
     expect(layout.path.match(/M/g)).toHaveLength(modules);
     for (const [, x, y] of layout.path.matchAll(/M(\d+) (\d+)/g)) {
-      expect(Number(x)).toBeGreaterThanOrEqual(QUIET_ZONE);
-      expect(Number(y)).toBeLessThan(layout.size - QUIET_ZONE);
+      for (const coord of [Number(x), Number(y)]) {
+        expect(coord).toBeGreaterThanOrEqual(QUIET_ZONE);
+        expect(coord).toBeLessThan(layout.size - QUIET_ZONE);
+      }
     }
   });
 });
