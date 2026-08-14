@@ -39,6 +39,7 @@ export function TranscriptSearch({
   const [query, setQuery] = useState("");
   const [count, setCount] = useState(0);
   const [current, setCurrent] = useState(0);
+  const [matchRevision, setMatchRevision] = useState(0);
 
   useEffect(() => {
     if (open) {
@@ -51,7 +52,10 @@ export function TranscriptSearch({
     }
   }, [open]);
 
-  useLayoutEffect(() => {
+  // DOM walking can be substantial after full-history paging. Run it after
+  // paint so typing into the search field never waits on a synchronous layout
+  // effect before the browser can update the input.
+  useEffect(() => {
     clearHighlights();
     if (!open || !rootRef.current || !query.trim()) {
       matchesRef.current = [];
@@ -64,14 +68,10 @@ export function TranscriptSearch({
     matchesRef.current = matches;
     setCount(matches.length);
     setCurrent((index) => (matches.length ? Math.min(index, matches.length - 1) : 0));
+    setMatchRevision((value) => value + 1);
     const registry = highlightRegistry();
     if (registry && matches.length) {
       registry.set(ALL_MATCHES, new Highlight(...matches.map((match) => match.range)));
-      // A page can add matches without changing the count (one live row may have
-      // disappeared at the same time). Restore the current highlight here too;
-      // relying only on the count/index effect would leave that case unselected.
-      const selected = matches[Math.min(current, matches.length - 1)];
-      if (selected) registry.set(CURRENT_MATCH, new Highlight(selected.range));
     }
     return clearHighlights;
   }, [open, query, revision, rootRef]);
@@ -83,7 +83,7 @@ export function TranscriptSearch({
     if (!match) return;
     registry?.set(CURRENT_MATCH, new Highlight(match.range));
     match.row.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [count, current]);
+  }, [count, current, matchRevision]);
 
   useEffect(() => clearHighlights, []);
 

@@ -512,7 +512,7 @@ export function ChatView({ chat }: { chat: Chat }) {
                 <div className="flex flex-col">
                   <MenuItem
                     icon={<Search />}
-                    hint="Ctrl+F"
+                    hint="⌘/Ctrl+F"
                     onClick={() => {
                       openSearch();
                       close();
