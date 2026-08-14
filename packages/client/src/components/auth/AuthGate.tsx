@@ -82,11 +82,12 @@ function FirstRun({ status }: { status: AuthStatus }) {
   const [error, setError] = useState<string | null>(null);
 
   async function dismiss() {
-    setBusy(true);
+    setBusy(true); setError(null);
     try {
       await authPost("/api/auth/first-run/dismiss");
       useAuth.getState().applyStatus({ ...status, firstRunDismissed: true });
-    } finally { setBusy(false); }
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
   }
   async function submit(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError(null);

@@ -79,7 +79,13 @@ export async function sessionFetch(input: RequestInfo | URL, init: RequestInit =
 }
 
 export async function authPost<T>(path: string, body?: unknown): Promise<T> {
-  const response = await sessionFetch(path, { method: "POST", headers: { "content-type": "application/json", "x-dispatch-session": "refresh" },
+  // Only declare a JSON body when there is one: a bodyless POST that still
+  // announces application/json is rejected by Fastify's parser with
+  // FST_ERR_CTP_EMPTY_JSON_BODY (400) before the route ever runs, which is what
+  // silently broke TOTP setup, passkey enrollment, invites, logout and disable.
+  const headers: Record<string, string> = { "x-dispatch-session": "refresh" };
+  if (body !== undefined) headers["content-type"] = "application/json";
+  const response = await sessionFetch(path, { method: "POST", headers,
     body: body === undefined ? undefined : JSON.stringify(body) });
   const json = await response.json().catch(() => ({})) as { error?: string };
   if (!response.ok) throw new Error(json.error ?? "Authentication request failed");
