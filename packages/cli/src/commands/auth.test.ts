@@ -20,13 +20,14 @@ describe("local owner recovery", () => {
       await rename(from, to);
     })).resolves.toBe("owner");
     const auth = JSON.parse(await readFile(join(dir, "auth.json"), "utf8")) as {
-      users: Array<{ owner: boolean; password?: { hash: string }; totp?: unknown }>;
+      users: Array<{ owner: boolean; password?: { hash: string }; totp?: unknown; securityVersion?: number }>;
     };
     const sessions = JSON.parse(await readFile(join(dir, "auth-sessions.json"), "utf8")) as {
       sessions: Array<{ revokedAt?: number }>;
     };
     const owner = auth.users.find((user) => user.owner)!;
     expect(owner.totp).toBeUndefined();
+    expect(owner.securityVersion).toBe(1);
     expect(owner.password?.hash).toMatch(/^\$argon2id\$/);
     await expect(verify(owner.password!.hash, "a sufficiently long new password")).resolves.toBe(true);
     expect(sessions.sessions.every((session) => typeof session.revokedAt === "number" && session.revokedAt > 1)).toBe(true);

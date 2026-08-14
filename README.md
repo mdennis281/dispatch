@@ -36,8 +36,8 @@ curl -fsSL https://github.com/mdennis281/dispatch/releases/latest/download/insta
 
 The bootstrap downloads the latest GitHub Release, verifies its SHA-256 checksum,
 installs runtime dependencies, and starts Dispatch at
-`http://127.0.0.1:4318` (also reachable through the machine's LAN addresses,
-including `http://10.0.4.1:4318` when that interface is present). Run the same command again to update. Existing chats and
+`http://127.0.0.1:4318` (also reachable at `http://<lan-ip>:4318`). Run the same
+command again to update. Existing chats and
 configuration live outside the app payload and survive updates.
 
 Every successful build of `main` is automatically tagged and published using the

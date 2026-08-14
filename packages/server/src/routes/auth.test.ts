@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildApp } from "../app.js";
@@ -18,6 +18,25 @@ async function app() {
     port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1,
   }});
   return { instance, store, dir };
+}
+
+async function pairedApps() {
+  const root = await mkdtemp(join(tmpdir(), "dispatch-auth-paired-"));
+  dirs.push(root);
+  const configDir = join(root, "config");
+  const dataOne = join(root, "stable-data");
+  const dataTwo = join(root, "dev-data");
+  await Promise.all([mkdir(configDir), mkdir(dataOne), mkdir(dataTwo)]);
+  const make = async (dataDir: string) => {
+    const store = new Store(dataDir, configDir);
+    const instance = await buildApp({ store, bus: new EventBus(), config: {
+      port: 0, host: "127.0.0.1", dataDir, configDir, maxActiveSessions: 1,
+    }});
+    return { store, instance };
+  };
+  const one = await make(dataOne);
+  const two = await make(dataTwo);
+  return { one, two, configDir };
 }
 
 async function bootstrap(instance: Awaited<ReturnType<typeof buildApp>>, ua = "Mozilla/5.0 Chrome/126.0 Windows NT 10.0") {
@@ -87,6 +106,77 @@ describe("optional authentication", () => {
     expect(stored.users).toHaveLength(1);
     expect(stored.users.filter((user) => user.owner)).toHaveLength(1);
     await instance.close();
+  });
+
+  it("serializes bootstrap across stable and dev instances sharing config", async () => {
+    const { one, two, configDir } = await pairedApps();
+    const attempt = (instance: typeof one.instance, username: string) => instance.inject({
+      method: "POST", url: "/api/auth/bootstrap", payload: {
+        username, password: "correct horse battery staple", canonicalUrl: "http://localhost",
+      },
+    });
+    const responses = await Promise.all([attempt(one.instance, "stable-owner"), attempt(two.instance, "dev-owner")]);
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+    const stored = JSON.parse(await readFile(join(configDir, "auth.json"), "utf8")) as { users: Array<{ owner: boolean }> };
+    expect(stored.users).toHaveLength(1);
+    await Promise.all([one.instance.close(), two.instance.close()]);
+  });
+
+  it("reloads and preserves concurrent shared identity mutations across instances", async () => {
+    const { one, two } = await pairedApps();
+    const ownerOne = await bootstrap(one.instance);
+    const ownerTwo = await two.instance.inject({ method: "POST", url: "/api/auth/login", payload: {
+      username: "owner", password: "correct horse battery staple",
+    }});
+    expect(ownerTwo.statusCode).toBe(200);
+    const ownerTwoToken = (ownerTwo.json() as { accessToken: string }).accessToken;
+    const [inviteOne, inviteTwo] = await Promise.all([
+      one.instance.inject({ method: "POST", url: "/api/auth/setup-codes",
+        headers: { authorization: `Bearer ${ownerOne.body.accessToken}` } }),
+      two.instance.inject({ method: "POST", url: "/api/auth/setup-codes",
+        headers: { authorization: `Bearer ${ownerTwoToken}` } }),
+    ]);
+    expect([inviteOne.statusCode, inviteTwo.statusCode]).toEqual([200, 200]);
+    const [memberOne, memberTwo] = await Promise.all([
+      one.instance.inject({ method: "POST", url: "/api/auth/setup/redeem", payload: {
+        code: (inviteOne.json() as { code: string }).code, username: "stable-member", password: "another correct horse password",
+      }}),
+      two.instance.inject({ method: "POST", url: "/api/auth/setup/redeem", payload: {
+        code: (inviteTwo.json() as { code: string }).code, username: "dev-member", password: "another correct horse password",
+      }}),
+    ]);
+    expect([memberOne.statusCode, memberTwo.statusCode]).toEqual([200, 200]);
+    const list = async (instance: typeof one.instance, token: string) => instance.inject({ url: "/api/auth/users",
+      headers: { authorization: `Bearer ${token}` } });
+    expect((await list(one.instance, ownerOne.body.accessToken)).json()).toHaveLength(3);
+    expect((await list(two.instance, ownerTwoToken)).json()).toHaveLength(3);
+
+    const memberTwoToken = (memberTwo.json() as { accessToken: string }).accessToken;
+    const memberOneToken = (memberOne.json() as { accessToken: string }).accessToken;
+    const resetIdentity = await two.instance.auth.authenticateAccess(memberTwoToken);
+    const deleteIdentity = await one.instance.auth.authenticateAccess(memberOneToken);
+    const users = (await list(one.instance, ownerOne.body.accessToken)).json() as Array<{ id: string; username: string }>;
+    const resetTarget = users.find((user) => user.username === "dev-member")!;
+    expect((await one.instance.inject({ method: "POST", url: `/api/auth/users/${resetTarget.id}/reset`,
+      headers: { authorization: `Bearer ${ownerOne.body.accessToken}` },
+      payload: { password: "a newly reset horse password" } })).statusCode).toBe(200);
+    expect(await two.instance.auth.identityStillValid(resetIdentity!)).toBe(false);
+    expect((await two.instance.inject({ url: "/api/projects",
+      headers: { authorization: `Bearer ${memberTwoToken}` } })).statusCode).toBe(401);
+
+    const deleteTarget = users.find((user) => user.username === "stable-member")!;
+    expect((await one.instance.inject({ method: "DELETE", url: `/api/auth/users/${deleteTarget.id}`,
+      headers: { authorization: `Bearer ${ownerOne.body.accessToken}` } })).statusCode).toBe(200);
+    expect(await one.instance.auth.identityStillValid(deleteIdentity!)).toBe(false);
+
+    expect((await one.instance.inject({ method: "POST", url: "/api/auth/disable",
+      headers: { authorization: `Bearer ${ownerOne.body.accessToken}`, "x-dispatch-session": "refresh" } })).statusCode).toBe(200);
+    expect((await one.instance.inject({ method: "POST", url: "/api/auth/enable", payload: {
+      username: "owner", password: "correct horse battery staple",
+    }})).statusCode).toBe(200);
+    expect((await two.instance.inject({ url: "/api/projects",
+      headers: { authorization: `Bearer ${ownerTwoToken}` } })).statusCode).toBe(401);
+    await Promise.all([one.instance.close(), two.instance.close()]);
   });
 
   it("hashes owner passwords and protects REST, WS, and runner control when enabled", async () => {

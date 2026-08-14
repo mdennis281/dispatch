@@ -1,4 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { hash as argonHash, verify as argonVerify } from "@node-rs/argon2";
 import {
   generateAuthenticationOptions,
@@ -26,6 +28,7 @@ const REFRESH_ABSOLUTE_MS = 90 * 24 * 60 * 60 * 1000;
 const CHALLENGE_MS = 5 * 60 * 1000;
 const SETUP_MS = 15 * 60 * 1000;
 const CONCURRENT_REFRESH_GRACE_MS = 2_000;
+const AUTH_LOCK_WAIT_MS = 5_000;
 
 export const REFRESH_COOKIE = "dispatch_refresh";
 
@@ -52,10 +55,13 @@ interface StoredUser {
   totp?: TotpCredential;
   /** Provider links resolve to this stable user id; authorization never depends on provider shape. */
   externalIdentities?: Array<{ provider: string; subject: string; linkedAt: number }>;
+  securityVersion?: number;
 }
 interface RefreshFamily {
   id: string;
   userId: string;
+  securityVersion?: number;
+  authEpoch?: number;
   currentHash: string;
   previousHash?: string;
   rotatedAt?: number;
@@ -78,10 +84,80 @@ interface SetupCodeRow {
 interface AuthData {
   version: 1;
   signingSecret: string;
+  sessionEpoch?: number;
   users: StoredUser[];
   setupCodes: SetupCodeRow[];
 }
 interface AuthSessionData { version: 1; sessions: RefreshFamily[] }
+
+function emptyAuthData(): AuthData {
+  return { version: 1, signingSecret: b64url(randomBytes(32)), sessionEpoch: 0, users: [], setupCodes: [] };
+}
+
+async function processIsAlive(pid: number): Promise<boolean> {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
+
+async function withAuthFileLock<T>(authFile: string, task: () => Promise<T>): Promise<T> {
+  const lockDir = `${authFile}.lock`;
+  const ownerFile = join(lockDir, "owner.json");
+  const nonce = crypto.randomUUID();
+  const deadline = Date.now() + AUTH_LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      await mkdir(lockDir);
+      try {
+        await writeFile(ownerFile, JSON.stringify({ pid: process.pid, nonce, acquiredAt: Date.now() }), { mode: 0o600 });
+      } catch (error) {
+        await rmdir(lockDir).catch(() => {});
+        throw error;
+      }
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let stale = false;
+      try {
+        const owner = JSON.parse(await readFile(ownerFile, "utf8")) as { pid?: unknown };
+        stale = typeof owner.pid === "number" && !(await processIsAlive(owner.pid));
+      } catch {
+        try { stale = Date.now() - (await stat(lockDir)).mtimeMs > 1_000; } catch { continue; }
+      }
+      if (stale) {
+        const quarantine = `${lockDir}.stale-${crypto.randomUUID()}`;
+        try {
+          await rename(lockDir, quarantine);
+          await unlink(join(quarantine, "owner.json")).catch(() => {});
+          await rmdir(quarantine).catch(() => {});
+        } catch (renameError) {
+          const code = (renameError as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT" && code !== "EEXIST") throw renameError;
+        }
+        continue;
+      }
+      if (Date.now() >= deadline) throw new AuthFailure(503, "Authentication data is busy. Try again shortly.");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  try { return await task(); }
+  finally {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const owner = JSON.parse(await readFile(ownerFile, "utf8")) as { nonce?: unknown };
+        if (owner.nonce !== nonce) break;
+        await unlink(ownerFile).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+        await rmdir(lockDir);
+        break;
+      } catch {
+        if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 25));
+        // A final failure leaves only this exact lock dir and owner metadata;
+        // the bounded stale-owner path above recovers it after process death.
+      }
+    }
+  }
+}
 
 interface Challenge {
   kind: "register" | "login";
@@ -99,6 +175,8 @@ export class AuthFailure extends Error {
 export interface RequestIdentity {
   user: AuthUserSummary;
   sessionId: string;
+  securityVersion: number;
+  authEpoch: number;
 }
 
 function b64url(input: Uint8Array | string): string {
@@ -172,6 +250,14 @@ function userSummary(user: StoredUser): AuthUserSummary {
   };
 }
 
+function securityVersion(user: StoredUser): number {
+  return user.securityVersion ?? 0;
+}
+
+function authEpoch(data: AuthData): number {
+  return data.sessionEpoch ?? 0;
+}
+
 function sessionSummary(row: RefreshFamily, currentId?: string): AuthSessionSummary {
   return {
     id: row.id,
@@ -228,6 +314,8 @@ export class AuthService {
   private data: AuthData | null = null;
   private sessionData: AuthSessionData | null = null;
   private loadPromise: Promise<AuthData> | null = null;
+  private authStamp: string | null = null;
+  private authReload: Promise<void> | null = null;
   private mutationTail: Promise<void> = Promise.resolve();
   private writeChain: Promise<void> = Promise.resolve();
   private challenges = new Map<string, Challenge>();
@@ -246,6 +334,16 @@ export class AuthService {
     finally { release(); }
   }
 
+  private async sharedMutation<T>(task: () => Promise<T>): Promise<T> {
+    return this.exclusive(async () => {
+      await this.load();
+      return withAuthFileLock(this.store.authFile(), async () => {
+        await this.reloadAuth(true);
+        return task();
+      });
+    });
+  }
+
   onSessionRevoked(listener: (sessionId: string) => void): () => void {
     this.revocationListeners.add(listener);
     return () => this.revocationListeners.delete(listener);
@@ -255,11 +353,13 @@ export class AuthService {
   }
 
   private async load(): Promise<AuthData> {
-    if (this.data) return this.data;
-    if (this.loadPromise) return this.loadPromise;
-    this.loadPromise = this.loadOnce();
-    try { return await this.loadPromise; }
-    catch (error) { this.loadPromise = null; throw error; }
+    if (!this.data) {
+      if (!this.loadPromise) this.loadPromise = this.loadOnce();
+      try { await this.loadPromise; }
+      catch (error) { this.loadPromise = null; throw error; }
+    }
+    await this.reloadAuth(false);
+    return this.data!;
   }
 
   private async loadOnce(): Promise<AuthData> {
@@ -267,14 +367,39 @@ export class AuthService {
       readJson(this.store.authFile()) as Promise<AuthData | undefined>,
       readJson(this.store.authSessionsFile()) as Promise<AuthSessionData | undefined>,
     ]);
-    this.data = raw?.version === 1 ? raw : {
-      version: 1,
-      signingSecret: b64url(randomBytes(32)),
-      users: [], setupCodes: [],
-    };
+    this.data = raw?.version === 1 ? raw : emptyAuthData();
     this.sessionData = rawSessions?.version === 1 ? rawSessions : { version: 1, sessions: [] };
-    if (!raw || !rawSessions) await this.persist();
+    this.authStamp = await this.readAuthStamp();
+    // auth.json is created only by a shared mutation while holding its
+    // cross-process lock. Session state is per-instance and needs no file lock.
+    if (!rawSessions) await this.persistSessions();
     return this.data;
+  }
+
+  private async readAuthStamp(): Promise<string | null> {
+    try {
+      const info = await stat(this.store.authFile(), { bigint: true });
+      return `${info.mtimeNs}:${info.size}:${info.ino}`;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  private async reloadAuth(force: boolean): Promise<void> {
+    if (this.authReload) {
+      await this.authReload;
+      if (force) return this.reloadAuth(true);
+      return;
+    }
+    this.authReload = (async () => {
+      const stamp = await this.readAuthStamp();
+      if (!force && stamp === this.authStamp) return;
+      const raw = await readJson(this.store.authFile()) as AuthData | undefined;
+      this.data = raw?.version === 1 ? raw : emptyAuthData();
+      this.authStamp = await this.readAuthStamp();
+    })().finally(() => { this.authReload = null; });
+    return this.authReload;
   }
 
   private async persist(): Promise<void> {
@@ -300,6 +425,7 @@ export class AuthService {
       if (auth) writes.push(writeJsonAtomic(this.store.authFile(), value, { mode: 0o600 }));
       if (sessions) writes.push(writeJsonAtomic(this.store.authSessionsFile(), sessionValue, { mode: 0o600 }));
       await Promise.all(writes);
+      if (auth) this.authStamp = await this.readAuthStamp();
     });
     await this.writeChain;
   }
@@ -353,8 +479,12 @@ export class AuthService {
     if (!payload || typeof payload.sub !== "string" || typeof payload.sid !== "string") return null;
     const user = data.users.find((u) => u.id === payload.sub && !u.disabled);
     const family = this.sessionData!.sessions.find((s) => s.id === payload.sid && !s.revokedAt);
-    if (!user || !family || family.userId !== user.id || family.expiresAt <= Date.now() || family.absoluteExpiresAt <= Date.now()) return null;
-    return { user: userSummary(user), sessionId: family.id };
+    const version = user ? securityVersion(user) : -1;
+    const epoch = authEpoch(data);
+    if (!user || !family || family.userId !== user.id || family.securityVersion !== version || payload.ver !== version ||
+        family.authEpoch !== epoch || payload.aep !== epoch ||
+        family.expiresAt <= Date.now() || family.absoluteExpiresAt <= Date.now()) return null;
+    return { user: userSummary(user), sessionId: family.id, securityVersion: version, authEpoch: epoch };
   }
 
   async authenticateWs(ticket: string | undefined): Promise<RequestIdentity | null> {
@@ -365,9 +495,19 @@ export class AuthService {
     const user = data.users.find((u) => u.id === payload.sub && !u.disabled);
     const family = this.sessionData!.sessions.find((s) => s.id === payload.sid && !s.revokedAt);
     const now = Date.now();
-    return user && family && family.userId === user.id && family.expiresAt > now && family.absoluteExpiresAt > now
-      ? { user: userSummary(user), sessionId: family.id }
+    const version = user ? securityVersion(user) : -1;
+    const epoch = authEpoch(data);
+    return user && family && family.userId === user.id && family.securityVersion === version && payload.ver === version &&
+        family.authEpoch === epoch && payload.aep === epoch &&
+        family.expiresAt > now && family.absoluteExpiresAt > now
+      ? { user: userSummary(user), sessionId: family.id, securityVersion: version, authEpoch: epoch }
       : null;
+  }
+
+  async identityStillValid(identity: RequestIdentity): Promise<boolean> {
+    const data = await this.load();
+    const user = data.users.find((row) => row.id === identity.user.id && !row.disabled);
+    return !!user && securityVersion(user) === identity.securityVersion && authEpoch(data) === identity.authEpoch;
   }
 
   async status(token?: string): Promise<AuthStatus> {
@@ -390,7 +530,7 @@ export class AuthService {
   }
 
   async bootstrap(input: { username: string; displayName?: string; password: string; canonicalUrl: string; rpId?: string }, meta: { ua: string; ip?: string }): Promise<{ session: AuthSessionResponse; refreshToken: string }> {
-    return this.exclusive(() => this.bootstrapUnsafe(input, meta));
+    return this.sharedMutation(() => this.bootstrapUnsafe(input, meta));
   }
 
   private async bootstrapUnsafe(input: { username: string; displayName?: string; password: string; canonicalUrl: string; rpId?: string }, meta: { ua: string; ip?: string }): Promise<{ session: AuthSessionResponse; refreshToken: string }> {
@@ -402,7 +542,7 @@ export class AuthService {
     const user: StoredUser = {
       id: crypto.randomUUID(), username: normalizeUsername(input.username),
       displayName: input.displayName?.trim() || input.username.trim(), owner: true,
-      disabled: false, createdAt: Date.now(), passkeys: [], externalIdentities: [],
+      disabled: false, createdAt: Date.now(), passkeys: [], externalIdentities: [], securityVersion: 1,
       password: { hash: await this.hashPassword(input.password) },
     };
     if (!user.username) throw new AuthFailure(400, "Username is required.");
@@ -427,6 +567,17 @@ export class AuthService {
     // 2 is Argon2id. The package exposes it as an ambient const enum, which
     // cannot be imported under this repo's verbatimModuleSyntax setting.
     return argonHash(password, { algorithm: 2, memoryCost: 19_456, timeCost: 3, parallelism: 1 });
+  }
+
+  private async bumpSecurity(user: StoredUser, currentSessionId?: string): Promise<void> {
+    user.securityVersion = securityVersion(user) + 1;
+    if (currentSessionId) {
+      const current = this.sessionData!.sessions.find((row) => row.id === currentSessionId && !row.revokedAt);
+      if (current) {
+        current.securityVersion = user.securityVersion;
+        await this.persistSessions();
+      }
+    }
   }
 
   async login(input: { username: string; password: string; totp?: string }, meta: { ua: string; ip?: string }): Promise<{ session: AuthSessionResponse; refreshToken: string }> {
@@ -455,14 +606,16 @@ export class AuthService {
     const id = crypto.randomUUID();
     const secret = b64url(randomBytes(32));
     const raw = `${id}.${secret}`;
-    this.sessionData!.sessions.push({ id, userId: user.id, currentHash: digest(raw),
+    const version = securityVersion(user);
+    const epoch = authEpoch(data);
+    this.sessionData!.sessions.push({ id, userId: user.id, securityVersion: version, authEpoch: epoch, currentHash: digest(raw),
       uaBinding: normalizeUserAgent(meta.ua), userAgent: meta.ua.slice(0, 300), ip: meta.ip,
       createdAt: now, lastUsedAt: now, expiresAt: now + REFRESH_SLIDING_MS,
       absoluteExpiresAt: now + REFRESH_ABSOLUTE_MS });
     await this.persistSessions();
     const nowSec = Math.floor(now / 1000);
     return { refreshToken: raw, session: {
-      accessToken: this.sign({ sub: user.id, sid: id, typ: "access", iat: nowSec, exp: nowSec + ACCESS_SECONDS }),
+      accessToken: this.sign({ sub: user.id, sid: id, ver: version, aep: epoch, typ: "access", iat: nowSec, exp: nowSec + ACCESS_SECONDS }),
       expiresIn: ACCESS_SECONDS, user: userSummary(user),
     }};
   }
@@ -508,6 +661,14 @@ export class AuthService {
     }
     const user = data.users.find((u) => u.id === family.userId && !u.disabled);
     if (!user) throw new AuthFailure(401, "Session expired.");
+    const version = securityVersion(user);
+    const epoch = authEpoch(data);
+    if (family.securityVersion !== version || family.authEpoch !== epoch) {
+      family.revokedAt = now;
+      await this.persistSessions();
+      this.notifyRevoked(family.id);
+      throw new AuthFailure(401, "Session revoked.");
+    }
     const next = `${family.id}.${b64url(randomBytes(32))}`;
     family.previousHash = family.currentHash;
     family.currentHash = digest(next);
@@ -517,7 +678,7 @@ export class AuthService {
     await this.persistSessions();
     const nowSec = Math.floor(now / 1000);
     return { refreshToken: next, session: {
-      accessToken: this.sign({ sub: user.id, sid: family.id, typ: "access", iat: nowSec, exp: nowSec + ACCESS_SECONDS }),
+      accessToken: this.sign({ sub: user.id, sid: family.id, ver: version, aep: epoch, typ: "access", iat: nowSec, exp: nowSec + ACCESS_SECONDS }),
       expiresIn: ACCESS_SECONDS, user: userSummary(user),
     }};
   }
@@ -525,7 +686,8 @@ export class AuthService {
   async wsTicket(identity: RequestIdentity): Promise<string> {
     await this.load();
     const now = Math.floor(Date.now() / 1000);
-    return this.sign({ sub: identity.user.id, sid: identity.sessionId, typ: "ws", iat: now, exp: now + 30 });
+    return this.sign({ sub: identity.user.id, sid: identity.sessionId, ver: identity.securityVersion,
+      aep: identity.authEpoch, typ: "ws", iat: now, exp: now + 30 });
   }
 
   async logout(sessionId: string): Promise<void> {
@@ -539,12 +701,12 @@ export class AuthService {
   }
 
   async disable(identity: RequestIdentity): Promise<void> {
-    return this.exclusive(() => this.disableUnsafe(identity));
+    return this.sharedMutation(() => this.disableUnsafe(identity));
   }
 
   private async disableUnsafe(identity: RequestIdentity): Promise<void> {
     if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
-    await this.load();
+    const data = await this.load();
     const now = Date.now();
     for (const row of this.sessionData!.sessions) if (!row.revokedAt) {
       row.revokedAt = now;
@@ -553,6 +715,8 @@ export class AuthService {
     // Revoke first: a crash can leave auth enabled, but can never leave tokens
     // live after Settings says it was disabled and those credentials are re-used.
     await this.persistSessions();
+    data.sessionEpoch = authEpoch(data) + 1;
+    await this.persistAuth();
     const settings = await this.store.getSettings();
     await this.store.saveSettings({ ...settings, auth: { ...settings.auth, enabled: false, firstRunDismissed: true } });
   }
@@ -584,7 +748,7 @@ export class AuthService {
   }
 
   async updateWebAuthnSettings(identity: RequestIdentity, input: { canonicalUrl: string; rpId?: string }): Promise<{ canonicalUrl: string; rpId: string }> {
-    return this.exclusive(async () => {
+    return this.sharedMutation(async () => {
       if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
       const webauthn = validateWebAuthnConfig(input);
       const settings = await this.store.getSettings();
@@ -594,7 +758,7 @@ export class AuthService {
   }
 
   async createSetupCode(identity: RequestIdentity): Promise<AuthSetupCode> {
-    return this.exclusive(() => this.createSetupCodeUnsafe(identity));
+    return this.sharedMutation(() => this.createSetupCodeUnsafe(identity));
   }
 
   private async createSetupCodeUnsafe(identity: RequestIdentity): Promise<AuthSetupCode> {
@@ -610,7 +774,7 @@ export class AuthService {
   }
 
   async redeemSetupCode(input: { code: string; username: string; displayName?: string; password: string }, meta: { ua: string; ip?: string }) {
-    return this.exclusive(() => this.redeemSetupCodeUnsafe(input, meta));
+    return this.sharedMutation(() => this.redeemSetupCodeUnsafe(input, meta));
   }
 
   private async redeemSetupCodeUnsafe(input: { code: string; username: string; displayName?: string; password: string }, meta: { ua: string; ip?: string }) {
@@ -623,7 +787,7 @@ export class AuthService {
     if (!username || data.users.some((u) => u.username === username)) throw new AuthFailure(400, "Unable to create account.");
     const user: StoredUser = { id: crypto.randomUUID(), username,
       displayName: input.displayName?.trim() || input.username.trim(), owner: false,
-      disabled: false, createdAt: Date.now(), passkeys: [], externalIdentities: [],
+      disabled: false, createdAt: Date.now(), passkeys: [], externalIdentities: [], securityVersion: 1,
       password: { hash: await this.hashPassword(input.password) } };
     row.usedAt = Date.now();
     data.users.push(user);
@@ -632,7 +796,7 @@ export class AuthService {
   }
 
   async updatePassword(identity: RequestIdentity, input: { currentPassword: string; password: string }): Promise<void> {
-    return this.exclusive(() => this.updatePasswordUnsafe(identity, input));
+    return this.sharedMutation(() => this.updatePasswordUnsafe(identity, input));
   }
 
   private async updatePasswordUnsafe(identity: RequestIdentity, input: { currentPassword: string; password: string }): Promise<void> {
@@ -641,6 +805,7 @@ export class AuthService {
     if (!user.password || !(await argonVerify(user.password.hash, input.currentPassword))) throw new AuthFailure(401, "Current password is incorrect.");
     this.validatePassword(input.password);
     user.password = { hash: await this.hashPassword(input.password) };
+    await this.bumpSecurity(user, identity.sessionId);
     await this.persistAuth();
   }
 
@@ -653,7 +818,7 @@ export class AuthService {
   }
 
   async confirmTotp(identity: RequestIdentity, code: string): Promise<void> {
-    return this.exclusive(() => this.confirmTotpUnsafe(identity, code));
+    return this.sharedMutation(() => this.confirmTotpUnsafe(identity, code));
   }
 
   private async confirmTotpUnsafe(identity: RequestIdentity, code: string): Promise<void> {
@@ -663,11 +828,12 @@ export class AuthService {
     const user = data.users.find((u) => u.id === identity.user.id)!;
     user.totp = { secret: challenge.challenge, enabledAt: Date.now() };
     this.challenges.delete(`totp:${identity.user.id}`);
+    await this.bumpSecurity(user, identity.sessionId);
     await this.persistAuth();
   }
 
   async disableTotp(identity: RequestIdentity, password: string): Promise<void> {
-    return this.exclusive(() => this.disableTotpUnsafe(identity, password));
+    return this.sharedMutation(() => this.disableTotpUnsafe(identity, password));
   }
 
   private async disableTotpUnsafe(identity: RequestIdentity, password: string): Promise<void> {
@@ -675,6 +841,7 @@ export class AuthService {
     const user = data.users.find((u) => u.id === identity.user.id)!;
     if (!user.password || !(await argonVerify(user.password.hash, password))) throw new AuthFailure(401, "Password is incorrect.");
     delete user.totp;
+    await this.bumpSecurity(user, identity.sessionId);
     await this.persistAuth();
   }
 
@@ -692,7 +859,7 @@ export class AuthService {
   }
 
   async verifyRegistration(identity: RequestIdentity, response: RegistrationResponseJSON, name?: string): Promise<void> {
-    return this.exclusive(() => this.verifyRegistrationUnsafe(identity, response, name));
+    return this.sharedMutation(() => this.verifyRegistrationUnsafe(identity, response, name));
   }
 
   private async verifyRegistrationUnsafe(identity: RequestIdentity, response: RegistrationResponseJSON, name?: string): Promise<void> {
@@ -709,6 +876,7 @@ export class AuthService {
       publicKey: b64url(cred.publicKey), counter: cred.counter, transports: response.response.transports,
       name: name?.trim() || "Passkey", createdAt: Date.now() });
     this.challenges.delete(`reg:${identity.user.id}`);
+    await this.bumpSecurity(user, identity.sessionId);
     await this.persistAuth();
   }
 
@@ -724,7 +892,7 @@ export class AuthService {
   }
 
   async verifyAuthentication(input: { id: string; response: AuthenticationResponseJSON }, meta: { ua: string; ip?: string }) {
-    return this.exclusive(() => this.verifyAuthenticationUnsafe(input, meta));
+    return this.sharedMutation(() => this.verifyAuthenticationUnsafe(input, meta));
   }
 
   private async verifyAuthenticationUnsafe(input: { id: string; response: AuthenticationResponseJSON }, meta: { ua: string; ip?: string }) {
@@ -748,7 +916,7 @@ export class AuthService {
   }
 
   async removePasskey(identity: RequestIdentity, passkeyId: string): Promise<void> {
-    return this.exclusive(() => this.removePasskeyUnsafe(identity, passkeyId));
+    return this.sharedMutation(() => this.removePasskeyUnsafe(identity, passkeyId));
   }
 
   private async removePasskeyUnsafe(identity: RequestIdentity, passkeyId: string): Promise<void> {
@@ -756,6 +924,7 @@ export class AuthService {
     const user = data.users.find((u) => u.id === identity.user.id)!;
     if (user.passkeys.length <= 1 && !user.password) throw new AuthFailure(400, "Add another login method before removing this passkey.");
     user.passkeys = user.passkeys.filter((p) => p.id !== passkeyId);
+    await this.bumpSecurity(user, identity.sessionId);
     await this.persistAuth();
   }
 
@@ -773,7 +942,7 @@ export class AuthService {
   }
 
   async ownerResetUser(identity: RequestIdentity, userId: string, password: string): Promise<void> {
-    return this.exclusive(() => this.ownerResetUserUnsafe(identity, userId, password));
+    return this.sharedMutation(() => this.ownerResetUserUnsafe(identity, userId, password));
   }
 
   private async ownerResetUserUnsafe(identity: RequestIdentity, userId: string, password: string): Promise<void> {
@@ -782,16 +951,19 @@ export class AuthService {
     const data = await this.load();
     const user = data.users.find((u) => u.id === userId);
     if (!user) throw new AuthFailure(404, "Account not found.");
-    user.password = { hash: await this.hashPassword(password) };
-    delete user.totp;
+    const hash = await this.hashPassword(password);
     for (const row of this.sessionData!.sessions) if (row.userId === userId) {
       row.revokedAt = Date.now(); this.notifyRevoked(row.id);
     }
-    await this.persist();
+    await this.persistSessions();
+    user.password = { hash };
+    delete user.totp;
+    user.securityVersion = securityVersion(user) + 1;
+    await this.persistAuth();
   }
 
   async ownerDeleteUser(identity: RequestIdentity, userId: string): Promise<void> {
-    return this.exclusive(() => this.ownerDeleteUserUnsafe(identity, userId));
+    return this.sharedMutation(() => this.ownerDeleteUserUnsafe(identity, userId));
   }
 
   private async ownerDeleteUserUnsafe(identity: RequestIdentity, userId: string): Promise<void> {
@@ -800,15 +972,16 @@ export class AuthService {
     const user = data.users.find((u) => u.id === userId);
     if (!user) throw new AuthFailure(404, "Account not found.");
     if (user.owner) throw new AuthFailure(400, "The bootstrap owner cannot be deleted.");
-    data.users = data.users.filter((u) => u.id !== userId);
     for (const row of this.sessionData!.sessions) if (row.userId === userId) this.notifyRevoked(row.id);
     this.sessionData!.sessions = this.sessionData!.sessions.filter((s) => s.userId !== userId);
-    await this.persist();
+    await this.persistSessions();
+    data.users = data.users.filter((u) => u.id !== userId);
+    await this.persistAuth();
   }
 
   /** Local CLI recovery path; never exposed over HTTP. */
   async localResetOwner(password: string): Promise<string> {
-    return this.exclusive(() => this.localResetOwnerUnsafe(password));
+    return this.sharedMutation(() => this.localResetOwnerUnsafe(password));
   }
 
   private async localResetOwnerUnsafe(password: string): Promise<string> {
@@ -816,12 +989,15 @@ export class AuthService {
     const data = await this.load();
     const owner = data.users.find((u) => u.owner);
     if (!owner) throw new AuthFailure(404, "No owner account exists.");
-    owner.password = { hash: await this.hashPassword(password) };
-    delete owner.totp;
+    const hash = await this.hashPassword(password);
     for (const row of this.sessionData!.sessions) {
       row.revokedAt = Date.now(); this.notifyRevoked(row.id);
     }
-    await this.persist();
+    await this.persistSessions();
+    owner.password = { hash };
+    delete owner.totp;
+    owner.securityVersion = securityVersion(owner) + 1;
+    await this.persistAuth();
     return owner.username;
   }
 }

@@ -46,7 +46,21 @@ export function registerWsRoutes(app: FastifyInstance): void {
           if (id === req.authIdentity?.sessionId) socket.close(4401, "session revoked");
         })
       : () => {};
-    const cleanup = () => { unsub(); unsubRevocation(); };
+    // Identity credentials live in shared config while session families are
+    // per instance. Polling the small stamped auth snapshot ensures a delete or
+    // credential reset in stable closes the same user's dev socket promptly.
+    const identityTimer = setInterval(() => {
+      const check = req.authIdentity
+        ? app.auth.identityStillValid(req.authIdentity)
+        : app.auth.enabled().then((enabled) => !enabled);
+      void check.then((valid) => {
+        if (!valid) socket.close(4401, "authentication changed");
+      }).catch(() => socket.close(1011, "identity check failed"));
+    }, 1_000);
+    const cleanup = () => {
+      unsub(); unsubRevocation();
+      clearInterval(identityTimer);
+    };
 
     socket.on("message", (raw: unknown) => {
       let json: unknown;

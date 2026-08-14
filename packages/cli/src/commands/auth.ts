@@ -5,7 +5,7 @@ import { CmError } from "../core/manifest.js";
 
 interface AuthFile {
   version: number;
-  users: Array<{ username: string; owner: boolean; password?: { hash: string }; totp?: unknown }>;
+  users: Array<{ username: string; owner: boolean; password?: { hash: string }; totp?: unknown; securityVersion?: number }>;
 }
 interface AuthSessionsFile {
   version: number;
@@ -54,6 +54,7 @@ export async function resetOwner(
   if (!owner) throw new CmError("no bootstrap owner exists");
   owner.password = { hash: await hash(password, { algorithm: 2, memoryCost: 19_456, timeCost: 3, parallelism: 1 }) };
   delete owner.totp;
+  owner.securityVersion = (owner.securityVersion ?? 0) + 1;
   let sessions: AuthSessionsFile = { version: 1, sessions: [] };
   try { sessions = JSON.parse(await readFile(sessionsFile, "utf8")) as AuthSessionsFile; } catch { /* no sessions yet */ }
   const now = Date.now();

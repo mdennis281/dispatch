@@ -18,10 +18,10 @@ change; the existing history is audited before publication.
 
 The development/default server bind address is `127.0.0.1`. The installed launcher
 explicitly binds `0.0.0.0` so Dispatch is reachable from the LAN (including
-`10.0.4.1:4318` on that interface), while its health probe and PWA URL stay on
+`<lan-ip>:4318`), while its health probe and PWA URL stay on
 `127.0.0.1`. This exposes a control plane that can run commands as your user. Authentication is optional and
 defaults off for backward compatibility; configure the bootstrap owner in
-Settings before enabling host mode outside a trusted network. Non-local passkeys
+Settings before exposing Dispatch outside a trusted network. Non-local passkeys
 require HTTPS and a stable canonical hostname.
 
 Passwords use salted Argon2id hashes. Browser sessions use short-lived in-memory
