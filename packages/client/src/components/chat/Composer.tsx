@@ -15,19 +15,17 @@ import {
   Paperclip,
   ArrowUp,
   Bot,
-  Map as MapIcon,
-  Zap,
   Pencil,
   Layers,
   X,
   SlidersHorizontal,
   Settings2,
   Eye,
-  BellOff,
-  ShieldOff,
   Check,
+  ChevronLeft,
   Cpu,
   ChevronsUpDown,
+  Gauge,
   Square,
   Image as ImageIcon,
   File as FileIcon,
@@ -52,7 +50,6 @@ import { IconButton } from "../ui/IconButton.js";
 import { Button } from "../ui/Button.js";
 import { Select, type SelectOption } from "../ui/Select.js";
 import { EffortGauge } from "../ui/EffortGauge.js";
-import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { Chip } from "../ui/Chip.js";
 import { Tooltip } from "../ui/Tooltip.js";
 import { Spinner } from "../ui/Spinner.js";
@@ -61,6 +58,8 @@ import { cn } from "../../lib/cn.js";
 import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
 import { useHarnesses } from "../../stores/harnesses.js";
+import { useLayoutMode } from "../../stores/layout.js";
+import { Drawer } from "../layout/Drawer.js";
 import { actions, uploadChatImage } from "../../lib/actions.js";
 import { useAssetSrc } from "../../lib/assetSrc.js";
 import { AssetImage } from "../ui/AssetImage.js";
@@ -72,7 +71,8 @@ import {
   useComposerPrefs,
 } from "../../lib/composerPrefs.js";
 import { EffortChip } from "../agents/runVisuals.js";
-import { ContextMeter } from "./ContextMeter.js";
+import { ContextMeter, ContextHint, ContextPanelBody } from "./ContextMeter.js";
+import { ModeControl, modeLabel } from "./ModeControl.js";
 
 /** The markup editor pulls in two annotation engines — lazy so they stay out of
     the initial bundle and only load when a thumbnail is actually opened. */
@@ -84,24 +84,6 @@ const ImageAnnotator = lazy(() => import("./ImageAnnotator.js"));
  * instantly across chat switches (local state only re-seeds on a `chat.id` change).
  */
 const modelByChat = new Map<string, string>();
-
-/** The three canonical modes surfaced as a segmented control. */
-const PRIMARY_MODE_IDS = ["plan", "auto", "edit"];
-const PRIMARY_MODE_LABEL: Record<string, string> = { plan: "Plan", auto: "Auto", edit: "Edit" };
-const MODE_ICONS: Record<string, ReactNode> = {
-  plan: <MapIcon />,
-  auto: <Zap />,
-  edit: <Pencil />,
-};
-
-/**
- * Built-in permission postures the SessionBroker understands via its mode-id
- * fallback map even without a stored ModeConfig — offered in the overflow menu.
- */
-const BUILTIN_POSTURES: { id: string; name: string; icon: ReactNode; hint: string }[] = [
-  { id: "dontAsk", name: "Don't ask", icon: <BellOff />, hint: "no prompts" },
-  { id: "bypass", name: "Bypass", icon: <ShieldOff />, hint: "yolo" },
-];
 
 export interface ComposerProps {
   chat: Chat;
@@ -304,6 +286,18 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // the row collapses to icons the moment its full-label layout would overflow
   // the composer width, and re-expands once there's room again (see below).
   const [compact, setCompact] = useState(false);
+  // Phone width is a DECISION, not a measurement. Fully compacted with a turn
+  // running the row still needs ~464px and a 390px iPhone gives the toolbar
+  // ~358px, so there is no measurement outcome here that keeps Send on screen —
+  // `overflow-hidden` simply clips it, and Send is the whole point of the box.
+  // Below `md` the row therefore drops to Mode / Dictate / ⚙ / Stop / Send and
+  // everything else moves into the sheet. `measure` still governs md and lg.
+  const sm = useLayoutMode() === "sm";
+  const [moreOpen, setMoreOpen] = useState(false);
+  // The sheet is one surface that swaps its own content, never a popover inside
+  // a popover: the inner one portals to `document.body`, which the outer's
+  // outside-click test reads as "outside" (see ui/Popover).
+  const [moreView, setMoreView] = useState<"root" | "effort" | "brain" | "context">("root");
   const toolbarRef = useRef<HTMLDivElement>(null);
   // The natural (full-label) content width captured at the instant we collapsed,
   // used as the re-expand threshold so the two states can't flip-flop.
@@ -431,6 +425,14 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     // git/memory views), so this one effect covers them all. Deferred a frame so
     // the focus lands after the click that opened the chat has settled, and after
     // `setContent` above, which is what makes "end" the end of the restored draft.
+    // ...but NOT on touch, where "typeable immediately" is the wrong default:
+    // you open a chat to READ it, and a caret landing in the composer either
+    // throws the keyboard over half the transcript or — because iOS refuses a
+    // programmatic focus that no gesture asked for — raises no keyboard at all
+    // while still firing `focusin`, which stood the bottom nav down and left it
+    // down until the next tap elsewhere. Tapping the composer still focuses it.
+    if (matchMedia("(pointer: coarse)").matches) return;
+
     const raf = requestAnimationFrame(() => {
       if (editor.isDestroyed || typingElsewhere(editor.view.dom)) return;
       editor.commands.focus("end");
@@ -651,29 +653,6 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     if (chat.agentId) setAgent("");
   };
 
-  /* -------------------------------------------------------------- mode wiring */
-
-  const modeSegments = PRIMARY_MODE_IDS.map((id) => ({
-    value: id,
-    label: modes.find((m) => m.id === id)?.name ?? PRIMARY_MODE_LABEL[id]!,
-    icon: MODE_ICONS[id],
-  }));
-
-  // Extra postures: custom store modes + the built-in fallbacks the broker maps.
-  const postureOptions = [
-    ...modes
-      .filter((m) => !PRIMARY_MODE_IDS.includes(m.id))
-      .map((m) => ({
-        id: m.id,
-        name: m.name,
-        icon: <SlidersHorizontal /> as ReactNode,
-        hint: m.permissionMode,
-      })),
-    ...BUILTIN_POSTURES.filter((b) => !modes.some((m) => m.id === b.id)),
-  ];
-  const isPosture = !PRIMARY_MODE_IDS.includes(chat.modeId);
-  const currentPosture = postureOptions.find((o) => o.id === chat.modeId);
-
   /* ------------------------------------------------------------- agent wiring */
 
   const scopedAgents = agents.filter(
@@ -725,14 +704,144 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     };
   }, [measure]);
 
-  // The control labels (model / agent / posture name) change the natural width
+  // The control labels (model / agent / mode name) change the natural width
   // without changing the row's box, so ResizeObserver won't fire — re-measure
   // synchronously whenever they (or the compact state itself) change.
   // Hiding a control changes the row's natural width without changing its box,
   // so `visible` belongs in here alongside the labels.
+  // `sm` belongs here too: it swaps which controls are in the row at all, and it
+  // flips on a media query rather than on the row's own box.
   useLayoutEffect(() => {
     measure();
-  }, [measure, compact, model, chat.modeId, chat.agentId, chat.effort, currentAgent?.name, currentPosture?.name, visible]);
+  }, [
+    measure,
+    compact,
+    sm,
+    model,
+    chat.modeId,
+    chat.agentId,
+    chat.effort,
+    currentAgent?.name,
+    modeLabel(modes, chat.modeId),
+    visible,
+  ]);
+
+  /* ------------------------------------------------------- shared menu bodies */
+
+  /**
+   * The model/agent list, at either density. The phone sheet cannot open the
+   * toolbar's popover (that would be a popover inside the sheet — see the
+   * `moreView` note above), so it shares these ROWS instead. A forked copy is
+   * how two surfaces start disagreeing about which models a harness has.
+   */
+  const brainRows = (close: () => void, dense: boolean) => (
+    <>
+      <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Provider</div>
+      {harnesses.map((candidate) => (
+        <MenuItem
+          key={candidate.kind}
+          icon={<Cpu />}
+          dense={dense}
+          active={candidate.kind === harness}
+          disabled={!candidate.runtime.available}
+          hint={candidate.runtime.available ? candidate.runtime.version : "not installed"}
+          onClick={() => {
+            if (!candidate.runtime.available || candidate.kind === harness) return;
+            modelByChat.delete(chat.id);
+            setModelState("");
+            upsertChat({
+              ...chat,
+              harness: candidate.kind,
+              sessionId: undefined,
+              model: undefined,
+              status: "idle",
+            });
+            actions.setHarness(chat.id, candidate.kind);
+            close();
+          }}
+        >
+          <span className="flex items-center gap-2 capitalize">
+            {candidate.kind}
+            {candidate.kind === harness && <Check className="size-3 text-accent" />}
+          </span>
+        </MenuItem>
+      ))}
+      <div className="my-1 h-px bg-line" />
+      <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
+        Model · {harness}
+      </div>
+      {models.map((m) => (
+        <MenuItem
+          key={m.value}
+          icon={<Cpu />}
+          hint={m.hint}
+          title={m.description}
+          dense={dense}
+          active={m === selectedModel}
+          onClick={() => {
+            chooseModel(m.value);
+            close();
+          }}
+        >
+          <span className="flex items-center gap-2">
+            {m.label}
+            {m === selectedModel && <Check className="size-3 text-accent" />}
+          </span>
+        </MenuItem>
+      ))}
+      {capabilities?.subagents !== false && scopedAgents.length > 0 && (
+        <>
+          <div className="my-1 h-px bg-line" />
+          <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Custom agent</div>
+          {scopedAgents.map((a) => (
+            <MenuItem
+              key={a.id}
+              icon={<Bot />}
+              dense={dense}
+              active={a.id === chat.agentId}
+              onClick={() => {
+                setAgent(a.id);
+                close();
+              }}
+            >
+              <span className="flex items-center gap-2">
+                {a.name}
+                {a.id === chat.agentId && <Check className="size-3 text-accent" />}
+              </span>
+            </MenuItem>
+          ))}
+        </>
+      )}
+    </>
+  );
+
+  /** Which controls the composer draws — the same list on both surfaces. */
+  const prefRows = (dense: boolean) => (
+    <>
+      <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Show in composer</div>
+      {COMPOSER_CONTROLS.map((c) => (
+        <MenuItem
+          key={c.id}
+          dense={dense}
+          icon={visible[c.id] ? <Check className="text-accent" /> : <span className="size-3" />}
+          hint={c.hint}
+          onClick={() => toggleControl(c.id)}
+        >
+          <span className={visible[c.id] ? "text-primary" : "text-muted"}>{c.label}</span>
+        </MenuItem>
+      ))}
+      {hidden > 0 && (
+        <>
+          <div className="my-1 h-px bg-line" />
+          <MenuItem icon={<Eye />} dense={dense} onClick={showAllControls}>
+            Show all
+          </MenuItem>
+        </>
+      )}
+    </>
+  );
+
+  const closeMore = () => setMoreOpen(false);
 
   return (
     <div className="border-t border-line bg-surface/80 px-4 py-3">
@@ -900,7 +1009,9 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               (inserted as text). They're split because the OS dialog can only
               ever return an image's CONTENT — never a path — so a path has to
               come from the server-backed picker instead. */}
-          {visible.attach && (
+          {/* Phone width sends Attach to the sheet — it's a two-row menu that
+              opens a dialog either way, so a tap of indirection costs nothing. */}
+          {!sm && visible.attach && (
           <Popover
             align="start"
             width={210}
@@ -943,9 +1054,15 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               push-to-talk key anywhere). `onPointerDown` rather than `onClick`
               is what makes the
               hold gesture possible at all — and it starts capturing on the way
-              down, so holding doesn't clip the first word. */}
+              down, so holding doesn't clip the first word.
+
+              This is also why Dictate stays in the PRIMARY row on a phone while
+              Attach doesn't: press-and-hold cannot survive a sheet that closes
+              on selection, and a mic is a better control on a phone than it has
+              ever been on a desktop. */}
           {visible.dictate && (
           <IconButton
+            size={sm ? "md" : "sm"}
             tip={
               dictation.unavailable
                 ? "Dictation unavailable"
@@ -971,87 +1088,17 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           </IconButton>
           )}
 
+          {/* Mode AND posture — one control over one field (see ModeControl). */}
           {visible.mode && (
-            <SegmentedControl
-              segments={modeSegments}
+            <ModeControl
+              modes={modes}
               value={chat.modeId}
               onChange={setMode}
               compact={compact}
             />
           )}
 
-          {/* overflow: custom modes + dontAsk / bypass postures */}
-          {visible.posture && (
-          <Popover
-            align="start"
-            width={210}
-            className="p-1"
-            trigger={({ open, toggle }) => {
-              const btn = (
-                <button
-                  onClick={toggle}
-                  aria-expanded={open}
-                  aria-label="More permission postures"
-                  className={cn(
-                    "inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-xs " +
-                      "font-medium transition-colors [&_svg]:size-3",
-                    isPosture
-                      ? "border-accent-line bg-accent-ghost text-accent-hi"
-                      : "border-line bg-inset text-muted hover:border-line-strong hover:text-secondary",
-                    open && !isPosture && "border-line-strong text-secondary",
-                  )}
-                >
-                  {currentPosture?.icon ?? <SlidersHorizontal />}
-                  {!compact && isPosture && (
-                    <span className="max-w-[84px] truncate">
-                      {currentPosture?.name ?? chat.modeId}
-                    </span>
-                  )}
-                </button>
-              );
-              return compact ? (
-                <Tooltip
-                  label={
-                    isPosture
-                      ? `Posture — ${currentPosture?.name ?? chat.modeId}`
-                      : "More permission postures"
-                  }
-                >
-                  {btn}
-                </Tooltip>
-              ) : (
-                btn
-              );
-            }}
-          >
-            {(close) => (
-              <div className="flex flex-col">
-                <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
-                  Permission posture
-                </div>
-                {postureOptions.map((o) => (
-                  <MenuItem
-                    key={o.id}
-                    icon={o.icon}
-                    hint={o.hint}
-                    active={o.id === chat.modeId}
-                    onClick={() => {
-                      setMode(o.id);
-                      close();
-                    }}
-                  >
-                    <span className="flex items-center gap-2">
-                      {o.name}
-                      {o.id === chat.modeId && <Check className="size-3 text-accent" />}
-                    </span>
-                  </MenuItem>
-                ))}
-              </div>
-            )}
-          </Popover>
-          )}
-
-          {visible.effort && (
+          {!sm && visible.effort && (
             <>
               <Select
                 options={effortOptions}
@@ -1075,7 +1122,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           {/* model / agent — the session "brain": a custom agent's name when one
               is picked (secondary state), otherwise the active model label so it
               never misleadingly reads "No agent" while a model is running. */}
-          {visible.brain && (
+          {!sm && visible.brain && (
           <Popover
             align="start"
             width={210}
@@ -1126,138 +1173,46 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               );
             }}
           >
-            {(close) => (
-              <div className="flex flex-col">
-                <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
-                  Provider
-                </div>
-                {harnesses.map((candidate) => (
-                  <MenuItem
-                    key={candidate.kind}
-                    icon={<Cpu />}
-                    active={candidate.kind === harness}
-                    disabled={!candidate.runtime.available}
-                    hint={candidate.runtime.available ? candidate.runtime.version : "not installed"}
-                    onClick={() => {
-                      if (!candidate.runtime.available || candidate.kind === harness) return;
-                      modelByChat.delete(chat.id);
-                      setModelState("");
-                      upsertChat({
-                        ...chat,
-                        harness: candidate.kind,
-                        sessionId: undefined,
-                        model: undefined,
-                        status: "idle",
-                      });
-                      actions.setHarness(chat.id, candidate.kind);
-                      close();
-                    }}
-                  >
-                    <span className="flex items-center gap-2 capitalize">
-                      {candidate.kind}
-                      {candidate.kind === harness && <Check className="size-3 text-accent" />}
-                    </span>
-                  </MenuItem>
-                ))}
-                <div className="my-1 h-px bg-line" />
-                <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
-                  Model · {harness}
-                </div>
-                {models.map((m) => (
-                  <MenuItem
-                    key={m.value}
-                    icon={<Cpu />}
-                    hint={m.hint}
-                    title={m.description}
-                    active={m === selectedModel}
-                    onClick={() => {
-                      chooseModel(m.value);
-                      close();
-                    }}
-                  >
-                    <span className="flex items-center gap-2">
-                      {m.label}
-                      {m === selectedModel && <Check className="size-3 text-accent" />}
-                    </span>
-                  </MenuItem>
-                ))}
-                {capabilities?.subagents !== false && scopedAgents.length > 0 && (
-                  <>
-                    <div className="my-1 h-px bg-line" />
-                    <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
-                      Custom agent
-                    </div>
-                    {scopedAgents.map((a) => (
-                      <MenuItem
-                        key={a.id}
-                        icon={<Bot />}
-                        active={a.id === chat.agentId}
-                        onClick={() => {
-                          setAgent(a.id);
-                          close();
-                        }}
-                      >
-                        <span className="flex items-center gap-2">
-                          {a.name}
-                          {a.id === chat.agentId && <Check className="size-3 text-accent" />}
-                        </span>
-                      </MenuItem>
-                    ))}
-                  </>
-                )}
-              </div>
-            )}
+            {(close) => <div className="flex flex-col">{brainRows(close, true)}</div>}
           </Popover>
           )}
 
           <div className="ml-auto flex items-center gap-2">
-            {/* Which of the above to draw. Last in the row and always present —
-                it's the only way back from a toolbar you've emptied. */}
-            <Popover
-              align="end"
-              width={264}
-              className="p-1"
-              trigger={({ open, toggle }) => (
-                <IconButton
-                  tip={hidden ? `Toolbar — ${hidden} hidden` : "Choose toolbar controls"}
-                  active={open}
-                  onClick={toggle}
-                >
-                  <Settings2 />
-                </IconButton>
-              )}
-            >
-              {() => (
-                <div className="flex flex-col">
-                  <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
-                    Show in composer
-                  </div>
-                  {COMPOSER_CONTROLS.map((c) => (
-                    <MenuItem
-                      key={c.id}
-                      icon={
-                        visible[c.id] ? <Check className="text-accent" /> : <span className="size-3" />
-                      }
-                      hint={c.hint}
-                      onClick={() => toggleControl(c.id)}
-                    >
-                      <span className={visible[c.id] ? "text-primary" : "text-muted"}>
-                        {c.label}
-                      </span>
-                    </MenuItem>
-                  ))}
-                  {hidden > 0 && (
-                    <>
-                      <div className="my-1 h-px bg-line" />
-                      <MenuItem icon={<Eye />} onClick={showAllControls}>
-                        Show all
-                      </MenuItem>
-                    </>
-                  )}
-                </div>
-              )}
-            </Popover>
-            {visible.context && (
+            {/* One trigger, two jobs by width. Above sm it's the visibility
+                menu — the only way back from a toolbar you've emptied. On sm it
+                opens the sheet that holds everything this row no longer has
+                space for, visibility menu included. */}
+            {sm ? (
+              <IconButton
+                size="md"
+                tip="Composer options"
+                active={moreOpen}
+                onClick={() => {
+                  setMoreView("root");
+                  setMoreOpen(true);
+                }}
+              >
+                <SlidersHorizontal />
+              </IconButton>
+            ) : (
+              <Popover
+                align="end"
+                width={264}
+                className="p-1"
+                trigger={({ open, toggle }) => (
+                  <IconButton
+                    tip={hidden ? `Toolbar — ${hidden} hidden` : "Choose toolbar controls"}
+                    active={open}
+                    onClick={toggle}
+                  >
+                    <Settings2 />
+                  </IconButton>
+                )}
+              >
+                {() => <div className="flex flex-col">{prefRows(true)}</div>}
+              </Popover>
+            )}
+            {!sm && visible.context && (
               <ContextMeter chatId={chat.id} model={model} iconOnly={compact} />
             )}
             {/* Stop the live turn — interrupts the running query server-side.
@@ -1267,11 +1222,13 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                 type="button"
                 variant="danger"
                 size="md"
+                circle={sm}
                 leftIcon={<Square />}
                 onClick={() => actions.interrupt(chat.id)}
                 title="Stop the current turn"
+                aria-label={sm ? "Stop the current turn" : undefined}
               >
-                {compact ? "" : "Stop"}
+                {sm ? null : compact ? "" : "Stop"}
               </Button>
             )}
             {/* Gate by look, not the native `disabled` attribute: a disabled
@@ -1284,18 +1241,169 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               type="button"
               variant="primary"
               size="md"
+              // The bug this whole layout exists for: at 390px the labelled
+              // button was the last thing in an `overflow-hidden` row, so "Send"
+              // as a word was clipped off the right edge and the primary action
+              // was unreachable on every phone.
+              circle={sm}
               rightIcon={running ? <Layers /> : <ArrowUp />}
               onClick={submit}
               aria-disabled={!canSend}
+              aria-label={sm ? (running ? "Queue" : "Send") : undefined}
               className={cn(!canSend && "opacity-45")}
             >
-              {running ? "Queue" : "Send"}
+              {sm ? null : running ? "Queue" : "Send"}
             </Button>
           </div>
         </div>
       </div>
 
       </div>
+
+      {/* The phone overflow sheet: everything the primary row gave up, each row
+          stating its current value so the row it replaced is still readable at a
+          glance. A bottom `Drawer` rather than a `Popover` — same surface as the
+          nav's More sheet, and it can host a drill-down without nesting one
+          popover inside another (which ui/Popover cannot survive). */}
+      {sm && (
+        <Drawer
+          open={moreOpen}
+          enabled
+          onClose={closeMore}
+          side="bottom"
+          label="Composer options"
+          className="max-h-[76dvh] flex-col overflow-hidden rounded-t-lg border-t border-line-strong bg-overlay/98 backdrop-blur-md"
+        >
+          {/* `min-h-0`: a flex child's default `min-height: auto` is its content,
+              so without it the list refuses to shrink under the sheet's `max-h`
+              and scrolls the page instead of itself. */}
+          <div className="cm-scroll min-h-0 w-full overflow-y-auto p-1.5 pb-[calc(var(--cm-bottom-nav-space)+0.375rem)]">
+            {moreView !== "root" && (
+              <div className="mb-1 flex items-center gap-1 border-b border-line-soft pb-1.5">
+                <Button
+                  variant="ghost"
+                  onClick={() => setMoreView("root")}
+                  leftIcon={<ChevronLeft />}
+                  className="h-11 px-2 text-base"
+                >
+                  Back
+                </Button>
+                <span className="text-base font-medium text-primary">
+                  {moreView === "effort"
+                    ? "Effort"
+                    : moreView === "brain"
+                      ? "Model / agent"
+                      : "Context"}
+                </span>
+              </div>
+            )}
+
+            {moreView === "root" && (
+              <div className="flex flex-col">
+                {visible.attach && (
+                  <>
+                    <MenuItem
+                      dense={false}
+                      icon={<ImageIcon />}
+                      hint="upload"
+                      onClick={() => {
+                        fileInputRef.current?.click();
+                        closeMore();
+                      }}
+                    >
+                      Attach image
+                    </MenuItem>
+                    <MenuItem
+                      dense={false}
+                      icon={<FileIcon />}
+                      hint="as text"
+                      onClick={() => {
+                        setPicker({ query: "" });
+                        closeMore();
+                      }}
+                    >
+                      Insert file path…
+                    </MenuItem>
+                    <div className="my-1 h-px bg-line" />
+                  </>
+                )}
+                {visible.effort && (
+                  <MenuItem
+                    dense={false}
+                    icon={<EffortGauge effort={chat.effort} />}
+                    hint={
+                      effortOptions.find((o) => o.value === chat.effort)?.label ?? chat.effort
+                    }
+                    onClick={() => setMoreView("effort")}
+                  >
+                    Effort
+                  </MenuItem>
+                )}
+                {visible.brain && (
+                  <MenuItem
+                    dense={false}
+                    icon={currentAgent ? <Bot /> : <Cpu />}
+                    hint={currentAgent ? currentAgent.name : modelLabelOf(model)}
+                    onClick={() => setMoreView("brain")}
+                  >
+                    Model / agent
+                  </MenuItem>
+                )}
+                {visible.context && (
+                  <MenuItem
+                    dense={false}
+                    icon={<Gauge />}
+                    hint={<ContextHint chatId={chat.id} model={model} />}
+                    onClick={() => setMoreView("context")}
+                  >
+                    Context
+                  </MenuItem>
+                )}
+                <div className="my-1 h-px bg-line" />
+                {prefRows(false)}
+              </div>
+            )}
+
+            {moreView === "effort" && (
+              <div className="flex flex-col">
+                {effortOptions.map((o) => (
+                  <MenuItem
+                    key={o.value}
+                    dense={false}
+                    icon={<EffortGauge effort={o.value} />}
+                    hint={o.hint}
+                    active={o.value === chat.effort}
+                    onClick={() => {
+                      setEffort(o.value);
+                      closeMore();
+                    }}
+                  >
+                    <span className="flex items-center gap-2">
+                      {o.label}
+                      {o.value === chat.effort && <Check className="size-3 text-accent" />}
+                    </span>
+                  </MenuItem>
+                ))}
+                {/* Same "what actually ran" disclosure the wide toolbar makes
+                    inline; on a phone this row is the only place it fits. */}
+                {effectiveEffort && effectiveEffort !== chat.effort && (
+                  <div className="px-3 py-2">
+                    <EffortChip effort={effectiveEffort} label="running at" />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {moreView === "brain" && (
+              <div className="flex flex-col">{brainRows(closeMore, false)}</div>
+            )}
+
+            {moreView === "context" && (
+              <ContextPanelBody chatId={chat.id} model={model} close={closeMore} />
+            )}
+          </div>
+        </Drawer>
+      )}
 
       {picker && (
         <FilePathPicker

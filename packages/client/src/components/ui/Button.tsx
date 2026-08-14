@@ -29,17 +29,34 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   size?: Size;
   leftIcon?: ReactNode;
   rightIcon?: ReactNode;
+  /**
+   * Square-and-round: drops the horizontal padding and the label, leaving the
+   * icon in a circle. For a variant-carrying action that has to survive a row
+   * with no width left — the composer's Send/Stop at phone width, where "Send"
+   * as a word is what pushed the button off the right edge. `IconButton` is
+   * still the answer for plain chrome; this is for the ones that must stay
+   * `primary`/`danger`.
+   */
+  circle?: boolean;
 }
 
 const base =
-  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-sm font-medium " +
+  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap font-medium " +
   "transition-[background,border-color,color,box-shadow,transform] duration-150 " +
   "ease-[var(--ease-out)] select-none active:translate-y-px " +
   "disabled:pointer-events-none disabled:opacity-45";
 
+// Radius lives in the shape slot, not in `base`: `cn` is plain clsx with no
+// conflict resolution, so a `rounded-full` and a `rounded-sm` on the same
+// element are settled by Tailwind's emit order rather than by the call site.
 const sizes: Record<Size, string> = {
-  sm: "h-6 px-2 text-xs",
-  md: "h-8 px-3 text-base",
+  sm: "h-6 rounded-sm px-2 text-xs",
+  md: "h-8 rounded-sm px-3 text-base",
+};
+
+const circles: Record<Size, string> = {
+  sm: "size-6 rounded-full",
+  md: "size-8 rounded-full",
 };
 
 const variants: Record<Variant, string> = {
@@ -72,11 +89,15 @@ const variants: Record<Variant, string> = {
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = "default", size = "sm", leftIcon, rightIcon, className, children, ...rest },
+  { variant = "default", size = "sm", leftIcon, rightIcon, circle, className, children, ...rest },
   ref,
 ) {
   return (
-    <button ref={ref} className={cn(base, sizes[size], variants[variant], className)} {...rest}>
+    <button
+      ref={ref}
+      className={cn(base, circle ? circles[size] : sizes[size], variants[variant], className)}
+      {...rest}
+    >
       {leftIcon && <span className="shrink-0 [&_svg]:size-3.5">{leftIcon}</span>}
       {children}
       {rightIcon && <span className="shrink-0 [&_svg]:size-3.5">{rightIcon}</span>}

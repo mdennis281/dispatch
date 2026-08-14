@@ -48,11 +48,7 @@ export interface ContextMeterProps {
  * the live category breakdown and compact/clear actions.
  */
 export function ContextMeter({ chatId, model, iconOnly = false }: ContextMeterProps) {
-  const tokens = useContextTokens(chatId);
-  const reportedWindow = useContextWindow(chatId);
-  const window =
-    reportedWindow ?? (model ? MODEL_WINDOW_FALLBACK[model] : undefined) ?? DEFAULT_WINDOW;
-  const pct = tokens === null ? 0 : (tokens / window) * 100;
+  const { tokens, window, pct } = useContextUsage(chatId, model);
   const t = tone(pct);
 
   const tip =
@@ -112,6 +108,48 @@ export function ContextMeter({ chatId, model, iconOnly = false }: ContextMeterPr
         />
       )}
     </Popover>
+  );
+}
+
+/** The meter's numbers: what a turn reported, over the session's real window. */
+function useContextUsage(chatId: string, model?: string) {
+  const tokens = useContextTokens(chatId);
+  const reportedWindow = useContextWindow(chatId);
+  const window =
+    reportedWindow ?? (model ? MODEL_WINDOW_FALLBACK[model] : undefined) ?? DEFAULT_WINDOW;
+  return { tokens, window, pct: tokens === null ? 0 : (tokens / window) * 100 };
+}
+
+/**
+ * The same numbers as a menu-row hint. A component rather than a value the
+ * composer computes, so the token subscription stays down here — the composer
+ * hosts a TipTap editor and does not need to re-render on every usage update
+ * just to label one row of a sheet.
+ */
+export function ContextHint({ chatId, model }: { chatId: string; model?: string }) {
+  const { tokens, window } = useContextUsage(chatId, model);
+  return <>{tokens === null ? "—" : `${compactTokens(tokens)} / ${compactTokens(window)}`}</>;
+}
+
+/**
+ * The dropup body on its own, for the composer's phone-width overflow sheet,
+ * which drills into it IN PLACE. It can't open the meter's own popover instead:
+ * that popover would be nested inside the sheet, and a nested `Popover` portals
+ * out of its parent's outside-click test, closing the parent on the first tap
+ * (see ui/Popover).
+ */
+export function ContextPanelBody({
+  chatId,
+  model,
+  close,
+}: {
+  chatId: string;
+  model?: string;
+  close: () => void;
+}) {
+  const { tokens, window } = useContextUsage(chatId, model);
+  return (
+    <ContextPanel chatId={chatId} fallbackTokens={tokens} fallbackWindow={window} close={close} />
   );
 }
 
