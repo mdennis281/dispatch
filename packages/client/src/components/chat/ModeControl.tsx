@@ -3,6 +3,7 @@ import {
   Map as MapIcon,
   Zap,
   Pencil,
+  Circle,
   SlidersHorizontal,
   BellOff,
   ShieldOff,
@@ -33,12 +34,28 @@ import { useLayoutMode } from "../../stores/layout.js";
  * and a control that can state what it's set to.
  */
 
-/** The three canonical modes — everything else is a posture. */
-export const PRIMARY_MODE_IDS = ["plan", "auto", "edit"];
+/**
+ * The canonical modes — everything else is a posture.
+ *
+ * `default` is in here because it is what `POST /api/chats` stamps on every new
+ * chat. Left out, a brand-new chat fell through every branch below: `isPosture`
+ * was true so the trigger wore the accent tint that is supposed to mean "you
+ * have left the rails", `modeLabel` bottomed out at the raw id and rendered a
+ * lowercase "default", and it appeared in NEITHER menu section — so switching
+ * away from it was a one-way door. It is a real mode the broker understands
+ * (`BUILTIN_MODE_PERMISSION`), not the absence of one.
+ */
+export const PRIMARY_MODE_IDS = ["default", "plan", "auto", "edit"];
 
-const PRIMARY_MODE_LABEL: Record<string, string> = { plan: "Plan", auto: "Auto", edit: "Edit" };
+const PRIMARY_MODE_LABEL: Record<string, string> = {
+  default: "Default",
+  plan: "Plan",
+  auto: "Auto",
+  edit: "Edit",
+};
 
 const MODE_ICONS: Record<string, ReactNode> = {
+  default: <Circle />,
   plan: <MapIcon />,
   auto: <Zap />,
   edit: <Pencil />,
