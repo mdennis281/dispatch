@@ -7,12 +7,13 @@ import { UserRow } from "./rows/UserRow.js";
 import { AssistantRow } from "./rows/AssistantRow.js";
 import { ToolCallCard } from "./rows/ToolCallCard.js";
 import { ShellRunGroup } from "./rows/ShellRunGroup.js";
+import { DispatchToolCard } from "./rows/DispatchToolCard.js";
 import { SubagentCard } from "./rows/SubagentCard.js";
 import { PermissionCard } from "./rows/PermissionCard.js";
 import { NoticeRowView, ResultRowView, SystemRowView } from "./rows/MiscRows.js";
 import { LimitPausedCard } from "./rows/LimitPausedCard.js";
 import { actions } from "../../lib/actions.js";
-import { groupTranscriptRows } from "../../lib/toolPresentations.js";
+import { groupTranscriptRows, toolPresentation } from "../../lib/toolPresentations.js";
 
 export type { StreamRow } from "../../stores/messages.js";
 
@@ -106,6 +107,17 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           const run = runsById.get(row.toolUseId);
           if (run) return <SubagentCard key={row.id} run={run} />;
           const result = resultsByUse.get(row.toolUseId);
+          const presentation = toolPresentation(row);
+          if (presentation?.kind === "dispatch") {
+            return (
+              <DispatchToolCard
+                key={row.id}
+                use={row}
+                result={result}
+                task={findTaskStatus(taskStatus, row.toolUseId, result)}
+              />
+            );
+          }
           return (
             <ToolCallCard
               key={row.id}

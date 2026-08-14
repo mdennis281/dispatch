@@ -10,7 +10,19 @@ export interface ShellToolPresentation {
   terminal?: string;
 }
 
-export type ToolPresentation = ShellToolPresentation;
+export type DispatchToolCategory = "wait" | "pr" | "terminal" | "preview" | "memory" | "chat" | "general";
+
+export interface DispatchToolPresentation {
+  kind: "dispatch";
+  tool: string;
+  title: string;
+  activity: string;
+  subject?: string;
+  category: DispatchToolCategory;
+  countdownSeconds?: number;
+}
+
+export type ToolPresentation = ShellToolPresentation | DispatchToolPresentation;
 
 /**
  * A presentation handler translates one provider's tool shape into a UI concept.
@@ -77,7 +89,80 @@ const handlers: readonly ToolPresentationHandler[] = [
       };
     },
   },
+  {
+    // Every first-party manager tool gets a Dispatch-native presentation. The
+    // handful with richer semantics map explicitly; newly added tools still get
+    // a useful generic card instead of silently dropping to MCP wire formatting.
+    match: (use) => parseMcpName(use.name)?.server === "manager",
+    present: (use) => dispatchPresentation(use),
+  },
 ];
+
+function numberArg(use: ToolUseRow, key: string): number | undefined {
+  const value = use.input[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function subjectFor(use: ToolUseRow, tool: string): string | undefined {
+  const pr = numberArg(use, "number");
+  if (pr !== undefined) return `PR #${pr}`;
+  const subApp = stringArg(use, "subApp");
+  const branch = stringArg(use, "branch");
+  if (subApp) return branch ? `${subApp} · ${branch}` : subApp;
+  const name = stringArg(use, "name");
+  if (name) return name;
+  const query = stringArg(use, "query");
+  if (query) return query;
+  const chatId = stringArg(use, "chatId");
+  if (chatId) return chatId;
+  const threadId = stringArg(use, "threadId");
+  if (threadId) return threadId;
+  return undefined;
+}
+
+const DISPATCH_COPY: Record<string, { title: string; activity: string; category: DispatchToolCategory }> = {
+  wait: { title: "Wait", activity: "Waiting", category: "wait" },
+  wait_for_chat: { title: "Wait for chat", activity: "Watching chat", category: "wait" },
+  terminal_output: { title: "Terminal output", activity: "Reading terminal", category: "terminal" },
+  create_pr: { title: "Open pull request", activity: "Opening pull request", category: "pr" },
+  watch_pr: { title: "Watch pull request", activity: "Watching pull request", category: "pr" },
+  approve_pr: { title: "Approve and merge", activity: "Merging pull request", category: "pr" },
+  resolve_thread: { title: "Resolve review thread", activity: "Resolving review thread", category: "pr" },
+  request_review: { title: "Request review", activity: "Requesting review", category: "pr" },
+  run_subapp: { title: "App preview", activity: "Starting app preview", category: "preview" },
+  context_usage: { title: "Context usage", activity: "Measuring context", category: "chat" },
+  compact_context: { title: "Compact context", activity: "Compacting context", category: "chat" },
+  remember: { title: "Remember", activity: "Saving project memory", category: "memory" },
+  recall: { title: "Recall", activity: "Searching project memory", category: "memory" },
+  forget: { title: "Forget", activity: "Removing project memory", category: "memory" },
+  memory_list: { title: "Memory index", activity: "Reading project memory", category: "memory" },
+  memory_search: { title: "Memory search", activity: "Searching project memory", category: "memory" },
+  create_worktree: { title: "Create worktree", activity: "Creating worktree", category: "general" },
+};
+
+function titleCaseTool(tool: string): string {
+  return tool.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function dispatchPresentation(use: ToolUseRow): DispatchToolPresentation | null {
+  const mcp = parseMcpName(use.name);
+  if (!mcp || mcp.server !== "manager") return null;
+  const copy = DISPATCH_COPY[mcp.tool] ?? {
+    title: titleCaseTool(mcp.tool),
+    activity: `${titleCaseTool(mcp.tool)} in progress`,
+    category: "general" as const,
+  };
+  const seconds = mcp.tool === "wait" ? numberArg(use, "seconds") : undefined;
+  return {
+    kind: "dispatch",
+    tool: mcp.tool,
+    title: copy.title,
+    activity: copy.activity,
+    subject: subjectFor(use, mcp.tool),
+    category: copy.category,
+    countdownSeconds: seconds,
+  };
+}
 
 export function toolPresentation(use: ToolUseRow): ToolPresentation | null {
   for (const handler of handlers) {
@@ -153,12 +238,18 @@ export function resultText(content: unknown): string {
   return safeJson(content);
 }
 
+/** Result text with manager transport metadata removed for transcript display. */
+export function displayResultText(content: unknown): string {
+  const lines = resultText(content).split(/\r?\n/);
+  if (lines.length > 1 && /^\[[^\]]+\]\s+cwd=.*\sexit=\d+$/.test(lines[0]!.trim())) {
+    lines.shift();
+  }
+  return lines.join("\n").trim();
+}
+
 /** One useful output line for the collapsed command row. */
 export function resultPreview(content: unknown): string {
-  const lines = resultText(content).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  // Managed terminals prepend transport metadata. The status column already
-  // carries exit state, so spend the scarce preview width on actual output.
-  if (lines.length > 1 && /^\[[^\]]+\]\s+cwd=.*\sexit=\d+$/.test(lines[0]!)) lines.shift();
+  const lines = displayResultText(content).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const first = lines[0];
   if (!first) return "No output";
   return first.length > 240 ? `${first.slice(0, 239)}…` : first;

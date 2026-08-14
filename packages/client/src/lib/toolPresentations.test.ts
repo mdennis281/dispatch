@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage, ToolUseRow } from "@dispatch/shared";
-import { groupTranscriptRows, resultPreview, resultText, toolPresentation } from "./toolPresentations.js";
+import { displayResultText, groupTranscriptRows, resultPreview, resultText, toolPresentation } from "./toolPresentations.js";
 
 function tool(name: string, input: Record<string, unknown>, id = name): ToolUseRow {
   return { kind: "tool_use", id, toolUseId: id, chatId: "chat", ts: 1, turn: 0, name, input };
@@ -21,6 +21,27 @@ describe("tool presentation handlers", () => {
   it("falls back for unknown and malformed tools", () => {
     expect(toolPresentation(tool("mcp__github__search", { query: "x" }))).toBeNull();
     expect(toolPresentation(tool("Bash", { description: "missing command" }))).toBeNull();
+  });
+
+  it("gives first-party Dispatch MCPs semantic presentations", () => {
+    expect(toolPresentation(tool("mcp__manager__wait", { seconds: 10 }))).toMatchObject({
+      kind: "dispatch",
+      title: "Wait",
+      activity: "Waiting",
+      category: "wait",
+      countdownSeconds: 10,
+    });
+    expect(toolPresentation(tool("mcp__manager__watch_pr", { number: 40 }))).toMatchObject({
+      kind: "dispatch",
+      title: "Watch pull request",
+      subject: "PR #40",
+      category: "pr",
+    });
+    expect(toolPresentation(tool("mcp__manager__brand_new_tool", { name: "demo" }))).toMatchObject({
+      kind: "dispatch",
+      title: "Brand New Tool",
+      subject: "demo",
+    });
   });
 });
 
@@ -47,6 +68,7 @@ it("builds a compact first-line result preview", () => {
   expect(resultPreview("\nfirst\nsecond")).toBe("first");
   expect(resultPreview([{ type: "text", text: "[build] cwd=C:\\repo exit=0\ncompiled 3 files" }])).toBe("compiled 3 files");
   expect(resultText([{ type: "text", text: "hello" }])).toBe("hello");
+  expect(displayResultText("[build] cwd=C:\\repo exit=0\ncompiled 3 files\ncomplete")).toBe("compiled 3 files\ncomplete");
   expect(resultText([{ type: "image", data: "base64" }])).toBe("");
   expect(resultPreview([])).toBe("No output");
   expect(resultPreview(undefined)).toBe("No output");
