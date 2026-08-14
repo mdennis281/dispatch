@@ -9,13 +9,28 @@ import { useLayoutEffect, useRef, type RefObject } from "react";
  * `transform`-only (no layout cost, respects `prefers-reduced-motion` below).
  *
  * Pass the container ref; tag each animating child with `data-flip-id={id}`.
+ *
+ * `active` exists for the mobile sidebar drawer. While the drawer is parked
+ * off-canvas the list still reorders as chats gain activity, and every one of
+ * those moves would be queued up as a delta against a layout nobody has seen —
+ * so the first frame after opening plays a burst of animations from positions
+ * the rows never visibly occupied. Passing `false` while the container is
+ * hidden drops the remembered positions, which makes every row read as "new"
+ * on the next open, and new rows don't animate.
  */
-export function useFlipReorder(containerRef: RefObject<HTMLElement | null>): void {
+export function useFlipReorder(
+  containerRef: RefObject<HTMLElement | null>,
+  active = true,
+): void {
   const prev = useRef<Map<string, number>>(new Map());
 
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    if (!active) {
+      prev.current = new Map();
+      return;
+    }
     const reduce =
       typeof window !== "undefined" &&
       window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;

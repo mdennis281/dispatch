@@ -29,6 +29,7 @@ import { ScrollArea } from "../ui/ScrollArea.js";
 import { useProjects, useActiveProject } from "../../stores/projects.js";
 import { useChats, useProjectChats } from "../../stores/chats.js";
 import { useView, openOverlay } from "../../stores/view.js";
+import { useLayout, dismissLeftDrawer } from "../../stores/layout.js";
 import { selectChat, selectProject } from "../../stores/navigation.js";
 import { useProjectMemories } from "../../stores/memory.js";
 import { useGit, useGitChangeCount } from "../../stores/git.js";
@@ -127,6 +128,9 @@ function ProjectSelector({
               onClick={() => {
                 selectProject(p.id);
                 close();
+                // Every navigation out of the sidebar closes it on a phone: the
+                // drawer covers the thing you just navigated to.
+                dismissLeftDrawer();
               }}
             >
               {p.name}
@@ -220,7 +224,9 @@ function SubAppRow({
           tip="Run"
           onClick={start}
           disabled={!target}
-          className="opacity-0 group-hover:opacity-100"
+          // `cm-touch-reveal` (index.css): always visible on a coarse pointer,
+          // where there is no hover to reveal it with.
+          className="cm-touch-reveal opacity-0 group-hover:opacity-100"
         >
           <Play />
         </IconButton>
@@ -343,7 +349,7 @@ function ChatRow({
             size="sm"
             tip="Rename chat"
             onClick={rename.start}
-            className="opacity-0 transition-opacity duration-150 focus-visible:opacity-100 group-hover/row:opacity-100"
+            className="cm-touch-reveal opacity-0 transition-opacity duration-150 focus-visible:opacity-100 group-hover/row:opacity-100"
           >
             <Pencil />
           </IconButton>
@@ -351,7 +357,7 @@ function ChatRow({
             size="sm"
             tip="Delete chat"
             onClick={() => setConfirmDelete(true)}
-            className="opacity-0 transition-opacity duration-150 focus-visible:opacity-100 group-hover/row:opacity-100"
+            className="cm-touch-reveal opacity-0 transition-opacity duration-150 focus-visible:opacity-100 group-hover/row:opacity-100"
           >
             <Trash2 />
           </IconButton>
@@ -439,6 +445,13 @@ function createChatAndFocus(input: { projectId: string; modeId?: string }): void
 }
 
 export function Sidebar() {
+  // Below `md` this whole column lives inside an off-canvas `Drawer`, so it
+  // fills the drawer instead of carrying its own 260px. At `md` and `lg` the
+  // classes are byte-for-byte what they always were.
+  const mode = useLayout((s) => s.mode);
+  const leftOpen = useLayout((s) => s.leftOpen);
+  const inDrawer = mode === "sm";
+
   const project = useActiveProject();
   const chats = useProjectChats(project?.id ?? null);
   const activeChatId = useChats((s) => s.activeChatId);
@@ -464,8 +477,13 @@ export function Sidebar() {
   }, [project?.repoPath, refreshGit]);
 
   // Opening a chat always returns to the chat workspace (out of the Memory view);
-  // selectChat does that, and keeps the project selection in step.
-  const setActiveChat = selectChat;
+  // selectChat does that, and keeps the project selection in step. On a phone it
+  // also closes the drawer, which is otherwise sitting on top of the transcript
+  // you just asked for.
+  const setActiveChat = (id: string) => {
+    selectChat(id);
+    dismissLeftDrawer();
+  };
 
   // Launch target for the Apps section. The SAME selection the right panel's
   // Runner picker drives (see useLaunchBranch) — one project, one answer to
@@ -486,14 +504,18 @@ export function Sidebar() {
   }, []);
 
   // FLIP: animate chat rows sliding to their new slot when activity reorders them.
+  // Skipped while the drawer is closed — see the `active` note in lib/useFlip:
+  // every reorder that happened off-canvas would otherwise replay at once on the
+  // first frame after opening.
   const chatListRef = useRef<HTMLDivElement>(null);
-  useFlipReorder(chatListRef);
+  useFlipReorder(chatListRef, !inDrawer || leftOpen);
 
   // New chat = instant create with defaults + auto-select (no dialog). Gated on a
   // selected project, so the trigger is disabled until there's somewhere to create.
   const startNewChat = () => {
     if (!project) return;
     setView("chat");
+    dismissLeftDrawer();
     // Deterministic default: "auto" is always a valid primary segment (both the
     // broker's mode-fallback map and the composer understand it without a stored
     // ModeConfig), so a fresh chat opens on Auto — never on whichever mode file
@@ -519,7 +541,12 @@ export function Sidebar() {
     });
 
   return (
-    <aside className="flex w-[260px] shrink-0 flex-col border-r border-line bg-surface">
+    <aside
+      className={cn(
+        "flex flex-col border-r border-line bg-surface",
+        inDrawer ? "h-full w-full" : "w-[260px] shrink-0",
+      )}
+    >
       <div className="flex h-12 shrink-0 items-center px-2.5 cm-hairline-b">
         {/* Adding a project is a full page, not a dialog: it ends by handing
             the repo to an agent, and that hand-off needs the config it's
@@ -538,7 +565,10 @@ export function Sidebar() {
             label="Memory"
             count={memCount}
             active={view === "memory"}
-            onClick={() => setView(view === "memory" ? "chat" : "memory")}
+            onClick={() => {
+              setView(view === "memory" ? "chat" : "memory");
+              dismissLeftDrawer();
+            }}
           />
           <NavButton
             icon={GitBranch}
@@ -547,7 +577,10 @@ export function Sidebar() {
             // by showing nothing at all.
             count={changeCount || undefined}
             active={view === "git"}
-            onClick={() => setView(view === "git" ? "chat" : "git")}
+            onClick={() => {
+              setView(view === "git" ? "chat" : "git");
+              dismissLeftDrawer();
+            }}
           />
         </div>
 

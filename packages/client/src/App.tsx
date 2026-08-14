@@ -2,6 +2,8 @@ import { MessageSquareDashed } from "lucide-react";
 import { TopBar } from "./components/layout/TopBar.js";
 import { Sidebar } from "./components/layout/Sidebar.js";
 import { RightPanel } from "./components/layout/RightPanel.js";
+import { Drawer } from "./components/layout/Drawer.js";
+import { BottomNav } from "./components/layout/BottomNav.js";
 import { ChatView } from "./components/chat/ChatView.js";
 import { CodeViewerHost } from "./components/monaco/index.js";
 import { AgentRunHost } from "./components/agents/AgentRunHost.js";
@@ -20,7 +22,9 @@ import { useChats } from "./stores/chats.js";
 import { useProjects, useActiveProject } from "./stores/projects.js";
 import { visibleChat } from "./stores/navigation.js";
 import { useView } from "./stores/view.js";
+import { useLayout } from "./stores/layout.js";
 import { AuthGate } from "./components/auth/AuthGate.js";
+import { cn } from "./lib/cn.js";
 
 /**
  * Empty state when no chat is open — including right after a project switch,
@@ -57,12 +61,55 @@ export default function App() {
   // best, and at worst reads as "you're editing that one".
   const fullBleed = view === "new-project";
 
+  // Breakpoint (see lib/useBreakpoint + stores/layout). `lg` is the layout this
+  // app has always had and must stay pixel-identical: both `Drawer`s are
+  // `enabled={false}` there, which renders them as `display: contents` — no box,
+  // no transform, the columns hand themselves straight back to the flex row.
+  const mode = useLayout((s) => s.mode);
+  const leftOpen = useLayout((s) => s.leftOpen);
+  const pane = useLayout((s) => s.pane);
+  const setLeftOpen = useLayout((s) => s.setLeftOpen);
+  const setPane = useLayout((s) => s.setPane);
+
   return (
     <AuthGate>
-      <div className="flex h-screen w-screen flex-col overflow-hidden bg-app text-primary antialiased">
+      {/* `100dvh`, not `100vh`. On mobile Safari `vh` is pinned to the LARGEST
+          viewport (URL bar retracted), so a `h-screen` app column is taller than
+          the window whenever the bar is showing — and since this column is
+          `overflow-hidden` with the composer at its bottom, the difference isn't
+          a scroll, it's the composer being cut off the bottom of the screen.
+          `dvh` tracks the live viewport. */}
+      <div className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-app text-primary antialiased">
       <TopBar />
-      <div className="flex min-h-0 flex-1">
-        {!fullBleed && <Sidebar />}
+      {/* `relative` so the two side drawers can be `absolute` to THIS box rather
+          than the viewport — they slide in below the top bar, not over it. It
+          adds no layout of its own, so `lg` is untouched. */}
+      <div
+        className="relative flex min-h-0 flex-1"
+        // Reserve the fixed bottom nav's strip so the composer and the last
+        // panel row aren't parked underneath it. A padding on the ROW, not a
+        // margin on the bar: the bar is `fixed` and takes no space, and putting
+        // the reservation here means it doesn't change while the bar slides away
+        // for the keyboard — a box that resized mid-animation would drive
+        // `Composer`'s ResizeObserver compaction loop.
+        style={mode === "lg" ? undefined : { paddingBottom: "var(--cm-bottom-nav-space)" }}
+      >
+        {!fullBleed && (
+          <Drawer
+            open={leftOpen}
+            enabled={mode === "sm"}
+            onClose={() => setLeftOpen(false)}
+            side="left"
+            position="absolute"
+            label="Chats and projects"
+            // The bottom nav sits above the drawer (it's how you close it), so
+            // the drawer reserves its strip or the pinned "New chat" button
+            // lands underneath the bar.
+            className="w-[86vw] max-w-[320px] pb-[var(--cm-bottom-nav-space)] cm-safe-x"
+          >
+            <Sidebar />
+          </Drawer>
+        )}
         <main className="flex min-w-0 flex-1">
           {view === "new-project" ? (
             <NewProjectView />
@@ -73,13 +120,43 @@ export default function App() {
           ) : chat ? (
             <>
               <ChatView chat={chat} />
-              <RightPanel chat={chat} />
+              {/* Below `lg` the right panel is off-canvas: a 360px sheet over the
+                  transcript at `md`, the full main area at `sm`. It stays MOUNTED
+                  either way — it holds scroll positions and a live orphan scan,
+                  and unmount-on-close throws both away every time you glance at a
+                  worktree. */}
+              <Drawer
+                open={pane !== "chat"}
+                enabled={mode !== "lg"}
+                onClose={() => setPane("chat")}
+                side="right"
+                position="absolute"
+                // At `sm` this fills the main area and the bottom nav switches
+                // away from it, so it is a PANE, not modal chrome — a scrim you
+                // can't see and a focus trap you can't escape would both be
+                // furniture.
+                modal={mode === "md"}
+                label="Ship and run"
+                // Padding rather than a `bottom` offset: `cn` is plain clsx with
+                // no tailwind-merge, so a `bottom-*` here would race the
+                // `inset-y-0` the Drawer sets by CSS source order rather than by
+                // the order they're written in.
+                className={cn(
+                  "pb-[var(--cm-bottom-nav-space)] cm-safe-x",
+                  mode === "sm" ? "w-full" : "w-[360px] max-w-full",
+                )}
+              >
+                <RightPanel chat={chat} />
+              </Drawer>
             </>
           ) : (
             <NoChat />
           )}
         </main>
       </div>
+      {/* Outside `<main>`, and outside the `<aside>`s: it switches between all
+          three of them, so it can't live inside any one. */}
+      <BottomNav chat={chat ?? null} />
       {/* Overlays. Every one of these is open/closed by a single field in the
           view store (see stores/view.ts) rather than by the three bespoke
           window-event buses and two stray useStates this used to take. */}
