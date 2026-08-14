@@ -5,6 +5,7 @@ import tsxLang from "react-syntax-highlighter/dist/esm/languages/prism/tsx";
 import jsLang from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
 import jsonLang from "react-syntax-highlighter/dist/esm/languages/prism/json";
 import bashLang from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import powershellLang from "react-syntax-highlighter/dist/esm/languages/prism/powershell";
 import diffLang from "react-syntax-highlighter/dist/esm/languages/prism/diff";
 import { Check, Copy } from "lucide-react";
 import { cn } from "../../lib/cn.js";
@@ -19,6 +20,8 @@ SyntaxHighlighter.registerLanguage("json", jsonLang);
 SyntaxHighlighter.registerLanguage("bash", bashLang);
 SyntaxHighlighter.registerLanguage("sh", bashLang);
 SyntaxHighlighter.registerLanguage("shell", bashLang);
+SyntaxHighlighter.registerLanguage("powershell", powershellLang);
+SyntaxHighlighter.registerLanguage("pwsh", powershellLang);
 SyntaxHighlighter.registerLanguage("diff", diffLang);
 
 const LABELS: Record<string, string> = {
@@ -31,6 +34,8 @@ const LABELS: Record<string, string> = {
   bash: "Bash",
   sh: "Shell",
   shell: "Shell",
+  powershell: "PowerShell",
+  pwsh: "PowerShell",
   diff: "Diff",
 };
 
@@ -39,6 +44,36 @@ export interface CodeBlockProps {
   language?: string;
   filename?: string;
   className?: string;
+}
+
+/** Single-line highlighted code for dense previews (no frame or copy chrome). */
+export function InlineCode({ code, language = "shell" }: { code: string; language?: string }) {
+  return (
+    <SyntaxHighlighter
+      language={language.toLowerCase()}
+      style={codeTheme}
+      PreTag="span"
+      customStyle={{
+        display: "block",
+        overflow: "hidden",
+        background: "transparent",
+        margin: 0,
+        padding: 0,
+        whiteSpace: "pre",
+      }}
+      codeTagProps={{
+        style: {
+          display: "block",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          fontFamily: "var(--font-mono)",
+          whiteSpace: "pre",
+        },
+      }}
+    >
+      {code.split(/\r?\n/, 1)[0] ?? ""}
+    </SyntaxHighlighter>
+  );
 }
 
 /** A framed, syntax-highlighted code block with a header + copy button. */
