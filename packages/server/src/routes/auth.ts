@@ -51,14 +51,17 @@ export function registerAuthRoutes(app: FastifyInstance): void {
   }, reply));
 
   app.post("/api/auth/bootstrap", (req, reply) => run(async () => {
+    sessionRequest(req);
     const result = await auth.bootstrap(req.body as Parameters<typeof auth.bootstrap>[0], meta(req));
     setRefresh(reply, result.refreshToken); return result.session;
   }, reply));
   app.post("/api/auth/login", (req, reply) => run(async () => {
+    sessionRequest(req);
     const result = await auth.login(req.body as Parameters<typeof auth.login>[0], meta(req));
     setRefresh(reply, result.refreshToken); return result.session;
   }, reply));
   app.post("/api/auth/enable", (req, reply) => run(async () => {
+    sessionRequest(req);
     const result = await auth.enableWithPassword(req.body as Parameters<typeof auth.enableWithPassword>[0], meta(req));
     setRefresh(reply, result.refreshToken); return result.session;
   }, reply));
@@ -68,11 +71,13 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     setRefresh(reply, result.refreshToken); return result.session;
   }, reply));
   app.post("/api/auth/setup/redeem", (req, reply) => run(async () => {
+    sessionRequest(req);
     const result = await auth.redeemSetupCode(req.body as Parameters<typeof auth.redeemSetupCode>[0], meta(req));
     setRefresh(reply, result.refreshToken); return result.session;
   }, reply));
   app.post("/api/auth/passkeys/login/options", (req, reply) => run(() => auth.authenticationOptions(meta(req)), reply));
   app.post("/api/auth/passkeys/login/verify", (req, reply) => run(async () => {
+    sessionRequest(req);
     const result = await auth.verifyAuthentication(req.body as { id: string; response: AuthenticationResponseJSON }, meta(req));
     setRefresh(reply, result.refreshToken); return result.session;
   }, reply));

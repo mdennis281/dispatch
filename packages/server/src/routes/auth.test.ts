@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { buildApp } from "../app.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
-import { verifyTotp } from "../services/auth.js";
+import { normalizeUserAgent, verifyTotp } from "../services/auth.js";
 
 const dirs: string[] = [];
+const sessionHeaders = { "x-dispatch-session": "refresh" } as const;
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
 async function app() {
@@ -41,7 +42,7 @@ async function pairedApps() {
 
 async function bootstrap(instance: Awaited<ReturnType<typeof buildApp>>, ua = "Mozilla/5.0 Chrome/126.0 Windows NT 10.0") {
   const response = await instance.inject({ method: "POST", url: "/api/auth/bootstrap",
-    headers: { "user-agent": ua }, payload: {
+    headers: { "user-agent": ua, ...sessionHeaders }, payload: {
       username: "Owner", password: "correct horse battery staple", canonicalUrl: "http://localhost",
     }});
   expect(response.statusCode).toBe(200);
@@ -53,6 +54,30 @@ function rawCookie(header: string): string {
 }
 
 describe("optional authentication", () => {
+  it("normalizes browser families without duplicating their major version", () => {
+    expect(normalizeUserAgent("Mozilla/5.0 Windows NT 10.0 Chrome/126.0 Edg/126.0")).toBe("edge/126|windows|desktop");
+    expect(normalizeUserAgent("Mozilla/5.0 iPhone Version/17.5 Mobile Safari/604.1")).toBe("safari/17|ios|mobile");
+  });
+
+  it("rejects cookie-issuing authentication requests without the CSRF header", async () => {
+    const { instance } = await app();
+    const response = await instance.inject({ method: "POST", url: "/api/auth/bootstrap", payload: {
+      username: "Owner", password: "correct horse battery staple", canonicalUrl: "http://localhost",
+    }});
+    expect(response.statusCode).toBe(403);
+    expect((await instance.inject({ url: "/api/auth/status" })).json()).toMatchObject({ configured: false, enabled: false });
+    await instance.close();
+  });
+
+  it("coalesces and briefly caches auth-setting reads used by request and socket guards", async () => {
+    const { instance, store } = await app();
+    const getSettings = vi.spyOn(store, "getSettings");
+    await Promise.all([instance.auth.enabled(), instance.auth.enabled(), instance.auth.enabled()]);
+    await instance.auth.enabled();
+    expect(getSettings).toHaveBeenCalledTimes(1);
+    await instance.close();
+  });
+
   it("accepts RFC-compatible TOTP codes within the clock-skew window", () => {
     expect(verifyTotp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "287082", 59_000)).toBe(true);
     expect(verifyTotp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "000000", 59_000)).toBe(false);
@@ -97,7 +122,7 @@ describe("optional authentication", () => {
 
   it("serializes concurrent bootstrap attempts so exactly one owner exists", async () => {
     const { instance, dir } = await app();
-    const attempt = (username: string) => instance.inject({ method: "POST", url: "/api/auth/bootstrap", payload: {
+    const attempt = (username: string) => instance.inject({ method: "POST", url: "/api/auth/bootstrap", headers: sessionHeaders, payload: {
       username, password: "correct horse battery staple", canonicalUrl: "http://localhost",
     }});
     const responses = await Promise.all([attempt("owner-one"), attempt("owner-two")]);
@@ -111,7 +136,7 @@ describe("optional authentication", () => {
   it("serializes bootstrap across stable and dev instances sharing config", async () => {
     const { one, two, configDir } = await pairedApps();
     const attempt = (instance: typeof one.instance, username: string) => instance.inject({
-      method: "POST", url: "/api/auth/bootstrap", payload: {
+      method: "POST", url: "/api/auth/bootstrap", headers: sessionHeaders, payload: {
         username, password: "correct horse battery staple", canonicalUrl: "http://localhost",
       },
     });
@@ -125,7 +150,7 @@ describe("optional authentication", () => {
   it("reloads and preserves concurrent shared identity mutations across instances", async () => {
     const { one, two } = await pairedApps();
     const ownerOne = await bootstrap(one.instance);
-    const ownerTwo = await two.instance.inject({ method: "POST", url: "/api/auth/login", payload: {
+    const ownerTwo = await two.instance.inject({ method: "POST", url: "/api/auth/login", headers: sessionHeaders, payload: {
       username: "owner", password: "correct horse battery staple",
     }});
     expect(ownerTwo.statusCode).toBe(200);
@@ -138,10 +163,10 @@ describe("optional authentication", () => {
     ]);
     expect([inviteOne.statusCode, inviteTwo.statusCode]).toEqual([200, 200]);
     const [memberOne, memberTwo] = await Promise.all([
-      one.instance.inject({ method: "POST", url: "/api/auth/setup/redeem", payload: {
+      one.instance.inject({ method: "POST", url: "/api/auth/setup/redeem", headers: sessionHeaders, payload: {
         code: (inviteOne.json() as { code: string }).code, username: "stable-member", password: "another correct horse password",
       }}),
-      two.instance.inject({ method: "POST", url: "/api/auth/setup/redeem", payload: {
+      two.instance.inject({ method: "POST", url: "/api/auth/setup/redeem", headers: sessionHeaders, payload: {
         code: (inviteTwo.json() as { code: string }).code, username: "dev-member", password: "another correct horse password",
       }}),
     ]);
@@ -171,7 +196,7 @@ describe("optional authentication", () => {
 
     expect((await one.instance.inject({ method: "POST", url: "/api/auth/disable",
       headers: { authorization: `Bearer ${ownerOne.body.accessToken}`, "x-dispatch-session": "refresh" } })).statusCode).toBe(200);
-    expect((await one.instance.inject({ method: "POST", url: "/api/auth/enable", payload: {
+    expect((await one.instance.inject({ method: "POST", url: "/api/auth/enable", headers: sessionHeaders, payload: {
       username: "owner", password: "correct horse battery staple",
     }})).statusCode).toBe(200);
     expect((await two.instance.inject({ url: "/api/projects",
@@ -269,10 +294,10 @@ describe("optional authentication", () => {
     expect(invite.statusCode).toBe(200);
     expect((invite.json() as { url: string }).url).toMatch(/^http:\/\/localhost\/\?setup=/);
     const code = (invite.json() as { code: string }).code;
-    const first = await instance.inject({ method: "POST", url: "/api/auth/setup/redeem",
+    const first = await instance.inject({ method: "POST", url: "/api/auth/setup/redeem", headers: sessionHeaders,
       payload: { code, username: "teammate", password: "another correct horse password" } });
     expect(first.statusCode).toBe(200);
-    const reuse = await instance.inject({ method: "POST", url: "/api/auth/setup/redeem",
+    const reuse = await instance.inject({ method: "POST", url: "/api/auth/setup/redeem", headers: sessionHeaders,
       payload: { code, username: "other", password: "another correct horse password" } });
     expect(reuse.statusCode).toBe(400);
     const users = await instance.inject({ url: "/api/auth/users",
@@ -287,7 +312,7 @@ describe("optional authentication", () => {
     const invite = await instance.inject({ method: "POST", url: "/api/auth/setup-codes",
       headers: { authorization: `Bearer ${owner.body.accessToken}` } });
     const code = (invite.json() as { code: string }).code;
-    const redeem = (username: string) => instance.inject({ method: "POST", url: "/api/auth/setup/redeem",
+    const redeem = (username: string) => instance.inject({ method: "POST", url: "/api/auth/setup/redeem", headers: sessionHeaders,
       payload: { code, username, password: "another correct horse password" } });
     const responses = await Promise.all([redeem("member-one"), redeem("member-two")]);
     expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 400]);
@@ -302,7 +327,7 @@ describe("optional authentication", () => {
     const owner = await bootstrap(instance);
     const invite = await instance.inject({ method: "POST", url: "/api/auth/setup-codes",
       headers: { authorization: `Bearer ${owner.body.accessToken}` } });
-    const member = await instance.inject({ method: "POST", url: "/api/auth/setup/redeem", payload: {
+    const member = await instance.inject({ method: "POST", url: "/api/auth/setup/redeem", headers: sessionHeaders, payload: {
       code: (invite.json() as { code: string }).code, username: "member", password: "another correct horse password",
     }});
     const memberToken = (member.json() as { accessToken: string }).accessToken;
@@ -338,7 +363,7 @@ describe("optional authentication", () => {
       headers: { authorization: `Bearer ${session.body.accessToken}`, "x-dispatch-session": "refresh" } });
     expect(disabled.statusCode).toBe(200);
     expect((await instance.inject({ url: "/api/projects" })).statusCode).toBe(200);
-    const enabled = await instance.inject({ method: "POST", url: "/api/auth/enable", headers: { "user-agent": ua },
+    const enabled = await instance.inject({ method: "POST", url: "/api/auth/enable", headers: { "user-agent": ua, ...sessionHeaders },
       payload: { username: "owner", password: "correct horse battery staple" } });
     expect(enabled.statusCode).toBe(200);
     expect((await instance.inject({ url: "/api/projects" })).statusCode).toBe(401);

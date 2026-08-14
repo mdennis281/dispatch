@@ -211,11 +211,15 @@ function validateWebAuthnConfig(input: { canonicalUrl: string; rpId?: string }):
 
 /** Stable enough to catch token theft without revoking on patch-version churn. */
 export function normalizeUserAgent(ua: string): string {
+  const major = (pattern: RegExp, name: string): string | undefined => {
+    const version = pattern.exec(ua)?.[1];
+    return version ? `${name}/${version}` : undefined;
+  };
   const browser =
-    /Edg\/(\d+)/.exec(ua)?.slice(0, 2).join("/") ??
-    /Firefox\/(\d+)/.exec(ua)?.slice(0, 2).join("/") ??
-    /(?:Chrome|CriOS)\/(\d+)/.exec(ua)?.slice(0, 2).join("/") ??
-    /Version\/(\d+).*Safari/.exec(ua)?.slice(0, 2).join("/") ??
+    major(/Edg\/(\d+)/, "edge") ??
+    major(/Firefox\/(\d+)/, "firefox") ??
+    major(/(?:Chrome|CriOS)\/(\d+)/, "chrome") ??
+    major(/Version\/(\d+).*Safari/, "safari") ??
     "other/0";
   const os = /Windows NT/.test(ua)
     ? "windows"
@@ -321,6 +325,8 @@ export class AuthService {
   private challenges = new Map<string, Challenge>();
   private rates = new Map<string, number[]>();
   private revocationListeners = new Set<(sessionId: string) => void>();
+  private settingsCache: { value: Awaited<ReturnType<Store["getSettings"]>>["auth"]; expiresAt: number } | null = null;
+  private settingsLoad: Promise<Awaited<ReturnType<Store["getSettings"]>>["auth"]> | null = null;
 
   constructor(private store: Store) {}
 
@@ -441,8 +447,22 @@ export class AuthService {
     this.rates.set(key, hits);
   }
 
-  async settings() {
-    return (await this.store.getSettings()).auth;
+  async settings(): Promise<Awaited<ReturnType<Store["getSettings"]>>["auth"]> {
+    const now = Date.now();
+    if (this.settingsCache && this.settingsCache.expiresAt > now) return this.settingsCache.value;
+    if (!this.settingsLoad) {
+      this.settingsLoad = this.store.getSettings().then((settings) => {
+        this.settingsCache = { value: settings.auth, expiresAt: Date.now() + 1_000 };
+        return settings.auth;
+      }).finally(() => { this.settingsLoad = null; });
+    }
+    return this.settingsLoad;
+  }
+
+  private async saveAuthSettings(auth: NonNullable<Awaited<ReturnType<Store["getSettings"]>>["auth"]>): Promise<void> {
+    const settings = await this.store.getSettings();
+    await this.store.saveSettings({ ...settings, auth });
+    this.settingsCache = { value: auth, expiresAt: Date.now() + 1_000 };
   }
 
   async enabled(): Promise<boolean> {
@@ -526,7 +546,7 @@ export class AuthService {
 
   async dismissFirstRun(): Promise<void> {
     const settings = await this.store.getSettings();
-    await this.store.saveSettings({ ...settings, auth: { ...settings.auth, enabled: false, firstRunDismissed: true } });
+    await this.saveAuthSettings({ ...settings.auth, enabled: false, firstRunDismissed: true });
   }
 
   async bootstrap(input: { username: string; displayName?: string; password: string; canonicalUrl: string; rpId?: string }, meta: { ua: string; ip?: string }): Promise<{ session: AuthSessionResponse; refreshToken: string }> {
@@ -551,12 +571,11 @@ export class AuthService {
     // these writes leaves auth safely disabled and re-enableable from Settings,
     // never enabled with no account capable of logging in.
     await this.persistAuth();
-    const settings = await this.store.getSettings();
-    await this.store.saveSettings({ ...settings, auth: {
+    await this.saveAuthSettings({
       enabled: true, firstRunDismissed: true,
       canonicalUrl: webauthn.canonicalUrl,
       rpId: webauthn.rpId,
-    }});
+    });
     return this.issueSession(user, meta);
   }
 
@@ -718,7 +737,7 @@ export class AuthService {
     data.sessionEpoch = authEpoch(data) + 1;
     await this.persistAuth();
     const settings = await this.store.getSettings();
-    await this.store.saveSettings({ ...settings, auth: { ...settings.auth, enabled: false, firstRunDismissed: true } });
+    await this.saveAuthSettings({ ...settings.auth, enabled: false, firstRunDismissed: true });
   }
 
   async enableWithPassword(input: { username: string; password: string; totp?: string }, meta: { ua: string; ip?: string }) {
@@ -729,7 +748,7 @@ export class AuthService {
     if ((await this.enabled())) throw new AuthFailure(409, "Authentication is already enabled.");
     const result = await this.loginUnsafe(input, meta);
     const settings = await this.store.getSettings();
-    await this.store.saveSettings({ ...settings, auth: { ...settings.auth, enabled: true, firstRunDismissed: true } });
+    await this.saveAuthSettings({ ...settings.auth, enabled: true, firstRunDismissed: true });
     return result;
   }
 
@@ -752,7 +771,7 @@ export class AuthService {
       if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
       const webauthn = validateWebAuthnConfig(input);
       const settings = await this.store.getSettings();
-      await this.store.saveSettings({ ...settings, auth: { ...settings.auth, ...webauthn, enabled: true, firstRunDismissed: true } });
+      await this.saveAuthSettings({ ...settings.auth, ...webauthn, enabled: true, firstRunDismissed: true });
       return webauthn;
     });
   }
