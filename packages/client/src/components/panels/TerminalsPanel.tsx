@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { TerminalSquare, FolderClosed, Plus, X, CornerDownLeft, Activity } from "lucide-react";
 import type { Chat, TerminalInfo } from "@dispatch/shared";
-import { useTerminals, nextShellName, type TerminalLine } from "../../stores/terminals.js";
+import {
+  isLiveChatTerminal,
+  useTerminals,
+  nextShellName,
+  type TerminalLine,
+} from "../../stores/terminals.js";
 import { api } from "../../lib/api.js";
 import { StatusDot } from "../ui/StatusDot.js";
 import { Chip } from "../ui/Chip.js";
@@ -229,6 +234,7 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
   const byId = useTerminals((s) => s.byId);
   const order = useTerminals((s) => s.order);
   const mine = order.map((id) => byId[id]!).filter((t) => t && t.chatId === chat.id);
+  const live = mine.filter((t) => isLiveChatTerminal(t, chat.id));
   const [opening, setOpening] = useState(false);
 
   // Open a shell the way the agent's `terminal` tool does — same service, same
@@ -247,11 +253,11 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
       .finally(() => setOpening(false));
   };
 
-  if (mine.length === 0) {
+  if (live.length === 0) {
     return (
       <div className="px-4 py-10 text-center">
         <TerminalSquare className="mx-auto mb-2 size-5 text-faint" />
-        <p className="text-sm text-muted">No terminals yet.</p>
+        <p className="text-sm text-muted">No terminals running.</p>
         <p className="mt-0.5 text-xs text-faint">
           Persistent shells — cwd and env survive across commands. The agent opens
           them with its <span className="cm-mono !text-2xs">terminal</span> tool;
@@ -268,7 +274,7 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
 
   return (
     <div className="space-y-2.5 p-3">
-      {mine.map((t) => (
+      {live.map((t) => (
         <TerminalCard key={t.id} terminal={t} projectId={chat.projectId} />
       ))}
       <div className="flex justify-center pt-0.5">

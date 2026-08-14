@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { api, type ProjectProcess } from "../lib/api.js";
-import { useTerminals } from "./terminals.js";
+import { isLiveChatTerminal, useTerminals } from "./terminals.js";
 
 /**
  * OS port scan results, per project — hoisted out of ProcessesPanel so the
@@ -115,7 +115,7 @@ export function useChatProcessPids(
   const fromShells = useTerminals(
     useShallow((s) =>
       Object.values(s.byId)
-        .filter((t) => t.chatId === chatId && t.status === "live")
+        .filter((t) => isLiveChatTerminal(t, chatId))
         .map((t) => t.pid)
         .filter((p): p is number => typeof p === "number"),
     ),

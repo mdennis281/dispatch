@@ -61,6 +61,14 @@ export const useTerminals = create<TerminalsStore>((set) => ({
   setLines: (id, lines) => set((s) => ({ lines: { ...s.lines, [id]: lines } })),
 }));
 
+/** One chat's shells that still have a process behind them. */
+export function isLiveChatTerminal(
+  terminal: TerminalInfo | undefined,
+  chatId: string,
+): terminal is TerminalInfo {
+  return !!terminal && terminal.chatId === chatId && terminal.status === "live";
+}
+
 /**
  * A free name for a human-opened shell: `shell`, then `shell 2`, `shell 3`…
  *
