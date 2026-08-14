@@ -6,6 +6,7 @@
  * utilities shared across the three panels.
  */
 import type { Chat, WorktreeInfo } from "@dispatch/shared";
+import { focusPanelTab } from "../../stores/layout.js";
 
 /** Detail of the `cm:open-file` event the Monaco area consumes. */
 export interface OpenFileRequest {
@@ -26,15 +27,21 @@ export function requestOpenFile(req: OpenFileRequest): void {
  *  top-level, chat-independent view — see stores/view.ts — not a panel tab.) */
 export type FocusPanelTab = "worktrees" | "agents" | "apps" | "terminals" | "prs";
 
-export const FOCUS_PANEL_EVENT = "cm:focus-panel";
-
 /**
- * Ask the RightPanel to switch to a given tab (Worktrees / Apps / PRs). Same
- * decoupled window-event seam as `requestOpenFile` — the command palette fires
- * it, `RightPanel` listens, so neither imports the other.
+ * Ask the shell to switch to a given right-panel tab (Worktrees / Apps / PRs).
+ *
+ * This used to be a `cm:focus-panel` window CustomEvent that `RightPanel`
+ * listened for, because the selected tab was a `useState` inside that component
+ * and nothing outside it could reach one. The tab now lives in `stores/layout`
+ * — the mobile bottom nav renders in `App.tsx`, outside the `<aside>`, and had
+ * to be able to select a tab too — so the event, its listener and the whole
+ * seam collapse into a store call. Callers (the command palette) are unchanged.
+ *
+ * The import is deliberately one-way at runtime: the store imports only the
+ * `FocusPanelTab` TYPE from this module, which erases at build time.
  */
 export function requestFocusPanel(tab: FocusPanelTab): void {
-  window.dispatchEvent(new CustomEvent<FocusPanelTab>(FOCUS_PANEL_EVENT, { detail: tab }));
+  focusPanelTab(tab);
 }
 
 /** True when a worktree belongs to a chat (by owned path or explicit chatId tag). */

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { GitBranch, Bot, AppWindow, SquareTerminal, GitPullRequest, Ship, Play } from "lucide-react";
 import type { Chat } from "@dispatch/shared";
 import { Tabs, type TabDef } from "../ui/Tabs.js";
@@ -16,10 +16,12 @@ import { isLiveChatTerminal, useTerminals } from "../../stores/terminals.js";
 import { useProcesses, useOrphanCount } from "../../stores/processes.js";
 import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
 import {
-  worktreeMatchesChat,
-  FOCUS_PANEL_EVENT,
-  type FocusPanelTab,
-} from "../panels/panelBus.js";
+  useLayout,
+  PANEL_GROUP,
+  GROUP_HOME,
+  type PanelGroup as PanelGroupId,
+} from "../../stores/layout.js";
+import { worktreeMatchesChat, type FocusPanelTab } from "../panels/panelBus.js";
 
 type PanelTab = FocusPanelTab;
 
@@ -37,32 +39,19 @@ type PanelTab = FocusPanelTab;
  * of your PROCESSES (subagents, terminals, dev servers). Two or three labelled
  * tabs per group fit the column with room to spare, and the group you aren't
  * looking at keeps a rolled-up badge so nothing can go unnoticed behind it.
+ *
+ * The grouping itself now lives in `stores/layout` (`PANEL_GROUP`), because the
+ * mobile bottom nav's Ship/Run slots are the same two groups and a second copy
+ * of the map is a second answer to "which pane is Terminals in?".
  */
-type PanelGroup = "ship" | "run";
-
-const GROUP_OF: Record<PanelTab, PanelGroup> = {
-  worktrees: "ship",
-  prs: "ship",
-  agents: "run",
-  terminals: "run",
-  apps: "run",
-};
 
 export function RightPanel({ chat }: { chat: Chat }) {
-  const [tab, setTab] = useState<PanelTab>("worktrees");
-  const group = GROUP_OF[tab];
-
-  // Let the command palette jump straight to a tab (Worktrees / Apps / Terminals / PRs / Agents).
-  // Selecting the tab is enough to select its group — the group is derived, so
-  // a deep link can't land on a tab whose group is hidden.
-  useEffect(() => {
-    const onFocus = (e: Event) => {
-      const next = (e as CustomEvent<FocusPanelTab>).detail;
-      if (next in GROUP_OF) setTab(next);
-    };
-    window.addEventListener(FOCUS_PANEL_EVENT, onFocus);
-    return () => window.removeEventListener(FOCUS_PANEL_EVENT, onFocus);
-  }, []);
+  // The selected tab is store state, not `useState`: the command palette and the
+  // mobile bottom nav both select tabs from outside this component. See
+  // stores/layout.
+  const tab = useLayout((s) => s.panelTab);
+  const setTab = useLayout((s) => s.setPanelTab);
+  const group = PANEL_GROUP[tab];
 
   const wtCount = usePanels((s) => s.worktrees.filter((w) => worktreeMatchesChat(w, chat)).length);
   // Same membership rule the panel renders with (see `belongsToChat`), so the
@@ -168,7 +157,7 @@ export function RightPanel({ chat }: { chat: Chat }) {
             },
           ]}
           value={group}
-          onChange={(g) => setTab(g === "ship" ? "worktrees" : "agents")}
+          onChange={(g) => setTab(GROUP_HOME[g as PanelGroupId])}
         />
       </div>
       <div className="flex h-9 shrink-0 items-center cm-hairline-b">
