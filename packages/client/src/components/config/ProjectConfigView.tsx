@@ -45,6 +45,7 @@ import type {
   Project,
   ProjectConfigError,
   WorkflowConfig,
+  ShellTranscriptFilter,
 } from "@dispatch/shared";
 import { Modal, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
@@ -62,6 +63,8 @@ import { WorkflowProfilePicker } from "./WorkflowProfilePicker.js";
 import { ConfigSectionPane } from "./ConfigSectionPane.js";
 import { sectionItems } from "./configItems.js";
 import { SECTIONS } from "./sections.js";
+import { ShellFilterPanel } from "../chat/ShellFilterPanel.js";
+import { useSettings } from "../../stores/settings.js";
 
 /* ------------------------------------------------------------------ errors */
 
@@ -128,9 +131,16 @@ export function ProjectConfigView() {
   // server (a watcher edit, another client) shows through instead of being
   // shadowed by a stale copy — but a draft in progress is never clobbered.
   const [draft, setDraft] = useState<WorkflowConfig | null>(null);
+  // null means untouched; undefined is a deliberate reset to app inheritance.
+  const [filterDraft, setFilterDraft] = useState<ShellTranscriptFilter | undefined | null>(null);
   const saved = savedWorkflow(project);
   const workflow = draft ?? saved;
-  const dirty = draft !== null && JSON.stringify(draft) !== JSON.stringify(saved);
+  const savedFilter = project?.shellFilter;
+  const shellFilter = filterDraft === null ? savedFilter : filterDraft;
+  const appShellFilter = useSettings((s) => s.shellFilter);
+  const workflowDirty = draft !== null && JSON.stringify(draft) !== JSON.stringify(saved);
+  const filterDirty = filterDraft !== null && JSON.stringify(filterDraft) !== JSON.stringify(savedFilter);
+  const dirty = workflowDirty || filterDirty;
 
   const config = result?.config ?? null;
   const errors = result?.errors ?? [];
@@ -153,6 +163,7 @@ export function ProjectConfigView() {
   // Switching projects must not carry one project's unsaved edits into another.
   useEffect(() => {
     setDraft(null);
+    setFilterDraft(null);
     setConfirmClose(false);
   }, [projectId]);
 
@@ -161,29 +172,43 @@ export function ProjectConfigView() {
   }, [projectId]);
 
   const saveWorkflow = useCallback(async () => {
-    if (!projectId || !draft || saving) return;
+    if (!projectId || !dirty || saving) return;
     setSaving(true);
     try {
-      const out = await api.projectConfig.saveWorkflow(projectId, draft);
-      useProjects.getState().upsertProject(out.project);
+      let target: "manifest" | "store" | undefined;
+      let manifestPath: string | undefined;
+      if (workflowDirty && draft) {
+        const out = await api.projectConfig.saveWorkflow(projectId, draft);
+        useProjects.getState().upsertProject(out.project);
+        target = out.target;
+        manifestPath = out.manifestPath;
+      }
+      if (filterDirty) {
+        const out = await api.projectConfig.saveShellFilter(projectId, filterDraft ?? undefined);
+        useProjects.getState().upsertProject(out.project);
+        target = out.target;
+        manifestPath = out.manifestPath;
+      }
       setDraft(null);
+      setFilterDraft(null);
       setConfirmClose(false);
       pushToast({
         level: "info",
         text:
-          out.target === "manifest"
-            ? `Saved to ${out.manifestPath ?? "project.yaml"}`
-            : "Workflow saved",
+          target === "manifest"
+            ? `Saved to ${manifestPath ?? "project.yaml"}`
+            : "Project settings saved",
       });
     } catch (e) {
       pushToast({ level: "error", text: e instanceof Error ? e.message : String(e) });
     } finally {
       setSaving(false);
     }
-  }, [projectId, draft, saving, pushToast]);
+  }, [projectId, dirty, saving, workflowDirty, draft, filterDirty, filterDraft, pushToast]);
 
   const discard = useCallback(() => {
     setDraft(null);
+    setFilterDraft(null);
     setConfirmClose(false);
   }, []);
 
@@ -378,7 +403,7 @@ export function ProjectConfigView() {
             <div className="flex items-center gap-2 rounded-md border border-warn/40 bg-warn-ghost px-3 py-2">
               <TriangleAlert className="size-3.5 shrink-0 text-warn" />
               <span className="min-w-0 flex-1 text-xs text-secondary">
-                You have unsaved workflow changes.
+                You have unsaved project settings.
               </span>
               <Button variant="ghost" onClick={() => setConfirmClose(false)}>
                 Keep editing
@@ -479,12 +504,26 @@ export function ProjectConfigView() {
                 onLaunched={() => (dirty ? setConfirmClose(true) : setClosed())}
               >
                 {activeSection.id === "workflow" && project && (
-                  <WorkflowProfilePicker
-                    value={workflow}
-                    onChange={setDraft}
-                    fromManifest={hasDir}
-                    disabled={saving}
-                  />
+                  <div className="space-y-4">
+                    <WorkflowProfilePicker
+                      value={workflow}
+                      onChange={setDraft}
+                      fromManifest={hasDir}
+                      disabled={saving}
+                    />
+                    <div className="border-t border-line-soft pt-3">
+                      <div className="mb-1 text-xs font-medium text-secondary">Transcript shell</div>
+                      <p className="mb-2 text-2xs leading-snug text-faint">
+                        Project visibility defaults. Chats inherit this filter until they override it.
+                      </p>
+                      <ShellFilterPanel
+                        value={shellFilter}
+                        inherited={appShellFilter}
+                        onChange={setFilterDraft}
+                        parentLabel="app defaults"
+                      />
+                    </div>
+                  </div>
                 )}
               </ConfigSectionPane>
             </div>

@@ -17,7 +17,12 @@
  * schema so validation and typing can never drift.
  */
 import * as z from "zod";
-import { EffortSchema, McpServerConfigSchema, PermissionModeSchema } from "./common.js";
+import {
+  EffortSchema,
+  McpServerConfigSchema,
+  PermissionModeSchema,
+  ShellTranscriptFilterSchema,
+} from "./common.js";
 import { SubAppSchema, AgentConfigSchema } from "./domain.js";
 import { WorkflowConfigSchema } from "./workflow.js";
 
@@ -133,6 +138,8 @@ export const ManifestDefaultsSchema = z.object({
    * and a chat that doesn't falls through to the app setting, then to off.
    */
   showInjectedContext: z.boolean().optional(),
+  /** Transcript-shell categories enabled by default for chats in this project. */
+  shellFilter: ShellTranscriptFilterSchema.optional(),
 });
 export type ManifestDefaults = z.infer<typeof ManifestDefaultsSchema>;
 
@@ -211,6 +218,7 @@ export const ProjectConfigDefaultsSchema = z.object({
   model: z.string().optional(),
   /** Project-level default for the transcript's injected-context disclosure. */
   showInjectedContext: z.boolean().optional(),
+  shellFilter: ShellTranscriptFilterSchema.optional(),
 });
 export type ProjectConfigDefaults = z.infer<typeof ProjectConfigDefaultsSchema>;
 

@@ -993,6 +993,9 @@ export function mergeProject(stored: Project, config: ProjectConfig): Project {
     worktreeCmd: config.worktreeCmd ?? stored.worktreeCmd,
     shipCmd: config.shipCmd ?? stored.shipCmd,
     workflow: config.workflow ?? stored.workflow,
+    // A manifest-backed project uses absence to mean "inherit from the app".
+    // Keeping the stored value here would resurrect an override the user reset.
+    shellFilter: config.defaults?.shellFilter,
     subApps: mergeById(config.subApps, stored.subApps),
     mcpServers:
       Object.keys(config.mcpServers).length || stored.mcpServers

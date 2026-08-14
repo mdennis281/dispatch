@@ -18,8 +18,8 @@
 import type { FastifyInstance } from "fastify";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { WorkflowConfigSchema } from "@dispatch/shared";
-import { saveProjectWorkflow } from "../services/workflow-writer.js";
+import { ShellTranscriptFilterSchema, WorkflowConfigSchema } from "@dispatch/shared";
+import { saveProjectShellFilter, saveProjectWorkflow } from "../services/workflow-writer.js";
 import { safeArchivePath } from "../services/project-config-archive.js";
 
 export function registerProjectConfigRoutes(app: FastifyInstance): void {
@@ -61,6 +61,33 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
         return reply
           .code(400)
           .send({ error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
+
+  app.put<{ Params: { id: string } }>(
+    "/api/projects/:id/config/shell-filter",
+    async (req, reply) => {
+      const body = req.body as { shellFilter?: unknown } | undefined;
+      if (!body || !Object.prototype.hasOwnProperty.call(body, "shellFilter")) {
+        return reply.code(400).send({ error: "shellFilter is required (use null to inherit)" });
+      }
+      const raw = body.shellFilter;
+      const parsed = raw === null
+        ? { success: true as const, data: undefined }
+        : ShellTranscriptFilterSchema.safeParse(raw);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      try {
+        const out = await saveProjectShellFilter(
+          { store, projectConfig },
+          req.params.id,
+          parsed.data,
+        );
+        if (!out) return reply.code(404).send({ error: "project not found" });
+        app.services.bus.publish({ type: "project-update", project: out.project });
+        return out;
+      } catch (err) {
+        return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
       }
     },
   );

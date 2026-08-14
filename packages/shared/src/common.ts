@@ -5,6 +5,24 @@
  */
 import * as z from "zod";
 
+/** Tool families that can be shown inside Dispatch's compact transcript shell. */
+export const SHELL_TRANSCRIPT_CATEGORIES = [
+  "shell",
+  "memory",
+  "pr",
+  "wait",
+  "preview",
+  "chat",
+  "dispatch",
+] as const;
+export const ShellTranscriptCategorySchema = z.enum(SHELL_TRANSCRIPT_CATEGORIES);
+export type ShellTranscriptCategory = z.infer<typeof ShellTranscriptCategorySchema>;
+export const ShellTranscriptFilterSchema = z
+  .array(ShellTranscriptCategorySchema)
+  .max(SHELL_TRANSCRIPT_CATEGORIES.length)
+  .refine((items) => new Set(items).size === items.length, "duplicate shell filter category");
+export type ShellTranscriptFilter = z.infer<typeof ShellTranscriptFilterSchema>;
+
 /**
  * Which agent runtime executes a chat.
  *

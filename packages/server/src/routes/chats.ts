@@ -71,9 +71,11 @@ export function registerChatRoutes(app: FastifyInstance): void {
       const existing = await store.getChat(req.params.id);
       if (!existing) return reply.code(404).send({ error: "not found" });
       const body = (req.body ?? {}) as Record<string, unknown>;
+      const merged = { ...existing, ...body } as Record<string, unknown>;
+      // JSON cannot carry `undefined`; null is the explicit "inherit" command.
+      if (body.shellFilter === null) delete merged.shellFilter;
       const parsed = ChatSchema.safeParse({
-        ...existing,
-        ...body,
+        ...merged,
         id: req.params.id,
         projectId: existing.projectId,
         updatedAt: Date.now(),

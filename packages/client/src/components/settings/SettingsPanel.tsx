@@ -25,6 +25,8 @@ import { useBrowserNotify, notifyUnavailableReason } from "../../lib/browserNoti
 import { StopDispatch } from "./StopDispatch.js";
 import { cn } from "../../lib/cn.js";
 import { positiveTokenLimit } from "../../lib/harness.js";
+import { SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
+import { ShellFilterPanel } from "../chat/ShellFilterPanel.js";
 
 /** A compact token-styled on/off switch (no primitive exists yet). */
 function Switch({
@@ -108,6 +110,7 @@ const DEFAULT_DRAFT: AppSettings = {
   theme: "dark",
   webhook: { enabled: false },
   harness: { defaultHarness: "claude", defaults: {} },
+  shellFilter: [...SHELL_TRANSCRIPT_CATEGORIES],
 };
 
 export function SettingsPanel() {
@@ -151,6 +154,7 @@ export function SettingsPanel() {
             window: s.autoCompact?.window,
           },
           showInjectedContext: s.showInjectedContext ?? false,
+          shellFilter: s.shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES],
           spawnChat: { autoApprove: s.spawnChat?.autoApprove ?? false },
           harness: {
             defaultHarness: s.harness?.defaultHarness ?? "claude",
@@ -246,6 +250,7 @@ export function SettingsPanel() {
         window: draft.autoCompact?.window || undefined,
       },
       showInjectedContext: draft.showInjectedContext ?? false,
+      shellFilter: draft.shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES],
       spawnChat: { autoApprove: draft.spawnChat?.autoApprove ?? false },
       harness: {
         defaultHarness: draft.harness?.defaultHarness ?? "claude",
@@ -415,6 +420,20 @@ export function SettingsPanel() {
               checked={!!draft.showInjectedContext}
               onChange={(v) => patch({ showInjectedContext: v })}
               label={draft.showInjectedContext ? "Shown" : "Hidden"}
+            />
+          </div>
+
+          <div className="mt-4">
+            <div className="mb-1 text-xs font-medium text-secondary">Transcript shell</div>
+            <p className="mb-2 text-2xs leading-snug text-faint">
+              App-wide visibility defaults. Projects and chats inherit these until they set their own filter.
+            </p>
+            <ShellFilterPanel
+              value={draft.shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES]}
+              inherited={[...SHELL_TRANSCRIPT_CATEGORIES]}
+              onChange={(shellFilter) =>
+                patch({ shellFilter: shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES] })
+              }
             />
           </div>
 

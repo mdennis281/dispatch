@@ -20,7 +20,12 @@
  */
 import { existsSync } from "node:fs";
 import { loadManifest, saveManifest, resolveProjectPaths } from "@dispatch/cli/core";
-import { WorkflowConfigSchema, type Project, type WorkflowConfig } from "@dispatch/shared";
+import {
+  WorkflowConfigSchema,
+  type Project,
+  type ShellTranscriptFilter,
+  type WorkflowConfig,
+} from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { ProjectConfigService } from "./project-config.js";
 
@@ -34,6 +39,8 @@ export interface WorkflowSaveResult {
   /** Absolute `project.yaml` path, when the manifest was the target. */
   manifestPath?: string;
 }
+
+export type ProjectSettingSaveResult = WorkflowSaveResult;
 
 /**
  * Which keys of a workflow block this writer manages. Anything the schema gains
@@ -83,6 +90,31 @@ export async function saveProjectWorkflow(
 
   // Re-read from disk so the store, the cached config and every WS client end up
   // agreeing with the file we just wrote — the same path a watcher edit takes.
+  await deps.projectConfig.reload(projectId);
+  const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
+  return { target: "manifest", project: project2, manifestPath };
+}
+
+/** Persist the project's transcript-shell override, or remove it to inherit. */
+export async function saveProjectShellFilter(
+  deps: { store: Store; projectConfig: ProjectConfigService },
+  projectId: string,
+  shellFilter: ShellTranscriptFilter | undefined,
+): Promise<ProjectSettingSaveResult | null> {
+  const project = await deps.store.getProject(projectId).catch(() => null);
+  if (!project) return null;
+
+  if (!isManifestBacked(project)) {
+    const next = { ...project, shellFilter };
+    if (shellFilter === undefined) delete next.shellFilter;
+    const saved = await deps.store.saveProject(next);
+    return { target: "store", project: saved };
+  }
+
+  const loaded = await loadManifest(project.repoPath);
+  if (shellFilter === undefined) loaded.doc.deleteIn(["defaults", "shellFilter"]);
+  else loaded.doc.setIn(["defaults", "shellFilter"], shellFilter);
+  const manifestPath = await saveManifest(loaded);
   await deps.projectConfig.reload(projectId);
   const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
   return { target: "manifest", project: project2, manifestPath };
