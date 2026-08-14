@@ -6,6 +6,7 @@ import { Chip } from "../ui/Chip.js";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
 import { cn } from "../../lib/cn.js";
+import { copyToClipboard } from "../../lib/clipboard.js";
 
 export type ToolDetailState = "running" | "ok" | "failed" | "stopped";
 
@@ -14,7 +15,8 @@ function CopyAction({ text }: { text: string }) {
   return (
     <Button
       variant="ghost"
-      onClick={() => void navigator.clipboard?.writeText(text).then(() => {
+      onClick={() => void copyToClipboard(text).then((ok) => {
+        if (!ok) return;
         setCopied(true);
         setTimeout(() => setCopied(false), 1_200);
       })}

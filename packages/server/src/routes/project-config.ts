@@ -68,8 +68,12 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
   app.put<{ Params: { id: string } }>(
     "/api/projects/:id/config/shell-filter",
     async (req, reply) => {
-      const raw = (req.body as { shellFilter?: unknown } | undefined)?.shellFilter;
-      const parsed = raw === null || raw === undefined
+      const body = req.body as { shellFilter?: unknown } | undefined;
+      if (!body || !Object.prototype.hasOwnProperty.call(body, "shellFilter")) {
+        return reply.code(400).send({ error: "shellFilter is required (use null to inherit)" });
+      }
+      const raw = body.shellFilter;
+      const parsed = raw === null
         ? { success: true as const, data: undefined }
         : ShellTranscriptFilterSchema.safeParse(raw);
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });

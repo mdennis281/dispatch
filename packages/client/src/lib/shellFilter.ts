@@ -30,6 +30,7 @@ export function presentationFilterCategory(presentation: ToolPresentation): Shel
     case "wait": return "wait";
     case "preview": return "preview";
     case "chat": return "chat";
+    case "terminal": return "shell";
     default: return "dispatch";
   }
 }
