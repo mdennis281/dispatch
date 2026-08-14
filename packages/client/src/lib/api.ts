@@ -228,8 +228,12 @@ export interface UploadAssetBody {
 }
 
 /**
- * Resolve an ImageRef to a URL the browser can render. `data:`/`http(s)`/`blob:`
- * pass through; a stored relative asset path maps to its serve endpoint.
+ * Resolve an ImageRef to its serve endpoint. `data:`/`http(s)`/`blob:` pass
+ * through; a stored relative asset path maps to `/api/chats/:id/assets/:name`.
+ *
+ * NOT a `src=` you can hand to an `<img>`: that endpoint is behind the bearer
+ * auth gate and a subresource request carries no token. Use `useAssetSrc` /
+ * `AssetImage` (lib/assetSrc.ts), which fetch it through the session.
  */
 export function assetUrl(chatId: string, image: { path: string }): string {
   const p = image.path;

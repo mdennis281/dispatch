@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { ImageIcon } from "lucide-react";
 import type { ImageRef } from "@dispatch/shared";
-import { assetUrl } from "../../../lib/actions.js";
+import { cn } from "../../../lib/cn.js";
+import { useAssetSrc } from "../../../lib/assetSrc.js";
 import { ImageLightbox } from "./ImageLightbox.js";
 
 /**
@@ -11,11 +12,12 @@ import { ImageLightbox } from "./ImageLightbox.js";
  * a Claude-in-Chrome screenshot).
  */
 export function ImageThumb({ chatId, img }: { chatId: string; img: ImageRef }) {
-  const [broken, setBroken] = useState(false);
+  const [decodeFailed, setDecodeFailed] = useState(false);
   const [zoomed, setZoomed] = useState(false);
   const name = img.path.split(/[\\/]/).pop() ?? img.path;
   const dims = img.width && img.height ? `${img.width}×${img.height}` : undefined;
-  const src = assetUrl(chatId, img);
+  const { src, failed } = useAssetSrc(chatId, img);
+  const broken = failed || decodeFailed;
 
   if (broken) {
     return (
@@ -37,26 +39,37 @@ export function ImageThumb({ chatId, img }: { chatId: string; img: ImageRef }) {
   return (
     <>
       <figure className="overflow-hidden rounded-md border border-line bg-inset">
+        {/* Nothing to enlarge until the bytes land — don't advertise a zoom
+            affordance (or take focus) for a click that would do nothing. */}
         <button
           type="button"
+          disabled={!src}
           onClick={() => setZoomed(true)}
-          className="block w-full cursor-zoom-in outline-none focus-visible:ring-1 focus-visible:ring-accent-line"
-          title="Click to enlarge"
+          className={cn(
+            "block w-full outline-none focus-visible:ring-1 focus-visible:ring-accent-line",
+            src ? "cursor-zoom-in" : "cursor-default",
+          )}
+          title={src ? "Click to enlarge" : undefined}
         >
-          <img
-            src={src}
-            alt={img.alt ?? name}
-            loading="lazy"
-            onError={() => setBroken(true)}
-            className="block max-h-52 max-w-[240px] object-contain"
-          />
+          {src ? (
+            <img
+              src={src}
+              alt={img.alt ?? name}
+              onError={() => setDecodeFailed(true)}
+              className="block max-h-52 max-w-[240px] object-contain"
+            />
+          ) : (
+            // The bytes are still being fetched. Hold the row's height so a
+            // transcript doesn't jump as thumbnails resolve.
+            <span className="block h-24 w-[160px] animate-pulse bg-panel-2" aria-hidden />
+          )}
         </button>
         <figcaption className="flex items-center gap-1.5 border-t border-line-soft px-2 py-1">
           <span className="truncate text-2xs text-secondary">{name}</span>
           {dims && <span className="cm-mono !text-2xs text-faint">{dims}</span>}
         </figcaption>
       </figure>
-      {zoomed && (
+      {zoomed && src && (
         <ImageLightbox src={src} name={name} dims={dims} onClose={() => setZoomed(false)} />
       )}
     </>
