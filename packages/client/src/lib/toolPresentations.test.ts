@@ -24,6 +24,12 @@ describe("tool presentation handlers", () => {
   });
 
   it("gives first-party Dispatch MCPs semantic presentations", () => {
+    expect(toolPresentation(tool("mcp__manager__ask_user", { questions: [] }))).toMatchObject({
+      kind: "dispatch",
+      title: "Ask user",
+      activity: "Waiting for an answer",
+      category: "chat",
+    });
     expect(toolPresentation(tool("mcp__manager__wait", { seconds: 10 }))).toMatchObject({
       kind: "dispatch",
       title: "Wait",
