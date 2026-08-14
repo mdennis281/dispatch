@@ -431,6 +431,14 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     // git/memory views), so this one effect covers them all. Deferred a frame so
     // the focus lands after the click that opened the chat has settled, and after
     // `setContent` above, which is what makes "end" the end of the restored draft.
+    // ...but NOT on touch, where "typeable immediately" is the wrong default:
+    // you open a chat to READ it, and a caret landing in the composer either
+    // throws the keyboard over half the transcript or — because iOS refuses a
+    // programmatic focus that no gesture asked for — raises no keyboard at all
+    // while still firing `focusin`, which stood the bottom nav down and left it
+    // down until the next tap elsewhere. Tapping the composer still focuses it.
+    if (matchMedia("(pointer: coarse)").matches) return;
+
     const raf = requestAnimationFrame(() => {
       if (editor.isDestroyed || typingElsewhere(editor.view.dom)) return;
       editor.commands.focus("end");
