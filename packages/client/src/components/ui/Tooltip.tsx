@@ -15,6 +15,7 @@ export interface TooltipProps {
   side?: "top" | "bottom" | "left" | "right";
   children: ReactNode;
   className?: string;
+  triggerClassName?: string;
 }
 
 type Side = NonNullable<TooltipProps["side"]>;
@@ -38,7 +39,7 @@ interface Pos {
  *   - clamps the cross-axis into the viewport,
  *   - reflows on scroll/resize while open.
  */
-export function Tooltip({ label, side = "top", children, className }: TooltipProps) {
+export function Tooltip({ label, side = "top", children, className, triggerClassName }: TooltipProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLSpanElement>(null);
   const tipRef = useRef<HTMLSpanElement>(null);
@@ -115,7 +116,7 @@ export function Tooltip({ label, side = "top", children, className }: TooltipPro
   return (
     <span
       ref={triggerRef}
-      className="relative inline-flex"
+      className={cn("relative inline-flex", triggerClassName)}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
       onFocusCapture={() => setOpen(true)}
