@@ -2,7 +2,10 @@
 
 [![CI](https://github.com/mdennis281/dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/mdennis281/dispatch/actions/workflows/ci.yml)
 
-I built this to get the most out of my AI subscriptions. Im not saying it's the best agent CLI harness out there, but it's the best for how I build projects.
+An all-in-one agent CLI harness that replaces how you work with your LLMs. I built this to get the most out of my AI subscriptions. Im not saying it's the best agent CLI harness out there, but it's the best for how I build projects.
+
+<img width="1273" height="795" alt="image" src="https://github.com/user-attachments/assets/407ecff5-85c2-4d6c-9beb-4bee646e1533" />
+
 
 ## What it does
 
