@@ -143,6 +143,7 @@ export function resultText(content: unknown): string {
       })
       .filter(Boolean);
     if (blocks.length) return blocks.join("\n");
+    return "";
   }
   if (typeof content === "object") {
     const value = content as Record<string, unknown>;

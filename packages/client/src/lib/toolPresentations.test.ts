@@ -47,5 +47,7 @@ it("builds a compact first-line result preview", () => {
   expect(resultPreview("\nfirst\nsecond")).toBe("first");
   expect(resultPreview([{ type: "text", text: "[build] cwd=C:\\repo exit=0\ncompiled 3 files" }])).toBe("compiled 3 files");
   expect(resultText([{ type: "text", text: "hello" }])).toBe("hello");
+  expect(resultText([{ type: "image", data: "base64" }])).toBe("");
+  expect(resultPreview([])).toBe("No output");
   expect(resultPreview(undefined)).toBe("No output");
 });
