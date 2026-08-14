@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { initializeAuth, useAuth } from "./auth.js";
+import { initializeAuth, sessionFetch, useAuth } from "./auth.js";
 
 describe("auth bootstrap state", () => {
   beforeEach(() => {
@@ -29,5 +29,27 @@ describe("auth bootstrap state", () => {
     await initializeAuth();
     expect(useAuth.getState().accessToken).toBe("memory-only");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ headers: { "x-dispatch-session": "refresh" } });
+  });
+
+  it("single-flights same-tab refresh when requests fail together", async () => {
+    useAuth.setState({ ready: true, accessToken: null, user: null,
+      status: { enabled: true, configured: true, firstRunDismissed: true, user: null } });
+    let refreshCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/auth/refresh") {
+        refreshCalls++;
+        await Promise.resolve();
+        return new Response(JSON.stringify({ accessToken: "shared-token", expiresIn: 600,
+          user: { id: "u1", username: "owner", displayName: "Owner", owner: true, disabled: false,
+            createdAt: 1, hasPassword: true, passkeyCount: 0, totpEnabled: false } }), { status: 200 });
+      }
+      const headers = new Headers(init?.headers);
+      return new Response("{}", { status: headers.get("authorization") ? 200 : 401 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const responses = await Promise.all([sessionFetch("/api/protected"), sessionFetch("/api/protected")]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(refreshCalls).toBe(1);
   });
 });

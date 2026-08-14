@@ -5,6 +5,7 @@
  * served from this same port (see index.ts vs dev.ts).
  */
 import { networkInterfaces } from "node:os";
+import { rm, writeFile } from "node:fs/promises";
 import { buildApp } from "./app.js";
 import { config, envVar } from "./config.js";
 import { seedDefaultsIfEmpty } from "./seed.js";
@@ -59,7 +60,16 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
   // `services.dispose()` instead of orphaning whatever already started.
   installShutdown(app);
 
-  await app.listen({ port: config.port, host: config.host });
+  const recoveryLock = app.cm.store.authRecoveryLockFile();
+  await writeFile(recoveryLock, JSON.stringify({ pid: process.pid, startedAt: Date.now() }) + "\n", { mode: 0o600 });
+  app.addHook("onClose", async () => { await rm(recoveryLock, { force: true }); });
+
+  try {
+    await app.listen({ port: config.port, host: config.host });
+  } catch (error) {
+    await rm(recoveryLock, { force: true });
+    throw error;
+  }
   const address = app.server.address();
   const listeningPort = typeof address === "object" && address ? address.port : config.port;
   const managerHost = WILDCARD.has(config.host) ? "127.0.0.1" : config.host;

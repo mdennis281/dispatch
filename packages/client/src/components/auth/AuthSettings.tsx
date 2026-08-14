@@ -5,7 +5,7 @@ import type { AuthSecurityOverview, AuthSessionResponse, AuthSetupCode, AuthUser
 import { Button } from "../ui/Button.js";
 import { Field, InlineError, TextInput } from "../sidebar/Modal.js";
 import { SectionLabel } from "../ui/Panel.js";
-import { authDelete, authPost, sessionFetch, useAuth } from "../../stores/auth.js";
+import { authDelete, authPost, authPut, sessionFetch, useAuth } from "../../stores/auth.js";
 
 async function get<T>(path: string): Promise<T> {
   const response = await sessionFetch(path);
@@ -58,6 +58,8 @@ export function AuthSettings() {
   const [totpCode, setTotpCode] = useState("");
   const [resetTarget, setResetTarget] = useState<AuthUserSummary | null>(null);
   const [resetPassword, setResetPassword] = useState("");
+  const [canonicalUrl, setCanonicalUrl] = useState(status?.canonicalUrl ?? location.origin);
+  const [rpId, setRpId] = useState(status?.rpId ?? location.hostname);
 
   const reload = async () => {
     if (!status?.enabled || !user) return;
@@ -68,6 +70,10 @@ export function AuthSettings() {
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
   };
   useEffect(() => { void reload(); }, [status?.enabled, user?.id]);
+  useEffect(() => {
+    setCanonicalUrl(status?.canonicalUrl ?? location.origin);
+    setRpId(status?.rpId ?? location.hostname);
+  }, [status?.canonicalUrl, status?.rpId]);
 
   if (!status) return null;
   return <div>
@@ -85,6 +91,23 @@ export function AuthSettings() {
         <div className="grid grid-cols-2 gap-2"><TextInput type="password" placeholder="Current password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} /><TextInput type="password" placeholder="New password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} /></div>
         <Button className="mt-2" onClick={async () => { try { await authPost("/api/auth/password", { currentPassword, password: newPassword }); setCurrentPassword(""); setNewPassword(""); } catch (e) { setError(e instanceof Error ? e.message : String(e)); } }}>Update password</Button>
       </div>
+
+      {user?.owner && <div className="rounded-lg border border-line p-3">
+        <p className="text-xs font-medium text-secondary">Passkey origin</p>
+        <p className="mt-1 text-2xs leading-relaxed text-warning">Changing the canonical URL or RP ID can make existing passkeys unusable. Users may need to re-enroll them from the new hostname.</p>
+        <form className="mt-2 grid gap-2" onSubmit={async (event) => {
+          event.preventDefault(); setError(null);
+          try {
+            const updated = await authPut<{ canonicalUrl: string; rpId: string }>("/api/auth/webauthn", { canonicalUrl, rpId });
+            setCanonicalUrl(updated.canonicalUrl); setRpId(updated.rpId);
+            useAuth.getState().applyStatus({ ...status, ...updated });
+          } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+        }}>
+          <Field label="Canonical URL" hint="localhost or HTTPS"><TextInput value={canonicalUrl} onChange={(e) => setCanonicalUrl(e.target.value)} /></Field>
+          <Field label="RP ID" hint="hostname or parent domain"><TextInput value={rpId} onChange={(e) => setRpId(e.target.value)} /></Field>
+          <Button className="justify-self-start" type="submit">Update passkey origin</Button>
+        </form>
+      </div>}
 
       <div className="rounded-lg border border-line p-3">
         <div className="flex items-center justify-between"><div><p className="text-xs font-medium text-secondary">Passkeys</p><p className="text-2xs text-faint">Passwordless login on supported devices</p></div><Button leftIcon={<Plus />} onClick={async () => {

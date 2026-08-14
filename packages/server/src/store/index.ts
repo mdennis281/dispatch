@@ -249,13 +249,17 @@ export class Store {
   private settingsFile() {
     return join(this.configDir, "config.json");
   }
-  /** Auth identities and refresh families share the config root across instances. */
+  /** Stable auth identities and their provider credentials share the config root. */
   authFile() {
     return join(this.configDir, "auth.json");
   }
   /** Refresh families are high-write and must never be shared by two processes. */
   authSessionsFile() {
     return join(this.dataDir, "auth-sessions.json");
+  }
+  /** Live-process marker used to make offline owner recovery fail closed. */
+  authRecoveryLockFile() {
+    return join(this.dataDir, "auth-recovery.lock");
   }
 
   /** Create both roots' trees. Idempotent; call once at boot. */
@@ -266,9 +270,13 @@ export class Store {
     const existing = async (dir: string): Promise<boolean> => {
       try { return (await readdir(dir)).length > 0; } catch { return false; }
     };
-    this.freshInstall = !existsSync(this.settingsFile()) &&
-      !(await existing(this.projectsDir())) && !(await existing(this.agentsDir())) &&
-      !(await existing(this.modesDir())) && !(await existing(this.chatsDir()));
+    // Any legacy file at either exact root proves this is an upgrade. Looking
+    // only in today's entity directories misclassified old roots containing
+    // just runners.json/checkpoints.json and showed them a first-run overlay.
+    const dataHadContent = await existing(this.dataDir);
+    const sameRoot = resolve(this.dataDir) === resolve(this.configDir);
+    const configHadContent = sameRoot ? dataHadContent : await existing(this.configDir);
+    this.freshInstall = !dataHadContent && !configHadContent;
     await mkdir(this.dataDir, { recursive: true });
     await mkdir(this.configDir, { recursive: true });
     await Promise.all([

@@ -18,7 +18,7 @@ const HELP = `cm — Dispatch project CLI
 
 Usage:
   dispatch mcp <command> [options]    Manage this project's MCP servers
-  dispatch auth reset-owner --config-dir <dir> [--data-dir <dir>] --password-stdin
+  dispatch auth reset-owner --config-dir <dir> [--data-dir <dir>] --password-stdin --confirm-stopped
   cm help                       Show this help
 
 Run \`dispatch mcp help\` for the MCP command surface.

@@ -29,12 +29,24 @@ export const useAuth = create<AuthStore>((set) => ({
     status: state.status ? { ...state.status, user: null } : state.status })); },
 }));
 
-async function refresh(): Promise<boolean> {
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function refreshAttempt(retryConflict = true): Promise<boolean> {
   const response = await fetch("/api/auth/refresh", { method: "POST", credentials: "same-origin",
     headers: { "x-dispatch-session": "refresh" } });
+  if (response.status === 409 && retryConflict) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return refreshAttempt(false);
+  }
   if (!response.ok) return false;
   useAuth.getState().applySession(await response.json() as AuthSessionResponse);
   return true;
+}
+
+async function refresh(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = refreshAttempt().finally(() => { refreshInFlight = null; });
+  return refreshInFlight;
 }
 
 export async function initializeAuth(): Promise<void> {
@@ -77,6 +89,14 @@ export async function authPost<T>(path: string, body?: unknown): Promise<T> {
 export async function authDelete<T>(path: string, body?: unknown): Promise<T> {
   const response = await sessionFetch(path, { method: "DELETE", headers: body === undefined ? undefined : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body) });
+  const json = await response.json().catch(() => ({})) as { error?: string };
+  if (!response.ok) throw new Error(json.error ?? "Authentication request failed");
+  return json as T;
+}
+
+export async function authPut<T>(path: string, body: unknown): Promise<T> {
+  const response = await sessionFetch(path, { method: "PUT", headers: { "content-type": "application/json" },
+    body: JSON.stringify(body) });
   const json = await response.json().catch(() => ({})) as { error?: string };
   if (!response.ok) throw new Error(json.error ?? "Authentication request failed");
   return json as T;

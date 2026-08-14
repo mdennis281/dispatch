@@ -25,6 +25,7 @@ const REFRESH_SLIDING_MS = 30 * 24 * 60 * 60 * 1000;
 const REFRESH_ABSOLUTE_MS = 90 * 24 * 60 * 60 * 1000;
 const CHALLENGE_MS = 5 * 60 * 1000;
 const SETUP_MS = 15 * 60 * 1000;
+const CONCURRENT_REFRESH_GRACE_MS = 2_000;
 
 export const REFRESH_COOKIE = "dispatch_refresh";
 
@@ -49,12 +50,15 @@ interface StoredUser {
   password?: PasswordCredential;
   passkeys: PasskeyCredential[];
   totp?: TotpCredential;
+  /** Provider links resolve to this stable user id; authorization never depends on provider shape. */
+  externalIdentities?: Array<{ provider: string; subject: string; linkedAt: number }>;
 }
 interface RefreshFamily {
   id: string;
   userId: string;
   currentHash: string;
   previousHash?: string;
+  rotatedAt?: number;
   uaBinding: string;
   userAgent: string;
   ip?: string;
@@ -110,6 +114,21 @@ function safeEqual(a: string, b: string): boolean {
 }
 function normalizeUsername(value: string): string {
   return value.trim().normalize("NFKC").toLocaleLowerCase("en-US");
+}
+
+function validateWebAuthnConfig(input: { canonicalUrl: string; rpId?: string }): { canonicalUrl: string; rpId: string } {
+  let canonical: URL;
+  try { canonical = new URL(input.canonicalUrl); }
+  catch { throw new AuthFailure(400, "Canonical URL is invalid."); }
+  if (canonical.protocol !== "https:" && canonical.hostname !== "localhost" && canonical.hostname !== "127.0.0.1") {
+    throw new AuthFailure(400, "Non-local passkey origins must use HTTPS.");
+  }
+  const rpId = (input.rpId?.trim() || canonical.hostname).toLowerCase();
+  const host = canonical.hostname.toLowerCase();
+  if (host !== rpId && !host.endsWith(`.${rpId}`)) {
+    throw new AuthFailure(400, "The passkey RP ID must be the canonical hostname or its parent domain.");
+  }
+  return { canonicalUrl: canonical.origin, rpId };
 }
 
 /** Stable enough to catch token theft without revoking on patch-version churn. */
@@ -208,12 +227,24 @@ export function verifyTotp(secret: string, code: string, at = Date.now()): boole
 export class AuthService {
   private data: AuthData | null = null;
   private sessionData: AuthSessionData | null = null;
+  private loadPromise: Promise<AuthData> | null = null;
+  private mutationTail: Promise<void> = Promise.resolve();
   private writeChain: Promise<void> = Promise.resolve();
   private challenges = new Map<string, Challenge>();
   private rates = new Map<string, number[]>();
   private revocationListeners = new Set<(sessionId: string) => void>();
 
   constructor(private store: Store) {}
+
+  /** Serialize check-then-write credential/session mutations within this process. */
+  private async exclusive<T>(task: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTail;
+    let release!: () => void;
+    this.mutationTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await task(); }
+    finally { release(); }
+  }
 
   onSessionRevoked(listener: (sessionId: string) => void): () => void {
     this.revocationListeners.add(listener);
@@ -225,6 +256,13 @@ export class AuthService {
 
   private async load(): Promise<AuthData> {
     if (this.data) return this.data;
+    if (this.loadPromise) return this.loadPromise;
+    this.loadPromise = this.loadOnce();
+    try { return await this.loadPromise; }
+    catch (error) { this.loadPromise = null; throw error; }
+  }
+
+  private async loadOnce(): Promise<AuthData> {
     const [raw, rawSessions] = await Promise.all([
       readJson(this.store.authFile()) as Promise<AuthData | undefined>,
       readJson(this.store.authSessionsFile()) as Promise<AuthSessionData | undefined>,
@@ -255,7 +293,9 @@ export class AuthService {
     const value = this.data;
     const sessionValue = this.sessionData;
     if (!value || !sessionValue) return;
-    this.writeChain = this.writeChain.then(async () => {
+    // A transient disk error must fail this operation without permanently
+    // poisoning every later recovery write in the process.
+    this.writeChain = this.writeChain.catch(() => {}).then(async () => {
       const writes: Promise<void>[] = [];
       if (auth) writes.push(writeJsonAtomic(this.store.authFile(), value, { mode: 0o600 }));
       if (sessions) writes.push(writeJsonAtomic(this.store.authSessionsFile(), sessionValue, { mode: 0o600 }));
@@ -350,23 +390,19 @@ export class AuthService {
   }
 
   async bootstrap(input: { username: string; displayName?: string; password: string; canonicalUrl: string; rpId?: string }, meta: { ua: string; ip?: string }): Promise<{ session: AuthSessionResponse; refreshToken: string }> {
+    return this.exclusive(() => this.bootstrapUnsafe(input, meta));
+  }
+
+  private async bootstrapUnsafe(input: { username: string; displayName?: string; password: string; canonicalUrl: string; rpId?: string }, meta: { ua: string; ip?: string }): Promise<{ session: AuthSessionResponse; refreshToken: string }> {
     const data = await this.load();
     this.limit(`bootstrap:${meta.ip ?? "local"}`, 5, 5 * 60_000);
     if (data.users.length) throw new AuthFailure(409, "Authentication is already configured.");
     this.validatePassword(input.password);
-    const canonical = new URL(input.canonicalUrl);
-    if (canonical.protocol !== "https:" && canonical.hostname !== "localhost" && canonical.hostname !== "127.0.0.1") {
-      throw new AuthFailure(400, "Non-local passkey origins must use HTTPS.");
-    }
-    const rpId = (input.rpId?.trim() || canonical.hostname).toLowerCase();
-    const host = canonical.hostname.toLowerCase();
-    if (host !== rpId && !host.endsWith(`.${rpId}`)) {
-      throw new AuthFailure(400, "The passkey RP ID must be the canonical hostname or its parent domain.");
-    }
+    const webauthn = validateWebAuthnConfig(input);
     const user: StoredUser = {
       id: crypto.randomUUID(), username: normalizeUsername(input.username),
       displayName: input.displayName?.trim() || input.username.trim(), owner: true,
-      disabled: false, createdAt: Date.now(), passkeys: [],
+      disabled: false, createdAt: Date.now(), passkeys: [], externalIdentities: [],
       password: { hash: await this.hashPassword(input.password) },
     };
     if (!user.username) throw new AuthFailure(400, "Username is required.");
@@ -378,8 +414,8 @@ export class AuthService {
     const settings = await this.store.getSettings();
     await this.store.saveSettings({ ...settings, auth: {
       enabled: true, firstRunDismissed: true,
-      canonicalUrl: canonical.origin,
-      rpId,
+      canonicalUrl: webauthn.canonicalUrl,
+      rpId: webauthn.rpId,
     }});
     return this.issueSession(user, meta);
   }
@@ -394,6 +430,10 @@ export class AuthService {
   }
 
   async login(input: { username: string; password: string; totp?: string }, meta: { ua: string; ip?: string }): Promise<{ session: AuthSessionResponse; refreshToken: string }> {
+    return this.exclusive(() => this.loginUnsafe(input, meta));
+  }
+
+  private async loginUnsafe(input: { username: string; password: string; totp?: string }, meta: { ua: string; ip?: string }): Promise<{ session: AuthSessionResponse; refreshToken: string }> {
     const data = await this.load();
     this.limit(`login:${meta.ip ?? "local"}`);
     const username = normalizeUsername(input.username);
@@ -428,6 +468,10 @@ export class AuthService {
   }
 
   async refresh(raw: string | undefined, meta: { ua: string; ip?: string }): Promise<{ session: AuthSessionResponse; refreshToken: string }> {
+    return this.exclusive(() => this.refreshUnsafe(raw, meta));
+  }
+
+  private async refreshUnsafe(raw: string | undefined, meta: { ua: string; ip?: string }): Promise<{ session: AuthSessionResponse; refreshToken: string }> {
     const data = await this.load();
     this.limit(`refresh:${meta.ip ?? "local"}`, 30);
     const id = raw?.split(".", 1)[0];
@@ -438,6 +482,10 @@ export class AuthService {
     }
     const incoming = digest(raw);
     if (family.previousHash && safeEqual(incoming, family.previousHash)) {
+      if (family.rotatedAt && now - family.rotatedAt <= CONCURRENT_REFRESH_GRACE_MS &&
+          family.uaBinding === normalizeUserAgent(meta.ua) && family.ip === meta.ip) {
+        throw new AuthFailure(409, "Session refreshed concurrently. Retry with the current cookie.");
+      }
       family.revokedAt = now;
       await this.persistSessions();
       this.notifyRevoked(family.id);
@@ -463,6 +511,7 @@ export class AuthService {
     const next = `${family.id}.${b64url(randomBytes(32))}`;
     family.previousHash = family.currentHash;
     family.currentHash = digest(next);
+    family.rotatedAt = now;
     family.lastUsedAt = now;
     family.expiresAt = Math.min(now + REFRESH_SLIDING_MS, family.absoluteExpiresAt);
     await this.persistSessions();
@@ -480,12 +529,20 @@ export class AuthService {
   }
 
   async logout(sessionId: string): Promise<void> {
+    return this.exclusive(() => this.logoutUnsafe(sessionId));
+  }
+
+  private async logoutUnsafe(sessionId: string): Promise<void> {
     await this.load();
     const row = this.sessionData!.sessions.find((s) => s.id === sessionId);
     if (row) { row.revokedAt = Date.now(); await this.persistSessions(); this.notifyRevoked(row.id); }
   }
 
   async disable(identity: RequestIdentity): Promise<void> {
+    return this.exclusive(() => this.disableUnsafe(identity));
+  }
+
+  private async disableUnsafe(identity: RequestIdentity): Promise<void> {
     if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
     await this.load();
     const now = Date.now();
@@ -493,14 +550,20 @@ export class AuthService {
       row.revokedAt = now;
       this.notifyRevoked(row.id);
     }
+    // Revoke first: a crash can leave auth enabled, but can never leave tokens
+    // live after Settings says it was disabled and those credentials are re-used.
+    await this.persistSessions();
     const settings = await this.store.getSettings();
     await this.store.saveSettings({ ...settings, auth: { ...settings.auth, enabled: false, firstRunDismissed: true } });
-    await this.persistSessions();
   }
 
   async enableWithPassword(input: { username: string; password: string; totp?: string }, meta: { ua: string; ip?: string }) {
+    return this.exclusive(() => this.enableWithPasswordUnsafe(input, meta));
+  }
+
+  private async enableWithPasswordUnsafe(input: { username: string; password: string; totp?: string }, meta: { ua: string; ip?: string }) {
     if ((await this.enabled())) throw new AuthFailure(409, "Authentication is already enabled.");
-    const result = await this.login(input, meta);
+    const result = await this.loginUnsafe(input, meta);
     const settings = await this.store.getSettings();
     await this.store.saveSettings({ ...settings, auth: { ...settings.auth, enabled: true, firstRunDismissed: true } });
     return result;
@@ -520,7 +583,21 @@ export class AuthService {
     return (await this.load()).users.map(userSummary);
   }
 
+  async updateWebAuthnSettings(identity: RequestIdentity, input: { canonicalUrl: string; rpId?: string }): Promise<{ canonicalUrl: string; rpId: string }> {
+    return this.exclusive(async () => {
+      if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
+      const webauthn = validateWebAuthnConfig(input);
+      const settings = await this.store.getSettings();
+      await this.store.saveSettings({ ...settings, auth: { ...settings.auth, ...webauthn, enabled: true, firstRunDismissed: true } });
+      return webauthn;
+    });
+  }
+
   async createSetupCode(identity: RequestIdentity): Promise<AuthSetupCode> {
+    return this.exclusive(() => this.createSetupCodeUnsafe(identity));
+  }
+
+  private async createSetupCodeUnsafe(identity: RequestIdentity): Promise<AuthSetupCode> {
     if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
     const data = await this.load();
     const code = b64url(randomBytes(18));
@@ -533,6 +610,10 @@ export class AuthService {
   }
 
   async redeemSetupCode(input: { code: string; username: string; displayName?: string; password: string }, meta: { ua: string; ip?: string }) {
+    return this.exclusive(() => this.redeemSetupCodeUnsafe(input, meta));
+  }
+
+  private async redeemSetupCodeUnsafe(input: { code: string; username: string; displayName?: string; password: string }, meta: { ua: string; ip?: string }) {
     const data = await this.load();
     this.limit(`setup:${meta.ip ?? "local"}`, 8, 5 * 60_000);
     const row = data.setupCodes.find((s) => !s.usedAt && s.expiresAt > Date.now() && safeEqual(s.hash, digest(input.code)));
@@ -542,7 +623,8 @@ export class AuthService {
     if (!username || data.users.some((u) => u.username === username)) throw new AuthFailure(400, "Unable to create account.");
     const user: StoredUser = { id: crypto.randomUUID(), username,
       displayName: input.displayName?.trim() || input.username.trim(), owner: false,
-      disabled: false, createdAt: Date.now(), passkeys: [], password: { hash: await this.hashPassword(input.password) } };
+      disabled: false, createdAt: Date.now(), passkeys: [], externalIdentities: [],
+      password: { hash: await this.hashPassword(input.password) } };
     row.usedAt = Date.now();
     data.users.push(user);
     await this.persistAuth();
@@ -550,6 +632,10 @@ export class AuthService {
   }
 
   async updatePassword(identity: RequestIdentity, input: { currentPassword: string; password: string }): Promise<void> {
+    return this.exclusive(() => this.updatePasswordUnsafe(identity, input));
+  }
+
+  private async updatePasswordUnsafe(identity: RequestIdentity, input: { currentPassword: string; password: string }): Promise<void> {
     const data = await this.load();
     const user = data.users.find((u) => u.id === identity.user.id)!;
     if (!user.password || !(await argonVerify(user.password.hash, input.currentPassword))) throw new AuthFailure(401, "Current password is incorrect.");
@@ -567,6 +653,10 @@ export class AuthService {
   }
 
   async confirmTotp(identity: RequestIdentity, code: string): Promise<void> {
+    return this.exclusive(() => this.confirmTotpUnsafe(identity, code));
+  }
+
+  private async confirmTotpUnsafe(identity: RequestIdentity, code: string): Promise<void> {
     const data = await this.load();
     const challenge = this.challenges.get(`totp:${identity.user.id}`);
     if (!challenge || challenge.expiresAt < Date.now() || !verifyTotp(challenge.challenge, code)) throw new AuthFailure(400, "Invalid verification code.");
@@ -577,6 +667,10 @@ export class AuthService {
   }
 
   async disableTotp(identity: RequestIdentity, password: string): Promise<void> {
+    return this.exclusive(() => this.disableTotpUnsafe(identity, password));
+  }
+
+  private async disableTotpUnsafe(identity: RequestIdentity, password: string): Promise<void> {
     const data = await this.load();
     const user = data.users.find((u) => u.id === identity.user.id)!;
     if (!user.password || !(await argonVerify(user.password.hash, password))) throw new AuthFailure(401, "Password is incorrect.");
@@ -598,6 +692,10 @@ export class AuthService {
   }
 
   async verifyRegistration(identity: RequestIdentity, response: RegistrationResponseJSON, name?: string): Promise<void> {
+    return this.exclusive(() => this.verifyRegistrationUnsafe(identity, response, name));
+  }
+
+  private async verifyRegistrationUnsafe(identity: RequestIdentity, response: RegistrationResponseJSON, name?: string): Promise<void> {
     const data = await this.load();
     const settings = await this.settings();
     const challenge = this.challenges.get(`reg:${identity.user.id}`);
@@ -626,6 +724,10 @@ export class AuthService {
   }
 
   async verifyAuthentication(input: { id: string; response: AuthenticationResponseJSON }, meta: { ua: string; ip?: string }) {
+    return this.exclusive(() => this.verifyAuthenticationUnsafe(input, meta));
+  }
+
+  private async verifyAuthenticationUnsafe(input: { id: string; response: AuthenticationResponseJSON }, meta: { ua: string; ip?: string }) {
     const data = await this.load();
     this.limit(`passkey:${meta.ip ?? "local"}`);
     const settings = await this.settings();
@@ -646,6 +748,10 @@ export class AuthService {
   }
 
   async removePasskey(identity: RequestIdentity, passkeyId: string): Promise<void> {
+    return this.exclusive(() => this.removePasskeyUnsafe(identity, passkeyId));
+  }
+
+  private async removePasskeyUnsafe(identity: RequestIdentity, passkeyId: string): Promise<void> {
     const data = await this.load();
     const user = data.users.find((u) => u.id === identity.user.id)!;
     if (user.passkeys.length <= 1 && !user.password) throw new AuthFailure(400, "Add another login method before removing this passkey.");
@@ -654,6 +760,10 @@ export class AuthService {
   }
 
   async revokeSession(identity: RequestIdentity, id: string): Promise<void> {
+    return this.exclusive(() => this.revokeSessionUnsafe(identity, id));
+  }
+
+  private async revokeSessionUnsafe(identity: RequestIdentity, id: string): Promise<void> {
     await this.load();
     const row = this.sessionData!.sessions.find((s) => s.id === id && s.userId === identity.user.id);
     if (!row) throw new AuthFailure(404, "Session not found.");
@@ -663,6 +773,10 @@ export class AuthService {
   }
 
   async ownerResetUser(identity: RequestIdentity, userId: string, password: string): Promise<void> {
+    return this.exclusive(() => this.ownerResetUserUnsafe(identity, userId, password));
+  }
+
+  private async ownerResetUserUnsafe(identity: RequestIdentity, userId: string, password: string): Promise<void> {
     if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
     this.validatePassword(password);
     const data = await this.load();
@@ -677,6 +791,10 @@ export class AuthService {
   }
 
   async ownerDeleteUser(identity: RequestIdentity, userId: string): Promise<void> {
+    return this.exclusive(() => this.ownerDeleteUserUnsafe(identity, userId));
+  }
+
+  private async ownerDeleteUserUnsafe(identity: RequestIdentity, userId: string): Promise<void> {
     if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
     const data = await this.load();
     const user = data.users.find((u) => u.id === userId);
@@ -690,6 +808,10 @@ export class AuthService {
 
   /** Local CLI recovery path; never exposed over HTTP. */
   async localResetOwner(password: string): Promise<string> {
+    return this.exclusive(() => this.localResetOwnerUnsafe(password));
+  }
+
+  private async localResetOwnerUnsafe(password: string): Promise<string> {
     this.validatePassword(password);
     const data = await this.load();
     const owner = data.users.find((u) => u.owner);

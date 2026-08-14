@@ -83,6 +83,9 @@ export function registerAuthRoutes(app: FastifyInstance): void {
   app.post("/api/auth/ws-ticket", (req, reply) => run(async () => ({ ticket: await auth.wsTicket(identity(req)) }), reply));
   app.get("/api/auth/security", (req, reply) => run(() => auth.security(identity(req)), reply));
   app.get("/api/auth/users", (req, reply) => run(() => auth.listUsers(identity(req)), reply));
+  app.put("/api/auth/webauthn", (req, reply) => run(() => auth.updateWebAuthnSettings(
+    identity(req), req.body as { canonicalUrl: string; rpId?: string },
+  ), reply));
   app.post("/api/auth/setup-codes", (req, reply) => run(() => auth.createSetupCode(identity(req)), reply));
   app.post("/api/auth/password", (req, reply) => run(async () => {
     await auth.updatePassword(identity(req), req.body as { currentPassword: string; password: string }); return { ok: true };

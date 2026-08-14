@@ -32,7 +32,7 @@ self.addEventListener("message", (event) => {
   if (event.data?.type === "auth-token") accessToken = event.data.token || null;
 });
 
-async function refreshSession() {
+async function refreshSession(retryConflict = true) {
   if (refreshInFlight) return refreshInFlight;
   refreshInFlight = (async () => {
     const response = await fetch("/api/auth/refresh", {
@@ -40,6 +40,11 @@ async function refreshSession() {
       credentials: "same-origin",
       headers: { "x-dispatch-session": "refresh" },
     });
+    if (response.status === 409 && retryConflict) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      refreshInFlight = null;
+      return refreshSession(false);
+    }
     if (!response.ok) { accessToken = null; return false; }
     const session = await response.json();
     accessToken = session.accessToken;

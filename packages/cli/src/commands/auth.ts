@@ -12,6 +12,24 @@ interface AuthSessionsFile {
   sessions: Array<{ revokedAt?: number }>;
 }
 
+async function assertServerStopped(dataDir: string): Promise<void> {
+  const marker = join(dataDir, "auth-recovery.lock");
+  let pid: number;
+  try {
+    const parsed = JSON.parse(await readFile(marker, "utf8")) as { pid?: unknown };
+    if (typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid)) return;
+    pid = parsed.pid;
+  } catch { return; }
+  try {
+    process.kill(pid, 0);
+    throw new CmError(`Dispatch is still running (pid ${pid}); stop it before owner recovery`);
+  } catch (error) {
+    if (error instanceof CmError) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH") throw new CmError(`cannot verify whether Dispatch pid ${pid} is stopped`);
+  }
+}
+
 async function stdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
@@ -19,8 +37,14 @@ async function stdin(): Promise<string> {
 }
 
 /** Explicitly local recovery primitive; the command wrapper keeps the secret on stdin. */
-export async function resetOwner(configDir: string, dataDir: string, password: string): Promise<string> {
+export async function resetOwner(
+  configDir: string,
+  dataDir: string,
+  password: string,
+  renameFile: typeof rename = rename,
+): Promise<string> {
   if (password.length < 12 || password.length > 256) throw new CmError("password must be 12–256 characters");
+  await assertServerStopped(dataDir);
   const file = join(configDir, "auth.json");
   const sessionsFile = join(dataDir, "auth-sessions.json");
   let data: AuthFile;
@@ -38,20 +62,25 @@ export async function resetOwner(configDir: string, dataDir: string, password: s
   const sessionsTmp = `${sessionsFile}.${process.pid}.tmp`;
   await writeFile(tmp, JSON.stringify(data, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
   await writeFile(sessionsTmp, JSON.stringify(sessions, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
-  await rename(tmp, file);
-  await rename(sessionsTmp, sessionsFile);
+  // Revoke first. If recovery is interrupted, the old credential may remain,
+  // but no pre-recovery browser session can become valid again.
+  await renameFile(sessionsTmp, sessionsFile);
+  await renameFile(tmp, file);
   return owner.username;
 }
 
 export async function runAuthCommand(argv: string[]): Promise<void> {
   if (argv[0] !== "reset-owner") {
-    throw new CmError("usage: dispatch auth reset-owner --config-dir <dir> --password-stdin");
+    throw new CmError("usage: dispatch auth reset-owner --config-dir <dir> --password-stdin --confirm-stopped");
   }
   const dirAt = argv.indexOf("--config-dir");
   const configured = dirAt >= 0 ? argv[dirAt + 1] : process.env.DISPATCH_CONFIG_DIR ?? process.env.CM_CONFIG_DIR;
   if (!configured) throw new CmError("--config-dir is required (or set DISPATCH_CONFIG_DIR)");
   if (!argv.includes("--password-stdin")) {
     throw new CmError("--password-stdin is required; passwords are never accepted in argv or environment variables");
+  }
+  if (!argv.includes("--confirm-stopped")) {
+    throw new CmError("--confirm-stopped is required after stopping Dispatch");
   }
   const password = await stdin();
   const configDir = resolve(configured);

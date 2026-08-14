@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -8,7 +8,7 @@ import { Store } from "../store/index.js";
 import { verifyTotp } from "../services/auth.js";
 
 const dirs: string[] = [];
-afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
 async function app() {
   const dir = await mkdtemp(join(tmpdir(), "dispatch-auth-"));
@@ -54,11 +54,38 @@ describe("optional authentication", () => {
     await instance.close();
   });
 
+  it("treats a legacy root containing only runners.json as an existing install", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dispatch-auth-legacy-upgrade-"));
+    dirs.push(dir);
+    await writeFile(join(dir, "runners.json"), "[]");
+    const store = new Store(dir);
+    const instance = await buildApp({ store, bus: new EventBus(), config: {
+      port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1,
+    }});
+    expect((await instance.inject({ url: "/api/auth/status" })).json()).toMatchObject({
+      enabled: false, firstRunDismissed: true,
+    });
+    await instance.close();
+  });
+
   it("offers the dismissible auth choice on a genuinely fresh install", async () => {
     const { instance } = await app();
     expect((await instance.inject({ url: "/api/auth/status" })).json()).toMatchObject({
       enabled: false, configured: false, firstRunDismissed: false,
     });
+    await instance.close();
+  });
+
+  it("serializes concurrent bootstrap attempts so exactly one owner exists", async () => {
+    const { instance, dir } = await app();
+    const attempt = (username: string) => instance.inject({ method: "POST", url: "/api/auth/bootstrap", payload: {
+      username, password: "correct horse battery staple", canonicalUrl: "http://localhost",
+    }});
+    const responses = await Promise.all([attempt("owner-one"), attempt("owner-two")]);
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+    const stored = JSON.parse(await readFile(join(dir, "auth.json"), "utf8")) as { users: Array<{ owner: boolean }> };
+    expect(stored.users).toHaveLength(1);
+    expect(stored.users.filter((user) => user.owner)).toHaveLength(1);
     await instance.close();
   });
 
@@ -96,14 +123,36 @@ describe("optional authentication", () => {
     await instance.close();
   });
 
-  it("detects reuse of an already-rotated refresh token and revokes its family", async () => {
+  it("treats narrowly concurrent refresh as retryable without killing the family", async () => {
     const { instance } = await app();
     const ua = "Mozilla/5.0 Chrome/126.0 Windows NT 10.0";
     const session = await bootstrap(instance, ua);
     const headers = { cookie: `dispatch_refresh=${encodeURIComponent(rawCookie(session.cookie))}`,
       "x-dispatch-session": "refresh", "user-agent": ua };
+    const responses = await Promise.all([
+      instance.inject({ method: "POST", url: "/api/auth/refresh", headers }),
+      instance.inject({ method: "POST", url: "/api/auth/refresh", headers }),
+    ]);
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+    const first = responses.find((response) => response.statusCode === 200)!;
+    const rotated = rawCookie(first.headers["set-cookie"] as string);
+    expect((await instance.inject({ method: "POST", url: "/api/auth/refresh", headers: {
+      ...headers, cookie: `dispatch_refresh=${encodeURIComponent(rotated)}`,
+    }})).statusCode).toBe(200);
+    await instance.close();
+  });
+
+  it("revokes the family when a rotated token is reused after the concurrency grace", async () => {
+    const { instance } = await app();
+    const ua = "Mozilla/5.0 Chrome/126.0 Windows NT 10.0";
+    const session = await bootstrap(instance, ua);
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const headers = { cookie: `dispatch_refresh=${encodeURIComponent(rawCookie(session.cookie))}`,
+      "x-dispatch-session": "refresh", "user-agent": ua };
     const first = await instance.inject({ method: "POST", url: "/api/auth/refresh", headers });
     expect(first.statusCode).toBe(200);
+    now += 2_001;
     expect((await instance.inject({ method: "POST", url: "/api/auth/refresh", headers })).statusCode).toBe(401);
     const rotated = rawCookie(first.headers["set-cookie"] as string);
     expect((await instance.inject({ method: "POST", url: "/api/auth/refresh", headers: {
@@ -139,6 +188,44 @@ describe("optional authentication", () => {
     const users = await instance.inject({ url: "/api/auth/users",
       headers: { authorization: `Bearer ${owner.body.accessToken}` } });
     expect(users.json()).toHaveLength(2);
+    await instance.close();
+  });
+
+  it("serializes concurrent setup redemption so a code creates only one account", async () => {
+    const { instance } = await app();
+    const owner = await bootstrap(instance);
+    const invite = await instance.inject({ method: "POST", url: "/api/auth/setup-codes",
+      headers: { authorization: `Bearer ${owner.body.accessToken}` } });
+    const code = (invite.json() as { code: string }).code;
+    const redeem = (username: string) => instance.inject({ method: "POST", url: "/api/auth/setup/redeem",
+      payload: { code, username, password: "another correct horse password" } });
+    const responses = await Promise.all([redeem("member-one"), redeem("member-two")]);
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 400]);
+    const users = await instance.inject({ url: "/api/auth/users",
+      headers: { authorization: `Bearer ${owner.body.accessToken}` } });
+    expect(users.json()).toHaveLength(2);
+    await instance.close();
+  });
+
+  it("lets only the owner update a validated canonical passkey origin", async () => {
+    const { instance } = await app();
+    const owner = await bootstrap(instance);
+    const invite = await instance.inject({ method: "POST", url: "/api/auth/setup-codes",
+      headers: { authorization: `Bearer ${owner.body.accessToken}` } });
+    const member = await instance.inject({ method: "POST", url: "/api/auth/setup/redeem", payload: {
+      code: (invite.json() as { code: string }).code, username: "member", password: "another correct horse password",
+    }});
+    const memberToken = (member.json() as { accessToken: string }).accessToken;
+    expect((await instance.inject({ method: "PUT", url: "/api/auth/webauthn",
+      headers: { authorization: `Bearer ${memberToken}` }, payload: { canonicalUrl: "https://dispatch.example.com" } })).statusCode).toBe(403);
+    expect((await instance.inject({ method: "PUT", url: "/api/auth/webauthn",
+      headers: { authorization: `Bearer ${owner.body.accessToken}` }, payload: { canonicalUrl: "http://dispatch.example.com" } })).statusCode).toBe(400);
+    expect((await instance.inject({ method: "PUT", url: "/api/auth/webauthn",
+      headers: { authorization: `Bearer ${owner.body.accessToken}` }, payload: { canonicalUrl: "https://dispatch.example.com", rpId: "unrelated.test" } })).statusCode).toBe(400);
+    const updated = await instance.inject({ method: "PUT", url: "/api/auth/webauthn",
+      headers: { authorization: `Bearer ${owner.body.accessToken}` }, payload: { canonicalUrl: "https://dispatch.example.com", rpId: "example.com" } });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toEqual({ canonicalUrl: "https://dispatch.example.com", rpId: "example.com" });
     await instance.close();
   });
 
