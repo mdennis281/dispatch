@@ -482,3 +482,15 @@
   width: 2px !important;
   margin-left: 3px;
 }
+
+/* Transcript search uses the CSS Custom Highlight API so React keeps ownership
+ * of the message DOM while matches can span Markdown elements. */
+::highlight(dispatch-transcript-search) {
+  color: inherit;
+  background-color: color-mix(in srgb, var(--p-accent) 38%, transparent);
+}
+
+::highlight(dispatch-transcript-search-current) {
+  color: var(--p-accent-fg);
+  background-color: var(--p-accent);
+}
