@@ -65,7 +65,7 @@ export const useTerminals = create<TerminalsStore>((set) => ({
 export function isLiveChatTerminal(
   terminal: TerminalInfo | undefined,
   chatId: string,
-): terminal is TerminalInfo {
+): terminal is TerminalInfo & { status: "live" } {
   return !!terminal && terminal.chatId === chatId && terminal.status === "live";
 }
 
