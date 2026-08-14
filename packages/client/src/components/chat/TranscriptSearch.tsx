@@ -71,7 +71,7 @@ export function TranscriptSearch({
       // disappeared at the same time). Restore the current highlight here too;
       // relying only on the count/index effect would leave that case unselected.
       const selected = matches[Math.min(current, matches.length - 1)];
-      registry.set(CURRENT_MATCH, new Highlight(selected.range));
+      if (selected) registry.set(CURRENT_MATCH, new Highlight(selected.range));
     }
     return clearHighlights;
   }, [open, query, revision, rootRef]);
