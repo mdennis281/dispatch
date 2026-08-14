@@ -260,9 +260,12 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
         onClose={() => setMoreOpen(false)}
         side="bottom"
         label="More"
-        className="max-h-[76dvh] flex-col rounded-t-lg border-t border-line-strong bg-overlay/98 backdrop-blur-md"
+        className="max-h-[76dvh] flex-col overflow-hidden rounded-t-lg border-t border-line-strong bg-overlay/98 backdrop-blur-md"
       >
-        <div className="cm-scroll overflow-y-auto p-1.5 pb-[calc(var(--cm-bottom-nav-space)+0.375rem)]">
+        {/* `min-h-0`: a flex child's default `min-height: auto` is its content,
+            so without this the list refuses to shrink under the sheet's
+            `max-h` and scrolls the page instead of itself. */}
+        <div className="cm-scroll min-h-0 overflow-y-auto p-1.5 pb-[calc(var(--cm-bottom-nav-space)+0.375rem)]">
           <SheetRow
             icon={<Brain />}
             label="Memory"
