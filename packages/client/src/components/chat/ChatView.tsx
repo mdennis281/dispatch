@@ -616,7 +616,9 @@ export function ChatView({ chat }: { chat: Chat }) {
                       close();
                     }}
                   >
-                    Running processes…
+                    {chatProcessPids.length
+                      ? `Running processes (${chatProcessPids.length})…`
+                      : "No running processes"}
                   </MenuItem>
                   <MenuItem
                     icon={<Skull />}

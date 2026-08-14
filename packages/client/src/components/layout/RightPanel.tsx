@@ -12,7 +12,7 @@ import { TerminalsPanel } from "../panels/TerminalsPanel.js";
 import { PRsPanel } from "../panels/PRsPanel.js";
 import { usePanels } from "../../stores/panels.js";
 import { useRunners, belongsToChat } from "../../stores/runners.js";
-import { useTerminals } from "../../stores/terminals.js";
+import { isLiveChatTerminal, useTerminals } from "../../stores/terminals.js";
 import { useProcesses, useOrphanCount } from "../../stores/processes.js";
 import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
 import {
@@ -75,7 +75,7 @@ export function RightPanel({ chat }: { chat: Chat }) {
         .length,
   );
   const termCount = useTerminals(
-    (s) => s.order.map((id) => s.byId[id]!).filter((t) => t?.chatId === chat.id && t.status === "live").length,
+    (s) => s.order.map((id) => s.byId[id]).filter((t) => isLiveChatTerminal(t, chat.id)).length,
   );
   // Counted separately from `termCount` because a background command starts in a
   // shell that ALREADY exists — the shell count doesn't move, but a port is about
