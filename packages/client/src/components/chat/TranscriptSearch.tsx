@@ -12,7 +12,15 @@ type HighlightRegistry = Map<string, Highlight> & {
 };
 
 function highlightRegistry(): HighlightRegistry | null {
+  if (typeof CSS === "undefined") return null;
   return (CSS as typeof CSS & { highlights?: HighlightRegistry }).highlights ?? null;
+}
+
+function makeHighlight(ranges: Range[]): Highlight | null {
+  if (typeof Highlight === "undefined") return null;
+  const highlight = new Highlight();
+  for (const range of ranges) highlight.add(range);
+  return highlight;
 }
 
 function clearHighlights() {
@@ -71,7 +79,8 @@ export function TranscriptSearch({
     setMatchRevision((value) => value + 1);
     const registry = highlightRegistry();
     if (registry && matches.length) {
-      registry.set(ALL_MATCHES, new Highlight(...matches.map((match) => match.range)));
+      const highlight = makeHighlight(matches.map((match) => match.range));
+      if (highlight) registry.set(ALL_MATCHES, highlight);
     }
     return clearHighlights;
   }, [open, query, revision, rootRef]);
@@ -81,7 +90,8 @@ export function TranscriptSearch({
     const registry = highlightRegistry();
     registry?.delete(CURRENT_MATCH);
     if (!match) return;
-    registry?.set(CURRENT_MATCH, new Highlight(match.range));
+    const highlight = makeHighlight([match.range]);
+    if (registry && highlight) registry.set(CURRENT_MATCH, highlight);
     match.row.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [count, current, matchRevision]);
 

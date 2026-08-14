@@ -14,7 +14,7 @@ interface TextSegment {
  * split across Markdown elements (for example text interrupted by `code`).
  */
 export function findTranscriptMatches(root: HTMLElement, query: string): TranscriptMatch[] {
-  const needle = query.trim().toLocaleLowerCase();
+  const needle = query.trim().toLowerCase();
   if (!needle) return [];
 
   const matches: TranscriptMatch[] = [];
@@ -39,14 +39,19 @@ export function findTranscriptMatches(root: HTMLElement, query: string): Transcr
       node = walker.nextNode() as Text | null;
     }
 
-    const haystack = text.toLocaleLowerCase();
+    const haystack = text.toLowerCase();
     let from = 0;
     while (from <= haystack.length - needle.length) {
       const at = haystack.indexOf(needle, from);
       if (at < 0) break;
       const end = at + needle.length;
-      const first = segments.find((segment) => segment.end > at);
-      const last = segments.findLast((segment) => segment.start < end);
+      let first: TextSegment | undefined;
+      let last: TextSegment | undefined;
+      for (const segment of segments) {
+        if (!first && segment.end > at) first = segment;
+        if (segment.start < end) last = segment;
+        else break;
+      }
       if (first && last) {
         const range = document.createRange();
         range.setStart(first.node, at - first.start);

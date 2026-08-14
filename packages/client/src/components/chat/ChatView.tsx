@@ -139,7 +139,7 @@ export function ChatView({ chat }: { chat: Chat }) {
   // understands paging and can therefore find rows that aren't loaded yet.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.key.toLocaleLowerCase() !== "f") return;
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "f") return;
       event.preventDefault();
       openSearch();
     };
