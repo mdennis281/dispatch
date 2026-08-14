@@ -120,11 +120,18 @@ export async function renameWithRetry(
 }
 
 /** Atomically write pretty JSON to `path` (temp file + rename). */
-export async function writeJsonAtomic(path: string, data: unknown): Promise<void> {
+export async function writeJsonAtomic(
+  path: string,
+  data: unknown,
+  options?: { mode?: number },
+): Promise<void> {
   await ensureDir(path);
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
-    await writeFile(tmp, JSON.stringify(data, null, 2), "utf8");
+    await writeFile(tmp, JSON.stringify(data, null, 2), {
+      encoding: "utf8",
+      ...(options?.mode !== undefined ? { mode: options.mode } : {}),
+    });
     await renameWithRetry(tmp, path);
   } catch (err) {
     await rm(tmp, { force: true }).catch(() => {});

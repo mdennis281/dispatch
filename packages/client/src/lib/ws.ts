@@ -17,10 +17,11 @@ import {
   type WsClientAction,
 } from "@dispatch/shared";
 import { applyServerEvent, useConnection } from "../stores/index.js";
+import { sessionFetch, useAuth } from "../stores/auth.js";
 
-function wsUrl(): string {
+function wsUrl(ticket?: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}/ws`;
+  return `${proto}//${location.host}/ws${ticket ? `?ticket=${encodeURIComponent(ticket)}` : ""}`;
 }
 
 const MIN_BACKOFF = 500;
@@ -39,22 +40,37 @@ export class WsClient {
   private outbox: string[] = [];
   private closedByUser = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private connecting = false;
 
   constructor(private opts: WsClientOptions = {}) {}
 
   connect(): void {
     if (this.opts.disabled || this.closedByUser) return;
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
+    if (this.connecting) return;
+    this.connecting = true;
+    void this.open();
+  }
+
+  private async open(): Promise<void> {
 
     useConnection.getState().setState(this.backoff === MIN_BACKOFF ? "connecting" : "reconnecting");
 
     let socket: WebSocket;
     try {
-      socket = new WebSocket(wsUrl());
+      let ticket: string | undefined;
+      if (useAuth.getState().status?.enabled) {
+        const response = await sessionFetch("/api/auth/ws-ticket", { method: "POST" });
+        if (!response.ok) throw new Error("unable to authorize websocket");
+        ticket = (await response.json() as { ticket: string }).ticket;
+      }
+      socket = new WebSocket(wsUrl(ticket));
     } catch {
+      this.connecting = false;
       this.scheduleReconnect();
       return;
     }
+    this.connecting = false;
     this.socket = socket;
 
     socket.addEventListener("open", () => {

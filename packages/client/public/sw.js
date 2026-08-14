@@ -4,8 +4,9 @@
  * ── What this deliberately does NOT do ──────────────────────────────────────
  * Dispatch is a control plane for live agents talking to a server on localhost.
  * Caching `/api` would serve stale truth about running work, which is worse than
- * any offline benefit — so every non-navigation, non-asset request is passed
- * straight through, untouched. There is no background sync and no API cache.
+ * any offline benefit — so API requests stay network-only. The worker may add
+ * an in-memory access token or refresh a session, but never caches a response.
+ * There is no background sync and no API cache.
  *
  * What it IS for:
  *   1. Installability. A Chromium PWA wants a service worker with a fetch
@@ -23,7 +24,43 @@
  */
 
 /** Bump to evict every previous shell. Old caches are dropped on activate. */
-const CACHE = "dispatch-shell-v1";
+const CACHE = "dispatch-shell-v2";
+let accessToken = null;
+let refreshInFlight = null;
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "auth-token") accessToken = event.data.token || null;
+});
+
+async function refreshSession() {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const response = await fetch("/api/auth/refresh", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "x-dispatch-session": "refresh" },
+    });
+    if (!response.ok) { accessToken = null; return false; }
+    const session = await response.json();
+    accessToken = session.accessToken;
+    const clients = await self.clients.matchAll({ includeUncontrolled: true });
+    for (const client of clients) client.postMessage({ type: "auth-session", session });
+    return true;
+  })().finally(() => { refreshInFlight = null; });
+  return refreshInFlight;
+}
+
+async function authenticatedFetch(request) {
+  const headers = new Headers(request.headers);
+  if (accessToken) headers.set("authorization", `Bearer ${accessToken}`);
+  let response = await fetch(new Request(request, { headers }));
+  const path = new URL(request.url).pathname;
+  if (response.status === 401 && !path.startsWith("/api/auth/") && await refreshSession()) {
+    headers.set("authorization", `Bearer ${accessToken}`);
+    response = await fetch(new Request(request, { headers }));
+  }
+  return response;
+}
 
 /** The minimum needed to render something recognisable with no network. */
 const SHELL = ["/", "/manifest.webmanifest", "/favicon.svg", "/icons/icon-192.png"];
@@ -51,7 +88,7 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-/** Live server truth — never cached, never intercepted. */
+/** Live server truth — never cached (API requests may receive auth headers). */
 const isLiveData = (url) => url.pathname.startsWith("/api") || url.pathname.startsWith("/ws");
 
 /**
@@ -64,10 +101,13 @@ const isHashedAsset = (url) =>
 
 self.addEventListener("fetch", (event) => {
   const { request } = event;
-  if (request.method !== "GET") return;
-
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith("/api") && !url.pathname.startsWith("/api/auth/")) {
+    event.respondWith(authenticatedFetch(request));
+    return;
+  }
+  if (request.method !== "GET") return;
   if (isLiveData(url)) return;
 
   if (request.mode === "navigate") {

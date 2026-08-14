@@ -24,7 +24,7 @@ interface SocketLike {
 }
 
 export function registerWsRoutes(app: FastifyInstance): void {
-  app.get("/ws", { websocket: true }, (rawSocket, _req) => {
+  app.get("/ws", { websocket: true }, (rawSocket, req) => {
     const socket = rawSocket as unknown as SocketLike;
     const { bus } = app.services;
 
@@ -41,6 +41,12 @@ export function registerWsRoutes(app: FastifyInstance): void {
 
     // Fan every bus event out to this socket (multiplexed, client routes by chatId).
     const unsub = bus.subscribe((evt) => send(evt));
+    const unsubRevocation = req.authIdentity
+      ? app.auth.onSessionRevoked((id) => {
+          if (id === req.authIdentity?.sessionId) socket.close(4401, "session revoked");
+        })
+      : () => {};
+    const cleanup = () => { unsub(); unsubRevocation(); };
 
     socket.on("message", (raw: unknown) => {
       let json: unknown;
@@ -62,7 +68,7 @@ export function registerWsRoutes(app: FastifyInstance): void {
       void dispatchClientAction(app.services, parsed.data);
     });
 
-    socket.on("close", () => unsub());
-    socket.on("error", () => unsub());
+    socket.on("close", cleanup);
+    socket.on("error", cleanup);
   });
 }

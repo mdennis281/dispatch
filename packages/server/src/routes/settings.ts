@@ -21,6 +21,10 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.message });
     }
-    return store.saveSettings(parsed.data);
+    // Auth has its own transactional endpoints because toggling it also revokes
+    // sessions. Older clients know nothing about the field and send a full PUT;
+    // preserving it here prevents a routine preference save from disabling auth.
+    const current = await store.getSettings();
+    return store.saveSettings({ ...parsed.data, auth: current.auth });
   });
 }

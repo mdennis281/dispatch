@@ -20,6 +20,7 @@ import { useChats } from "./stores/chats.js";
 import { useProjects, useActiveProject } from "./stores/projects.js";
 import { visibleChat } from "./stores/navigation.js";
 import { useView } from "./stores/view.js";
+import { AuthGate } from "./components/auth/AuthGate.js";
 
 /**
  * Empty state when no chat is open — including right after a project switch,
@@ -57,7 +58,8 @@ export default function App() {
   const fullBleed = view === "new-project";
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-app text-primary antialiased">
+    <AuthGate>
+      <div className="flex h-screen w-screen flex-col overflow-hidden bg-app text-primary antialiased">
       <TopBar />
       <div className="flex min-h-0 flex-1">
         {!fullBleed && <Sidebar />}
@@ -91,6 +93,7 @@ export default function App() {
       <ManageConfigDialog />
       <Toasts />
       <ShutdownScreen />
-    </div>
+      </div>
+    </AuthGate>
   );
 }

@@ -43,6 +43,7 @@ import type {
   Effort,
   ShellTranscriptFilter,
 } from "@dispatch/shared";
+import { sessionFetch } from "../stores/auth.js";
 
 /**
  * Global app settings — mirrors the server `AppSettingsSchema`
@@ -80,6 +81,12 @@ export interface AppSettings {
    */
   spawnChat?: {
     autoApprove?: boolean;
+  };
+  auth?: {
+    enabled?: boolean;
+    firstRunDismissed?: boolean;
+    canonicalUrl?: string;
+    rpId?: string;
   };
   harness?: {
     defaultHarness?: HarnessKind;
@@ -250,7 +257,7 @@ async function request<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await sessionFetch(`${BASE}${path}`, {
     method,
     headers: body !== undefined ? { "content-type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,

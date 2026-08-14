@@ -84,10 +84,11 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
   }
   if (WILDCARD.has(config.host)) {
     const lan = lanUrls();
+    const authEnabled = await app.auth.enabled();
     // eslint-disable-next-line no-console
     console.log(
       lan.length > 0
-        ? `[dispatch] host mode — also reachable at ${lan.join(", ")}  (no auth: trust the network, or set DISPATCH_HOST=127.0.0.1)`
+        ? `[dispatch] host mode — also reachable at ${lan.join(", ")}  (${authEnabled ? "authentication enabled" : "authentication OFF: trust the network, configure login, or set DISPATCH_HOST=127.0.0.1"})`
         : `[dispatch] host mode — bound to every interface, but this box has no non-loopback IPv4 address`,
     );
   }

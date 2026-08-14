@@ -18,6 +18,7 @@
   "dependencies": {
     "@dispatch/shared": "workspace:*",
     "@monaco-editor/react": "^4.6.0",
+    "@simplewebauthn/browser": "^13.3.0",
     "@tiptap/extension-placeholder": "^2.10.4",
     "@tiptap/pm": "^2.10.4",
     "@tiptap/react": "^2.10.4",

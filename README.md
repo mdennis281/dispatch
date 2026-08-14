@@ -75,8 +75,9 @@ developer and operator guide.
 
 ## Security
 
-Dispatch binds to loopback by default. Host mode (`DISPATCH_HOST=0.0.0.0`) has no
-application authentication and should only be used on a trusted network. See
+Dispatch binds to loopback by default. Optional authentication is off after an
+upgrade and can be configured in Settings; enable it before using host mode
+(`DISPATCH_HOST=0.0.0.0`) outside a trusted network. See
 [SECURITY.md](./SECURITY.md) for credential handling and reporting guidance.
 
 The onboarding and in-app release update work is mapped in
