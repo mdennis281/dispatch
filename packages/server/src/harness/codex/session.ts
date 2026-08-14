@@ -36,7 +36,7 @@ import type {
   HarnessSession,
   HarnessSessionSpec,
 } from "../types.js";
-import { CodexStreamDecoder, questionsOf } from "./stream.js";
+import { CodexStreamDecoder, legacySubagentToolUseId, questionsOf } from "./stream.js";
 import { toCodexPosture, toDeveloperInstructions, clampEffort } from "./options.js";
 import type { CodexConnection, RpcFrame, ServerRequest } from "./rpc.js";
 
@@ -324,10 +324,11 @@ export class CodexSession implements HarnessSession {
       const childId = typeof item.agentThreadId === "string" ? item.agentThreadId : undefined;
       if (!childId) return;
       const toolUseId =
-        this.childContexts.get(childId)?.parentToolUseId ?? this.pendingSpawns.get(senderThreadId);
-      if (!toolUseId) return;
+        this.childContexts.get(childId)?.parentToolUseId ??
+        this.pendingSpawns.get(senderThreadId) ??
+        legacySubagentToolUseId(childId);
       const path = typeof item.agentPath === "string" ? item.agentPath : "";
-      const label = path.split("/").filter(Boolean).at(-1) || "codex";
+      const label = path.split(/[\\/]/).filter(Boolean).at(-1) || "codex";
       this.subscribeChild(childId, toolUseId, label);
     }
   }

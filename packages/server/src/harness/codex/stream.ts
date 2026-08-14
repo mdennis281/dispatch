@@ -40,6 +40,16 @@ function firstLine(s: string): string {
   return line;
 }
 
+/**
+ * Stable neutral run id for app-server versions that announce a child only via
+ * `subAgentActivity`. The session and decoder both need the same value: one
+ * subscribes the child thread under it, while the other emits the `Agent` row
+ * consumed by the same run UI as Claude's `Task` tool.
+ */
+export function legacySubagentToolUseId(threadId: string): string {
+  return `codex-agent:${threadId}`;
+}
+
 export interface CodexStreamDecoderOpts {
   genId: () => string;
 }
@@ -163,17 +173,27 @@ export class CodexStreamDecoder {
         // The detailed run comes from `collabAgentToolCall` plus the child
         // thread stream. This marker carries only started/interacted/path; a
         // notice beside the real run card is duplicate, lower-fidelity noise.
-        // Older app-server builds emitted only this marker, so retain their
-        // previous notice rather than making those agents disappear entirely.
-        return this.sawStructuredCollaboration
-          ? []
-          : [
-              {
-                type: "notice",
-                level: "info",
-                text: `Subagent ${String(item.kind ?? "activity")} (${String(item.agentPath ?? "")})`.trim(),
+        // Older app-server builds emitted only this marker. Promote its
+        // `started` event into the same neutral Agent row so the transcript,
+        // Run > Subagents roster, and inspector all receive a real run.
+        if (this.sawStructuredCollaboration) return [];
+        if (item.kind === "started" && typeof item.agentThreadId === "string") {
+          const path = typeof item.agentPath === "string" ? item.agentPath : "";
+          const agentType = path.split(/[\\/]/).filter(Boolean).at(-1) || "codex";
+          return [
+            {
+              type: "tool-use",
+              toolUseId: legacySubagentToolUseId(item.agentThreadId),
+              name: "Agent",
+              input: {
+                agentType,
+                description: `Subagent ${agentType}`,
+                agent_ids: [item.agentThreadId],
               },
-            ];
+            },
+          ];
+        }
+        return [];
       case "contextCompaction":
         return [{ type: "compacted" }];
       default:

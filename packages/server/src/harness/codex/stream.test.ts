@@ -238,7 +238,7 @@ describe("CodexStreamDecoder — tools", () => {
     ).toEqual([]);
   });
 
-  it("keeps the legacy activity notice when structured collaboration is unavailable", () => {
+  it("promotes legacy activity into the same Agent run vocabulary", () => {
     const d = decoder();
     expect(
       d.decode(
@@ -255,9 +255,14 @@ describe("CodexStreamDecoder — tools", () => {
       ),
     ).toEqual([
       {
-        type: "notice",
-        level: "info",
-        text: "Subagent started (/root/audit)",
+        type: "tool-use",
+        toolUseId: "codex-agent:child-1",
+        name: "Agent",
+        input: {
+          agentType: "audit",
+          description: "Subagent audit",
+          agent_ids: ["child-1"],
+        },
       },
     ]);
   });
