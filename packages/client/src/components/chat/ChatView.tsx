@@ -16,6 +16,7 @@ import {
   Eye,
   EyeOff,
   ArrowRightLeft,
+  Search,
 } from "lucide-react";
 import type { AgentActivity, Chat, HarnessKind, WorktreeInfo } from "@dispatch/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
@@ -30,6 +31,7 @@ import { StreamingTail } from "./StreamingTail.js";
 import { TodosStrip } from "./TodosStrip.js";
 import { Composer } from "./Composer.js";
 import { DeleteChatDialog } from "./DeleteChatDialog.js";
+import { TranscriptSearch } from "./TranscriptSearch.js";
 import { Modal } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { useChatRename } from "./useChatRename.js";
@@ -127,6 +129,50 @@ export function ChatView({ chat }: { chat: Chat }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [loadingSearchHistory, setLoadingSearchHistory] = useState(false);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+
+  const openSearch = useCallback(() => setSearchOpen(true), []);
+
+  // Own the browser's find shortcut while a chat is open. The transcript search
+  // understands paging and can therefore find rows that aren't loaded yet.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLocaleLowerCase() !== "f") return;
+      event.preventDefault();
+      openSearch();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [openSearch]);
+
+  // Search means the whole transcript, not just the newest window. Page to the
+  // beginning once when the bar opens; stop if a request makes no progress so a
+  // transient server failure cannot spin forever (the pager deliberately keeps
+  // hasMore=true after failures so manual scrolling can retry later).
+  useEffect(() => {
+    if (!searchOpen) return;
+    let cancelled = false;
+    void (async () => {
+      setLoadingSearchHistory(true);
+      while (!cancelled) {
+        const before = useMessages.getState();
+        const page = before.pages[chat.id];
+        const oldestId = before.byChat[chat.id]?.[0]?.id;
+        if (!page?.hasMore) break;
+        await loadOlderMessages(chat.id);
+        const after = useMessages.getState();
+        const nextOldestId = after.byChat[chat.id]?.[0]?.id;
+        if (nextOldestId === oldestId) break;
+      }
+      if (!cancelled) setLoadingSearchHistory(false);
+    })();
+    return () => {
+      cancelled = true;
+      setLoadingSearchHistory(false);
+    };
+  }, [chat.id, searchOpen]);
 
   // Whether this chat's transcript admits the context Dispatch attached for you
   // (chat → project → app → off). Toggling pins an explicit answer on the chat.
@@ -287,9 +333,9 @@ export function ChatView({ chat }: { chat: Chat }) {
    * reading history — or paging older rows IN — is left alone entirely.
    */
   useEffect(() => {
-    if (!atBottomRef.current) return;
+    if (!atBottomRef.current || searchOpen) return;
     useMessages.getState().trimWindow(chat.id);
-  }, [chat.id, messages]);
+  }, [chat.id, messages, searchOpen]);
 
   /* ------------------------------------------------ backward paging (older rows) */
 
@@ -465,6 +511,17 @@ export function ChatView({ chat }: { chat: Chat }) {
               {(close) => (
                 <div className="flex flex-col">
                   <MenuItem
+                    icon={<Search />}
+                    hint="Ctrl+F"
+                    onClick={() => {
+                      openSearch();
+                      close();
+                    }}
+                  >
+                    Search transcript
+                  </MenuItem>
+                  <div className="my-1 h-px bg-line" />
+                  <MenuItem
                     icon={<Pencil />}
                     onClick={() => {
                       rename.start();
@@ -596,6 +653,14 @@ export function ChatView({ chat }: { chat: Chat }) {
         {running && <div className="absolute inset-x-0 bottom-0 h-px cm-working-strip" />}
       </div>
 
+      <TranscriptSearch
+        open={searchOpen}
+        rootRef={transcriptRef}
+        revision={messages}
+        loadingHistory={loadingSearchHistory}
+        onClose={() => setSearchOpen(false)}
+      />
+
       {/* live task list (agent TodoWrite/TaskCreate/TaskUpdate) */}
       <TodosStrip key={chat.id} messages={messages} />
 
@@ -630,7 +695,10 @@ export function ChatView({ chat }: { chat: Chat }) {
                     </button>
                   </div>
                 )}
-                <div className="flex flex-col divide-y divide-line-soft/70">
+                <div
+                  ref={transcriptRef}
+                  className="flex flex-col divide-y divide-line-soft/70"
+                >
                   <MessageList chatId={chat.id} messages={messages} />
                   <StreamingTail
                     chatId={chat.id}
