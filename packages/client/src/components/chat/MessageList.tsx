@@ -6,11 +6,13 @@ import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
 import { UserRow } from "./rows/UserRow.js";
 import { AssistantRow } from "./rows/AssistantRow.js";
 import { ToolCallCard } from "./rows/ToolCallCard.js";
+import { ShellRunGroup } from "./rows/ShellRunGroup.js";
 import { SubagentCard } from "./rows/SubagentCard.js";
 import { PermissionCard } from "./rows/PermissionCard.js";
 import { NoticeRowView, ResultRowView, SystemRowView } from "./rows/MiscRows.js";
 import { LimitPausedCard } from "./rows/LimitPausedCard.js";
 import { actions } from "../../lib/actions.js";
+import { groupTranscriptRows } from "../../lib/toolPresentations.js";
 
 export type { StreamRow } from "../../stores/messages.js";
 
@@ -78,6 +80,11 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
     return { roots, runsById };
   }, [messages, runs]);
 
+  // Provider-specific tool names are normalized by presentation handlers. Only
+  // handled shell calls take this grouped route; everything else reaches the
+  // existing renderRow/ToolCallCard fallback unchanged.
+  const transcriptItems = useMemo(() => groupTranscriptRows(roots), [roots]);
+
   // Stable across renders (deps only change when the transcript does) so the
   // memoized row components actually get to bail out.
   const renderRow = useCallback(
@@ -140,7 +147,25 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
 
   return (
     <>
-      {roots.map((row) => {
+      {transcriptItems.map((item) => {
+        if (item.kind === "shell") {
+          const first = item.rows[0]!;
+          return (
+            <div key={`shell:${first.id}`} className="cm-row-cv">
+              <ShellRunGroup
+                entries={item.rows.map((use) => {
+                  const result = resultsByUse.get(use.toolUseId);
+                  return {
+                    use,
+                    result,
+                    task: findTaskStatus(taskStatus, use.toolUseId, result),
+                  };
+                })}
+              />
+            </div>
+          );
+        }
+        const row = item.row;
         const node = renderRow(row);
         // Rows that render nothing (a tool_result folded into its card) must emit
         // NO element — the parent's `divide-y` would draw a hairline for an empty
