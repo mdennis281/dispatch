@@ -256,7 +256,7 @@ export function ChatView({ chat }: { chat: Chat }) {
   }, [chat.projectId, chatProcessPids, pushToast]);
 
   const meta = statusMeta(chat.status, prSettled);
-  const running = chat.status === "running";
+  const running = chat.status === "running" || chat.status === "waiting";
   const pr = chat.prs[0];
 
   // Header worktree chip: primary branch + a "+N" for the rest, promoting the next

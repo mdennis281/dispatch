@@ -693,6 +693,30 @@ const THREAD_MAP_CAP = 2_000;
 /** Max time `stop()`/`dispose()` waits for a subprocess consume loop to unwind. */
 const STOP_TIMEOUT_MS = 5_000;
 
+/**
+ * Tools whose call blocks the main agent on work happening elsewhere. Keeping
+ * this as a real chat status (rather than a client-only color guess) makes the
+ * blue waiting state survive reloads and server restarts.
+ */
+export function statusForTool(name: string, input?: Record<string, unknown>): ChatStatus {
+  const normalized = name.toLowerCase().replace(/[.:/]/g, "_");
+  const encodedInput = input ? safeHandoffJson(input).toLowerCase() : "";
+  const terminal =
+    normalized === "bash" ||
+    normalized === "shell_command" ||
+    normalized.endsWith("_shell_command") ||
+    normalized.includes("manager__terminal") ||
+    normalized === "functions_wait" ||
+    (normalized === "functions_exec" &&
+      (encodedInput.includes("mcp__manager__terminal") || encodedInput.includes("shell_command")));
+  const subagent =
+    normalized === "task" ||
+    normalized === "agent" ||
+    normalized.endsWith("_wait_agent") ||
+    normalized.includes("collaboration_wait_agent");
+  return terminal || subagent ? "waiting" : "running";
+}
+
 /* ------------------------------------------------------- internal helpers */
 
 /** Parse `mcp__<server>__<tool>` → server id. */
@@ -1244,7 +1268,13 @@ export class SessionBroker {
         sessionId: chat.sessionId,
         model: chat.model,
         modelOverride: chat.model,
-        status: "idle",
+        status:
+          chat.status === "running" ||
+          chat.status === "waiting" ||
+          chat.status === "queued" ||
+          chat.status === "awaiting-input"
+            ? "error"
+            : (chat.status ?? "idle"),
         started: false,
         outbox: [],
         pendingPermissions: new Map(),
@@ -1967,7 +1997,7 @@ export class SessionBroker {
     session.resumeSessionId = session.sessionId;
     session.forkAtUuid = atMessageUuid;
     session.fork = true;
-    session.status = "idle";
+    this.setStatus(session, "idle", { state: "idle" });
     return this.view(session);
   }
 
@@ -2046,6 +2076,12 @@ export class SessionBroker {
   /** Tear down every session (process teardown). */
   async dispose(): Promise<void> {
     await Promise.all([...this.sessions.keys()].map((id) => this.stop(id)));
+    // `setStatus(done)` is deliberately non-blocking during ordinary event
+    // handling. Teardown is the one place it must be durable before exit, or a
+    // graceful Dispatch restart can resurrect the preceding running color.
+    await Promise.all(
+      [...this.sessions.values()].map((session) => session.writeChain.catch(() => {})),
+    );
     this.sessions.clear();
     this.queueOrder = [];
   }
@@ -2053,7 +2089,7 @@ export class SessionBroker {
   /* -------------------------------------------------------- scheduling */
 
   private isActive(s: LiveSession): boolean {
-    return s.status === "running" || s.status === "awaiting-input";
+    return s.status === "running" || s.status === "waiting" || s.status === "awaiting-input";
   }
 
   private schedule(session: LiveSession): void {
@@ -2371,10 +2407,11 @@ export class SessionBroker {
           effort: event.effort ?? session.effort,
         });
         return;
-      case "tool-use":
-        this.setStatus(session, "running", {
+      case "tool-use": {
+        const toolStatus = statusForTool(event.name, event.input);
+        this.setStatus(session, toolStatus, {
           state: "tool",
-          label: `running ${event.name}`,
+          label: `${toolStatus === "waiting" ? "waiting on" : "running"} ${event.name}`,
           toolName: event.name,
           target: deriveTarget(event.input),
         });
@@ -2391,6 +2428,7 @@ export class SessionBroker {
           uuid: event.uuid,
         });
         return;
+      }
       case "tool-result": {
         const persisted = await this.persistContentImages(session, event.content);
         await this.emit(session, {
@@ -2404,6 +2442,7 @@ export class SessionBroker {
           parentToolUseId: event.parentToolUseId,
           subagentType: event.subagentType,
         });
+        this.setStatus(session, "running", { state: "thinking", label: "thinking." });
         return;
       }
       case "permission-request":
@@ -2487,6 +2526,8 @@ export class SessionBroker {
         if ((session.harnessSession?.pending() ?? 0) > 0 || session.outbox.length > 0) {
           this.setStatus(session, "running", { state: "thinking" });
           this.flushOutbox(session);
+        } else if (!event.ok) {
+          this.onTurnFailed(session);
         } else {
           this.onTurnEnd(session);
         }
@@ -2638,9 +2679,10 @@ export class SessionBroker {
           // generic tool_use row so the transcript shows one canonical question
           // surface (and no orphan "running AskUserQuestion" tool card).
           if (name === "AskUserQuestion") continue;
-          this.setStatus(session, "running", {
+          const toolStatus = statusForTool(name, input);
+          this.setStatus(session, toolStatus, {
             state: "tool",
-            label: `running ${name}`,
+            label: `${toolStatus === "waiting" ? "waiting on" : "running"} ${name}`,
             toolName: name,
             target: deriveTarget(input),
           });
@@ -2794,6 +2836,8 @@ export class SessionBroker {
         // Chained turn buffered? Stay running; otherwise the turn is complete.
         if (session.input && session.input.pending() > 0) {
           this.setStatus(session, "running", { state: "thinking" });
+        } else if (isError) {
+          this.onTurnFailed(session);
         } else {
           this.onTurnEnd(session);
         }
@@ -3091,7 +3135,27 @@ export class SessionBroker {
   /* ----------------------------------------------------- state helpers */
 
   private setStatus(session: LiveSession, status: ChatStatus, activity?: AgentActivity): void {
+    const changed = session.status !== status;
     session.status = status;
+    if (changed) {
+      // Serialize with transcript writes so rapid running -> waiting -> idle
+      // transitions always land in order. Status writes preserve updatedAt:
+      // changing a dot color is not new conversational activity.
+      session.writeChain = session.writeChain
+        .catch(() => {})
+        .then(async () => {
+          try {
+            await this.store.patchChat(session.chatId, { status });
+          } catch (err) {
+            this.bus.publish({
+              type: "error",
+              chatId: session.chatId,
+              message: "failed to persist chat status",
+              detail: err instanceof Error ? err.message : String(err),
+            });
+          }
+        });
+    }
     this.bus.publish({
       type: "chat-status",
       chatId: session.chatId,
@@ -3125,6 +3189,12 @@ export class SessionBroker {
         createdAt: this.now(),
       },
     });
+    this.pump();
+  }
+
+  /** A turn failed but its reusable runtime session is still available. */
+  private onTurnFailed(session: LiveSession): void {
+    this.setStatus(session, "failed", { state: "idle" });
     this.pump();
   }
 
@@ -4039,10 +4109,8 @@ export class SessionBroker {
 
   private async patchChat(chatId: string, patch: Partial<Chat>): Promise<void> {
     try {
-      const chat = await this.store.getChat(chatId);
-      if (!chat) return;
-      const updated = { ...chat, ...patch, updatedAt: this.now() };
-      const saved = await this.store.saveChat(updated);
+      const saved = await this.store.patchChat(chatId, { ...patch, updatedAt: this.now() });
+      if (!saved) return;
       this.bus.publish({ type: "chat-update", chat: saved });
     } catch (err) {
       this.bus.publish({

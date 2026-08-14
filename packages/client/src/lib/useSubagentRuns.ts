@@ -20,7 +20,10 @@ export function useSubagentRuns(chatId: string): SubagentRun[] {
   const messages = useChatMessages(chatId);
   // A scalar selector: the transcript re-renders on status changes anyway, and
   // this keeps a chat-object identity change from invalidating the memo.
-  const chatRunning = useChats((s) => s.byId[chatId]?.status === "running");
+  const chatRunning = useChats((s) => {
+    const status = s.byId[chatId]?.status;
+    return status === "running" || status === "waiting";
+  });
   // Joined for the same reason: `worktrees` is a fresh array on every
   // `chat-update`, and the run fold is not worth re-running for that.
   const worktreeKey = useChats((s) =>

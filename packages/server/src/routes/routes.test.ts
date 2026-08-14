@@ -555,7 +555,7 @@ describe("routes — usage-limit auto-resume", () => {
     ).json().id as string;
     const done = new Promise<void>((resolve) => {
       const off = bus.on("chat-status", (e) => {
-        if (e.chatId === chatId && e.status === "idle") {
+        if (e.chatId === chatId && e.status === "failed") {
           off();
           resolve();
         }
@@ -570,7 +570,7 @@ describe("routes — usage-limit auto-resume", () => {
 
   it("schedules a resume off the limit result, and cancels it on request", async () => {
     await boot(makeFakeQuery(() => [assistantText(LIMIT), limitResultMsg(LIMIT)]));
-    // The plan is persisted just AFTER the turn goes idle (the scheduler reads
+    // The plan is persisted just AFTER the turn fails (the scheduler reads
     // and rewrites the chat), so wait for the broadcast that carries it.
     const planned$ = new Promise<void>((resolve) => {
       const off = bus.on("chat-update", (e) => {

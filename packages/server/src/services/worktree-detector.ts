@@ -101,7 +101,10 @@ export interface WorktreeDetectionResult {
 /** Chat statuses that mean the session is live (creating work). */
 function isActiveStatus(status: ChatStatus): boolean {
   return (
-    status === "running" || status === "queued" || status === "awaiting-input"
+    status === "running" ||
+    status === "waiting" ||
+    status === "queued" ||
+    status === "awaiting-input"
   );
 }
 

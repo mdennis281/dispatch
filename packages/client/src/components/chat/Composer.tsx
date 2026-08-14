@@ -333,7 +333,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     useCallback((text: string) => insertSpokenRef.current(text), []),
   );
 
-  const running = chat.status === "running";
+  const running = chat.status === "running" || chat.status === "waiting";
 
   const editor = useEditor({
     extensions: [
