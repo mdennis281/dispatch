@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 import { GitBranch, Bot, AppWindow, SquareTerminal, GitPullRequest, Ship, Play } from "lucide-react";
 import type { Chat } from "@dispatch/shared";
 import { Tabs, type TabDef } from "../ui/Tabs.js";
@@ -10,18 +10,16 @@ import { AgentsPanel } from "../panels/AgentsPanel.js";
 import { RunnerPanel } from "../panels/RunnerPanel.js";
 import { TerminalsPanel } from "../panels/TerminalsPanel.js";
 import { PRsPanel } from "../panels/PRsPanel.js";
-import { usePanels } from "../../stores/panels.js";
-import { useRunners, belongsToChat } from "../../stores/runners.js";
-import { isLiveChatTerminal, useTerminals } from "../../stores/terminals.js";
-import { useProcesses, useOrphanCount } from "../../stores/processes.js";
-import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
+import { usePanelCounts, appsTip } from "../panels/usePanelCounts.js";
+import { cn } from "../../lib/cn.js";
+import { useProcesses } from "../../stores/processes.js";
 import {
   useLayout,
   PANEL_GROUP,
   GROUP_HOME,
   type PanelGroup as PanelGroupId,
 } from "../../stores/layout.js";
-import { worktreeMatchesChat, type FocusPanelTab } from "../panels/panelBus.js";
+import { type FocusPanelTab } from "../panels/panelBus.js";
 
 type PanelTab = FocusPanelTab;
 
@@ -51,37 +49,12 @@ export function RightPanel({ chat }: { chat: Chat }) {
   // stores/layout.
   const tab = useLayout((s) => s.panelTab);
   const setTab = useLayout((s) => s.setPanelTab);
+  const mode = useLayout((s) => s.mode);
   const group = PANEL_GROUP[tab];
 
-  const wtCount = usePanels((s) => s.worktrees.filter((w) => worktreeMatchesChat(w, chat)).length);
-  // Same membership rule the panel renders with (see `belongsToChat`), so the
-  // badge can't promise a count the tab then fails to show.
-  const runnerCount = useRunners(
-    (s) =>
-      s.order
-        .map((id) => s.byId[id]!)
-        .filter((r) => r && r.status === "running" && belongsToChat(r, chat.id, chat.projectId))
-        .length,
-  );
-  const termCount = useTerminals(
-    (s) => s.order.map((id) => s.byId[id]).filter((t) => isLiveChatTerminal(t, chat.id)).length,
-  );
-  // Counted separately from `termCount` because a background command starts in a
-  // shell that ALREADY exists — the shell count doesn't move, but a port is about
-  // to appear. This is the edge that has to trigger the rescan below.
-  const bgCount = useTerminals(
-    (s) => s.order.map((id) => s.byId[id]!).filter((t) => t?.chatId === chat.id && t.background).length,
-  );
-  const chatPrNumbers = new Set(chat.prs.map((p) => p.number));
-  const prOpen = usePanels((s) => s.prs.filter((p) => p.state === "open" && chatPrNumbers.has(p.number)).length);
-
-  // Badge the LIVE runs only — a finished run isn't something to act on, and a
-  // long chat would otherwise wear a permanent "31" that means nothing.
-  const runs = useSubagentRuns(chat.id);
-  const agentsLive = useMemo(
-    () => runs.filter((r) => r.status === "running").length,
-    [runs],
-  );
+  // Shared with the mobile bottom nav, so a nav badge and a tab badge can never
+  // disagree. See panels/usePanelCounts.
+  const counts = usePanelCounts(chat);
 
   // Orphaned dev servers are the one thing in here you have to be TOLD about:
   // they hold a port with no runner behind them, so nothing else in the UI
@@ -94,39 +67,40 @@ export function RightPanel({ chat }: { chat: Chat }) {
   // server is now a row too: the Terminals cards render the ports attributed to
   // each shell, and without this trigger a server started mid-session would show
   // no port until something unrelated happened to rescan.
-  const orphanCount = useOrphanCount(chat.projectId);
   useEffect(() => {
     void useProcesses.getState().scan(chat.projectId);
-  }, [chat.projectId, runnerCount, termCount, bgCount]);
+  }, [chat.projectId, counts.runners, counts.terminals, counts.background]);
 
   const shipTabs: TabDef[] = [
-    { id: "worktrees", label: "Worktrees", icon: <GitBranch />, count: wtCount },
-    { id: "prs", label: "PRs", icon: <GitPullRequest />, count: prOpen },
+    { id: "worktrees", label: "Worktrees", icon: <GitBranch />, count: counts.worktrees },
+    { id: "prs", label: "PRs", icon: <GitPullRequest />, count: counts.prs },
   ];
   const runTabs: TabDef[] = [
-    { id: "agents", label: "Agents", icon: <Bot />, count: agentsLive },
-    { id: "terminals", label: "Terminals", icon: <SquareTerminal />, count: termCount },
+    { id: "agents", label: "Agents", icon: <Bot />, count: counts.agents },
+    { id: "terminals", label: "Terminals", icon: <SquareTerminal />, count: counts.terminals },
     {
       id: "apps",
       label: "Apps",
       icon: <AppWindow />,
-      // Orphans count toward the badge: both are processes this tab is the only
-      // place to see, and an orphan is the more urgent of the two. The tip keeps
-      // the sum honest, since "3" alone can't say which is which.
-      count: runnerCount + orphanCount,
-      tip:
-        orphanCount > 0
-          ? `Apps · ${runnerCount} running, ${orphanCount} orphan${orphanCount === 1 ? "" : "s"}`
-          : undefined,
+      count: counts.apps,
+      // The tip keeps the summed badge honest — "3" alone can't say how much of
+      // it is orphans.
+      tip: appsTip(counts),
     },
   ];
 
-  const shipCount = wtCount + prOpen;
-  const runCount = agentsLive + termCount + runnerCount + orphanCount;
   const tabs = group === "ship" ? shipTabs : runTabs;
 
   return (
-    <aside className="flex w-[360px] shrink-0 flex-col border-l border-line bg-surface">
+    <aside
+      className={cn(
+        "flex flex-col border-l border-line bg-surface",
+        // Below `lg` this column is inside a `Drawer`, which owns the width —
+        // as a 360px sheet on a tablet, as the full main area on a phone. Only
+        // the `lg` branch is the original inline column.
+        mode === "lg" ? "w-[360px] shrink-0" : "h-full w-full",
+      )}
+    >
       <div className="flex h-9 shrink-0 items-center px-2 pt-1.5">
         <SegmentedControl
           className="w-full [&>button]:flex-1"
@@ -138,9 +112,9 @@ export function RightPanel({ chat }: { chat: Chat }) {
               // Only the group you're NOT on needs a badge; the one you're
               // looking at is already showing its per-tab counts below.
               badge:
-                group !== "ship" && shipCount > 0 ? (
+                group !== "ship" && counts.ship > 0 ? (
                   <span className="ml-1">
-                    <Badge count={shipCount} tone="warn" />
+                    <Badge count={counts.ship} tone="warn" />
                   </span>
                 ) : undefined,
             },
@@ -149,9 +123,9 @@ export function RightPanel({ chat }: { chat: Chat }) {
               label: "Run",
               icon: <Play />,
               badge:
-                group !== "run" && runCount > 0 ? (
+                group !== "run" && counts.run > 0 ? (
                   <span className="ml-1">
-                    <Badge count={runCount} tone="warn" />
+                    <Badge count={counts.run} tone="warn" />
                   </span>
                 ) : undefined,
             },
