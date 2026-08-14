@@ -215,6 +215,7 @@ export function MenuItem({
   title,
   className,
   disabled,
+  dense = true,
 }: {
   icon?: ReactNode;
   children: ReactNode;
@@ -231,6 +232,13 @@ export function MenuItem({
    * openings, which is worse to aim at than a dimmed row.
    */
   disabled?: boolean;
+  /**
+   * Off gives a 44px row — the minimum a thumb can reliably hit, and what the
+   * composer's phone-width sheet uses. On by default because every menu in the
+   * app was laid out against the 29px row; flipping the default would move all
+   * of them to fix the handful that are touched.
+   */
+  dense?: boolean;
 }) {
   return (
     <button
@@ -238,8 +246,9 @@ export function MenuItem({
       title={title}
       disabled={disabled}
       className={cn(
-        "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-secondary " +
+        "flex w-full items-center gap-2 rounded-sm text-left text-secondary " +
           "transition-colors hover:bg-active hover:text-primary",
+        dense ? "px-2 py-1.5 text-sm" : "min-h-11 px-3 py-2 text-base",
         active && "text-primary",
         disabled && "pointer-events-none opacity-40",
         className,

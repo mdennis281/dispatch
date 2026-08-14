@@ -22,8 +22,10 @@ import { create } from "zustand";
 export const COMPOSER_CONTROLS = [
   { id: "attach", label: "Attach", hint: "image upload / file path" },
   { id: "dictate", label: "Dictate", hint: "microphone" },
-  { id: "mode", label: "Mode", hint: "Plan / Auto / Edit" },
-  { id: "posture", label: "Permission posture", hint: "don't-ask / bypass" },
+  // One entry, because there is one control: mode and posture both write
+  // `chat.modeId`, and showing them as two toggles let you hide the half of a
+  // single radio group that says which value is actually set.
+  { id: "mode", label: "Mode & posture", hint: "Plan / Auto / Edit · bypass" },
   { id: "effort", label: "Effort", hint: "reasoning depth" },
   { id: "brain", label: "Model / agent", hint: "the session brain" },
   { id: "context", label: "Context meter", hint: "window usage" },
