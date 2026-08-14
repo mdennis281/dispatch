@@ -90,7 +90,9 @@ export async function buildApp(
   // it silently broke every bodyless auth endpoint (TOTP setup, passkey
   // enrollment, invites, logout, disable). An empty body is simply no body.
   app.addContentTypeParser<string>("application/json", { parseAs: "string" }, (_req, body, done) => {
-    if (body.trim() === "") return done(null, undefined);
+    // Strictly empty only — a whitespace-only payload is malformed JSON, and
+    // trimming would copy every byte of a 16 MiB base64 image upload.
+    if (body.length === 0) return done(null, undefined);
     try { done(null, JSON.parse(body) as unknown); }
     catch { done(Object.assign(new Error("Invalid JSON body."), { statusCode: 400 })); }
   });

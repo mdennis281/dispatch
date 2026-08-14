@@ -368,9 +368,9 @@ describe("optional authentication", () => {
     expect(begin.json()).toMatchObject({ secret: expect.any(String), uri: expect.stringContaining("otpauth://") });
     const options = await instance.inject({ method: "POST", url: "/api/auth/passkeys/register/options", headers });
     expect(options.statusCode).toBe(200);
-    const malformed = await instance.inject({ method: "POST", url: "/api/auth/totp/confirm",
-      headers, payload: "{not json" });
-    expect(malformed.statusCode).toBe(400);
+    for (const payload of ["{not json", "   "]) {
+      expect((await instance.inject({ method: "POST", url: "/api/auth/totp/confirm", headers, payload })).statusCode).toBe(400);
+    }
     await instance.close();
   });
 
