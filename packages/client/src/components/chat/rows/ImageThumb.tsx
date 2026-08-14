@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ImageIcon } from "lucide-react";
 import type { ImageRef } from "@dispatch/shared";
+import { cn } from "../../../lib/cn.js";
 import { useAssetSrc } from "../../../lib/assetSrc.js";
 import { ImageLightbox } from "./ImageLightbox.js";
 
@@ -38,11 +39,17 @@ export function ImageThumb({ chatId, img }: { chatId: string; img: ImageRef }) {
   return (
     <>
       <figure className="overflow-hidden rounded-md border border-line bg-inset">
+        {/* Nothing to enlarge until the bytes land — don't advertise a zoom
+            affordance (or take focus) for a click that would do nothing. */}
         <button
           type="button"
-          onClick={() => src && setZoomed(true)}
-          className="block w-full cursor-zoom-in outline-none focus-visible:ring-1 focus-visible:ring-accent-line"
-          title="Click to enlarge"
+          disabled={!src}
+          onClick={() => setZoomed(true)}
+          className={cn(
+            "block w-full outline-none focus-visible:ring-1 focus-visible:ring-accent-line",
+            src ? "cursor-zoom-in" : "cursor-default",
+          )}
+          title={src ? "Click to enlarge" : undefined}
         >
           {src ? (
             <img

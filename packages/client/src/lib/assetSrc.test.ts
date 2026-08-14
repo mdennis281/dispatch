@@ -19,7 +19,7 @@ afterEach(() => {
   __resetAssetCache();
 });
 
-const ok = () => ({ ok: true, status: 200, blob: async () => ({}) as Blob });
+const ok = () => ({ ok: true, status: 200, statusText: "OK", blob: async () => ({}) as Blob });
 
 describe("directSrc", () => {
   it("passes through what the DOM can already render", () => {
@@ -68,13 +68,17 @@ describe("loadAsset", () => {
     expect(sessionFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects on a non-OK response", async () => {
-    sessionFetch.mockResolvedValue({ ok: false, status: 401, blob: async () => ({}) as Blob });
-    await expect(loadAsset("/api/chats/c1/assets/shot.png")).rejects.toThrow("asset 401");
+  it("names the failing asset and its status when the fetch is rejected", async () => {
+    sessionFetch.mockResolvedValue({ ok: false, status: 401, statusText: "Unauthorized",
+      blob: async () => ({}) as Blob });
+    await expect(loadAsset("/api/chats/c1/assets/shot.png")).rejects.toThrow(
+      "asset /api/chats/c1/assets/shot.png failed: 401 Unauthorized",
+    );
   });
 
   it("does not memoize a failure, so a blip can recover", async () => {
-    sessionFetch.mockResolvedValueOnce({ ok: false, status: 500, blob: async () => ({}) as Blob });
+    sessionFetch.mockResolvedValueOnce({ ok: false, status: 500, statusText: "Server Error",
+      blob: async () => ({}) as Blob });
     await expect(loadAsset("/api/chats/c1/assets/shot.png")).rejects.toThrow();
     sessionFetch.mockResolvedValue(ok());
     await expect(loadAsset("/api/chats/c1/assets/shot.png")).resolves.toMatch(/^blob:/);

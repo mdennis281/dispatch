@@ -80,7 +80,11 @@ function entryFor(url: string): Entry {
   const entry: Entry = { refs: 0, usedAt: ++clock, promise: undefined as never };
   entry.promise = (async () => {
     const response = await sessionFetch(url);
-    if (!response.ok) throw new Error(`asset ${response.status}`);
+    if (!response.ok) {
+      // Name the asset: several are usually in flight at once, and a bare
+      // status says nothing about which one failed.
+      throw new Error(`asset ${url} failed: ${response.status} ${response.statusText}`.trimEnd());
+    }
     const objectUrl = URL.createObjectURL(await response.blob());
     entry.objectUrl = objectUrl;
     return objectUrl;
@@ -98,6 +102,11 @@ function entryFor(url: string): Entry {
 /**
  * Fetch `url` with the session's bearer token and expose the bytes as an object
  * URL, memoized per URL. Concurrent and repeat callers share one request.
+ *
+ * INTERNAL — for `useAssetSrc` and its tests, not for feature code. It does not
+ * take a reference on the cache entry, so the object URL it returns may be
+ * revoked by a later eviction; anything holding one in the DOM must go through
+ * `useAssetSrc` / `AssetImage`, which keep the entry pinned while it is mounted.
  */
 export function loadAsset(url: string): Promise<string> {
   return entryFor(url).promise;
