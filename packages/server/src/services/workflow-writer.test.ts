@@ -6,7 +6,11 @@ import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { resolveWorkflow, type Project } from "@dispatch/shared";
 import { ProjectConfigService } from "./project-config.js";
-import { isManifestBacked, saveProjectWorkflow } from "./workflow-writer.js";
+import {
+  isManifestBacked,
+  saveProjectShellFilter,
+  saveProjectWorkflow,
+} from "./workflow-writer.js";
 
 let dataDir: string;
 let repoDir: string;
@@ -162,5 +166,31 @@ describe("workflow-writer", () => {
     expect(isManifestBacked(p)).toBe(false);
     await writeManifest("name: Seed\n");
     expect(isManifestBacked(p)).toBe(true);
+  });
+
+  it("stores a shell filter on projects without a manifest and can reset it", async () => {
+    await seedProject();
+    await saveProjectShellFilter(deps(), "p1", ["shell", "pr"]);
+    expect((await store.getProject("p1"))?.shellFilter).toEqual(["shell", "pr"]);
+
+    await saveProjectShellFilter(deps(), "p1", undefined);
+    expect((await store.getProject("p1"))?.shellFilter).toBeUndefined();
+  });
+
+  it("writes and removes the manifest shell filter without leaving a stale project override", async () => {
+    await writeManifest("name: Seed\ndefaults:\n  model: test-model\n");
+    await seedProject({ shellFilter: ["memory"] });
+
+    await saveProjectShellFilter(deps(), "p1", ["shell", "wait"]);
+    let yaml = await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8");
+    expect(yaml).toContain("shellFilter:");
+    expect(yaml).toContain("- wait");
+    expect((await store.getProject("p1"))?.shellFilter).toEqual(["shell", "wait"]);
+
+    await saveProjectShellFilter(deps(), "p1", undefined);
+    yaml = await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8");
+    expect(yaml).not.toContain("shellFilter");
+    expect(yaml).toContain("model: test-model");
+    expect((await store.getProject("p1"))?.shellFilter).toBeUndefined();
   });
 });

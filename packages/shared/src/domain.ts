@@ -10,6 +10,7 @@ import {
   McpServerConfigSchema,
   PermissionModeSchema,
   ChatStatusSchema,
+  ShellTranscriptFilterSchema,
 } from "./common.js";
 import { ResumePlanSchema } from "./limits.js";
 import { WorkflowConfigSchema } from "./workflow.js";
@@ -63,6 +64,8 @@ export const ProjectSchema = z.object({
    * rather than reading this field directly.
    */
   workflow: WorkflowConfigSchema.optional(),
+  /** Transcript-shell categories shown for this project; unset inherits the app. */
+  shellFilter: ShellTranscriptFilterSchema.optional(),
   /** MCP servers passed through to every session in this project. */
   mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
   /**
@@ -358,6 +361,8 @@ export const ChatSchema = z.object({
    * the same context either way, so toggling it can't change how a chat runs.
    */
   showInjectedContext: z.boolean().optional(),
+  /** Transcript-shell categories shown for this chat; unset inherits the project. */
+  shellFilter: ShellTranscriptFilterSchema.optional(),
   archived: z.boolean().optional(),
   /**
    * A pending (or just-settled) auto-resume after a usage limit. Persisted so a

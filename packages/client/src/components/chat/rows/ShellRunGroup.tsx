@@ -1,5 +1,5 @@
 import { memo, useMemo, useState } from "react";
-import { Check, Circle, SquareTerminal, X } from "lucide-react";
+import { Check, Circle, SlidersHorizontal, SquareTerminal, X } from "lucide-react";
 import type { TaskStatusRow, ToolResultRow, ToolUseRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { InlineCode } from "../CodeBlock.js";
@@ -7,6 +7,7 @@ import { ToolDetailModal, type ToolDetailState } from "../ToolDetailModal.js";
 import { DispatchToolCard } from "./DispatchToolCard.js";
 import { Chip } from "../../ui/Chip.js";
 import { Button } from "../../ui/Button.js";
+import { IconButton } from "../../ui/IconButton.js";
 import { Spinner } from "../../ui/Spinner.js";
 import { OverflowTooltip } from "../../ui/OverflowTooltip.js";
 import { cn } from "../../../lib/cn.js";
@@ -14,6 +15,8 @@ import { dur } from "../../../lib/format.js";
 import { ackTaskId } from "../../../lib/subagentRuns.js";
 import { hydrateFullRows } from "../../../stores/index.js";
 import { displayResultText, toolPresentation } from "../../../lib/toolPresentations.js";
+import { presentationFilterCategory, useShellFilter } from "../../../lib/shellFilter.js";
+import { ShellFilterModal } from "../ShellFilterModal.js";
 
 export interface ShellRunEntry {
   use: ToolUseRow;
@@ -143,6 +146,10 @@ export const ShellRunGroup = memo(function ShellRunGroup({
   entries: ShellRunEntry[];
   active?: boolean;
 }) {
+  const [filterOpen, setFilterOpen] = useState(false);
+  const chatId = entries[0]?.use.chatId ?? "";
+  const filter = useShellFilter(chatId);
+  const enabled = useMemo(() => new Set(filter.enabled), [filter.enabled]);
   const summary = useMemo(() => {
     const states = entries.map(entryState);
     if (states.includes("running")) return { tone: "accent" as const, label: "running", icon: <Spinner size={9} /> };
@@ -166,16 +173,27 @@ export const ShellRunGroup = memo(function ShellRunGroup({
   );
   const activeLanguage = languages[languages.length - 1] ?? "bash";
   const headerLabel = languages.length === 1 ? shellLabel(activeLanguage) : "Shell";
+  const visibleEntries = entries.filter((entry) => {
+    const presentation = toolPresentation(entry.use);
+    return presentation ? enabled.has(presentationFilterCategory(presentation)) : true;
+  });
+  const collapseGroup = !active && visibleEntries.length === 0;
 
   return (
-    <RowShell
-      gutter={
-        <span className="flex size-6 items-center justify-center rounded-md bg-inset text-secondary ring-1 ring-line [&_svg]:size-3.5">
-          <SquareTerminal />
-        </span>
-      }
-    >
-      <div className="overflow-hidden rounded-md border border-line bg-inset shadow-[inset_0_1px_0_0_var(--p-line-soft)]">
+    <>
+      <div className={cn(
+        "grid transition-[grid-template-rows,opacity] duration-300 ease-[var(--ease-out)]",
+        collapseGroup ? "grid-rows-[0fr] opacity-0" : "grid-rows-[1fr] opacity-100",
+      )}>
+        <div className="min-h-0 overflow-hidden">
+          <RowShell
+            gutter={
+              <span className="flex size-6 items-center justify-center rounded-md bg-inset text-secondary ring-1 ring-line [&_svg]:size-3.5">
+                <SquareTerminal />
+              </span>
+            }
+          >
+            <div className="overflow-hidden rounded-md border border-line bg-inset shadow-[inset_0_1px_0_0_var(--p-line-soft)]">
         <div className="flex h-8 items-center gap-2 border-b border-line-soft px-2.5">
           <span className="flex items-center gap-1.5 cm-mono !text-xs font-semibold text-primary">
             <span className="size-1.5 rounded-full bg-danger/65" />
@@ -185,21 +203,39 @@ export const ShellRunGroup = memo(function ShellRunGroup({
           </span>
           <span className="cm-mono !text-2xs text-faint">{entries.length} exchange{entries.length === 1 ? "" : "s"}</span>
           {terminals.length === 1 && <Chip tone="muted" mono>{terminals[0]}</Chip>}
-          <span className="ml-auto"><Chip tone={summary.tone} icon={summary.icon}>{summary.label}</Chip></span>
+          <span className="ml-auto">
+            <IconButton
+              tip={`Shell visibility · ${filter.enabled.length} of 7 shown`}
+              active={filter.enabled.length < 7}
+              onClick={() => setFilterOpen(true)}
+            >
+              <SlidersHorizontal />
+            </IconButton>
+          </span>
         </div>
         <div>
-          {entries.map((entry) => {
+          {entries.map((entry, index) => {
             const presentation = toolPresentation(entry.use);
-            return presentation?.kind === "dispatch" ? (
-              <DispatchToolCard
+            const admitted = presentation ? enabled.has(presentationFilterCategory(presentation)) : true;
+            const settledBehindActiveCommand = !admitted && active && index < entries.length - 1 && entryState(entry) !== "running";
+            const collapsed = !admitted && !active;
+            return (
+              <div
                 key={entry.use.id}
-                embedded
-                use={entry.use}
-                result={entry.result}
-                task={entry.task}
-              />
-            ) : (
-              <ShellCommandPair key={entry.use.id} entry={entry} />
+                className={cn(
+                  "grid transition-[grid-template-rows,opacity] duration-300 ease-[var(--ease-out)]",
+                  collapsed ? "grid-rows-[0fr] opacity-0" : "grid-rows-[1fr]",
+                  settledBehindActiveCommand && "opacity-50",
+                )}
+              >
+                <div className="min-h-0 overflow-hidden">
+                  {presentation?.kind === "dispatch" ? (
+                    <DispatchToolCard embedded use={entry.use} result={entry.result} task={entry.task} />
+                  ) : (
+                    <ShellCommandPair entry={entry} />
+                  )}
+                </div>
+              </div>
             );
           })}
           {active && languages.length > 0 && summary.label !== "running" && (
@@ -214,6 +250,10 @@ export const ShellRunGroup = memo(function ShellRunGroup({
           )}
         </div>
       </div>
-    </RowShell>
+          </RowShell>
+        </div>
+      </div>
+      <ShellFilterModal open={filterOpen} onClose={() => setFilterOpen(false)} chatId={chatId} resolved={filter} />
+    </>
   );
 });

@@ -54,6 +54,7 @@ import {
   type RunnerInstance,
   CheckpointSchema,
   type Checkpoint,
+  ShellTranscriptFilterSchema,
 } from "@dispatch/shared";
 import { HarnessSettingsSchema } from "@dispatch/shared";
 import {
@@ -104,6 +105,8 @@ export const AppSettingsSchema = z.object({
    * "false" mean the same thing at the bottom of a fallback chain.
    */
   showInjectedContext: z.boolean().optional(),
+  /** App-wide transcript-shell defaults. Unset resolves to every category on. */
+  shellFilter: ShellTranscriptFilterSchema.optional(),
   /**
    * Policy for `mcp__manager__spawn_chat` — an agent starting ANOTHER chat.
    * `autoApprove` off (the default, and the reason this is opt-in rather than

@@ -41,6 +41,7 @@ import type {
   MessagePart,
   HarnessKind,
   Effort,
+  ShellTranscriptFilter,
 } from "@dispatch/shared";
 
 /**
@@ -70,6 +71,8 @@ export interface AppSettings {
    * an individual chat can override it; unset everywhere means off.
    */
   showInjectedContext?: boolean;
+  /** App-wide defaults for which tool families appear in transcript shells. */
+  shellFilter?: ShellTranscriptFilter;
   /**
    * Whether an agent calling `spawn_chat` may start a chat WITHOUT asking. Off
    * by default: a spawn stops for an approval prompt, and this is the only thing
@@ -311,7 +314,10 @@ export const api = {
     get: (id: string) => get<Chat>(`/api/chats/${id}`),
     create: (body: { projectId: string; title?: string; modeId?: string; agentId?: string }) =>
       post<Chat>("/api/chats", body),
-    update: (id: string, body: Partial<Chat>) =>
+    update: (
+      id: string,
+      body: Omit<Partial<Chat>, "shellFilter"> & { shellFilter?: ShellTranscriptFilter | null },
+    ) =>
       put<Chat>(`/api/chats/${id}`, body),
     remove: (id: string) => del<void>(`/api/chats/${id}`),
     /**
@@ -388,6 +394,11 @@ export const api = {
       put<{ target: "manifest" | "store"; project: Project; manifestPath?: string }>(
         `/api/projects/${projectId}/config/workflow`,
         workflow,
+      ),
+    saveShellFilter: (projectId: string, shellFilter: ShellTranscriptFilter | undefined) =>
+      put<{ target: "manifest" | "store"; project: Project; manifestPath?: string }>(
+        `/api/projects/${projectId}/config/shell-filter`,
+        { shellFilter: shellFilter ?? null },
       ),
     /** Derive a `.dispatch/` from the project's `.data` record. */
     scaffold: (projectId: string, force?: boolean) =>

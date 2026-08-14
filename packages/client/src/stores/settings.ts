@@ -14,16 +14,22 @@
  */
 import { create } from "zustand";
 import type { AppSettings } from "../lib/api.js";
+import { SHELL_TRANSCRIPT_CATEGORIES, type ShellTranscriptFilter } from "@dispatch/shared";
 
 interface SettingsStore {
   /** App-wide default for showing Dispatch-attached context in transcripts. */
   showInjectedContext: boolean;
+  shellFilter: ShellTranscriptFilter;
   /** Apply a freshly-fetched or freshly-saved AppSettings payload. */
   apply: (settings: Partial<AppSettings>) => void;
 }
 
 export const useSettings = create<SettingsStore>((set) => ({
   showInjectedContext: false,
+  shellFilter: [...SHELL_TRANSCRIPT_CATEGORIES],
   apply: (settings) =>
-    set({ showInjectedContext: settings.showInjectedContext ?? false }),
+    set({
+      showInjectedContext: settings.showInjectedContext ?? false,
+      shellFilter: settings.shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES],
+    }),
 }));
