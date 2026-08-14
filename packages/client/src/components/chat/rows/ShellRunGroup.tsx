@@ -37,6 +37,11 @@ function StateIcon({ state }: { state: ToolDetailState }) {
   return <Check className="text-success" />;
 }
 
+function shellLabel(language: "bash" | "powershell", short = false): string {
+  if (language === "powershell") return short ? "ps" : "PowerShell";
+  return short ? "bash" : "Bash";
+}
+
 function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
   const [detailOpen, setDetailOpen] = useState(false);
   const presentation = toolPresentation(entry.use);
@@ -65,40 +70,35 @@ function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
   return (
     <div
       data-row-id={entry.use.id}
-      className="group/pair border-t border-line-soft/70 transition-colors duration-150 first:border-t-0 hover:bg-hover/35"
+      className="group/pair py-0.5 transition-colors duration-150 hover:bg-hover/20"
     >
       <Button
         type="button"
         variant="ghost"
         onClick={inspect}
-        className="group/send !flex !h-8 w-full min-w-0 justify-start gap-0 !rounded-none !border-0 px-2.5 text-left !font-normal hover:!bg-active/55 active:translate-y-0"
+        className="group/send !flex !h-7 w-full min-w-0 justify-start gap-0 !rounded-none !border-0 px-2.5 text-left !font-normal hover:!bg-transparent active:translate-y-0"
       >
         <span className="mr-2 shrink-0 cm-mono !text-xs font-semibold text-accent-hi">
-          dispatch &gt;
+          {shellLabel(presentation.language, true)} &gt;
         </span>
         <OverflowTooltip text={presentation.command} className="min-w-0 flex-1 !text-xs">
-          <InlineCode code={presentation.command} language={presentation.language} />
+          <span className="block min-w-0 opacity-80 transition-[filter,opacity] duration-150 group-hover/send:brightness-125 group-hover/send:opacity-100 group-focus/send:brightness-125 group-focus/send:opacity-100">
+            <InlineCode code={presentation.command} language={presentation.language} />
+          </span>
         </OverflowTooltip>
-        <span className="ml-1.5 flex h-3 w-3 shrink-0 items-center justify-center">
-          {state === "running" ? (
-            <Spinner size={9} />
-          ) : (
-            <span className="h-3 w-1.5 bg-secondary opacity-0 cm-anim-pulse transition-opacity group-hover/send:opacity-80 group-focus/send:opacity-80" />
-          )}
-        </span>
       </Button>
 
       <Button
         type="button"
         variant="ghost"
         onClick={inspect}
-        className="group/receipt !grid !h-auto min-h-9 w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 !rounded-none !border-0 px-2.5 py-1.5 text-left !font-normal text-muted hover:!bg-active/45 hover:text-secondary active:translate-y-0"
+        className="group/receipt !grid !h-auto min-h-0 w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 !whitespace-normal !rounded-none !border-0 px-2.5 py-1 text-left !font-normal text-muted hover:!bg-transparent hover:text-secondary active:translate-y-0"
       >
         <OverflowTooltip
           text={output}
           lines={2}
           className={cn(
-            "cm-mono !text-2xs leading-[1.45] transition-colors group-hover/receipt:text-primary",
+            "whitespace-pre-wrap cm-mono !text-2xs leading-[1.45] opacity-75 transition-[color,opacity] duration-150 group-hover/receipt:text-primary group-hover/receipt:opacity-100 group-focus/receipt:text-primary group-focus/receipt:opacity-100",
             state === "failed" && "text-danger",
             state === "running" && "italic text-faint",
           )}
@@ -113,7 +113,7 @@ function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
         title="Shell exchange"
-        description={presentation.terminal ? `${presentation.terminal} terminal` : "Dispatch terminal"}
+        description={presentation.terminal ? `${presentation.terminal} terminal` : `${shellLabel(presentation.language)} session`}
         state={state}
         duration={dur(elapsed)}
         request={presentation.command}
@@ -127,7 +127,13 @@ function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
 }
 
 /** A compact terminal transcript: prompt/input followed by its unprefixed receipt. */
-export const ShellRunGroup = memo(function ShellRunGroup({ entries }: { entries: ShellRunEntry[] }) {
+export const ShellRunGroup = memo(function ShellRunGroup({
+  entries,
+  active = false,
+}: {
+  entries: ShellRunEntry[];
+  active?: boolean;
+}) {
   const summary = useMemo(() => {
     const states = entries.map(entryState);
     if (states.includes("running")) return { tone: "accent" as const, label: "running", icon: <Spinner size={9} /> };
@@ -142,6 +148,16 @@ export const ShellRunGroup = memo(function ShellRunGroup({ entries }: { entries:
     }).filter(Boolean))],
     [entries],
   );
+  const languages = useMemo(
+    () => [...new Set(entries.map((entry) => {
+      const presentation = toolPresentation(entry.use);
+      return presentation?.kind === "shell" ? presentation.language : undefined;
+    }).filter((language): language is "bash" | "powershell" => Boolean(language)))],
+    [entries],
+  );
+  const lastPresentation = toolPresentation(entries[entries.length - 1]!.use);
+  const activeLanguage = lastPresentation?.kind === "shell" ? lastPresentation.language : "bash";
+  const headerLabel = languages.length === 1 ? shellLabel(activeLanguage) : "Shell";
 
   return (
     <RowShell
@@ -157,7 +173,7 @@ export const ShellRunGroup = memo(function ShellRunGroup({ entries }: { entries:
             <span className="size-1.5 rounded-full bg-danger/65" />
             <span className="size-1.5 rounded-full bg-warn/65" />
             <span className="size-1.5 rounded-full bg-success/65" />
-            <span className="ml-1">dispatch shell</span>
+            <span className="ml-1">{headerLabel}</span>
           </span>
           <span className="cm-mono !text-2xs text-faint">{entries.length} exchange{entries.length === 1 ? "" : "s"}</span>
           {terminals.length === 1 && <Chip tone="muted" mono>{terminals[0]}</Chip>}
@@ -165,6 +181,16 @@ export const ShellRunGroup = memo(function ShellRunGroup({ entries }: { entries:
         </div>
         <div>
           {entries.map((entry) => <ShellCommandPair key={entry.use.id} entry={entry} />)}
+          {active && (
+            <div className="flex h-7 items-center px-2.5 cm-mono !text-xs" aria-label="Active shell prompt">
+              <span className="mr-2 font-semibold text-accent-hi">{shellLabel(activeLanguage, true)} &gt;</span>
+              {summary.label === "running" ? (
+                <Spinner size={9} />
+              ) : (
+                <span className="h-3 w-1.5 bg-secondary cm-anim-pulse" />
+              )}
+            </div>
+          )}
         </div>
       </div>
     </RowShell>

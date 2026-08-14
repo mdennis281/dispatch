@@ -159,12 +159,13 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
 
   return (
     <>
-      {transcriptItems.map((item) => {
+      {transcriptItems.map((item, itemIndex) => {
         if (item.kind === "shell") {
           const first = item.rows[0]!;
           return (
             <div key={`shell:${first.id}`} className="cm-row-cv">
               <ShellRunGroup
+                active={itemIndex === transcriptItems.length - 1}
                 entries={item.rows.map((use) => {
                   const result = resultsByUse.get(use.toolUseId);
                   return {

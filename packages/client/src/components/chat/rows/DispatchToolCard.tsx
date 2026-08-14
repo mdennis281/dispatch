@@ -124,7 +124,6 @@ export const DispatchToolCard = memo(function DispatchToolCard({
     >
       <div className="overflow-hidden rounded-md border border-line bg-panel-2/60">
         <div className="flex h-8 items-center gap-2 px-2.5">
-          <span className="text-xs font-semibold uppercase tracking-[0.07em] text-accent-hi">Dispatch</span>
           <span className="text-sm font-semibold text-primary">{presentation.title}</span>
           {presentation.subject && <Chip tone="info" mono>{presentation.subject}</Chip>}
           <span className="ml-auto"><Chip tone={tone} icon={<StateMark state={state} />}>{statusLabel}</Chip></span>
@@ -172,7 +171,7 @@ export const DispatchToolCard = memo(function DispatchToolCard({
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
         title={presentation.title}
-        description={presentation.subject ? `Dispatch · ${presentation.subject}` : "Dispatch MCP exchange"}
+        description={presentation.subject ?? "MCP exchange"}
         icon={categoryIcon(presentation.category)}
         state={state}
         duration={dur(elapsed)}
