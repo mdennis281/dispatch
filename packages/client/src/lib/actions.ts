@@ -16,6 +16,7 @@ import type {
   Effort,
   HarnessKind,
   ImageRef,
+  MessagePart,
   PermissionDecision,
 } from "@dispatch/shared";
 import { ws } from "./ws.js";
@@ -63,6 +64,7 @@ export const actions = {
     opts: {
       text?: string;
       images?: ImageRef[];
+      parts?: MessagePart[];
       effort?: Effort;
       priority?: Priority;
     } = {},
@@ -72,6 +74,7 @@ export const actions = {
       chatId,
       text: opts.text,
       images: opts.images,
+      parts: opts.parts,
       effort: opts.effort,
       priority: opts.priority,
     });
@@ -127,6 +130,11 @@ export const actions = {
       notes: opts.notes,
       answers: opts.answers,
     });
+  },
+
+  /** Keep an agent-configured question timeout alive while the human answers. */
+  questionActivity(chatId: string, requestId: string): void {
+    ws.send({ type: "question-activity", chatId, requestId });
   },
 
   /** Decline an AskUserQuestion prompt without answering it. */

@@ -86,11 +86,13 @@ describe("manager-mcp — ask_user", () => {
   ];
 
   it("passes radio / multi-select questions to the bound chat and returns answers", async () => {
-    let call: { chatId: string; questions: typeof questions } | undefined;
+    let call:
+      | { chatId: string; questions: typeof questions; timeoutSeconds?: number }
+      | undefined;
     const broker: ManagerMcpBroker = {
       ...fakeBroker({ c1: "running" }),
-      askUser: async (chatId, asked) => {
-        call = { chatId, questions: asked as typeof questions };
+      askUser: async (chatId, asked, timeoutSeconds) => {
+        call = { chatId, questions: asked as typeof questions, timeoutSeconds };
         return {
           status: "answered",
           answers: { "Which surfaces should be protected?": "REST, WebSocket" },
@@ -99,9 +101,9 @@ describe("manager-mcp — ask_user", () => {
     };
     const { askUser } = createManagerTools({ chatId: "c1", bus, broker });
 
-    const res = await askUser.handler({ questions }, {});
+    const res = await askUser.handler({ questions, timeoutSeconds: 90 }, {});
 
-    expect(call).toEqual({ chatId: "c1", questions });
+    expect(call).toEqual({ chatId: "c1", questions, timeoutSeconds: 90 });
     expect(resultText(res)).toContain("REST, WebSocket");
     expect(res.isError).toBeFalsy();
   });
@@ -113,11 +115,26 @@ describe("manager-mcp — ask_user", () => {
     };
     const { askUser } = createManagerTools({ chatId: "c1", bus, broker });
 
-    const res = await askUser.handler({ questions }, {});
+    const res = await askUser.handler({ questions, timeoutSeconds: undefined }, {});
 
     expect(resultText(res)).toContain("declined");
     expect(resultText(res)).toContain("Not now.");
     expect(res.isError).toBeFalsy();
+  });
+
+  it("reports an inactivity timeout distinctly from a human decline", async () => {
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({ c1: "running" }),
+      askUser: async () => ({ status: "timed_out", message: "No recent activity." }),
+    };
+    const { askUser } = createManagerTools({ chatId: "c1", bus, broker });
+
+    const res = await askUser.handler({ questions, timeoutSeconds: 30 }, {});
+    const text = resultText(res);
+
+    expect(text).toContain("timed out without an answer");
+    expect(text).toContain("No recent activity.");
+    expect(text).not.toContain("declined");
   });
 
   it("does not describe an unavailable question channel as a human decline", async () => {
@@ -130,7 +147,7 @@ describe("manager-mcp — ask_user", () => {
     };
     const { askUser } = createManagerTools({ chatId: "c1", bus, broker });
 
-    const res = await askUser.handler({ questions }, {});
+    const res = await askUser.handler({ questions, timeoutSeconds: undefined }, {});
     const text = resultText(res);
 
     expect(text).toContain("could not be shown");

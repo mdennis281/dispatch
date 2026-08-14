@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -734,6 +734,46 @@ describe("SessionBroker — permissions", () => {
     broker.declineQuestion(reqId, "Not now.");
 
     await expect(answerP).resolves.toEqual({ status: "declined", message: "Not now." });
+  });
+
+  it("times out a manager question after inactivity and resets on card activity", async () => {
+    const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    vi.useFakeTimers();
+    try {
+      const reqP = nextPermissionId();
+      const answerP = broker.askUser(
+        "c1",
+        [
+          {
+            header: "Proceed",
+            question: "Should I continue?",
+            options: [{ label: "Yes" }, { label: "No" }],
+          },
+        ],
+        30,
+      );
+      const reqId = await reqP;
+      let settled = false;
+      void answerP.then(() => {
+        settled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(broker.touchQuestion("other", reqId)).toBe(false);
+      expect(broker.touchQuestion("c1", reqId)).toBe(true);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(answerP).resolves.toEqual({
+        status: "timed_out",
+        message: "No answer was submitted within 30 seconds of the last user activity.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports the manager question channel as unavailable without a live session", async () => {

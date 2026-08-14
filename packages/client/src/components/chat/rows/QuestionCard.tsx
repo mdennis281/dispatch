@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MessageCircleQuestion, CornerDownLeft, Check, Undo2 } from "lucide-react";
-import type { PermissionRow } from "@dispatch/shared";
+import { composeMessageText, type MessagePart, type PermissionRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
@@ -188,6 +188,39 @@ export function QuestionCard({ row }: QuestionCardProps) {
   const [answered, setAnswered] = useState(false);
   const busy = pending && answered;
 
+  const timeoutSeconds =
+    typeof row.input.timeoutSeconds === "number" ? row.input.timeoutSeconds : undefined;
+  const activity = useRef<{ lastSent: number; timer?: ReturnType<typeof setTimeout> }>({
+    lastSent: 0,
+  });
+
+  useEffect(
+    () => () => {
+      if (activity.current.timer) clearTimeout(activity.current.timer);
+    },
+    [],
+  );
+
+  const touch = () => {
+    if (!resolvedPending || !timeoutSeconds) return;
+    // Send immediately when the interval has elapsed, then one trailing refresh
+    // for activity inside it. Half the configured timeout keeps even the 1s
+    // minimum alive while capping continuous typing at two frames per second.
+    const intervalMs = Math.max(100, Math.min(1_000, (timeoutSeconds * 1_000) / 2));
+    const elapsed = Date.now() - activity.current.lastSent;
+    const sendActivity = () => {
+      actions.questionActivity(row.chatId, row.requestId);
+      activity.current.lastSent = Date.now();
+      activity.current.timer = undefined;
+    };
+    if (activity.current.lastSent === 0 || elapsed >= intervalMs) {
+      if (activity.current.timer) clearTimeout(activity.current.timer);
+      sendActivity();
+    } else if (!activity.current.timer) {
+      activity.current.timer = setTimeout(sendActivity, intervalMs - elapsed);
+    }
+  };
+
   const labelOf = (qi: number, id: string) =>
     questions[qi]?.options.find((o) => o.id === id)?.label ?? id;
 
@@ -196,16 +229,22 @@ export function QuestionCard({ row }: QuestionCardProps) {
 
     if (reverting) {
       // The original request is long resolved — deliver the correction as a
-      // message. Mirror the composer's rule: steer a turn that's somehow still
-      // running (the interrupt may not have landed yet), otherwise send.
+      // composed instruction. `send-message` also steers an active turn, so the
+      // quick-action-style parts survive if the interrupt has not landed yet.
       // No `answered` latch here: clearing `reverting` closes the card in the
       // same batch, so `pending` goes false and re-entry is already blocked.
-      const text = buildCorrection(questions, answers, row.message, declined);
-      if (chatStatus === "running" || chatStatus === "waiting") {
-        actions.steer(row.chatId, text, "next");
-      } else {
-        actions.sendMessage(row.chatId, { text });
-      }
+      const parts: MessagePart[] = [
+        {
+          kind: "instructions",
+          label: "Re-answer",
+          text: buildCorrection(questions, answers, row.message, declined),
+        },
+      ];
+      actions.sendMessage(row.chatId, {
+        text: composeMessageText(parts),
+        parts,
+        priority: chatStatus === "running" || chatStatus === "waiting" ? "next" : undefined,
+      });
       setReverting(false);
       setCorrected(true);
       return;
@@ -265,6 +304,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
   };
 
   const toggle = (qi: number, id: string, single: boolean) => {
+    touch();
     // On a pick-one question the custom row is just another radio, so choosing a
     // listed option unchecks it — the typed text stays put in case they come back.
     if (single) setCustom((c) => (c[qi] ? { ...c, [qi]: false } : c));
@@ -277,6 +317,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
 
   /** Check the custom row — from its radio, its label, or the caret landing in it. */
   const pickCustom = (qi: number, single: boolean) => {
+    touch();
     if (single) setSelected((s) => (s[qi]?.length ? { ...s, [qi]: [] } : s));
     setCustom((c) => (c[qi] ? c : { ...c, [qi]: true }));
   };
@@ -458,6 +499,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
                     <div
                       onMouseDown={(e) => {
                         if (busy) return;
+                        touch();
                         // The marker is the UNCHECK. On a multi-select, dropping
                         // the custom answer out of the set must not mean deleting
                         // the text you'd want back — and the listed options each
@@ -493,6 +535,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
                         }}
                         value={freeText[qi] ?? ""}
                         onChange={(e) => {
+                          touch();
                           setFreeText((s) => ({ ...s, [qi]: e.target.value }));
                           if (e.target.value.trim()) pickCustom(qi, !q.multiSelect);
                         }}
@@ -514,7 +557,10 @@ export function QuestionCard({ row }: QuestionCardProps) {
                   ) : (
                     <input
                       value={freeText[qi] ?? ""}
-                      onChange={(e) => setFreeText((s) => ({ ...s, [qi]: e.target.value }))}
+                      onChange={(e) => {
+                        touch();
+                        setFreeText((s) => ({ ...s, [qi]: e.target.value }));
+                      }}
                       disabled={busy}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && allAnswered) {
@@ -534,7 +580,10 @@ export function QuestionCard({ row }: QuestionCardProps) {
                       whichever option is checked rather than being one. */}
                   <input
                     value={notes[qi] ?? ""}
-                    onChange={(e) => setNotes((s) => ({ ...s, [qi]: e.target.value }))}
+                    onChange={(e) => {
+                      touch();
+                      setNotes((s) => ({ ...s, [qi]: e.target.value }));
+                    }}
                     disabled={busy}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && allAnswered) {

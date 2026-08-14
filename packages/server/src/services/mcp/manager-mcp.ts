@@ -127,7 +127,11 @@ export interface ManagerAskQuestion {
 export type ManagerAskResult =
   | { status: "answered"; answers: Record<string, string> }
   | { status: "declined"; message?: string }
+  | { status: "timed_out"; message: string }
   | { status: "unavailable"; message: string };
+
+/** Longest inactivity timeout an agent may put on a question card. */
+export const ASK_USER_TIMEOUT_CAP_SECONDS = 3_600;
 
 /**
  * Check conclusions that count as a FAILING check for `watch_pr` — the ones an
@@ -162,7 +166,11 @@ export interface ManagerMcpBroker {
   /** Flag that a `watch_pr` on this chat hit a terminal PR state (drives the green "PR done" dot). */
   markPrWatched(chatId: string): void;
   /** Ask the human through Dispatch's radio / multi-select question card. */
-  askUser(chatId: string, questions: ManagerAskQuestion[]): Promise<ManagerAskResult>;
+  askUser(
+    chatId: string,
+    questions: ManagerAskQuestion[],
+    timeoutSeconds?: number,
+  ): Promise<ManagerAskResult>;
 }
 
 /**
@@ -1405,7 +1413,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     "Ask the human one to three structured questions and wait for their answer. " +
       "Use this when a choice materially changes the work and cannot be inferred. " +
       "Each question can be single-select (radio) or multi-select (checkbox); the UI " +
-      "also offers a free-form answer. A decline is a final answer, not a reason to retry.",
+      "also offers a free-form answer. An optional inactivity timeout resets while the human " +
+      "types or selects options. A decline is a final answer, not a reason to retry.",
     {
       questions: z
         .array(
@@ -1438,9 +1447,18 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .min(1)
         .max(3)
         .describe("One to three questions presented in one card."),
+      timeoutSeconds: z
+        .number()
+        .int()
+        .min(1)
+        .max(ASK_USER_TIMEOUT_CAP_SECONDS)
+        .optional()
+        .describe(
+          "Optional inactivity timeout in seconds. Typing or selecting an option resets it.",
+        ),
     },
-    async ({ questions }): Promise<CallToolResult> => {
-      const result = await ctx.broker.askUser(ctx.chatId, questions);
+    async ({ questions, timeoutSeconds }): Promise<CallToolResult> => {
+      const result = await ctx.broker.askUser(ctx.chatId, questions, timeoutSeconds);
       if (result.status === "unavailable") {
         return textResult(
           `The question could not be shown to the human. ${result.message}\n` +
@@ -1452,6 +1470,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           `The human declined to answer.${result.message ? ` ${result.message}` : ""}\n` +
             JSON.stringify(result),
         );
+      }
+      if (result.status === "timed_out") {
+        return textResult(`The question timed out without an answer. ${result.message}\n${JSON.stringify(result)}`);
       }
       return textResult(`The human answered:\n${JSON.stringify(result.answers, null, 2)}`);
     },

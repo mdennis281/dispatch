@@ -27,6 +27,7 @@ import {
   ChatMessageSchema,
   PermissionRequestSchema,
   AttentionItemSchema,
+  MessagePartSchema,
 } from "./messages.js";
 import { ProjectConfigSchema, ProjectConfigErrorSchema } from "./project-config.js";
 import { UsageSnapshotSchema } from "./usage.js";
@@ -324,6 +325,8 @@ export const SendMessageActionSchema = z.object({
   chatId: z.string(),
   text: z.string().optional(),
   images: z.array(ImageRefSchema).optional(),
+  /** Authorship breakdown for a composed message, such as a quick-action instruction. */
+  parts: z.array(MessagePartSchema).optional(),
   effort: EffortSchema.optional(),
   priority: z.enum(["now", "next", "later"]).optional(),
 });
@@ -377,6 +380,13 @@ export const AnswerQuestionActionSchema = z.object({
   notes: z.string().optional(),
   /** Multi-question shape — one entry per question; supersedes optionId/answer. */
   answers: z.array(QuestionAnswerSchema).optional(),
+});
+
+/** Refresh an agent-configured question timeout while the human is interacting. */
+export const QuestionActivityActionSchema = z.object({
+  type: z.literal("question-activity"),
+  chatId: z.string(),
+  requestId: z.string(),
 });
 
 /** Decline an AskUserQuestion prompt without answering it. */
@@ -539,6 +549,7 @@ export const WsClientActionSchema = z.discriminatedUnion("type", [
   SteerActionSchema,
   AnswerPermissionActionSchema,
   AnswerQuestionActionSchema,
+  QuestionActivityActionSchema,
   DeclineQuestionActionSchema,
   SetModeActionSchema,
   SetAgentActionSchema,
