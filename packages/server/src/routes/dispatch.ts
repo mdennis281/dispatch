@@ -283,6 +283,7 @@ export async function dispatchClientAction(
         await broker.sendMessage(action.chatId, action.text ?? "", {
           priority: action.priority,
           images: action.images as ImageRef[] | undefined,
+          parts: action.parts,
           effort: action.effort,
         });
         return;
@@ -331,6 +332,12 @@ export async function dispatchClientAction(
         }
         return;
       }
+
+      case "question-activity":
+        // Best-effort heartbeat. Native harness questions have no configured
+        // timer, while manager questions reset theirs on every interaction.
+        broker.touchQuestion(action.requestId);
+        return;
 
       case "decline-question": {
         // Decline resolves the AskUserQuestion as a DENY, so the model sees the

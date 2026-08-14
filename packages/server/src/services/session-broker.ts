@@ -1067,7 +1067,13 @@ interface PendingPermission {
   input: Record<string, unknown>;
   request: PermissionRequest;
   attentionId: string;
+  /** Manager ask_user inactivity window; native harness questions do not set one. */
+  timeoutMs?: number;
+  timeoutTimer?: ReturnType<typeof setTimeout>;
 }
+
+const questionTimeoutMessage = (timeoutMs: number): string =>
+  `No answer was submitted within ${timeoutMs / 1_000} seconds of the last user activity.`;
 
 interface LiveSession {
   chatId: string;
@@ -1490,6 +1496,7 @@ export class SessionBroker {
       const pending = session.pendingPermissions.get(requestId);
       if (!pending) continue;
       session.pendingPermissions.delete(requestId);
+      if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
 
       if (pending.harnessSession) {
         pending.harnessSession.resolvePermission(requestId, resolution);
@@ -1607,6 +1614,17 @@ export class SessionBroker {
         updatedInput,
         message: message ?? answer.answer,
       });
+    }
+    return false;
+  }
+
+  /** Reset a manager ask_user inactivity timeout after a card interaction. */
+  touchQuestion(requestId: string): boolean {
+    for (const session of this.sessions.values()) {
+      const pending = session.pendingPermissions.get(requestId);
+      if (!pending || pending.toolName !== "AskUserQuestion") continue;
+      this.armQuestionTimeout(session, requestId, pending);
+      return true;
     }
     return false;
   }
@@ -3003,6 +3021,7 @@ export class SessionBroker {
       title?: string;
       displayName?: string;
       description?: string;
+      timeoutMs?: number;
     },
   ): Promise<PermissionResult> {
     // A SELF-GATED tool asks for itself, in its own words, with its own card —
@@ -3057,14 +3076,33 @@ export class SessionBroker {
     });
 
     return new Promise<PermissionResult>((resolve) => {
-      session.pendingPermissions.set(requestId, {
+      const pending: PendingPermission = {
         resolve,
         toolName,
         input,
         request,
         attentionId,
-      });
+        timeoutMs: opts.timeoutMs,
+      };
+      session.pendingPermissions.set(requestId, pending);
+      this.armQuestionTimeout(session, requestId, pending);
     });
+  }
+
+  /** Start (or restart) the inactivity clock owned by one pending question. */
+  private armQuestionTimeout(
+    session: LiveSession,
+    requestId: string,
+    pending: PendingPermission,
+  ): void {
+    if (!pending.timeoutMs) return;
+    if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
+    pending.timeoutTimer = setTimeout(() => {
+      this.resolvePermission(requestId, {
+        decision: "deny",
+        message: questionTimeoutMessage(pending.timeoutMs!),
+      });
+    }, pending.timeoutMs);
   }
 
   /**
@@ -3072,7 +3110,11 @@ export class SessionBroker {
    * harness question tools. Keeping this on the broker means Claude's in-process
    * server and Codex's HTTP bridge get byte-identical question/attention state.
    */
-  async askUser(chatId: string, questions: ManagerAskQuestion[]): Promise<ManagerAskResult> {
+  async askUser(
+    chatId: string,
+    questions: ManagerAskQuestion[],
+    timeoutSeconds?: number,
+  ): Promise<ManagerAskResult> {
     const session = this.sessions.get(chatId);
     if (!session) {
       return { status: "unavailable", message: "No live session is available to ask through." };
@@ -3080,10 +3122,19 @@ export class SessionBroker {
     const result = await this.handlePermission(
       session,
       "AskUserQuestion",
-      { questions },
-      { displayName: "Question" },
+      { questions, ...(timeoutSeconds ? { timeoutSeconds } : {}) },
+      {
+        displayName: "Question",
+        timeoutMs: timeoutSeconds ? timeoutSeconds * 1_000 : undefined,
+      },
     );
     if (result.behavior !== "allow") {
+      if (
+        timeoutSeconds &&
+        result.message === questionTimeoutMessage(timeoutSeconds * 1_000)
+      ) {
+        return { status: "timed_out", message: result.message };
+      }
       return { status: "declined", message: result.message };
     }
     const raw = result.updatedInput?.answers;
@@ -3321,6 +3372,7 @@ export class SessionBroker {
    */
   private drainPendingPermissions(session: LiveSession, message: string): void {
     for (const [requestId, p] of session.pendingPermissions) {
+      if (p.timeoutTimer) clearTimeout(p.timeoutTimer);
       if (p.harnessSession) {
         p.harnessSession.resolvePermission(requestId, { decision: "deny", message });
       } else {
