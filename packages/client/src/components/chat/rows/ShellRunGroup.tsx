@@ -95,19 +95,27 @@ function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
         onClick={inspect}
         className="group/receipt !grid !h-auto min-h-0 w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 !whitespace-normal !rounded-none !border-0 px-2.5 py-1 text-left !font-normal text-muted hover:!bg-transparent hover:text-secondary active:translate-y-0"
       >
-        <OverflowTooltip
-          text={output}
-          lines={2}
-          className={cn(
-            "whitespace-pre-wrap cm-mono !text-2xs leading-[1.45] opacity-75 transition-[color,opacity] duration-150 group-hover/receipt:text-primary group-hover/receipt:opacity-100 group-focus/receipt:text-primary group-focus/receipt:opacity-100",
-            state === "failed" && "text-danger",
-            state === "running" && "italic text-faint",
-          )}
-        />
-        <span className="flex min-w-12 items-center justify-end gap-1.5 pt-px cm-mono !text-2xs text-faint [&_svg]:size-3">
-          {elapsed !== undefined && <span>{dur(elapsed)}</span>}
-          <StateIcon state={state} />
-        </span>
+        {state === "running" ? (
+          <span className="flex items-center gap-1.5 whitespace-pre-wrap cm-mono !text-2xs italic leading-[1.45] text-faint">
+            {output}
+            <Spinner size={9} className="shrink-0" />
+          </span>
+        ) : (
+          <OverflowTooltip
+            text={output}
+            lines={2}
+            className={cn(
+              "whitespace-pre-wrap cm-mono !text-2xs leading-[1.45] opacity-75 transition-[color,opacity] duration-150 group-hover/receipt:text-primary group-hover/receipt:opacity-100 group-focus/receipt:text-primary group-focus/receipt:opacity-100",
+              state === "failed" && "text-danger",
+            )}
+          />
+        )}
+        {state !== "running" && (
+          <span className="flex min-w-12 items-center justify-end gap-1.5 pt-px cm-mono !text-2xs text-faint [&_svg]:size-3">
+            {elapsed !== undefined && <span>{dur(elapsed)}</span>}
+            <StateIcon state={state} />
+          </span>
+        )}
       </Button>
 
       <ToolDetailModal
@@ -194,7 +202,7 @@ export const ShellRunGroup = memo(function ShellRunGroup({
               <ShellCommandPair key={entry.use.id} entry={entry} />
             );
           })}
-          {active && languages.length > 0 && (
+          {active && languages.length > 0 && summary.label !== "running" && (
             <div className="flex h-7 items-center px-2.5 cm-mono !text-xs" aria-label="Active shell prompt">
               <span className="mr-2 font-semibold text-accent-hi">{shellLabel(activeLanguage, true)} &gt;</span>
               {summary.label === "running" ? (
