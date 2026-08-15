@@ -217,10 +217,17 @@
     --cm-safe-left: env(safe-area-inset-left, 0px);
 
     /* The mobile bottom nav's own height, and the space it actually occupies
-     * (row + home indicator). Panes below `lg` reserve the latter so their last
-     * row isn't parked under the bar. */
+     * (row + home indicator). The bar is in FLOW, so the shell doesn't need
+     * either number — these are for the overlays that cover it (the two "More"
+     * sheets) and want their last row to clear the bar underneath. */
     --cm-bottom-nav-h: 52px;
     --cm-bottom-nav-space: calc(var(--cm-bottom-nav-h) + var(--cm-safe-bottom));
+
+    /* How much of the window the soft keyboard is covering. Written by
+     * lib/useKeyboardInset from `visualViewport`; declared here so the shell's
+     * `calc()`s resolve to a real length before the first measurement, and on
+     * every platform that never raises one. */
+    --cm-kb: 0px;
   }
 
   /*
