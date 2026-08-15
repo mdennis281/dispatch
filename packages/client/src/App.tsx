@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { MessageSquareDashed } from "lucide-react";
 import { TopBar } from "./components/layout/TopBar.js";
 import { Sidebar } from "./components/layout/Sidebar.js";
@@ -25,7 +26,8 @@ import { visibleChat } from "./stores/navigation.js";
 import { useView } from "./stores/view.js";
 import { useLayout } from "./stores/layout.js";
 import { AuthGate } from "./components/auth/AuthGate.js";
-import { useKeyboardInset } from "./lib/useKeyboardInset.js";
+import { ViewportDebug } from "./components/layout/ViewportDebug.js";
+import { startViewportTracking } from "./stores/viewport.js";
 import { cn } from "./lib/cn.js";
 
 /**
@@ -73,8 +75,8 @@ export default function App() {
   const setLeftOpen = useLayout((s) => s.setLeftOpen);
   const setPane = useLayout((s) => s.setPane);
 
-  // Publishes `--cm-kb` — see below, and lib/useKeyboardInset.
-  useKeyboardInset();
+  // Publishes `--cm-kb` (see below) and the raw readings behind `ViewportDebug`.
+  useEffect(startViewportTracking, []);
 
   return (
     <AuthGate>
@@ -174,6 +176,7 @@ export default function App() {
       <SettingsPanel />
       <ManageConfigDialog />
       <Toasts />
+      <ViewportDebug />
       <ShutdownScreen />
       {/* After ShutdownScreen so it wins the tie: an update DOES stop the server,
           and "Dispatch has stopped, start it from the Start menu" is the wrong
