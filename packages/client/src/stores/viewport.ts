@@ -10,6 +10,11 @@
  * the only way to see these on the device where they misbehave.
  */
 import { create } from "zustand";
+// Whether we're installed is the same question the install card asks, so it
+// gets the same answer — including `window-controls-overlay`, which this
+// manifest requests FIRST, and iOS's pre-standard `navigator.standalone`. Two
+// definitions of "installed" would disagree exactly where it matters.
+import { isStandalone } from "../lib/pwaInstall.js";
 
 export interface ViewportMetrics {
   /** What the shell subtracts — see `keyboardInset`. */
@@ -74,23 +79,6 @@ export const useViewport = create<ViewportStore>((set) => ({
 }));
 
 /**
- * True in an installed PWA, false in a browser tab — and the difference decides
- * whether a shrinking window is a bug or normal.
- *
- * In a browser, `innerHeight` shrinking means the URL bar came back, which is
- * legitimate and which the shell must follow or the composer ends up underneath
- * it. In a standalone PWA there is no URL bar and nothing that can legitimately
- * take height, so the same shrink is the WebKit bug and must be ignored.
- */
-export function isStandalone(): boolean {
-  return (
-    matchMedia("(display-mode: standalone)").matches ||
-    // iOS predates the media query for home-screen apps and still needs this.
-    (navigator as { standalone?: boolean }).standalone === true
-  );
-}
-
-/**
  * How tall the shell should be, given everything seen so far.
  *
  * The iOS standalone bug shrinks `innerHeight` — and `100dvh` with it — by ~59px
@@ -102,6 +90,11 @@ export function isStandalone(): boolean {
  *
  * Returns 0 when there's nothing to correct — the caller then leaves the shell
  * on plain `100dvh`, which is right everywhere the bug isn't.
+ *
+ * `standalone` decides whether a shrink is a bug at all: in a browser tab it
+ * means the URL bar came back, which the shell must FOLLOW or the composer ends
+ * up underneath it. Installed, there is no URL bar and nothing that can
+ * legitimately take the height, so the same shrink is the WebKit bug.
  */
 export function standaloneShellHeight(
   standalone: boolean,

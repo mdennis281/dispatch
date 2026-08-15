@@ -1,4 +1,5 @@
-import { useViewport, isStandalone, standaloneShellHeight } from "../../stores/viewport.js";
+import { useViewport, standaloneShellHeight } from "../../stores/viewport.js";
+import { isStandalone } from "../../lib/pwaInstall.js";
 import { LAYER } from "../../lib/layers.js";
 
 /**
