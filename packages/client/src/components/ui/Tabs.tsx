@@ -83,7 +83,11 @@ export function Tabs({ tabs, value, onChange, className, iconOnly, labelSlot }: 
               "group relative inline-flex h-9 items-center rounded-none text-sm font-medium " +
                 "transition-colors duration-150 ease-[var(--ease-out)]",
               collapsed ? "w-9 justify-center" : "gap-1.5 px-2.5",
-              active ? "text-primary" : "text-muted hover:text-secondary",
+              // Amber for the selected tab — its underline is already
+              // `bg-accent`, so a `text-primary` label left the strip saying
+              // "current" in two different colours. Same brand highlight the
+              // sidebar and bottom nav use.
+              active ? "text-accent-hi" : "text-muted hover:text-secondary",
             )}
           >
             {t.icon && <span className="[&_svg]:size-3.5">{t.icon}</span>}

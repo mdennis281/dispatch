@@ -31,23 +31,32 @@ export function TopBar() {
   // palette, and usage.
   const compact = useLayout((s) => s.mode) === "sm";
 
-  // `min-h-11` rather than `h-11`, plus `cm-safe-t`: with `viewport-fit=cover`
+  // `min-h-13` rather than `h-13`, plus `cm-safe-t`: with `viewport-fit=cover`
   // and a black-translucent status bar (see index.html) the installed PWA draws
-  // under the clock, so the inset has to be added ON TOP of the bar's 44px — a
-  // fixed `h-11` would have carved the padding out of it and left the controls
-  // half under the notch. Nothing in here is taller than 44px, so off an inset
-  // display (`env()` = 0) the box is still exactly 44.
+  // under the clock, so the inset has to be added ON TOP of the bar's height — a
+  // fixed height would have carved the padding out of it and left the controls
+  // half under the notch.
+  //
+  // `pb-2` on top of that: the row was sitting hard against the hairline, so on
+  // a phone the mark and the first chat row below it read as one crowded block.
+  // Padding only at the BOTTOM, because the top is already spoken for by
+  // `cm-safe-t` — adding `pt` there would double the inset on a notched display
+  // and leave the bar visibly lopsided on a flat one. 52 − 8 still leaves the
+  // 44px touch row intact.
   return (
-    <header className="flex min-h-11 shrink-0 items-center gap-3 border-b border-line bg-surface px-3 cm-safe-t">
+    <header className="flex min-h-13 shrink-0 items-center gap-3 border-b border-line bg-surface px-3 pb-2 cm-safe-t">
       {/* mark — the real app icon, not a stand-in glyph: the thing in the
           top-left should be the thing you launched, matching the tab favicon
-          and the taskbar icon exactly (see ui/DispatchMark). */}
+          and the taskbar icon exactly (see ui/DispatchMark).
+
+          No ring. The mark already draws its own rounded plate, so an amber
+          ring around it was a second border on the same edge — at 24px it read
+          as a badge someone had outlined rather than as the app icon, and it
+          didn't appear on the favicon or the installed icon it's supposed to
+          match. Dropping it also frees the 2px it was eating, so the mark goes
+          to 32px: same footprint in the bar, a bigger actual logo. */}
       <div className="flex items-center gap-2 pr-1">
-        <DispatchMark
-          platedTheme
-          className="size-6 shrink-0 rounded-md ring-1 ring-accent-line"
-          title="Dispatch"
-        />
+        <DispatchMark platedTheme className="size-8 shrink-0" title="Dispatch" />
         {/* No version here. `v0.1` was a hardcoded stand-in that never moved and
             said nothing about the bundle you're running; the sidebar's build
             stamp does, so a second, permanently-wrong number next to the logo is
