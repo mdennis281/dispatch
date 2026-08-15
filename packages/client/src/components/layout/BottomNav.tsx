@@ -114,14 +114,11 @@ function SheetRow({
 /**
  * True while the caret is in a text field.
  *
- * A `fixed bottom-0` bar and a soft keyboard are a fight the bar always loses:
- * iOS shrinks the VISUAL viewport but not the layout viewport, so `bottom: 0`
- * stays pinned to the bottom of the page and the bar ends up behind the
- * keyboard — or, in the standalone PWA, floating halfway up the screen over the
- * transcript. Rather than track `visualViewport` (a resize storm on every
- * keyboard animation frame, and a second source of truth about the shell's
- * height), the bar simply stands down while you're typing: the composer is the
- * whole task at that moment, and the nav is one tap away again on blur.
+ * The shell shrinks to sit above the keyboard (`--cm-kb`, see
+ * lib/useKeyboardInset), so the bar would still be on screen while you type —
+ * eating 52px of an already-short window to offer four destinations you aren't
+ * going to. It stands down instead: the composer is the whole task at that
+ * moment, and the nav is one tap away again on blur.
  *
  * Focus-based rather than composer-specific so it also covers the rename input,
  * the transcript search field and every dialog input — all of which raise the
@@ -207,18 +204,40 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
 
   return (
     <>
+      {/* In flow as the app column's last row, not `fixed`: a `fixed bottom: 0`
+          bar resolves against the LAYOUT viewport while the column above it is
+          sized in `dvh`, so the two disagreed by the height of the URL bar and
+          left a dead band under the composer. As a sibling row there is no
+          second measurement to disagree with.
+
+          While you're typing the row collapses to nothing and only the home
+          indicator's inset is left — the standdown described above, now a
+          height change rather than a slide, since a bar translated off a box
+          that no longer extends under the keyboard would just be gone from the
+          layout's point of view anyway. */}
       <nav
         aria-label="Main"
+        // With the strip hidden this element is nothing but the home
+        // indicator's inset — an empty landmark for a screen reader to announce
+        // and offer to jump to.
+        aria-hidden={typing || undefined}
         style={{ zIndex: LAYER.bottomNav }}
         className={cn(
-          "fixed inset-x-0 bottom-0 flex cm-safe-b cm-safe-x border-t border-line bg-surface",
-          "transition-transform duration-150 ease-[var(--ease-out)] motion-reduce:transition-none",
-          typing && "pointer-events-none translate-y-full",
+          "relative flex shrink-0 cm-safe-b cm-safe-x bg-surface",
+          !typing && "border-t border-line",
         )}
       >
-        {/* The bar's own height is a variable so panes can reserve exactly it —
-            see `--cm-bottom-nav-space` in index.css. */}
-        <div className="flex h-[var(--cm-bottom-nav-h)] w-full items-stretch">
+        {/* The bar's own height is a variable so overlays that cover it can
+            reserve exactly it — see `--cm-bottom-nav-space` in index.css. */}
+        {/* `hidden`, not a zero height or a transform: a strip you can't see but
+            can still tab into and hear announced is worse than one that's gone.
+            Blur brings it straight back. */}
+        <div
+          className={cn(
+            "w-full items-stretch",
+            typing ? "hidden" : "flex h-[var(--cm-bottom-nav-h)]",
+          )}
+        >
           {mode === "sm" && canOpenLeft && (
             <NavSlot
               icon={<Menu />}

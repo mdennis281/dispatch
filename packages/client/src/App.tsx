@@ -25,6 +25,7 @@ import { visibleChat } from "./stores/navigation.js";
 import { useView } from "./stores/view.js";
 import { useLayout } from "./stores/layout.js";
 import { AuthGate } from "./components/auth/AuthGate.js";
+import { useKeyboardInset } from "./lib/useKeyboardInset.js";
 import { cn } from "./lib/cn.js";
 
 /**
@@ -72,6 +73,9 @@ export default function App() {
   const setLeftOpen = useLayout((s) => s.setLeftOpen);
   const setPane = useLayout((s) => s.setPane);
 
+  // Publishes `--cm-kb` — see below, and lib/useKeyboardInset.
+  useKeyboardInset();
+
   return (
     <AuthGate>
       {/* `100dvh`, not `100vh`. On mobile Safari `vh` is pinned to the LARGEST
@@ -79,22 +83,30 @@ export default function App() {
           the window whenever the bar is showing — and since this column is
           `overflow-hidden` with the composer at its bottom, the difference isn't
           a scroll, it's the composer being cut off the bottom of the screen.
-          `dvh` tracks the live viewport. */}
-      <div className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-app text-primary antialiased">
+          `dvh` tracks the live viewport.
+
+          …but only the URL bar. A soft keyboard shrinks the VISUAL viewport
+          and leaves the layout viewport (and therefore `dvh`) alone, so the
+          bottom of this column would sit behind the keyboard. `--cm-kb` is how
+          much the keyboard is covering; padding it off the column shrinks the
+          whole shell to what you can actually see, which puts the composer
+          directly on top of the keyboard instead of stranding it mid-screen.
+          It is 0px whenever no keyboard is up, so desktop is untouched. */}
+      <div
+        className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-app text-primary antialiased"
+        style={{ paddingBottom: "var(--cm-kb, 0px)" }}
+      >
       <TopBar />
       {/* `relative` so the two side drawers can be `absolute` to THIS box rather
           than the viewport — they slide in below the top bar, not over it. It
           adds no layout of its own, so `lg` is untouched. */}
-      <div
-        className="relative flex min-h-0 flex-1"
-        // Reserve the fixed bottom nav's strip so the composer and the last
-        // panel row aren't parked underneath it. A padding on the ROW, not a
-        // margin on the bar: the bar is `fixed` and takes no space, and putting
-        // the reservation here means it doesn't change while the bar slides away
-        // for the keyboard — a box that resized mid-animation would drive
-        // `Composer`'s ResizeObserver compaction loop.
-        style={mode === "lg" ? undefined : { paddingBottom: "var(--cm-bottom-nav-space)" }}
-      >
+      {/* No bottom-nav reservation here: the bar is a flex SIBLING of this row
+          rather than a `fixed` overlay, so the row already stops where the bar
+          starts. A reservation plus a `fixed bottom: 0` bar was two independent
+          guesses at the same edge — and they disagreed by whatever the layout
+          viewport and the dynamic viewport differed by, which is the dead band
+          that used to show up between the composer and the bar. */}
+      <div className="relative flex min-h-0 flex-1">
         {!fullBleed && (
           <Drawer
             open={leftOpen}
@@ -103,10 +115,7 @@ export default function App() {
             side="left"
             position="absolute"
             label="Chats and projects"
-            // The bottom nav sits above the drawer (it's how you close it), so
-            // the drawer reserves its strip or the pinned "New chat" button
-            // lands underneath the bar.
-            className="w-[86vw] max-w-[320px] pb-[var(--cm-bottom-nav-space)] cm-safe-x"
+            className="w-[86vw] max-w-[320px] cm-safe-x"
           >
             <Sidebar />
           </Drawer>
@@ -138,14 +147,7 @@ export default function App() {
                 // furniture.
                 modal={mode === "md"}
                 label="Ship and run"
-                // Padding rather than a `bottom` offset: `cn` is plain clsx with
-                // no tailwind-merge, so a `bottom-*` here would race the
-                // `inset-y-0` the Drawer sets by CSS source order rather than by
-                // the order they're written in.
-                className={cn(
-                  "pb-[var(--cm-bottom-nav-space)] cm-safe-x",
-                  mode === "sm" ? "w-full" : "w-[360px] max-w-full",
-                )}
+                className={cn("cm-safe-x", mode === "sm" ? "w-full" : "w-[360px] max-w-full")}
               >
                 <RightPanel chat={chat} />
               </Drawer>
@@ -156,7 +158,9 @@ export default function App() {
         </main>
       </div>
       {/* Outside `<main>`, and outside the `<aside>`s: it switches between all
-          three of them, so it can't live inside any one. */}
+          three of them, so it can't live inside any one. In FLOW as the column's
+          last row, so the space it occupies and the space it's given are the
+          same measurement rather than two that can drift apart. */}
       <BottomNav chat={chat ?? null} />
       {/* Overlays. Every one of these is open/closed by a single field in the
           view store (see stores/view.ts) rather than by the three bespoke
