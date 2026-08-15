@@ -60,9 +60,13 @@ export function registerUpdateRoutes(app: FastifyInstance): void {
     reply.raw.once("finish", () => {
       setTimeout(() => {
         void launchUpdate({ tag, appDir: payloadAppDir() }).catch((err: unknown) => {
-          // Nothing left to tell the client — it is already watching /api/health
-          // for a restart that will now never come. The server log is the only
-          // place this can be said.
+          // The latch has to come off: nothing was spawned, so this server is
+          // staying up, and leaving `installing: true` set would strand the UI
+          // on a restart that is never coming with no way to retry but a
+          // restart. A reloaded tab now sees the button again.
+          release.clearInstalling();
+          // Nothing left to tell the client directly — it is already polling
+          // /api/health. The server log is the only place this can be said.
           console.error("[Dispatch] update install failed to launch:", err);
         });
       }, SETTLE_MS).unref?.();

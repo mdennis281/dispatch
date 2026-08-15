@@ -250,6 +250,19 @@ export class ReleaseService {
   }
 
   /**
+   * Un-latch it when the launch never happened.
+   *
+   * The flag is set BEFORE the spawn so two clicks cannot race two installers at
+   * one `app/` rename — which means a spawn that throws (no Node on PATH, the
+   * bundled installer missing, a permission error) would otherwise leave this
+   * server reporting `installing: true` for the rest of its life, with the UI
+   * stuck on a restart that is never coming and no way to retry but a restart.
+   */
+  clearInstalling(): void {
+    this.installing = false;
+  }
+
+  /**
    * Check now, coalescing concurrent callers and floor-spacing manual clicks.
    * Never rejects: a failure is reported in the status, not thrown at a route.
    */

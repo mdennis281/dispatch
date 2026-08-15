@@ -75,7 +75,12 @@ async function withRelease(manifest: unknown, latestTag: string | null): Promise
 }
 
 beforeEach(async () => {
-  launchUpdate.mockClear();
+  // A full reset, not `mockClear`: the install route spawns 150ms AFTER its
+  // reply is flushed, so a previous test's launch can land during this one and
+  // would otherwise consume a `…Once` queued here — making this file's result
+  // depend on test order.
+  launchUpdate.mockReset();
+  launchUpdate.mockResolvedValue({ logFile: "", installerSource: "release" as const });
   dir = await mkdtemp(join(tmpdir(), "cm-update-"));
   bus = new EventBus();
 });
@@ -139,6 +144,21 @@ describe("POST /api/update/install", () => {
     // contract; a caller that gets a dropped socket cannot tell start from fail.
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.85068" });
+  });
+
+  it("un-latches when the installer never actually launches", async () => {
+    const release = await withRelease(MANIFEST, "v2026.08.14.85068");
+    launchUpdate.mockRejectedValue(new Error("node is not on PATH"));
+
+    const res = await app.inject({ method: "POST", url: "/api/update/install" });
+    expect(res.statusCode).toBe(200);
+
+    // The reply is flushed before the spawn is even attempted, so the failure
+    // lands after it. Without the un-latch this server reports installing:true
+    // forever and the UI waits for a restart that is never coming.
+    await vi.waitFor(() => expect(release.status().installing).toBeUndefined());
+    const retry = await app.inject({ method: "POST", url: "/api/update/install" });
+    expect(retry.statusCode).toBe(200);
   });
 
   it("refuses a second install once one is already running", async () => {

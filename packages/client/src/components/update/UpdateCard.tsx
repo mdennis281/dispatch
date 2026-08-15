@@ -42,7 +42,8 @@ export function UpdateCard() {
                 — you're on <span className="font-mono">v{status.installed.version}</span>
               </>
             )}
-            . Updating restarts the app; running agents keep working.
+            . Updating stops the app and starts it again — running agents stop with it,
+            and their transcripts are kept.
           </p>
           {error && <p className="mt-1 text-xs leading-snug text-danger">{error}</p>}
           <div className="mt-1.5 flex items-center gap-2">
