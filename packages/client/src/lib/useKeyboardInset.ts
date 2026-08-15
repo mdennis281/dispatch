@@ -42,10 +42,13 @@ export function useKeyboardInset(): void {
     const apply = () => {
       frame = 0;
       const kb = keyboardInset(window.innerHeight, vv.height, vv.offsetTop);
+      if (kb === last) return;
       // Sub-pixel churn during the keyboard animation would otherwise write a
       // new value on every frame and, through the shell's height, feed the
-      // Composer's ResizeObserver-driven toolbar compaction.
-      if (Math.abs(kb - last) < 2) return;
+      // Composer's ResizeObserver-driven toolbar compaction. Zero is exempt:
+      // it's the resting state, and a keyboard that dismissed from 1px would
+      // otherwise leave the shell permanently a pixel short.
+      if (kb !== 0 && Math.abs(kb - last) < 2) return;
       last = kb;
       document.documentElement.style.setProperty("--cm-kb", `${kb}px`);
     };

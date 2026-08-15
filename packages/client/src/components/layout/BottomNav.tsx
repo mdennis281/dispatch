@@ -217,6 +217,10 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
           layout's point of view anyway. */}
       <nav
         aria-label="Main"
+        // With the strip hidden this element is nothing but the home
+        // indicator's inset — an empty landmark for a screen reader to announce
+        // and offer to jump to.
+        aria-hidden={typing || undefined}
         style={{ zIndex: LAYER.bottomNav }}
         className={cn(
           "relative flex shrink-0 cm-safe-b cm-safe-x bg-surface",
