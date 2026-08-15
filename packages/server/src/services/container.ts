@@ -37,6 +37,7 @@ import { GitHubService } from "./github.js";
 import { Notifier } from "./notifier.js";
 import { AttentionQueue } from "./attention.js";
 import { UsageService } from "./usage.js";
+import { ReleaseService } from "./release.js";
 import { ResumeScheduler } from "./resume-scheduler.js";
 import { TrunkSyncService } from "./trunk-sync.js";
 import { PrReviewWatcher } from "./pr-review-watcher.js";
@@ -74,6 +75,7 @@ export interface ServiceOverrides {
   notifier?: Notifier;
   attention?: AttentionQueue;
   usage?: UsageService;
+  release?: ReleaseService;
   resume?: ResumeScheduler;
   fileIndex?: FileIndexService;
   trunkSync?: TrunkSyncService;
@@ -109,6 +111,8 @@ export interface Services extends ServiceBase {
   notifier: Notifier;
   attention: AttentionQueue;
   usage: UsageService;
+  /** Knows whether a newer Dispatch release exists, and can launch the installer. */
+  release: ReleaseService;
   /** Schedules a chat to continue itself once a usage limit lifts. */
   resume: ResumeScheduler;
   fileIndex: FileIndexService;
@@ -264,6 +268,9 @@ export function createServices(
   // Subscription usage (5h + weekly) for the header meter. Polls the account
   // OAuth usage endpoint once (server-side) and fans snapshots to every client.
   const usage = overrides.usage ?? new UsageService({ bus });
+  // "Is there a newer Dispatch than this one." Inert on a payload built from
+  // source: with no release-manifest.json there is nothing to compare against.
+  const release = overrides.release ?? new ReleaseService({ bus });
   // Backs the composer's file-path picker: the browser can't see the filesystem,
   // so real paths have to be listed server-side.
   const fileIndex = overrides.fileIndex ?? new FileIndexService();
@@ -388,6 +395,7 @@ export function createServices(
     notifier,
     attention,
     usage,
+    release,
     resume,
     fileIndex,
     trunkSync,
@@ -431,6 +439,9 @@ export function createServices(
       // Subscription usage polling (a missing token / offline just yields an
       // "unavailable" snapshot the header meter hides on).
       safeStart("usage", () => usage.start());
+      // Release polling. A no-op unless this payload came from a release, and
+      // its first check is deferred so an unreachable GitHub delays no boot.
+      safeStart("release", () => release.start());
       // Notices review rounds on PRs chats own — the half of the loop that
       // doesn't require an agent to keep asking.
       safeStart("prReviewWatcher", () => prReviewWatcher.start());
@@ -515,6 +526,7 @@ export function createServices(
       prReviewWatcher.dispose();
       await prReviewWatcher.drain().catch(() => {});
       usage.stop();
+      release.stop();
       // Disarm first so nothing new fires, then let an in-flight resume land
       // before the broker goes away under it.
       resume.dispose();

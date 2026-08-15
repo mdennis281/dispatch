@@ -3,8 +3,10 @@ import type { ReactNode } from "react";
 import { useNotices, type NoticeLevel } from "../stores/notices.js";
 import { InstallCard } from "./pwa/InstallCard.js";
 import { EnableNotificationsCard } from "./notify/EnableNotificationsCard.js";
+import { UpdateCard } from "./update/UpdateCard.js";
 import { useShouldOfferInstall } from "../lib/pwaInstall.js";
 import { useShouldAskToNotify } from "../lib/browserNotify.js";
+import { useShouldNudgeUpdate } from "../stores/update.js";
 import { cn } from "../lib/cn.js";
 import { LAYER } from "../lib/layers.js";
 
@@ -35,7 +37,8 @@ export function Toasts() {
   const dismiss = useNotices((s) => s.dismiss);
   const offerInstall = useShouldOfferInstall();
   const askNotify = useShouldAskToNotify();
-  if (toasts.length === 0 && !offerInstall && !askNotify) return null;
+  const nudgeUpdate = useShouldNudgeUpdate();
+  if (toasts.length === 0 && !offerInstall && !askNotify && !nudgeUpdate) return null;
 
   return (
     <div
@@ -70,9 +73,16 @@ export function Toasts() {
           </button>
         </div>
       ))}
-      {/* One standing card at a time: installing is the bigger upgrade, and it
-          carries the notification promise in its own copy anyway. */}
-      {offerInstall ? <InstallCard /> : askNotify ? <EnableNotificationsCard /> : null}
+      {/* One standing card at a time. An available update outranks both nudges:
+          it is the only one that goes stale, and the other two will still be
+          true after the restart. */}
+      {nudgeUpdate ? (
+        <UpdateCard />
+      ) : offerInstall ? (
+        <InstallCard />
+      ) : askNotify ? (
+        <EnableNotificationsCard />
+      ) : null}
     </div>
   );
 }

@@ -34,6 +34,7 @@ import type {
   GitStash,
   ProjectConfigResult,
   UsageSnapshot,
+  UpdateStatus,
   ContextUsage,
   ModelOption,
   WorkflowConfig,
@@ -700,6 +701,15 @@ export const api = {
 
   /* stop the whole app (see routes/shutdown.ts) */
   shutdown: () => post<{ ok: boolean; error?: string }>("/api/shutdown"),
+
+  /* in-app release updates (see routes/update.ts) */
+  update: {
+    get: () => get<UpdateStatus>("/api/update"),
+    /** Force a fresh GitHub check now (the "Check now" link). */
+    check: () => post<UpdateStatus>("/api/update/check"),
+    /** Launch the installer. The server goes down moments after this answers. */
+    install: () => post<{ ok: boolean; tag?: string; error?: string }>("/api/update/install"),
+  },
 
   /* subscription usage (5h + weekly) for the header meter */
   usage: {

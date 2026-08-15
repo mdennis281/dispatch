@@ -231,6 +231,64 @@ export const UsageUpdateEventSchema = z.object({
   usage: UsageSnapshotSchema,
 });
 
+/** The release this payload was built as, read from `app/release-manifest.json`. */
+export const InstalledReleaseSchema = z.object({
+  version: z.string(),
+  tag: z.string(),
+  sha: z.string().optional(),
+  builtAt: z.string().optional(),
+  /** When the installer put it here, from `current.json`. Absent on a hand-built payload. */
+  installedAt: z.string().optional(),
+});
+export type InstalledRelease = z.infer<typeof InstalledReleaseSchema>;
+
+/** The newest published release, as GitHub reports it. */
+export const LatestReleaseSchema = z.object({
+  version: z.string(),
+  tag: z.string(),
+  url: z.string(),
+  name: z.string().optional(),
+  publishedAt: z.string().optional(),
+});
+export type LatestRelease = z.infer<typeof LatestReleaseSchema>;
+
+/**
+ * Everything the update surfaces need in one object.
+ *
+ * `supported: false` is the honest answer for a dev checkout run from source:
+ * there is no `release-manifest.json`, so there is no installed release to
+ * compare against and no installer that would know what to replace. Clients hide
+ * every update affordance on it rather than showing a broken one.
+ *
+ * `available` is deliberately its own field rather than something the client
+ * derives: an unorderable tag pair (a semver release) must read as "no update",
+ * and duplicating that rule in the client is how the two drift apart.
+ */
+export const UpdateStatusSchema = z.object({
+  supported: z.boolean(),
+  installed: InstalledReleaseSchema.nullable(),
+  latest: LatestReleaseSchema.nullable(),
+  available: z.boolean(),
+  /** Ms epoch of the last completed check, or null if none has finished. */
+  checkedAt: z.number().int().nullable(),
+  /** Why the last check did not produce a result. The previous result is kept. */
+  error: z.string().optional(),
+  /** An install was launched from this server and it is on its way down. */
+  installing: z.boolean().optional(),
+});
+export type UpdateStatus = z.infer<typeof UpdateStatusSchema>;
+
+/**
+ * A newer release appeared. Global (no chatId), pushed the moment the poller
+ * first sees it so the nudge shows up without waiting for a reload — the check
+ * runs on an hours-long interval, and a tab left open would otherwise never
+ * learn about the release it is being asked to install.
+ */
+export const UpdateAvailableEventSchema = z.object({
+  type: z.literal("update-available"),
+  status: UpdateStatusSchema,
+});
+
 /** A transient toast/notice. */
 export const NoticeEventSchema = z.object({
   type: z.literal("notice"),
@@ -288,6 +346,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   MemoryUpdateEventSchema,
   MemoryDeletedEventSchema,
   UsageUpdateEventSchema,
+  UpdateAvailableEventSchema,
   NoticeEventSchema,
   ErrorEventSchema,
   ServerShutdownEventSchema,
