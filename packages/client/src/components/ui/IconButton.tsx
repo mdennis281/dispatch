@@ -30,7 +30,16 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(
           "inline-flex items-center justify-center rounded-sm border border-transparent " +
             "text-secondary transition-colors duration-150 ease-[var(--ease-out)] " +
             "hover:bg-active hover:text-primary disabled:pointer-events-none disabled:opacity-40",
-          active && "bg-selected text-primary",
+          // Selected is BRAND, not just "a bit brighter". `bg-selected` +
+          // `text-primary` differed from the hover state by a few percent of
+          // lightness, so on a phone — where the pressed button is under your
+          // thumb — you couldn't tell which overlay was open. The amber matches
+          // what the sidebar's NavButton and the bottom nav already do for the
+          // same idea, so one colour means "current" everywhere in the shell.
+          // `hover:` repeated because Tailwind emits hover variants after plain
+          // utilities: without it the base `hover:text-primary` would win and
+          // the selected button would drop its amber the moment you pointed at it.
+          active && "bg-accent-ghost text-accent-hi hover:text-accent-hi",
           sizes[size],
           className,
         )}
