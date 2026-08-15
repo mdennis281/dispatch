@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Tooltip } from "./Tooltip.js";
 import { cn } from "../../lib/cn.js";
+import { measureOverflow } from "../../lib/overflow.js";
 
 export interface OverflowTooltipProps {
   text: string;
@@ -28,8 +29,13 @@ export function OverflowTooltip({
     const node = ref.current;
     if (!node) return;
     const measure = () => {
-      const measuredWidth = measureRef.current?.scrollWidth ?? node.scrollWidth;
-      const next = measuredWidth > node.clientWidth + 1 || node.scrollHeight > node.clientHeight + 1;
+      const next = measureOverflow({
+        measuredWidth: measureRef.current?.scrollWidth ?? node.scrollWidth,
+        clientWidth: node.clientWidth,
+        scrollHeight: node.scrollHeight,
+        clientHeight: node.clientHeight,
+      });
+      if (next === null) return; // skipped subtree — keep the last real answer
       setOverflowing((current) => (current === next ? current : next));
     };
     measure();

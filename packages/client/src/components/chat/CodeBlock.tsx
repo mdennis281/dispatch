@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import tsLang from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
 import tsxLang from "react-syntax-highlighter/dist/esm/languages/prism/tsx";
@@ -46,8 +46,22 @@ export interface CodeBlockProps {
   className?: string;
 }
 
-/** Single-line highlighted code for dense previews (no frame or copy chrome). */
-export function InlineCode({ code, language = "shell" }: { code: string; language?: string }) {
+/**
+ * Single-line highlighted code for dense previews (no frame or copy chrome).
+ *
+ * Memoized because it is the most expensive leaf in the transcript and the most
+ * repeated: one per shell command, each render re-tokenizing through Prism and
+ * rebuilding a span-per-token tree. Its props are two strings, so a parent that
+ * re-renders for an unrelated reason (a token tick landing on the chat) now
+ * costs nothing here.
+ */
+export const InlineCode = memo(function InlineCode({
+  code,
+  language = "shell",
+}: {
+  code: string;
+  language?: string;
+}) {
   return (
     <SyntaxHighlighter
       language={language.toLowerCase()}
@@ -74,7 +88,7 @@ export function InlineCode({ code, language = "shell" }: { code: string; languag
       {code.split(/\r?\n/, 1)[0] ?? ""}
     </SyntaxHighlighter>
   );
-}
+});
 
 /** A framed, syntax-highlighted code block with a header + copy button. */
 export function CodeBlock({ code, language = "ts", filename, className }: CodeBlockProps) {
