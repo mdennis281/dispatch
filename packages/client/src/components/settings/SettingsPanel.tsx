@@ -28,6 +28,7 @@ import { positiveTokenLimit } from "../../lib/harness.js";
 import { SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
 import { ShellFilterPanel } from "../chat/ShellFilterPanel.js";
 import { AuthSettings } from "../auth/AuthSettings.js";
+import { UpdateBanner } from "../update/UpdateBanner.js";
 
 /** A compact token-styled on/off switch (no primitive exists yet). */
 function Switch({
@@ -321,6 +322,10 @@ export function SettingsPanel() {
       }
     >
       <div className="space-y-4">
+        {/* First, above auth: on a release install this is the one row whose answer
+            changes without anyone touching Settings, and it is where a dismissed
+            update stays reachable. Renders nothing on a build run from source. */}
+        <UpdateBanner />
         <AuthSettings />
         {/* appearance */}
         <div>

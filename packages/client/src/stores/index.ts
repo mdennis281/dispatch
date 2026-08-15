@@ -27,6 +27,7 @@ import { useConfig } from "./config.js";
 import { useCheckpoints } from "./checkpoints.js";
 import { useNotices } from "./notices.js";
 import { useUsage } from "./usage.js";
+import { useUpdate } from "./update.js";
 import { useModels } from "./models.js";
 import { useSettings } from "./settings.js";
 import { useHarnesses } from "./harnesses.js";
@@ -63,6 +64,7 @@ export { useCheckpoints, useHasCheckpoint } from "./checkpoints.js";
 export { useNotices } from "./notices.js";
 export type { Toast, NoticeLevel } from "./notices.js";
 export { useUsage } from "./usage.js";
+export { useUpdate } from "./update.js";
 export { useModels } from "./models.js";
 export { useSettings } from "./settings.js";
 export { useHarnesses } from "./harnesses.js";
@@ -276,6 +278,13 @@ export function applyServerEvent(evt: WsServerEvent): void {
       useUsage.getState().set(evt.usage);
       return;
 
+    case "update-available":
+      // The poller found a newer release. Pushed rather than polled by the
+      // client because the check runs on an hours-long interval, and a tab left
+      // open would otherwise never learn about it.
+      useUpdate.getState().set(evt.status);
+      return;
+
     case "notice":
       useNotices.getState().push({
         level: evt.level,
@@ -380,6 +389,10 @@ export async function hydrateFromServer(): Promise<boolean> {
         .then((models) => useModels.getState().setModels(models, harness));
     })
     .catch(() => {});
+  // Whether a newer release exists. Best-effort and never gating: an older
+  // server has no /api/update at all, and the surfaces all render nothing
+  // until a status arrives. Live `update-available` events keep it fresh.
+  void useUpdate.getState().load();
   useChats.getState().hydrate(chats);
   useAttention.getState().hydrate(attention);
   useRunners.getState().hydrate(runners, {});

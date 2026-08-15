@@ -40,6 +40,13 @@ installs runtime dependencies, and starts Dispatch at
 command again to update. Existing chats and
 configuration live outside the app payload and survive updates.
 
+An installed Dispatch checks for newer releases itself and offers to install one
+from a dismissable card; the same offer, plus the running build and a manual
+check, lives at the top of Settings. Choosing to update runs this installer
+detached, so it survives the shutdown it performs on the way through. A Dispatch
+run from a source checkout has no release to compare against and shows none of
+this.
+
 Every successful build of `main` is automatically tagged and published using the
 UTC build version displayed in the app (`vyyyy.mm.dd.sssss`). Re-running the
 release workflow for the same commit safely refreshes that release's assets.

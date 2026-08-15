@@ -45,18 +45,27 @@ Use GitHub Releases as the only production update channel. The existing bootstra
 and release artifact format remain the install engine; the app adds discovery,
 policy, and progress around them.
 
-1. Add a server-side release client with ETag caching, timeouts, anonymous-rate
-   handling, stable/prerelease channels, and semantic-version comparison.
-2. Check at startup and then at a bounded interval; never block app startup on
-   GitHub availability.
-3. Surface the current version, newest version, release notes, and last check in
-   Settings. Offer Download, Install on restart, Skip version, and Remind later.
-4. Run the release installer out-of-process so it survives the server's graceful
-   shutdown. Stream machine-readable phase updates into the UI.
-5. Preserve the current payload until the new server passes `/api/health`; roll
-   back automatically on extraction, dependency, launch, or readiness failure.
-6. Support an admin policy for automatic checks and automatic installation, with
-   metered-network and active-session safeguards.
+1. **Done.** Server-side release client with ETag caching, timeouts and
+   rate-limit handling, falling back to the `gh` CLI while the repo is private
+   (`packages/server/src/services/release.ts`). Build stamps are compared by
+   `compareBuildVersions`; an unorderable tag pair reads as "no update" rather
+   than guessing. Stable/prerelease channels are still outstanding — a draft or
+   prerelease is currently ignored, as the installer would refuse it anyway.
+2. **Done.** A deferred first check plus an unref'd interval, so GitHub being
+   unreachable delays nothing at startup.
+3. **Done.** A dismissable card (per-version, so the next release nudges again)
+   and a Settings row carrying the running build, the newest build and the last
+   check time, with a manual check. Release notes are still outstanding, as are
+   the Download / Install-on-restart split.
+4. **Done** for the out-of-process part
+   (`packages/server/src/services/update-install.ts`): the installer is spawned
+   detached, from outside `app/`, with its output captured to `update.log`.
+   Machine-readable phase streaming is still outstanding — the client watches
+   `/api/health` for the restart instead.
+5. Already the installer's behaviour (`tools/install.mjs`), unchanged by this
+   work: the previous payload is kept and restored on any post-swap failure.
+6. Outstanding. No admin policy, no automatic installation, and no metered-network
+   or active-session safeguards.
 
 Acceptance criteria:
 

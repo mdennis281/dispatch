@@ -18,6 +18,7 @@ import { SettingsPanel } from "./components/settings/SettingsPanel.js";
 import { ManageConfigDialog } from "./components/sidebar/ManageConfigDialog.js";
 import { Toasts } from "./components/Toasts.js";
 import { ShutdownScreen } from "./components/ShutdownScreen.js";
+import { UpdatingScreen } from "./components/update/UpdatingScreen.js";
 import { useChats } from "./stores/chats.js";
 import { useProjects, useActiveProject } from "./stores/projects.js";
 import { visibleChat } from "./stores/navigation.js";
@@ -170,6 +171,10 @@ export default function App() {
       <ManageConfigDialog />
       <Toasts />
       <ShutdownScreen />
+      {/* After ShutdownScreen so it wins the tie: an update DOES stop the server,
+          and "Dispatch has stopped, start it from the Start menu" is the wrong
+          thing to tell someone whose install is halfway through. */}
+      <UpdatingScreen />
       </div>
     </AuthGate>
   );
