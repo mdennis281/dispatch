@@ -44,22 +44,38 @@ export interface ResolvedShellFilter {
   projectId?: string;
 }
 
+/**
+ * Every category, as ONE array. Rebuilding `[...CATEGORIES]` per render would
+ * hand a fresh identity to the `useMemo` in every `ShellRunGroup`, so the default
+ * (nobody has filtered anything) would be the one case that never memoizes.
+ *
+ * Frozen because that shared identity is the whole point: this instance is handed
+ * out to every caller, so an in-place `sort`/`push` by any one of them would
+ * silently change the default filter for every chat in the app.
+ */
+const ALL_CATEGORIES = Object.freeze([...SHELL_TRANSCRIPT_CATEGORIES]) as ShellTranscriptFilter;
+
 /** Resolve chat → project → app; the app's absent value is every category on. */
 export function useShellFilter(chatId: string): ResolvedShellFilter {
-  const chat = useChats((s) => s.byId[chatId]);
+  // Select the two FIELDS, not the chat. A `ShellRunGroup` calls this per group,
+  // so subscribing to the whole chat object re-rendered every shell group in the
+  // transcript on every token/activity tick of a running chat — and each of those
+  // re-runs Prism over its commands. These two fields change when someone edits a
+  // filter, which is approximately never.
+  const chatFilter = useChats((s) => s.byId[chatId]?.shellFilter);
+  const projectId = useChats((s) => s.byId[chatId]?.projectId);
   const project = useProjects((s) =>
-    chat?.projectId ? s.projects.find((candidate) => candidate.id === chat.projectId) : undefined,
+    projectId ? s.projects.find((candidate) => candidate.id === projectId) : undefined,
   );
   const app = useSettings((s) => s.shellFilter);
   const projectFilter = project?.shellFilter;
-  const chatFilter = chat?.shellFilter;
   return {
-    enabled: chatFilter ?? projectFilter ?? app ?? [...SHELL_TRANSCRIPT_CATEGORIES],
-    app: app ?? [...SHELL_TRANSCRIPT_CATEGORIES],
+    enabled: chatFilter ?? projectFilter ?? app ?? ALL_CATEGORIES,
+    app: app ?? ALL_CATEGORIES,
     project: projectFilter,
     chat: chatFilter,
     source: chatFilter ? "chat" : projectFilter ? "project" : "app",
-    projectId: chat?.projectId,
+    projectId,
   };
 }
 
