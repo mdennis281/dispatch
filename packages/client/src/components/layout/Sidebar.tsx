@@ -128,9 +128,11 @@ function ProjectSelector({
               onClick={() => {
                 selectProject(p.id);
                 close();
-                // Every navigation out of the sidebar closes it on a phone: the
-                // drawer covers the thing you just navigated to.
-                dismissLeftDrawer();
+                // Deliberately NOT dismissLeftDrawer(): unlike the nav items below,
+                // switching project navigates you INTO the sidebar, not out of it.
+                // `selectProject` clears the open chat, so closing the drawer here
+                // left a phone staring at the empty state with the chat list it
+                // needs to pick from hidden behind a second tap.
               }}
             >
               {p.name}
