@@ -11,6 +11,7 @@ import {
   Blocks,
   FileCog,
   GitPullRequest,
+  Ruler,
 } from "lucide-react";
 import type { Chat } from "@dispatch/shared";
 import { Drawer } from "./Drawer.js";
@@ -24,6 +25,7 @@ import { useAttention } from "../../stores/attention.js";
 import { useProjectMemories } from "../../stores/memory.js";
 import { useProjects } from "../../stores/projects.js";
 import { useGitChangeCount } from "../../stores/git.js";
+import { useViewport } from "../../stores/viewport.js";
 import { LAYER } from "../../lib/layers.js";
 import { cn } from "../../lib/cn.js";
 
@@ -114,11 +116,11 @@ function SheetRow({
 /**
  * True while the caret is in a text field.
  *
- * The shell shrinks to sit above the keyboard (`--cm-kb`, see
- * lib/useKeyboardInset), so the bar would still be on screen while you type —
- * eating 52px of an already-short window to offer four destinations you aren't
- * going to. It stands down instead: the composer is the whole task at that
- * moment, and the nav is one tap away again on blur.
+ * The shell shrinks to sit above the keyboard (`--cm-kb`, see stores/viewport),
+ * so the bar would still be on screen while you type — eating 52px of an
+ * already-short window to offer four destinations you aren't going to. It
+ * stands down instead: the composer is the whole task at that moment, and the
+ * nav is one tap away again on blur.
  *
  * Focus-based rather than composer-specific so it also covers the rename input,
  * the transcript search field and every dialog input — all of which raise the
@@ -158,7 +160,18 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
   const view = useView((s) => s.view);
   const setView = useView((s) => s.setView);
   const counts = usePanelCounts(chat);
-  const typing = useTextEntryFocused();
+  // Focus and the keyboard are not the same event, and the gap between them is
+  // where the flicker lived. `focusout` fires the instant you tap away, but the
+  // keyboard then takes ~250ms to retract — bringing the bar back on `focusout`
+  // alone drops it into the space the keyboard is still occupying, and it jumps
+  // again when the retraction finishes. So: hide on focus (immediate, no wait
+  // for a keyboard that's still animating in), and only come back once the
+  // keyboard has actually gone.
+  const focused = useTextEntryFocused();
+  const kb = useViewport((s) => s.inset);
+  const typing = focused || kb > 0;
+  const debug = useViewport((s) => s.debug);
+  const toggleDebug = useViewport((s) => s.toggleDebug);
   const [moreOpen, setMoreOpen] = useState(false);
 
   const project = useProjects((s) => s.activeProjectId);
@@ -223,7 +236,13 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
         aria-hidden={typing || undefined}
         style={{ zIndex: LAYER.bottomNav }}
         className={cn(
-          "relative flex shrink-0 cm-safe-b cm-safe-x bg-surface",
+          "relative flex shrink-0 cm-safe-x bg-surface",
+          // The home indicator's inset only means anything when the home
+          // indicator is what's down there. With the keyboard up it's the
+          // keyboard, and iOS does not reliably zero the inset for you — so
+          // keeping the padding leaves a 34px band of nothing between the
+          // composer and the keys.
+          kb > 0 ? "pb-0" : "cm-safe-b",
           !typing && "border-t border-line",
         )}
       >
@@ -312,6 +331,16 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
           <SheetRow icon={<Blocks />} label="MCP tools" onClick={() => goOverlay("mcp")} />
           <SheetRow icon={<FileCog />} label="Project config" onClick={() => goOverlay("config")} />
           <SheetRow icon={<Settings />} label="Settings" onClick={() => goOverlay("settings")} />
+          <div className="my-1 h-px bg-line-soft" />
+          {/* An iPhone can't be inspected remotely from Windows, and the shell
+              bugs this diagnoses only happen in the installed PWA — no console,
+              no inspector, no URL bar to add a flag to. This row is the only way
+              in. Off by default and never persisted. */}
+          <SheetRow
+            icon={<Ruler />}
+            label={debug ? "Hide viewport readout" : "Viewport readout"}
+            onClick={toggleDebug}
+          />
           <div className="my-1 h-px bg-line-soft" />
           {/* The attention queue is a triage LIST, not a destination, so it keeps
               its popover rather than becoming a row that opens another sheet. */}

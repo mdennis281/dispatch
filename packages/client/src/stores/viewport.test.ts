@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { keyboardInset } from "./useKeyboardInset.js";
+import { keyboardInset } from "./viewport.js";
 
 describe("keyboardInset", () => {
   it("is zero with no keyboard up", () => {
@@ -33,5 +33,13 @@ describe("keyboardInset", () => {
 
   it("rounds to whole pixels", () => {
     expect(keyboardInset(932.4, 596.1, 0)).toBe(336);
+  });
+
+  it("reports nothing when the whole window shrank with the keyboard", () => {
+    // The standalone-PWA failure mode: `innerHeight` shrinks too, so there is
+    // no difference left to measure and the shell must NOT pad. Whether that
+    // is correct depends on whether `100dvh` shrank with it — which is why the
+    // debug overlay reports `dvh` and `inner` side by side.
+    expect(keyboardInset(596, 596, 0)).toBe(0);
   });
 });
