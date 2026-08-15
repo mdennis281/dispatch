@@ -23,8 +23,16 @@ import { LAYER } from "../../lib/layers.js";
  *    being told to shrink at all.
  */
 export function ViewportDebug() {
+  // Subscribes to `debug` ALONE. The tracker writes the store every frame for
+  // 600ms after each focus change, and this component is mounted for everyone —
+  // subscribing to the whole store would re-render the app's last child on
+  // every one of those frames to render null.
+  const debug = useViewport((s) => s.debug);
+  return debug ? <ViewportReadout /> : null;
+}
+
+function ViewportReadout() {
   const m = useViewport();
-  if (!m.debug) return null;
 
   const shrunk = m.maxInnerHeight - m.innerHeight;
   const rows: Array<[string, string, boolean]> = [

@@ -96,6 +96,11 @@ export function startViewportTracking(): () => void {
   let lastInset = -1;
 
   const apply = () => {
+    // Cancel rather than just forget: the burst loop calls `apply` directly, so
+    // clearing the id without cancelling would leave a live rAF nothing is
+    // tracking — one that fires after teardown and re-sets `--cm-kb` on a
+    // document the app has already left.
+    if (frame) cancelAnimationFrame(frame);
     frame = 0;
     const innerHeight = window.innerHeight;
     const vvHeight = vv?.height ?? innerHeight;
