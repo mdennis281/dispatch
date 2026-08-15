@@ -48,8 +48,12 @@ export interface ResolvedShellFilter {
  * Every category, as ONE array. Rebuilding `[...CATEGORIES]` per render would
  * hand a fresh identity to the `useMemo` in every `ShellRunGroup`, so the default
  * (nobody has filtered anything) would be the one case that never memoizes.
+ *
+ * Frozen because that shared identity is the whole point: this instance is handed
+ * out to every caller, so an in-place `sort`/`push` by any one of them would
+ * silently change the default filter for every chat in the app.
  */
-const ALL_CATEGORIES: ShellTranscriptFilter = [...SHELL_TRANSCRIPT_CATEGORIES];
+const ALL_CATEGORIES = Object.freeze([...SHELL_TRANSCRIPT_CATEGORIES]) as ShellTranscriptFilter;
 
 /** Resolve chat → project → app; the app's absent value is every category on. */
 export function useShellFilter(chatId: string): ResolvedShellFilter {
