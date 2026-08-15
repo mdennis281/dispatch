@@ -1,5 +1,35 @@
 import { describe, it, expect } from "vitest";
-import { keyboardInset } from "./viewport.js";
+import { keyboardInset, standaloneShellHeight } from "./viewport.js";
+
+describe("standaloneShellHeight", () => {
+  it("stays out of the way in a browser tab", () => {
+    // A shrinking window there means the URL bar came back, which the shell
+    // must follow. 0 tells the caller to leave it on `100dvh`.
+    expect(standaloneShellHeight(false, 873, 932)).toBe(0);
+  });
+
+  it("stays out of the way until a shrink is actually observed", () => {
+    expect(standaloneShellHeight(true, 932, 932)).toBe(0);
+  });
+
+  it("pins to the pre-shrink height once the window drops", () => {
+    // The iOS standalone bug: ~59px gone the first time the keyboard opens,
+    // never returned. This is the whole fix — 932, not the reported 873.
+    expect(standaloneShellHeight(true, 873, 932)).toBe(932);
+  });
+
+  it("ignores a rounding-sized wobble", () => {
+    // Pinning the shell a pixel taller than the window would make the document
+    // scrollable for no reason.
+    expect(standaloneShellHeight(true, 929, 932)).toBe(0);
+  });
+
+  it("keeps the correction while the keyboard is up", () => {
+    // `innerHeight` does not move with the keyboard, so the deficit — and the
+    // correction — persist across the whole typing session.
+    expect(standaloneShellHeight(true, 873, 932)).toBe(932);
+  });
+});
 
 describe("keyboardInset", () => {
   it("is zero with no keyboard up", () => {

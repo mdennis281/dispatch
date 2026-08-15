@@ -93,10 +93,21 @@ export default function App() {
           much the keyboard is covering; padding it off the column shrinks the
           whole shell to what you can actually see, which puts the composer
           directly on top of the keyboard instead of stranding it mid-screen.
-          It is 0px whenever no keyboard is up, so desktop is untouched. */}
+          It is 0px whenever no keyboard is up, so desktop is untouched.
+
+          …and `dvh` itself lies in an installed iOS PWA. The first time the
+          keyboard opens, WebKit shrinks the window by ~59px and never gives it
+          back — `innerHeight`, `visualViewport` and `100dvh` all move together,
+          so the shell has no way to notice in the moment and just renders 59px
+          short of the screen for the rest of the session. That is the dead band
+          at the bottom, and it's also why the composer sat 60px above the
+          keyboard: `--cm-kb` was right, but it was being subtracted from a
+          height that was already wrong. `--cm-vh` is the tallest the window has
+          ever been (see stores/viewport), and it is only set once a shrink has
+          actually been observed — everywhere else this falls back to `dvh`. */}
       <div
-        className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-app text-primary antialiased"
-        style={{ paddingBottom: "var(--cm-kb, 0px)" }}
+        className="flex w-screen flex-col overflow-hidden bg-app text-primary antialiased"
+        style={{ height: "var(--cm-vh, 100dvh)", paddingBottom: "var(--cm-kb, 0px)" }}
       >
       <TopBar />
       {/* `relative` so the two side drawers can be `absolute` to THIS box rather
