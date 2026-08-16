@@ -64,6 +64,23 @@ jobs:
           set -euo pipefail
           if [ -n "$REQUESTED" ]; then
             TAG="$REQUESTED"
+            # The auto-resolve path below filters to build stamps; this one has
+            # to do it explicitly, and it is not a formality. `compareBuildVersions`
+            # answers `null` — "not orderable" — for anything else, and the server
+            # reads that as "no update". Promoting a semver tag to `--latest` would
+            # therefore leave every stable subscriber pinned to a version they can
+            # never be offered a move away from, with no error anywhere.
+            #
+            # docs/ROADMAP.md still plans a hand-cut `v0.1.0` before the first
+            # public release, so this is a tag someone will one day really type.
+            case "$TAG" in
+              v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9][0-9][0-9][0-9][0-9]) ;;
+              *)
+                echo "Refusing to promote '$TAG': stable must be a build stamp (vYYYY.MM.DD.SSSSS)." >&2
+                echo "The updater cannot order any other tag shape and would offer no update at all." >&2
+                exit 1
+                ;;
+            esac
           else
             # Newest prerelease by tag name. Build stamps are zero-padded
             # precisely so a lexical sort is a version sort (see
