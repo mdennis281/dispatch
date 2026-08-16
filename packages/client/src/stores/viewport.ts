@@ -10,6 +10,11 @@
  * the only way to see these on the device where they misbehave.
  */
 import { create } from "zustand";
+// Whether we're installed is the same question the install card asks, so it
+// gets the same answer — including `window-controls-overlay`, which this
+// manifest requests FIRST, and iOS's pre-standard `navigator.standalone`. Two
+// definitions of "installed" would disagree exactly where it matters.
+import { isStandalone } from "../lib/pwaInstall.js";
 
 export interface ViewportMetrics {
   /** What the shell subtracts — see `keyboardInset`. */
@@ -53,11 +58,14 @@ const EMPTY: ViewportMetrics = {
 };
 
 interface ViewportStore extends ViewportMetrics {
-  /** Highest `innerHeight` seen this session — see `ViewportDebug`. */
+  /**
+   * The tallest `innerHeight` seen at the current width — the shell's height in
+   * a standalone PWA. See `standaloneShellHeight`.
+   */
   maxInnerHeight: number;
   debug: boolean;
   toggleDebug: () => void;
-  set: (m: ViewportMetrics) => void;
+  set: (m: ViewportMetrics, maxInnerHeight: number) => void;
 }
 
 export const useViewport = create<ViewportStore>((set) => ({
@@ -67,8 +75,37 @@ export const useViewport = create<ViewportStore>((set) => ({
   // diagnostic overlay that survives a reload is one you forget you left on.
   debug: false,
   toggleDebug: () => set((s) => ({ debug: !s.debug })),
-  set: (m) => set((s) => ({ ...m, maxInnerHeight: Math.max(s.maxInnerHeight, m.innerHeight) })),
+  set: (m, maxInnerHeight) => set({ ...m, maxInnerHeight }),
 }));
+
+/**
+ * How tall the shell should be, given everything seen so far.
+ *
+ * The iOS standalone bug shrinks `innerHeight` — and `100dvh` with it — by ~59px
+ * the first time the keyboard opens, permanently. Nothing recovers it, and the
+ * shell can't detect it in the moment because every number it can read moves
+ * together. What DOESN'T move is the tallest value seen before the keyboard was
+ * ever raised, so that becomes the height and the post-shrink readings are
+ * discarded as the lie they are.
+ *
+ * Returns 0 when there's nothing to correct — the caller then leaves the shell
+ * on plain `100dvh`, which is right everywhere the bug isn't.
+ *
+ * `standalone` decides whether a shrink is a bug at all: in a browser tab it
+ * means the URL bar came back, which the shell must FOLLOW or the composer ends
+ * up underneath it. Installed, there is no URL bar and nothing that can
+ * legitimately take the height, so the same shrink is the WebKit bug.
+ */
+export function standaloneShellHeight(
+  standalone: boolean,
+  innerHeight: number,
+  maxInnerHeight: number,
+): number {
+  if (!standalone) return 0;
+  // A 1-2px wobble is rounding, not the bug, and pinning the shell a pixel
+  // taller than the window would make the document scrollable for no reason.
+  return maxInnerHeight - innerHeight > 4 ? maxInnerHeight : 0;
+}
 
 /**
  * A hidden element whose only job is to be measured.
@@ -92,8 +129,15 @@ export function startViewportTracking(): () => void {
   const dvhProbe = makeProbe("100dvh");
   const safeProbe = makeProbe("env(safe-area-inset-bottom, 0px)");
 
+  const standalone = isStandalone();
   let frame = 0;
   let lastInset = -1;
+  let lastVh = -1;
+  // Reset per width: a rotation swaps the dimensions, so a portrait maximum is
+  // not a landscape one and carrying it over would pin the shell taller than
+  // the screen.
+  let maxWidth = window.innerWidth;
+  let maxInnerHeight = 0;
 
   const apply = () => {
     // Cancel rather than just forget: the burst loop calls `apply` directly, so
@@ -107,6 +151,22 @@ export function startViewportTracking(): () => void {
     const vvOffsetTop = vv?.offsetTop ?? 0;
     const inset = keyboardInset(innerHeight, vvHeight, vvOffsetTop);
 
+    if (window.innerWidth !== maxWidth) {
+      maxWidth = window.innerWidth;
+      maxInnerHeight = 0;
+    }
+    maxInnerHeight = Math.max(maxInnerHeight, innerHeight);
+
+    // `--cm-vh` is the shell's height, and it is DELIBERATELY absent unless the
+    // window has demonstrably shrunk under us: `height: var(--cm-vh, 100dvh)`
+    // then falls back to the unit that is correct everywhere the bug isn't.
+    const vh = standaloneShellHeight(standalone, innerHeight, maxInnerHeight);
+    if (vh !== lastVh) {
+      lastVh = vh;
+      if (vh > 0) document.documentElement.style.setProperty("--cm-vh", `${vh}px`);
+      else document.documentElement.style.removeProperty("--cm-vh");
+    }
+
     if (inset !== lastInset) {
       // Sub-pixel churn during the keyboard animation would otherwise write a
       // new value every frame and, through the shell's height, feed the
@@ -119,17 +179,20 @@ export function startViewportTracking(): () => void {
       }
     }
 
-    useViewport.getState().set({
-      inset: lastInset < 0 ? inset : lastInset,
-      innerHeight,
-      vvHeight: Math.round(vvHeight),
-      vvOffsetTop: Math.round(vvOffsetTop),
-      vvScale: vv?.scale ?? 1,
-      clientHeight: document.documentElement.clientHeight,
-      dvh: Math.round(dvhProbe.getBoundingClientRect().height),
-      safeBottom: Math.round(safeProbe.getBoundingClientRect().height),
-      screenHeight: window.screen.height,
-    });
+    useViewport.getState().set(
+      {
+        inset: lastInset < 0 ? inset : lastInset,
+        innerHeight,
+        vvHeight: Math.round(vvHeight),
+        vvOffsetTop: Math.round(vvOffsetTop),
+        vvScale: vv?.scale ?? 1,
+        clientHeight: document.documentElement.clientHeight,
+        dvh: Math.round(dvhProbe.getBoundingClientRect().height),
+        safeBottom: Math.round(safeProbe.getBoundingClientRect().height),
+        screenHeight: window.screen.height,
+      },
+      maxInnerHeight,
+    );
   };
 
   const schedule = () => {
@@ -179,5 +242,6 @@ export function startViewportTracking(): () => void {
     dvhProbe.remove();
     safeProbe.remove();
     document.documentElement.style.removeProperty("--cm-kb");
+    document.documentElement.style.removeProperty("--cm-vh");
   };
 }

@@ -1,4 +1,5 @@
-import { useViewport } from "../../stores/viewport.js";
+import { useViewport, standaloneShellHeight } from "../../stores/viewport.js";
+import { isStandalone } from "../../lib/pwaInstall.js";
 import { LAYER } from "../../lib/layers.js";
 
 /**
@@ -35,7 +36,11 @@ function ViewportReadout() {
   const m = useViewport();
 
   const shrunk = m.maxInnerHeight - m.innerHeight;
+  const vh = standaloneShellHeight(isStandalone(), m.innerHeight, m.maxInnerHeight);
   const rows: Array<[string, string, boolean]> = [
+    // What the shell is ACTUALLY sized to, and why — the one line that says
+    // whether the correction is engaged.
+    ["shell", vh > 0 ? `${vh} (fixed)` : `${m.dvh} (dvh)`, vh > 0],
     ["kb", `${m.inset}`, m.inset > 0],
     ["inner", `${m.innerHeight}${shrunk > 2 ? ` (-${shrunk} of ${m.maxInnerHeight})` : ""}`, shrunk > 2],
     ["vv", `${m.vvHeight}`, false],
