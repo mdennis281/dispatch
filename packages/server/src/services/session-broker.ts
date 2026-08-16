@@ -73,6 +73,14 @@ import type { EventBus } from "../bus.js";
 import type { TerminalService } from "./terminal.js";
 import type { MemoryService } from "./memory.js";
 import type { MemoryHistoryService } from "./memory-history.js";
+import type {
+  FindChatsQuery,
+  FindChatsResult,
+  ProjectInfoQuery,
+  ProjectInfoResult,
+  ReadChatQuery,
+  ReadChatResult,
+} from "./inspect.js";
 import type { GitHubService } from "./github.js";
 import type { RunnerService } from "./runner.js";
 import type { WorktreeService } from "./worktree.js";
@@ -577,6 +585,18 @@ export interface BrokerProjectConfig {
   getSpawnAutoApprove?(projectId: string): boolean | null;
 }
 
+/**
+ * The read-only inspection surface, narrowed to what a session needs. Mirrors
+ * {@link ManagerMcpInspect} except that `projectInfo` also takes the CALLER's
+ * project id — the tool lets the agent omit `project` and mean "my own", and
+ * only the broker knows which that is.
+ */
+export interface BrokerInspect {
+  findChats(q: FindChatsQuery): Promise<FindChatsResult>;
+  readChat(q: ReadChatQuery): Promise<ReadChatResult>;
+  projectInfo(q: ProjectInfoQuery, callerProjectId?: string): Promise<ProjectInfoResult>;
+}
+
 export interface SessionBrokerOptions {
   store: Store;
   bus: EventBus;
@@ -602,6 +622,8 @@ export interface SessionBrokerOptions {
   harnesses?: HarnessRegistry;
   /** HTTP front door for Dispatch's manager MCP tools (required by Codex). */
   managerMcp?: ManagerMcpBridge;
+  /** Read-only cross-chat inspection behind `chat_find`/`chat_read`/`project_info`. */
+  inspect?: BrokerInspect;
   /**
    * Called when a turn ends in ERROR, with the SDK's message. The broker doesn't
    * interpret it — the ResumeScheduler decides whether it was a usage limit and
@@ -1214,6 +1236,7 @@ export class SessionBroker {
   private readonly projectConfig?: BrokerProjectConfig;
   private readonly harnesses?: HarnessRegistry;
   private readonly managerMcp?: ManagerMcpBridge;
+  private readonly inspect?: BrokerInspect;
   /** Settable after construction — the scheduler is built after the broker. */
   onTurnError?: (chatId: string, reason: string | undefined) => void;
   /**
@@ -1257,6 +1280,7 @@ export class SessionBroker {
     this.projectConfig = opts.projectConfig;
     this.harnesses = opts.harnesses;
     this.managerMcp = opts.managerMcp;
+    this.inspect = opts.inspect;
     this.onTurnError = opts.onTurnError;
     this.query = opts.deps?.query ?? (sdkQuery as unknown as QueryFn);
     this.genId = opts.deps?.genId ?? (() => nanoid());
@@ -4123,6 +4147,17 @@ export class SessionBroker {
         // agent adds while working in a throwaway worktree has to land in the
         // real working copy or it vanishes with the worktree.
         mcpConfig: project?.repoPath ? createMcpConfigEditor(project.repoPath) : undefined,
+        // Read-only inspection of the whole store. Deliberately NOT scoped to
+        // this chat's project — the point is to reach work that happened
+        // somewhere else. Only `project_info`'s default is bound to the caller,
+        // so omitting `project` means "mine" rather than "all of them".
+        inspect: this.inspect
+          ? {
+              findChats: (q) => this.inspect!.findChats(q),
+              readChat: (q) => this.inspect!.readChat(q),
+              projectInfo: (q) => this.inspect!.projectInfo(q, projectId),
+            }
+          : undefined,
         signal: session.abortController?.signal,
         now: this.now,
       }),
