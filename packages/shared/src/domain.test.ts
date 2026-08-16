@@ -31,6 +31,10 @@ describe("isPrSettledIdle", () => {
     expect(isPrSettledIdle(chat({ lastUserMessageAt: 500 }))).toBe(true);
   });
 
+  it("treats a chat with no recorded status as idle", () => {
+    expect(isPrSettledIdle({ prs: [MERGED], updatedAt: 900, lastUserMessageAt: 100 })).toBe(true);
+  });
+
   it("is false with no PRs, or only open ones", () => {
     expect(isPrSettledIdle(chat({ prs: [] }))).toBe(false);
     expect(isPrSettledIdle(chat({ prs: [OPEN] }))).toBe(false);

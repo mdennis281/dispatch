@@ -1915,7 +1915,13 @@ export class SessionBroker {
       const chat = await this.store.getChat(chatId);
       if (!chat?.prs?.some((p) => p.number === pr.number)) return;
       const prs = chat.prs.map((p) =>
-        p.number === pr.number ? { ...p, state: pr.state, settledAt: this.now() } : p,
+        p.number === pr.number
+          ? // FIRST observation wins. Re-stamping on a later look (a second
+            // watch_pr over an already-merged PR) would push `settledAt` past
+            // user messages that came after the real merge, and the dot would
+            // wrongly go green again on the next reload.
+            { ...p, state: pr.state, settledAt: p.settledAt ?? this.now() }
+          : p,
       );
       // patchChat, not saveChat: settling a PR is bookkeeping, not conversational
       // activity, so it must not bump the chat up the sidebar's recency sort.

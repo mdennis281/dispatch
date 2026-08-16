@@ -397,7 +397,9 @@ export type Chat = z.infer<typeof ChatSchema>;
  * `prWatchSettled` is the live echo of this; this is the durable truth.
  */
 export function isPrSettledIdle(chat: Pick<Chat, "status" | "prs" | "updatedAt" | "lastUserMessageAt">): boolean {
-  if (chat.status !== "idle") return false;
+  // Absent status means idle, matching what session creation assumes — a legacy
+  // chat that never recorded one must not be locked out of the green dot.
+  if ((chat.status ?? "idle") !== "idle") return false;
   let settledAt: number | undefined;
   for (const pr of chat.prs ?? []) {
     if (pr.state !== "merged" && pr.state !== "closed") continue;
