@@ -120,6 +120,20 @@ describe("file tool presentations", () => {
       action: "search",
       pattern: "toolPresentation",
       scope: "packages",
+      filter: undefined,
+    });
+    // The directory and the glob narrow a Grep in different ways, so neither
+    // one shadows the other — the old shape dropped the glob whenever a path
+    // was also given.
+    expect(
+      toolPresentation(tool("Grep", { pattern: "useMemo", path: "C:/repo/src", glob: "**/*.tsx" })),
+    ).toEqual({
+      kind: "file",
+      tool: "Grep",
+      action: "search",
+      pattern: "useMemo",
+      scope: "C:/repo/src",
+      filter: "**/*.tsx",
     });
     // A Glob's pattern IS its scope — repeating it would read as a filter on itself.
     expect(toolPresentation(tool("Glob", { glob: "**/*.tsx" }))).toEqual({
@@ -128,6 +142,7 @@ describe("file tool presentations", () => {
       action: "search",
       pattern: "**/*.tsx",
       scope: undefined,
+      filter: undefined,
     });
   });
 
