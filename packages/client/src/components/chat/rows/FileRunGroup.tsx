@@ -95,6 +95,9 @@ function StatCell({
 }) {
   if (state === "running") return <Spinner size={9} />;
   if (state === "failed") return <X className="size-3 text-danger" />;
+  // A stopped call was interrupted mid-flight: whatever stat we could compute
+  // describes what it INTENDED to do, so showing it would read as completed.
+  if (state === "stopped") return <span className="text-muted">stopped</span>;
   if (!stat) return <span className="text-faint">·</span>;
 
   if (action === "edit" || action === "write") {
@@ -306,15 +309,20 @@ export const FileRunGroup = memo(function FileRunGroup({ entries }: { entries: F
     let added = 0;
     let removed = 0;
     let touched = 0;
-    let looked = 0;
+    let read = 0;
+    let searched = 0;
     let failed = false;
     let running = false;
     for (const { entry, presentation } of rows) {
       const state = toolCallState(entry.result, entry.task);
       if (state === "failed") failed = true;
       if (state === "running") running = true;
-      if (presentation.action === "read" || presentation.action === "search") {
-        looked++;
+      if (presentation.action === "read") {
+        read++;
+        continue;
+      }
+      if (presentation.action === "search") {
+        searched++;
         continue;
       }
       touched++;
@@ -322,14 +330,17 @@ export const FileRunGroup = memo(function FileRunGroup({ entries }: { entries: F
       added += stat?.added ?? 0;
       removed += stat?.removed ?? 0;
     }
-    return { added, removed, touched, looked, failed, running };
+    return { added, removed, touched, read, searched, failed, running };
   }, [rows]);
 
   if (!rows.length) return null;
 
+  // Counted separately because they are named separately: a Grep is not a read,
+  // and folding both into "4 reads" describes a run that did not happen.
   const counts = [
     summary.touched ? `${summary.touched} change${summary.touched === 1 ? "" : "s"}` : "",
-    summary.looked ? `${summary.looked} read${summary.looked === 1 ? "" : "s"}` : "",
+    summary.read ? `${summary.read} read${summary.read === 1 ? "" : "s"}` : "",
+    summary.searched ? `${summary.searched} search${summary.searched === 1 ? "" : "es"}` : "",
   ].filter(Boolean);
 
   return (
