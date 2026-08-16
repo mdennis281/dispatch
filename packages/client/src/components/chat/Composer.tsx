@@ -55,6 +55,7 @@ import { Tooltip } from "../ui/Tooltip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { cn } from "../../lib/cn.js";
+import { composerPlaceholder } from "../../lib/submitHint.js";
 import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
 import { useHarnesses } from "../../stores/harnesses.js";
@@ -337,10 +338,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ heading: false }),
-      Placeholder.configure({
-        placeholder:
-          "Message agent — ⌘↵ to send, ⇧↵ for newline. Paste an image to attach, drop a file for its path.",
-      }),
+      Placeholder.configure({ placeholder: composerPlaceholder() }),
     ],
     content: "",
     // The composer is plain text: what you type is what you send, verbatim. Input
