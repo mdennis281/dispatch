@@ -270,7 +270,22 @@ export function createServices(
   const usage = overrides.usage ?? new UsageService({ bus });
   // "Is there a newer Dispatch than this one." Inert on a payload built from
   // source: with no release-manifest.json there is nothing to compare against.
-  const release = overrides.release ?? new ReleaseService({ bus });
+  // The channel subscription is read/written through the settings store because
+  // it lives in `config/`, the one directory an update never replaces.
+  const release =
+    overrides.release ??
+    new ReleaseService({
+      bus,
+      channelStore: {
+        read: async () => (await store.getSettings()).updateChannel ?? "stable",
+        write: async (updateChannel) => {
+          // Read-modify-write against the CURRENT settings, not a captured copy:
+          // this runs whenever the user flips the switch, long after boot.
+          const current = await store.getSettings();
+          await store.saveSettings({ ...current, updateChannel });
+        },
+      },
+    });
   // Backs the composer's file-path picker: the browser can't see the filesystem,
   // so real paths have to be listed server-side.
   const fileIndex = overrides.fileIndex ?? new FileIndexService();
@@ -441,6 +456,9 @@ export function createServices(
       safeStart("usage", () => usage.start());
       // Release polling. A no-op unless this payload came from a release, and
       // its first check is deferred so an unreachable GitHub delays no boot.
+      // Hydrate the channel FIRST — a check that ran before the subscription
+      // loaded would ask the stable endpoint on behalf of an unstable install.
+      await release.hydrate().catch(() => {});
       safeStart("release", () => release.start());
       // Notices review rounds on PRs chats own — the half of the loop that
       // doesn't require an agent to keep asking.

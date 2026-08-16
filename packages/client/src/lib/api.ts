@@ -35,6 +35,7 @@ import type {
   ProjectConfigResult,
   UsageSnapshot,
   UpdateStatus,
+  UpdateChannel,
   ContextUsage,
   ModelOption,
   WorkflowConfig,
@@ -707,8 +708,19 @@ export const api = {
     get: () => get<UpdateStatus>("/api/update"),
     /** Force a fresh GitHub check now (the "Check now" link). */
     check: () => post<UpdateStatus>("/api/update/check"),
-    /** Launch the installer. The server goes down moments after this answers. */
-    install: () => post<{ ok: boolean; tag?: string; error?: string }>("/api/update/install"),
+    /** Subscribe to a channel. Answers with the new channel's head already resolved. */
+    setChannel: (channel: UpdateChannel) =>
+      put<UpdateStatus>("/api/update/channel", { channel }),
+    /**
+     * Launch the installer. The server goes down moments after this answers.
+     * `tag` names the channel head explicitly, which is the only way to ask for
+     * a step-back — the server refuses any tag that is not that head.
+     */
+    install: (tag?: string) =>
+      post<{ ok: boolean; tag?: string; error?: string }>(
+        "/api/update/install",
+        tag ? { tag } : undefined,
+      ),
   },
 
   /* subscription usage (5h + weekly) for the header meter */

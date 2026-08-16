@@ -40,6 +40,35 @@ reason `data/` is split while `config/` is shared, and why
 
 Both publish the **committed** sha. A dirty tree is warned about, never included.
 
+## Releasing vs promoting. A channel is the prerelease flag.
+
+Neither of the two scripts above is how a build reaches a user. That is GitHub
+Releases, and there are two channels:
+
+- **unstable** — `.github/workflows/release.yml`, on every merge to `main`, as a
+  `--prerelease`. Nothing gates it beyond the release job's own build/test.
+- **stable** — `.github/workflows/promote.yml`, `workflow_dispatch` only. It
+  re-runs the full gate against an existing prerelease's sha and then **flips
+  that same release** with `gh release edit --prerelease=false --latest`.
+
+It promotes rather than rebuilds so the stable tarball is byte-for-byte the one
+that was tested as unstable. Do not "fix" this into a second build — a rebuild
+means the stable bits are not the tested bits, and adds a second way for a
+release to be half-published.
+
+Consequences worth remembering:
+
+- `releases/latest` IS the stable channel; GitHub excludes prereleases from it
+  server-side, so no code has to remember to filter.
+- Re-running `release.yml` on an existing tag uploads assets with `--clobber` and
+  deliberately does **not** set the prerelease flag — doing so would retract an
+  already-promoted release.
+- `retention.yml` deletes prereleases past 90 days, keeping the newest 10
+  whatever their age. It never touches a non-prerelease.
+- The subscription is `AppSettings.updateChannel` in `config/`, which install and
+  upgrade never replace. `PUT /api/settings` is a full replace, so it preserves
+  that field by hand — exactly as it does for `auth`.
+
 ## Spawning `pnpm` from Node needs `shell: true`.
 
 It is a `.cmd` shim on Windows, and since the CVE-2024-27980 fix Node refuses to

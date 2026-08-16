@@ -6,7 +6,7 @@
  * "nothing to show", so no update affordance can appear on the dev instance.
  */
 import { create } from "zustand";
-import type { UpdateStatus } from "@dispatch/shared";
+import type { UpdateChannel, UpdateStatus } from "@dispatch/shared";
 import { api } from "../lib/api.js";
 import { dismissVersion, dismissedVersion } from "../lib/updatePrefs.js";
 
@@ -16,6 +16,8 @@ interface UpdateStore {
   loaded: boolean;
   /** A manual "Check now" is in flight. */
   checking: boolean;
+  /** A channel switch is in flight — it re-checks server-side, so it is not instant. */
+  switching: boolean;
   /** The install request has been accepted; the server is on its way down. */
   installing: boolean;
   /** Version the user dismissed, mirrored into state so the card re-renders. */
@@ -25,8 +27,14 @@ interface UpdateStore {
   set: (status: UpdateStatus) => void;
   load: () => Promise<void>;
   check: () => Promise<void>;
-  /** Ask the server to install. Resolves false with a reason if it refused. */
-  install: () => Promise<{ ok: boolean; error?: string }>;
+  /** Subscribe to a channel; resolves once the new channel's head is known. */
+  setChannel: (channel: UpdateChannel) => Promise<void>;
+  /**
+   * Ask the server to install. Resolves false with a reason if it refused.
+   * `tag` names the channel head explicitly — the only way to ask for a
+   * step-back, since a downgrade is never reported as `available`.
+   */
+  install: (tag?: string) => Promise<{ ok: boolean; error?: string }>;
   dismiss: () => void;
 }
 
@@ -34,6 +42,7 @@ export const useUpdate = create<UpdateStore>((set, get) => ({
   status: null,
   loaded: false,
   checking: false,
+  switching: false,
   installing: false,
   dismissed: dismissedVersion(),
 
@@ -60,13 +69,25 @@ export const useUpdate = create<UpdateStore>((set, get) => ({
     }
   },
 
-  install: async () => {
+  setChannel: async (channel) => {
+    if (get().switching) return;
+    set({ switching: true });
+    try {
+      get().set(await api.update.setChannel(channel));
+    } catch {
+      /* keep the last status; the toggle springs back to the real channel */
+    } finally {
+      set({ switching: false });
+    }
+  },
+
+  install: async (tag) => {
     // Latched before the request so a double-click cannot post twice; the
     // server refuses a second install anyway, but the UI should not offer it.
     if (get().installing) return { ok: true };
     set({ installing: true });
     try {
-      const res = await api.update.install();
+      const res = await api.update.install(tag);
       if (!res.ok) set({ installing: false });
       return res;
     } catch (err) {

@@ -2,10 +2,13 @@
  * The update REST surface.
  *
  * The property worth defending here is that `POST /api/update/install` cannot be
- * talked into installing something the server did not itself resolve as newer:
- * it takes no tag from the caller, and it refuses outright on a payload that was
- * not installed from a release. `launchUpdate` is mocked throughout — a test that
- * really spawned it would replace the checkout it is running in.
+ * talked into installing something the server did not itself resolve. It now
+ * accepts a tag — that is how the unstable → stable step-back is asked for,
+ * since a downgrade is by construction never `available` — but ONLY the head of
+ * the subscribed channel, so the trust boundary is unchanged. It also refuses
+ * outright on a payload that was not installed from a release. `launchUpdate` is
+ * mocked throughout — a test that really spawned it would replace the checkout
+ * it is running in.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
@@ -46,10 +49,22 @@ async function payloadDir(manifest: unknown): Promise<string> {
 
 /** Build an app whose ReleaseService sees `manifest` and `latestTag`. */
 async function withRelease(manifest: unknown, latestTag: string | null): Promise<ReleaseService> {
+  const store = new Store(dir);
+  await store.init();
   const release = new ReleaseService({
     bus,
     appDir: await payloadDir(manifest),
     env: {},
+    // The same channel wiring `createServices` installs. Built over the real
+    // store rather than stubbed, because the property most worth testing here is
+    // that the subscription survives a full-replace PUT /api/settings.
+    channelStore: {
+      read: async () => (await store.getSettings()).updateChannel ?? "stable",
+      write: async (updateChannel) => {
+        const current = await store.getSettings();
+        await store.saveSettings({ ...current, updateChannel });
+      },
+    },
     fetchImpl: (async () => ({
       ok: latestTag !== null,
       status: latestTag !== null ? 200 : 500,
@@ -62,11 +77,7 @@ async function withRelease(manifest: unknown, latestTag: string | null): Promise
   });
   app = await buildApp({
     config: { ...loadConfig(), dataDir: dir },
-    store: await (async () => {
-      const s = new Store(dir);
-      await s.init();
-      return s;
-    })(),
+    store,
     bus,
     serviceOverrides: { release },
   });
@@ -169,5 +180,82 @@ describe("POST /api/update/install", () => {
     const res = await app.inject({ method: "POST", url: "/api/update/install" });
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toContain("already running");
+  });
+
+  it("installs an explicitly named tag when it is the channel head", async () => {
+    // The step-back: the head is OLDER than what is installed, so `available` is
+    // false and the tag-less form would be refused. Naming it is the ask.
+    await withRelease(MANIFEST, "v2026.08.14.79778");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/update/install",
+      payload: { tag: "v2026.08.14.79778" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.79778" });
+  });
+
+  it("refuses any tag that is not the channel head", async () => {
+    await withRelease(MANIFEST, "v2026.08.14.85068");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/update/install",
+      payload: { tag: "v2026.08.16.63367" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toContain("only the head");
+    expect(launchUpdate).not.toHaveBeenCalled();
+  });
+
+  it("refuses a named tag when no head has been resolved at all", async () => {
+    await withRelease(MANIFEST, null);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/update/install",
+      payload: { tag: "v2026.08.14.85068" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(launchUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe("PUT /api/update/channel", () => {
+  it("switches, persists to settings, and answers with the new channel", async () => {
+    await withRelease(MANIFEST, "v2026.08.14.85068");
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/update/channel",
+      payload: { channel: "unstable" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ channel: "unstable" });
+
+    const settings = await app.inject({ method: "GET", url: "/api/settings" });
+    expect(settings.json().updateChannel).toBe("unstable");
+  });
+
+  it("survives a full-replace settings save that knows nothing about channels", async () => {
+    // The exact hazard: PUT /api/settings is a deliberate full replace, so an
+    // older client picking a theme would otherwise silently unsubscribe you.
+    await withRelease(MANIFEST, "v2026.08.14.85068");
+    await app.inject({
+      method: "PUT",
+      url: "/api/update/channel",
+      payload: { channel: "unstable" },
+    });
+    await app.inject({ method: "PUT", url: "/api/settings", payload: { theme: "light" } });
+
+    const settings = await app.inject({ method: "GET", url: "/api/settings" });
+    expect(settings.json()).toMatchObject({ theme: "light", updateChannel: "unstable" });
+  });
+
+  it("rejects a channel that does not exist", async () => {
+    await withRelease(MANIFEST, "v2026.08.14.85068");
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/update/channel",
+      payload: { channel: "nightly" },
+    });
+    expect(res.statusCode).toBe(400);
   });
 });

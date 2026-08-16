@@ -49,8 +49,16 @@ policy, and progress around them.
    rate-limit handling, falling back to the `gh` CLI while the repo is private
    (`packages/server/src/services/release.ts`). Build stamps are compared by
    `compareBuildVersions`; an unorderable tag pair reads as "no update" rather
-   than guessing. Stable/prerelease channels are still outstanding — a draft or
-   prerelease is currently ignored, as the installer would refuse it anyway.
+   than guessing.
+1b. **Done.** Stable/unstable channels, where a channel IS the GitHub
+   `prerelease` flag. Every merge to `main` publishes a prerelease
+   (`.github/workflows/release.yml`); `promote.yml` re-runs the full gate against
+   that sha and flips the SAME release to stable, so the stable bits are
+   bit-identical to the bits that were tested. Stable reads `releases/latest`
+   unchanged; unstable lists releases and ranks by build stamp. The subscription
+   lives in `config/` (`AppSettings.updateChannel`), so an update never resets
+   it. `retention.yml` prunes prereleases at 90 days behind a keep-newest-10
+   floor; stable releases are kept indefinitely. Drafts are refused everywhere.
 2. **Done.** A deferred first check plus an unref'd interval, so GitHub being
    unreachable delays nothing at startup.
 3. **Done.** A dismissable card (per-version, so the next release nudges again)

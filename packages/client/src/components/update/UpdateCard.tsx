@@ -33,7 +33,12 @@ export function UpdateCard() {
           <ArrowUpCircle />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-base font-medium leading-snug text-primary">Update available</p>
+          <p className="text-base font-medium leading-snug text-primary">
+            {/* The channel is named here, not just in Settings: an unstable build
+                arriving minutes after a merge is a different proposition from a
+                promoted one, and the card is where most people decide. */}
+            {status?.channel === "unstable" ? "Unstable update available" : "Update available"}
+          </p>
           <p className="mt-0.5 text-xs leading-snug text-muted">
             Dispatch <span className="font-mono">v{latest.version}</span> is out
             {status?.installed && (

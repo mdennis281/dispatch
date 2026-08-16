@@ -227,6 +227,15 @@ describe("Store runners + checkpoints + settings", () => {
     await store.saveSettings({ theme: "light", defaultModeId: "plan" });
     expect(await store.getSettings()).toMatchObject({ theme: "light", defaultModeId: "plan" });
   });
+
+  it("leaves updateChannel unset, which every pre-channel install reads as stable", async () => {
+    // Deliberately not `.default("stable")`: a default would make the field
+    // REQUIRED in the inferred type and invalidate every existing AppSettings
+    // literal, and "unset" and "stable" mean the same thing to every reader.
+    expect((await store.getSettings()).updateChannel).toBeUndefined();
+    await store.saveSettings({ theme: "dark", updateChannel: "unstable" });
+    expect((await store.getSettings()).updateChannel).toBe("unstable");
+  });
 });
 
 describe("Store config/state split", () => {

@@ -1,5 +1,5 @@
 /**
- * The update row at the top of Settings.
+ * The update section at the top of Settings.
  *
  * This is where a dismissed update goes to keep existing. `UpdateCard`'s
  * "Not now" silences the standing nudge, and if that were the only surface the
@@ -11,10 +11,17 @@
  * checked two minutes ago" is the answer people open Settings to get. Only an
  * unsupported payload (a build run from source, no release manifest) renders
  * nothing at all — there, an update control would be a lie.
+ *
+ * The channel toggle lives here rather than further down Settings because the
+ * three questions it answers — which stream am I on, what is on it, do I want
+ * it — are one question, and splitting them puts "you are two builds behind"
+ * and "…of a channel you did not mean to be on" on different screens.
  */
 import { useEffect, useState } from "react";
-import { ArrowUpCircle, CheckCircle2, RefreshCw } from "lucide-react";
+import { ArrowUpCircle, CheckCircle2, RefreshCw, Rocket, ShieldCheck } from "lucide-react";
+import type { UpdateChannel } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
+import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { cn } from "../../lib/cn.js";
 import { useUpdate, hasUpdate } from "../../stores/update.js";
 
@@ -30,14 +37,25 @@ function ago(ms: number): string {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
+const CHANNEL_BLURB: Record<UpdateChannel, string> = {
+  stable: "Tested builds, published by hand. Fewer updates, each one gated.",
+  unstable: "Every merge to main, minutes after it lands. Newest, least proven.",
+};
+
 export function UpdateBanner() {
   const status = useUpdate((s) => s.status);
   const loaded = useUpdate((s) => s.loaded);
   const checking = useUpdate((s) => s.checking);
+  const switching = useUpdate((s) => s.switching);
   const load = useUpdate((s) => s.load);
   const check = useUpdate((s) => s.check);
+  const setChannel = useUpdate((s) => s.setChannel);
   const install = useUpdate((s) => s.install);
   const [error, setError] = useState<string | null>(null);
+  // Two clicks for a step-back. It is the one action here that moves you
+  // BACKWARDS through builds, and a mis-click on a segmented control should not
+  // be one button away from reinstalling an older app.
+  const [confirmStepBack, setConfirmStepBack] = useState(false);
 
   useEffect(() => {
     if (!loaded) void load();
@@ -46,6 +64,18 @@ export function UpdateBanner() {
   if (!status?.supported) return null;
 
   const available = hasUpdate(status);
+  const channel = status.channel;
+  // "Ahead" only matters while there is a head to be ahead OF; a failed first
+  // check leaves `latest` null and this must not claim anything either way.
+  const ahead = status.ahead === true && status.latest !== null;
+
+  const runInstall = (tag?: string) => {
+    setError(null);
+    setConfirmStepBack(false);
+    void install(tag).then((res) => {
+      if (!res.ok) setError(res.error ?? "The update could not be started.");
+    });
+  };
 
   return (
     <div
@@ -70,39 +100,88 @@ export function UpdateBanner() {
           <p className="mt-0.5 text-xs leading-snug text-faint">
             {status.installed && (
               <>
-                Running <span className="font-mono">v{status.installed.version}</span>
+                Running <span className="font-mono">v{status.installed.version}</span> on{" "}
+                {channel}
                 {". "}
               </>
             )}
             {status.checkedAt ? `Checked ${ago(status.checkedAt)}.` : "Not checked yet."}
           </p>
-          {status.error && (
-            <p className="mt-1 text-xs leading-snug text-warn">{status.error}</p>
+
+          {ahead && (
+            <p className="mt-1 text-xs leading-snug text-warn">
+              This build is newer than {channel} v
+              <span className="font-mono">{status.latest!.version}</span>. You'll rejoin{" "}
+              {channel} at its next release, or step back to it now.
+            </p>
           )}
+          {status.error && <p className="mt-1 text-xs leading-snug text-warn">{status.error}</p>}
           {error && <p className="mt-1 text-xs leading-snug text-danger">{error}</p>}
-          <div className="mt-2 flex items-center gap-2">
+
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             {available && (
               <Button
                 variant="primary"
                 disabled={status.installing === true}
-                onClick={() => {
-                  setError(null);
-                  void install().then((res) => {
-                    if (!res.ok) setError(res.error ?? "The update could not be started.");
-                  });
-                }}
+                onClick={() => runInstall()}
               >
                 {status.installing ? "Updating…" : "Update now"}
               </Button>
             )}
+            {ahead &&
+              (confirmStepBack ? (
+                <>
+                  <Button
+                    variant="danger"
+                    disabled={status.installing === true}
+                    onClick={() => runInstall(status.latest!.tag)}
+                  >
+                    {status.installing
+                      ? "Installing…"
+                      : `Confirm — install v${status.latest!.version}`}
+                  </Button>
+                  <Button variant="ghost" onClick={() => setConfirmStepBack(false)}>
+                    Cancel
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  variant="default"
+                  disabled={status.installing === true}
+                  onClick={() => setConfirmStepBack(true)}
+                >
+                  Step back to {channel} v{status.latest!.version}
+                </Button>
+              ))}
             <Button
               variant={available ? "ghost" : "default"}
               leftIcon={<RefreshCw className={cn(checking && "cm-anim-spin")} />}
-              disabled={checking}
+              disabled={checking || switching}
               onClick={() => void check()}
             >
               {checking ? "Checking…" : "Check now"}
             </Button>
+          </div>
+
+          <div className="mt-2.5 border-t border-line pt-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-muted">Channel</span>
+              <SegmentedControl<UpdateChannel>
+                segments={[
+                  { value: "stable", label: "Stable", icon: <ShieldCheck /> },
+                  { value: "unstable", label: "Unstable", icon: <Rocket /> },
+                ]}
+                value={channel}
+                onChange={(next) => {
+                  if (next === channel || switching) return;
+                  setError(null);
+                  setConfirmStepBack(false);
+                  void setChannel(next);
+                }}
+              />
+              {switching && <span className="text-xs text-faint">Checking {channel}…</span>}
+            </div>
+            <p className="mt-1 text-xs leading-snug text-faint">{CHANNEL_BLURB[channel]}</p>
           </div>
         </div>
       </div>

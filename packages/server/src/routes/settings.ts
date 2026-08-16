@@ -24,7 +24,16 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
     // Auth has its own transactional endpoints because toggling it also revokes
     // sessions. Older clients know nothing about the field and send a full PUT;
     // preserving it here prevents a routine preference save from disabling auth.
+    //
+    // `updateChannel` is preserved for exactly the same reason and it matters
+    // more than it looks: the channel is owned by PUT /api/update/channel, so a
+    // full-replace save from anywhere else in Settings — picking a theme — would
+    // otherwise silently unsubscribe you from unstable back to stable.
     const current = await store.getSettings();
-    return store.saveSettings({ ...parsed.data, auth: current.auth });
+    return store.saveSettings({
+      ...parsed.data,
+      auth: current.auth,
+      ...(current.updateChannel ? { updateChannel: current.updateChannel } : {}),
+    });
   });
 }

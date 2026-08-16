@@ -43,7 +43,8 @@ function usage() {
 
 Usage: node install.mjs [options]
 
-  --version <tag>     install a release tag instead of the latest release
+  --version <tag>     install a release tag instead of the channel head
+  --channel <name>    stable (default) or unstable; ignored with --version
   --repo <owner/name> release repository (default: ${DEFAULT_REPO})
   --target <path>     installation root (default: the platform user-data dir)
   --no-start          install without starting Dispatch
@@ -55,9 +56,10 @@ Set GITHUB_TOKEN for private repositories or to avoid anonymous API limits.
 Rerun the same command later to update to the newest release.`);
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const out = {
     repo: process.env.DISPATCH_INSTALL_REPO || DEFAULT_REPO,
+    channel: "stable",
     start: true,
     shortcut: true,
     dryRun: false,
@@ -70,12 +72,16 @@ function parseArgs(argv) {
     else if (arg === "--no-shortcut") out.shortcut = false;
     else if (arg === "--dry-run") out.dryRun = true;
     else if (arg === "--version") out.version = requiredValue(argv, ++i, arg);
+    else if (arg === "--channel") out.channel = requiredValue(argv, ++i, arg);
     else if (arg === "--repo") out.repo = requiredValue(argv, ++i, arg);
     else if (arg === "--target") out.target = requiredValue(argv, ++i, arg);
     else throw new Error(`unknown argument: ${arg}`);
   }
   if (!/^[^/\s]+\/[^/\s]+$/.test(out.repo)) {
     throw new Error(`--repo must be an owner/name pair (received ${JSON.stringify(out.repo)})`);
+  }
+  if (out.channel !== "stable" && out.channel !== "unstable") {
+    throw new Error(`--channel must be stable or unstable (received ${JSON.stringify(out.channel)})`);
   }
   return out;
 }
@@ -130,18 +136,76 @@ async function fetchOk(url, options = {}) {
   return response;
 }
 
-async function resolveRelease(repo, requestedVersion) {
+/** How far back the unstable channel looks; its head is always the newest release. */
+const UNSTABLE_PAGE_SIZE = 30;
+
+/**
+ * Order two build stamps (`yyyy.mm.dd.sssss`), or `null` when either is not one.
+ *
+ * A local copy of `packages/shared/src/version.ts` on purpose: this file is
+ * downloaded standalone by `install.ps1`/`install.sh` and by the in-app updater,
+ * long before any workspace package exists to import from.
+ */
+export function compareStamps(a, b) {
+  const strip = (v) => (v.startsWith("v") ? v.slice(1) : v);
+  const stamp = /^\d{4}\.\d{2}\.\d{2}\.\d{5}$/;
+  const left = strip(a);
+  const right = strip(b);
+  if (!stamp.test(left) || !stamp.test(right)) return null;
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+/**
+ * The newest release on `channel`.
+ *
+ * Stable is `releases/latest`, which GitHub already filters prereleases and
+ * drafts out of server-side. Unstable has to do it here: list a page, drop the
+ * drafts (their assets may not exist), and take the highest build stamp — by
+ * version, not by the list's own order, and skipping anything unorderable rather
+ * than guessing. Promoted builds stay in that list, so promoting a release must
+ * never look to an unstable install like the channel went backwards.
+ */
+async function resolveChannelHead(repo, channel) {
+  if (channel !== "unstable") {
+    return (await fetchOk(`https://api.github.com/repos/${repo}/releases/latest`)).json();
+  }
+  const list = await (
+    await fetchOk(`https://api.github.com/repos/${repo}/releases?per_page=${UNSTABLE_PAGE_SIZE}`)
+  ).json();
+  let best = null;
+  for (const release of Array.isArray(list) ? list : []) {
+    if (release.draft || typeof release.tag_name !== "string") continue;
+    // Unorderable (a semver tag) is skipped, not guessed at — same call the
+    // server's comparator documents.
+    if (compareStamps(release.tag_name, release.tag_name) === null) continue;
+    // `-1` means `best` is OLDER than this one, so this one takes over.
+    if (!best || compareStamps(best.tag_name, release.tag_name) === -1) best = release;
+  }
+  if (!best) throw new Error(`no installable release found on the unstable channel of ${repo}`);
+  return best;
+}
+
+export async function resolveRelease(repo, requestedVersion, channel = "stable") {
   const tag = requestedVersion
     ? requestedVersion.startsWith("v")
       ? requestedVersion
       : `v${requestedVersion}`
     : null;
-  const endpoint = tag
-    ? `https://api.github.com/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`
-    : `https://api.github.com/repos/${repo}/releases/latest`;
-  const release = await (await fetchOk(endpoint)).json();
-  if (release.draft || release.prerelease) {
-    throw new Error(`refusing draft/prerelease ${release.tag_name}`);
+  const release = tag
+    ? await (
+        await fetchOk(
+          `https://api.github.com/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`,
+        )
+      ).json()
+    : await resolveChannelHead(repo, channel);
+  // A DRAFT is refused however it was reached: its assets may not be uploaded,
+  // so this would fail later and messier. A PRERELEASE is only refused when it
+  // arrived by channel resolution — an explicitly named tag is the unstable
+  // channel's whole install path, and the in-app updater always names one.
+  if (release.draft) throw new Error(`refusing draft ${release.tag_name}`);
+  if (release.prerelease && !tag && channel !== "unstable") {
+    throw new Error(`refusing prerelease ${release.tag_name} on the stable channel`);
   }
   const archiveName = `dispatch-${release.tag_name}.tar.gz`;
   const archive = release.assets?.find((asset) => asset.name === archiveName);
@@ -381,8 +445,10 @@ async function main() {
 
   const root = desktopRoot(args.target);
   assertSafeRoot(root);
-  console.log(`Resolving ${args.version || "the latest release"} from ${args.repo}...`);
-  const selected = await resolveRelease(args.repo, args.version);
+  console.log(
+    `Resolving ${args.version || `the ${args.channel} channel head`} from ${args.repo}...`,
+  );
+  const selected = await resolveRelease(args.repo, args.version, args.channel);
   const filename = selected.archive.name;
   console.log(`release: ${selected.release.tag_name}`);
   console.log(`target : ${root}`);

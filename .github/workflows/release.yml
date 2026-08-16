@@ -1,3 +1,14 @@
+# Publishes the UNSTABLE channel: every merge to main, as a GitHub prerelease.
+#
+# `--prerelease` is the whole channel mechanism. GitHub excludes prereleases
+# from `releases/latest`, which is exactly what the server asks for on the
+# stable channel — so a merge landing here can never reach a stable subscriber,
+# and no code anywhere has to remember to filter it out.
+#
+# Nothing in this file promotes. A build becomes stable only through
+# `promote.yml`, which re-runs the full gate against this same sha and then
+# flips THIS release rather than building a second one — so the stable bits are
+# bit-identical to the bits that were tested here.
 name: Release
 
 on:
@@ -100,10 +111,14 @@ jobs:
             tools/install.mjs
           )
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # Re-run of an existing tag: replace the assets, but do NOT touch the
+            # prerelease flag. If this tag has already been promoted, forcing it
+            # back to prerelease here would silently retract a stable release.
             gh release upload "$RELEASE_TAG" "${ASSETS[@]}" --clobber
           else
             gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
               --verify-tag \
               --generate-notes \
-              --title "Dispatch $RELEASE_TAG"
+              --prerelease \
+              --title "Dispatch $RELEASE_TAG (unstable)"
           fi

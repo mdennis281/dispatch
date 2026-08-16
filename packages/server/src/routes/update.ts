@@ -2,14 +2,17 @@
  * REST for the in-app release update.
  *   GET  /api/update          → UpdateStatus (cached; never hits the network)
  *   POST /api/update/check    → refresh from GitHub, then UpdateStatus
+ *   PUT  /api/update/channel  → switch stable/unstable, then UpdateStatus
  *   POST /api/update/install  → { ok: true }, then the installer takes over
  *
- * `POST /api/update/install` is the only endpoint here with teeth, and it is
- * deliberately narrow: it will not install an arbitrary tag. The only thing it
- * can do is install the release the server itself has already resolved as newer,
- * so a caller cannot talk this into a downgrade or into fetching a tag from
- * somewhere else. It also refuses on a payload that is not a release install
- * (`supported: false`) — there, the installer has nothing to replace.
+ * `POST /api/update/install` is the only endpoint here with teeth, and it stays
+ * deliberately narrow: the ONLY tag it will ever install is the head of the
+ * subscribed channel, which the server resolved itself. A caller may now name
+ * that tag explicitly — that is how the unstable → stable step-back works, since
+ * a downgrade is by definition not `available` — but naming any OTHER tag is
+ * refused, so this cannot be talked into fetching a build from somewhere else.
+ * It also refuses on a payload that is not a release install (`supported:
+ * false`) — there, the installer has nothing to replace.
  *
  * The response is flushed BEFORE the installer is launched, the same ordering
  * `routes/shutdown.ts` enforces for the same reason: the installer's first act
@@ -17,6 +20,7 @@
  * its `{ ok: true }` cannot tell "the update started" from "the update failed".
  */
 import type { FastifyInstance } from "fastify";
+import { UpdateChannelSchema } from "@dispatch/shared";
 import { launchUpdate } from "../services/update-install.js";
 import { payloadAppDir } from "../services/release.js";
 
@@ -30,8 +34,23 @@ export function registerUpdateRoutes(app: FastifyInstance): void {
 
   app.post("/api/update/check", async () => release.check(true));
 
-  app.post("/api/update/install", async (_req, reply) => {
+  app.put("/api/update/channel", async (req, reply) => {
+    const parsed = UpdateChannelSchema.safeParse(
+      (req.body as { channel?: unknown } | undefined)?.channel,
+    );
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'channel must be "stable" or "unstable"' });
+    }
+    // Answers with the REFRESHED status, not the stale one: the switch is only
+    // meaningful once the new channel's head is known, and a client that had to
+    // fire its own follow-up check would render one frame of the old channel's
+    // answer under the new channel's label.
+    return release.setChannel(parsed.data);
+  });
+
+  app.post("/api/update/install", async (req, reply) => {
     const status = release.status();
+    const requested = (req.body as { tag?: unknown } | undefined)?.tag;
 
     if (!status.supported) {
       reply.code(409);
@@ -42,7 +61,19 @@ export function registerUpdateRoutes(app: FastifyInstance): void {
           "rebuild it from source instead",
       };
     }
-    if (!status.available || !status.latest) {
+    // An explicitly named tag is how a step-back is asked for, so it is checked
+    // BEFORE `available` — a downgrade is never "available" by construction.
+    // What it must be is the head of the channel you are actually subscribed to,
+    // which is the whole of the trust boundary here.
+    if (requested !== undefined) {
+      if (typeof requested !== "string" || requested !== release.headTag()) {
+        reply.code(409);
+        return {
+          ok: false,
+          error: `only the head of the ${status.channel} channel can be installed`,
+        };
+      }
+    } else if (!status.available || !status.latest) {
       reply.code(409);
       return { ok: false, error: "there is no newer release to install" };
     }
@@ -51,7 +82,7 @@ export function registerUpdateRoutes(app: FastifyInstance): void {
       return { ok: false, error: "an update is already running" };
     }
 
-    const tag = status.latest.tag;
+    const tag = typeof requested === "string" ? requested : status.latest!.tag;
     // Latched before the reply, not after the spawn: two clicks that arrive
     // together would otherwise both pass the check above and start two
     // installers racing for the same `app/` rename.
