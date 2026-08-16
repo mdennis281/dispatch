@@ -243,10 +243,16 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
           // keeping the padding leaves a 34px band of nothing between the
           // composer and the keys.
           //
-          // `--cm-bottom-nav-clear` rather than the whole inset: the slots grow
-          // into the rest of it. See index.css — reserving all 34px is what
-          // made the bar read as cut off.
-          kb > 0 ? "pb-0" : "pb-[var(--cm-bottom-nav-clear)]",
+          // With no keyboard it's a THREE-way choice, not two, because the
+          // reduced clearance is only PAID FOR by the slots that grow into the
+          // rest of the inset (see index.css). In the standdown gap — focused,
+          // keyboard still animating in, `kb` not yet non-zero — the strip is
+          // `hidden`, so nothing has grown into anything and the full inset is
+          // again the honest reservation. Shrinking it there would edge the
+          // composer into the gesture area for the ~250ms before the keyboard
+          // lands. The condition is deliberately the SAME `typing` the strip
+          // reads, so "strip hidden" and "full inset" cannot come apart.
+          kb > 0 ? "pb-0" : typing ? "cm-safe-b" : "pb-[var(--cm-bottom-nav-clear)]",
           !typing && "border-t border-line",
         )}
       >
