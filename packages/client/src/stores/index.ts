@@ -361,8 +361,11 @@ export async function hydrateFromServer(): Promise<boolean> {
   const prevProject = useProjects.getState().activeProjectId;
   const prevChat = useChats.getState().activeChatId;
 
+  // Every chat has to re-read its transcript from the server, because we stopped
+  // receiving its events for however long the socket was down. Mark them all
+  // unloaded — but DON'T drop the windows themselves (see below); the resident
+  // rows are what `setForChat` splices the fresh snapshot into.
   loadedChats.clear();
-  recentChats = [];
   useProjects.getState().hydrate({ projects, agents, modes });
   // Best-effort: refresh the composer's model picker from the server, which
   // reads the live list off the Claude Code runtime. Kept out of the gating
@@ -397,7 +400,13 @@ export async function hydrateFromServer(): Promise<boolean> {
   useAttention.getState().hydrate(attention);
   useRunners.getState().hydrate(runners, {});
   useTerminals.getState().hydrate(terminals, {});
-  useMessages.getState().hydrate({});
+  // NOT `useMessages.hydrate({})`. Blanking every transcript here is what made a
+  // reconnect feel like a page refresh: the open chat's rows went to `[]`, the
+  // scroll container collapsed, and the refetch below landed the reader back at
+  // the bottom of a chat they were reading the middle of. The windows stay; the
+  // refetch reconciles them in place. Only the streaming buffers have to go —
+  // nothing will ever deliver the rest of a delta we stopped listening for.
+  useMessages.getState().resetStreaming();
   useCheckpoints.getState().reset();
   useMemory.getState().reset();
   useMcp.getState().reset();
