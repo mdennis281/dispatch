@@ -43,7 +43,13 @@ interface MessagesStore {
   streaming: Record<string, { text: string; thinking: string }>;
 
   hydrate: (byChat: Record<string, ChatMessage[]>) => void;
-  /** Replace one chat's transcript (REST snapshot on open) without touching others. */
+  /**
+   * Drop every in-flight streaming buffer, for every chat, leaving transcripts
+   * alone. A reconnect can't reconcile buffers it stopped receiving deltas for,
+   * but the windows themselves are still good (see {@link setForChat}).
+   */
+  resetStreaming: () => void;
+  /** Fold a REST snapshot (newest page) into one chat's window, in place. */
   setForChat: (chatId: string, messages: ChatMessage[], page?: Partial<ChatPage>) => void;
   /** Prepend an older page above the current window (backward paging). */
   prependForChat: (chatId: string, older: ChatMessage[], page?: Partial<ChatPage>) => void;
@@ -107,6 +113,13 @@ function dropStreamKey(streaming: StreamMap, key: string): StreamMap {
   return next;
 }
 
+/** Same rows, same objects, same order — i.e. a merge that changed nothing. */
+function sameRows(a: ChatMessage[], b: ChatMessage[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 /** Drop every streaming buffer belonging to a chat (on transcript replace). */
 function dropChatStreaming(streaming: StreamMap, chatId: string): StreamMap {
   const prefix = `${chatId}:`;
@@ -126,9 +139,40 @@ export const useMessages = create<MessagesStore>((set) => ({
   // they key off transcripts that no longer exist and would otherwise leak.
   hydrate: (byChat) => set({ byChat, pages: {}, streaming: {} }),
 
+  resetStreaming: () =>
+    set((s) => (Object.keys(s.streaming).length === 0 ? {} : { streaming: {} })),
+
   setForChat: (chatId, messages, page) =>
     set((s) => {
-      // The REST snapshot is authoritative, but a live `chat-message` /
+      const prev = s.byChat[chatId] ?? [];
+      const snapIds = new Set(messages.map((m) => m.id));
+      const snapReqIds = new Set(
+        messages.flatMap((m) => (m.kind === "permission" ? [m.requestId] : [])),
+      );
+
+      // Where does this snapshot begin inside the window we already hold?
+      //
+      // A reconnect re-reads the NEWEST page while the reader may be scrolled up
+      // over older rows paged in earlier. Overwriting the window with just that
+      // page threw those rows away and collapsed the transcript to ~zero height,
+      // which is what reset the scroll position on every dropped socket. Splicing
+      // the snapshot in at its first overlapping row keeps everything above it —
+      // the same row objects, so the same DOM and the same scroll offset.
+      let cut = -1;
+      let from = 0;
+      if (prev.length > 0) {
+        const positions = new Map(prev.map((m, i) => [m.id, i] as const));
+        for (let i = 0; i < messages.length; i++) {
+          const at = positions.get(messages[i]!.id);
+          if (at !== undefined) {
+            cut = at;
+            from = i;
+            break;
+          }
+        }
+      }
+
+      // The snapshot is authoritative, but a live `chat-message` /
       // `permission-request` can land during the in-flight GET. Merge instead of
       // replacing so such a row is neither DROPPED (arrived after the server read
       // its snapshot) nor DUPLICATED (arrived before, already in the snapshot):
@@ -136,22 +180,47 @@ export const useMessages = create<MessagesStore>((set) => ({
       //   - permission rows are keyed by requestId (only persisted on resolve),
       //     so carry ANY prev card whose requestId is absent from the snapshot —
       //     pending (open) or just-resolved mid-load — keyed by requestId.
-      const prev = s.byChat[chatId] ?? [];
-      const snapIds = new Set(messages.map((m) => m.id));
-      const snapReqIds = new Set(
-        messages.flatMap((m) => (m.kind === "permission" ? [m.requestId] : [])),
-      );
-      const extra = prev.filter((m) =>
+      // A row that raced the GET is necessarily NEWER than the newest row the
+      // server had read. Requiring that is what keeps this from also resurrecting
+      // a window that drifted off the end of the snapshot entirely (a compaction,
+      // a chat re-read after a long outage): those rows are stale history, not
+      // arrivals, and re-appending them below the fold is how you get a
+      // transcript that reads in the wrong order.
+      const newestSnapTs = messages.length > 0 ? messages[messages.length - 1]!.ts : -Infinity;
+      const extra = (cut >= 0 ? prev.slice(cut) : prev).filter((m) =>
         m.kind === "permission"
           ? !snapReqIds.has(m.requestId)
-          : !snapIds.has(m.id),
+          : !snapIds.has(m.id) && m.ts >= newestSnapTs,
       );
+
+      // Reuse the row object we already hold for any id the snapshot repeats. It
+      // carries client-side work the snapshot doesn't — a lean tool row the
+      // reader expanded is hydrated in place (see `replaceRows`) and would
+      // otherwise re-clip itself on every reconnect — and it lets the
+      // no-op check below keep the array identity when nothing actually changed.
+      const prevById = new Map(prev.map((m) => [m.id, m] as const));
+      const head = cut >= 0 ? prev.slice(0, cut) : [];
+      const tail = (cut >= 0 ? messages.slice(from) : messages).map(
+        (m) => prevById.get(m.id) ?? m,
+      );
+      const next = [...head, ...tail, ...extra];
+
+      // `hasMore` describes what's ABOVE the window. When the snapshot spliced
+      // into rows we already hold, the caller's "the page came back full" answer
+      // is about the SNAPSHOT — the older rows still sitting above it, and
+      // whatever the last page-up learned about them, are unaffected.
+      const prevPage = s.pages[chatId] ?? DEFAULT_PAGE;
+      const nextPage: ChatPage = {
+        ...DEFAULT_PAGE,
+        ...(page ?? {}),
+        ...(cut > 0 ? { hasMore: prevPage.hasMore } : {}),
+      };
+
       return {
-        byChat: { ...s.byChat, [chatId]: [...messages, ...extra] },
-        pages: {
-          ...s.pages,
-          [chatId]: { ...DEFAULT_PAGE, ...(page ?? {}) },
-        },
+        // Identity-stable when the snapshot told us nothing new (the ordinary
+        // reconnect): no new array means no transcript re-render at all.
+        byChat: sameRows(prev, next) ? s.byChat : { ...s.byChat, [chatId]: next },
+        pages: { ...s.pages, [chatId]: nextPage },
         streaming: dropChatStreaming(s.streaming, chatId),
       };
     }),

@@ -21,7 +21,39 @@ interface SocketLike {
   send(data: string): void;
   close(code?: number, reason?: string): void;
   on(event: string, listener: (...args: unknown[]) => void): unknown;
+  /** Optional in the structural type so a test double needn't implement it. */
+  ping?(): void;
 }
+
+/**
+ * How often to poll whether this socket's identity is still good.
+ *
+ * Was 1s, which meant every connected client re-read the shared auth/settings
+ * files once a second — for a check whose answer only changes when a human
+ * edits a user or signs out.
+ */
+const IDENTITY_POLL_MS = 5_000;
+
+/**
+ * Consecutive FAILED identity checks (the check threw) tolerated before the
+ * socket is closed. A thrown check is not a "no": the read goes at files in the
+ * SHARED config dir, so the other instance's atomic rename is enough to make one
+ * land on EPERM/EBUSY. Closing on the first throw turned that race into a
+ * dropped socket — and a dropped socket is a visible reload of whatever chat the
+ * user was reading. Only a definitive `false` closes immediately.
+ */
+const IDENTITY_FAILURES_BEFORE_CLOSE = 3;
+
+/**
+ * Idle-connection keepalive: traffic on a socket that would otherwise go quiet
+ * for minutes at a time, so an idle-timing proxy or NAT table doesn't reap it.
+ *
+ * This is NOT dead-connection detection — nothing tracks the pongs, and a socket
+ * that stops answering keeps its timer until the transport notices. That's the
+ * intended scope: the client already reconnects on close, and the point of this
+ * change is that a reconnect no longer costs the reader their place.
+ */
+const PING_MS = 30_000;
 
 export function registerWsRoutes(app: FastifyInstance): void {
   app.get("/ws", { websocket: true }, (rawSocket, req) => {
@@ -49,17 +81,35 @@ export function registerWsRoutes(app: FastifyInstance): void {
     // Identity credentials live in shared config while session families are
     // per instance. Polling the small stamped auth snapshot ensures a delete or
     // credential reset in stable closes the same user's dev socket promptly.
+    let identityFailures = 0;
     const identityTimer = setInterval(() => {
       const check = req.authIdentity
         ? app.auth.identityStillValid(req.authIdentity)
         : app.auth.enabled().then((enabled) => !enabled);
       void check.then((valid) => {
+        identityFailures = 0;
         if (!valid) socket.close(4401, "authentication changed");
-      }).catch(() => socket.close(1011, "identity check failed"));
-    }, 1_000);
+      }).catch(() => {
+        // Fail OPEN for a bounded number of tries: a transient read error says
+        // nothing about whether the identity is still good, and tearing the
+        // socket down costs the user their place in the chat they're reading.
+        if (++identityFailures >= IDENTITY_FAILURES_BEFORE_CLOSE) {
+          socket.close(1011, "identity check failed");
+        }
+      });
+    }, IDENTITY_POLL_MS);
+    const pingTimer = setInterval(() => {
+      if (socket.readyState !== WS_OPEN) return;
+      try {
+        socket.ping?.();
+      } catch {
+        /* the close listener owns teardown */
+      }
+    }, PING_MS);
     const cleanup = () => {
       unsub(); unsubRevocation();
       clearInterval(identityTimer);
+      clearInterval(pingTimer);
     };
 
     socket.on("message", (raw: unknown) => {

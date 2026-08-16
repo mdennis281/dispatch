@@ -132,3 +132,47 @@ describe("setActiveChat", () => {
     expect(useChats.getState().activeChatId).toBeNull();
   });
 });
+
+/**
+ * `hydrate` runs on every WebSocket reconnect, not just at boot. Taking
+ * `order[0]` unconditionally moved the reader to whichever chat held the newest
+ * `updatedAt` — and when that lived in another project the transcript unmounted
+ * outright, which is what a dropped socket looked like from the user's chair.
+ */
+describe("hydrate — the reconnect path", () => {
+  it("keeps the chat the reader has open instead of jumping to the newest", () => {
+    const chats = [chat("a", "p1", 10), chat("b", "p2", 99)];
+    useChats.getState().hydrate(chats);
+    useChats.getState().setActiveChat("a");
+
+    useChats.getState().hydrate(chats); // reconnect: "b" is still globally newest
+
+    expect(useChats.getState().activeChatId).toBe("a");
+  });
+
+  it("still opens the newest chat when nothing was open (first load)", () => {
+    useChats.getState().hydrate([chat("a", "p1", 10), chat("b", "p2", 99)]);
+
+    expect(useChats.getState().activeChatId).toBe("b");
+  });
+
+  it("falls back to the newest when the open chat is gone from the snapshot", () => {
+    useChats.getState().hydrate([chat("a", "p1", 10), chat("b", "p2", 99)]);
+    useChats.getState().setActiveChat("a");
+
+    useChats.getState().hydrate([chat("b", "p2", 99)]); // "a" was deleted elsewhere
+
+    expect(useChats.getState().activeChatId).toBe("b");
+  });
+
+  it("holds the open chat even as an unrelated one is bumped to the top", () => {
+    useChats.getState().hydrate([chat("a", "p1", 10), chat("b", "p2", 20)]);
+    useChats.getState().setActiveChat("a");
+
+    // A worktree reconcile stamps `updatedAt` on "b": it re-sorts, "a" stays open.
+    useChats.getState().hydrate([chat("a", "p1", 10), chat("b", "p2", 999)]);
+
+    expect(useChats.getState().order).toEqual(["b", "a"]);
+    expect(useChats.getState().activeChatId).toBe("a");
+  });
+});

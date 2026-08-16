@@ -61,18 +61,27 @@ export const useChats = create<ChatsStore>((set) => ({
 
   setActiveChat: (id) => set({ activeChatId: id }),
 
-  hydrate: (chats) => {
-    const byId: Record<string, Chat> = {};
-    const lastActivity: Record<string, number> = {};
-    for (const c of chats) {
-      byId[c.id] = c;
-      lastActivity[c.id] = c.updatedAt ?? c.createdAt;
-    }
-    const order = [...chats]
-      .sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt))
-      .map((c) => c.id);
-    set({ byId, order, lastActivity, activeChatId: order[0] ?? null });
-  },
+  hydrate: (chats) =>
+    set((s) => {
+      const byId: Record<string, Chat> = {};
+      const lastActivity: Record<string, number> = {};
+      for (const c of chats) {
+        byId[c.id] = c;
+        lastActivity[c.id] = c.updatedAt ?? c.createdAt;
+      }
+      const order = [...chats]
+        .sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt))
+        .map((c) => c.id);
+      // Keep whatever the reader has OPEN. Taking `order[0]` unconditionally
+      // meant a reconnect handed the view to whichever chat happened to hold the
+      // newest `updatedAt` — a worktree reconcile on an unrelated chat is enough
+      // to move that — and if it lived in another project, `visibleChat` went
+      // undefined and unmounted the transcript outright before the caller could
+      // put the selection back.
+      const activeChatId =
+        s.activeChatId && byId[s.activeChatId] ? s.activeChatId : (order[0] ?? null);
+      return { byId, order, lastActivity, activeChatId };
+    }),
 
   upsertChat: (chat) =>
     set((s) => ({

@@ -247,3 +247,150 @@ describe("messages store — live window trimming", () => {
     expect(useMessages.getState().byChat["never-opened"]).toBeUndefined();
   });
 });
+
+/**
+ * A reconnect re-reads the NEWEST page into a window the reader may be scrolled
+ * up inside. Overwriting with just that page dropped everything above it and
+ * collapsed the scroll container — the "chats randomly refresh" report.
+ */
+describe("messages store — reconnect re-reads the newest page", () => {
+  const ids = () => (useMessages.getState().byChat[CHAT] ?? []).map((m) => m.id);
+
+  beforeEach(() => {
+    useMessages.setState({ byChat: {}, pages: {}, streaming: {} });
+  });
+
+  /** A window the reader paged up into: 4 rows held, more above. */
+  function windowOfFour(): void {
+    useMessages.getState().setForChat(CHAT, [assistantRow("m3", "c"), assistantRow("m4", "d")], {
+      hasMore: true,
+    });
+    useMessages.getState().prependForChat(
+      CHAT,
+      [assistantRow("m1", "a"), assistantRow("m2", "b")],
+      { hasMore: true, loadingOlder: false },
+    );
+  }
+
+  it("splices the page in at its overlap, keeping the rows paged in above it", () => {
+    windowOfFour();
+
+    // The reconnect snapshot is the newest page — it starts at m3, not m1.
+    useMessages
+      .getState()
+      .setForChat(CHAT, [assistantRow("m3", "c"), assistantRow("m4", "d")], { hasMore: true });
+
+    expect(ids()).toEqual(["m1", "m2", "m3", "m4"]);
+  });
+
+  it("is a complete no-op when the snapshot brought nothing new", () => {
+    windowOfFour();
+    const before = useMessages.getState().byChat;
+
+    useMessages
+      .getState()
+      .setForChat(CHAT, [assistantRow("m3", "c"), assistantRow("m4", "d")], { hasMore: true });
+
+    // Same array object → no transcript re-render → no scroll disturbance.
+    expect(useMessages.getState().byChat).toBe(before);
+  });
+
+  it("appends rows that landed while the socket was down", () => {
+    windowOfFour();
+
+    useMessages.getState().setForChat(
+      CHAT,
+      [assistantRow("m3", "c"), assistantRow("m4", "d"), assistantRow("m5", "e")],
+      { hasMore: true },
+    );
+
+    expect(ids()).toEqual(["m1", "m2", "m3", "m4", "m5"]);
+  });
+
+  it("keeps `hasMore` for the rows above rather than the page's own answer", () => {
+    windowOfFour();
+
+    // A SHORT page would normally mean "we hold the whole transcript" — but it's
+    // only short relative to the snapshot; m1/m2 still have history above them.
+    useMessages.getState().setForChat(CHAT, [assistantRow("m4", "d")], { hasMore: false });
+
+    expect(useMessages.getState().pages[CHAT]!.hasMore).toBe(true);
+  });
+
+  it("takes the page's own `hasMore` when it covers the whole window", () => {
+    useMessages.getState().setForChat(CHAT, [assistantRow("m1", "a")], { hasMore: true });
+
+    useMessages
+      .getState()
+      .setForChat(CHAT, [assistantRow("m1", "a"), assistantRow("m2", "b")], { hasMore: false });
+
+    expect(useMessages.getState().pages[CHAT]!.hasMore).toBe(false);
+  });
+
+  it("replaces a window that drifted with no overlap left", () => {
+    const old = { ...assistantRow("m1", "a"), ts: 100 };
+    useMessages.getState().setForChat(CHAT, [old], { hasMore: false });
+
+    useMessages.getState().setForChat(
+      CHAT,
+      [
+        { ...assistantRow("m8", "h"), ts: 900 },
+        { ...assistantRow("m9", "i"), ts: 901 },
+      ],
+      { hasMore: true },
+    );
+
+    expect(ids()).toEqual(["m8", "m9"]);
+  });
+
+  it("still carries a row that raced the in-flight GET", () => {
+    useMessages.getState().setForChat(CHAT, [{ ...assistantRow("m1", "a"), ts: 100 }]);
+    // The agent emits a row after the server read its snapshot but before it lands.
+    useMessages.getState().append(CHAT, { ...assistantRow("live", "z"), ts: 900 });
+
+    useMessages
+      .getState()
+      .setForChat(CHAT, [{ ...assistantRow("m1", "a"), ts: 100 }], { hasMore: false });
+
+    expect(ids()).toEqual(["m1", "live"]);
+  });
+
+  it("keeps a row hydrated on expand from re-clipping itself", () => {
+    const lean: ChatMessage = {
+      kind: "tool_result",
+      id: "t1",
+      chatId: CHAT,
+      ts: 1,
+      toolUseId: "u1",
+      ok: true,
+      content: "clipped…",
+      contentOmitted: true,
+      contentBytes: 90_000,
+    };
+    useMessages.getState().setForChat(CHAT, [lean, assistantRow("m2", "b")]);
+    useMessages
+      .getState()
+      .replaceRows(CHAT, [{ ...lean, content: "the whole thing", contentOmitted: undefined }]);
+
+    // The reconnect snapshot serves the LEAN row again; the expanded one wins.
+    useMessages.getState().setForChat(CHAT, [lean, assistantRow("m2", "b")]);
+
+    expect(useMessages.getState().byChat[CHAT]![0]).toMatchObject({
+      content: "the whole thing",
+      contentOmitted: undefined,
+    });
+  });
+
+  it("resetStreaming drops every chat's buffers without touching transcripts", () => {
+    const st = useMessages.getState();
+    st.setForChat(CHAT, [assistantRow("m1", "a")], { hasMore: true });
+    st.chunk(CHAT, "m9", "half a sen", "text");
+    st.chunk("other", "m8", "…tence", "text");
+
+    st.resetStreaming();
+
+    expect(useMessages.getState().streaming).toEqual({});
+    expect(ids()).toEqual(["m1"]);
+    expect(useMessages.getState().pages[CHAT]!.hasMore).toBe(true);
+  });
+});
