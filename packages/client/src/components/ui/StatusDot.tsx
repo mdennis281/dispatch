@@ -10,31 +10,34 @@ export type DotTone =
   | "muted"
   | "working";
 
-const toneColor: Record<DotTone, string> = {
-  success: "bg-success",
-  accent: "bg-accent",
-  info: "bg-info",
-  warn: "bg-warn",
-  danger: "bg-danger",
-  muted: "bg-faint",
-  working: "bg-accent",
+/**
+ * Every tone's classes, dot and glyph TOGETHER — a status marker is a dot on
+ * most rows but a glyph on a chat spawned for a job (it wears that job's icon),
+ * and a status that reads green as a dot must read green as an icon or the
+ * sidebar has two conflicting colour languages. One entry per tone means the two
+ * can't be recoloured independently.
+ *
+ * The class names are spelled out rather than built from a family name because
+ * Tailwind scans source for LITERAL candidates: a `bg-${family}` template
+ * compiles to no CSS at all, and the failure is an invisible transparent dot.
+ */
+const toneClass: Record<DotTone, { bg: string; text: string }> = {
+  success: { bg: "bg-success", text: "text-success" },
+  accent: { bg: "bg-accent", text: "text-accent" },
+  info: { bg: "bg-info", text: "text-info" },
+  warn: { bg: "bg-warn", text: "text-warn" },
+  danger: { bg: "bg-danger", text: "text-danger" },
+  muted: { bg: "bg-faint", text: "text-faint" },
+  working: { bg: "bg-accent", text: "text-accent" },
 };
 
-/**
- * The same tones as foreground colors, for status markers that are a GLYPH
- * rather than a dot (a spawned chat wearing its job's icon). Kept beside
- * `toneColor` so the two never drift — a status that reads green as a dot must
- * read green as an icon, or the sidebar has two conflicting colour languages.
- */
-export const toneText: Record<DotTone, string> = {
-  success: "text-success",
-  accent: "text-accent",
-  info: "text-info",
-  warn: "text-warn",
-  danger: "text-danger",
-  muted: "text-faint",
-  working: "text-accent",
-};
+/** Exposed for the test that holds the dot and glyph halves of a tone together. */
+export const TONE_CLASS = toneClass;
+
+/** A tone's foreground class, for a status marker rendered as an icon. */
+export function toneText(tone: DotTone): string {
+  return toneClass[tone].text;
+}
 
 export interface StatusDotProps {
   tone: DotTone;
@@ -55,13 +58,13 @@ export function StatusDot({ tone, pulse, size = 7, className }: StatusDotProps) 
         <span
           className={cn(
             "absolute inset-0 rounded-full transition-colors duration-300",
-            toneColor[tone],
+            toneClass[tone].bg,
             "cm-anim-pulse opacity-60",
           )}
         />
       )}
       <span
-        className={cn("relative rounded-full transition-colors duration-300", toneColor[tone])}
+        className={cn("relative rounded-full transition-colors duration-300", toneClass[tone].bg)}
         style={{ width: size, height: size }}
       />
     </span>

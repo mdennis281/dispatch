@@ -288,7 +288,7 @@ function ChatRow({
             title={chat.purpose?.label ?? chat.purpose?.kind}
             className={cn(
               "flex size-[15px] shrink-0 items-center justify-center [&_svg]:size-3.5",
-              toneText[meta.tone],
+              toneText(meta.tone),
               "transition-colors duration-300",
               meta.pulse && "animate-pulse",
             )}
