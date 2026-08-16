@@ -163,8 +163,12 @@ export interface ManagerMcpBroker {
   getContextUsage(chatId: string): Promise<ContextUsage | null>;
   /** Compact a chat's context in place (native SDK `/compact`). */
   compact(chatId: string): void;
-  /** Flag that a `watch_pr` on this chat hit a terminal PR state (drives the green "PR done" dot). */
-  markPrWatched(chatId: string): void;
+  /**
+   * Flag that a `watch_pr` on this chat hit a terminal PR state (drives the green
+   * "PR done" dot). Pass the PR so the state is stamped on the chat's ref and
+   * survives a restart/reload, not just the life of this session.
+   */
+  markPrWatched(chatId: string, pr?: { number: number; state: "merged" | "closed" }): void;
   /** Ask the human through Dispatch's radio / multi-select question card. */
   askUser(
     chatId: string,
@@ -1722,7 +1726,10 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         const s = outcome.state;
         // The PR settled (merged/closed) — mark the chat so its dot reads green
         // ("PR done") once the agent finishes and returns to idle.
-        ctx.broker.markPrWatched(ctx.chatId);
+        ctx.broker.markPrWatched(ctx.chatId, {
+          number: s.number,
+          state: s.merged ? "merged" : "closed",
+        });
         // A merge (usually the auto-merge job's, not ours) means the trunk moved;
         // tell the manager so the primary checkout can fast-forward to it.
         if (s.merged) ctx.github.notePrMerged?.();
@@ -2433,7 +2440,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
 
       // Same bookkeeping a watch_pr-observed merge does: the chat's dot goes
       // green, and the manager fast-forwards the primary checkout to the trunk.
-      ctx.broker.markPrWatched(ctx.chatId);
+      ctx.broker.markPrWatched(ctx.chatId, { number, state: "merged" });
       const noChecks = pr.checks.length === 0 ? " (this PR had no CI checks reporting)" : "";
       return textResult(
         `Merged PR #${number} (${method}${approved.approved ? ", approved" : ""})${noChecks}. ` +

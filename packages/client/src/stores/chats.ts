@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import type { Chat, ChatStatus, AgentActivity } from "@dispatch/shared";
+import { isPrSettledIdle } from "@dispatch/shared";
 import { clearDraft } from "../lib/composerDrafts.js";
 
 interface ChatsStore {
@@ -65,9 +66,14 @@ export const useChats = create<ChatsStore>((set) => ({
     set((s) => {
       const byId: Record<string, Chat> = {};
       const lastActivity: Record<string, number> = {};
+      const prSettled: Record<string, boolean> = {};
       for (const c of chats) {
         byId[c.id] = c;
         lastActivity[c.id] = c.updatedAt ?? c.createdAt;
+        // Rebuilt from the record on every load. `prSettled` is otherwise only
+        // ever written by a live `chat-status` event, so a reload turned every
+        // chat that had already landed its PR back into an anonymous gray "idle".
+        if (isPrSettledIdle(c)) prSettled[c.id] = true;
       }
       const order = [...chats]
         .sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt))
@@ -80,13 +86,16 @@ export const useChats = create<ChatsStore>((set) => ({
       // put the selection back.
       const activeChatId =
         s.activeChatId && byId[s.activeChatId] ? s.activeChatId : (order[0] ?? null);
-      return { byId, order, lastActivity, activeChatId };
+      return { byId, order, lastActivity, prSettled, activeChatId };
     }),
 
   upsertChat: (chat) =>
     set((s) => ({
       byId: { ...s.byId, [chat.id]: chat },
       order: s.order.includes(chat.id) ? s.order : [chat.id, ...s.order],
+      // A `chat-update` is how the settled PR ref reaches the client, so re-derive
+      // here too rather than waiting for the next status event to carry the flag.
+      prSettled: { ...s.prSettled, [chat.id]: isPrSettledIdle(chat) },
       lastActivity: {
         ...s.lastActivity,
         [chat.id]: Math.max(

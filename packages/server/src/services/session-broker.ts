@@ -65,6 +65,7 @@ import {
   DEFAULT_HARNESS,
   EffortSchema,
   classifyWorkflowViolation,
+  isPrSettledIdle,
   resolveWorkflow,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
@@ -1289,6 +1290,10 @@ export class SessionBroker {
           chat.status === "awaiting-input"
             ? "error"
             : (chat.status ?? "idle"),
+        // Rebuilt from the record, not carried over: a session created after a
+        // restart has no memory of the merge that settled this chat, and without
+        // this the green "PR done" dot silently downgraded to plain idle.
+        prWatchSettled: isPrSettledIdle(chat) || undefined,
         started: false,
         outbox: [],
         pendingPermissions: new Map(),
@@ -1326,8 +1331,18 @@ export class SessionBroker {
 
     // A fresh user message supersedes any completed PR watch: the green "PR done"
     // dot resets so the chat reads as active again (the imminent turn flips it to
-    // the pulsing running state).
+    // the pulsing running state). Persisted alongside the live flag so the reset
+    // survives a reload too — otherwise a chat you'd already resumed past its
+    // merge would go back to reading "PR done" the next time it rehydrated.
     session.prWatchSettled = false;
+    const userMessageAt = this.now();
+    session.writeChain = session.writeChain.catch(() => {}).then(async () => {
+      try {
+        await this.store.patchChat(chatId, { lastUserMessageAt: userMessageAt });
+      } catch {
+        /* best-effort: worst case the dot reads stale until the next write */
+      }
+    });
 
     // A message sent while a question is pending is an implicit decline: unblock
     // the AskUserQuestion(s) so this message can be consumed as the real reply.
@@ -1881,9 +1896,40 @@ export class SessionBroker {
    * sticky display flag so the chat's dot turns green ("PR done") the moment the
    * agent settles back to idle; a new user message (or fork/clear) clears it.
    */
-  markPrWatched(chatId: string): void {
+  markPrWatched(chatId: string, pr?: { number: number; state: "merged" | "closed" }): void {
     const session = this.sessions.get(chatId);
     if (session) session.prWatchSettled = true;
+    // The in-memory flag above only lives as long as the session does — it used
+    // to be the ONLY record, so a server restart (or just a page reload, which
+    // rehydrates from the store) dropped a landed chat back to a neutral gray
+    // dot. Stamp the PR ref too, so `isPrSettledIdle` can rebuild the state.
+    if (pr) void this.persistPrSettled(chatId, pr);
+  }
+
+  /** Record a terminal PR state + when we saw it on the chat's matching ref. */
+  private async persistPrSettled(
+    chatId: string,
+    pr: { number: number; state: "merged" | "closed" },
+  ): Promise<void> {
+    try {
+      const chat = await this.store.getChat(chatId);
+      if (!chat?.prs?.some((p) => p.number === pr.number)) return;
+      const prs = chat.prs.map((p) =>
+        p.number === pr.number
+          ? // FIRST observation wins. Re-stamping on a later look (a second
+            // watch_pr over an already-merged PR) would push `settledAt` past
+            // user messages that came after the real merge, and the dot would
+            // wrongly go green again on the next reload.
+            { ...p, state: pr.state, settledAt: p.settledAt ?? this.now() }
+          : p,
+      );
+      // patchChat, not saveChat: settling a PR is bookkeeping, not conversational
+      // activity, so it must not bump the chat up the sidebar's recency sort.
+      const saved = await this.store.patchChat(chatId, { prs });
+      if (saved) this.bus.publish({ type: "chat-update", chat: saved });
+    } catch {
+      /* best-effort: the live flag still carries the dot for this session */
+    }
   }
 
   /**

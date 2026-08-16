@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
+import { isPrSettledIdle } from "@dispatch/shared";
 import {
   SessionBroker,
   EFFORT_THINKING_TOKENS,
@@ -2436,5 +2437,81 @@ describe("SessionBroker — spawn_chat consent", () => {
     await expect(
       broker.consentToSpawn("nobody", { prompt: "go" }, { id: "p1", name: "Dispatch" }),
     ).resolves.toMatchObject({ approved: false, auto: false });
+  });
+});
+
+describe("SessionBroker — settled PRs", () => {
+  const openPr = { number: 7, url: "u", branch: "b", state: "open" as const };
+
+  /** `markPrWatched` persists fire-and-forget; wait for the write to land. */
+  async function settledPr(chatId: string) {
+    for (let i = 0; i < 50; i++) {
+      const pr = (await store.getChat(chatId))?.prs?.[0];
+      if (pr?.settledAt !== undefined) return pr;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error("settledAt never persisted");
+  }
+
+  it("stamps the terminal state and time on the chat's PR ref", async () => {
+    const broker = makeBroker(makeFakeQuery(() => []).fn);
+    await store.saveChat({ ...chatFor("c1"), prs: [openPr] });
+    broker.create(chatFor("c1"));
+
+    broker.markPrWatched("c1", { number: 7, state: "merged" });
+
+    expect((await settledPr("c1")).state).toBe("merged");
+    // The whole point: the dot can now be rebuilt from the persisted record
+    // rather than only from the session that happened to observe the merge.
+    const stored = await store.getChat("c1");
+    expect(isPrSettledIdle({ ...stored!, status: "idle" })).toBe(true);
+  });
+
+  it("keeps the FIRST settle time when the same PR is observed again", async () => {
+    const broker = makeBroker(makeFakeQuery(() => []).fn);
+    await store.saveChat({ ...chatFor("c1"), prs: [openPr] });
+    broker.create(chatFor("c1"));
+
+    broker.markPrWatched("c1", { number: 7, state: "merged" });
+    const first = (await settledPr("c1")).settledAt;
+
+    // A second watch_pr over an already-merged PR must not push `settledAt`
+    // past user messages that came after the real merge — that would wrongly
+    // turn the dot green again on the next reload.
+    broker.markPrWatched("c1", { number: 7, state: "merged" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect((await store.getChat("c1"))?.prs?.[0]?.settledAt).toBe(first);
+  });
+
+  it("ignores a PR the chat doesn't own", async () => {
+    const broker = makeBroker(makeFakeQuery(() => []).fn);
+    await store.saveChat({ ...chatFor("c1"), prs: [openPr] });
+    broker.create(chatFor("c1"));
+
+    broker.markPrWatched("c1", { number: 999, state: "merged" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect((await store.getChat("c1"))?.prs?.[0]).toMatchObject({ state: "open" });
+  });
+
+  it("records when the user last spoke, so a later message supersedes the merge", async () => {
+    const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
+    const broker = makeBroker(fn);
+    const landed: Chat = {
+      ...chatFor("c1"),
+      prs: [{ ...openPr, state: "merged", settledAt: 500 }],
+    };
+    await store.saveChat(landed);
+    broker.create(landed);
+    expect(isPrSettledIdle({ ...landed, status: "idle" })).toBe(true);
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "actually, one more thing");
+    await idleP;
+
+    const stored = await store.getChat("c1");
+    expect(stored?.lastUserMessageAt).toBeGreaterThan(500);
+    expect(isPrSettledIdle(stored!)).toBe(false);
   });
 });
