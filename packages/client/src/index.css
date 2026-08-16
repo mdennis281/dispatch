@@ -216,12 +216,34 @@
     --cm-safe-bottom: env(safe-area-inset-bottom, 0px);
     --cm-safe-left: env(safe-area-inset-left, 0px);
 
-    /* The mobile bottom nav's own height, and the space it actually occupies
-     * (row + home indicator). The bar is in FLOW, so the shell doesn't need
-     * either number — these are for the overlays that cover it (the two "More"
-     * sheets) and want their last row to clear the bar underneath. */
+    /*
+     * The mobile bottom nav, in three parts.
+     *
+     * `-h` is the slot height the touch targets need (52px clears the 44px
+     * minimum with room for a label). `-clear` is how much of the home
+     * indicator's inset stays EMPTY beneath them. `-strip` is what's left for
+     * the slots themselves, and `-space` is the whole thing — derived, so the
+     * two can't drift apart the way a hand-maintained total does.
+     *
+     * `-clear` is deliberately a FRACTION of the inset rather than all of it.
+     * Reserving the full 34px put the icons in the top 52px of an 86px slab
+     * with an empty band under them, and a bar whose content stops well short
+     * of where the bar visibly ends reads as clipped rather than as inset —
+     * the hairline and the icons say "bar", and everything below them says
+     * "leftover". Growing the slots into most of the inset makes it one band
+     * again. The remainder still clears the indicator, which is a ~5px pill
+     * sitting ~8px off the bottom edge, so ~19px of the 34 is ample.
+     *
+     * The bar is in FLOW, so the shell doesn't need any of these — `-space` is
+     * for the overlays that cover it (the two "More" sheets) and want their
+     * last row to clear the bar underneath.
+     */
     --cm-bottom-nav-h: 52px;
-    --cm-bottom-nav-space: calc(var(--cm-bottom-nav-h) + var(--cm-safe-bottom));
+    --cm-bottom-nav-clear: calc(var(--cm-safe-bottom) * 0.55);
+    --cm-bottom-nav-strip: calc(
+      var(--cm-bottom-nav-h) + var(--cm-safe-bottom) - var(--cm-bottom-nav-clear)
+    );
+    --cm-bottom-nav-space: calc(var(--cm-bottom-nav-strip) + var(--cm-bottom-nav-clear));
 
     /* How much of the window the soft keyboard is covering. Written by
      * lib/useKeyboardInset from `visualViewport`; declared here so the shell's
