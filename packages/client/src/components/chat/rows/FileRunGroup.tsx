@@ -66,6 +66,12 @@ interface SplitPath {
   file: string;
 }
 
+/** Same file/directory, ignoring slash flavour, a trailing slash, and Windows case. */
+function samePath(a: string, b: string): boolean {
+  const n = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return n(a) === n(b);
+}
+
 function splitPath(path: string): SplitPath {
   const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
   const cut = normalized.lastIndexOf("/");
@@ -324,11 +330,17 @@ export const FileRunGroup = memo(function FileRunGroup({ entries }: { entries: F
           : null;
         // A search's `path` arrives absolute more often than not, and the
         // worktree prefix is the one part of it the reader already knows.
-        // Resolving to "" means it searched the worktree root — say nothing.
         const scopeTarget = presentation.scope
           ? resolveChatFile(chat, worktrees, presentation.scope)
           : null;
-        const scope = scopeTarget?.relPath ?? presentation.scope ?? "";
+        // A search that ran AT the worktree root has no scope worth naming, and
+        // resolving it does not produce one either: relativeTo() hands back the
+        // input untouched when it strips nothing, so the row would show the very
+        // absolute path the resolve was meant to remove.
+        const scope =
+          scopeTarget && samePath(scopeTarget.relPath, scopeTarget.worktreePath)
+            ? ""
+            : (scopeTarget?.relPath ?? presentation.scope ?? "");
         return [{ entry, presentation, target, scope }];
       }),
     [entries, chat, worktrees],
