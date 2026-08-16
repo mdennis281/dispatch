@@ -32,17 +32,31 @@ export interface ViewportMetrics {
   dvh: number;
   /** `env(safe-area-inset-bottom)`, likewise measured rather than guessed. */
   safeBottom: number;
+  /**
+   * `env(safe-area-inset-top)`. Non-zero means the viewport we were given
+   * INCLUDES the status bar — which is what makes the same band missing from
+   * `innerHeight` a double charge rather than an honest measurement.
+   */
+  safeTop: number;
+  /** The height the shell is actually laid out at, fallbacks resolved. */
+  shell: number;
   /** The physical screen, which nothing should be able to change. */
   screenHeight: number;
 }
 
-export function keyboardInset(innerHeight: number, vvHeight: number, vvOffsetTop: number): number {
-  // What we want is the gap between the window's bottom and the bottom of the
+export function keyboardInset(shellHeight: number, vvHeight: number, vvOffsetTop: number): number {
+  // What we want is the gap between the SHELL's bottom and the bottom of the
   // band you can actually see — which is where the shell has to stop. When iOS
   // scrolls the page to reveal the caret it moves that band DOWN the window
   // (`offsetTop`), so the gap below it shrinks by exactly that much; the shell
   // is anchored to the window's top and has scrolled with it.
-  return Math.max(0, Math.round(innerHeight - vvHeight - vvOffsetTop));
+  //
+  // The reference is the shell's OWN height, not `innerHeight`. Those are the
+  // same number only while the shell is uncorrected; every correction below
+  // makes the shell taller than the window WebKit admits to, and subtracting a
+  // keyboard measured against the short window from the tall shell strands the
+  // composer above the keys by exactly the difference.
+  return Math.max(0, Math.round(shellHeight - vvHeight - vvOffsetTop));
 }
 
 const EMPTY: ViewportMetrics = {
@@ -54,6 +68,8 @@ const EMPTY: ViewportMetrics = {
   clientHeight: 0,
   dvh: 0,
   safeBottom: 0,
+  safeTop: 0,
+  shell: 0,
   screenHeight: 0,
 };
 
@@ -95,16 +111,41 @@ export const useViewport = create<ViewportStore>((set) => ({
  * means the URL bar came back, which the shell must FOLLOW or the composer ends
  * up underneath it. Installed, there is no URL bar and nothing that can
  * legitimately take the height, so the same shrink is the WebKit bug.
+ *
+ * The SECOND correction is the status bar, and it is the one that left the band
+ * of dead black under the bottom nav. With `black-translucent`, the web view
+ * covers the whole screen and the status bar is described to us as an inset —
+ * that is the entire meaning of `env(safe-area-inset-top)` being non-zero. But
+ * WebKit also subtracts that same band from `innerHeight`/`100dvh`, so a shell
+ * sized in `dvh` and then padded by `safe-area-inset-top` pays for the status
+ * bar TWICE: once at the top as padding, once at the bottom as a shell that
+ * stops short of the screen. Adding the top inset back is what makes the shell
+ * reach the bottom of the display.
+ *
+ * The evidence for that double-charge is `safeTop` itself, so this is
+ * self-limiting rather than a guess about a device: a UA that has already taken
+ * the status bar out of the viewport reports a top inset of 0 and gets no
+ * correction. `screenHeight` is the sanity check — the recovered band has to
+ * actually exist between the window and the panel, or we'd pin the shell taller
+ * than the screen and re-create the overflow #60 just removed.
  */
 export function standaloneShellHeight(
   standalone: boolean,
   innerHeight: number,
   maxInnerHeight: number,
+  safeTop: number,
+  screenHeight: number,
 ): number {
   if (!standalone) return 0;
   // A 1-2px wobble is rounding, not the bug, and pinning the shell a pixel
   // taller than the window would make the document scrollable for no reason.
-  return maxInnerHeight - innerHeight > 4 ? maxInnerHeight : 0;
+  const shrunk = maxInnerHeight - innerHeight > 4;
+  const base = shrunk ? maxInnerHeight : innerHeight;
+  // `- 2` for the same rounding: these are two independently rounded CSS
+  // lengths and an exact-equality gate would fail on a half-pixel.
+  const statusBar = safeTop > 0 && screenHeight - base >= safeTop - 2 ? safeTop : 0;
+  if (!statusBar) return shrunk ? base : 0;
+  return base + statusBar;
 }
 
 /**
@@ -128,6 +169,7 @@ export function startViewportTracking(): () => void {
   const vv = window.visualViewport;
   const dvhProbe = makeProbe("100dvh");
   const safeProbe = makeProbe("env(safe-area-inset-bottom, 0px)");
+  const safeTopProbe = makeProbe("env(safe-area-inset-top, 0px)");
 
   const standalone = isStandalone();
   let frame = 0;
@@ -146,10 +188,19 @@ export function startViewportTracking(): () => void {
     // document the app has already left.
     if (frame) cancelAnimationFrame(frame);
     frame = 0;
+    // iOS scrolls the DOCUMENT to bring the focused caret into view, and it does
+    // it whether or not there is anything to scroll — the shell is `fixed`, so
+    // what actually moves is the layout viewport out from under it, taking the
+    // top bar up behind the status bar and leaving the app looking like it has
+    // been dragged. Nothing here is ever legitimately scrolled, so the honest
+    // resting position is 0 and we put it back.
+    if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
+
     const innerHeight = window.innerHeight;
     const vvHeight = vv?.height ?? innerHeight;
     const vvOffsetTop = vv?.offsetTop ?? 0;
-    const inset = keyboardInset(innerHeight, vvHeight, vvOffsetTop);
+    const dvh = Math.round(dvhProbe.getBoundingClientRect().height);
+    const safeTop = Math.round(safeTopProbe.getBoundingClientRect().height);
 
     if (window.innerWidth !== maxWidth) {
       maxWidth = window.innerWidth;
@@ -160,7 +211,16 @@ export function startViewportTracking(): () => void {
     // `--cm-vh` is the shell's height, and it is DELIBERATELY absent unless the
     // window has demonstrably shrunk under us: `height: var(--cm-vh, 100dvh)`
     // then falls back to the unit that is correct everywhere the bug isn't.
-    const vh = standaloneShellHeight(standalone, innerHeight, maxInnerHeight);
+    const vh = standaloneShellHeight(
+      standalone,
+      innerHeight,
+      maxInnerHeight,
+      safeTop,
+      window.screen.height,
+    );
+    // What the shell is ACTUALLY laid out at — the CSS fallback resolved here,
+    // because that is the edge the keyboard has to be measured against.
+    const inset = keyboardInset(vh || dvh || innerHeight, vvHeight, vvOffsetTop);
     if (vh !== lastVh) {
       lastVh = vh;
       if (vh > 0) document.documentElement.style.setProperty("--cm-vh", `${vh}px`);
@@ -187,8 +247,10 @@ export function startViewportTracking(): () => void {
         vvOffsetTop: Math.round(vvOffsetTop),
         vvScale: vv?.scale ?? 1,
         clientHeight: document.documentElement.clientHeight,
-        dvh: Math.round(dvhProbe.getBoundingClientRect().height),
+        dvh,
         safeBottom: Math.round(safeProbe.getBoundingClientRect().height),
+        safeTop,
+        shell: vh || dvh || innerHeight,
         screenHeight: window.screen.height,
       },
       maxInnerHeight,
@@ -227,6 +289,10 @@ export function startViewportTracking(): () => void {
   vv?.addEventListener("scroll", schedule);
   window.addEventListener("resize", schedule);
   window.addEventListener("orientationchange", schedule);
+  // Not for the metrics — this is how the scroll reset above gets a chance to
+  // run at all. iOS's focus scroll fires no resize, so without this the shell
+  // sits displaced until something else happens to schedule a frame.
+  window.addEventListener("scroll", schedule, { passive: true });
   document.addEventListener("focusin", scheduleBurst);
   document.addEventListener("focusout", scheduleBurst);
 
@@ -237,10 +303,12 @@ export function startViewportTracking(): () => void {
     vv?.removeEventListener("scroll", schedule);
     window.removeEventListener("resize", schedule);
     window.removeEventListener("orientationchange", schedule);
+    window.removeEventListener("scroll", schedule);
     document.removeEventListener("focusin", scheduleBurst);
     document.removeEventListener("focusout", scheduleBurst);
     dvhProbe.remove();
     safeProbe.remove();
+    safeTopProbe.remove();
     document.documentElement.style.removeProperty("--cm-kb");
     document.documentElement.style.removeProperty("--cm-vh");
   };

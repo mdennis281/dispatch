@@ -22,6 +22,11 @@ import { LAYER } from "../../lib/layers.js";
  *    and it skews `kb` directly.
  *  - `kb` staying 0 while the keyboard is visibly up means the shell is never
  *    being told to shrink at all.
+ *  - `dead` is how much of the screen the shell does NOT cover. Anything but 0
+ *    is the band of nothing under the bottom nav, in the units to fix it with.
+ *  - `safe-t` non-zero means the status bar is ours to pad around; if `inner`
+ *    is ALSO short of `screen` by about that much, we are being charged for it
+ *    twice and the shell has to add it back.
  */
 export function ViewportDebug() {
   // Subscribes to `debug` ALONE. The tracker writes the store every frame for
@@ -36,17 +41,30 @@ function ViewportReadout() {
   const m = useViewport();
 
   const shrunk = m.maxInnerHeight - m.innerHeight;
-  const vh = standaloneShellHeight(isStandalone(), m.innerHeight, m.maxInnerHeight);
+  const vh = standaloneShellHeight(
+    isStandalone(),
+    m.innerHeight,
+    m.maxInnerHeight,
+    m.safeTop,
+    m.screenHeight,
+  );
+  // The one number that says whether the shell reaches the bottom of the
+  // display: how much of the screen nothing is drawn on. It should be 0.
+  const dead = m.screenHeight - m.safeTop - m.shell;
   const rows: Array<[string, string, boolean]> = [
     // What the shell is ACTUALLY sized to, and why — the one line that says
     // whether the correction is engaged.
     ["shell", vh > 0 ? `${vh} (fixed)` : `${m.dvh} (dvh)`, vh > 0],
+    ["dead", `${dead}`, Math.abs(dead) > 2],
     ["kb", `${m.inset}`, m.inset > 0],
     ["inner", `${m.innerHeight}${shrunk > 2 ? ` (-${shrunk} of ${m.maxInnerHeight})` : ""}`, shrunk > 2],
     ["vv", `${m.vvHeight}`, false],
     ["off", `${m.vvOffsetTop}`, m.vvOffsetTop !== 0],
     ["dvh", `${m.dvh}`, Math.abs(m.dvh - m.innerHeight) > 2],
     ["client", `${m.clientHeight}`, false],
+    // `safe-t` non-zero alongside a short `inner` IS the status-bar double
+    // charge — the two numbers only mean something next to each other.
+    ["safe-t", `${m.safeTop}`, false],
     ["safe-b", `${m.safeBottom}`, false],
     ["screen", `${m.screenHeight}`, false],
     ["scale", m.vvScale.toFixed(2), Math.abs(m.vvScale - 1) > 0.01],
