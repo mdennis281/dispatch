@@ -56,6 +56,11 @@ export function UpdateBanner() {
   // BACKWARDS through builds, and a mis-click on a segmented control should not
   // be one button away from reinstalling an older app.
   const [confirmStepBack, setConfirmStepBack] = useState(false);
+  // The channel being switched TO, held locally until the server answers.
+  // `status.channel` is still the old one for the whole round trip, so without
+  // this the toggle springs back under the cursor as if the click missed, and
+  // the progress line names the channel we are switching AWAY from.
+  const [pending, setPending] = useState<UpdateChannel | null>(null);
 
   useEffect(() => {
     if (!loaded) void load();
@@ -65,6 +70,9 @@ export function UpdateBanner() {
 
   const available = hasUpdate(status);
   const channel = status.channel;
+  // What the toggle and its blurb show: the target while a switch is in flight,
+  // the server's answer otherwise.
+  const shown = pending ?? channel;
   // "Ahead" only matters while there is a head to be ahead OF; a failed first
   // check leaves `latest` null and this must not claim anything either way.
   const ahead = status.ahead === true && status.latest !== null;
@@ -171,17 +179,22 @@ export function UpdateBanner() {
                   { value: "stable", label: "Stable", icon: <ShieldCheck /> },
                   { value: "unstable", label: "Unstable", icon: <Rocket /> },
                 ]}
-                value={channel}
+                value={shown}
                 onChange={(next) => {
-                  if (next === channel || switching) return;
+                  if (next === shown || switching) return;
                   setError(null);
                   setConfirmStepBack(false);
-                  void setChannel(next);
+                  setPending(next);
+                  // Cleared either way: on failure the toggle must fall back to
+                  // whatever channel the server still says is real.
+                  void setChannel(next).finally(() => setPending(null));
                 }}
               />
-              {switching && <span className="text-xs text-faint">Checking {channel}…</span>}
+              {switching && pending && (
+                <span className="text-xs text-faint">Checking {pending}…</span>
+              )}
             </div>
-            <p className="mt-1 text-xs leading-snug text-faint">{CHANNEL_BLURB[channel]}</p>
+            <p className="mt-1 text-xs leading-snug text-faint">{CHANNEL_BLURB[shown]}</p>
           </div>
         </div>
       </div>

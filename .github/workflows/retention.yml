@@ -65,6 +65,24 @@ jobs:
         run: |
           set -euo pipefail
 
+          # workflow_dispatch inputs arrive as STRINGS, and a typo in one reaches
+          # `date -d` and the `-le` integer test, which fail under `set -e` with a
+          # message that names neither the input nor this job's purpose. Validate
+          # up front so a fat-fingered dispatch says what is wrong.
+          #
+          # `keep_min` may be 0 (prune purely by age); `max_age_days` may not,
+          # because 0 would delete everything past the floor in one run.
+          case "$MAX_AGE_DAYS" in
+            ''|*[!0-9]*) echo "max_age_days must be a whole number of days (got '$MAX_AGE_DAYS')" >&2; exit 1 ;;
+          esac
+          case "$KEEP_MIN" in
+            ''|*[!0-9]*) echo "keep_min must be a non-negative whole number (got '$KEEP_MIN')" >&2; exit 1 ;;
+          esac
+          if [ "$MAX_AGE_DAYS" -lt 1 ]; then
+            echo "max_age_days must be at least 1; refusing to delete everything past the floor." >&2
+            exit 1
+          fi
+
           CUTOFF="$(date -u -d "-${MAX_AGE_DAYS} days" +%s)"
           echo "Cutoff: $(date -u -d "@$CUTOFF" +%Y-%m-%dT%H:%M:%SZ) | keep_min=$KEEP_MIN | dry_run=$DRY_RUN"
           echo "## Release retention" >> "$GITHUB_STEP_SUMMARY"
