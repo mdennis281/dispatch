@@ -20,6 +20,22 @@ const toneColor: Record<DotTone, string> = {
   working: "bg-accent",
 };
 
+/**
+ * The same tones as foreground colors, for status markers that are a GLYPH
+ * rather than a dot (a spawned chat wearing its job's icon). Kept beside
+ * `toneColor` so the two never drift — a status that reads green as a dot must
+ * read green as an icon, or the sidebar has two conflicting colour languages.
+ */
+export const toneText: Record<DotTone, string> = {
+  success: "text-success",
+  accent: "text-accent",
+  info: "text-info",
+  warn: "text-warn",
+  danger: "text-danger",
+  muted: "text-faint",
+  working: "text-accent",
+};
+
 export interface StatusDotProps {
   tone: DotTone;
   /** Emit a soft expanding ring (for live/working states). */
