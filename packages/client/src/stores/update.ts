@@ -8,7 +8,15 @@
 import { create } from "zustand";
 import type { UpdateChannel, UpdateStatus } from "@dispatch/shared";
 import { api } from "../lib/api.js";
-import { dismissVersion, dismissedVersion } from "../lib/updatePrefs.js";
+import {
+  clearFlight,
+  dismissVersion,
+  dismissedVersion,
+  readFlight,
+  writeFlight,
+  type UpdateFlight,
+} from "../lib/updatePrefs.js";
+import { probeHealth } from "../lib/updateProbe.js";
 
 interface UpdateStore {
   status: UpdateStatus | null;
@@ -20,6 +28,13 @@ interface UpdateStore {
   switching: boolean;
   /** The install request has been accepted; the server is on its way down. */
   installing: boolean;
+  /**
+   * The persisted record of that install — crucially, the identity of the server
+   * that accepted it. Non-null exactly when the updating screen should be up.
+   * Hydrated from localStorage at store creation so a reload lands straight back
+   * on the update screen instead of on a login form.
+   */
+  flight: UpdateFlight | null;
   /** Version the user dismissed, mirrored into state so the card re-renders. */
   dismissed: string | null;
 
@@ -35,15 +50,31 @@ interface UpdateStore {
    * step-back, since a downgrade is never reported as `available`.
    */
   install: (tag?: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Take over an install this tab did not start — a second tab, or this tab
+   * after a reload that beat the shutdown. The baseline has to be probed rather
+   * than assumed: the server still answering IS the one the installer is about
+   * to stop, so its identity is exactly what the screen needs to watch for.
+   */
+  adopt: () => Promise<void>;
+  /** The update reached a conclusion (or the user dismissed a failed one). */
+  endFlight: () => void;
   dismiss: () => void;
 }
+
+const initialFlight = readFlight();
 
 export const useUpdate = create<UpdateStore>((set, get) => ({
   status: null,
   loaded: false,
   checking: false,
   switching: false,
-  installing: false,
+  // A persisted marker means an update was running when this tab last had a
+  // say. Believing it BEFORE any network call is the point: the screen is up on
+  // the first frame, so there is no window in which the shell (or the login
+  // form) renders over an install in progress.
+  installing: initialFlight !== null,
+  flight: initialFlight,
   dismissed: dismissedVersion(),
 
   set: (status) => set({ status, loaded: true, ...(status.installing ? { installing: true } : {}) }),
@@ -86,14 +117,56 @@ export const useUpdate = create<UpdateStore>((set, get) => ({
     // server refuses a second install anyway, but the UI should not offer it.
     if (get().installing) return { ok: true };
     set({ installing: true });
+
+    // Probed BEFORE the install is asked for, while the answer is unambiguously
+    // the outgoing process. Probing afterwards would race the shutdown and could
+    // record the identity of the build we are waiting for as the one we are
+    // waiting to LOSE, which strands the screen forever.
+    const baseline = await probeHealth();
+
     try {
       const res = await api.update.install(tag);
-      if (!res.ok) set({ installing: false });
+      if (!res.ok) {
+        set({ installing: false });
+        return res;
+      }
+      const flight: UpdateFlight = {
+        tag: res.tag ?? tag ?? null,
+        version: get().status?.latest?.version ?? null,
+        fromPid: baseline?.pid ?? null,
+        fromStartedAt: baseline?.startedAt ?? null,
+        startedAt: Date.now(),
+      };
+      writeFlight(flight);
+      set({ flight });
       return res;
     } catch (err) {
       set({ installing: false });
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+  },
+
+  adopt: async () => {
+    if (get().flight) return;
+    const baseline = await probeHealth();
+    // Re-checked after the await: another caller may have landed a flight while
+    // the probe was out, and two markers for one install would disagree about
+    // which process to watch for.
+    if (get().flight) return;
+    const flight: UpdateFlight = {
+      tag: get().status?.latest?.tag ?? null,
+      version: get().status?.latest?.version ?? null,
+      fromPid: baseline?.pid ?? null,
+      fromStartedAt: baseline?.startedAt ?? null,
+      startedAt: Date.now(),
+    };
+    writeFlight(flight);
+    set({ flight, installing: true });
+  },
+
+  endFlight: () => {
+    clearFlight();
+    set({ flight: null, installing: false });
   },
 
   dismiss: () => {

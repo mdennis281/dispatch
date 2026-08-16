@@ -79,7 +79,14 @@ export default function App() {
   useEffect(startViewportTracking, []);
 
   return (
-    <AuthGate>
+    <>
+      {/* OUTSIDE the auth gate, deliberately. An update restarts the server, so
+          for part of it there is no session to authenticate against — inside the
+          gate this screen was replaced by a login form partway through the very
+          process it exists to narrate. It renders over everything either way,
+          and watching your own update finish is not a privileged operation. */}
+      <UpdatingScreen />
+      <AuthGate>
       {/* `100dvh`, not `100vh`. On mobile Safari `vh` is pinned to the LARGEST
           viewport (URL bar retracted), so a `h-screen` app column is taller than
           the window whenever the bar is showing — and since this column is
@@ -198,12 +205,14 @@ export default function App() {
       <ManageConfigDialog />
       <Toasts />
       <ViewportDebug />
+      {/* An update also stops the server, and "Dispatch has stopped, start it
+          from the Start menu" is both wrong and unhelpful halfway through one.
+          ShutdownScreen stands down on its own while an update is in flight
+          (see its guard) rather than being out-stacked by a screen that now
+          lives outside this tree entirely. */}
       <ShutdownScreen />
-      {/* After ShutdownScreen so it wins the tie: an update DOES stop the server,
-          and "Dispatch has stopped, start it from the Start menu" is the wrong
-          thing to tell someone whose install is halfway through. */}
-      <UpdatingScreen />
       </div>
     </AuthGate>
+    </>
   );
 }

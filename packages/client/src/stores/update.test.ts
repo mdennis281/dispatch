@@ -6,9 +6,10 @@
  * release must silence only THAT release — a boolean or a timestamp here would
  * either nag about an update you rejected or hide the next one you never saw.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import type { UpdateStatus } from "@dispatch/shared";
 import { useUpdate, hasUpdate } from "./update.js";
+import { readFlight } from "../lib/updatePrefs.js";
 
 const INSTALLED = { version: "2026.08.14.81160", tag: "v2026.08.14.81160" };
 const LATEST = {
@@ -59,6 +60,7 @@ beforeEach(() => {
     checking: false,
     switching: false,
     installing: false,
+    flight: null,
     dismissed: null,
   });
 });
@@ -138,5 +140,119 @@ describe("installing", () => {
     // A second tab, or this tab after a reload that beat the shutdown.
     useUpdate.getState().set(status({ installing: true }));
     expect(useUpdate.getState().installing).toBe(true);
+  });
+});
+
+/**
+ * The marker that makes the update survivable.
+ *
+ * Its job is to record WHICH server is about to go away, so the updating screen
+ * can wait for a different one instead of reloading the moment the old one — up
+ * and healthy for the whole download and dependency install — answers a probe.
+ */
+describe("the in-flight marker", () => {
+  const HEALTH = { ok: true, pid: 4242, startedAt: 1_760_000_000_000, sha: "abc" };
+
+  function routeFetch(over: { health?: unknown; install?: unknown } = {}) {
+    const mock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.includes("/api/health")
+        ? (over.health ?? HEALTH)
+        : (over.install ?? { ok: true, tag: LATEST.tag });
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", mock);
+    return mock;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("records the identity of the server that accepted the install", async () => {
+    routeFetch();
+    useUpdate.getState().set(status());
+    await useUpdate.getState().install();
+
+    expect(readFlight()).toMatchObject({
+      tag: LATEST.tag,
+      version: LATEST.version,
+      fromPid: 4242,
+      fromStartedAt: 1_760_000_000_000,
+    });
+    expect(useUpdate.getState().flight).not.toBeNull();
+  });
+
+  it("probes the baseline BEFORE asking for the install", async () => {
+    // Probing afterwards races the shutdown: a health read that lands on the
+    // NEW server would record the build we are waiting FOR as the one we are
+    // waiting to lose, and the screen then waits forever.
+    const mock = routeFetch();
+    useUpdate.getState().set(status());
+    await useUpdate.getState().install();
+
+    const urls = mock.mock.calls.map((c) => String(c[0]));
+    expect(urls.findIndex((u) => u.includes("/api/health"))).toBeLessThan(
+      urls.findIndex((u) => u.includes("/api/update/install")),
+    );
+  });
+
+  it("writes no marker when the server refuses the install", async () => {
+    routeFetch({ install: { ok: false, error: "there is no newer release to install" } });
+    useUpdate.getState().set(status());
+    const res = await useUpdate.getState().install();
+
+    expect(res.ok).toBe(false);
+    expect(readFlight()).toBeNull();
+    expect(useUpdate.getState().installing).toBe(false);
+  });
+
+  it("still records the install when health cannot be reached", async () => {
+    // No baseline to compare against, so the screen falls back to watching the
+    // server go down and come back — but losing the marker entirely would lose
+    // the update screen, which is worse.
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/api/health")) throw new Error("connection refused");
+      return new Response(JSON.stringify({ ok: true, tag: LATEST.tag }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    }));
+    useUpdate.getState().set(status());
+    await useUpdate.getState().install();
+
+    expect(readFlight()).toMatchObject({ fromPid: null, fromStartedAt: null });
+  });
+
+  it("clears both the marker and the latch when the update concludes", async () => {
+    routeFetch();
+    useUpdate.getState().set(status());
+    await useUpdate.getState().install();
+    useUpdate.getState().endFlight();
+
+    expect(readFlight()).toBeNull();
+    expect(useUpdate.getState()).toMatchObject({ flight: null, installing: false });
+  });
+
+  it("adopts an install this tab did not start, capturing the live server as the baseline", async () => {
+    routeFetch();
+    useUpdate.getState().set(status({ installing: true }));
+    await useUpdate.getState().adopt();
+
+    // The server still answering IS the one the installer is about to stop.
+    expect(readFlight()).toMatchObject({ fromPid: 4242 });
+    expect(useUpdate.getState().installing).toBe(true);
+  });
+
+  it("does not overwrite a marker that already exists", async () => {
+    routeFetch();
+    useUpdate.getState().set(status());
+    await useUpdate.getState().install();
+    const first = readFlight();
+
+    await useUpdate.getState().adopt();
+    expect(readFlight()).toEqual(first);
   });
 });

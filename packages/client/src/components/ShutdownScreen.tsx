@@ -14,12 +14,18 @@
 import { Power, RotateCw } from "lucide-react";
 import { Button } from "./ui/Button.js";
 import { useConnection } from "../stores/connection.js";
+import { useUpdate } from "../stores/update.js";
 import { LAYER } from "../lib/layers.js";
 
 export function ShutdownScreen() {
   const stopped = useConnection((s) => s.stopped);
   const reason = useConnection((s) => s.stoppedReason);
-  if (!stopped) return null;
+  // An update stops the server too, and everything this screen says about it
+  // would be wrong: nothing needs starting by hand, reconnecting now just
+  // reloads into a build that is being replaced, and the update is in fact
+  // proceeding. `UpdatingScreen` owns that case end to end.
+  const updating = useUpdate((s) => s.flight !== null);
+  if (!stopped || updating) return null;
 
   return (
     // Above EVERY other layer (see lib/layers). Anything that outranked this

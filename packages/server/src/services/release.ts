@@ -235,6 +235,14 @@ export class ReleaseService {
   /** `If-None-Match` for the next poll; a 304 costs no rate-limit quota. */
   private etag: string | undefined;
   private installing = false;
+  /**
+   * Ms epoch the latch was set. `update.json` is not written until the installer
+   * is actually spawned — after the reply flushes, plus `SETTLE_MS` — so for a
+   * moment the newest stamp on disk belongs to the PREVIOUS install. Anything
+   * reading that stamp has to be able to tell it is stale, or it reports the
+   * last update's outcome as this one's.
+   */
+  private installingSinceMs: number | null = null;
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private firstTimer: ReturnType<typeof setTimeout> | null = null;
@@ -359,6 +367,12 @@ export class ReleaseService {
   /** Latch "an install was launched" so the status stops advertising the button. */
   markInstalling(): void {
     this.installing = true;
+    this.installingSinceMs = Date.now();
+  }
+
+  /** When the latch was set, or null if no install was launched from this process. */
+  installingSince(): number | null {
+    return this.installingSinceMs;
   }
 
   /**
@@ -372,6 +386,7 @@ export class ReleaseService {
    */
   clearInstalling(): void {
     this.installing = false;
+    this.installingSinceMs = null;
   }
 
   /**
