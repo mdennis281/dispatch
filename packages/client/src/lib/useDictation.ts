@@ -39,6 +39,8 @@ export interface Dictation {
   pressStart(): void;
   /** Pointer came up (or was cancelled) after `pressStart`. */
   pressEnd(): void;
+  /** Latch on/off with no gesture — the composer's options menu row. */
+  toggle(): void;
   /** Force the mic off — chat switches, unmount, send. */
   stop(): void;
 }
@@ -109,6 +111,18 @@ export function useDictation(onText: (text: string) => void): Dictation {
     if (pressOutcome(Date.now() - press.at) === "release") stop();
   }, [stop]);
 
+  /**
+   * Latch the mic on or off with no gesture behind it — for the composer's
+   * options menu, where a row is clicked rather than held. Clears any pending
+   * press so a stray release afterwards can't be read as the end of a hold.
+   */
+  const toggle = useCallback(() => {
+    if (unavailable) return;
+    pressRef.current = null;
+    if (listening) stop();
+    else start();
+  }, [unavailable, listening, start, stop]);
+
   // Push-to-talk, live anywhere in the app — including while the caret sits in
   // the composer, which is the whole point: think, hold, speak, release.
   useEffect(() => {
@@ -157,6 +171,7 @@ export function useDictation(onText: (text: string) => void): Dictation {
     dismissError,
     pressStart,
     pressEnd,
+    toggle,
     stop,
   };
 }

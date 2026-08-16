@@ -69,10 +69,19 @@ import {
   COMPOSER_CONTROLS,
   hiddenCount,
   useComposerPrefs,
+  type ComposerControl,
 } from "../../lib/composerPrefs.js";
+import {
+  demote,
+  promote,
+  reconcile,
+  widestSizes,
+  evictedCount,
+  type ComposerSizes,
+} from "../../lib/composerFit.js";
 import { EffortChip } from "../agents/runVisuals.js";
 import { ContextMeter, ContextHint, ContextPanelBody } from "./ContextMeter.js";
-import { ModeControl, modeLabel } from "./ModeControl.js";
+import { ModeControl, ModeMenu, modeLabel, modeIcon } from "./ModeControl.js";
 
 /** The markup editor pulls in two annotation engines — lazy so they stay out of
     the initial bundle and only load when a thumbnail is actually opened. */
@@ -217,6 +226,47 @@ function typingElsewhere(editorDom: Element): boolean {
   );
 }
 
+/**
+ * The header of a drilled-into options page. Shared by the popover and the
+ * sheet, which differ only in row height — the popover is aimed with a pointer,
+ * the sheet with a thumb.
+ */
+function ConfigBackRow({
+  title,
+  dense,
+  onBack,
+}: {
+  title: string;
+  dense: boolean;
+  onBack: () => void;
+}) {
+  return (
+    <div className="mb-1 flex items-center gap-1 border-b border-line-soft pb-1.5">
+      <Button
+        variant="ghost"
+        onClick={onBack}
+        leftIcon={<ChevronLeft />}
+        className={dense ? "h-7 px-1.5 text-sm" : "h-11 px-2 text-base"}
+      >
+        Back
+      </Button>
+      <span className={cn("font-medium text-primary", dense ? "text-sm" : "text-base")}>
+        {title}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Which page the composer-options surface is showing. `root` is a plain list of
+ * every control — the menu is the one place that always has all of them, whether
+ * or not the toolbar had room — and each of the others is one control's own menu
+ * drilled into IN PLACE. `customize` is where you choose what the toolbar tries
+ * to show, nested a level down because it is a setting, not a thing you reach
+ * for mid-turn.
+ */
+type ConfigView = "root" | ComposerControl | "customize";
+
 /** The chat composer: TipTap input + attachments + effort/mode/agent + send/steer. */
 export function Composer({ chat, agents, modes }: ComposerProps) {
   const upsertChat = useChats((s) => s.upsertChat);
@@ -282,26 +332,31 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const toggleControl = useComposerPrefs((s) => s.toggle);
   const showAllControls = useComposerPrefs((s) => s.showAll);
   const hidden = hiddenCount(visible);
-  // Compact toolbar: icon-only controls with tooltips. Chosen automatically —
-  // the row collapses to icons the moment its full-label layout would overflow
-  // the composer width, and re-expands once there's room again (see below).
-  const [compact, setCompact] = useState(false);
-  // Phone width is a DECISION, not a measurement. Fully compacted with a turn
-  // running the row still needs ~464px and a 390px iPhone gives the toolbar
-  // ~358px, so there is no measurement outcome here that keeps Send on screen —
-  // `overflow-hidden` simply clips it, and Send is the whole point of the box.
-  // Below `md` the row therefore drops to Mode / Dictate / ⚙ / Stop / Send and
-  // everything else moves into the sheet. `measure` still governs md and lg.
-  const sm = useLayoutMode() === "sm";
+  // How big each control is currently drawn — derived from measurement, never
+  // stored. Starts at everything's widest and gets walked down by `fit` below.
+  const [sizes, setSizes] = useState<ComposerSizes>(() => widestSizes(visible));
+  const evicted = evictedCount(sizes, visible);
+  // Phone still matters, but only for TOUCH now: taller boxes, roomier menu
+  // rows, a circular Send. Which controls the row carries is decided by the
+  // same measurement at every width — a phone simply ends up with icons,
+  // because icons are what fits.
+  const phone = useLayoutMode() === "sm";
   const [moreOpen, setMoreOpen] = useState(false);
-  // The sheet is one surface that swaps its own content, never a popover inside
-  // a popover: the inner one portals to `document.body`, which the outer's
-  // outside-click test reads as "outside" (see ui/Popover).
-  const [moreView, setMoreView] = useState<"root" | "effort" | "brain" | "context">("root");
+  // The options surface is ONE surface that swaps its own content, never a
+  // popover inside a popover: the inner one portals to `document.body`, which
+  // the outer's outside-click test reads as "outside" (see ui/Popover). That is
+  // true of the desktop popover as much as the phone sheet, so both drill.
+  const [moreView, setMoreView] = useState<ConfigView>("root");
   const toolbarRef = useRef<HTMLDivElement>(null);
-  // The natural (full-label) content width captured at the instant we collapsed,
-  // used as the re-expand threshold so the two states can't flip-flop.
-  const expandedWidthRef = useRef(0);
+  // The row width at which the CURRENT layout was last seen to overflow. Growing
+  // a control back is only retried once the row is meaningfully wider than that,
+  // which is the hysteresis that stops the two states flip-flopping on the
+  // boundary pixel.
+  const blockedWidthRef = useRef(0);
+  // `step` is memoized with no deps (the ResizeObserver must not be torn down and
+  // rebuilt on every preference change), so it reads visibility through a ref.
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Latest submit/upload closures, so the (once-configured) TipTap key/paste
@@ -662,26 +717,32 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
 
   const canSend = (!isEmpty || attachments.length > 0) && uploading === 0;
 
-  /* ---------------------------------------------------- auto compact toolbar */
+  /* ------------------------------------------------------ auto-sizing toolbar */
 
-  // Decide compact vs full purely from geometry: the toolbar row is `flex-nowrap`
-  // with non-shrinking children, so `scrollWidth > clientWidth` means the full
-  // layout doesn't fit. On collapse we remember the overflowing width and only
-  // re-expand once the row is at least that wide again — a hysteresis band that
-  // makes the two states stable instead of oscillating on the boundary pixel.
-  const measure = useCallback(() => {
+  // One measurement step. The row is `flex-nowrap` with non-shrinking children,
+  // so `scrollWidth > clientWidth` means the current layout genuinely doesn't
+  // fit — and the fix is to shrink exactly ONE control by one rung and measure
+  // again. Each step re-renders and re-runs this effect, so the row converges on
+  // the widest layout that fits, in at most (controls × rungs) passes. All of it
+  // happens in layout effects, before paint, so the walk is never visible.
+  //
+  // Growing back is the same loop in reverse, gated on `blockedWidthRef`: the
+  // width at which we last saw an overflow. Without that gate a promotion that
+  // doesn't fit would be undone by the next demotion, forever.
+  const step = useCallback(() => {
     const el = toolbarRef.current;
     if (!el) return;
-    setCompact((cur) => {
-      if (!cur) {
-        if (el.scrollWidth > el.clientWidth + 1) {
-          expandedWidthRef.current = el.scrollWidth;
-          return true;
-        }
-        return cur;
-      }
-      return el.clientWidth >= expandedWidthRef.current + 4 ? false : cur;
-    });
+    const width = el.clientWidth;
+    if (el.scrollWidth > width + 1) {
+      // Remember that THIS layout is too wide here, so we don't immediately try
+      // to grow back into the space we just proved isn't there.
+      blockedWidthRef.current = width;
+      setSizes((cur) => demote(cur, visibleRef.current) ?? cur);
+      return;
+    }
+    if (width > blockedWidthRef.current + 4) {
+      setSizes((cur) => promote(cur, visibleRef.current) ?? cur);
+    }
   }, []);
 
   // Re-measure on width changes (debounced so a drag-resize doesn't thrash) and
@@ -693,30 +754,39 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const onResize = () => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(measure, 90);
+      timer = setTimeout(step, 90);
     };
-    measure();
+    step();
     const ro = new ResizeObserver(onResize);
     ro.observe(el);
     return () => {
       if (timer) clearTimeout(timer);
       ro.disconnect();
     };
-  }, [measure]);
+  }, [step]);
+
+  // Drive the convergence loop: every accepted step changes `sizes`, which runs
+  // this again until neither `demote` nor `promote` has anything left to do.
+  useLayoutEffect(() => {
+    step();
+  }, [step, sizes]);
 
   // The control labels (model / agent / mode name) change the natural width
-  // without changing the row's box, so ResizeObserver won't fire — re-measure
-  // synchronously whenever they (or the compact state itself) change.
-  // Hiding a control changes the row's natural width without changing its box,
-  // so `visible` belongs in here alongside the labels.
-  // `sm` belongs here too: it swaps which controls are in the row at all, and it
-  // flips on a media query rather than on the row's own box.
+  // without changing the row's box, so ResizeObserver won't fire. Worse, they
+  // can only ever make the row NARROWER or wider by an amount we can't predict —
+  // so clear the hysteresis gate and let the loop re-derive the whole layout from
+  // scratch. `visible` belongs here for the same reason: switching a control on
+  // changes the natural width without changing the box.
   useLayoutEffect(() => {
-    measure();
+    blockedWidthRef.current = 0;
+    setSizes((cur) => reconcile(cur, visible));
+    step();
   }, [
-    measure,
-    compact,
-    sm,
+    step,
+    phone,
+    // Stop appears beside Send mid-turn, which is ~60px the row suddenly hasn't
+    // got — the layout has to be re-derived when a turn starts and ends.
+    running,
     model,
     chat.modeId,
     chat.agentId,
@@ -815,9 +885,67 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     </>
   );
 
-  /** Which controls the composer draws — the same list on both surfaces. */
-  const prefRows = (dense: boolean) => (
-    <>
+  /** The effort list, shared by the toolbar's own Select and the options menu. */
+  const effortRows = (close: () => void, dense: boolean) => (
+    <div className="flex flex-col">
+      {effortOptions.map((o) => (
+        <MenuItem
+          key={o.value}
+          dense={dense}
+          icon={<EffortGauge effort={o.value} />}
+          hint={o.hint}
+          active={o.value === chat.effort}
+          onClick={() => {
+            setEffort(o.value);
+            close();
+          }}
+        >
+          <span className="flex items-center gap-2">
+            {o.label}
+            {o.value === chat.effort && <Check className="size-3 text-accent" />}
+          </span>
+        </MenuItem>
+      ))}
+      {/* The same "what actually ran" disclosure the wide toolbar makes inline. */}
+      {effectiveEffort && effectiveEffort !== chat.effort && (
+        <div className="px-3 py-2">
+          <EffortChip effort={effectiveEffort} label="running at" />
+        </div>
+      )}
+    </div>
+  );
+
+  /** Attach's two actions — split because the OS dialog can't return a path. */
+  const attachRows = (close: () => void, dense: boolean) => (
+    <div className="flex flex-col">
+      <MenuItem
+        dense={dense}
+        icon={<ImageIcon />}
+        hint="upload"
+        onClick={() => {
+          fileInputRef.current?.click();
+          close();
+        }}
+      >
+        Attach image
+      </MenuItem>
+      <MenuItem
+        dense={dense}
+        icon={<FileIcon />}
+        hint="as text"
+        onClick={() => {
+          setPicker({ query: "" });
+          close();
+        }}
+      >
+        Insert file path…
+      </MenuItem>
+    </div>
+  );
+
+  /** Which controls the toolbar TRIES to show — nested under the options menu. */
+  const customizeRows = (dense: boolean) => (
+    <div className="flex flex-col">
       <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Show in composer</div>
       {COMPOSER_CONTROLS.map((c) => (
         <MenuItem
@@ -838,8 +966,116 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           </MenuItem>
         </>
       )}
-    </>
+      {/* Wanting a control and not seeing it is the one confusing outcome of an
+          automatic layout, so the menu says so rather than leaving you to
+          wonder whether the toggle took. */}
+      {evicted > 0 && (
+        <div className="px-2 py-1.5 text-2xs leading-snug text-faint">
+          {evicted} shown {evicted === 1 ? "control doesn't" : "controls don't"} fit this width and
+          {evicted === 1 ? " is" : " are"} only in this menu. Widen the window or hide another.
+        </div>
+      )}
+    </div>
   );
+
+  /**
+   * The options surface, at either density. Root is a plain list of EVERY
+   * control — this menu is the one place that always has all of them, whichever
+   * ones the row had room for — and each row drills into that control's own menu
+   * in place. Both the desktop popover and the phone sheet render this same
+   * function, so the two surfaces cannot drift apart.
+   */
+  const configSurface = (close: () => void, dense: boolean) => {
+    if (moreView === "attach") return attachRows(close, dense);
+    if (moreView === "mode")
+      return (
+        <ModeMenu modes={modes} value={chat.modeId} onChange={setMode} close={close} dense={dense} />
+      );
+    if (moreView === "effort") return effortRows(close, dense);
+    if (moreView === "brain") return <div className="flex flex-col">{brainRows(close, dense)}</div>;
+    if (moreView === "context")
+      return <ContextPanelBody chatId={chat.id} model={model} close={close} />;
+    if (moreView === "customize") return customizeRows(dense);
+    return (
+      <div className="flex flex-col">
+        <MenuItem
+          dense={dense}
+          icon={<Paperclip />}
+          hint="image / path"
+          onClick={() => setMoreView("attach")}
+        >
+          Attach
+        </MenuItem>
+        {/* Dictate is an action, not a menu — it toggles from here directly.
+            Press-and-hold only works on the toolbar's own button, which is why
+            Dictate is the last control the row ever gives up. */}
+        <MenuItem
+          dense={dense}
+          icon={<Mic />}
+          disabled={!!dictation.unavailable}
+          hint={
+            dictation.unavailable ? "unavailable" : dictation.listening ? "listening" : "microphone"
+          }
+          onClick={() => {
+            dictation.toggle();
+            close();
+          }}
+        >
+          {dictation.listening ? "Stop dictating" : "Dictate"}
+        </MenuItem>
+        <MenuItem
+          dense={dense}
+          icon={modeIcon(modes, chat.modeId)}
+          hint={modeLabel(modes, chat.modeId)}
+          onClick={() => setMoreView("mode")}
+        >
+          Mode &amp; posture
+        </MenuItem>
+        <MenuItem
+          dense={dense}
+          icon={<EffortGauge effort={chat.effort} />}
+          hint={effortOptions.find((o) => o.value === chat.effort)?.label ?? chat.effort}
+          onClick={() => setMoreView("effort")}
+        >
+          Effort
+        </MenuItem>
+        <MenuItem
+          dense={dense}
+          icon={currentAgent ? <Bot /> : <Cpu />}
+          hint={currentAgent ? currentAgent.name : modelLabelOf(model)}
+          onClick={() => setMoreView("brain")}
+        >
+          Model / agent
+        </MenuItem>
+        <MenuItem
+          dense={dense}
+          icon={<Gauge />}
+          hint={<ContextHint chatId={chat.id} model={model} />}
+          onClick={() => setMoreView("context")}
+        >
+          Context
+        </MenuItem>
+        <div className="my-1 h-px bg-line" />
+        <MenuItem
+          dense={dense}
+          icon={<Settings2 />}
+          hint={hidden ? `${hidden} hidden` : "all shown"}
+          onClick={() => setMoreView("customize")}
+        >
+          Composer controls…
+        </MenuItem>
+      </div>
+    );
+  };
+
+  const CONFIG_TITLE: Record<string, string> = {
+    attach: "Attach",
+    mode: "Mode & posture",
+    effort: "Effort",
+    brain: "Model / agent",
+    context: "Context",
+    customize: "Composer controls",
+  };
 
   const closeMore = () => setMoreOpen(false);
 
@@ -1019,44 +1255,22 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           {/* Attach: an image (uploaded, sent with the message) or a file PATH
               (inserted as text). They're split because the OS dialog can only
               ever return an image's CONTENT — never a path — so a path has to
-              come from the server-backed picker instead. */}
-          {/* Phone width sends Attach to the sheet — it's a two-row menu that
-              opens a dialog either way, so a tap of indirection costs nothing. */}
-          {!sm && visible.attach && (
+              come from the server-backed picker instead.
+
+              Icon-only at every width: there is no value to display, so a
+              labelled form would just be a wider paperclip. */}
+          {sizes.attach !== "off" && (
           <Popover
             align="start"
             width={210}
             className="p-1"
             trigger={({ open, toggle }) => (
-              <IconButton tip="Attach" active={open} onClick={toggle}>
+              <IconButton size={phone ? "md" : "sm"} tip="Attach" active={open} onClick={toggle}>
                 <Paperclip />
               </IconButton>
             )}
           >
-            {(close) => (
-              <div className="flex flex-col">
-                <MenuItem
-                  icon={<ImageIcon />}
-                  hint="upload"
-                  onClick={() => {
-                    fileInputRef.current?.click();
-                    close();
-                  }}
-                >
-                  Attach image
-                </MenuItem>
-                <MenuItem
-                  icon={<FileIcon />}
-                  hint="as text"
-                  onClick={() => {
-                    setPicker({ query: "" });
-                    close();
-                  }}
-                >
-                  Insert file path…
-                </MenuItem>
-              </div>
-            )}
+            {(close) => attachRows(close, !phone)}
           </Popover>
           )}
 
@@ -1067,13 +1281,13 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               hold gesture possible at all — and it starts capturing on the way
               down, so holding doesn't clip the first word.
 
-              This is also why Dictate stays in the PRIMARY row on a phone while
-              Attach doesn't: press-and-hold cannot survive a sheet that closes
-              on selection, and a mic is a better control on a phone than it has
-              ever been on a desktop. */}
-          {visible.dictate && (
+              This is also why Dictate is the LAST control the row gives up when
+              it runs out of width: press-and-hold cannot survive a menu that
+              closes on selection, so the menu's copy of it is a plain toggle and
+              the gesture only exists here. */}
+          {sizes.dictate !== "off" && (
           <IconButton
-            size={sm ? "md" : "sm"}
+            size={phone ? "md" : "sm"}
             tip={
               dictation.unavailable
                 ? "Dictation unavailable"
@@ -1100,16 +1314,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           )}
 
           {/* Mode AND posture — one control over one field (see ModeControl). */}
-          {visible.mode && (
+          {sizes.mode !== "off" && (
             <ModeControl
               modes={modes}
               value={chat.modeId}
               onChange={setMode}
-              compact={compact}
+              size={sizes.mode as "lg" | "md" | "sm"}
             />
           )}
 
-          {!sm && visible.effort && (
+          {sizes.effort !== "off" && (
             <>
               <Select
                 options={effortOptions}
@@ -1118,13 +1332,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                 leftIcon={<EffortGauge effort={chat.effort} />}
                 label="effort"
                 width={172}
-                compact={compact}
+                size={sizes.effort as "lg" | "md" | "sm"}
+                touch={phone}
               />
 
               {/* Only shown when the level that RAN differs from the one picked — an
                   agent pinning its own, or a model silently downgrading it. Silent
-                  otherwise, so the row stays quiet in the normal case. */}
-              {effectiveEffort && effectiveEffort !== chat.effort && (
+                  otherwise, so the row stays quiet in the normal case. Dropped
+                  once effort itself is down to an icon: it is a disclosure, and a
+                  row this cramped has no width to spend on one. */}
+              {sizes.effort === "lg" && effectiveEffort && effectiveEffort !== chat.effort && (
                 <EffortChip effort={effectiveEffort} label="running at" />
               )}
             </>
@@ -1133,7 +1350,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           {/* model / agent — the session "brain": a custom agent's name when one
               is picked (secondary state), otherwise the active model label so it
               never misleadingly reads "No agent" while a model is running. */}
-          {!sm && visible.brain && (
+          {sizes.brain !== "off" && (
           <Popover
             align="start"
             width={210}
@@ -1145,9 +1362,10 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                   aria-expanded={open}
                   aria-label={currentAgent ? "Agent" : "Model"}
                   className={cn(
-                    "inline-flex h-6 items-center gap-1.5 rounded-md border text-sm " +
+                    "inline-flex items-center gap-1.5 rounded-md border text-sm " +
                       "font-medium transition-colors [&_svg]:size-3.5",
-                    compact ? "justify-center px-1.5" : "px-2",
+                    phone ? "h-8" : "h-6",
+                    sizes.brain === "sm" ? "justify-center px-1.5" : "px-2",
                     // Violet, not amber: a custom agent is machine chrome, and
                     // amber in this row means "live / yours" (see ui/Chip).
                     currentAgent
@@ -1159,17 +1377,27 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                   <span className={currentAgent ? "text-accent-2-hi" : "text-muted"}>
                     {currentAgent ? <Bot /> : <Cpu />}
                   </span>
-                  {!compact && (
+                  {sizes.brain !== "sm" && (
                     <>
-                      <span className="max-w-[120px] truncate">
+                      {/* A model id is long and an agent name can be longer, so
+                          `md` gives the name half the room `lg` does rather than
+                          dropping it — a truncated name still says which. */}
+                      <span
+                        className={cn(
+                          "truncate",
+                          sizes.brain === "md" ? "max-w-[68px]" : "max-w-[120px]",
+                        )}
+                      >
                         {currentAgent ? currentAgent.name : modelLabelOf(model)}
                       </span>
-                      <ChevronsUpDown className="ml-auto text-faint" />
+                      {sizes.brain === "lg" && <ChevronsUpDown className="ml-auto text-faint" />}
                     </>
                   )}
                 </button>
               );
-              return compact ? (
+              return sizes.brain === "lg" ? (
+                btn
+              ) : (
                 <Tooltip
                   label={
                     currentAgent
@@ -1179,21 +1407,20 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                 >
                   {btn}
                 </Tooltip>
-              ) : (
-                btn
               );
             }}
           >
-            {(close) => <div className="flex flex-col">{brainRows(close, true)}</div>}
+            {(close) => <div className="flex flex-col">{brainRows(close, !phone)}</div>}
           </Popover>
           )}
 
           <div className="ml-auto flex items-center gap-2">
-            {/* One trigger, two jobs by width. Above sm it's the visibility
-                menu — the only way back from a toolbar you've emptied. On sm it
-                opens the sheet that holds everything this row no longer has
-                space for, visibility menu included. */}
-            {sm ? (
+            {/* The options menu, and the one control that is never optional: it
+                holds every control at every width, so it is both the way back
+                from a toolbar you've emptied and the home of whatever the row
+                couldn't fit. Same content either way — a sheet on touch, a
+                popover on a pointer. */}
+            {phone ? (
               <IconButton
                 size="md"
                 tip="Composer options"
@@ -1208,23 +1435,48 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             ) : (
               <Popover
                 align="end"
-                width={264}
+                width={280}
                 className="p-1"
                 trigger={({ open, toggle }) => (
                   <IconButton
-                    tip={hidden ? `Toolbar — ${hidden} hidden` : "Choose toolbar controls"}
+                    tip={
+                      evicted
+                        ? `Composer options — ${evicted} won't fit`
+                        : "Composer options"
+                    }
                     active={open}
-                    onClick={toggle}
+                    onClick={() => {
+                      // Always reopen on the root list; a menu that remembers it
+                      // was left three levels deep is a menu you have to escape.
+                      setMoreView("root");
+                      toggle();
+                    }}
                   >
                     <Settings2 />
                   </IconButton>
                 )}
               >
-                {() => <div className="flex flex-col">{prefRows(true)}</div>}
+                {(close) => (
+                  <>
+                    {moreView !== "root" && (
+                      <ConfigBackRow
+                        title={CONFIG_TITLE[moreView] ?? ""}
+                        dense
+                        onBack={() => setMoreView("root")}
+                      />
+                    )}
+                    {configSurface(close, true)}
+                  </>
+                )}
               </Popover>
             )}
-            {!sm && visible.context && (
-              <ContextMeter chatId={chat.id} model={model} iconOnly={compact} />
+            {sizes.context !== "off" && (
+              <ContextMeter
+                chatId={chat.id}
+                model={model}
+                size={sizes.context as "md" | "sm"}
+                touch={phone}
+              />
             )}
             {/* Stop the live turn — interrupts the running query server-side.
                 Shown only mid-run, right beside Send so it's where the eye is. */}
@@ -1233,13 +1485,13 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                 type="button"
                 variant="danger"
                 size="md"
-                circle={sm}
+                circle={phone}
                 leftIcon={<Square />}
                 onClick={() => actions.interrupt(chat.id)}
                 title="Stop the current turn"
-                aria-label={sm ? "Stop the current turn" : undefined}
+                aria-label={phone ? "Stop the current turn" : undefined}
               >
-                {sm ? null : compact ? "" : "Stop"}
+                {phone ? null : "Stop"}
               </Button>
             )}
             {/* Gate by look, not the native `disabled` attribute: a disabled
@@ -1256,14 +1508,14 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               // button was the last thing in an `overflow-hidden` row, so "Send"
               // as a word was clipped off the right edge and the primary action
               // was unreachable on every phone.
-              circle={sm}
+              circle={phone}
               rightIcon={running ? <Layers /> : <ArrowUp />}
               onClick={submit}
               aria-disabled={!canSend}
-              aria-label={sm ? (running ? "Queue" : "Send") : undefined}
+              aria-label={phone ? (running ? "Queue" : "Send") : undefined}
               className={cn(!canSend && "opacity-45")}
             >
-              {sm ? null : running ? "Queue" : "Send"}
+              {phone ? null : running ? "Queue" : "Send"}
             </Button>
           </div>
         </div>
@@ -1271,12 +1523,11 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
 
       </div>
 
-      {/* The phone overflow sheet: everything the primary row gave up, each row
-          stating its current value so the row it replaced is still readable at a
-          glance. A bottom `Drawer` rather than a `Popover` — same surface as the
-          nav's More sheet, and it can host a drill-down without nesting one
-          popover inside another (which ui/Popover cannot survive). */}
-      {sm && (
+      {/* The same options surface as the pointer popover, as a bottom `Drawer`:
+          a thumb-sized target list at the bottom of the screen beats a floating
+          menu, and it's the same shape as the nav's More sheet. The CONTENT is
+          `configSurface` either way, so the two can't drift. */}
+      {phone && (
         <Drawer
           open={moreOpen}
           enabled
@@ -1290,128 +1541,13 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
               and scrolls the page instead of itself. */}
           <div className="cm-scroll min-h-0 w-full overflow-y-auto p-1.5 pb-[calc(var(--cm-bottom-nav-space)+0.375rem)]">
             {moreView !== "root" && (
-              <div className="mb-1 flex items-center gap-1 border-b border-line-soft pb-1.5">
-                <Button
-                  variant="ghost"
-                  onClick={() => setMoreView("root")}
-                  leftIcon={<ChevronLeft />}
-                  className="h-11 px-2 text-base"
-                >
-                  Back
-                </Button>
-                <span className="text-base font-medium text-primary">
-                  {moreView === "effort"
-                    ? "Effort"
-                    : moreView === "brain"
-                      ? "Model / agent"
-                      : "Context"}
-                </span>
-              </div>
+              <ConfigBackRow
+                title={CONFIG_TITLE[moreView] ?? ""}
+                dense={false}
+                onBack={() => setMoreView("root")}
+              />
             )}
-
-            {moreView === "root" && (
-              <div className="flex flex-col">
-                {visible.attach && (
-                  <>
-                    <MenuItem
-                      dense={false}
-                      icon={<ImageIcon />}
-                      hint="upload"
-                      onClick={() => {
-                        fileInputRef.current?.click();
-                        closeMore();
-                      }}
-                    >
-                      Attach image
-                    </MenuItem>
-                    <MenuItem
-                      dense={false}
-                      icon={<FileIcon />}
-                      hint="as text"
-                      onClick={() => {
-                        setPicker({ query: "" });
-                        closeMore();
-                      }}
-                    >
-                      Insert file path…
-                    </MenuItem>
-                    <div className="my-1 h-px bg-line" />
-                  </>
-                )}
-                {visible.effort && (
-                  <MenuItem
-                    dense={false}
-                    icon={<EffortGauge effort={chat.effort} />}
-                    hint={
-                      effortOptions.find((o) => o.value === chat.effort)?.label ?? chat.effort
-                    }
-                    onClick={() => setMoreView("effort")}
-                  >
-                    Effort
-                  </MenuItem>
-                )}
-                {visible.brain && (
-                  <MenuItem
-                    dense={false}
-                    icon={currentAgent ? <Bot /> : <Cpu />}
-                    hint={currentAgent ? currentAgent.name : modelLabelOf(model)}
-                    onClick={() => setMoreView("brain")}
-                  >
-                    Model / agent
-                  </MenuItem>
-                )}
-                {visible.context && (
-                  <MenuItem
-                    dense={false}
-                    icon={<Gauge />}
-                    hint={<ContextHint chatId={chat.id} model={model} />}
-                    onClick={() => setMoreView("context")}
-                  >
-                    Context
-                  </MenuItem>
-                )}
-                <div className="my-1 h-px bg-line" />
-                {prefRows(false)}
-              </div>
-            )}
-
-            {moreView === "effort" && (
-              <div className="flex flex-col">
-                {effortOptions.map((o) => (
-                  <MenuItem
-                    key={o.value}
-                    dense={false}
-                    icon={<EffortGauge effort={o.value} />}
-                    hint={o.hint}
-                    active={o.value === chat.effort}
-                    onClick={() => {
-                      setEffort(o.value);
-                      closeMore();
-                    }}
-                  >
-                    <span className="flex items-center gap-2">
-                      {o.label}
-                      {o.value === chat.effort && <Check className="size-3 text-accent" />}
-                    </span>
-                  </MenuItem>
-                ))}
-                {/* Same "what actually ran" disclosure the wide toolbar makes
-                    inline; on a phone this row is the only place it fits. */}
-                {effectiveEffort && effectiveEffort !== chat.effort && (
-                  <div className="px-3 py-2">
-                    <EffortChip effort={effectiveEffort} label="running at" />
-                  </div>
-                )}
-              </div>
-            )}
-
-            {moreView === "brain" && (
-              <div className="flex flex-col">{brainRows(closeMore, false)}</div>
-            )}
-
-            {moreView === "context" && (
-              <ContextPanelBody chatId={chat.id} model={model} close={closeMore} />
-            )}
+            {configSurface(closeMore, false)}
           </div>
         </Drawer>
       )}

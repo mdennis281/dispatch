@@ -35,8 +35,18 @@ export interface ContextMeterProps {
   chatId: string;
   /** The chat's active model — picks the fallback window before a turn reports one. */
   model?: string;
-  /** Compact composer mode: bar only, token count lives in the tooltip. */
-  iconOnly?: boolean;
+  /**
+   * How much room the toolbar granted it (see lib/composerFit): `md` is the bar
+   * plus the running token count, `sm` is the bar alone with the count in the
+   * tooltip. There is no `lg` — bar-and-number IS the full control.
+   */
+  size?: "md" | "sm";
+  /**
+   * Taller box for touch. The meter is a 4px bar in a 20px button, which was
+   * fine while it only ever appeared on a desktop toolbar — now that a phone can
+   * carry it in the row, it needs something a thumb can actually land on.
+   */
+  touch?: boolean;
 }
 
 /**
@@ -47,7 +57,8 @@ export interface ContextMeterProps {
  * per-model default until the first turn reports it. Clicking opens a dropup with
  * the live category breakdown and compact/clear actions.
  */
-export function ContextMeter({ chatId, model, iconOnly = false }: ContextMeterProps) {
+export function ContextMeter({ chatId, model, size = "md", touch = false }: ContextMeterProps) {
+  const iconOnly = size === "sm";
   const { tokens, window, pct } = useContextUsage(chatId, model);
   const t = tone(pct);
 
@@ -72,6 +83,7 @@ export function ContextMeter({ chatId, model, iconOnly = false }: ContextMeterPr
             className={cn(
               "inline-flex select-none items-center gap-1.5 rounded-md px-1 py-0.5 " +
                 "transition-colors hover:bg-active",
+              touch && "h-8 px-2",
               open && "bg-active",
             )}
           >
