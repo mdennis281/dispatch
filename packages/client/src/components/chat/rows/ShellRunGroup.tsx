@@ -13,8 +13,9 @@ import { OverflowTooltip } from "../../ui/OverflowTooltip.js";
 import { cn } from "../../../lib/cn.js";
 import { dur } from "../../../lib/format.js";
 import { ackTaskId } from "../../../lib/subagentRuns.js";
+import { toolCallState } from "../../../lib/toolState.js";
 import { hydrateFullRows } from "../../../stores/index.js";
-import { displayResultText, toolPresentation } from "../../../lib/toolPresentations.js";
+import { displayResultText, shellGroupPresentation } from "../../../lib/toolPresentations.js";
 import { presentationFilterCategory, useShellFilter } from "../../../lib/shellFilter.js";
 import { ShellFilterModal } from "../ShellFilterModal.js";
 
@@ -25,13 +26,7 @@ export interface ShellRunEntry {
 }
 
 function entryState({ result, task }: ShellRunEntry): ToolDetailState {
-  const backgrounded = !!result && (!!task || !!ackTaskId(result));
-  if (!result || (backgrounded && !task)) return "running";
-  if (task?.status === "failed" || (!backgrounded && (result.isError || result.ok === false))) {
-    return "failed";
-  }
-  if (task?.status === "stopped") return "stopped";
-  return "ok";
+  return toolCallState(result, task);
 }
 
 function StateIcon({ state }: { state: ToolDetailState }) {
@@ -48,7 +43,7 @@ function shellLabel(language: "bash" | "powershell", short = false): string {
 
 function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
   const [detailOpen, setDetailOpen] = useState(false);
-  const presentation = toolPresentation(entry.use);
+  const presentation = shellGroupPresentation(entry.use);
   if (!presentation || presentation.kind !== "shell") return null;
 
   const state = entryState(entry);
@@ -159,14 +154,14 @@ export const ShellRunGroup = memo(function ShellRunGroup({
   }, [entries]);
   const terminals = useMemo(
     () => [...new Set(entries.map((entry) => {
-      const presentation = toolPresentation(entry.use);
+      const presentation = shellGroupPresentation(entry.use);
       return presentation?.kind === "shell" ? presentation.terminal : undefined;
     }).filter(Boolean))],
     [entries],
   );
   const languages = useMemo(
     () => [...new Set(entries.map((entry) => {
-      const presentation = toolPresentation(entry.use);
+      const presentation = shellGroupPresentation(entry.use);
       return presentation?.kind === "shell" ? presentation.language : undefined;
     }).filter((language): language is "bash" | "powershell" => Boolean(language)))],
     [entries],
@@ -174,7 +169,7 @@ export const ShellRunGroup = memo(function ShellRunGroup({
   const activeLanguage = languages[languages.length - 1] ?? "bash";
   const headerLabel = languages.length === 1 ? shellLabel(activeLanguage) : "Shell";
   const visibleEntries = entries.filter((entry) => {
-    const presentation = toolPresentation(entry.use);
+    const presentation = shellGroupPresentation(entry.use);
     return presentation ? enabled.has(presentationFilterCategory(presentation)) : true;
   });
   const collapseGroup = !active && visibleEntries.length === 0;
@@ -215,7 +210,7 @@ export const ShellRunGroup = memo(function ShellRunGroup({
         </div>
         <div>
           {entries.map((entry, index) => {
-            const presentation = toolPresentation(entry.use);
+            const presentation = shellGroupPresentation(entry.use);
             const admitted = presentation ? enabled.has(presentationFilterCategory(presentation)) : true;
             const settledBehindActiveCommand = !admitted && active && index < entries.length - 1 && entryState(entry) !== "running";
             const collapsed = !admitted && !active;

@@ -1,4 +1,4 @@
-import type { ChatMessage, ToolUseRow } from "@dispatch/shared";
+import { fileToolAction, type ChatMessage, type FileToolAction, type ToolUseRow } from "@dispatch/shared";
 import { parseMcpName, safeJson } from "./format.js";
 
 export type ShellLanguage = "bash" | "powershell";
@@ -22,7 +22,27 @@ export interface DispatchToolPresentation {
   countdownSeconds?: number;
 }
 
-export type ToolPresentation = ShellToolPresentation | DispatchToolPresentation;
+/**
+ * A call that touched the filesystem, reduced to what its one-line row shows:
+ * which file (or which pattern), and what it did to it. The counts are NOT here
+ * — they come off the row's `fileStat` because they depend on the result too.
+ */
+export interface FileToolPresentation {
+  kind: "file";
+  tool: string;
+  action: FileToolAction;
+  /** The path the tool named, verbatim (absent for a search). */
+  path?: string;
+  /** What a search looked for. */
+  pattern?: string;
+  /** The directory or glob a search was narrowed to. */
+  scope?: string;
+}
+
+export type ToolPresentation = ShellToolPresentation | DispatchToolPresentation | FileToolPresentation;
+
+/** The presentations that belong in a terminal frame — everything but files. */
+export type ShellGroupPresentation = ShellToolPresentation | DispatchToolPresentation;
 
 /**
  * A presentation handler translates one provider's tool shape into a UI concept.
@@ -87,6 +107,28 @@ const handlers: readonly ToolPresentationHandler[] = [
         language: inferredLanguage(use, "powershell"),
         terminal: stringArg(use, "name"),
       };
+    },
+  },
+  {
+    // Read/Write/Edit/Grep/Glob and friends. A row that names no file (and no
+    // pattern) has nothing to show, so it falls through to ToolCallCard rather
+    // than rendering an empty path.
+    match: (use) => fileToolAction(use.name) !== null,
+    present: (use) => {
+      const action = fileToolAction(use.name);
+      if (!action) return null;
+      if (action === "search") {
+        const pattern = stringArg(use, "pattern") ?? stringArg(use, "query") ?? stringArg(use, "glob");
+        if (!pattern) return null;
+        const scope = stringArg(use, "path") ?? (use.name === "Grep" ? stringArg(use, "glob") : undefined);
+        return { kind: "file", tool: use.name, action, pattern, scope: scope === pattern ? undefined : scope };
+      }
+      const path =
+        stringArg(use, "file_path") ??
+        stringArg(use, "filePath") ??
+        stringArg(use, "notebook_path") ??
+        stringArg(use, "path");
+      return path ? { kind: "file", tool: use.name, action, path } : null;
     },
   },
   {
@@ -177,6 +219,12 @@ export function toolPresentation(use: ToolUseRow): ToolPresentation | null {
   return null;
 }
 
+/** The presentation for a row inside a terminal frame (never a file row). */
+export function shellGroupPresentation(use: ToolUseRow): ShellGroupPresentation | null {
+  const presentation = toolPresentation(use);
+  return presentation && presentation.kind !== "file" ? presentation : null;
+}
+
 export interface TranscriptRowItem {
   kind: "row";
   row: ChatMessage;
@@ -187,25 +235,47 @@ export interface TranscriptShellItem {
   rows: ToolUseRow[];
 }
 
-export type TranscriptItem = TranscriptRowItem | TranscriptShellItem;
+export interface TranscriptFilesItem {
+  kind: "files";
+  rows: ToolUseRow[];
+}
 
-/** Group adjacent terminal-style calls while leaving every unhandled row untouched. */
+export type TranscriptItem = TranscriptRowItem | TranscriptShellItem | TranscriptFilesItem;
+
+/**
+ * Group adjacent terminal-style calls and adjacent file calls into their own
+ * runs, leaving every unhandled row untouched.
+ *
+ * The two kinds do NOT merge: a shell run is a terminal session and a file run
+ * is a changelog, and interleaving them would make both unreadable. A file call
+ * between two commands therefore closes the terminal frame, which is honest —
+ * that is what happened.
+ */
 export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
-  let shell: ToolUseRow[] | null = null;
+  let run: { kind: "shell" | "files"; rows: ToolUseRow[] } | null = null;
 
   const flush = () => {
-    if (shell?.length) items.push({ kind: "shell", rows: shell });
-    shell = null;
+    if (run?.rows.length) items.push({ kind: run.kind, rows: run.rows });
+    run = null;
   };
 
   for (const row of rows) {
     // Results and task statuses are folded into their owning command. They do
     // not interrupt a run of commands, just as they did not create visible rows.
     if (row.kind === "tool_result" || row.kind === "task_status") continue;
-    if (row.kind === "tool_use" && toolPresentation(row) !== null) {
-      (shell ??= []).push(row);
-      continue;
+    if (row.kind === "tool_use") {
+      const presentation = toolPresentation(row);
+      if (presentation) {
+        const kind = presentation.kind === "file" ? "files" : "shell";
+        if (!run || run.kind !== kind) {
+          flush();
+          run = { kind, rows: [row] };
+        } else {
+          run.rows.push(row);
+        }
+        continue;
+      }
     }
     flush();
     items.push({ kind: "row", row });

@@ -10,6 +10,7 @@ import {
   EffortSchema,
   PermissionDecisionSchema,
 } from "./common.js";
+import { FileToolStatSchema } from "./file-tools.js";
 
 /** Fields shared by every persisted row. */
 const MessageBase = {
@@ -146,6 +147,14 @@ export const ToolUseRowSchema = z.object({
    * the `/messages/full` route). Absent ⇒ `input` is verbatim.
    */
   inputOmitted: z.boolean().optional(),
+  /**
+   * LEAN-TRANSCRIPT CARRY-OVER (never persisted — set only on the wire). The
+   * `+added −removed` summary of a write/edit, computed from the FULL input
+   * before it was clipped, because the file row shows those numbers collapsed
+   * and clipping is exactly what takes the edit bodies away. Absent ⇒ derive it
+   * from `input` with {@link fileEditStat}.
+   */
+  fileStat: FileToolStatSchema.optional(),
 });
 export type ToolUseRow = z.infer<typeof ToolUseRowSchema>;
 
@@ -177,6 +186,12 @@ export const ToolResultRowSchema = z.object({
   contentOmitted: z.boolean().optional(),
   /** Byte size of the un-clipped `content` (only set alongside `contentOmitted`). */
   contentBytes: z.number().int().optional(),
+  /**
+   * LEAN-TRANSCRIPT CARRY-OVER (never persisted — set only on the wire). The
+   * line range a read returned / hit count a search found, computed from the
+   * FULL content before clipping. Absent ⇒ derive it with {@link fileResultStat}.
+   */
+  fileStat: FileToolStatSchema.optional(),
 });
 export type ToolResultRow = z.infer<typeof ToolResultRowSchema>;
 

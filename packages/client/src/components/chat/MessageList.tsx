@@ -7,6 +7,7 @@ import { UserRow } from "./rows/UserRow.js";
 import { AssistantRow } from "./rows/AssistantRow.js";
 import { ToolCallCard } from "./rows/ToolCallCard.js";
 import { ShellRunGroup } from "./rows/ShellRunGroup.js";
+import { FileRunGroup } from "./rows/FileRunGroup.js";
 import { DispatchToolCard } from "./rows/DispatchToolCard.js";
 import { SubagentCard } from "./rows/SubagentCard.js";
 import { PermissionCard } from "./rows/PermissionCard.js";
@@ -160,6 +161,19 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
   return (
     <>
       {transcriptItems.map((item, itemIndex) => {
+        if (item.kind === "files") {
+          const first = item.rows[0]!;
+          return (
+            <div key={`files:${first.id}`} className="cm-row-cv">
+              <FileRunGroup
+                entries={item.rows.map((use) => {
+                  const result = resultsByUse.get(use.toolUseId);
+                  return { use, result, task: findTaskStatus(taskStatus, use.toolUseId, result) };
+                })}
+              />
+            </div>
+          );
+        }
         if (item.kind === "shell") {
           const first = item.rows[0]!;
           return (

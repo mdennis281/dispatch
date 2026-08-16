@@ -205,6 +205,52 @@ const md = [
   "```",
 ].join("\n");
 
+/** The necromancer chat's worktree root — file paths resolve against it. */
+const WT_NECRO = "C:/Users/Michael/projects/zombie-worktrees/feat-necromancer-elite";
+
+/** `cat -n`-shaped output, so a Read fixture reports a real line range. */
+function numbered(from: number, count: number): string {
+  return Array.from({ length: count }, (_, i) => `${from + i}\tsource line ${from + i}`).join("\n");
+}
+
+/** Expand a compact file-call spec into its tool_use + tool_result pair. */
+function fileRun(
+  chatId: string,
+  calls: Array<{
+    name: string;
+    input: Record<string, unknown>;
+    out?: string;
+    ok?: boolean;
+    ms?: number;
+  }>,
+): ChatMessage[] {
+  return calls.flatMap((call, i) => [
+    {
+      kind: "tool_use",
+      id: `f${i}`,
+      chatId,
+      ts: ago(6) + i,
+      turn: 0,
+      toolUseId: `t_file${i}`,
+      name: call.name,
+      input: call.input,
+    },
+    {
+      kind: "tool_result",
+      id: `f${i}r`,
+      chatId,
+      ts: ago(6) + i,
+      turn: 0,
+      toolUseId: `t_file${i}`,
+      name: call.name,
+      ok: call.ok ?? true,
+      isError: call.ok === false ? true : undefined,
+      durationMs: call.ms,
+      content: call.out ?? "Applied 1 edit.",
+    },
+  ]);
+}
+
 export const MOCK_MESSAGES: Record<string, ChatMessage[]> = {
   [CHAT_NECRO]: [
     {
@@ -329,6 +375,20 @@ export const MOCK_MESSAGES: Record<string, ChatMessage[]> = {
         ],
       },
     },
+    // A run of file work — the fixture for FileRunGroup. Deliberately mixed
+    // (searches, reads, repeated edits to one file, a failure) because the row
+    // type earns its keep on a LONG run, not on one tidy edit.
+    ...fileRun(CHAT_NECRO, [
+      { name: "Grep", input: { pattern: "recurringElites", path: "packages/config/src" }, out: "Found 3 files\npackages/config/src/enemies/index.ts\npackages/config/src/waves/elites.ts\npackages/config/src/waves/schedule.ts", ms: 240 },
+      { name: "Read", input: { file_path: `${WT_NECRO}/packages/config/src/waves/elites.ts` }, out: numbered(1, 96), ms: 90 },
+      { name: "Read", input: { file_path: `${WT_NECRO}/packages/config/src/enemies/hive.ts`, offset: 30, limit: 40 }, out: numbered(30, 40), ms: 74 },
+      { name: "Edit", input: { file_path: `${WT_NECRO}/packages/config/src/enemies/hive.ts`, old_string: "  introWave: 10,\n  boss: true,", new_string: "  introWave: null,\n  boss: false,\n  supersededBy: 'necromancer'," }, ms: 130 },
+      { name: "Edit", input: { file_path: `${WT_NECRO}/packages/config/src/enemies/hive.ts`, old_string: "  healthScalingMax: 4.0,", new_string: "  healthScalingMax: 4.0,\n  // moved to the necromancer's minion budget\n  minionCap: 0," }, ms: 118 },
+      { name: "Write", input: { file_path: `${WT_NECRO}/packages/config/src/enemies/necromancer.ts`, content: Array.from({ length: 64 }, (_, i) => `line ${i}`).join("\n") }, ms: 210 },
+      { name: "Edit", input: { file_path: `${WT_NECRO}/packages/config/src/waves/elites.ts`, old_string: "  hive,\n  wraith,", new_string: "  necromancer,\n  wraith," }, ms: 96 },
+      { name: "Edit", input: { file_path: `${WT_NECRO}/packages/game/src/systems/ai.ts`, old_string: "const owner = phaseOwner(wave);", new_string: "const owner = phaseOwner(wave, { elites: true });" }, ok: false, out: "String to replace not found in file.", ms: 61 },
+      { name: "Glob", input: { glob: "packages/**/*.test.ts" }, out: "a.test.ts\nb.test.ts\nc.test.ts\nd.test.ts\ne.test.ts\nf.test.ts\ng.test.ts", ms: 55 },
+    ]),
     {
       kind: "permission",
       id: "m7",
