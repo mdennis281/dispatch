@@ -40,6 +40,7 @@ import { AlertTriangle, ArrowUpCircle, Check, ChevronDown, RotateCw } from "luci
 import type { UpdatePhase } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { useUpdate } from "../../stores/update.js";
+import type { UpdateFlight } from "../../lib/updatePrefs.js";
 import { LAYER } from "../../lib/layers.js";
 import { isNewProcess, probeHealth, probeProgress } from "../../lib/updateProbe.js";
 
@@ -87,9 +88,31 @@ type Stage = "working" | "failed";
 
 export function UpdatingScreen() {
   const flight = useUpdate((s) => s.flight);
-  const endFlight = useUpdate((s) => s.endFlight);
   const statusInstalling = useUpdate((s) => s.status?.installing);
   const adopt = useUpdate((s) => s.adopt);
+
+  // An install this tab did not start (a second tab, or the server still
+  // reporting one after a reload) needs a marker of its own before `Attempt`
+  // has anything to watch for. This lives out here because it has to run while
+  // there is no flight at all — which is exactly when `Attempt` is not mounted.
+  useEffect(() => {
+    if (statusInstalling && !flight) void adopt();
+  }, [statusInstalling, flight, adopt]);
+
+  if (!flight) return null;
+
+  // Keyed, so a second install in the same tab gets a genuinely fresh render
+  // rather than inheriting the last one. This component stays mounted forever
+  // (it renders `null` between updates), and a FAILED update ends without a
+  // reload — the user clicks "Back to Dispatch" and carries on. Without the key,
+  // the next update would open still saying "Update failed", still showing the
+  // previous run's log, and with `highWater` already ratcheted forward so every
+  // early phase of the new install was discarded as backwards movement.
+  return <Attempt key={flight.startedAt} flight={flight} />;
+}
+
+function Attempt({ flight }: { flight: UpdateFlight }) {
+  const endFlight = useUpdate((s) => s.endFlight);
 
   const [phase, setPhase] = useState<UpdatePhase>("launching");
   const [stage, setStage] = useState<Stage>("working");
@@ -109,15 +132,7 @@ export function UpdatingScreen() {
     setPhase(next);
   }, []);
 
-  // An install this tab did not start (a second tab, or the server still
-  // reporting one after a reload) needs a marker of its own before the loop
-  // below has anything to watch for.
   useEffect(() => {
-    if (statusInstalling && !flight) void adopt();
-  }, [statusInstalling, flight, adopt]);
-
-  useEffect(() => {
-    if (!flight) return;
     let stopped = false;
     let downStreak = 0;
     // Decided on the FIRST answering probe. If the very first thing we see is
@@ -193,8 +208,6 @@ export function UpdatingScreen() {
       clearInterval(timer);
     };
   }, [flight, endFlight, ratchet]);
-
-  if (!flight) return null;
 
   const index = Math.max(0, stepIndex(phase));
   const patient = waited > PATIENCE_MS;

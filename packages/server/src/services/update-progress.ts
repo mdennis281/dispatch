@@ -103,8 +103,13 @@ async function readSince(path: string, offset: number): Promise<string> {
   const handle = await open(path, "r");
   try {
     const buf = Buffer.alloc(length);
-    await handle.read(buf, 0, length, start);
-    return buf.toString("utf8");
+    // Sliced to what was ACTUALLY read. `length` came from a `stat` taken a
+    // moment ago on a file an installer is actively writing; if it is truncated
+    // or replaced in between, the tail of the buffer is still zero-fill, and
+    // those NULs survive into the string as their own "lines" — junk in the log
+    // the user is shown, and noise the phase matcher has to walk past.
+    const { bytesRead } = await handle.read(buf, 0, length, start);
+    return buf.subarray(0, bytesRead).toString("utf8");
   } finally {
     await handle.close();
   }
