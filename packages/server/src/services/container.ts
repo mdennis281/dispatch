@@ -14,7 +14,9 @@
  * execa/SDK-backed services. `start()`/`dispose()` bound the background work.
  */
 import type { ServerConfig } from "../config.js";
-import type { Store } from "../store/index.js";
+// Value import (not `import type`): the InspectService needs to CONSTRUCT a
+// second Store over the installed instance's roots for `instance: "stable"`.
+import { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
 import { SessionBroker } from "./session-broker.js";
@@ -24,6 +26,7 @@ import { MemoryCommitter } from "./memory-committer.js";
 import { MemoryHistoryService } from "./memory-history.js";
 import { ProjectConfigService } from "./project-config.js";
 import { ProjectConfigArchive } from "./project-config-archive.js";
+import { InspectService, installedRoots } from "./inspect.js";
 import { makeFakeQuery } from "./fake-sdk.js";
 import { TitleService, makeFakeTitleGenerator } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
@@ -63,6 +66,7 @@ export interface ServiceOverrides {
   memoryHistory?: MemoryHistoryService;
   projectConfig?: ProjectConfigService;
   projectConfigArchive?: ProjectConfigArchive;
+  inspect?: InspectService;
   title?: TitleService;
   checkpoints?: CheckpointService;
   worktrees?: WorktreeService;
@@ -97,6 +101,8 @@ export interface Services extends ServiceBase {
   memoryHistory: MemoryHistoryService;
   projectConfig: ProjectConfigService;
   projectConfigArchive: ProjectConfigArchive;
+  /** Read-only cross-chat/project reads behind the session MCP's inspect tools. */
+  inspect: InspectService;
   title: TitleService;
   checkpoints: CheckpointService;
   worktrees: WorktreeService;
@@ -203,6 +209,19 @@ export function createServices(
   const projectConfigArchive =
     overrides.projectConfigArchive ??
     new ProjectConfigArchive({ store, projectConfig });
+  // Read-only sweep across every chat + project, exposed to sessions as
+  // `chat_find`/`chat_read`/`project_info`. Given `makeStore` so a DEV server can
+  // open the INSTALLED instance's store and answer questions about production
+  // chats — the one thing this whole surface exists to make cheap.
+  const inspect =
+    overrides.inspect ??
+    new InspectService({
+      store,
+      projectConfig,
+      memory,
+      stableRoots: () => installedRoots(),
+      makeStore: (dataDir, configDir) => new Store(dataDir, configDir),
+    });
   // GitHub control plane (PRs + Actions). Constructed before the broker so it can
   // back the session MCP's `watch_pr` checks / review-thread / merge-state polls.
   const github = overrides.github ?? new GitHubService({ bus, store });
@@ -240,6 +259,7 @@ export function createServices(
       projectConfig,
       harnesses,
       managerMcp,
+      inspect,
       deps: brokerDeps,
     });
   const title =
@@ -398,6 +418,7 @@ export function createServices(
     memoryHistory,
     projectConfig,
     projectConfigArchive,
+    inspect,
     title,
     checkpoints,
     worktrees,

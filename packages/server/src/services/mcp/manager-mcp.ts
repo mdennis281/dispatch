@@ -82,6 +82,15 @@ import type { EventBus } from "../../bus.js";
 import { clampBody } from "../memory.js";
 import type { MemoryGrepMatch, MemoryInventoryEntry } from "../memory.js";
 import type { MemoryHistoryResult } from "../memory-history.js";
+import { renderFind, renderProject, renderRead } from "../inspect-render.js";
+import type {
+  FindChatsQuery,
+  FindChatsResult,
+  ProjectInfoQuery,
+  ProjectInfoResult,
+  ReadChatQuery,
+  ReadChatResult,
+} from "../inspect.js";
 
 /** Hard ceiling on a single `wait` (also the default `wait_for_chat` timeout). */
 export const WAIT_CAP_SECONDS = 3600;
@@ -974,6 +983,20 @@ export interface ManagerMcpChats {
   }): Promise<SpawnedChat>;
 }
 
+/**
+ * Read-only inspection of OTHER chats, their images, and project config.
+ *
+ * Every method is a pure read — there is deliberately no write path on this
+ * binding, so `chat_find`/`chat_read`/`project_info` cannot disturb a chat the
+ * human is watching no matter how they're called.
+ */
+export interface ManagerMcpInspect {
+  findChats(q: FindChatsQuery): Promise<FindChatsResult>;
+  readChat(q: ReadChatQuery): Promise<ReadChatResult>;
+  /** Project resolution falls back to the CALLER's project when none is named. */
+  projectInfo(q: ProjectInfoQuery): Promise<ProjectInfoResult>;
+}
+
 /** Per-session context the factory closes over. */
 export interface ManagerMcpContext {
   /** The chat this session drives (for the waiting status label). */
@@ -1005,6 +1028,8 @@ export interface ManagerMcpContext {
   chats?: ManagerMcpChats;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
   mcpConfig?: ManagerMcpConfig;
+  /** Cross-chat read surface (omitted → no `chat_find`/`chat_read`/`project_info`). */
+  inspect?: ManagerMcpInspect;
   /** The session's abort signal — cancels in-flight waits on stop/fork. */
   signal?: AbortSignal;
   now?: () => number;
@@ -1025,6 +1050,28 @@ function extraSignal(extra: unknown): AbortSignal | undefined {
 
 function textResult(text: string, isError = false): CallToolResult {
   return { content: [{ type: "text", text }], isError };
+}
+
+/**
+ * Parse a time bound as either a relative age (`30m`, `6h`, `7d`, `2w`) or an
+ * absolute date the `Date` constructor understands. Relative comes first because
+ * "what happened since yesterday" is the question that actually gets asked, and
+ * making the agent compute an epoch for it invites off-by-a-timezone answers.
+ * Returns undefined for anything unparseable — the filter is then simply not
+ * applied, which is the safe direction for a search.
+ */
+export function parseTimeBound(value: string | undefined, now: number): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  const rel = /^(\d+(?:\.\d+)?)\s*(m|h|d|w)$/i.exec(trimmed);
+  if (rel) {
+    const n = Number(rel[1]);
+    const unit = rel[2]!.toLowerCase();
+    const ms = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 }[unit]!;
+    return now - n * ms;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? undefined : parsed;
 }
 
 /* --------------------------------------------------- memory inventory rendering */
@@ -3393,6 +3440,192 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
+  /* ------------------------------------------------------------ inspection
+   * Acquiring context on work that happened in ANOTHER chat used to mean asking
+   * the human to paste it. These three read the store directly: find the chat,
+   * read what it decided, and pull the project's config — all read-only, so
+   * they're safe to reach for without checking first. */
+
+  const inspectInstance = z
+    .enum(["self", "stable"])
+    .optional()
+    .describe(
+      "Which instance's data to read. Omit for this server's own store (the " +
+        "normal case). 'stable' reads the INSTALLED app's store — use it only " +
+        "from a dev server that needs to see production chats.",
+    );
+
+  const chatFind = tool(
+    "chat_find",
+    "Search ACROSS every chat in the store and get back the few that matter, newest " +
+      "first — the fast way to answer \"which chat was that\" or \"has anyone hit this " +
+      "error before\". `query` is matched against transcript CONTENT (and titles), so " +
+      "a file path, an error string or a PR number all work. Returns each hit as a " +
+      "one-line snippet with the chat id and row id, which feed straight into " +
+      "`chat_read`. Filter with `project`/`since` to keep a broad query fast. This is " +
+      "a read — it never touches a running chat.",
+    {
+      query: z
+        .string()
+        .optional()
+        .describe(
+          "Text to look for inside transcripts. Case-insensitive substring, not regex. " +
+            "Omit to just list chats matching the filters.",
+        ),
+      project: z
+        .string()
+        .optional()
+        .describe("Project id, or part of its name (case-insensitive)."),
+      since: z
+        .string()
+        .optional()
+        .describe(
+          "Only chats active since then: a relative age like '6h', '7d', '2w', or a date.",
+        ),
+      before: z.string().optional().describe("Only chats active BEFORE then (same formats)."),
+      status: z.string().optional().describe("Only chats in this status, e.g. 'running'."),
+      archived: z.boolean().optional().describe("Include archived chats (default false)."),
+      kinds: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Row kinds to search. Default ['user','assistant'] — the conversation. Add " +
+            "'tool_use'/'tool_result' to search what tools actually did (file paths, " +
+            "commands, output), which is much slower but finds things the prose never names.",
+        ),
+      limit: z.number().optional().describe("Max chats to return (default 20)."),
+      hitsPerChat: z.number().optional().describe("Max snippets per chat (default 3)."),
+      instance: inspectInstance,
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.inspect) {
+        return textResult("Chat inspection is not available in this session.", true);
+      }
+      const now = ctx.now?.() ?? Date.now();
+      try {
+        const result = await ctx.inspect.findChats({
+          query: args.query,
+          project: args.project,
+          status: args.status,
+          archived: args.archived,
+          since: parseTimeBound(args.since, now),
+          before: parseTimeBound(args.before, now),
+          kinds: args.kinds,
+          limit: args.limit,
+          hitsPerChat: args.hitsPerChat,
+          instance: args.instance,
+        });
+        return textResult(renderFind(result, args.query));
+      } catch (err) {
+        return textResult(
+          `Could not search chats: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const chatRead = tool(
+    "chat_read",
+    "Read ONE chat's transcript. Three views: 'digest' (default) is the catch-up — " +
+      "what the human asked in their own words, the errors, the latest activity, and " +
+      "every image; 'grep' finds `query` inside just this chat; 'messages' pages the " +
+      "raw rows. Images come back as ABSOLUTE PATHS — read them with the file tools to " +
+      "actually see a screenshot the other chat took. Page long transcripts with " +
+      "`beforeId` (the oldest row id shown) rather than raising `limit`.",
+    {
+      chatId: z.string().describe("The chat's id, as reported by `chat_find`."),
+      view: z
+        .enum(["digest", "messages", "grep"])
+        .optional()
+        .describe("digest = catch up (default); grep = search inside; messages = raw rows."),
+      query: z.string().optional().describe("Required for view 'grep': text to find."),
+      kinds: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Restrict rows to these kinds: user, assistant, tool_use, tool_result, " +
+            "result, system, permission, task_status, notice.",
+        ),
+      limit: z.number().optional().describe("Max rows (default 30 digest / 60 otherwise)."),
+      beforeId: z.string().optional().describe("Page backwards: rows before this row id."),
+      afterId: z.string().optional().describe("Page forwards: rows after this row id."),
+      full: z
+        .boolean()
+        .optional()
+        .describe("Keep tool payloads verbatim instead of clipping them. Expensive."),
+      instance: inspectInstance,
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.inspect) {
+        return textResult("Chat inspection is not available in this session.", true);
+      }
+      if (args.view === "grep" && !args.query?.trim()) {
+        return textResult("view: 'grep' needs a `query` to search for.", true);
+      }
+      try {
+        const result = await ctx.inspect.readChat({
+          chatId: args.chatId,
+          view: args.view,
+          query: args.query,
+          kinds: args.kinds,
+          limit: args.limit,
+          beforeId: args.beforeId,
+          afterId: args.afterId,
+          full: args.full,
+          instance: args.instance,
+        });
+        return textResult(renderRead(result));
+      } catch (err) {
+        return textResult(
+          `Could not read that chat: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const projectInfo = tool(
+    "project_info",
+    "Everything Dispatch knows about a project in one call: its repo path, workflow " +
+      "profile and default branch, the committable `.dispatch/` config (instructions, " +
+      "agents, modes, skills, MCP servers) with any config ERRORS, its subApps and " +
+      "ports, optionally its durable memory index, and its most recent chats. Use it " +
+      "before working in an unfamiliar project instead of reading its config files one " +
+      "at a time. Omit `project` to describe this chat's own.",
+    {
+      project: z
+        .string()
+        .optional()
+        .describe("Project id or part of its name. Omit for this chat's own project."),
+      memory: z
+        .boolean()
+        .optional()
+        .describe("Include the project's memory index (one line per recorded fact)."),
+      chats: z.number().optional().describe("How many recent chats to list (default 5)."),
+      instance: inspectInstance,
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.inspect) {
+        return textResult("Chat inspection is not available in this session.", true);
+      }
+      try {
+        const result = await ctx.inspect.projectInfo({
+          project: args.project,
+          memory: args.memory,
+          chats: args.chats,
+          instance: args.instance,
+        });
+        return textResult(renderProject(result));
+      } catch (err) {
+        return textResult(
+          `Could not describe that project: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
   return {
     askUser,
     wait,
@@ -3418,6 +3651,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     mcpList,
     mcpAdd,
     mcpRemove,
+    chatFind,
+    chatRead,
+    projectInfo,
   };
 }
 
@@ -3452,6 +3688,9 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   mcp_list: "mcpConfig",
   mcp_add: "mcpConfig",
   mcp_remove: "mcpConfig",
+  chat_find: "inspect",
+  chat_read: "inspect",
+  project_info: "inspect",
 };
 
 /** The session bindings that gate manager tools. */
@@ -3463,7 +3702,8 @@ export type ManagerToolBinding =
   | "memory"
   | "runner"
   | "chats"
-  | "mcpConfig";
+  | "mcpConfig"
+  | "inspect";
 
 /** Which bindings a session has — decides which tools are offered/available. */
 export type ManagerToolBindings = Partial<Record<ManagerToolBinding, boolean>>;
@@ -3557,6 +3797,9 @@ export function createManagerMcpServer(
     mcpList,
     mcpAdd,
     mcpRemove,
+    chatFind,
+    chatRead,
+    projectInfo,
   } = createManagerTools(ctx);
   // Each tool is only meaningful when its backing service is wired in; omit the
   // dead ones so the agent isn't offered a tool it can't use.
@@ -3588,6 +3831,9 @@ export function createManagerMcpServer(
     // route the consent prompt through; both are bound together or not at all.
     ...(ctx.chats ? [spawnChat] : []),
     ...(ctx.mcpConfig ? [mcpList, mcpAdd, mcpRemove] : []),
+    // Read-only cross-chat inspection. Bound together because they're one
+    // workflow — find the chat, read it, then read its project's config.
+    ...(ctx.inspect ? [chatFind, chatRead, projectInfo] : []),
   ];
   const server = createSdkMcpServer({
     name: "manager",

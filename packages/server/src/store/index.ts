@@ -246,6 +246,15 @@ export class Store {
   private messagesFile(chatId: string) {
     return join(this.chatDir(chatId), "messages.jsonl");
   }
+  /**
+   * Absolute path to a chat's TRANSCRIPT file, for readers that must stream it
+   * rather than take it whole. `readMessages` slurps the file to window it —
+   * correct for one chat, ruinous for the InspectService's sweep across every
+   * transcript in the store, which streams line-by-line under a byte budget.
+   */
+  chatTranscriptPath(chatId: string) {
+    return this.messagesFile(chatId);
+  }
   /** Absolute path to a chat's asset dir (images). Created on demand. */
   chatAssetsDir(chatId: string) {
     return join(this.chatDir(chatId), "assets");

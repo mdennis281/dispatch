@@ -51,6 +51,7 @@ describe("mcp-catalog — builder", () => {
         runner: true,
         chats: true,
         mcpConfig: true,
+        inspect: true,
       },
     });
 
@@ -78,6 +79,9 @@ describe("mcp-catalog — builder", () => {
         "mcp_list",
         "mcp_add",
         "mcp_remove",
+        "chat_find",
+        "chat_read",
+        "project_info",
       ]),
     );
 
