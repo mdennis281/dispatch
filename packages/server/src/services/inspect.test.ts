@@ -342,26 +342,32 @@ describe("instance: stable", () => {
 });
 
 describe("installedRoots", () => {
+  // Absolute-path fixtures must be rooted PER PLATFORM: POSIX doesn't treat a
+  // drive letter as absolute, so `resolve("D:/dispatch")` on the Linux CI runner
+  // silently prepends the cwd. `installedRoots` resolves DISPATCH_HOME, so a
+  // literal "D:/…" here fails the gate for a reason that has nothing to do with
+  // the code under test.
+  const LOCAL = process.platform === "win32" ? "C:/Users/x/AppData/Local" : "/home/x/.local/share";
+  const HOME = process.platform === "win32" ? "D:/dispatch" : "/opt/dispatch";
+  const slash = (p: string | undefined) => p?.replace(/\\/g, "/");
+
   it("derives the documented layout from LOCALAPPDATA", () => {
-    const roots = installedRoots({ LOCALAPPDATA: "C:/Users/x/AppData/Local" } as NodeJS.ProcessEnv);
-    expect(roots?.dataDir.replace(/\\/g, "/")).toBe("C:/Users/x/AppData/Local/claude-manager/data");
-    expect(roots?.configDir.replace(/\\/g, "/")).toBe(
-      "C:/Users/x/AppData/Local/claude-manager/config",
-    );
+    const roots = installedRoots({ LOCALAPPDATA: LOCAL } as NodeJS.ProcessEnv);
+    expect(slash(roots?.dataDir)).toBe(`${LOCAL}/claude-manager/data`);
+    expect(slash(roots?.configDir)).toBe(`${LOCAL}/claude-manager/config`);
   });
 
   it("returns null when this process ALREADY is the installed instance", () => {
-    const local = "C:/Users/x/AppData/Local";
     const roots = installedRoots({
-      LOCALAPPDATA: local,
-      DISPATCH_DATA_DIR: join(local, "claude-manager", "data"),
+      LOCALAPPDATA: LOCAL,
+      DISPATCH_DATA_DIR: join(LOCAL, "claude-manager", "data"),
     } as NodeJS.ProcessEnv);
     expect(roots).toBeNull();
   });
 
   it("honours an explicit DISPATCH_HOME override", () => {
-    const roots = installedRoots({ DISPATCH_HOME: "D:/dispatch" } as NodeJS.ProcessEnv);
-    expect(roots?.dataDir.replace(/\\/g, "/")).toBe("D:/dispatch/data");
+    const roots = installedRoots({ DISPATCH_HOME: HOME } as NodeJS.ProcessEnv);
+    expect(slash(roots?.dataDir)).toBe(`${HOME}/data`);
   });
 });
 
