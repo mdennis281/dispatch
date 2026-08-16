@@ -151,6 +151,12 @@ export const PRRefSchema = z.object({
   repo: z.string().optional(),
   title: z.string().optional(),
   state: z.enum(["open", "closed", "merged"]).optional(),
+  /**
+   * When this PR was observed to reach `merged`/`closed`, epoch ms. Persisted so
+   * the "PR done" dot survives a server restart or a page reload — it used to
+   * live only on the in-memory session and was lost by both.
+   */
+  settledAt: z.number().int().optional(),
 });
 export type PRRef = z.infer<typeof PRRefSchema>;
 
@@ -369,10 +375,48 @@ export const ChatSchema = z.object({
    * server restart re-arms the timer instead of silently dropping the chat.
    */
   resume: ResumePlanSchema.optional(),
+  /**
+   * When the user last sent a message, epoch ms. Distinct from `updatedAt`,
+   * which any bookkeeping write bumps — this one moves ONLY on real user input,
+   * which is what {@link isPrSettledIdle} needs to tell "the PR landed and
+   * nobody has said anything since" from "the PR landed and we kept working".
+   */
+  lastUserMessageAt: z.number().int().optional(),
   createdAt: z.number().int(),
   updatedAt: z.number().int().optional(),
 });
 export type Chat = z.infer<typeof ChatSchema>;
+
+/**
+ * Does this chat read as "PR done" — finished, its PR landed, nothing said
+ * since? True when the chat is idle, one of its PRs reached a terminal state,
+ * and no user message followed it.
+ *
+ * Derived from the persisted record rather than tracked as its own flag, so it
+ * survives a server restart and a page reload alike. The broker's in-memory
+ * `prWatchSettled` is the live echo of this; this is the durable truth.
+ */
+export function isPrSettledIdle(chat: Pick<Chat, "status" | "prs" | "updatedAt" | "lastUserMessageAt">): boolean {
+  if (chat.status !== "idle") return false;
+  let settledAt: number | undefined;
+  for (const pr of chat.prs ?? []) {
+    if (pr.state !== "merged" && pr.state !== "closed") continue;
+    // A terminal PR with no `settledAt` predates that field. Its settle time is
+    // unrecoverable, so fall back to the chat's last write — for a chat that
+    // ended on a merge (the case this whole path exists for) that IS about when
+    // it settled, and it lets already-landed chats read correctly instead of
+    // staying gray forever.
+    //
+    // Only while the chat ALSO predates `lastUserMessageAt`, though: once we've
+    // started recording user messages, an undated ref can't be compared against
+    // them, and guessing "now" would pin the dot green through every later turn.
+    const legacy = chat.lastUserMessageAt === undefined;
+    const at = pr.settledAt ?? (legacy ? chat.updatedAt : undefined);
+    if (at !== undefined && (settledAt === undefined || at > settledAt)) settledAt = at;
+  }
+  if (settledAt === undefined) return false;
+  return (chat.lastUserMessageAt ?? 0) <= settledAt;
+}
 
 /* --------------------------------------------------------------- worktrees */
 

@@ -368,7 +368,9 @@ export class PrReviewWatcher {
       const chat = await this.store.getChat(chatId);
       if (!chat) return;
       const prs = (chat.prs ?? []).map((p) =>
-        p.number === ref.number && p.repo === ref.repo ? { ...p, state } : p,
+        p.number === ref.number && p.repo === ref.repo
+          ? { ...p, state, settledAt: p.settledAt ?? this.now() }
+          : p,
       );
       const saved = await this.store.saveChat({ ...chat, prs, updatedAt: this.now() });
       this.bus.publish({ type: "chat-update", chat: saved });
