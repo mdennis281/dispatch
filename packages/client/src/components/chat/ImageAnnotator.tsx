@@ -78,7 +78,12 @@ export interface ImageAnnotatorProps {
 
 /** Screen-pixel radius for grabbing a crop corner. Sized for a fingertip. */
 const CROP_GRAB = 28;
-/** Minimum image-space movement before a stroke records another point. */
+/**
+ * Minimum SCREEN-space movement, in CSS pixels, before a stroke records another
+ * point. Screen-space rather than image-space on purpose: it makes the sampling
+ * rate follow the zoom, so detail work at 8× records eight times more points per
+ * image pixel and the stroke stays as smooth as it looked while being drawn.
+ */
 const DECIMATE = 1.5;
 /** Below this a drag is a click, and a click should not leave a 2px rectangle. */
 const MIN_DRAG = 4;
@@ -456,8 +461,8 @@ function Editor({ chatId, alt, base: initialBase, onCancel, onApply }: ImageAnno
               const n = s.points.length;
               const dx = ix - s.points[n - 2]!;
               const dy = iy - s.points[n - 1]!;
-              // Decimate in IMAGE space so the sampling rate follows the zoom:
-              // detail work at 8× still records every wobble.
+              // `* vp.scale` converts the image-space step into the screen-space
+              // one the threshold is defined in — see DECIMATE.
               if (Math.hypot(dx, dy) * vp.scale < DECIMATE) return s;
               return { ...s, points: [...s.points, ix, iy] };
             }
@@ -607,6 +612,21 @@ function Editor({ chatId, alt, base: initialBase, onCancel, onApply }: ImageAnno
     const bounds = rotatedBounds(image.width, image.height, angle);
     const rect = clampRect(normalize(crop), bounds.w, bounds.h);
     if (rect.w < 1 || rect.h < 1) {
+      setMode("markup");
+      return;
+    }
+    // Entering crop and pressing Crop straight back out is not an edit. Baking
+    // it anyway would re-encode the whole bitmap, keep the old one alive in the
+    // undo stack, and leave a step that undoes to an identical picture.
+    const noop =
+      angle % 360 === 0 &&
+      !flipH &&
+      !flipV &&
+      rect.x === 0 &&
+      rect.y === 0 &&
+      rect.w === image.width &&
+      rect.h === image.height;
+    if (noop) {
       setMode("markup");
       return;
     }
@@ -766,7 +786,9 @@ function Editor({ chatId, alt, base: initialBase, onCancel, onApply }: ImageAnno
               size="sm"
               leftIcon={busy ? <Spinner size={13} /> : <Check />}
               onClick={apply}
-              disabled={busy}
+              // Nothing drawn means Apply would upload a byte-identical copy as
+              // a NEW asset and orphan the original — a no-op that costs disk.
+              disabled={busy || !doc.dirty}
             >
               {busy ? "Saving…" : "Apply"}
             </Button>

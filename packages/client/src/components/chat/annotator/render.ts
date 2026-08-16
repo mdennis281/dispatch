@@ -83,6 +83,9 @@ export function exportStage(stage: Konva.Stage, width: number, height: number): 
     scale: stage.scale() ?? { x: 1, y: 1 },
     x: stage.x(),
     y: stage.y(),
+    // Restored, not assumed: forcing `true` afterwards would silently re-enable
+    // hit detection on a stage a caller had deliberately turned off.
+    listening: stage.listening(),
   };
   stage.listening(false);
   try {
@@ -94,7 +97,7 @@ export function exportStage(stage: Konva.Stage, width: number, height: number): 
     stage.size({ width: prev.width, height: prev.height });
     stage.scale(prev.scale);
     stage.position({ x: prev.x, y: prev.y });
-    stage.listening(true);
+    stage.listening(prev.listening);
     stage.batchDraw();
   }
 }
