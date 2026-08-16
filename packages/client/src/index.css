@@ -314,6 +314,11 @@
   .cm-scroll {
     scrollbar-width: thin;
     scrollbar-color: var(--p-line-strong) transparent;
+    /* Stop at your own end. Without this, flicking a pane that is already at its
+     * top or bottom hands the leftover momentum to its ancestors and finally to
+     * the document — which is how a swipe inside the transcript ended up moving
+     * the shell (and the bottom nav with it) rather than doing nothing. */
+    overscroll-behavior: contain;
   }
   .cm-scroll::-webkit-scrollbar {
     width: 9px;

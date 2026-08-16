@@ -105,8 +105,18 @@ export default function App() {
           height that was already wrong. `--cm-vh` is the tallest the window has
           ever been (see stores/viewport), and it is only set once a shrink has
           actually been observed — everywhere else this falls back to `dvh`. */}
+      {/* `fixed`, not in flow. `--cm-vh` is deliberately TALLER than the height
+          WebKit is currently reporting, so in flow this box overflows the
+          document by those ~59px — and `overflow: hidden` on html/body does not
+          stop iOS touch-panning that overflow. You could drag the whole app up
+          and down, which slid the bottom nav around and let Safari's URL bar
+          collapse and expand under you. A fixed box does not contribute to the
+          document's scrollable overflow at all, so there is nothing left to pan:
+          the shell is clipped to the window and stays where it is put.
+          `inset-x-0` rather than `w-screen` for the same reason horizontally —
+          `100vw` includes a scrollbar the shell doesn't have. */}
       <div
-        className="flex w-screen flex-col overflow-hidden bg-app text-primary antialiased"
+        className="fixed inset-x-0 top-0 flex flex-col overflow-hidden bg-app text-primary antialiased"
         style={{ height: "var(--cm-vh, 100dvh)", paddingBottom: "var(--cm-kb, 0px)" }}
       >
       <TopBar />
