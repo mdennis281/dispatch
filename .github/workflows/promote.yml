@@ -59,6 +59,9 @@ jobs:
         id: pick
         env:
           GH_TOKEN: ${{ github.token }}
+          # Set even though this job DOES check out the tree, so `gh` working
+          # here never silently depends on that checkout staying.
+          GH_REPO: ${{ github.repository }}
           REQUESTED: ${{ inputs.tag }}
         run: |
           set -euo pipefail
@@ -219,13 +222,30 @@ jobs:
       - name: Flip the release
         env:
           GH_TOKEN: ${{ github.token }}
+          # REQUIRED, and its absence is not obvious. This job deliberately does
+          # not check out the tree — it only edits a release — so `gh` has no git
+          # remote to infer the repository from and dies with "fatal: not a git
+          # repository" before it ever reaches the API. `retention.yml` sets this
+          # for the same reason.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
           # Re-check rather than trusting the resolve job's answer: the gate takes
           # tens of minutes, and a concurrent promotion of the same tag would
           # otherwise be flipped twice with the second one reporting success.
-          if [ "$(gh release view "$TAG" --json isPrerelease -q .isPrerelease)" != "true" ]; then
+          #
+          # Assigned to a variable rather than tested inline. `[ "$(gh …)" != … ]`
+          # hides a FAILING gh behind an empty string, which then compares
+          # unequal to "true" and reports "someone promoted it already" — the
+          # opposite of what happened, and `set -e` cannot see it because the
+          # substitution is inside a test. That is exactly how the missing
+          # GH_REPO above stayed invisible for a whole run.
+          if ! STATE="$(gh release view "$TAG" --json isPrerelease -q .isPrerelease)"; then
+            echo "Could not read $TAG from GitHub; refusing to flip a release whose state is unknown." >&2
+            exit 1
+          fi
+          if [ "$STATE" != "true" ]; then
             echo "$TAG is no longer a prerelease — someone promoted it already." >&2
             exit 1
           fi
