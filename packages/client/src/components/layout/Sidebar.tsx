@@ -20,7 +20,7 @@ import type { Chat, SubApp, RunnerInstance, Project } from "@dispatch/shared";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { IconButton } from "../ui/IconButton.js";
 import { SectionLabel } from "../ui/Panel.js";
-import { StatusDot, statusMeta } from "../ui/StatusDot.js";
+import { StatusDot, statusMeta, toneText } from "../ui/StatusDot.js";
 import { TitleText } from "../ui/TitleText.js";
 import { purposeIcon } from "../config/sections.js";
 import { Chip } from "../ui/Chip.js";
@@ -278,14 +278,18 @@ function ChatRow({
         {active && <span className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-accent" />}
         {/* A chat the app spawned for a job wears that job's icon instead of the
             status dot — in a sidebar of a dozen rows it's the only way to spot
-            the one that's off editing your config. Status still reads from the
-            row's subtitle, and an unknown purpose kind falls back to the dot. */}
+            the one that's off editing your config. It's a bare glyph in the
+            dot's slot, tinted with the SAME tone the dot would have used: the
+            icon says what the chat is, its colour says how the chat is doing,
+            so one marker carries both and the row keeps one colour language.
+            An unknown purpose kind falls back to the dot. */}
         {PurposeIcon ? (
           <span
             title={chat.purpose?.label ?? chat.purpose?.kind}
             className={cn(
-              "flex size-[15px] shrink-0 items-center justify-center rounded-[4px]",
-              "bg-accent-ghost text-accent ring-1 ring-accent-line [&_svg]:size-2.5",
+              "flex size-[15px] shrink-0 items-center justify-center [&_svg]:size-3.5",
+              toneText(meta.tone),
+              "transition-colors duration-300",
               meta.pulse && "animate-pulse",
             )}
           >
