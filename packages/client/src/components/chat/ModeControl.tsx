@@ -84,22 +84,9 @@ export function modeLabel(modes: ModeConfig[], modeId: string): string {
   );
 }
 
-export interface ModeControlProps {
-  modes: ModeConfig[];
-  /** The chat's `modeId` — a primary mode or a posture, they share the field. */
-  value: string;
-  onChange: (modeId: string) => void;
-  /** Icon-only trigger (the toolbar's auto-compact state); the label moves into the tooltip. */
-  compact?: boolean;
-}
-
-export function ModeControl({ modes, value, onChange, compact = false }: ModeControlProps) {
-  // Phone width never goes icon-only here: `Tooltip` is hover/focus, so on touch
-  // a bare icon has nothing that can tell you which mode you're in.
-  const sm = useLayoutMode() === "sm";
-  const iconOnly = compact && !sm;
-
-  const postures: { id: string; name: string; icon: ReactNode; hint: string }[] = [
+/** The postures on offer: configured ones first, then the builtins they don't shadow. */
+function posturesOf(modes: ModeConfig[]) {
+  const out: { id: string; name: string; icon: ReactNode; hint: string }[] = [
     ...modes
       .filter((m) => !PRIMARY_MODE_IDS.includes(m.id))
       .map((m) => ({
@@ -110,6 +97,101 @@ export function ModeControl({ modes, value, onChange, compact = false }: ModeCon
       })),
     ...BUILTIN_POSTURES.filter((b) => !modes.some((m) => m.id === b.id)),
   ];
+  return out;
+}
+
+/**
+ * The menu body on its own, so the composer's options surface can drill into
+ * mode IN PLACE. It can't open this control's own popover from in there: a
+ * nested `Popover` portals to `document.body`, which the outer surface's
+ * outside-click test reads as "outside" and closes on the first tap.
+ */
+export function ModeMenu({
+  modes,
+  value,
+  onChange,
+  close,
+  dense = true,
+}: {
+  modes: ModeConfig[];
+  value: string;
+  onChange: (modeId: string) => void;
+  close: () => void;
+  dense?: boolean;
+}) {
+  const postures = posturesOf(modes);
+  const row = (o: { id: string; name: string; icon: ReactNode; hint?: string }) => (
+    <MenuItem
+      key={o.id}
+      icon={o.icon}
+      hint={o.hint}
+      dense={dense}
+      active={o.id === value}
+      onClick={() => {
+        onChange(o.id);
+        close();
+      }}
+    >
+      <span className="flex items-center gap-2">
+        {o.name}
+        {o.id === value && <Check className="size-3 text-accent" />}
+      </span>
+    </MenuItem>
+  );
+  return (
+    <div className="flex flex-col">
+      <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Mode</div>
+      {PRIMARY_MODE_IDS.map((id) =>
+        row({
+          id,
+          name: modes.find((m) => m.id === id)?.name ?? PRIMARY_MODE_LABEL[id]!,
+          icon: MODE_ICONS[id],
+        }),
+      )}
+      {postures.length > 0 && (
+        <>
+          <div className="my-1 h-px bg-line" />
+          <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
+            Permission posture
+          </div>
+          {postures.map(row)}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The active mode's glyph. Exported so the composer's options menu can label its
+ * "Mode & posture" row with the same icon the toolbar control wears — a menu row
+ * that doesn't look like the button it stands in for is a menu row you have to
+ * read twice.
+ */
+export function modeIcon(modes: ModeConfig[], modeId: string): ReactNode {
+  if (PRIMARY_MODE_IDS.includes(modeId)) return MODE_ICONS[modeId] ?? <SlidersHorizontal />;
+  return posturesOf(modes).find((p) => p.id === modeId)?.icon ?? <SlidersHorizontal />;
+}
+
+export interface ModeControlProps {
+  modes: ModeConfig[];
+  /** The chat's `modeId` — a primary mode or a posture, they share the field. */
+  value: string;
+  onChange: (modeId: string) => void;
+  /**
+   * How much room the toolbar has granted this control (see lib/composerFit):
+   * `lg` icon + mode name + chevron, `md` icon + mode name, `sm` icon only with
+   * the name in the tooltip. The toolbar never renders it at all below that.
+   */
+  size?: "lg" | "md" | "sm";
+}
+
+export function ModeControl({ modes, value, onChange, size = "lg" }: ModeControlProps) {
+  // Touch gets the taller box and the roomier menu; `Tooltip` is hover/focus, so
+  // at `sm` on a phone the tap-to-open menu is what tells you the current mode.
+  const phone = useLayoutMode() === "sm";
+  const iconOnly = size === "sm";
+
+  const postures = posturesOf(modes);
 
   const isPosture = !PRIMARY_MODE_IDS.includes(value);
   const label = modeLabel(modes, value);
@@ -120,7 +202,7 @@ export function ModeControl({ modes, value, onChange, compact = false }: ModeCon
   return (
     <Popover
       align="start"
-      width={sm ? 240 : 220}
+      width={phone ? 240 : 220}
       className="p-1"
       trigger={({ open, toggle }) => {
         const btn = (
@@ -131,7 +213,7 @@ export function ModeControl({ modes, value, onChange, compact = false }: ModeCon
             className={cn(
               "inline-flex items-center gap-1.5 rounded-md border text-sm font-medium " +
                 "transition-colors [&_svg]:size-3.5",
-              sm ? "h-8" : "h-6",
+              phone ? "h-8" : "h-6",
               iconOnly ? "justify-center px-1.5" : "px-2",
               // The accent is the "you are off the rails" signal the standalone
               // posture button carried; losing it would make bypass look normal.
@@ -144,58 +226,22 @@ export function ModeControl({ modes, value, onChange, compact = false }: ModeCon
             {icon}
             {!iconOnly && (
               <>
-                {/* Tighter at phone width so a renamed mode can't grow the row
-                    into the Send button on a 320px screen. */}
-                <span className={cn("truncate", sm ? "max-w-16" : "max-w-[84px]")}>{label}</span>
-                <ChevronsUpDown className="text-faint" />
+                {/* Tighter at phone width, and tighter again at `md`, so a
+                    renamed mode can't grow the row into the Send button. */}
+                <span className={cn("truncate", size === "md" || phone ? "max-w-16" : "max-w-[84px]")}>
+                  {label}
+                </span>
+                {size === "lg" && <ChevronsUpDown className="text-faint" />}
               </>
             )}
           </button>
         );
-        return iconOnly ? <Tooltip label={`Mode — ${label}`}>{btn}</Tooltip> : btn;
+        return size === "lg" ? btn : <Tooltip label={`Mode — ${label}`}>{btn}</Tooltip>;
       }}
     >
-      {(close) => {
-        const row = (o: { id: string; name: string; icon: ReactNode; hint?: string }) => (
-          <MenuItem
-            key={o.id}
-            icon={o.icon}
-            hint={o.hint}
-            dense={!sm}
-            active={o.id === value}
-            onClick={() => {
-              onChange(o.id);
-              close();
-            }}
-          >
-            <span className="flex items-center gap-2">
-              {o.name}
-              {o.id === value && <Check className="size-3 text-accent" />}
-            </span>
-          </MenuItem>
-        );
-        return (
-          <div className="flex flex-col">
-            <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Mode</div>
-            {PRIMARY_MODE_IDS.map((id) =>
-              row({
-                id,
-                name: modes.find((m) => m.id === id)?.name ?? PRIMARY_MODE_LABEL[id]!,
-                icon: MODE_ICONS[id],
-              }),
-            )}
-            {postures.length > 0 && (
-              <>
-                <div className="my-1 h-px bg-line" />
-                <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
-                  Permission posture
-                </div>
-                {postures.map(row)}
-              </>
-            )}
-          </div>
-        );
-      }}
+      {(close) => (
+        <ModeMenu modes={modes} value={value} onChange={onChange} close={close} dense={!phone} />
+      )}
     </Popover>
   );
 }

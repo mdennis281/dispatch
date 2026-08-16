@@ -20,8 +20,18 @@ export interface SelectProps<T extends string> {
   className?: string;
   align?: "start" | "end";
   width?: number;
-  /** Icon-only trigger; the label + current value move into a hover tooltip. */
-  compact?: boolean;
+  /**
+   * How much room the trigger is allowed to take (the composer's toolbar picks
+   * this by measurement — see lib/composerFit):
+   *   `lg` the full chip — `label` prefix, value, chevron
+   *   `md` icon + value only; the prefix and chevron are the first things a
+   *        cramped row can afford to lose, because the value is the point
+   *   `sm` icon only, with everything else in the hover tooltip
+   * Defaults to `lg`, which is every Select outside the composer.
+   */
+  size?: "lg" | "md" | "sm";
+  /** Extra height for touch — the composer's phone row, where 24px is unhittable. */
+  touch?: boolean;
 }
 
 /** A compact dropdown-select styled as a subtle chip button. */
@@ -34,10 +44,12 @@ export function Select<T extends string>({
   className,
   align = "start",
   width = 180,
-  compact = false,
+  size = "lg",
+  touch = false,
 }: SelectProps<T>) {
   const current = options.find((o) => o.value === value);
   const tip = [label, current?.label ?? value].filter(Boolean).join(" · ");
+  const iconOnly = size === "sm";
   return (
     <Popover
       align={align}
@@ -48,29 +60,41 @@ export function Select<T extends string>({
           <button
             onClick={toggle}
             aria-expanded={open}
-            aria-label={compact ? tip : undefined}
+            // Any size below `lg` has dropped the `label` prefix, so the button
+            // reads as a bare value ("Medium") with nothing saying which knob it
+            // is. The tooltip can't supply that — it's hover/focus chrome in a
+            // portal, not an accessible name.
+            aria-label={size === "lg" ? undefined : tip}
             className={cn(
-              "inline-flex h-6 items-center gap-1.5 rounded-md border border-line bg-panel-2 " +
+              "inline-flex items-center gap-1.5 rounded-md border border-line bg-panel-2 " +
                 "text-sm font-medium text-secondary transition-colors hover:border-line-strong hover:text-primary " +
                 "[&_svg]:size-3.5",
-              compact ? "justify-center px-1.5" : "px-2",
+              touch ? "h-8" : "h-6",
+              iconOnly ? "justify-center px-1.5" : "px-2",
               open && "border-line-strong text-primary",
               className,
             )}
           >
             {leftIcon && <span className="text-muted">{leftIcon}</span>}
-            {!compact && (
+            {!iconOnly && (
               <>
-                {label && <span className="text-faint">{label}</span>}
-                <span className="text-primary">{current?.icon}</span>
+                {size === "lg" && label && <span className="text-faint">{label}</span>}
+                {/* Only when there IS one: an empty span still takes a `gap-1.5`
+                    slot, which is 6px of a row that shrank to save exactly that.
+                    Most option sets (EFFORT_OPTIONS among them) carry no icons. */}
+                {current?.icon && <span className="text-primary">{current.icon}</span>}
                 <span className="truncate">{current?.label ?? value}</span>
-                <ChevronsUpDown className="ml-auto text-faint" />
+                {size === "lg" && <ChevronsUpDown className="ml-auto text-faint" />}
               </>
             )}
-            {compact && !leftIcon && <span className="text-primary">{current?.icon}</span>}
+            {iconOnly && !leftIcon && current?.icon && (
+              <span className="text-primary">{current.icon}</span>
+            )}
           </button>
         );
-        return compact ? <Tooltip label={tip}>{btn}</Tooltip> : btn;
+        // `md` keeps the tooltip too: it drops the "effort ·" prefix, so the
+        // hover is the only thing left saying WHICH knob the value belongs to.
+        return size === "lg" ? btn : <Tooltip label={tip}>{btn}</Tooltip>;
       }}
     >
       {(close) => (
