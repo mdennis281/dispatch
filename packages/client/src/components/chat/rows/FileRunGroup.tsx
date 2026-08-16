@@ -1,5 +1,5 @@
 import { memo, useMemo, useState } from "react";
-import { Eye, FilePlus2, Files, Pencil, Search, X } from "lucide-react";
+import { Eye, FilePlus2, FileSearch, Files, Pencil, Search, X } from "lucide-react";
 import {
   fileEditStat,
   fileResultStat,
@@ -139,12 +139,15 @@ function FileRow({
   entry,
   presentation,
   target,
+  /** A search's directory, already made relative to the worktree it ran in. */
+  scope,
   /** True when the row above touched the same file — its path is dimmed as a repeat. */
   repeat,
 }: {
   entry: FileRunEntry;
   presentation: FileToolPresentation;
   target: WorktreeTarget | null;
+  scope: string;
   repeat: boolean;
 }) {
   const [detailOpen, setDetailOpen] = useState(false);
@@ -154,7 +157,9 @@ function FileRow({
   const stat = action === "read" || action === "search"
     ? readStatOf(entry.use, entry.result)
     : editStatOf(entry.use);
-  const Icon = ACTION_ICON[action];
+  // A Glob matches file NAMES and a Grep matches file CONTENTS — different
+  // enough that the pattern on the row reads differently, so the icon says which.
+  const Icon = presentation.tool === "Glob" ? FileSearch : ACTION_ICON[action];
 
   const openDetail = () => {
     const ids: string[] = [];
@@ -189,7 +194,7 @@ function FileRow({
   const shown = target?.relPath ?? presentation.path ?? "";
   const { dir, file } = splitPath(shown);
   const label = action === "search"
-    ? `${presentation.pattern}${presentation.scope ? ` in ${presentation.scope}` : ""}`
+    ? [presentation.pattern, scope && `in ${scope}`, presentation.filter].filter(Boolean).join(" ")
     : shown;
 
   return (
@@ -218,10 +223,27 @@ function FileRow({
 
         <OverflowTooltip text={label} className="min-w-0 !text-xs">
           {action === "search" ? (
+            // The query is the row. Everything else is where it ran, so the
+            // shrink weights let the directory collapse to nothing before the
+            // pattern gives up a character — an absolute worktree path used to
+            // take the whole line and leave the search string invisible.
             <span className="flex min-w-0 items-baseline gap-1.5 cm-mono !text-xs">
-              <span className="min-w-0 truncate text-primary">{presentation.pattern}</span>
-              {presentation.scope && (
-                <span className="shrink-0 truncate text-faint">in {presentation.scope}</span>
+              <span className="min-w-0 shrink truncate font-medium text-primary">
+                {presentation.pattern}
+              </span>
+              {scope && (
+                // RTL for the same reason a file path uses it: the tail is the
+                // part that says which directory this actually was. The "in"
+                // rides along so it ellipsizes away with the rest of the phrase
+                // rather than being left dangling over an empty span.
+                <span dir="rtl" className="min-w-0 shrink-[100] truncate text-faint">
+                  in {scope}
+                </span>
+              )}
+              {presentation.filter && (
+                <span className="min-w-0 shrink-[100] truncate text-muted">
+                  {presentation.filter}
+                </span>
               )}
             </span>
           ) : (
@@ -300,7 +322,14 @@ export const FileRunGroup = memo(function FileRunGroup({ entries }: { entries: F
         const target = presentation.path
           ? resolveChatFile(chat, worktrees, presentation.path)
           : null;
-        return [{ entry, presentation, target }];
+        // A search's `path` arrives absolute more often than not, and the
+        // worktree prefix is the one part of it the reader already knows.
+        // Resolving to "" means it searched the worktree root — say nothing.
+        const scopeTarget = presentation.scope
+          ? resolveChatFile(chat, worktrees, presentation.scope)
+          : null;
+        const scope = scopeTarget?.relPath ?? presentation.scope ?? "";
+        return [{ entry, presentation, target, scope }];
       }),
     [entries, chat, worktrees],
   );
@@ -367,7 +396,7 @@ export const FileRunGroup = memo(function FileRunGroup({ entries }: { entries: F
           </div>
         )}
         <div className="py-0.5">
-          {rows.map(({ entry, presentation, target }, index) => {
+          {rows.map(({ entry, presentation, target, scope }, index) => {
             const previous = rows[index - 1];
             return (
               <FileRow
@@ -375,6 +404,7 @@ export const FileRunGroup = memo(function FileRunGroup({ entries }: { entries: F
                 entry={entry}
                 presentation={presentation}
                 target={target}
+                scope={scope}
                 repeat={
                   !!previous &&
                   !!presentation.path &&

@@ -35,8 +35,10 @@ export interface FileToolPresentation {
   path?: string;
   /** What a search looked for. */
   pattern?: string;
-  /** The directory or glob a search was narrowed to. */
+  /** The directory a search was narrowed to. */
   scope?: string;
+  /** The glob/type a search was further filtered by (Grep only). */
+  filter?: string;
 }
 
 export type ToolPresentation = ShellToolPresentation | DispatchToolPresentation | FileToolPresentation;
@@ -120,8 +122,19 @@ const handlers: readonly ToolPresentationHandler[] = [
       if (action === "search") {
         const pattern = stringArg(use, "pattern") ?? stringArg(use, "query") ?? stringArg(use, "glob");
         if (!pattern) return null;
-        const scope = stringArg(use, "path") ?? (use.name === "Grep" ? stringArg(use, "glob") : undefined);
-        return { kind: "file", tool: use.name, action, pattern, scope: scope === pattern ? undefined : scope };
+        const scope = stringArg(use, "path");
+        // A Grep's glob/type narrows the regex it already ran; that is a filter
+        // ON the search, not the place it ran, so it gets its own slot instead
+        // of impersonating the directory (and shadowing it when both are set).
+        const filter = use.name === "Grep" ? (stringArg(use, "glob") ?? stringArg(use, "type")) : undefined;
+        return {
+          kind: "file",
+          tool: use.name,
+          action,
+          pattern,
+          scope: scope === pattern ? undefined : scope,
+          filter: filter === pattern ? undefined : filter,
+        };
       }
       const path =
         stringArg(use, "file_path") ??
