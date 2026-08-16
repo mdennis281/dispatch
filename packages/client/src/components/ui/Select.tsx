@@ -60,7 +60,11 @@ export function Select<T extends string>({
           <button
             onClick={toggle}
             aria-expanded={open}
-            aria-label={iconOnly ? tip : undefined}
+            // Any size below `lg` has dropped the `label` prefix, so the button
+            // reads as a bare value ("Medium") with nothing saying which knob it
+            // is. The tooltip can't supply that — it's hover/focus chrome in a
+            // portal, not an accessible name.
+            aria-label={size === "lg" ? undefined : tip}
             className={cn(
               "inline-flex items-center gap-1.5 rounded-md border border-line bg-panel-2 " +
                 "text-sm font-medium text-secondary transition-colors hover:border-line-strong hover:text-primary " +
@@ -75,12 +79,17 @@ export function Select<T extends string>({
             {!iconOnly && (
               <>
                 {size === "lg" && label && <span className="text-faint">{label}</span>}
-                <span className="text-primary">{current?.icon}</span>
+                {/* Only when there IS one: an empty span still takes a `gap-1.5`
+                    slot, which is 6px of a row that shrank to save exactly that.
+                    Most option sets (EFFORT_OPTIONS among them) carry no icons. */}
+                {current?.icon && <span className="text-primary">{current.icon}</span>}
                 <span className="truncate">{current?.label ?? value}</span>
                 {size === "lg" && <ChevronsUpDown className="ml-auto text-faint" />}
               </>
             )}
-            {iconOnly && !leftIcon && <span className="text-primary">{current?.icon}</span>}
+            {iconOnly && !leftIcon && current?.icon && (
+              <span className="text-primary">{current.icon}</span>
+            )}
           </button>
         );
         // `md` keeps the tooltip too: it drops the "effort ·" prefix, so the
