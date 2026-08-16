@@ -26,12 +26,24 @@
  * does. While the repo is PRIVATE neither applies — the server process has no
  * token in its environment — so a 401/403/404 falls back to `gh api`, which
  * already backs `services/github.ts` and carries the user's own credentials.
+ *
+ * CHANNELS. A channel is the GitHub `prerelease` flag. Stable is still exactly
+ * `releases/latest`, which GitHub filters prereleases out of server-side — the
+ * proven path, and one that cannot be broken by a paging bug here. Unstable
+ * lists releases and picks the newest build stamp itself, which is why it also
+ * sees promoted (no longer prerelease) builds: promotion must never look like a
+ * regression to someone on unstable.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
-import type { InstalledRelease, LatestRelease, UpdateStatus } from "@dispatch/shared";
+import type {
+  InstalledRelease,
+  LatestRelease,
+  UpdateChannel,
+  UpdateStatus,
+} from "@dispatch/shared";
 import { compareBuildVersions } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 
@@ -52,8 +64,29 @@ const REQUEST_TIMEOUT_MS = 15_000;
 /** Floor between manual "Check now" clicks, so the button cannot be leaned on. */
 const MIN_MANUAL_GAP_MS = 10_000;
 
+/**
+ * How many releases the unstable channel looks back over.
+ *
+ * The unstable head is by definition the newest release, so one page is always
+ * enough to find it; the depth only buys tolerance for drafts and unorderable
+ * tags near the top. Stable deliberately does NOT page — it asks GitHub for
+ * `releases/latest` — so a long unstable run can never push the stable head off
+ * the end of a list this code had to paginate correctly.
+ */
+const UNSTABLE_PAGE_SIZE = 30;
+
+/** Where the channel subscription is persisted; `config/`, so updates never reset it. */
+export interface ReleaseChannelStore {
+  read(): Promise<UpdateChannel>;
+  write(channel: UpdateChannel): Promise<void>;
+}
+
 export interface ReleaseServiceDeps {
   bus: EventBus;
+  /** Persistence for the channel subscription. Omitted in tests → in-memory only. */
+  channelStore?: ReleaseChannelStore;
+  /** Starting channel before `hydrate()` runs, and the value tests inject. */
+  channel?: UpdateChannel;
   /** Injected in tests so no real network or `gh` is touched. */
   fetchImpl?: typeof fetch;
   execImpl?: (file: string, args: readonly string[]) => Promise<{ stdout: string }>;
@@ -154,13 +187,16 @@ interface RawRelease {
   prerelease?: unknown;
 }
 
-function toLatest(raw: RawRelease): LatestRelease | null {
+function toLatest(raw: RawRelease, allowPrerelease = false): LatestRelease | null {
   const tag = str(raw.tag_name);
   if (!tag) return null;
-  // Draft and prerelease are exactly what `tools/install.mjs:146-148` refuses to
-  // install, so offering one here would advertise an update the installer would
-  // then reject with a stack trace.
-  if (raw.draft === true || raw.prerelease === true) return null;
+  // A DRAFT is refused unconditionally and on both channels: its assets may not
+  // exist yet, so offering one advertises an update the installer would then
+  // fail to download. `tools/install.mjs` refuses drafts for the same reason.
+  if (raw.draft === true) return null;
+  // A PRERELEASE is the unstable channel — offering one on stable would hand the
+  // installer a tag it is explicitly asked to skip when resolving a channel head.
+  if (raw.prerelease === true && !allowPrerelease) return null;
   return {
     version: tag.startsWith("v") ? tag.slice(1) : tag,
     tag,
@@ -180,11 +216,22 @@ export class ReleaseService {
   private readonly appDir: string;
   private readonly repo: string;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly channelStore: ReleaseChannelStore | undefined;
 
+  private channel: UpdateChannel;
   private readonly installed: InstalledRelease | null;
   private latest: LatestRelease | null = null;
   private checkedAt: number | null = null;
   private lastError: string | undefined;
+  /**
+   * "The switch took effect but could not be written down."
+   *
+   * Kept apart from `lastError` because `runCheck` clears that one on every
+   * success, and the re-check `setChannel` fires immediately afterwards would
+   * therefore erase this the instant it was set — leaving a channel that
+   * silently reverts on restart with nothing anywhere saying why.
+   */
+  private channelPersistError: string | undefined;
   /** `If-None-Match` for the next poll; a 304 costs no rate-limit quota. */
   private etag: string | undefined;
   private installing = false;
@@ -207,12 +254,68 @@ export class ReleaseService {
     this.appDir = deps.appDir ?? payloadAppDir();
     this.env = deps.env ?? process.env;
     this.repo = deps.repo ?? this.env.DISPATCH_INSTALL_REPO ?? DEFAULT_REPO;
+    this.channelStore = deps.channelStore;
+    this.channel = deps.channel ?? "stable";
     this.installed = readInstalledRelease(this.appDir);
   }
 
   /** True only for a payload installed from a release — see rule 1 in the header. */
   get supported(): boolean {
     return this.installed !== null;
+  }
+
+  /**
+   * Load the persisted channel. Awaited during boot BEFORE `start()`, so the
+   * very first check already asks the right channel and `GET /api/update` never
+   * answers "stable" to someone who is on unstable.
+   */
+  async hydrate(): Promise<void> {
+    if (!this.channelStore) return;
+    try {
+      this.channel = await this.channelStore.read();
+    } catch {
+      // A stored value we cannot read is not worth failing boot over; `stable`
+      // is the safe side of that coin — it can only ever under-offer.
+    }
+  }
+
+  /**
+   * Switch channels and immediately re-check.
+   *
+   * The etag is dropped rather than kept per-channel: it belongs to the URL we
+   * just stopped asking, and a `304` replayed against the other channel's
+   * endpoint would strand the UI showing the old channel's head as the new
+   * channel's answer. `announced` is dropped too, so crossing to a channel whose
+   * head you have already been told about still nudges once.
+   */
+  async setChannel(next: UpdateChannel): Promise<UpdateStatus> {
+    if (next === this.channel) return this.check(true);
+    this.channel = next;
+    this.etag = undefined;
+    this.latest = null;
+    this.announced = null;
+    this.checkedAt = null;
+    this.lastError = undefined;
+    this.channelPersistError = undefined;
+    if (this.channelStore) {
+      try {
+        await this.channelStore.write(next);
+      } catch (err) {
+        this.channelPersistError = `channel saved for this session only: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+      }
+    }
+    return this.check(true);
+  }
+
+  /**
+   * The tag `POST /api/update/install` is allowed to install — the head of the
+   * subscribed channel and nothing else. Exposed so the route can validate an
+   * explicitly requested tag without being handed the power to fetch any tag.
+   */
+  headTag(): string | null {
+    return this.latest?.tag ?? null;
   }
 
   /** Begin polling. A no-op on an unsupported payload: nothing would use the answer. */
@@ -239,7 +342,16 @@ export class ReleaseService {
       latest: this.latest,
       available: this.isAvailable(),
       checkedAt: this.checkedAt,
-      ...(this.lastError ? { error: this.lastError } : {}),
+      channel: this.channel,
+      ...(this.isAhead() ? { ahead: true } : {}),
+      // Both can be true at once (a switch that neither persisted nor reached
+      // GitHub), and each names a different thing that is wrong. Neither may
+      // swallow the other.
+      ...(this.lastError || this.channelPersistError
+        ? {
+            error: [this.channelPersistError, this.lastError].filter(Boolean).join(" — "),
+          }
+        : {}),
       ...(this.installing ? { installing: true } : {}),
     };
   }
@@ -283,7 +395,25 @@ export class ReleaseService {
     // `null` from the comparator means the two tags cannot be ordered (a semver
     // release, say). That reads as "no update known" on purpose — see the
     // comparator's own note in packages/shared/src/version.ts.
+    //
+    // Still strictly `-1`, even now that a step-back is reachable: a downgrade
+    // is something the user asks for by name, never something `available` turns
+    // on and the standing nudge card starts pushing.
     return compareBuildVersions(this.installed.version, this.latest.version) === -1;
+  }
+
+  /**
+   * Running a build the subscribed channel has not caught up to.
+   *
+   * The unstable → stable case: you are on a merge that stable has not been
+   * promoted to yet. There is no update, but there is something to say and
+   * something to offer, and reporting it as a plain "up to date" would make the
+   * channel switch look like it did nothing for however long until the next
+   * promote.
+   */
+  private isAhead(): boolean {
+    if (!this.installed || !this.latest) return false;
+    return compareBuildVersions(this.installed.version, this.latest.version) === 1;
   }
 
   private async runCheck(): Promise<UpdateStatus> {
@@ -319,9 +449,44 @@ export class ReleaseService {
     return headers;
   }
 
+  /** The GitHub path this channel's head comes from — one page, or none at all. */
+  private headPath(): string {
+    return this.channel === "unstable"
+      ? `repos/${this.repo}/releases?per_page=${UNSTABLE_PAGE_SIZE}`
+      : `repos/${this.repo}/releases/latest`;
+  }
+
+  /**
+   * Pick the channel head out of whatever GitHub answered.
+   *
+   * Stable gets an object back and GitHub has already done the filtering.
+   * Unstable gets an array and has to order it here — by build stamp, not by the
+   * array's own order, because `created_at` order and version order come apart
+   * the moment two releases are cut in the same second or a tag is re-pushed.
+   * Anything unorderable (a semver tag) is skipped rather than guessed at, the
+   * same call `compareBuildVersions` documents.
+   */
+  private pickHead(payload: unknown): LatestRelease | null {
+    if (this.channel !== "unstable") return toLatest(payload as RawRelease);
+    if (!Array.isArray(payload)) return null;
+    let best: LatestRelease | null = null;
+    for (const raw of payload as RawRelease[]) {
+      const candidate = toLatest(raw, true);
+      if (!candidate) continue;
+      // Skip the unorderable BEFORE it can become `best`. Without this, a semver
+      // tag high in the list wins by default and then never loses, because every
+      // later comparison against it answers `null` rather than `-1`.
+      if (compareBuildVersions(candidate.version, candidate.version) === null) continue;
+      if (!best || compareBuildVersions(best.version, candidate.version) === -1) {
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
   /** Resolve the newest release, or the sentinel `"not-modified"` on a 304. */
   private async fetchLatest(): Promise<LatestRelease | null | "not-modified"> {
-    const url = `https://api.github.com/repos/${this.repo}/releases/latest`;
+    const url = `https://api.github.com/${this.headPath()}`;
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
@@ -345,21 +510,21 @@ export class ReleaseService {
     if (!response.ok) throw new Error(`GitHub answered ${response.status} for the latest release`);
 
     this.etag = response.headers.get("etag") ?? undefined;
-    return toLatest((await response.json()) as RawRelease);
+    return this.pickHead(await response.json());
   }
 
   private async fetchLatestViaGh(httpStatus: number): Promise<LatestRelease | null> {
     try {
       const { stdout } = await this.execImpl("gh", [
         "api",
-        `repos/${this.repo}/releases/latest`,
+        this.headPath(),
         "-H",
         "X-GitHub-Api-Version: 2022-11-28",
       ]);
       // A gh answer has no ETag we can reuse; drop the stale one so the next
       // HTTP attempt asks for the full body instead of a misleading 304.
       this.etag = undefined;
-      return toLatest(JSON.parse(stdout) as RawRelease);
+      return this.pickHead(JSON.parse(stdout));
     } catch (err) {
       throw new Error(
         `GitHub answered ${httpStatus} and the gh CLI fallback failed ` +

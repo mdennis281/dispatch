@@ -2,7 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ReleaseService, readInstalledRelease, payloadAppDir } from "./release.js";
+import type { UpdateChannel } from "@dispatch/shared";
+import {
+  ReleaseService,
+  readInstalledRelease,
+  payloadAppDir,
+  type ReleaseChannelStore,
+} from "./release.js";
 import { EventBus } from "../bus.js";
 
 /**
@@ -139,6 +145,8 @@ describe("ReleaseService", () => {
     fetchImpl?: typeof fetch;
     execImpl?: (file: string, args: readonly string[]) => Promise<{ stdout: string }>;
     now?: () => number;
+    channel?: UpdateChannel;
+    channelStore?: ReleaseChannelStore;
   } = {}) {
     const appDir = await fixture(opts.manifest === undefined ? MANIFEST : opts.manifest);
     return new ReleaseService({
@@ -148,6 +156,8 @@ describe("ReleaseService", () => {
       ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
       ...(opts.execImpl ? { execImpl: opts.execImpl } : {}),
       ...(opts.now ? { now: opts.now } : {}),
+      ...(opts.channel ? { channel: opts.channel } : {}),
+      ...(opts.channelStore ? { channelStore: opts.channelStore } : {}),
     });
   }
 
@@ -305,5 +315,228 @@ describe("ReleaseService", () => {
     await service.check();
     service.markInstalling();
     expect(service.status().installing).toBe(true);
+  });
+});
+
+/**
+ * Channels. The rule that has to hold in every one of these: what the STABLE
+ * channel offers must be exactly what it offered before channels existed, or
+ * this change quietly starts shipping unreviewed merges to stable subscribers.
+ */
+describe("ReleaseService channels", () => {
+  let bus: EventBus;
+  beforeEach(() => {
+    bus = new EventBus();
+  });
+
+  async function svc(opts: {
+    fetchImpl?: typeof fetch;
+    execImpl?: (file: string, args: readonly string[]) => Promise<{ stdout: string }>;
+    channel?: UpdateChannel;
+    channelStore?: ReleaseChannelStore;
+    manifest?: unknown;
+  }) {
+    const appDir = await fixture(opts.manifest === undefined ? MANIFEST : opts.manifest);
+    return new ReleaseService({
+      bus,
+      appDir,
+      env: {},
+      ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+      ...(opts.execImpl ? { execImpl: opts.execImpl } : {}),
+      ...(opts.channel ? { channel: opts.channel } : {}),
+      ...(opts.channelStore ? { channelStore: opts.channelStore } : {}),
+    });
+  }
+
+  /** A `gh release list`-shaped page, newest last so nothing can pass by luck of order. */
+  const PAGE = [
+    releaseJson("v2026.08.14.79778"),
+    releaseJson("v2026.08.16.63367", { prerelease: true }),
+    releaseJson("v2026.08.15.10000", { prerelease: true }),
+  ];
+
+  it("defaults to stable and asks releases/latest", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(releaseJson("v2026.08.14.85068")));
+    const service = await svc({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    const status = await service.check();
+    expect(status.channel).toBe("stable");
+    expect((fetchImpl.mock.calls[0] as unknown as [string])[0]).toContain("/releases/latest");
+  });
+
+  it("takes the highest build stamp on unstable, not the first in the list", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(PAGE));
+    const service = await svc({
+      channel: "unstable",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const status = await service.check();
+    expect((fetchImpl.mock.calls[0] as unknown as [string])[0]).toContain("/releases?per_page=");
+    expect(status.latest?.tag).toBe("v2026.08.16.63367");
+    expect(status.available).toBe(true);
+    expect(status.channel).toBe("unstable");
+  });
+
+  it("still sees a promoted build on unstable — promotion is not a regression", async () => {
+    // The newest release has been flipped to stable. An unstable subscriber must
+    // be offered it, not held on an older prerelease because it stopped being one.
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse([
+        releaseJson("v2026.08.15.10000", { prerelease: true }),
+        releaseJson("v2026.08.16.63367"),
+      ]),
+    );
+    const service = await svc({
+      channel: "unstable",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect((await service.check()).latest?.tag).toBe("v2026.08.16.63367");
+  });
+
+  it("refuses a draft on unstable — its assets may not exist", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse([
+        releaseJson("v2026.08.15.10000", { prerelease: true }),
+        releaseJson("v2026.08.16.63367", { prerelease: true, draft: true }),
+      ]),
+    );
+    const service = await svc({
+      channel: "unstable",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect((await service.check()).latest?.tag).toBe("v2026.08.15.10000");
+  });
+
+  it("skips an unorderable tag on unstable rather than ranking it", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse([
+        releaseJson("v0.1.0", { prerelease: true }),
+        releaseJson("v2026.08.15.10000", { prerelease: true }),
+      ]),
+    );
+    const service = await svc({
+      channel: "unstable",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect((await service.check()).latest?.tag).toBe("v2026.08.15.10000");
+  });
+
+  it("reports ahead — not available — when the install outruns the channel head", async () => {
+    // Switched to stable while running a newer unstable build. This is the case
+    // that must NOT read as a plain "up to date": there is a step-back to offer.
+    const fetchImpl = vi.fn(async () => jsonResponse(releaseJson("v2026.08.14.79778")));
+    const service = await svc({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const events: unknown[] = [];
+    bus.subscribe((e) => events.push(e));
+
+    const status = await service.check();
+    expect(status.ahead).toBe(true);
+    expect(status.available).toBe(false);
+    // And it must never nudge: a downgrade is asked for by name, never pushed.
+    expect(events).toHaveLength(0);
+  });
+
+  it("does not claim ahead when the head is unknown", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ message: "boom" }, { status: 500 }));
+    const service = await svc({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect((await service.check()).ahead).toBeUndefined();
+  });
+
+  it("persists a switch and re-checks against the new channel", async () => {
+    let stored: UpdateChannel = "stable";
+    const fetchImpl = vi.fn(async (url: unknown) =>
+      String(url).includes("/releases/latest")
+        ? jsonResponse(releaseJson("v2026.08.14.79778"))
+        : jsonResponse(PAGE),
+    );
+    const service = await svc({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      channelStore: {
+        read: async () => stored,
+        write: async (next) => {
+          stored = next;
+        },
+      },
+    });
+
+    await service.check();
+    const status = await service.setChannel("unstable");
+
+    expect(stored).toBe("unstable");
+    expect(status.channel).toBe("unstable");
+    expect(status.latest?.tag).toBe("v2026.08.16.63367");
+    expect(status.available).toBe(true);
+  });
+
+  it("drops the etag on a switch so a 304 cannot strand the old channel's answer", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(releaseJson("v2026.08.14.85068"), { etag: 'W/"stable"' }),
+      )
+      .mockResolvedValueOnce(jsonResponse(PAGE));
+    const service = await svc({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await service.check();
+    await service.setChannel("unstable");
+
+    const second = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
+    expect((second[1].headers as Record<string, string>)["If-None-Match"]).toBeUndefined();
+  });
+
+  it("hydrates the persisted channel before the first check", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(PAGE));
+    const service = await svc({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      channelStore: { read: async () => "unstable", write: async () => {} },
+    });
+
+    expect(service.status().channel).toBe("stable");
+    await service.hydrate();
+    expect(service.status().channel).toBe("unstable");
+    expect((await service.check()).latest?.tag).toBe("v2026.08.16.63367");
+  });
+
+  it("still switches when persistence fails, and says so", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(PAGE));
+    const service = await svc({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      channelStore: {
+        read: async () => "stable",
+        write: async () => {
+          throw new Error("EACCES config.json");
+        },
+      },
+    });
+
+    const status = await service.setChannel("unstable");
+    expect(status.channel).toBe("unstable");
+    expect(status.error).toMatch(/this session only/);
+  });
+
+  it("exposes only the channel head as an installable tag", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(PAGE));
+    const service = await svc({
+      channel: "unstable",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(service.headTag()).toBeNull();
+    await service.check();
+    expect(service.headTag()).toBe("v2026.08.16.63367");
+  });
+
+  it("asks gh for the same channel path on the CLI fallback", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ message: "Not Found" }, { status: 404 }));
+    const execImpl = vi.fn(async () => ({ stdout: JSON.stringify(PAGE) }));
+    const service = await svc({
+      channel: "unstable",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      execImpl,
+    });
+
+    const status = await service.check();
+    expect(execImpl).toHaveBeenCalledWith("gh", expect.arrayContaining([expect.stringContaining("/releases?per_page=")]));
+    expect(status.latest?.tag).toBe("v2026.08.16.63367");
   });
 });

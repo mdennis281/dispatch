@@ -4,7 +4,48 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { desktopRoot, renameWithRetry } from "./install.mjs";
+import {
+  compareStamps,
+  desktopRoot,
+  parseArgs,
+  renameWithRetry,
+  resolveRelease,
+} from "./install.mjs";
+
+/** A release as the GitHub API returns it, with the two assets the installer requires. */
+function release(tag, extra = {}) {
+  return {
+    tag_name: tag,
+    assets: [{ name: `dispatch-${tag}.tar.gz` }, { name: "SHA256SUMS" }],
+    ...extra,
+  };
+}
+
+/**
+ * Stub `fetch` for one call and record the URLs asked for.
+ *
+ * `resolveRelease` reaches GitHub through the module-level `fetchOk`, so there
+ * is nothing to inject; replacing the global is the seam. Restored in a finally
+ * so one failing assertion cannot leave the rest of the file offline.
+ */
+async function withFetch(routes, fn) {
+  const original = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async (url) => {
+    asked.push(String(url));
+    for (const [fragment, body] of Object.entries(routes)) {
+      if (String(url).includes(fragment)) {
+        return { ok: true, status: 200, json: async () => body };
+      }
+    }
+    return { ok: false, status: 404, text: async () => "no route" };
+  };
+  try {
+    return await fn(asked);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
 
 test("relative targets keep the bootstrap caller's working directory", () => {
   const before = process.env.DISPATCH_INSTALL_CWD;
@@ -70,6 +111,85 @@ test("renameWithRetry gives an actionable error after a persistent lock", async 
     }),
     /Close terminals whose current directory is inside app/,
   );
+});
+
+test("--channel defaults to stable and rejects anything but the two channels", () => {
+  assert.equal(parseArgs([]).channel, "stable");
+  assert.equal(parseArgs(["--channel", "unstable"]).channel, "unstable");
+  assert.throws(() => parseArgs(["--channel", "nightly"]), /--channel must be stable or unstable/);
+});
+
+test("compareStamps orders build stamps and refuses to order anything else", () => {
+  assert.equal(compareStamps("v2026.08.14.81160", "v2026.08.14.85068"), -1);
+  assert.equal(compareStamps("2026.08.16.63367", "v2026.08.15.10000"), 1);
+  assert.equal(compareStamps("v2026.08.14.81160", "2026.08.14.81160"), 0);
+  // The whole point of the zero padding: a naive string compare gets this wrong.
+  assert.equal(compareStamps("v2026.08.14.09999", "v2026.08.14.10000"), -1);
+  assert.equal(compareStamps("v0.1.0", "v2026.08.14.81160"), null);
+});
+
+test("the stable channel resolves releases/latest and refuses a prerelease there", async () => {
+  await withFetch({ "/releases/latest": release("v2026.08.14.85068") }, async (asked) => {
+    const { release: picked } = await resolveRelease("o/r", undefined, "stable");
+    assert.equal(picked.tag_name, "v2026.08.14.85068");
+    assert.match(asked[0], /\/releases\/latest$/);
+  });
+
+  await withFetch(
+    { "/releases/latest": release("v2026.08.14.85068", { prerelease: true }) },
+    async () => {
+      await assert.rejects(
+        resolveRelease("o/r", undefined, "stable"),
+        /refusing prerelease .* on the stable channel/,
+      );
+    },
+  );
+});
+
+test("the unstable channel takes the highest build stamp, not the first listed", async () => {
+  const page = [
+    release("v2026.08.14.79778"),
+    release("v2026.08.16.63367", { prerelease: true }),
+    release("v2026.08.15.10000", { prerelease: true }),
+  ];
+  await withFetch({ "/releases?per_page=": page }, async (asked) => {
+    const { release: picked } = await resolveRelease("o/r", undefined, "unstable");
+    assert.equal(picked.tag_name, "v2026.08.16.63367");
+    assert.match(asked[0], /\/releases\?per_page=\d+$/);
+  });
+});
+
+test("an unstable resolve skips drafts and unorderable tags", async () => {
+  const page = [
+    release("v9.9.9", { prerelease: true }),
+    release("v2026.08.17.00001", { prerelease: true, draft: true }),
+    release("v2026.08.15.10000", { prerelease: true }),
+  ];
+  await withFetch({ "/releases?per_page=": page }, async () => {
+    const { release: picked } = await resolveRelease("o/r", undefined, "unstable");
+    assert.equal(picked.tag_name, "v2026.08.15.10000");
+  });
+});
+
+test("an explicitly named tag may be a prerelease — that is how the app updates", async () => {
+  // The in-app updater always passes `--version <tag>`, and on unstable that tag
+  // is always a prerelease. Refusing it here would break the whole channel.
+  const tagged = release("v2026.08.16.63367", { prerelease: true });
+  await withFetch({ "/releases/tags/": tagged }, async (asked) => {
+    const { release: picked } = await resolveRelease("o/r", "v2026.08.16.63367", "stable");
+    assert.equal(picked.tag_name, "v2026.08.16.63367");
+    assert.match(asked[0], /\/releases\/tags\/v2026\.08\.16\.63367$/);
+  });
+});
+
+test("a draft is refused however it was reached", async () => {
+  const drafted = release("v2026.08.16.63367", { draft: true });
+  await withFetch({ "/releases/tags/": drafted }, async () => {
+    await assert.rejects(
+      resolveRelease("o/r", "v2026.08.16.63367", "unstable"),
+      /refusing draft/,
+    );
+  });
 });
 
 test(

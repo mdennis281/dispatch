@@ -24,6 +24,7 @@ function status(over: Partial<UpdateStatus> = {}): UpdateStatus {
     latest: LATEST,
     available: true,
     checkedAt: 1_760_000_000_000,
+    channel: "stable",
     ...over,
   };
 }
@@ -56,6 +57,7 @@ beforeEach(() => {
     status: null,
     loaded: false,
     checking: false,
+    switching: false,
     installing: false,
     dismissed: null,
   });
@@ -106,6 +108,22 @@ describe("dismissal", () => {
     useUpdate.getState().set(status({ latest: null, available: false }));
     useUpdate.getState().dismiss();
     expect(useUpdate.getState().dismissed).toBeNull();
+  });
+});
+
+describe("channels", () => {
+  it("does not treat 'ahead of the channel' as an update", () => {
+    // Switched unstable → stable while running a build stable has not been
+    // promoted to. There is something to SAY, but nothing the nudge should push.
+    const s = status({ channel: "stable", available: false, ahead: true });
+    expect(hasUpdate(s)).toBe(false);
+    useUpdate.getState().set(s);
+    expect(shouldNudge()).toBe(false);
+  });
+
+  it("still nudges on the unstable channel", () => {
+    useUpdate.getState().set(status({ channel: "unstable" }));
+    expect(shouldNudge()).toBe(true);
   });
 });
 

@@ -56,7 +56,7 @@ import {
   type Checkpoint,
   ShellTranscriptFilterSchema,
 } from "@dispatch/shared";
-import { HarnessSettingsSchema } from "@dispatch/shared";
+import { HarnessSettingsSchema, UpdateChannelSchema } from "@dispatch/shared";
 import {
   KeyedMutex,
   readJson,
@@ -107,6 +107,16 @@ export const AppSettingsSchema = z.object({
   showInjectedContext: z.boolean().optional(),
   /** App-wide transcript-shell defaults. Unset resolves to every category on. */
   shellFilter: ShellTranscriptFilterSchema.optional(),
+  /**
+   * Which release stream this install follows. Lives here rather than in the
+   * payload because `config/` is the one directory install and upgrade never
+   * touch — a subscription that reset on every update would be no subscription.
+   *
+   * Optional rather than `.default("stable")` so every existing AppSettings
+   * literal (tests, DEFAULT_SETTINGS) stays valid; unset reads as `stable`,
+   * which is also what every install predating channels was on.
+   */
+  updateChannel: UpdateChannelSchema.optional(),
   /**
    * Policy for `mcp__manager__spawn_chat` — an agent starting ANOTHER chat.
    * `autoApprove` off (the default, and the reason this is opt-in rather than

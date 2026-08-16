@@ -1,0 +1,239 @@
+# Promote an unstable build to the STABLE channel.
+#
+# WHY THIS EXISTS. `release.yml` publishes a prerelease on every merge to main,
+# so shipping and merging are the same event on the unstable channel — which is
+# the point of that channel. Stable must be the opposite: nothing reaches it
+# without someone deciding it should and a full gate agreeing. This workflow is
+# that decision, and it is `workflow_dispatch` only for exactly that reason.
+#
+# WHY IT PROMOTES INSTEAD OF BUILDING. It re-tests the sha and then flips the
+# EXISTING release's prerelease flag. It does not rebuild and it does not cut a
+# second tag. The tarball and its SHA256SUMS were uploaded by `release.yml` and
+# are pinned to that sha, so promotion makes the stable bits bit-identical to the
+# bits that were tested as unstable — a rebuild would quietly break that, for no
+# gain, and would add a second way for a release to be half-published.
+#
+# WHY THE GATE IS DUPLICATED FROM ci.yml RATHER THAN REUSED. `ci.yml` runs on a
+# PR's merge commit; this runs on a tag that may be days old and several merges
+# back. A `workflow_run` dependency cannot express "that sha, now", and a
+# reusable workflow would couple the stable gate to a file whose whole job is to
+# be tuned for PR latency. The steps below are deliberately the same steps in
+# the same order — if you change one, change the other.
+name: Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to promote (blank = the newest prerelease)"
+        required: false
+        type: string
+
+# Never two promotions at once: they would race on which release ends up
+# `--latest`, and the loser silently wins.
+concurrency:
+  group: promote-stable
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Resolve first, in its own job, so the gate jobs both check out the SAME
+  # resolved tag. Resolving "newest prerelease" independently in two jobs would
+  # be a race against `release.yml` finishing a merge mid-run.
+  # ---------------------------------------------------------------------------
+  resolve:
+    name: resolve target
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pick the tag
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REQUESTED" ]; then
+            TAG="$REQUESTED"
+            # The auto-resolve path below filters to build stamps; this one has
+            # to do it explicitly, and it is not a formality. `compareBuildVersions`
+            # answers `null` — "not orderable" — for anything else, and the server
+            # reads that as "no update". Promoting a semver tag to `--latest` would
+            # therefore leave every stable subscriber pinned to a version they can
+            # never be offered a move away from, with no error anywhere.
+            #
+            # docs/ROADMAP.md still plans a hand-cut `v0.1.0` before the first
+            # public release, so this is a tag someone will one day really type.
+            case "$TAG" in
+              v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9][0-9][0-9][0-9][0-9]) ;;
+              *)
+                echo "Refusing to promote '$TAG': stable must be a build stamp (vYYYY.MM.DD.SSSSS)." >&2
+                echo "The updater cannot order any other tag shape and would offer no update at all." >&2
+                exit 1
+                ;;
+            esac
+          else
+            # Newest prerelease by tag name. Build stamps are zero-padded
+            # precisely so a lexical sort is a version sort (see
+            # packages/shared/src/version.ts); `createdAt` is NOT used, because a
+            # re-pushed tag reorders it away from build order.
+            TAG="$(gh release list --limit 200 \
+              --json tagName,isPrerelease,isDraft \
+              --jq '[.[] | select(.isPrerelease and (.isDraft | not)) | .tagName]
+                    | map(select(test("^v[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}\\.[0-9]{5}$")))
+                    | sort | last // ""')"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "No prerelease found to promote." >&2
+            exit 1
+          fi
+
+          # Fail here rather than after a 30-minute gate: promoting something
+          # that is already stable is a no-op the operator should know about,
+          # and promoting a draft would publish assets that may not exist.
+          STATE="$(gh release view "$TAG" --json isPrerelease,isDraft -q \
+            '[(.isPrerelease | tostring), (.isDraft | tostring)] | join(" ")')"
+          case "$STATE" in
+            "true false") ;;
+            "false false") echo "$TAG is already on the stable channel." >&2; exit 1 ;;
+            *) echo "$TAG is a draft; drafts are never promoted." >&2; exit 1 ;;
+          esac
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Promoting $TAG ($(git rev-list -n 1 "$TAG"))"
+
+  # ---------------------------------------------------------------------------
+  # THE GATE. Same steps, same order as ci.yml's `test` job — including build
+  # before typecheck, which is load-bearing (shared/cli expose types from dist/).
+  # ---------------------------------------------------------------------------
+  gate:
+    name: build + typecheck + test (linux, self-hosted)
+    needs: resolve
+    runs-on: [self-hosted, Linux, X64, dispatch]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # No `cache: pnpm` — this runner's store is persistent local disk.
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Verify release payload
+        run: |
+          node tools/release/package.mjs \
+            --out .artifacts/promote-release \
+            --tag v0.0.0 \
+            --sha "$(git rev-parse HEAD)"
+          pnpm -C .artifacts/promote-release install --prod --frozen-lockfile --config.confirmModulesPurge=false
+          node --input-type=module --eval "await import('./.artifacts/promote-release/packages/shared/dist/index.js')"
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test (shared, cli, server)
+        run: pnpm test
+
+      - name: Test (client)
+        run: pnpm --filter @dispatch/client exec vitest run
+
+  # ---------------------------------------------------------------------------
+  # The Windows leg, same subset as ci.yml. Dispatch runs on Windows; a stable
+  # gate that skips the platform the app actually lives on is not a gate.
+  # ---------------------------------------------------------------------------
+  windows:
+    name: windows-specific tests
+    needs: resolve
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (shared + cli)
+        run: pnpm --filter @dispatch/shared --filter @dispatch/cli build
+
+      - name: Test (windows-sensitive files)
+        run: >
+          pnpm --filter @dispatch/server exec vitest run
+          src/store/store.test.ts
+          src/services/agent-cwd.test.ts
+          src/services/runtime.test.ts
+          src/services/processes.test.ts
+          src/services/terminal.test.ts
+          src/services/file-index.test.ts
+          src/services/runner.test.ts
+          src/routes/fs.test.ts
+          src/services/mcp/manager-mcp.integration.test.ts
+
+      - name: Test release installer (Windows)
+        run: node --test tools/install.test.mjs
+
+  promote:
+    name: flip to stable
+    needs: [resolve, gate, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Flip the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Re-check rather than trusting the resolve job's answer: the gate takes
+          # tens of minutes, and a concurrent promotion of the same tag would
+          # otherwise be flipped twice with the second one reporting success.
+          if [ "$(gh release view "$TAG" --json isPrerelease -q .isPrerelease)" != "true" ]; then
+            echo "$TAG is no longer a prerelease — someone promoted it already." >&2
+            exit 1
+          fi
+          # `--latest` is explicit rather than inferred: it is what the server's
+          # stable channel reads, and leaving it to GitHub's created_at ordering
+          # would be a silent dependency on promoting strictly forward in time.
+          gh release edit "$TAG" \
+            --prerelease=false \
+            --latest \
+            --title "Dispatch $TAG"
+          echo "Promoted $TAG to stable." >> "$GITHUB_STEP_SUMMARY"

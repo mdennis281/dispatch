@@ -242,6 +242,19 @@ export const InstalledReleaseSchema = z.object({
 });
 export type InstalledRelease = z.infer<typeof InstalledReleaseSchema>;
 
+/**
+ * Which stream of builds this install follows.
+ *
+ * A channel is the GitHub `prerelease` flag, not a separate tag namespace: every
+ * merge to `main` publishes a prerelease, and the promote workflow re-runs the
+ * full gate against that exact sha and then flips the SAME release to
+ * `prerelease: false`. So a stable build is bit-identical to the unstable build
+ * it was promoted from, and `releases/latest` — which GitHub filters prereleases
+ * out of server-side — is the stable head with no client-side rule to get wrong.
+ */
+export const UpdateChannelSchema = z.enum(["stable", "unstable"]);
+export type UpdateChannel = z.infer<typeof UpdateChannelSchema>;
+
 /** The newest published release, as GitHub reports it. */
 export const LatestReleaseSchema = z.object({
   version: z.string(),
@@ -275,6 +288,18 @@ export const UpdateStatusSchema = z.object({
   error: z.string().optional(),
   /** An install was launched from this server and it is on its way down. */
   installing: z.boolean().optional(),
+  /** Which channel `latest` is the head of, and what this install follows. */
+  channel: UpdateChannelSchema,
+  /**
+   * The installed build is NEWER than the channel head — you switched unstable →
+   * stable while running a build stable has not been promoted to yet.
+   *
+   * Its own field rather than something the client derives, for the same reason
+   * `available` is: it is the one case where "no update" and "nothing to do" are
+   * different answers, and the client has to offer an explicit step-back instead
+   * of silently looking like the channel switch did nothing.
+   */
+  ahead: z.boolean().optional(),
 });
 export type UpdateStatus = z.infer<typeof UpdateStatusSchema>;
 

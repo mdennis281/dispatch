@@ -1,0 +1,142 @@
+# Prune old UNSTABLE releases.
+#
+# WHY THIS EXISTS. `release.yml` mints a release on every merge to main, each
+# carrying a ~5 MB tarball plus four smaller assets, and nothing has ever deleted
+# one — 31 accumulated in the first four days. At merge cadence that is tens of
+# gigabytes a year of build output whose only remaining value is "you could
+# reinstall that exact build", which stops being worth anything about as fast as
+# the build stops being one anybody is running.
+#
+# WHAT IT WILL NOT DO. It never touches a release that is not a prerelease.
+# Stable releases are kept indefinitely and deliberately: they are the promoted,
+# gated builds, they are what someone is most likely to want to pin or roll back
+# to, and there are few enough of them that they cost nothing.
+#
+# WHY THERE IS A FLOOR AS WELL AS AN AGE. `keep_min` is not belt-and-braces. An
+# age rule alone empties the unstable channel during any quiet stretch longer
+# than `max_age_days`, and an empty channel is not "no updates" — it is an
+# unstable subscriber whose update check finds no installable release at all.
+name: Retention
+
+on:
+  schedule:
+    # Weekly, Sunday 04:17 UTC. Off the hour on purpose: GitHub's scheduler is
+    # heavily contended at :00 and delays cron runs there by tens of minutes.
+    - cron: "17 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List what would be deleted without deleting it"
+        required: false
+        default: false
+        type: boolean
+      max_age_days:
+        description: "Delete prereleases older than this many days"
+        required: false
+        default: "90"
+        type: string
+      keep_min:
+        description: "Always keep at least this many newest prereleases"
+        required: false
+        default: "10"
+        type: string
+
+concurrency:
+  group: retention
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    name: prune unstable releases
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          MAX_AGE_DAYS: ${{ inputs.max_age_days || '90' }}
+          KEEP_MIN: ${{ inputs.keep_min || '10' }}
+        run: |
+          set -euo pipefail
+
+          # workflow_dispatch inputs arrive as STRINGS, and a typo in one reaches
+          # `date -d` and the `-le` integer test, which fail under `set -e` with a
+          # message that names neither the input nor this job's purpose. Validate
+          # up front so a fat-fingered dispatch says what is wrong.
+          #
+          # `keep_min` may be 0 (prune purely by age); `max_age_days` may not,
+          # because 0 would delete everything past the floor in one run.
+          case "$MAX_AGE_DAYS" in
+            ''|*[!0-9]*) echo "max_age_days must be a whole number of days (got '$MAX_AGE_DAYS')" >&2; exit 1 ;;
+          esac
+          case "$KEEP_MIN" in
+            ''|*[!0-9]*) echo "keep_min must be a non-negative whole number (got '$KEEP_MIN')" >&2; exit 1 ;;
+          esac
+          if [ "$MAX_AGE_DAYS" -lt 1 ]; then
+            echo "max_age_days must be at least 1; refusing to delete everything past the floor." >&2
+            exit 1
+          fi
+
+          CUTOFF="$(date -u -d "-${MAX_AGE_DAYS} days" +%s)"
+          echo "Cutoff: $(date -u -d "@$CUTOFF" +%Y-%m-%dT%H:%M:%SZ) | keep_min=$KEEP_MIN | dry_run=$DRY_RUN"
+          echo "## Release retention" >> "$GITHUB_STEP_SUMMARY"
+
+          # Newest first, so the first KEEP_MIN lines are the ones the floor
+          # protects. Sorted by tag name for the same reason promote.yml is:
+          # zero-padded build stamps sort lexically in build order, and
+          # `createdAt` does not survive a re-pushed tag.
+          gh release list --limit 500 \
+            --json tagName,isPrerelease,isDraft,createdAt \
+            --jq '[.[] | select(.isPrerelease and (.isDraft | not))]
+                  | sort_by(.tagName) | reverse | .[]
+                  | [.tagName, .createdAt] | @tsv' > prereleases.tsv
+
+          TOTAL="$(wc -l < prereleases.tsv | tr -d ' ')"
+          echo "Found $TOTAL prerelease(s)." | tee -a "$GITHUB_STEP_SUMMARY"
+
+          KEPT_FLOOR=0
+          KEPT_YOUNG=0
+          DELETED=0
+          INDEX=0
+
+          while IFS=$'\t' read -r TAG CREATED; do
+            INDEX=$((INDEX + 1))
+            if [ "$INDEX" -le "$KEEP_MIN" ]; then
+              KEPT_FLOOR=$((KEPT_FLOOR + 1))
+              echo "keep  $TAG (newest $INDEX of $KEEP_MIN)"
+              continue
+            fi
+            AGE_TS="$(date -u -d "$CREATED" +%s)"
+            if [ "$AGE_TS" -ge "$CUTOFF" ]; then
+              KEPT_YOUNG=$((KEPT_YOUNG + 1))
+              echo "keep  $TAG ($CREATED, within $MAX_AGE_DAYS days)"
+              continue
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "WOULD DELETE $TAG ($CREATED)" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              # `--cleanup-tag` removes the git tag too. The commit stays on
+              # main, so nothing is lost but the ability to re-install that exact
+              # build — which is the storage this job exists to reclaim.
+              echo "delete $TAG ($CREATED)" | tee -a "$GITHUB_STEP_SUMMARY"
+              gh release delete "$TAG" --cleanup-tag --yes
+            fi
+            DELETED=$((DELETED + 1))
+          done < prereleases.tsv
+
+          # Say what was NOT deleted as loudly as what was: a retention job that
+          # silently caps its own work reads as "everything is pruned" when it is
+          # not, and the floor is exactly such a cap.
+          {
+            echo ""
+            echo "- deleted: $DELETED"
+            echo "- kept (newest $KEEP_MIN floor): $KEPT_FLOOR"
+            echo "- kept (younger than $MAX_AGE_DAYS days): $KEPT_YOUNG"
+            echo "- stable releases are never considered and were not touched"
+          } >> "$GITHUB_STEP_SUMMARY"
