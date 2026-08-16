@@ -62,20 +62,25 @@ describe("standaloneShellHeight", () => {
   });
 });
 
+// An uncorrected shell — it IS the window, which is every platform where the
+// standalone status-bar bug doesn't apply.
+const plain = (windowHeight: number, vvHeight: number, vvOffsetTop: number) =>
+  keyboardInset(windowHeight, windowHeight, vvHeight, vvOffsetTop);
+
 describe("keyboardInset", () => {
   it("is zero with no keyboard up", () => {
-    expect(keyboardInset(932, 932, 0)).toBe(0);
+    expect(plain(932, 932, 0)).toBe(0);
   });
 
   it("is zero while the URL bar is showing", () => {
     // `innerHeight` tracks the URL bar, so both sides shrink together. This is
     // the case that ruled out `documentElement.clientHeight` as the reference:
     // that one stays at the large viewport and would report a ~60px keyboard.
-    expect(keyboardInset(872, 872, 0)).toBe(0);
+    expect(plain(872, 872, 0)).toBe(0);
   });
 
   it("reports the keyboard's height", () => {
-    expect(keyboardInset(932, 596, 0)).toBe(336);
+    expect(plain(932, 596, 0)).toBe(336);
   });
 
   it("measures to the visible band's bottom edge, not the keyboard's height", () => {
@@ -84,24 +89,39 @@ describe("keyboardInset", () => {
     // window's bottom than the keyboard alone accounts for. What the shell has
     // to clear is that bottom edge — it is anchored to the window's top, which
     // has moved off screen with everything else.
-    expect(keyboardInset(932, 596, 40)).toBe(296);
+    expect(plain(932, 596, 40)).toBe(296);
   });
 
-  it("measures against the shell, not the window it was corrected away from", () => {
+  it("charges the keyboard for the band the shell recovered", () => {
     // Shell 932 because the status bar was added back; the window still says
-    // 873 and the keyboard leaves 519 visible. Measured against the window this
-    // is 354, and the composer floats a status bar's worth above the keys —
-    // which is the gap that survived #59 and #60.
-    expect(keyboardInset(932, 519, 0)).toBe(413);
+    // 873 and the keyboard leaves 519 of it visible. The keyboard is drawn up
+    // from the bottom of the SCREEN, so it covers the recovered band too —
+    // measured against the window alone this is 354 and the composer floats a
+    // status bar's worth above the keys.
+    expect(keyboardInset(932, 873, 519, 0)).toBe(413);
+  });
+
+  it("is zero at rest even when the shell is taller than the window", () => {
+    // The regression this replaces: `visualViewport` is capped at the layout
+    // viewport, so it can NEVER account for the recovered band and reported it
+    // as covered with no keyboard anywhere. A permanent phantom keyboard reads
+    // downstream as "typing" and took the bottom nav off screen for good.
+    expect(keyboardInset(932, 873, 873, 0)).toBe(0);
+  });
+
+  it("does not amplify a rounding wobble into a status bar", () => {
+    // 1px of disagreement between two viewports is not a keyboard, and the
+    // recovered band must not be added on the strength of it.
+    expect(keyboardInset(932, 873, 872, 0)).toBe(0);
   });
 
   it("never goes negative", () => {
     // Pinch-zoom makes the visual viewport taller than the window.
-    expect(keyboardInset(932, 1400, 0)).toBe(0);
+    expect(plain(932, 1400, 0)).toBe(0);
   });
 
   it("rounds to whole pixels", () => {
-    expect(keyboardInset(932.4, 596.1, 0)).toBe(336);
+    expect(plain(932.4, 596.1, 0)).toBe(336);
   });
 
   it("reports nothing when the whole window shrank with the keyboard", () => {
@@ -109,6 +129,6 @@ describe("keyboardInset", () => {
     // no difference left to measure and the shell must NOT pad. Whether that
     // is correct depends on whether `100dvh` shrank with it — which is why the
     // debug overlay reports `dvh` and `inner` side by side.
-    expect(keyboardInset(596, 596, 0)).toBe(0);
+    expect(plain(596, 596, 0)).toBe(0);
   });
 });

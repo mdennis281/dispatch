@@ -44,19 +44,32 @@ export interface ViewportMetrics {
   screenHeight: number;
 }
 
-export function keyboardInset(shellHeight: number, vvHeight: number, vvOffsetTop: number): number {
+export function keyboardInset(
+  shellHeight: number,
+  windowHeight: number,
+  vvHeight: number,
+  vvOffsetTop: number,
+): number {
   // What we want is the gap between the SHELL's bottom and the bottom of the
   // band you can actually see — which is where the shell has to stop. When iOS
   // scrolls the page to reveal the caret it moves that band DOWN the window
   // (`offsetTop`), so the gap below it shrinks by exactly that much; the shell
   // is anchored to the window's top and has scrolled with it.
   //
-  // The reference is the shell's OWN height, not `innerHeight`. Those are the
-  // same number only while the shell is uncorrected; every correction below
-  // makes the shell taller than the window WebKit admits to, and subtracting a
-  // keyboard measured against the short window from the tall shell strands the
-  // composer above the keys by exactly the difference.
-  return Math.max(0, Math.round(shellHeight - vvHeight - vvOffsetTop));
+  // Two viewports, and the order matters. WHETHER anything is down there is a
+  // question only the window can answer: `visualViewport` is expressed in
+  // layout-viewport terms and can never exceed it, so it is blind to the band
+  // the shell recovers BELOW the window and would report that band as covered
+  // forever — a permanent phantom keyboard, which reads downstream as "the user
+  // is typing" and takes the bottom nav off screen for good.
+  const covered = Math.round(windowHeight - vvHeight - vvOffsetTop);
+  // A pixel or two is rounding between two viewports, not a keyboard — and it
+  // would be amplified into a whole status bar by the line below.
+  if (covered <= 2) return 0;
+  // Something IS down there, and a keyboard is drawn up from the bottom of the
+  // SCREEN — so it covers the recovered band too. `visualViewport` can't see
+  // that band, so it has to be added rather than measured.
+  return Math.max(0, covered + Math.max(0, Math.round(shellHeight - windowHeight)));
 }
 
 const EMPTY: ViewportMetrics = {
@@ -220,7 +233,7 @@ export function startViewportTracking(): () => void {
     );
     // What the shell is ACTUALLY laid out at — the CSS fallback resolved here,
     // because that is the edge the keyboard has to be measured against.
-    const inset = keyboardInset(vh || dvh || innerHeight, vvHeight, vvOffsetTop);
+    const inset = keyboardInset(vh || dvh || innerHeight, innerHeight, vvHeight, vvOffsetTop);
     if (vh !== lastVh) {
       lastVh = vh;
       if (vh > 0) document.documentElement.style.setProperty("--cm-vh", `${vh}px`);
