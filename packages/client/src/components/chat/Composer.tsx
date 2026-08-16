@@ -859,7 +859,18 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
 
       <div
         className={cn(
-          "relative rounded-lg border border-line bg-panel-2 focus-within:border-line-strong",
+          "relative rounded-lg border border-line bg-panel-2 transition-colors",
+          // The focus frame belongs to the WHOLE composer, not the text box
+          // inside it. The global `:focus-visible` ring (index.css) drew a
+          // rectangle around the contenteditable alone, which read as a second,
+          // smaller field floating inside the real one — worst on mobile, where
+          // the toolbar and attachment strip sat visibly OUTSIDE the lit border.
+          // `.cm-prose .ProseMirror` opts out of that ring; this is what
+          // replaces it.
+          "focus-within:border-accent-line focus-within:ring-1 focus-within:ring-accent-line",
+          // Carrying an attachment lifts the fill a rung so the box reads as
+          // holding something — the accent frame above still wins the border.
+          (attachments.length > 0 || uploading > 0) && "bg-elevated",
           // Lit from the moment a file enters the WINDOW, not just this box:
           // the target has to be findable before you're on top of it.
           fileDrag.active && "border-accent-line ring-1 ring-accent-line",

@@ -402,6 +402,12 @@
   /* TipTap / ProseMirror composer surface */
   .cm-prose .ProseMirror {
     outline: none;
+    /* Opt out of the global `:focus-visible` ring above. The contenteditable is
+     * not the focusable thing the user perceives — the composer BOX is — and a
+     * ring drawn tight around the text area left the toolbar and attachment
+     * strip stranded outside it. `Composer.tsx` puts the accent frame on the
+     * wrapper via `focus-within:` instead. */
+    box-shadow: none;
     min-height: 44px;
     font-size: 13px;
     line-height: 1.6;
