@@ -45,9 +45,13 @@ const IDENTITY_POLL_MS = 5_000;
 const IDENTITY_FAILURES_BEFORE_CLOSE = 3;
 
 /**
- * WebSocket-level keepalive. Nothing in the protocol tells us an idle socket
- * died — a sleeping laptop, a backgrounded PWA or an idle-timing proxy all drop
- * it silently — so `ws` gets asked to ping and mark the connection alive.
+ * Idle-connection keepalive: traffic on a socket that would otherwise go quiet
+ * for minutes at a time, so an idle-timing proxy or NAT table doesn't reap it.
+ *
+ * This is NOT dead-connection detection — nothing tracks the pongs, and a socket
+ * that stops answering keeps its timer until the transport notices. That's the
+ * intended scope: the client already reconnects on close, and the point of this
+ * change is that a reconnect no longer costs the reader their place.
  */
 const PING_MS = 30_000;
 
