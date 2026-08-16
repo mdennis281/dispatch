@@ -26,11 +26,11 @@
  * Everything here is READ-ONLY by construction — no method writes, and the
  * manager-MCP binding exposes no path that could.
  */
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 
 import type { Chat, ImageRef, Project } from "@dispatch/shared";
 
@@ -355,6 +355,30 @@ function snippet(text: string, needle: string): string {
   return `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
 }
 
+/**
+ * Turn an `ImageRef.path` into something the caller can actually open.
+ *
+ * Only the PORTABLE `assets/<name>` form is resolved against the chat's asset
+ * dir, and only via `basename` — mirroring `Store.safeAssetPath`. A stored path
+ * is not automatically trustworthy input: `assets/../../secrets.png` would
+ * otherwise resolve outside the chat entirely, and this function's whole output
+ * is a path an agent is invited to read.
+ *
+ * Everything else is returned UNTOUCHED, because `ImageRef.path` is also allowed
+ * to be a `data:` payload or a remote URL — running those through `resolve()`
+ * produced a corrupted path that pointed at nothing.
+ */
+export function resolveImagePath(path: string, assetsDir: string): string {
+  if (!path) return path;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(path)) return path; // data:, http(s):, file:
+  if (isAbsolute(path)) return path;
+  const match = /^assets[/\\](.+)$/.exec(path);
+  if (!match) return path; // harness-relative or unknown shape — leave it alone
+  const name = basename(match[1]!);
+  if (!name || name === "." || name === "..") return path;
+  return resolve(assetsDir, name);
+}
+
 /** Parse a JSONL line, tolerating anything that isn't a JSON object. */
 function parseRow(line: string): RawRow | null {
   try {
@@ -404,20 +428,28 @@ export class InspectService {
   }
 
   /**
-   * The store for an instance. `stable` is only meaningful from a DEV server;
-   * when this process already IS the installed instance the roots resolve to its
-   * own store and the extra Store is pointless, so `self` is returned instead.
+   * The store for an instance. `stable` is only meaningful from a DEV server: it
+   * opens a SECOND Store over the installed deployment's roots.
+   *
+   * Two distinct not-a-foreign-store cases, deliberately handled differently:
+   *   - `stableRoots()` returns null → this process ALREADY IS the installed
+   *     instance, so `self` is the very store being asked for. Return it. Making
+   *     `instance: "stable"` fail on the stable instance would be absurd.
+   *   - no resolver/factory wired at all → we genuinely cannot reach it. THROW,
+   *     rather than quietly answering from the dev store, which would return a
+   *     confidently wrong answer to a question explicitly about production.
    */
   private storeFor(instance: InspectInstance | undefined): Store {
     if (instance !== "stable") return this.store;
     if (this.foreign) return this.foreign;
-    const roots = this.stableRoots?.();
-    if (!roots || !this.makeStore) {
+    if (!this.stableRoots || !this.makeStore) {
       throw new Error(
-        "instance: 'stable' is unavailable — the installed instance's data root " +
-          "could not be resolved. Omit `instance` to read this server's own store.",
+        "instance: 'stable' is unavailable — no installed-instance root resolver " +
+          "is wired in. Omit `instance` to read this server's own store.",
       );
     }
+    const roots = this.stableRoots();
+    if (!roots) return this.store; // this process is the installed instance
     this.foreign = this.makeStore(roots.dataDir, roots.configDir);
     return this.foreign;
   }
@@ -528,17 +560,30 @@ export class InspectService {
     let scanned = 0;
     let stopped = false;
 
+    // Chats that never got opened, for whatever reason — the count that makes
+    // `truncated` honest. Incremented only on a BUDGET skip, never on a chat
+    // that simply has no transcript (there is nothing there to have missed).
+    let skipped = 0;
+
     const results = await mapLimit(candidates, SCAN_CONCURRENCY, async (chat) => {
-      if (stopped) return null;
+      if (stopped) {
+        skipped++;
+        return null;
+      }
       const path = this.transcriptPath(store, chat.id);
       let size = 0;
       try {
         size = (await stat(path)).size;
       } catch {
-        return null; // no transcript yet
+        return null; // no transcript yet — nothing skipped, nothing to report
       }
-      if (bytesScanned + size > budget) {
+      // Re-check AFTER the await: up to SCAN_CONCURRENCY workers were already
+      // past the check above when another one exhausted the budget, and without
+      // this a small straggler still gets scanned — which would make the
+      // reported `scanned`/`bytesScanned` disagree with the cap they claim.
+      if (stopped || bytesScanned + size > budget) {
         stopped = true;
+        skipped++;
         return null;
       }
       bytesScanned += size;
@@ -571,7 +616,7 @@ export class InspectService {
       scanned,
       bytesScanned,
       truncated: stopped,
-      unscanned: stopped ? candidates.length - scanned : 0,
+      unscanned: skipped,
     };
   }
 
@@ -635,16 +680,21 @@ export class InspectService {
     const kept: RawRow[] = [];
     let totalRows = 0;
     let afterSeen = !q.afterId;
-    let stopAtBefore = false;
+    let doneKeeping = false;
 
     const wanted = q.kinds?.length ? new Set(q.kinds) : null;
     const needle = q.query?.trim().toLowerCase();
     const assetsDir = store.chatAssetsDir(q.chatId);
 
-    const stream = createReadStream(path, { encoding: "utf8" });
-    const lines = createInterface({ input: stream, crlfDelay: Infinity });
+    // A chat can legitimately have no transcript yet — created but never spoken
+    // to, which is 22 of the ~280 chats in the live store. Streaming a file that
+    // isn't there throws ENOENT and would fail the whole tool over a chat that
+    // is simply empty, so report the empty transcript it actually is (what
+    // Store.readMessages / lastActivityAt already do).
+    const stream = existsSync(path) ? createReadStream(path, { encoding: "utf8" }) : null;
+    const lines = stream ? createInterface({ input: stream, crlfDelay: Infinity }) : null;
     try {
-      for await (const line of lines) {
+      for await (const line of lines ?? []) {
         if (!line) continue;
         const row = parseRow(line);
         if (!row) continue;
@@ -654,7 +704,7 @@ export class InspectService {
 
         for (const img of row.images ?? []) {
           images.push({
-            path: isAbsolute(img.path) ? img.path : resolve(assetsDir, img.path.replace(/^assets[/\\]/, "")),
+            path: resolveImagePath(img.path, assetsDir),
             mimeType: img.mimeType,
             alt: img.alt,
             rowId: row.id,
@@ -670,29 +720,38 @@ export class InspectService {
         }
 
         // Cursor handling mirrors Store.readMessages: afterId is exclusive and
-        // opens the window, beforeId is exclusive and closes it.
-        if (stopAtBefore) continue;
+        // opens the window, beforeId is exclusive and closes it. `doneKeeping`
+        // stops COLLECTING rows, never scanning — kindCounts and the image
+        // inventory describe the whole transcript however small the window is.
+        if (doneKeeping) continue;
         if (!afterSeen) {
           if (row.id === q.afterId) afterSeen = true;
           continue;
         }
         if (q.beforeId && row.id === q.beforeId) {
-          stopAtBefore = true;
+          doneKeeping = true;
           continue;
         }
         if (wanted && !wanted.has(kind)) continue;
         if (needle && !rowText(row).toLowerCase().includes(needle)) continue;
-        kept.push(row);
-        // Keep the NEWEST `limit`: drop from the front rather than growing a
-        // whole 18 MB transcript in memory just to slice its tail.
-        if (view !== "grep" && kept.length > limit) kept.shift();
-        if (view === "grep" && kept.length > limit) {
-          stopAtBefore = true;
+        if (view === "grep") {
+          // Grep returns the FIRST `limit` matches, so the cap is checked BEFORE
+          // pushing — testing it afterwards let the (limit+1)th match ride along.
+          if (kept.length >= limit) {
+            doneKeeping = true;
+            continue;
+          }
+          kept.push(row);
+        } else {
+          kept.push(row);
+          // Keep the NEWEST `limit`: drop from the front rather than growing a
+          // whole 18 MB transcript in memory just to slice its tail.
+          if (kept.length > limit) kept.shift();
         }
       }
     } finally {
-      lines.close();
-      stream.destroy();
+      lines?.close();
+      stream?.destroy();
     }
 
     let transcriptBytes: number | undefined;

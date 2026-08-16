@@ -8,6 +8,7 @@ import { Store } from "../store/index.js";
 import {
   InspectService,
   installedRoots,
+  resolveImagePath,
   rowLabel,
   rowText,
   type RawRow,
@@ -177,6 +178,15 @@ describe("findChats", () => {
     expect(renderFind(result, "release workflow")).toContain("Scan budget reached");
   });
 
+  it("honours the budget even with workers already in flight", async () => {
+    // The budget is re-checked after the `stat` await: without that, workers
+    // that were already past the first check scan anyway, and the reported
+    // scanned/bytesScanned quietly exceed the cap they claim to respect.
+    const result = await service().findChats({ query: "release workflow", scanBudgetBytes: 1 });
+    expect(result.scanned).toBe(0);
+    expect(result.bytesScanned).toBe(0);
+  });
+
   it("lists chats by metadata alone when no query is given", async () => {
     const result = await service().findChats({ limit: 2 });
     expect(result.chats.map((c) => c.id)).toEqual(["chat-other", "chat-new"]);
@@ -281,8 +291,61 @@ describe("readChat", () => {
     expect(result.kindCounts.mystery_kind).toBe(1);
   });
 
+  it("returns at most `limit` rows in grep view", async () => {
+    const result = await service().readChat({
+      chatId: "c1",
+      view: "grep",
+      query: "ask",
+      limit: 1,
+    });
+    expect(result.rows.map((r) => r.id)).toEqual(["a"]);
+  });
+
+  it("still counts kinds and images beyond the returned window", async () => {
+    const result = await service().readChat({ chatId: "c1", view: "grep", query: "ask", limit: 1 });
+    // The window is one row, but the histogram/inventory describe the whole file.
+    expect(result.totalRows).toBe(6);
+    expect(result.images).toHaveLength(1);
+  });
+
+  it("reads a chat that has no transcript yet as empty, not as an error", async () => {
+    await seedChat("silent", { title: "never spoke" }, []);
+    const result = await service().readChat({ chatId: "silent" });
+    expect(result.totalRows).toBe(0);
+    expect(result.rows).toEqual([]);
+    expect(result.images).toEqual([]);
+    expect(renderRead(result)).toContain("never spoke");
+  });
+
   it("errors clearly on an unknown chat id", async () => {
     await expect(service().readChat({ chatId: "nope" })).rejects.toThrow(/No chat with id/);
+  });
+});
+
+describe("resolveImagePath", () => {
+  const DIR = process.platform === "win32" ? "C:/chats/c1/assets" : "/chats/c1/assets";
+
+  it("resolves the portable assets/<name> form against the chat's asset dir", () => {
+    expect(resolveImagePath("assets/shot.png", DIR).replace(/\\/g, "/")).toBe(`${DIR}/shot.png`);
+  });
+
+  it("refuses to let a stored path escape the asset dir", () => {
+    // A persisted path is not trustworthy input — and this function's output is
+    // a path an agent is then invited to read.
+    const out = resolveImagePath("assets/../../secrets.png", DIR).replace(/\\/g, "/");
+    expect(out).toBe(`${DIR}/secrets.png`);
+    expect(out).not.toContain("..");
+  });
+
+  it("leaves data: and remote URLs untouched", () => {
+    expect(resolveImagePath("data:image/png;base64,AAAA", DIR)).toBe("data:image/png;base64,AAAA");
+    expect(resolveImagePath("https://example.com/a.png", DIR)).toBe("https://example.com/a.png");
+  });
+
+  it("leaves an absolute or unrecognised path alone", () => {
+    const abs = process.platform === "win32" ? "C:/tmp/a.png" : "/tmp/a.png";
+    expect(resolveImagePath(abs, DIR)).toBe(abs);
+    expect(resolveImagePath("some/harness/relative.png", DIR)).toBe("some/harness/relative.png");
   });
 });
 
@@ -311,9 +374,25 @@ describe("projectInfo", () => {
 });
 
 describe("instance: stable", () => {
-  it("refuses rather than silently reading the wrong store when roots are unknown", async () => {
-    const svc = new InspectService({ store, stableRoots: () => null });
+  it("refuses rather than silently reading the wrong store when nothing is wired", async () => {
+    const svc = new InspectService({ store });
     await expect(svc.findChats({ instance: "stable" })).rejects.toThrow(/unavailable/);
+  });
+
+  it("answers from self when this process ALREADY is the installed instance", async () => {
+    // installedRoots() returns null in exactly that case; failing there would
+    // make `instance: "stable"` unusable on the stable instance itself.
+    await seedProject("p1", "Dispatch");
+    await seedChat("c1", { title: "local" }, [
+      { id: "r1", ts: T0, kind: "user", text: "findable" },
+    ]);
+    const svc = new InspectService({
+      store,
+      stableRoots: () => null,
+      makeStore: (d, c) => new Store(d, c),
+    });
+    const result = await svc.findChats({ instance: "stable", query: "findable" });
+    expect(result.chats.map((c) => c.id)).toEqual(["c1"]);
   });
 
   it("opens a second store over the installed roots", async () => {
