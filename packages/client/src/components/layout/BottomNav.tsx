@@ -242,19 +242,33 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
           // keyboard, and iOS does not reliably zero the inset for you — so
           // keeping the padding leaves a 34px band of nothing between the
           // composer and the keys.
-          kb > 0 ? "pb-0" : "cm-safe-b",
+          //
+          // With no keyboard it's a THREE-way choice, not two, because the
+          // reduced clearance is only PAID FOR by the slots that grow into the
+          // rest of the inset (see index.css). In the standdown gap — focused,
+          // keyboard still animating in, `kb` not yet non-zero — the strip is
+          // `hidden`, so nothing has grown into anything and the full inset is
+          // again the honest reservation. Shrinking it there would edge the
+          // composer into the gesture area for the ~250ms before the keyboard
+          // lands. The condition is deliberately the SAME `typing` the strip
+          // reads, so "strip hidden" and "full inset" cannot come apart.
+          kb > 0 ? "pb-0" : typing ? "cm-safe-b" : "pb-[var(--cm-bottom-nav-clear)]",
           !typing && "border-t border-line",
         )}
       >
-        {/* The bar's own height is a variable so overlays that cover it can
-            reserve exactly it — see `--cm-bottom-nav-space` in index.css. */}
+        {/* The slots' band is `--cm-bottom-nav-strip`: the 52px they need PLUS
+            the part of the home indicator's inset they're allowed to grow into.
+            The bar's total height is unchanged (`strip + clear` is still
+            `52px + inset`), so nothing above it moves — the icons just stop
+            floating in the top half of it. Overlays that cover the bar reserve
+            `--cm-bottom-nav-space`, which is derived from both. */}
         {/* `hidden`, not a zero height or a transform: a strip you can't see but
             can still tab into and hear announced is worse than one that's gone.
             Blur brings it straight back. */}
         <div
           className={cn(
             "w-full items-stretch",
-            typing ? "hidden" : "flex h-[var(--cm-bottom-nav-h)]",
+            typing ? "hidden" : "flex h-[var(--cm-bottom-nav-strip)]",
           )}
         >
           {mode === "sm" && canOpenLeft && (
