@@ -22,8 +22,9 @@ import { LAYER } from "../../lib/layers.js";
  *    and it skews `kb` directly.
  *  - `kb` staying 0 while the keyboard is visibly up means the shell is never
  *    being told to shrink at all.
- *  - `dead` is how much of the screen the shell does NOT cover. Anything but 0
- *    is the band of nothing under the bottom nav, in the units to fix it with.
+ *  - `dead` is how much of the screen the shell does NOT cover. Installed,
+ *    anything but 0 is the band of nothing under the bottom nav, in the units
+ *    to fix it with. In a browser tab it is just the URL bar.
  *  - `safe-t` non-zero means the status bar is ours to pad around; if `inner`
  *    is ALSO short of `screen` by about that much, we are being charged for it
  *    twice and the shell has to add it back.
@@ -49,8 +50,12 @@ function ViewportReadout() {
     m.screenHeight,
   );
   // The one number that says whether the shell reaches the bottom of the
-  // display: how much of the screen nothing is drawn on. It should be 0.
-  const dead = m.screenHeight - m.safeTop - m.shell;
+  // display: how much of the screen nothing is drawn on. The shell starts at
+  // the top of the screen — the status bar is padding INSIDE it, not an offset
+  // above it, which is the whole point of the correction — so the status bar
+  // must not be subtracted here as well. Installed, this should read 0; in a
+  // browser tab it is legitimately the URL bar.
+  const dead = m.screenHeight - m.shell;
   const rows: Array<[string, string, boolean]> = [
     // What the shell is ACTUALLY sized to, and why — the one line that says
     // whether the correction is engaged.
