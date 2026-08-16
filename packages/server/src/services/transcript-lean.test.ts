@@ -90,6 +90,42 @@ describe("lean transcript projection — large payloads are clipped + flagged", 
   });
 });
 
+describe("lean transcript projection — file stats survive the clip", () => {
+  it("carries an edit's +n −m, computed before the bodies were dropped", () => {
+    const lean = leanRow(
+      toolUse("Edit", {
+        file_path: "src/a.ts",
+        old_string: `${BIG}\nconst b = 2;\n${BIG}`,
+        new_string: `${BIG}\nconst b = 20;\nconst c = 3;\n${BIG}`,
+      }),
+    ) as ToolUseRow;
+    expect(lean.inputOmitted).toBe(true);
+    expect(lean.input.old_string).toBeUndefined();
+    // The row still knows what the edit did, which is the whole point.
+    expect(lean.fileStat).toEqual({ added: 2, removed: 1 });
+  });
+
+  it("carries a read's line range, taken from the numbering the preview truncates", () => {
+    const numbered = Array.from({ length: 900 }, (_, i) => `${i + 1}\tline ${i + 1}`).join("\n");
+    const [use, result] = leanRows([toolUse("Read", { file_path: "src/a.ts" }), toolResult(numbered)]);
+    expect((use as ToolUseRow).name).toBe("Read");
+    const lean = result as ToolResultRow;
+    expect(lean.contentOmitted).toBe(true);
+    expect(lean.fileStat).toEqual({ startLine: 1, endLine: 900, lines: 900 });
+  });
+
+  it("leaves a result unstatted when its tool_use is on another page", () => {
+    // No paired tool_use ⇒ no tool name ⇒ no claim about what the content means.
+    const lean = leanRow(toolResult(BIG)) as ToolResultRow;
+    expect(lean.fileStat).toBeUndefined();
+  });
+
+  it("adds no stat for a tool that touches no file", () => {
+    const lean = leanRow(toolUse("Bash", { command: BIG })) as ToolUseRow;
+    expect(lean.fileStat).toBeUndefined();
+  });
+});
+
 describe("lean transcript projection — todo tools are exempt", () => {
   // The client folds these inputs into the live Tasks strip on every render, so
   // clipping them would silently break task tracking on long chats.

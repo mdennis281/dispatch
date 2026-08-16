@@ -6,7 +6,7 @@ import {
 import { useChats } from "../stores/chats.js";
 import { useProjects } from "../stores/projects.js";
 import { useSettings } from "../stores/settings.js";
-import type { ToolPresentation } from "./toolPresentations.js";
+import type { ShellGroupPresentation } from "./toolPresentations.js";
 
 export const SHELL_FILTER_OPTIONS: ReadonlyArray<{
   id: ShellTranscriptCategory;
@@ -22,7 +22,7 @@ export const SHELL_FILTER_OPTIONS: ReadonlyArray<{
   { id: "dispatch", label: "Other Dispatch tools", description: "Worktrees and newly added manager tools" },
 ];
 
-export function presentationFilterCategory(presentation: ToolPresentation): ShellTranscriptCategory {
+export function presentationFilterCategory(presentation: ShellGroupPresentation): ShellTranscriptCategory {
   if (presentation.kind === "shell") return "shell";
   switch (presentation.category) {
     case "memory": return "memory";

@@ -74,8 +74,65 @@ describe("groupTranscriptRows", () => {
   });
 
   it("keeps an unhandled tool on the existing row path", () => {
-    const unknown = tool("Read", { file_path: "README.md" });
+    const unknown = tool("WebFetch", { url: "https://example.com" });
     expect(groupTranscriptRows([unknown])).toEqual([{ kind: "row", row: unknown }]);
+  });
+
+  it("collects adjacent file calls into their own run", () => {
+    const edit = tool("Edit", { file_path: "src/a.ts", old_string: "a", new_string: "b" }, "edit");
+    const read = tool("Read", { file_path: "src/b.ts" }, "read");
+    const grouped = groupTranscriptRows([edit, read]);
+    expect(grouped).toEqual([{ kind: "files", rows: [edit, read] }]);
+  });
+
+  it("does not merge file work into a terminal run", () => {
+    // A shell run is a session and a file run is a changelog; interleaving them
+    // in one frame would make both unreadable.
+    const first = tool("Bash", { command: "pwd" }, "first");
+    const write = tool("Write", { file_path: "src/a.ts", content: "x" }, "write");
+    const last = tool("Bash", { command: "ls" }, "last");
+    expect(groupTranscriptRows([first, write, last])).toEqual([
+      { kind: "shell", rows: [first] },
+      { kind: "files", rows: [write] },
+      { kind: "shell", rows: [last] },
+    ]);
+  });
+});
+
+describe("file tool presentations", () => {
+  it("presents a path-bearing call with the action it performs", () => {
+    expect(toolPresentation(tool("Edit", { file_path: "C:/repo/src/a.ts" }))).toEqual({
+      kind: "file",
+      tool: "Edit",
+      action: "edit",
+      path: "C:/repo/src/a.ts",
+    });
+    expect(toolPresentation(tool("Read", { file_path: "src/a.ts" }))).toMatchObject({
+      kind: "file",
+      action: "read",
+    });
+  });
+
+  it("presents a search by what it looked for, and where", () => {
+    expect(toolPresentation(tool("Grep", { pattern: "toolPresentation", path: "packages" }))).toEqual({
+      kind: "file",
+      tool: "Grep",
+      action: "search",
+      pattern: "toolPresentation",
+      scope: "packages",
+    });
+    // A Glob's pattern IS its scope — repeating it would read as a filter on itself.
+    expect(toolPresentation(tool("Glob", { glob: "**/*.tsx" }))).toEqual({
+      kind: "file",
+      tool: "Glob",
+      action: "search",
+      pattern: "**/*.tsx",
+      scope: undefined,
+    });
+  });
+
+  it("falls back to the generic card when a file call names no file", () => {
+    expect(toolPresentation(tool("Edit", { old_string: "a", new_string: "b" }))).toBeNull();
   });
 });
 

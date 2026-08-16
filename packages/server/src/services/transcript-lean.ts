@@ -21,7 +21,7 @@
  *   - Everything the client reads off a collapsed row is whitelisted below. Adding
  *     a new field to a collapsed card means adding its key here.
  */
-import type { ChatMessage } from "@dispatch/shared";
+import { fileEditStat, fileResultStat, type ChatMessage } from "@dispatch/shared";
 
 /** Inputs at or under this serialized size ship verbatim (no hydrate needed). */
 const INPUT_INLINE_LIMIT = 4_096;
@@ -50,6 +50,13 @@ const DISPLAY_INPUT_KEYS = [
   "pattern",
   "query",
   "url",
+  // File rows: the read range a Read asked for (the fallback when its result
+  // carries no line numbers) and the search scope a Grep/Glob narrowed to.
+  "offset",
+  "limit",
+  "glob",
+  "output_mode",
+  "replace_all",
 ] as const;
 
 /** Tools whose input drives the Tasks strip — never clipped, at any size. */
@@ -85,6 +92,26 @@ function leanInput(input: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+/**
+ * A result payload as plain text, for measuring it. Mirrors the client's
+ * `resultText` for the two shapes a file tool actually returns; anything else
+ * measures as empty, which yields no stat rather than a wrong one.
+ */
+function resultAsText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((block) =>
+        block && typeof block === "object" && "text" in block && typeof block.text === "string"
+          ? block.text
+          : "",
+      )
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
 /** A readable head preview of a tool result payload of any shape. */
 function previewContent(content: unknown): string {
   if (typeof content === "string") return clip(content, RESULT_PREVIEW_CHARS);
@@ -100,23 +127,33 @@ function previewContent(content: unknown): string {
  * with the matching `*Omitted` flag set so the client knows to hydrate on expand.
  * Pure — never mutates the input row.
  */
-export function leanRow(row: ChatMessage): ChatMessage {
+export function leanRow(row: ChatMessage, toolName?: string): ChatMessage {
   switch (row.kind) {
     case "tool_use": {
       // The Tasks strip folds these inputs on every render — keep them whole.
       if (TODO_TOOLS.has(row.name)) return row;
       if (jsonBytes(row.input) <= INPUT_INLINE_LIMIT) return row;
-      return { ...row, input: leanInput(row.input), inputOmitted: true };
+      // The `+n −m` a file row shows is computed FROM the edit bodies we are
+      // about to drop, so it has to be taken here or the row loses it until
+      // someone expands the card — which is the one thing it must not need.
+      const fileStat = fileEditStat(row.name, row.input) ?? undefined;
+      return { ...row, input: leanInput(row.input), inputOmitted: true, fileStat };
     }
 
     case "tool_result": {
       const bytes = jsonBytes(row.content);
       if (bytes <= RESULT_INLINE_LIMIT) return row;
+      // Same reason as above: a Read's line range lives in the numbering of the
+      // very text the preview truncates. `name` is not persisted on result rows,
+      // so it comes from the paired tool_use (see leanRows); when that row is
+      // outside this page there is no stat and the client falls back.
+      const name = row.name ?? toolName;
       return {
         ...row,
         content: previewContent(row.content),
         contentOmitted: true,
         contentBytes: bytes,
+        fileStat: name ? fileResultStat(name, resultAsText(row.content)) ?? undefined : undefined,
       };
     }
 
@@ -141,5 +178,14 @@ export function leanRow(row: ChatMessage): ChatMessage {
 
 /** Project a page of rows for the wire. */
 export function leanRows(rows: ChatMessage[]): ChatMessage[] {
-  return rows.map(leanRow);
+  // Result rows carry no tool name of their own, and a Read's line-range stat is
+  // only computable while the full content is still here. Resolve the name from
+  // the page's own tool_use rows first so the projection can take it.
+  const names = new Map<string, string>();
+  for (const row of rows) {
+    if (row.kind === "tool_use") names.set(row.toolUseId, row.name);
+  }
+  return rows.map((row) =>
+    leanRow(row, row.kind === "tool_result" ? names.get(row.toolUseId) : undefined),
+  );
 }
