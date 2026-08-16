@@ -304,6 +304,72 @@ export const UpdateStatusSchema = z.object({
 export type UpdateStatus = z.infer<typeof UpdateStatusSchema>;
 
 /**
+ * How far a running install has got.
+ *
+ * These are derived from the installer's PROSE on stdout, not from anything it
+ * declares: `tools/install.mjs` writes no progress file and never advances the
+ * `phase` in `update.json` (that field is a constant `"launched"`, written by
+ * the server before the spawn). Matching on its output is therefore the only
+ * signal that exists — see `services/update-progress.ts` for the markers, and
+ * keep them in step with the installer if its wording changes. A phase that
+ * stops being recognised degrades to "stuck on the previous one", never to a
+ * wrong claim of success.
+ *
+ * The order here is the order they happen in, and clients rely on that: the
+ * index is what drives a monotonic progress bar, so a phase must never be
+ * re-ordered or removed without moving the client's ratchet with it.
+ */
+export const UpdatePhaseSchema = z.enum([
+  /** No install has ever been launched from this root. */
+  "idle",
+  /** `update.json` exists but the installer has not printed anything yet. */
+  "launching",
+  "resolving",
+  "downloading",
+  "verifying",
+  "extracting",
+  "dependencies",
+  "stopping",
+  /**
+   * The swap itself. Never reported BY the server — the rename happens while
+   * nothing is listening, so this is the client's name for "the installer said
+   * it was stopping and then the socket died", which is the expected path.
+   */
+  "swapping",
+  "relinking",
+  "starting",
+  "done",
+  "failed",
+]);
+export type UpdatePhase = z.infer<typeof UpdatePhaseSchema>;
+
+/**
+ * A read of `update.json` + `update.log`, which is all the state an in-flight
+ * install has. Deliberately derived from disk on every request rather than held
+ * in memory: the process that answers this is usually NOT the process that
+ * started the install, and the interesting reads happen either side of a
+ * restart that wipes anything in-process.
+ */
+export const UpdateProgressSchema = z.object({
+  /** An install was launched and the log has not reached a terminal phase. */
+  inFlight: z.boolean(),
+  phase: UpdatePhaseSchema,
+  /** Release being installed, from `update.json`. */
+  tag: z.string().nullable(),
+  /** ISO timestamp the installer was spawned at. */
+  startedAt: z.string().nullable(),
+  /** The installer's own error line, when `phase` is `"failed"`. */
+  failure: z.string().nullable(),
+  /**
+   * Tail of the installer's output for THIS install. Omitted entirely for an
+   * unauthenticated caller — the phase alone is enough to drive the screen, and
+   * the log carries filesystem paths.
+   */
+  log: z.array(z.string()).optional(),
+});
+export type UpdateProgress = z.infer<typeof UpdateProgressSchema>;
+
+/**
  * A newer release appeared. Global (no chatId), pushed the moment the poller
  * first sees it so the nudge shows up without waiting for a reload — the check
  * runs on an hours-long interval, and a tab left open would otherwise never

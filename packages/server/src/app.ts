@@ -106,7 +106,12 @@ export async function buildApp(
   app.addHook("onRequest", async (req, reply) => {
     if (!(await auth.enabled())) return;
     const path = req.url.split("?", 1)[0]!;
-    if (path === "/api/health" || path === "/api/auth/status" ||
+    // `/api/update/progress` is exempt for the same reason `/api/health` is: the
+    // updating screen polls it across a restart, and it must answer during the
+    // window where the tab has no live session to authenticate with. It gates
+    // its own log tail on a bearer token — see routes/update.ts.
+    if (path === "/api/health" || path === "/api/update/progress" ||
+        path === "/api/auth/status" ||
         path === "/api/auth/login" || path === "/api/auth/refresh" ||
         path === "/api/auth/enable" || path === "/api/auth/setup/redeem" ||
         path === "/api/auth/passkeys/login/options" || path === "/api/auth/passkeys/login/verify" ||

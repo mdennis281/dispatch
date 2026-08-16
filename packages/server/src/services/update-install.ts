@@ -121,13 +121,26 @@ export async function launchUpdate(opts: LaunchUpdateOptions): Promise<LaunchUpd
   const logFile = join(root, "update.log");
   const log = await open(logFile, "a");
   try {
+    // Where THIS install's output begins. The log is opened in append mode and
+    // never rotated, so without this every reader sees the whole history — and
+    // `services/update-progress.ts` would report a previous update's `done` (or
+    // its failure) as the current one's outcome. Sampled from the handle we just
+    // opened, so it cannot race a write.
+    const logOffset = (await log.stat()).size;
+
     // Written BEFORE the spawn: if the machine dies mid-update this file is the
     // only record that an update was even attempted, and it sits beside the
     // `upgrade.json` the dev tooling writes for the same reason.
     await writeFile(
       join(root, "update.json"),
       `${JSON.stringify(
-        { phase: "launched", tag: opts.tag, installerSource: source, startedAt: new Date().toISOString() },
+        {
+          phase: "launched",
+          tag: opts.tag,
+          installerSource: source,
+          startedAt: new Date().toISOString(),
+          logOffset,
+        },
         null,
         2,
       )}\n`,

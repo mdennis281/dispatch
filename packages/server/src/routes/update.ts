@@ -19,9 +19,11 @@
  * is to stop this server, and a caller that gets a dropped connection instead of
  * its `{ ok: true }` cannot tell "the update started" from "the update failed".
  */
+import { resolve } from "node:path";
 import type { FastifyInstance } from "fastify";
-import { UpdateChannelSchema } from "@dispatch/shared";
+import { UpdateChannelSchema, type UpdateProgress } from "@dispatch/shared";
 import { launchUpdate } from "../services/update-install.js";
+import { readUpdateProgress } from "../services/update-progress.js";
 import { payloadAppDir } from "../services/release.js";
 
 /** Breathing room after the response is on the wire — mirrors shutdown.ts. */
@@ -31,6 +33,52 @@ export function registerUpdateRoutes(app: FastifyInstance): void {
   const { release } = app.services;
 
   app.get("/api/update", async () => release.status());
+
+  /**
+   * How far the running install has got. Exempt from the auth gate
+   * (`app.ts`) for the same reason `/api/health` is: it is polled by a screen
+   * that has to keep working across the restart, and on the far side of that
+   * restart the answer may be "your update failed and rolled back" — which is
+   * precisely the moment you must not be bounced to a login form instead.
+   *
+   * Being exempt, it authenticates itself, and only to decide how much to say:
+   * the phase is handed to anyone (it is a state machine position, and the
+   * screen needs it before the auth store has even hydrated), while the log tail
+   * carries filesystem paths and is withheld unless the caller proves it may
+   * read them. The tab that started the update still holds its access token —
+   * it no longer reloads mid-install — so in practice it sees the log.
+   */
+  app.get("/api/update/progress", async (req) => {
+    let includeLog = true;
+    if (await app.auth.enabled()) {
+      const header = req.headers.authorization;
+      const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
+      includeLog = Boolean(await app.auth.authenticateAccess(token));
+    }
+    const progress = await readUpdateProgress({ root: resolve(payloadAppDir(), ".."), includeLog });
+
+    // The stamp on disk is written by the installer launch, which happens after
+    // this reply flushes plus SETTLE_MS. Between `markInstalling()` and that
+    // write, the newest `update.json` is still the PREVIOUS install's — and
+    // answering with its `done` would tell the screen the update it just started
+    // had already succeeded. So an install this process launched outranks a
+    // stamp that predates the launch.
+    const since = release.installingSince();
+    const stampedAt = progress.startedAt ? Date.parse(progress.startedAt) : NaN;
+    if (since !== null && !(stampedAt >= since)) {
+      return { inFlight: true, phase: "launching", tag: null, startedAt: null, failure: null,
+        ...(includeLog ? { log: [] } : {}) } satisfies UpdateProgress;
+    }
+
+    // An install that fails BEFORE the stop — a bad download, a checksum
+    // mismatch — leaves this server running with the latch still set, and
+    // `status.installing` would then strand every tab on an update screen
+    // waiting for a restart that is never coming, with no way out but a manual
+    // restart. The log reaching a terminal phase is the authoritative signal
+    // that nothing is in flight, so let it release the latch.
+    if (!progress.inFlight) release.clearInstalling();
+    return progress;
+  });
 
   app.post("/api/update/check", async () => release.check(true));
 
