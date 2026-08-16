@@ -184,6 +184,7 @@ function Editor({ chatId, alt, base: initialBase, onCancel, onApply }: ImageAnno
 
   const drag = useRef<Drag>({ kind: "none" });
   const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const textRef = useRef<HTMLTextAreaElement>(null);
   const styles = useAnnotatorPrefs((s) => s.styles);
   const setStyle = useAnnotatorPrefs((s) => s.setStyle);
 
@@ -334,6 +335,23 @@ function Editor({ chatId, alt, base: initialBase, onCancel, onApply }: ImageAnno
     },
     [doc],
   );
+
+  /**
+   * Focus the text field a frame after it mounts, rather than with `autoFocus`.
+   * The field is created from a pointerdown handler, and the browser's own
+   * default action for that same press — focusing the element under the pointer,
+   * i.e. the canvas — runs afterwards and takes the focus straight back. A frame
+   * later there is nothing left to race with.
+   */
+  useEffect(() => {
+    if (!editingText) return;
+    const id = requestAnimationFrame(() => {
+      const el = textRef.current;
+      el?.focus();
+      el?.select();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [editingText]);
 
   /* ---- pointer pipeline -------------------------------------------------- */
 
@@ -575,6 +593,28 @@ function Editor({ chatId, alt, base: initialBase, onCancel, onApply }: ImageAnno
       drag.current = { kind: "none" };
     },
     [doc, vp.scale],
+  );
+
+  /**
+   * Double-click an existing text annotation to edit it again. Without this the
+   * only way to fix a typo is delete-and-retype, which is what everyone tries
+   * second after double-clicking it and getting nothing.
+   */
+  const onDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (mode !== "markup" || busy) return;
+      const r = boxRef.current?.getBoundingClientRect();
+      const p = { x: e.clientX - (r?.left ?? 0), y: e.clientY - (r?.top ?? 0) };
+      const hitId = stageRef.current?.getIntersection(p)?.id();
+      const hit = hitId ? doc.shapes.find((s) => s.id === hitId) : undefined;
+      if (!hit || hit.kind !== "text") return;
+      setSelectedId(hit.id);
+      // Opens a step so the whole re-edit undoes in one press, and so blanking
+      // the field can `discard()` back to the original wording.
+      doc.mark();
+      setEditingText(hit.id);
+    },
+    [busy, doc, mode],
   );
 
   /* ---- crop mode --------------------------------------------------------- */
@@ -821,6 +861,7 @@ function Editor({ chatId, alt, base: initialBase, onCancel, onApply }: ImageAnno
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onDoubleClick={onDoubleClick}
         className={cn(
           "relative min-h-0 flex-1 overflow-hidden bg-inset",
           // The browser must not claim the gesture: without this, a one-finger
@@ -863,9 +904,13 @@ function Editor({ chatId, alt, base: initialBase, onCancel, onApply }: ImageAnno
                 height={image.height}
                 listening={false}
               />
-              {doc.shapes.map((s) => (
-                <ShapeNode key={s.id} shape={s} listening={mode === "markup" && tool === "select"} />
-              ))}
+              {doc.shapes.map((s) =>
+                // The one being edited is drawn by the textarea instead, or the
+                // two render on top of each other at slightly different metrics.
+                s.id === editingText ? null : (
+                  <ShapeNode key={s.id} shape={s} listening={mode === "markup" && tool === "select"} />
+                ),
+              )}
             </Group>
             {mode === "markup" && selected && !busy && (
               <SelectionOverlay shape={selected} scale={vp.scale} accent={accent} />
@@ -882,26 +927,48 @@ function Editor({ chatId, alt, base: initialBase, onCancel, onApply }: ImageAnno
           </Layer>
         </Stage>
 
-        {/* live text entry, positioned over the shape it edits */}
+        {/* Live text entry, positioned over the shape it edits.
+            It sits INSIDE the box that owns the pointer pipeline, so every
+            pointer event has to be stopped here: without that, clicking into
+            the field reaches the container's onPointerDown, which commits the
+            (still empty) shape and unmounts the field out from under the
+            caret — the box appeared and then died on first click. */}
         {textShape && textShape.kind === "text" && (
           <textarea
-            autoFocus
+            // Keyed per shape so a second text box actually mounts, and so the
+            // focus effect below re-runs for it rather than leaving the caret
+            // in the previous one.
+            key={textShape.id}
+            ref={textRef}
             value={textShape.text}
             onChange={(e) => patch(textShape.id, (s) => ({ ...s, text: e.target.value }) as Shape)}
             onBlur={commitText}
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerMove={(e) => e.stopPropagation()}
+            onPointerUp={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
               if (e.key === "Escape" || (e.key === "Enter" && !e.shiftKey)) {
                 e.preventDefault();
                 e.currentTarget.blur();
               }
             }}
-            className="absolute resize-none rounded-sm border border-accent bg-panel/95 px-1 py-0.5 text-primary outline-none"
+            placeholder="Type…"
+            // `select-text` undoes the box's `select-none`, which otherwise
+            // makes the caret and drag-selection behave like a dead element.
+            className={cn(
+              "absolute resize-none select-text rounded-sm border border-accent bg-panel/95",
+              "px-1 py-0.5 text-primary shadow-[var(--shadow-pop)] outline-none",
+            )}
             style={{
               left: vpm.toScreen(vp, textShape.x, textShape.y)[0],
               top: vpm.toScreen(vp, textShape.x, textShape.y)[1],
               fontSize: Math.max(12, textShape.fontSize * vp.scale),
               lineHeight: 1.2,
               minWidth: 120,
+              // Matches the Konva Text node so the box is not a different shape
+              // to the thing it is editing.
+              color: textShape.color,
+              fontWeight: 600,
             }}
           />
         )}
