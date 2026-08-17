@@ -8,7 +8,6 @@ import { BottomNav } from "./components/layout/BottomNav.js";
 import { ChatView } from "./components/chat/ChatView.js";
 import { CodeViewerHost } from "./components/monaco/index.js";
 import { AgentRunHost } from "./components/agents/AgentRunHost.js";
-import { ProjectPRsView } from "./components/prs/ProjectPRsView.js";
 import { WorkspaceView } from "./components/workspace/WorkspaceView.js";
 import { ProcessesOverlay } from "./components/panels/ProcessesOverlay.js";
 import { McpCatalogView } from "./components/mcp/McpCatalogView.js";
@@ -207,7 +206,6 @@ export default function App() {
       <CodeViewerHost />
       <AgentRunHost />
       <WorkspaceView />
-      <ProjectPRsView />
       <ProcessesOverlay />
       <McpCatalogView />
       <ManageConfigDialog />

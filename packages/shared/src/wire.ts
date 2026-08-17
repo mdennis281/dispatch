@@ -18,6 +18,7 @@ import {
   ProjectSchema,
   RunnerInstanceSchema,
   PRInfoSchema,
+  PrRecordSchema,
   WorkflowRunSchema,
   WorktreeInfoSchema,
   TerminalInfoSchema,
@@ -139,6 +140,22 @@ export const PrUpdateEventSchema = z.object({
   type: z.literal("pr-update"),
   chatId: z.string().optional(),
   pr: PRInfoSchema,
+});
+
+/**
+ * A tracked PR's registry row changed — the PR catalog's live feed.
+ *
+ * Separate from `pr-update` rather than replacing it, because they answer
+ * different questions. `pr-update` is a one-shot "here is a PR I just acted on",
+ * scoped to a chat and keyed by NUMBER, which is why the project roster could
+ * never safely fold it in (numbers collide across repos). This carries the whole
+ * registry row under its `repo#number` key, so a client can render the catalog
+ * from the event stream alone — which is what removes the fetch-on-open the old
+ * overlay structurally required.
+ */
+export const PrRecordUpdateEventSchema = z.object({
+  type: z.literal("pr-record-update"),
+  record: PrRecordSchema,
 });
 
 /** A GitHub Actions run's state changed. */
@@ -438,6 +455,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   RunnerLogEventSchema,
   RunnerUpdateEventSchema,
   PrUpdateEventSchema,
+  PrRecordUpdateEventSchema,
   WorkflowUpdateEventSchema,
   WorktreeUpdateEventSchema,
   TerminalUpdateEventSchema,

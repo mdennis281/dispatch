@@ -19,6 +19,7 @@ import type {
   WorktreeInfo,
   BranchInfo,
   PRInfo,
+  PrRecord,
   WorkflowDef,
   WorkflowRun,
   WorkflowWithLastRun,
@@ -572,6 +573,20 @@ export const api = {
      */
     killAll: (query: Partial<RegistryQuery> = {}) =>
       post<{ killed: number; ids: string[] }>("/api/terminals/kill-all", query),
+  },
+
+  /* the tracked-PR catalog — the Workspace view's third registry */
+  prs: {
+    /**
+     * The catalog. A pure read of the server's roster: no `gh` call, so it
+     * answers immediately. Clients call this ONCE on connect and then follow
+     * `pr-record-update` on the socket — which is why the PRs tab renders with
+     * no fetch when you open it, unlike the overlay it replaces.
+     */
+    list: (query: Partial<RegistryQuery> = {}) =>
+      get<PrRecord[]>(`/api/prs${qs({ ...query })}`),
+    /** Poll one PR now, rather than waiting out its adaptive cadence. */
+    refresh: (key: string) => post<PrRecord>("/api/prs/refresh", { key }),
   },
 
   /* file-path picker (the browser can't see the filesystem; the server can) */
