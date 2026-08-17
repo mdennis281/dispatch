@@ -17,6 +17,7 @@ import type { ServerConfig } from "../config.js";
 // Value import (not `import type`): the InspectService needs to CONSTRUCT a
 // second Store over the installed instance's roots for `instance: "stable"`.
 import { Store } from "../store/index.js";
+import type { PRRef } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
 import { SessionBroker } from "./session-broker.js";
@@ -44,6 +45,7 @@ import { ReleaseService } from "./release.js";
 import { ResumeScheduler } from "./resume-scheduler.js";
 import { TrunkSyncService } from "./trunk-sync.js";
 import { PrReviewWatcher } from "./pr-review-watcher.js";
+import { PrRegistry } from "./pr-registry.js";
 import { FileIndexService } from "./file-index.js";
 import { FsExplorerService } from "./fs-explorer.js";
 import { HarnessRegistry } from "../harness/index.js";
@@ -86,6 +88,7 @@ export interface ServiceOverrides {
   fsExplorer?: FsExplorerService;
   trunkSync?: TrunkSyncService;
   prReviewWatcher?: PrReviewWatcher;
+  prRegistry?: PrRegistry;
 }
 
 /** Everything the routes/WS layer needs, wired to one bus + store. */
@@ -130,6 +133,8 @@ export interface Services extends ServiceBase {
   trunkSync: TrunkSyncService;
   /** Raises `review` attention (and wakes the owning chat) on PR activity. */
   prReviewWatcher: PrReviewWatcher;
+  /** The tracked-PR catalog — the Workspace view's third registry. */
+  prRegistry: PrRegistry;
   /** Start background wiring (attention, notifier, reconcile, auto-checkpoint). */
   start(): Promise<void>;
   /** Tear everything down (broker sessions, runners, subscriptions). */
@@ -364,16 +369,56 @@ export function createServices(
   // motivated this stopped calling after one "no CI checks configured" reply and
   // then missed two rounds of review comments entirely. This is the half that
   // doesn't depend on anybody remembering to ask.
+  // The PR catalog: rows for every tracked PR, fed by the one poll body. It owns
+  // no timer — the sweep below and `watch_pr` both hand it what they read, which
+  // is what keeps the app's picture of a PR and the agent's the same picture.
+  const prRegistry =
+    overrides.prRegistry ??
+    new PrRegistry({
+      store,
+      bus,
+      poll: (repo, number) => github.pollPrState(repo, number),
+    });
+  // Every `watch_pr` poll lands in the catalog too. An agent watching its PR
+  // polls far more tightly than the background sweep can afford to; before this
+  // that answer was read once and discarded.
+  broker.onPrSnapshot = (chatId, snapshot) => {
+    void prRegistry.record(snapshot, { chatId }).catch(() => {});
+  };
   const prReviewWatcher =
     overrides.prReviewWatcher ??
     new PrReviewWatcher({
       store,
       bus,
       github: {
-        prMergeState: (n, o) => github.prMergeState(n, o),
-        prChecks: (repo, n) => github.prChecks(repo, n),
-        reviewThreads: (repo, n) => github.reviewThreads(repo, n),
-        prReviewState: (repo, n) => github.prReviewState(repo, n),
+        pollPrState: (repo, n) => github.pollPrState(repo, n),
+      },
+      registry: prRegistry,
+      // Open PRs nobody in Dispatch opened. Resolving project → repo → open PRs
+      // needs the Store and the GitHub service together, so it lives here rather
+      // than widening the watcher's GitHub surface. Best-effort per project: a
+      // repo we can't resolve (no remote, no auth) simply contributes nothing.
+      discover: async () => {
+        const out: Array<{ projectId: string; ref: PRRef }> = [];
+        for (const project of await store.listProjects().catch(() => [])) {
+          const repo = await github.repoForProject(project).catch(() => null);
+          if (!repo) continue;
+          const prs = await github.projectOpenPrs(repo).catch(() => []);
+          for (const pr of prs) {
+            out.push({
+              projectId: project.id,
+              ref: {
+                number: pr.number,
+                url: pr.url,
+                branch: pr.branch,
+                repo,
+                title: pr.title,
+                state: pr.state,
+              },
+            });
+          }
+        }
+        return out;
       },
       // Same lazy-session path the ResumeScheduler uses — by the time a review
       // round lands, the chat's subprocess is long gone.
@@ -397,6 +442,11 @@ export function createServices(
   // inside `arm`; the `.catch` is belt-and-braces against an unhandled rejection.
   broker.armPrWatch = (chatId, ref) => {
     void prReviewWatcher.arm(chatId, ref).catch(() => {});
+    // The tracking hook for `create_pr`. Separate from arming because they want
+    // different things: arming reads GitHub to SUPPRESS pre-existing activity,
+    // this records the row so the PR is in the catalog the instant it is opened
+    // — even if that read fails, and even before the first sweep.
+    void prRegistry.track(ref, { chatId }).catch(() => {});
   };
   // `mcp__manager__spawn_chat`: an agent starting ANOTHER chat, after the human
   // approved it (the broker asks; this only runs once they said yes). Deliberately
@@ -461,6 +511,7 @@ export function createServices(
     fsExplorer,
     trunkSync,
     prReviewWatcher,
+    prRegistry,
 
     async start(): Promise<void> {
       // This runs before clients hydrate. Graceful shutdowns have already
@@ -506,8 +557,15 @@ export function createServices(
       // loaded would ask the stable endpoint on behalf of an unstable install.
       await release.hydrate().catch(() => {});
       safeStart("release", () => release.start());
+      // Seed the PR catalog from every chat's `Chat.prs` BEFORE the sweep runs,
+      // so PRs opened before this catalog existed appear with nobody doing
+      // anything. No GitHub calls — the rows come from the pointers a chat
+      // already holds, and the first sweep fills in live state.
+      await prRegistry.backfill().catch((err: unknown) => {
+        console.error("[Dispatch] PR catalog backfill failed (continuing):", err);
+      });
       // Notices review rounds on PRs chats own — the half of the loop that
-      // doesn't require an agent to keep asking.
+      // doesn't require an agent to keep asking — and keeps the catalog current.
       safeStart("prReviewWatcher", () => prReviewWatcher.start());
 
       // Agent-created worktree detection: subscribe to turn-complete signals and

@@ -54,6 +54,7 @@ describe("mcp-catalog — builder", () => {
         mcpConfig: true,
         inspect: true,
         prewarm: true,
+        exemptions: true,
       },
     });
 
@@ -143,6 +144,17 @@ describe("mcp-catalog — builder", () => {
       bindings: { github: true, prApproval: true },
     });
     expect(on.servers[0]!.tools.find((t) => t.name === "approve_pr")!.available).toBe(true);
+  });
+
+  it("offers request_exemption only where a guard actually refuses things", async () => {
+    // On `warn`/`off` nothing is blocked, so a tool for asking to have a guard
+    // lifted would be an invitation to seek permission nobody needed to give.
+    const off = await buildProjectMcpCatalog(makeProject(), { bindings: { exemptions: false } });
+    expect(off.servers[0]!.tools.find((t) => t.name === "request_exemption")!.available).toBe(
+      false,
+    );
+    const on = await buildProjectMcpCatalog(makeProject(), { bindings: { exemptions: true } });
+    expect(on.servers[0]!.tools.find((t) => t.name === "request_exemption")!.available).toBe(true);
   });
 
   it("offers create_pr only where change ships through a PR", async () => {

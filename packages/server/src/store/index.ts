@@ -23,9 +23,10 @@
  *   worktrees.json               — WorktreeRecord[] (attribution, keyed by path)
  *   terminals.json               — TerminalRecord[] (shell roster)
  *   terminals/<logId>.jsonl      — that shell's retained output
+ *   prs.json                     — PrRecord[] (PR roster, keyed `repo#number`)
  *
- * `runners.json`, `checkpoints.json`, `worktrees.json` and `terminals.json` are
- * whole-file read-modify-write maps
+ * `runners.json`, `checkpoints.json`, `worktrees.json`, `terminals.json` and
+ * `prs.json` are whole-file read-modify-write maps
  * guarded only by this process's {@link KeyedMutex}, so two processes sharing
  * them would silently lose each other's entries — that's the reason for the
  * split, and the reason chats stay per-instance even though sharing them would
@@ -66,6 +67,8 @@ import {
   type TerminalRecord,
   TerminalLineSchema,
   type TerminalLineRecord,
+  PrRecordSchema,
+  type PrRecord,
   McpPortLeaseSchema,
   type McpPortLease,
   ShellTranscriptFilterSchema,
@@ -295,6 +298,14 @@ export class Store {
   }
   private terminalsFile() {
     return join(this.dataDir, "terminals.json");
+  }
+  /**
+   * The PR roster. STATE root for the same reason as worktrees.json: a whole-file
+   * read-modify-write map guarded only by this process's mutex, so a stable and a
+   * dev instance sharing it would silently drop each other's rows.
+   */
+  private prsFile() {
+    return join(this.dataDir, "prs.json");
   }
   private terminalLogsDir() {
     return join(this.dataDir, "terminals");
@@ -998,6 +1009,80 @@ export class Store {
     await this.mutex.run(`terminal-log:${logId}`, () =>
       rm(this.terminalLogFile(logId), { force: true }),
     );
+  }
+
+  /* --------------------------------------------------------------- PRs */
+
+  /**
+   * Tracked PULL REQUESTS, keyed `owner/repo#number`.
+   *
+   * Unlike worktrees — where git's `worktree list` is ground truth and the row
+   * only carries what git can't say — this row IS the state. Nothing else in the
+   * app remembers what a PR's CI, reviewers or threads looked like: `Chat.prs`
+   * holds a pointer, and every other read went straight to `gh` and kept
+   * nothing. So a row here outlives its PR deliberately, and a settled PR keeps
+   * its final state rather than being deleted.
+   *
+   * A malformed row is DROPPED rather than throwing, matching the MCP port
+   * leases: one bad row costs one PR from the roster until its next poll, where
+   * a throw would cost the entire catalog.
+   */
+  async listPrRecords(): Promise<PrRecord[]> {
+    const raw = (await readJson<unknown[]>(this.prsFile())) ?? [];
+    return raw.flatMap((r) => {
+      const p = PrRecordSchema.safeParse(r);
+      return p.success ? [p.data] : [];
+    });
+  }
+  async getPrRecord(key: string): Promise<PrRecord | null> {
+    const all = await this.listPrRecords();
+    return all.find((p) => p.key === key) ?? null;
+  }
+
+  /**
+   * Upsert by key: `create` fields apply ONLY when the row is new, `update`
+   * always — the same split {@link upsertWorktreeRecord} uses, and here for the
+   * same hazard. The discovery sweep sees every open PR in a project including
+   * ones a chat opened; without the split it would restate an attributed row
+   * with no `chatId` and orphan it from the chat that owns it.
+   *
+   * One mutex hold covers the read AND the write: the discovery sweep and a
+   * `create_pr` land on this concurrently, and a hand-rolled get-then-save pair
+   * loses whichever attribution loses the race.
+   */
+  async upsertPrRecord(
+    key: string,
+    create: Omit<PrRecord, "key">,
+    update: Partial<Omit<PrRecord, "key">> = {},
+  ): Promise<PrRecord> {
+    let result!: PrRecord;
+    await this.mutex.run("prs", async () => {
+      const raw = (await readJson<unknown[]>(this.prsFile())) ?? [];
+      const list = raw.flatMap((r) => {
+        const p = PrRecordSchema.safeParse(r);
+        return p.success ? [p.data] : [];
+      });
+      const idx = list.findIndex((p) => p.key === key);
+      const prev = idx >= 0 ? list[idx] : undefined;
+      result = PrRecordSchema.parse({ ...(prev ?? create), ...update, key });
+      if (idx >= 0) list[idx] = result;
+      else list.push(result);
+      await writeJsonAtomic(this.prsFile(), list);
+    });
+    return result;
+  }
+
+  async deletePrRecord(key: string): Promise<void> {
+    await this.mutex.run("prs", async () => {
+      const raw = (await readJson<unknown[]>(this.prsFile())) ?? [];
+      const list = raw
+        .flatMap((r) => {
+          const p = PrRecordSchema.safeParse(r);
+          return p.success ? [p.data] : [];
+        })
+        .filter((p) => p.key !== key);
+      await writeJsonAtomic(this.prsFile(), list);
+    });
   }
 
   /* ------------------------------------------------------- checkpoints */

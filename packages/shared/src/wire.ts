@@ -18,6 +18,7 @@ import {
   ProjectSchema,
   RunnerInstanceSchema,
   PRInfoSchema,
+  PrRecordSchema,
   WorkflowRunSchema,
   WorktreeInfoSchema,
   TerminalInfoSchema,
@@ -31,6 +32,7 @@ import {
 } from "./messages.js";
 import { ProjectConfigSchema, ProjectConfigErrorSchema } from "./project-config.js";
 import { UsageSnapshotSchema } from "./usage.js";
+import { WorkflowExemptionSchema } from "./workflow.js";
 
 /* =============================================================== server → client */
 
@@ -76,6 +78,18 @@ export const ChatStatusEventSchema = z.object({
    * only reads as green once `status` is also back to `idle` (no active agent).
    */
   prSettled: z.boolean().optional(),
+});
+
+/**
+ * This chat's live guard exemptions changed — one was granted, used up, or
+ * revoked. Always the FULL list, never a delta: the client renders a persistent
+ * chip off it, and a chip that drifts from what the server is actually enforcing
+ * is worse than no chip. Empty array = back to fully guarded.
+ */
+export const ChatExemptionsEventSchema = z.object({
+  type: z.literal("chat-exemptions"),
+  chatId: z.string(),
+  exemptions: z.array(WorkflowExemptionSchema),
 });
 
 /** A permission decision is required (from canUseTool). */
@@ -126,6 +140,22 @@ export const PrUpdateEventSchema = z.object({
   type: z.literal("pr-update"),
   chatId: z.string().optional(),
   pr: PRInfoSchema,
+});
+
+/**
+ * A tracked PR's registry row changed — the PR catalog's live feed.
+ *
+ * Separate from `pr-update` rather than replacing it, because they answer
+ * different questions. `pr-update` is a one-shot "here is a PR I just acted on",
+ * scoped to a chat and keyed by NUMBER, which is why the project roster could
+ * never safely fold it in (numbers collide across repos). This carries the whole
+ * registry row under its `repo#number` key, so a client can render the catalog
+ * from the event stream alone — which is what removes the fetch-on-open the old
+ * overlay structurally required.
+ */
+export const PrRecordUpdateEventSchema = z.object({
+  type: z.literal("pr-record-update"),
+  record: PrRecordSchema,
 });
 
 /** A GitHub Actions run's state changed. */
@@ -417,6 +447,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   ChatMessageEventSchema,
   MessageChunkEventSchema,
   ChatStatusEventSchema,
+  ChatExemptionsEventSchema,
   PermissionRequestEventSchema,
   PermissionResolvedEventSchema,
   AttentionAddEventSchema,
@@ -424,6 +455,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   RunnerLogEventSchema,
   RunnerUpdateEventSchema,
   PrUpdateEventSchema,
+  PrRecordUpdateEventSchema,
   WorkflowUpdateEventSchema,
   WorktreeUpdateEventSchema,
   TerminalUpdateEventSchema,

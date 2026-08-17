@@ -19,6 +19,7 @@ import type {
   WorktreeInfo,
   BranchInfo,
   PRInfo,
+  PrRecord,
   WorkflowDef,
   WorkflowRun,
   WorkflowWithLastRun,
@@ -40,6 +41,7 @@ import type {
   ContextUsage,
   ModelOption,
   WorkflowConfig,
+  WorkflowExemption,
   LaunchAgentTaskInput,
   MessagePart,
   HarnessKind,
@@ -300,7 +302,11 @@ const post = <T>(path: string, body?: unknown) => request<T>("POST", path, body)
 const put = <T>(path: string, body?: unknown) => request<T>("PUT", path, body);
 const del = <T>(path: string, body?: unknown) => request<T>("DELETE", path, body);
 
-function qs(params: Record<string, string | number | undefined>): string {
+// `boolean` is in the union for the registry's facet flags: `false` is a real
+// filter ("only the ones that aren't"), so it must serialize rather than be
+// mistaken for "unset" — which is why the guard below tests `undefined`, not
+// falsiness.
+function qs(params: Record<string, string | number | boolean | undefined>): string {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== "") p.set(k, String(v));
@@ -364,6 +370,15 @@ export const api = {
         `/api/chats/${id}/messages/full${qs({ ids: ids.join(",") })}`,
       ),
     checkpoints: (id: string) => get<Checkpoint[]>(`/api/chats/${id}/checkpoints`),
+    /**
+     * Human-approved guard lifts live on this chat's session. Live-session
+     * state, so a chat that isn't running answers `[]` — there is nowhere for an
+     * exemption to persist, by design.
+     */
+    exemptions: (id: string) => get<WorkflowExemption[]>(`/api/chats/${id}/exemptions`),
+    /** Revoke one (the header chip's action). 404 when it's already gone. */
+    revokeExemption: (id: string, exemptionId: string) =>
+      del<void>(`/api/chats/${id}/exemptions/${exemptionId}`),
     /** Cancel the auto-resume scheduled after a usage limit (409 if none). */
     cancelResume: (id: string) => post<Chat>(`/api/chats/${id}/resume/cancel`),
     /** Live context-window breakdown (null when the subprocess isn't live). */
@@ -559,6 +574,27 @@ export const api = {
     /** Close it AND forget what it printed. */
     purge: (id: string) =>
       del<{ ok: true }>(`/api/terminals/${encodeURIComponent(id)}?purge=1`),
+    /**
+     * Close every LIVE shell the query selects — the same query the catalog was
+     * read with, so this kills exactly the rows on screen. Transcripts survive;
+     * this reclaims ports, it doesn't forget output.
+     */
+    killAll: (query: Partial<RegistryQuery> = {}) =>
+      post<{ killed: number; ids: string[] }>("/api/terminals/kill-all", query),
+  },
+
+  /* the tracked-PR catalog — the Workspace view's third registry */
+  prs: {
+    /**
+     * The catalog. A pure read of the server's roster: no `gh` call, so it
+     * answers immediately. Clients call this ONCE on connect and then follow
+     * `pr-record-update` on the socket — which is why the PRs tab renders with
+     * no fetch when you open it, unlike the overlay it replaces.
+     */
+    list: (query: Partial<RegistryQuery> = {}) =>
+      get<PrRecord[]>(`/api/prs${qs({ ...query })}`),
+    /** Poll one PR now, rather than waiting out its adaptive cadence. */
+    refresh: (key: string) => post<PrRecord>("/api/prs/refresh", { key }),
   },
 
   /* file-path picker (the browser can't see the filesystem; the server can) */

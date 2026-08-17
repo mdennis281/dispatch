@@ -15,7 +15,13 @@ import {
   ArrowRightLeft,
   Search,
 } from "lucide-react";
-import type { AgentActivity, Chat, HarnessKind, WorktreeInfo } from "@dispatch/shared";
+import type {
+  AgentActivity,
+  Chat,
+  HarnessKind,
+  WorkflowExemption,
+  WorktreeInfo,
+} from "@dispatch/shared";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
@@ -33,7 +39,7 @@ import { Modal } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { useChatRename } from "./useChatRename.js";
 import { useChatMessages, useChatPage, useMessages } from "../../stores/messages.js";
-import { loadOlderMessages } from "../../stores/index.js";
+import { loadExemptions, loadOlderMessages } from "../../stores/index.js";
 import { useChats } from "../../stores/chats.js";
 import { useHarnesses } from "../../stores/harnesses.js";
 import { useProjects } from "../../stores/projects.js";
@@ -101,6 +107,9 @@ const OLDER_PAGE_TRIGGER_PX = 400;
  */
 const MAX_CHAINED_PAGES = 8;
 
+/** Stable empty array so the selector doesn't hand back a new [] every render. */
+const EMPTY_EXEMPTIONS: WorkflowExemption[] = [];
+
 /** Quiet empty state for a chat with no transcript yet. */
 function EmptyTranscript() {
   return (
@@ -119,6 +128,7 @@ export function ChatView({ chat }: { chat: Chat }) {
   const { hasMore, loadingOlder } = useChatPage(chat.id);
   const activity = useChats((s) => s.activity[chat.id]);
   const prSettled = useChats((s) => s.prSettled[chat.id] ?? false);
+  const exemptions = useChats((s) => s.exemptions[chat.id] ?? EMPTY_EXEMPTIONS);
   const agents = useProjects((s) => s.agents);
   const modes = useProjects((s) => s.modes);
   const worktrees = usePanels((s) => s.worktrees);
@@ -258,6 +268,31 @@ export function ChatView({ chat }: { chat: Chat }) {
       void useProcesses.getState().scan(chat.projectId);
     }
   }, [chat.projectId, chatProcessPids, pushToast]);
+
+  // Live-session state with no persistent home, so it has to be READ on open —
+  // nothing in the chat record carries it. The `chat-exemptions` event keeps it
+  // current after that; a reconnect is covered by `hydrateFromServer`.
+  useEffect(() => {
+    void loadExemptions(chat.id);
+  }, [chat.id]);
+
+  const revokeExemption = useCallback(
+    (id: string) => {
+      void api.chats
+        .revokeExemption(chat.id, id)
+        // The server broadcasts the new list, so there is nothing to set here —
+        // but a failure has to say so rather than leaving a chip that looks
+        // clicked and a guard that is still off.
+        .catch((err) =>
+          pushToast({
+            level: "error",
+            text: "Couldn't revoke the exemption",
+            detail: err instanceof Error ? err.message : String(err),
+          }),
+        );
+    },
+    [chat.id, pushToast],
+  );
 
   const meta = statusMeta(chat.status, prSettled);
   const running = chat.status === "running" || chat.status === "waiting";
@@ -509,6 +544,8 @@ export function ChatView({ chat }: { chat: Chat }) {
               primaryMerged={primaryMerged}
               extraBranches={extraBranches}
               pr={pr}
+              exemptions={exemptions}
+              onRevokeExemption={revokeExemption}
             />
             <Popover
               align="end"

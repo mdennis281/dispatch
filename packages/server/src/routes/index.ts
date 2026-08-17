@@ -21,6 +21,7 @@ import { registerGitRoutes } from "./git.js";
 import { registerRunnerRoutes } from "./runner.js";
 import { registerTerminalRoutes } from "./terminals.js";
 import { registerGithubRoutes } from "./github.js";
+import { registerPrRoutes } from "./prs.js";
 import { registerAttentionRoutes } from "./attention.js";
 import { registerSettingsRoutes } from "./settings.js";
 import { registerUsageRoutes } from "./usage.js";
@@ -49,6 +50,7 @@ export function registerRoutes(app: FastifyInstance): void {
   registerRunnerRoutes(app);
   registerTerminalRoutes(app);
   registerGithubRoutes(app);
+  registerPrRoutes(app);
   registerAttentionRoutes(app);
   registerSettingsRoutes(app);
   registerUsageRoutes(app);

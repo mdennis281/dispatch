@@ -21,6 +21,7 @@ import { useAttention } from "./attention.js";
 import { useRunners } from "./runners.js";
 import { useTerminals } from "./terminals.js";
 import { usePanels } from "./panels.js";
+import { usePrs } from "./prs.js";
 import { useMemory } from "./memory.js";
 import { useMcp } from "./mcp.js";
 import { useConfig } from "./config.js";
@@ -57,6 +58,7 @@ export { useAttention, useAttentionCount } from "./attention.js";
 export { useRunners, useChatRunners } from "./runners.js";
 export { useTerminals, useChatTerminals } from "./terminals.js";
 export { usePanels } from "./panels.js";
+export { usePrs, selectPrs } from "./prs.js";
 export { useMemory, useProjectMemories } from "./memory.js";
 export { useGit, useGitChangeCount, changeCount } from "./git.js";
 export type { GitSelection, GitTab } from "./git.js";
@@ -142,6 +144,10 @@ export function applyServerEvent(evt: WsServerEvent): void {
       }
       return;
 
+    case "chat-exemptions":
+      useChats.getState().setExemptions(evt.chatId, evt.exemptions);
+      return;
+
     case "permission-request":
       // Synthesize the inline pending permission card immediately (the server
       // only persists the `permission` row once it's resolved). The attention
@@ -191,6 +197,13 @@ export function applyServerEvent(evt: WsServerEvent): void {
 
     case "pr-update":
       usePanels.getState().upsertPr(evt.pr);
+      return;
+
+    // The catalog's live feed. Distinct from `pr-update` above, which is a
+    // chat-scoped one-shot keyed by PR NUMBER — numbers collide across repos,
+    // which is why the project-wide roster could never fold that one in.
+    case "pr-record-update":
+      usePrs.getState().upsert(evt.record);
       return;
 
     case "workflow-update":
@@ -343,9 +356,9 @@ function scheduleTurnEndRefresh(chatId: string): void {
  * core lists are unreachable (backend down) — the caller then keeps the mock.
  */
 export async function hydrateFromServer(): Promise<boolean> {
-  let projects, agents, modes, chats, attention, runners, terminals;
+  let projects, agents, modes, chats, attention, runners, terminals, prs;
   try {
-    [projects, agents, modes, chats, attention, runners, terminals] = await Promise.all([
+    [projects, agents, modes, chats, attention, runners, terminals, prs] = await Promise.all([
       api.projects.list(),
       api.agents.list(),
       api.modes.list(),
@@ -353,6 +366,10 @@ export async function hydrateFromServer(): Promise<boolean> {
       api.attention.list(),
       api.runners.list(),
       api.terminals.list().catch(() => []),
+      // The PR catalog. Non-gating like the terminals roster, and cheap: it's a
+      // read of the server's own store, not a `gh` call — which is exactly why
+      // the PRs tab can render on open with no fetch of its own.
+      api.prs.list().catch(() => []),
     ]);
   } catch {
     return false;
@@ -400,6 +417,7 @@ export async function hydrateFromServer(): Promise<boolean> {
   useAttention.getState().hydrate(attention);
   useRunners.getState().hydrate(runners, {});
   useTerminals.getState().hydrate(terminals, {});
+  usePrs.getState().hydrate(prs);
   // NOT `useMessages.hydrate({})`. Blanking every transcript here is what made a
   // reconnect feel like a page refresh: the open chat's rows went to `[]`, the
   // scroll container collapsed, and the refetch below landed the reader back at
@@ -429,12 +447,32 @@ export async function hydrateFromServer(): Promise<boolean> {
   if (activeProject) void loadProjectPanels(activeProject);
   const activeChat = useChats.getState().activeChatId;
   if (activeChat) void ensureChatMessages(activeChat);
+  // …and re-read whether that chat is running with a guard lifted. The store
+  // dropped every exemption on hydrate (see `useChats.hydrate`), so without this
+  // a reconnect leaves an unguarded chat looking guarded until the next grant.
+  if (activeChat) void loadExemptions(activeChat);
 
   // Re-materialize open permission/question cards dropped by the transcript wipe
   // above (see {@link restorePendingPermissions}).
   void restorePendingPermissions();
 
   return true;
+}
+
+/**
+ * Re-read one chat's live guard exemptions from the server.
+ *
+ * A REST read rather than something the WS snapshot carries, for the same reason
+ * `context-usage` is one: this is live-session state with no persistent home, so
+ * the only place it exists is the broker. Best-effort — a failed read leaves the
+ * previous answer rather than falsely clearing the chip.
+ */
+export async function loadExemptions(chatId: string): Promise<void> {
+  try {
+    useChats.getState().setExemptions(chatId, await api.chats.exemptions(chatId));
+  } catch {
+    /* keep whatever we last knew */
+  }
 }
 
 /**

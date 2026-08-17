@@ -9,6 +9,7 @@ import {
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn.js";
 import { LAYER } from "../../lib/layers.js";
+import { usableTop } from "../../lib/windowControls.js";
 
 export interface TooltipProps {
   label: ReactNode;
@@ -37,6 +38,8 @@ interface Pos {
  * header, a sidebar) or the viewport edge, and always shows in full:
  *   - flips to the opposite side when the preferred one is cramped,
  *   - clamps the cross-axis into the viewport,
+ *   - treats the window controls overlay's drag strip as NOT viewport — see
+ *     `usableTop`,
  *   - reflows on scroll/resize while open.
  */
 export function Tooltip({ label, side = "top", children, className, triggerClassName }: TooltipProps) {
@@ -55,10 +58,16 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
     const h = tipEl.offsetHeight;
     const vw = document.documentElement.clientWidth;
     const vh = document.documentElement.clientHeight;
+    // Not every pixel above the trigger is ours to use: with the window controls
+    // overlay the top band of the window is a drag strip with the system's close
+    // button on it. Measuring it here rather than assuming 0 is what stops a
+    // header tooltip from flipping UP into the OS chrome — which is exactly what
+    // it started doing when the strip gave it just enough room to "fit".
+    const top0 = usableTop();
 
     // Resolve the side, flipping to the opposite edge when the preferred one
     // can't fit the bubble and the far side has more room.
-    const roomTop = t.top;
+    const roomTop = t.top - top0;
     const roomBottom = vh - t.bottom;
     const roomLeft = t.left;
     const roomRight = vw - t.right;
@@ -76,10 +85,13 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
       left = t.left + t.width / 2 - w / 2;
       left = Math.max(MARGIN, Math.min(left, vw - w - MARGIN));
       top = resolved === "top" ? t.top - GAP - h : t.bottom + GAP;
-      top = Math.max(MARGIN, Math.min(top, vh - h - MARGIN));
+      // Clamped to the strip's bottom edge, not to 0 — otherwise a bubble too
+      // tall to fit anywhere gets pinned INTO the band this just stopped it
+      // choosing.
+      top = Math.max(top0 + MARGIN, Math.min(top, vh - h - MARGIN));
     } else {
       top = t.top + t.height / 2 - h / 2;
-      top = Math.max(MARGIN, Math.min(top, vh - h - MARGIN));
+      top = Math.max(top0 + MARGIN, Math.min(top, vh - h - MARGIN));
       left = resolved === "left" ? t.left - GAP - w : t.right + GAP;
       left = Math.max(MARGIN, Math.min(left, vw - w - MARGIN));
     }

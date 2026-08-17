@@ -134,6 +134,29 @@ export type ResolvedPrPolicy = z.infer<typeof ResolvedPrPolicySchema>;
 export const MERGE_HOLD_LABEL = "hold";
 
 /**
+ * Every label this app reads as "parked", not just the one it writes.
+ *
+ * `MERGE_HOLD_LABEL` is what `hold()` applies; these are the conventions a HUMAN
+ * may have applied instead, and a PR carrying `do-not-merge` must not be
+ * rendered as ready to land just because the label isn't spelled `hold`. The
+ * client had this set duplicated in two components with no shared definition —
+ * which is how "held" came to mean something slightly different in each panel.
+ */
+export const HOLD_LABELS: readonly string[] = [
+  MERGE_HOLD_LABEL,
+  "no-automerge",
+  "do-not-merge",
+  "wip",
+];
+
+/** Is this PR parked by a hold label? Case-insensitive, like `approve_pr`'s gate. */
+export function isHeldByLabel(labels: readonly string[] | undefined): boolean {
+  if (!labels?.length) return false;
+  const held = new Set(HOLD_LABELS);
+  return labels.some((l) => held.has(l.trim().toLowerCase()));
+}
+
+/**
  * GitHub's Copilot code reviewer. The `review` profile's default reviewer, and
  * the login every hand-rolled ship path in this repo already requested.
  *
@@ -347,6 +370,103 @@ export type WorkflowViolationKind = z.infer<typeof WorkflowViolationKindSchema>;
 export interface WorkflowViolation {
   kind: WorkflowViolationKind;
   reason: string;
+}
+
+/* --------------------------------------------------------------- exemptions */
+
+/**
+ * What a single granted exemption lifts.
+ *
+ * WHY this exists at all: on 2026-08-17 a GitHub outage poisoned a cache in
+ * `create_pr`, so the sanctioned path refused every call for the rest of the
+ * session — while the guard went on (correctly) refusing the raw `gh pr create`
+ * it redirects to. The chat sat on two finished, pushed branches it could not
+ * open PRs for, and the only escapes were editing project config (which changes
+ * the rule for every chat, permanently) or restarting the server. Both are far
+ * too big a hammer for "let this one chat run this one command".
+ *
+ * Deliberately only the WORKFLOW guard's kinds, plus `all`. The worktree guard
+ * (`git worktree add` → `mcp__manager__worktree`) is NOT exemptible: its
+ * sanctioned path has no observed failure mode, so there is no incident to
+ * justify a hole in it. Widen this when one exists, not before.
+ *
+ * `all` is offered because the guard an agent is blocked on is not always one it
+ * can name — a compound command trips whichever clause the classifier reaches
+ * first, and an agent that guesses wrong gets a grant that silently doesn't
+ * apply and re-asks. It stays the LOUD option everywhere it is rendered
+ * ({@link describeExemptionScope}), because it is the one that lifts guards
+ * nobody discussed.
+ */
+export const WorkflowExemptionScopeSchema = z.enum([
+  ...WorkflowViolationKindSchema.options,
+  "all",
+]);
+export type WorkflowExemptionScope = z.infer<typeof WorkflowExemptionScopeSchema>;
+
+/**
+ * How long a grant lives.
+ *
+ * The HUMAN picks this on the consent card, not the agent and not a constant:
+ * "just this once" and "for the rest of this chat" are answers to different
+ * situations (a one-off vs. a sanctioned path that's down for the session), and
+ * only the person approving knows which one they're in. An agent that could
+ * propose the lifetime would always propose the generous one.
+ *
+ * Neither survives the live session. Even `session` is in-memory on the broker's
+ * `LiveSession`, so a stop, a fork, or a server restart clears it — an exemption
+ * is a response to a live incident, and one that outlived the incident silently
+ * would be exactly the permanent config change this feature exists to avoid.
+ */
+export const WorkflowExemptionLifetimeSchema = z.enum(["once", "session"]);
+export type WorkflowExemptionLifetime = z.infer<typeof WorkflowExemptionLifetimeSchema>;
+
+/** One human-approved lift of a guard, scoped to one chat's live session. */
+export const WorkflowExemptionSchema = z.object({
+  id: z.string(),
+  scope: WorkflowExemptionScopeSchema,
+  lifetime: WorkflowExemptionLifetimeSchema,
+  /** The agent's stated justification, as the human approved it. */
+  reason: z.string(),
+  /**
+   * The command the agent said it would run. Shown on the card and in the UI,
+   * but deliberately NOT part of the match: a retry with a corrected flag is the
+   * same intent, and an exemption that stopped applying there would read to the
+   * agent as "the grant didn't work" and send it back for another card.
+   */
+  command: z.string().optional(),
+  grantedAt: z.number().int(),
+  /** How many blocked commands this grant has actually let through. */
+  uses: z.number().int().nonnegative(),
+});
+export type WorkflowExemption = z.infer<typeof WorkflowExemptionSchema>;
+
+/** Whether a grant covers a given violation. `all` covers every kind. */
+export function exemptionCovers(
+  exemption: Pick<WorkflowExemption, "scope">,
+  kind: WorkflowViolationKind,
+): boolean {
+  return exemption.scope === "all" || exemption.scope === kind;
+}
+
+/**
+ * The scope, in the words a human reads on the card and on the chip.
+ *
+ * One definition, because the card and the chip disagreeing about what was
+ * granted is the failure mode a consent surface can least afford.
+ */
+export function describeExemptionScope(scope: WorkflowExemptionScope): string {
+  switch (scope) {
+    case "commit-on-trunk":
+      return "committing on the trunk";
+    case "push-to-trunk":
+      return "pushing to the trunk";
+    case "manual-merge":
+      return "merging by hand (`gh pr merge` / `git merge`)";
+    case "pr-create-by-hand":
+      return "opening a PR by hand (`gh pr create`)";
+    case "all":
+      return "EVERY workflow guard";
+  }
 }
 
 /** Context the classifier needs about where a command is about to run. */

@@ -6,6 +6,7 @@ import type {
   ReviewThread,
   WsServerEvent,
   ProjectMemory,
+  WorkflowExemption,
 } from "@dispatch/shared";
 import { EventBus } from "../../bus.js";
 import { memorySimilarity } from "../memory.js";
@@ -14,6 +15,9 @@ import {
   createManagerMcpServer,
   prLandingBlockers,
   overrideConsentPrompt,
+  exemptionConsentQuestion,
+  readExemptionAnswer,
+  EXEMPTION_ANSWERS,
   prCreateBlockers,
   WAIT_CAP_SECONDS,
   PR_POLL_INTERVAL_MS,
@@ -25,12 +29,14 @@ import {
   type ManagerMcpPrApproval,
   type ManagerMcpPrCreate,
   type PrPollResult,
+  type PrWatchSnapshot,
   type PrReadiness,
   type PrLandingPolicy,
   type PrLandingBlocker,
   type PrCreateState,
   type PrCreateResult,
   type ManagerMcpChats,
+  type ManagerMcpExemptions,
   type SpawnChatConsent,
   type SpawnChatRequest,
   type SpawnChatTarget,
@@ -320,9 +326,13 @@ interface PollSnap {
 }
 
 /**
- * A scriptable ManagerMcpGitHub. `prMergeState` advances to the next snapshot on
- * each call (the watcher polls it first every iteration); `prChecks`/
- * `reviewThreads` read the CURRENT snapshot, so one snapshot = one poll cycle.
+ * A scriptable ManagerMcpGitHub. Each `pollPrState` call advances to the next
+ * snapshot, so one snapshot = one poll cycle — which is now literally true, the
+ * whole poll being one call.
+ *
+ * A snapshot that scripts no `review` yields `review: null`, i.e. "this poll
+ * carried no read of the reviewer queue". That's the path a narrower binding
+ * takes, and it must stay silent rather than reporting a stall it cannot see.
  */
 function fakeGitHub(
   snaps: PollSnap[],
@@ -330,24 +340,30 @@ function fakeGitHub(
   const calls: { number: number; repo?: string }[] = [];
   let idx = -1;
   const cur = (): PollSnap => snaps[Math.min(Math.max(idx, 0), snaps.length - 1)]!;
+  const scriptsReview = snaps.some((s) => s.review !== undefined);
   return {
     calls,
-    prMergeState: async (n, repo) => {
+    pollPrState: async (n, repo) => {
       calls.push({ number: n, repo });
       idx = Math.min(idx + 1, snaps.length - 1);
-      return cur().merge;
+      const snap = cur();
+      if (!snap.merge) return null;
+      return {
+        ...snap.merge,
+        checks: snap.checks === undefined ? [] : snap.checks,
+        threads: snap.threads === undefined ? [] : snap.threads,
+        review: scriptsReview ? (snap.review ?? null) : null,
+      };
     },
-    prChecks: async () => (cur().checks === undefined ? [] : cur().checks!),
-    reviewThreads: async () => (cur().threads === undefined ? [] : cur().threads!),
-    // Only bound when at least one snapshot scripts a queue, so the "no
-    // prReviewState on this binding" path is exercised by every other test.
-    ...(snaps.some((s) => s.review !== undefined)
-      ? { prReviewState: async () => cur().review ?? null }
-      : {}),
   };
 }
 
 const OPEN: PrPollResult = { number: 83, state: "open", merged: false };
+
+/** One `pollPrState` answer, built from just the pieces a test cares about. */
+function snap(over: Partial<PrWatchSnapshot> = {}): PrWatchSnapshot {
+  return { ...OPEN, checks: [], threads: [], review: null, ...over };
+}
 const FAIL_BUILD: CheckRun = {
   name: "build",
   status: "completed",
@@ -591,10 +607,7 @@ describe("manager-mcp — watch_pr", () => {
       reported: [{ author: "Copilot", state: "APPROVED" }],
     };
     const gh: ManagerMcpGitHub = {
-      prMergeState: async () => OPEN,
-      prChecks: async () => [RUNNING_BUILD],
-      reviewThreads: async () => [],
-      prReviewState: async () => queue,
+      pollPrState: async () => snap({ checks: [RUNNING_BUILD], review: queue }),
     };
     const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
@@ -641,16 +654,15 @@ describe("manager-mcp — watch_pr", () => {
     expect(resultText(await p)).not.toContain("review-stalled");
   });
 
-  // A binding with no `prReviewState` at all (an older/narrower GitHub surface)
-  // must watch normally and never mention a stall. Most tests in this file run
-  // on such a binding; this one states the contract by name.
-  it("watches normally when the binding has no prReviewState at all", async () => {
+  // A poll that carries NO read of the reviewer queue (an older/narrower GitHub
+  // surface) must watch normally and never mention a stall. Most tests in this
+  // file run on such a poll; this one states the contract by name.
+  it("watches normally when the poll carries no reviewer queue", async () => {
     const gh: ManagerMcpGitHub = {
-      prMergeState: async () => OPEN,
-      prChecks: async () => [PASS_BUILD],
-      reviewThreads: async () => [THREAD_A],
-      // no prReviewState — `gh.prReviewState?.(…)` short-circuits the whole chain
-      // (including the `.catch`), so this is a quiet no-op, not a crash.
+      // `review: null` — no queue read this poll, which is a different claim
+      // from an empty queue and must not be reported as a stall.
+      pollPrState: async () =>
+        snap({ checks: [PASS_BUILD], threads: [THREAD_A], review: null }),
     };
     const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
@@ -670,10 +682,7 @@ describe("manager-mcp — watch_pr", () => {
     let review: { requested: string[]; reported: Array<{ author: string; state: string }> } | null =
       { requested: [], reported: [] };
     const gh: ManagerMcpGitHub = {
-      prMergeState: async () => OPEN,
-      prChecks: async () => [RUNNING_BUILD],
-      reviewThreads: async () => [],
-      prReviewState: async () => review,
+      pollPrState: async () => snap({ checks: [RUNNING_BUILD], review }),
     };
     const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
@@ -843,13 +852,11 @@ describe("manager-mcp — watch_pr", () => {
     expect(resultText(res)).toContain("cancelled");
   });
 
-  it("returns an informative error when the merge poll throws (gh error)", async () => {
+  it("returns an informative error when the poll throws (gh error)", async () => {
     const gh: ManagerMcpGitHub = {
-      prMergeState: async () => {
+      pollPrState: async () => {
         throw new Error("gh: not authenticated");
       },
-      prChecks: async () => [],
-      reviewThreads: async () => [],
     };
     const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
@@ -911,9 +918,7 @@ function fakeThreadGitHub(
   return {
     replies,
     resolved,
-    prMergeState: async () => OPEN,
-    prChecks: async () => [],
-    reviewThreads: async () => [],
+    pollPrState: async () => snap(),
     replyToThread: async (id, body) => {
       if (opts.replyThrows) throw new Error(opts.replyThrows);
       replies.push([id, body]);
@@ -1091,11 +1096,9 @@ describe("manager-mcp — request_review", () => {
     const queued = verify === undefined ? result.requested : verify;
     return {
       asked,
-      prMergeState: async () => OPEN,
-      prChecks: async () => [],
-      reviewThreads: async () => [],
       defaultReviewers: defaults,
-      prReviewState: async () => (queued === null ? null : { requested: queued, reported: [] }),
+      pollPrState: async () =>
+        snap({ review: queued === null ? null : { requested: queued, reported: [] } }),
       requestReviewers: async (n, list) => {
         asked.push({ n, list });
         return result;
@@ -1634,6 +1637,217 @@ describe("prCreateBlockers", () => {
       readyBranch({ branch: "main", aheadOfBase: 0, dirty: true }),
     ).map((b) => b.code);
     expect(codes).toEqual(["on-trunk", "no-commits", "dirty"]);
+  });
+});
+
+/* ------------------------------------------------------ request_exemption */
+
+/** A scriptable exemption binding recording exactly what it was asked for. */
+function fakeExemptions(
+  opts: {
+    verdict?: Awaited<ReturnType<ManagerMcpExemptions["request"]>>;
+    throws?: string;
+    existing?: WorkflowExemption[];
+  } = {},
+) {
+  const asked: Parameters<ManagerMcpExemptions["request"]>[0][] = [];
+  const binding: ManagerMcpExemptions = {
+    request: async (input) => {
+      asked.push(input);
+      if (opts.throws) throw new Error(opts.throws);
+      return opts.verdict ?? { granted: false };
+    },
+    list: () => opts.existing ?? [],
+  };
+  return { binding, asked };
+}
+
+function granted(over: Partial<WorkflowExemption> = {}): WorkflowExemption {
+  return {
+    id: "x1",
+    scope: "pr-create-by-hand",
+    lifetime: "session",
+    reason: "create_pr keeps refusing with 'Could not resolve this chat's repo or branch'",
+    grantedAt: 1,
+    uses: 0,
+    ...over,
+  };
+}
+
+describe("manager-mcp — request_exemption", () => {
+  it("reports the grant and its lifetime when the human says yes", async () => {
+    const { binding, asked } = fakeExemptions({
+      verdict: { granted: true, exemption: granted({ lifetime: "once" }) },
+    });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    const res = await requestExemption.handler(
+      { guard: "pr-create-by-hand", reason: "create_pr is down", command: "gh pr create --fill" },
+      {},
+    );
+    expect(asked).toEqual([
+      {
+        scope: "pr-create-by-hand",
+        reason: "create_pr is down",
+        command: "gh pr create --fill",
+      },
+    ]);
+    const text = resultText(res);
+    expect(text).toContain("Granted");
+    expect(text).toContain("one shot");
+    expect(JSON.parse(text.slice(text.lastIndexOf("{")))).toMatchObject({
+      granted: true,
+      lifetime: "once",
+    });
+  });
+
+  it("treats a refusal as an ANSWER, not an error, and says don't re-ask", async () => {
+    // Same shape as the approve_pr override decline: flagging it as an error is
+    // what pushes a model into retrying the thing it was just told not to do.
+    const { binding } = fakeExemptions({
+      verdict: { granted: false, message: "fix create_pr instead" },
+    });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    const res = await requestExemption.handler(
+      { guard: "pr-create-by-hand", reason: "blocked", command: undefined },
+      {},
+    );
+    expect(res.isError).toBeFalsy();
+    const text = resultText(res);
+    expect(text).toContain("fix create_pr instead");
+    expect(text).toMatch(/don't re-ask/i);
+    expect(JSON.parse(text.slice(text.lastIndexOf("{")))).toMatchObject({ granted: false });
+  });
+
+  it("fails CLOSED when the card can't be raised at all", async () => {
+    const { binding } = fakeExemptions({ throws: "no live session to ask through" });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    const text = resultText(
+      await requestExemption.handler({ guard: "all", reason: "everything is broken", command: undefined }, {}),
+    );
+    expect(text).toContain("Not granted");
+    expect(text).toContain("no live session");
+  });
+
+  it("doesn't spend a second card on a guard that's already lifted", async () => {
+    const { binding, asked } = fakeExemptions({ existing: [granted()] });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    const text = resultText(
+      await requestExemption.handler(
+        { guard: "pr-create-by-hand", reason: "still stuck", command: undefined },
+        {},
+      ),
+    );
+    expect(asked).toEqual([]);
+    expect(text).toContain("Already exempt");
+  });
+
+  it("counts an existing `all` grant as covering a narrower ask", async () => {
+    const { binding, asked } = fakeExemptions({ existing: [granted({ scope: "all" })] });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    await requestExemption.handler({ guard: "push-to-trunk", reason: "x", command: undefined }, {});
+    expect(asked).toEqual([]);
+  });
+
+  it("still asks for `all` when only a narrow grant is held", async () => {
+    const { binding, asked } = fakeExemptions({ existing: [granted()] });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    await requestExemption.handler({ guard: "all", reason: "x", command: undefined }, {});
+    expect(asked).toHaveLength(1);
+  });
+
+  it("refuses a request with no reason — that's the whole basis for the decision", async () => {
+    const { binding, asked } = fakeExemptions();
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    const res = await requestExemption.handler(
+      { guard: "pr-create-by-hand", reason: "   ", command: undefined },
+      {},
+    );
+    expect(res.isError).toBe(true);
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("exemptionConsentQuestion / readExemptionAnswer", () => {
+  it("quotes the command and the agent's reason — the two things worth reading", () => {
+    const q = exemptionConsentQuestion({
+      scope: "pr-create-by-hand",
+      command: "gh pr create --fill --base main",
+      reason: "create_pr returns 'Could not resolve this chat's repo or branch'",
+    });
+    expect(q.question).toContain("gh pr create --fill --base main");
+    expect(q.question).toContain("Could not resolve");
+    expect(q.question).toContain("THIS CHAT");
+    expect(q.options.map((o) => o.label)).toEqual([
+      EXEMPTION_ANSWERS.once,
+      EXEMPTION_ANSWERS.session,
+      EXEMPTION_ANSWERS.no,
+    ]);
+  });
+
+  it("shouts about `all`, which is the grant that covers guards nobody discussed", () => {
+    const q = exemptionConsentQuestion({ scope: "all", reason: "several guards at once" });
+    expect(q.question).toContain("EVERY workflow guard");
+    // …and doesn't shout on a narrow one, or the warning means nothing.
+    expect(
+      exemptionConsentQuestion({ scope: "push-to-trunk", reason: "x" }).question,
+    ).not.toContain("EVERY workflow guard");
+  });
+
+  it("maps only the two YES labels to a lifetime; everything else is a NO", () => {
+    expect(readExemptionAnswer(EXEMPTION_ANSWERS.once)).toBe("once");
+    expect(readExemptionAnswer(EXEMPTION_ANSWERS.session)).toBe("session");
+    expect(readExemptionAnswer(EXEMPTION_ANSWERS.no)).toBeNull();
+    expect(readExemptionAnswer(undefined)).toBeNull();
+    // Free-form prose is NOT consent to a particular scope — reading it as one
+    // is exactly the inference that produced the unreviewed merge confirmOverride
+    // exists to prevent.
+    expect(readExemptionAnswer("yeah go on then")).toBeNull();
+  });
+
+  it("still reads a picked option when the human attached a note to it", () => {
+    // The card appends notes as `<label> — additional instructions: …`. An
+    // exact-match read would turn a yes-with-a-caveat into a silent denial.
+    expect(
+      readExemptionAnswer(`${EXEMPTION_ANSWERS.session} — additional instructions: only for #93`),
+    ).toBe("session");
+    expect(
+      readExemptionAnswer(`${EXEMPTION_ANSWERS.no} — additional instructions: fix create_pr`),
+    ).toBeNull();
   });
 });
 
@@ -3053,6 +3267,27 @@ describe("manager-mcp — server factory", () => {
         prCreate: fakePrCreate(readyBranch()).binding,
       }),
     ).toContain("create_pr");
+  });
+
+  it("registers request_exemption ONLY when the exemptions binding is present", () => {
+    // Bound only where a guard is actually enforcing. Offering it anywhere else
+    // invites the agent to ask for permission nobody needed to give.
+    const names = (ctx: Parameters<typeof createManagerMcpServer>[0]) =>
+      Object.keys(
+        (createManagerMcpServer(ctx) as unknown as {
+          instance: { _registeredTools?: Record<string, unknown> };
+        }).instance._registeredTools ?? {},
+      );
+
+    expect(names({ chatId: "c1", bus, broker: fakeBroker({}) })).not.toContain("request_exemption");
+    expect(
+      names({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({}),
+        exemptions: fakeExemptions().binding,
+      }),
+    ).toContain("request_exemption");
   });
 
   it("registers spawn_chat ONLY when the chats binding is present", () => {

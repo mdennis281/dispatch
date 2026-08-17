@@ -61,6 +61,7 @@ import {
   openAppSettings,
   openProjectSettings,
 } from "../../stores/view.js";
+import { openWorkspace } from "../../stores/workspace.js";
 import { APP_SECTIONS } from "../settings/appSections.js";
 import { SECTIONS } from "../config/sections.js";
 import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
@@ -276,15 +277,15 @@ export function CommandPalette({
           "files file explorer browse folder directory disk drive volume mount path finder manager",
         run: () => useView.getState().setView("files"),
       });
-      // Project-wide open-PR board (distinct from the per-chat "Go to PRs" panel).
+      // The tracked-PR catalog (distinct from the per-chat "Go to PRs" panel).
       list.push({
         id: "project-prs",
-        title: "Open pull requests",
-        subtitle: `all open PRs in ${project.name}`,
+        title: "Pull requests",
+        subtitle: "tracked PRs, with live review and CI state",
         group: "Navigate",
         icon: <GitPullRequest />,
-        keywords: "pr pull request github review merge hold board project all open",
-        run: () => openOverlay("prs"),
+        keywords: "pr pull request github review merge hold board project all open tracked",
+        run: () => openWorkspace("prs"),
       });
       // MCP catalog — every tool endpoint (custom manager + external) for the project.
       list.push({

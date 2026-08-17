@@ -198,6 +198,10 @@ export const ReviewThreadSchema = z.object({
   line: z.number().int().nullable().optional(),
   author: z.string().optional(),
   body: z.string().optional(),
+  /** Deep link to the first comment, so a row in the PR catalog is clickable. */
+  url: z.string().optional(),
+  /** ISO timestamp of the first comment — drives "newest comment" ordering. */
+  createdAt: z.string().optional(),
 });
 export type ReviewThread = z.infer<typeof ReviewThreadSchema>;
 
@@ -228,6 +232,135 @@ export const PRInfoSchema = z.object({
   createdAt: z.string().optional(),
 });
 export type PRInfo = z.infer<typeof PRInfoSchema>;
+
+/* ------------------------------------------------------------- PR registry */
+
+/**
+ * What ONE reviewer is actually doing right now.
+ *
+ * The terminal three (`approved` / `changes_requested` / `commented`) were the
+ * only states this app could see, because they're the only ones REST exposes —
+ * and they cannot answer the question that matters while you wait: has the
+ * reviewer STARTED? `in_progress` is that answer. GitHub represents a review
+ * that has been begun but not submitted as a `PENDING` PullRequestReview, and
+ * the GraphQL API returns another author's PENDING review where
+ * `GET /pulls/{n}/reviews` omits it entirely. That PENDING row is precisely the
+ * "Copilot is reviewing…" spinner on the PR page.
+ *
+ * `requested` is the weaker claim: on the hook, nothing begun that we can see.
+ */
+export const PrReviewerStateSchema = z.enum([
+  "requested",
+  "in_progress",
+  "approved",
+  "changes_requested",
+  "commented",
+  "dismissed",
+]);
+export type PrReviewerState = z.infer<typeof PrReviewerStateSchema>;
+
+/** What KIND of account a reviewer is — bots are reviewers here, not an edge case. */
+export const PrReviewerKindSchema = z.enum(["user", "bot", "team", "mannequin"]);
+export type PrReviewerKind = z.infer<typeof PrReviewerKindSchema>;
+
+/** One reviewer on a PR, and where they've got to. */
+export const PrReviewerSchema = z.object({
+  login: z.string(),
+  kind: PrReviewerKindSchema.default("user"),
+  state: PrReviewerStateSchema,
+  /** ISO timestamp of their latest SUBMITTED review, when they have one. */
+  submittedAt: z.string().optional(),
+  /**
+   * They reviewed a commit that is no longer this PR's head — so their verdict
+   * is about code you have since replaced. Distinct from having no review at
+   * all, and the difference decides whether re-requesting them is warranted.
+   */
+  stale: z.boolean().optional(),
+});
+export type PrReviewer = z.infer<typeof PrReviewerSchema>;
+
+/**
+ * A tracked pull request — the third catalog, beside worktrees and terminals.
+ *
+ * Keyed `owner/repo#number` rather than by number alone: PR numbers restart at 1
+ * per repository, and a store keyed on the bare number let one project's PR #7
+ * overwrite another's (the exact hazard `ProjectPRsView` documents as its reason
+ * for refusing to fold `pr-update` in at all).
+ *
+ * This holds LIVE STATE, continuously tracked, which is what separates it from
+ * everything that came before: `Chat.prs` records only that a chat owns a PR,
+ * and the old project overlay re-fetched from `gh` on every open and kept
+ * nothing. `Chat.prs` remains the ownership pointer — `chatId` here is copied
+ * FROM it — so the settled-PR green dot keeps reading the record it always has.
+ */
+export const PrRecordSchema = z.object({
+  /** `owner/repo#number` — the primary key. */
+  key: z.string(),
+  repo: z.string(),
+  number: z.number().int(),
+  url: z.string(),
+  title: z.string().default(""),
+  branch: z.string().default(""),
+  baseBranch: z.string().default(""),
+  state: z.enum(["open", "closed", "merged"]).default("open"),
+  isDraft: z.boolean().default(false),
+  author: z.string().optional(),
+  labels: z.array(z.string()).default([]),
+  /** Parked by a hold label (see `isHeldByLabel`) — precomputed for the roster. */
+  hold: z.boolean().default(false),
+  /**
+   * false = MERGE CONFLICTS. null = GitHub hasn't computed it yet, which it
+   * reports as `UNKNOWN` on a PR it has only just been asked about — treating
+   * that as "conflicted" would flag half the PRs opened in the last minute.
+   */
+  mergeable: z.boolean().nullable().default(null),
+  mergeStateStatus: z.string().optional(),
+  reviewDecision: ReviewDecisionSchema.nullable().default(null),
+  reviewers: z.array(PrReviewerSchema).default([]),
+  threads: z.array(ReviewThreadSchema).default([]),
+  checks: z.array(CheckRunSchema).default([]),
+  /** Issue-comment count (review threads are counted separately, in `threads`). */
+  commentCount: z.number().int().optional(),
+  /** Head sha, so a reviewer's verdict can be dated against the current code. */
+  headRefOid: z.string().optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+  mergedAt: z.string().optional(),
+  closedAt: z.string().optional(),
+
+  /* --- registry scope (RegistryScoped) --- */
+  projectId: z.string().optional(),
+  /**
+   * The chat that owns this PR, from its `Chat.prs`. Absent = nobody in Dispatch
+   * opened it — a human's PR, a bot's. Shown as "unattributed", exactly like a
+   * worktree that appeared from outside: a visible, fixable state rather than an
+   * invisible one.
+   */
+  chatId: z.string().optional(),
+
+  /* --- tracking bookkeeping --- */
+  firstSeenAt: z.number().int(),
+  /** Last completed poll, epoch ms. 0 = created from a ref, never polled yet. */
+  lastPolledAt: z.number().int().default(0),
+  /** Last poll at which any tracked field actually CHANGED — the recency stamp. */
+  lastChangedAt: z.number().int(),
+  /** Earliest epoch ms the sweep should poll this row again (adaptive cadence). */
+  nextPollAt: z.number().int().default(0),
+  /** Consecutive polls that changed nothing — drives the backoff ladder. */
+  quietPolls: z.number().int().default(0),
+  /**
+   * Why the last poll failed. Kept ON the row rather than dropping it: a stale
+   * row that says why it's stale is honest; one that silently keeps showing
+   * five-minute-old state as current is not.
+   */
+  pollError: z.string().optional(),
+});
+export type PrRecord = z.infer<typeof PrRecordSchema>;
+
+/** Compose the registry key. The one place the `repo#number` shape is spelled. */
+export function prRecordKey(repo: string, number: number): string {
+  return `${repo}#${number}`;
+}
 
 /** A GitHub Actions workflow definition. */
 export const WorkflowDefSchema = z.object({
@@ -487,6 +620,18 @@ export const WorktreeInfoSchema = z.object({
   lastSeenAt: z.number().int().optional(),
   /** True for the project's primary checkout (never a disposable worktree). */
   isPrimary: z.boolean().optional(),
+  /**
+   * Whether this branch's work has landed on the trunk. UNDEFINED means nobody
+   * could tell — no resolvable trunk ref, or no store to read PRs from — which
+   * is a third answer, not a `false`.
+   *
+   * Two sources, OR'd, because neither alone is enough (see
+   * `WorktreeService.mergedBranches`): git's own ancestry, and the merged PRs
+   * Dispatch recorded. A squash merge rewrites history, so a landed branch is
+   * NOT an ancestor of the trunk and git will call it unmerged forever — which
+   * on a squash-merging repo would be almost every branch here.
+   */
+  merged: z.boolean().optional(),
 });
 export type WorktreeInfo = z.infer<typeof WorktreeInfoSchema>;
 

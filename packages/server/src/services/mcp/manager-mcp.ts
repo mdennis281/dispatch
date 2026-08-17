@@ -38,6 +38,15 @@
  *     `allowNoChecks`/`allowNoReview` escape hatches don't grant themselves: a
  *     load-bearing one goes to the human as a permission card and waits
  *     ({@link ManagerMcpPrApproval.confirmOverride}).
+ *   - `mcp__manager__request_exemption({ guard, reason, command? })` — ASK the human
+ *     to lift ONE command guard for THIS CHAT (see {@link ManagerMcpExemptions}).
+ *     The escape hatch for the 2026-08-17 shape of failure: the sanctioned path a
+ *     guard redirects to breaks, the guard goes on (correctly) refusing the raw
+ *     command, and the chat is stranded with the only exits being a permanent
+ *     project-config edit or a server restart. It grants nothing itself — the
+ *     human picks whether the grant covers one command or the rest of the chat,
+ *     a refusal is final, and the grant dies with the live session. Offered only
+ *     where the guard is actually enforcing.
  *   - `mcp__manager__spawn_chat({ prompt, projectId?, … })` — start ANOTHER chat
  *     (via {@link ManagerMcpChats}), but only after the human says yes. The
  *     consent rides the broker's ordinary permission channel, so the request
@@ -67,7 +76,9 @@ import {
   MemoryTypeSchema,
   ManifestMcpTransportSchema,
   MERGE_HOLD_LABEL,
+  WorkflowExemptionScopeSchema,
   WorkflowMergeMethodSchema,
+  describeExemptionScope,
   type ChatStatus,
   type CheckRun,
   type ContextUsage,
@@ -78,6 +89,9 @@ import {
   type ReviewThread,
   type RegistryScope,
   type TerminalInfo,
+  type WorkflowExemption,
+  type WorkflowExemptionLifetime,
+  type WorkflowExemptionScope,
   type WorkflowMergeMethod,
   type WorktreeInfo,
 } from "@dispatch/shared";
@@ -308,36 +322,47 @@ export interface PrPollResult {
 }
 
 /**
- * The narrow GitHub surface the manager MCP needs to watch a PR — its merge/close
- * state, its CI checks, and its review threads — already bound to this session's
- * default repo (its worktree cwd, else the project root) by the broker. `repo` is
- * an optional `owner/name` override.
+ * ONE poll of a PR: its merge/close state plus every signal the watch reacts to,
+ * read together.
  *
- * `prMergeState` null = the PR/repo couldn't be resolved (unknown PR / gh error)
- * and ENDS the watch as an error. `prChecks`/`reviewThreads` null = that signal
- * couldn't be read THIS poll (a transient gh hiccup); the watch treats it as "no
- * new activity of that kind" and keeps going rather than aborting. Omitted from
- * the ctx → the `watch_pr` tool isn't offered.
+ * They travel together because they are now READ together — one GraphQL query
+ * rather than the five `gh` subprocess spawns this tool used to make per poll
+ * (see `GitHubService.pollPrState`). The same body feeds the background sweep
+ * and the PR catalog, so the app and the agent can no longer hold different
+ * beliefs about the same pull request.
+ *
+ * The three signal fields stay INDEPENDENTLY nullable even though the real
+ * binding always fills them in. `null` means "this poll carried no read of that
+ * signal", which is a different claim from an empty array — an empty check list
+ * is what makes `no-checks` honest, and an empty reviewer queue is what makes
+ * `review-stalled` fire. Collapsing the two would turn a failed read into a
+ * confident false alarm, which is the exact bug the review-queue code exists to
+ * prevent.
+ */
+export interface PrWatchSnapshot extends PrPollResult {
+  /* Structurally a subset of `GitHubService`'s PrPollSnapshot; kept separate so
+     this module stays decoupled from that service, as the rest of it is. */
+  checks: CheckRun[] | null;
+  threads: ReviewThread[] | null;
+  review: {
+    requested: string[];
+    reported: Array<{ author: string; state: string }>;
+  } | null;
+}
+
+/**
+ * The narrow GitHub surface the manager MCP needs to watch a PR — already bound
+ * to this session's default repo (its worktree cwd, else the project root) by
+ * the broker. `repo` is an optional `owner/name` override.
+ *
+ * `pollPrState` null = no snapshot could be produced (unknown PR, unresolvable
+ * repo, gh/GraphQL failure) and ENDS the watch as an error — the same contract
+ * the merge-state read has always had, now covering the whole poll because the
+ * whole poll is one call. Omitted from the ctx → the `watch_pr` tool isn't
+ * offered.
  */
 export interface ManagerMcpGitHub {
-  prMergeState(prNumber: number, repo?: string): Promise<PrPollResult | null>;
-  prChecks(prNumber: number, repo?: string): Promise<CheckRun[] | null>;
-  reviewThreads(prNumber: number, repo?: string): Promise<ReviewThread[] | null>;
-  /**
-   * Who is CURRENTLY on the hook to review, and who has already reported. null =
-   * couldn't read this poll (treated like a failed checks read: no news, not an
-   * abort).
-   *
-   * The watch needs this because GitHub CLEARS a reviewer's request the moment
-   * they submit a review, and pushing fix commits does not re-queue them. Without
-   * it, `watch_pr` cannot tell "the reviewer is working on it" from "nobody will
-   * ever look at this again" — and it spent the whole quiet window on the second
-   * one, reporting it as waiting.
-   */
-  prReviewState?(
-    prNumber: number,
-    repo?: string,
-  ): Promise<{ requested: string[]; reported: Array<{ author: string; state: string }> } | null>;
+  pollPrState(prNumber: number, repo?: string): Promise<PrWatchSnapshot | null>;
   /** Put reviewers back on the hook. Omitted → the `request_review` tool isn't offered. */
   requestReviewers?(
     prNumber: number,
@@ -749,6 +774,110 @@ export function overrideConsentPrompt(
   };
 }
 
+/* ------------------------------------------------- guard-exemption consent */
+
+/**
+ * The three answers the exemption card offers.
+ *
+ * Exported constants rather than inline strings because the card BUILDS them and
+ * the broker READS them back out of the human's answer — a typo that made those
+ * two disagree would silently turn every "yes" into a denial, which is the one
+ * failure mode a consent surface can't be allowed to have quietly.
+ */
+export const EXEMPTION_ANSWERS: Record<WorkflowExemptionLifetime | "no", string> = {
+  once: "Just this once",
+  session: "Rest of this chat",
+  no: "No — keep the guard",
+};
+
+/**
+ * The card the human reads before a guard stops applying to a chat.
+ *
+ * A QUESTION card, not the binary approve/deny one `approve_pr`'s override uses,
+ * for one reason: the lifetime is part of the decision and only the human is in
+ * a position to make it. "Just this once" and "rest of this chat" answer
+ * different situations — a one-off vs. a sanctioned path that is down for the
+ * session — and an agent allowed to propose which it needed would always propose
+ * the generous one. Both ride the same permission channel, so this is still the
+ * same Attention Queue entry, notifier webhook and teardown-denies-pending
+ * behaviour as any tool prompt.
+ *
+ * Pure and separate from the tool so the wording is directly testable. The card
+ * states the COMMAND and the agent's stated reason verbatim: "lift a guard?"
+ * with neither of those is a rubber stamp with extra steps.
+ */
+export function exemptionConsentQuestion(input: {
+  scope: WorkflowExemptionScope;
+  command?: string;
+  reason: string;
+}): ManagerAskQuestion {
+  const lines = [
+    `The agent is blocked by Dispatch's workflow guard on ${describeExemptionScope(input.scope)}. ` +
+      `Lift it for THIS CHAT only?`,
+  ];
+  // `all` is the one grant that covers guards nobody discussed, so it says so in
+  // its own sentence rather than hiding inside a scope label.
+  if (input.scope === "all") {
+    lines.push(
+      "⚠️ This is EVERY workflow guard at once — trunk commits, trunk pushes, hand " +
+        "merges and hand-opened PRs all stop being refused in this chat.",
+    );
+  }
+  if (input.command) lines.push(`It wants to run: ${clip(input.command, 300)}`);
+  lines.push(`Its reason: ${clip(input.reason, 500)}`);
+  lines.push(
+    "Nothing outside this chat changes, and the grant dies with this session.",
+  );
+  return {
+    header: "Lift a guard?",
+    question: lines.join("\n\n"),
+    options: [
+      {
+        label: EXEMPTION_ANSWERS.once,
+        description:
+          "Lifts it for the single next command that trips this guard, then it's gone.",
+      },
+      {
+        label: EXEMPTION_ANSWERS.session,
+        description:
+          "Stays lifted until this session ends. Shown as a chip on the chat header, " +
+          "where you can revoke it.",
+      },
+      {
+        label: EXEMPTION_ANSWERS.no,
+        description: "The refusal stands, and the agent is told not to re-ask.",
+      },
+    ],
+  };
+}
+
+/**
+ * Map the human's answer back to a lifetime, or null for "not granted".
+ *
+ * Anything that isn't one of the two YES labels is a NO — including the free-form
+ * answer the question card always offers. That direction is deliberate: a human
+ * who typed prose instead of picking an option has not agreed to a specific
+ * scope, and reading their words as consent is exactly the inference that
+ * produced the unreviewed merge `confirmOverride` exists to prevent. Their text
+ * still reaches the agent as the reason it was refused.
+ */
+export function readExemptionAnswer(answer: string | undefined): WorkflowExemptionLifetime | null {
+  // The card appends any note the human typed as `<label> — additional
+  // instructions: …` (see `answerText`), so an exact-match read would turn
+  // "Rest of this chat, but only for PR #93" into a silent DENIAL. Match the
+  // chosen label instead. Safe because the three labels share no prefix.
+  const picked = (answer ?? "").split(" — additional instructions:")[0]?.trim();
+  if (picked === EXEMPTION_ANSWERS.once) return "once";
+  if (picked === EXEMPTION_ANSWERS.session) return "session";
+  return null;
+}
+
+/** Single-line clip for text quoted onto a consent card. */
+function clip(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
 export function prLandingBlockers(
   pr: PrReadiness,
   policy: PrLandingPolicy = {},
@@ -1035,6 +1164,34 @@ export interface ManagerMcpInspect {
   projectInfo(q: ProjectInfoQuery): Promise<ProjectInfoResult>;
 }
 
+/**
+ * The guard-exemption surface for this session (omitted → no
+ * `request_exemption` tool).
+ *
+ * One call, and it is the ASK — there is deliberately no "grant" method the tool
+ * could reach on its own, for the same structural reason `approve_pr`'s
+ * `allowNoReview` stopped deciding anything: an escape hatch whose entire
+ * justification is "the situation warrants it" cannot be certified by the one
+ * party who is not a witness to that. The agent supplies the scope, the command
+ * and the reason; the human supplies the answer AND the lifetime.
+ *
+ * A refusal, a timeout, and no-live-session-to-ask-through all come back the
+ * same way: not granted. Fail closed — the guard stands.
+ */
+export interface ManagerMcpExemptions {
+  request(input: {
+    scope: WorkflowExemptionScope;
+    /** The command the agent intends to run, verbatim. Shown on the card. */
+    command?: string;
+    reason: string;
+  }): Promise<
+    | { granted: true; exemption: WorkflowExemption }
+    | { granted: false; message?: string }
+  >;
+  /** Grants currently live on this chat — so the tool can report "already have one". */
+  list(): readonly WorkflowExemption[];
+}
+
 /** Per-session context the factory closes over. */
 export interface ManagerMcpContext {
   /** The chat this session drives (for the waiting status label). */
@@ -1072,6 +1229,13 @@ export interface ManagerMcpContext {
   mcpConfig?: ManagerMcpConfig;
   /** Cross-chat read surface (omitted → no `chat_find`/`chat_read`/`project_info`). */
   inspect?: ManagerMcpInspect;
+  /**
+   * Guard-exemption surface (omitted → no `request_exemption` tool). Bound
+   * whenever the workflow guard is actually ENFORCING, which is the same
+   * condition under which a refusal can strand a chat — so the escape hatch
+   * exists exactly where the wall does.
+   */
+  exemptions?: ManagerMcpExemptions;
   /** The session's abort signal — cancels in-flight waits on stop/fork. */
   signal?: AbortSignal;
   now?: () => number;
@@ -1371,9 +1535,9 @@ async function watchForPrActivity(
   for (;;) {
     if (aborted()) return { kind: "aborted" };
 
-    let merge: PrPollResult | null;
+    let merge: PrWatchSnapshot | null;
     try {
-      merge = await gh.prMergeState(number, repo);
+      merge = await gh.pollPrState(number, repo);
     } catch (err) {
       return { kind: "error", error: err instanceof Error ? err.message : String(err) };
     }
@@ -1388,13 +1552,10 @@ async function watchForPrActivity(
       return { kind: "terminal", state: merge };
     }
 
-    // Checks + threads are best-effort: a transient gh failure on either yields
-    // null, which we treat as "no new activity of that kind" (not fatal).
-    const [checks, threads, review] = await Promise.all([
-      gh.prChecks(number, repo).catch(() => null),
-      gh.reviewThreads(number, repo).catch(() => null),
-      gh.prReviewState?.(number, repo).catch(() => null) ?? Promise.resolve(null),
-    ]);
+    // One read, so these arrive together. A `null` on any of them still means
+    // "no read of that signal this poll" — see {@link PrWatchSnapshot} — which
+    // every branch below already distinguishes from an empty read.
+    const { checks, threads, review } = merge;
 
     const events: WatchPrEvent[] = [];
     const runs = checks ?? [];
@@ -2092,8 +2253,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       // had already reported: exit 0, `requested_reviewers: []`. Reporting that as
       // success is the worst possible outcome here, because it sends the agent
       // back to watch_pr to wait on the empty queue this tool exists to refill.
-      const queue = await gh.prReviewState?.(number, repo).catch(() => null);
-      const onHook = queue?.requested ?? null;
+      const queue = await gh.pollPrState(number, repo).catch(() => null);
+      const onHook = queue?.review?.requested ?? null;
       if (onHook !== null) {
         lines.push(
           onHook.length
@@ -2536,6 +2697,108 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           "The branch is deleted and the trunk will fast-forward — the task is done, so " +
           "don't watch it or open anything else.\n" +
           JSON.stringify({ number, merged: true, method, approved: approved.approved }),
+      );
+    },
+  );
+
+  const requestExemption = tool(
+    "request_exemption",
+    "ASK THE HUMAN to lift one of Dispatch's command guards for THIS CHAT ONLY — the " +
+      "escape hatch for when the sanctioned path a guard redirects you to is genuinely " +
+      "BROKEN and you are stuck between a tool that won't work and a refusal. This is a " +
+      "request, not a decision: the call blocks while a card sits in front of the human, " +
+      "THEY choose whether it covers one command or the rest of this chat, and a refusal " +
+      "is final — do not re-ask, and do not try to route around the guard another way. " +
+      "Nothing outside this chat is affected and the grant dies with the session, so it " +
+      "is never a substitute for fixing the underlying problem. Name the specific guard " +
+      "you tripped (the refusal message tells you which); `all` is for the rare case " +
+      "where a compound command trips more than one.",
+    {
+      guard: WorkflowExemptionScopeSchema.describe(
+        "Which guard to lift. Use the exact kind named in the refusal you got; `all` " +
+          "lifts every workflow guard and is much harder to justify.",
+      ),
+      reason: z
+        .string()
+        .min(1)
+        .describe(
+          "Why the sanctioned path cannot be used right now — what you tried and how it " +
+            "failed. This is the whole basis for the human's decision; 'it's faster' is not one.",
+        ),
+      command: z
+        .string()
+        .optional()
+        .describe("The exact command you intend to run. Shown on the card."),
+    },
+    async (args): Promise<CallToolResult> => {
+      const exemptions = ctx.exemptions;
+      if (!exemptions) {
+        return textResult(
+          "There is no guard to lift in this session — request_exemption isn't available here.",
+          true,
+        );
+      }
+      const reason = typeof args.reason === "string" ? args.reason.trim() : "";
+      if (!reason) {
+        return textResult(
+          "request_exemption requires a reason — it is the only thing the human has to " +
+            "decide on.",
+          true,
+        );
+      }
+      const scope = args.guard;
+      const command =
+        typeof args.command === "string" ? args.command.trim() || undefined : undefined;
+
+      // Already covered → don't spend a card on a question that's been answered.
+      // An agent that re-asks after being granted reads to the human as one that
+      // didn't notice the first yes, and each extra card makes the next one
+      // cheaper to wave through.
+      const existing = exemptions.list().find((e) => e.scope === "all" || e.scope === scope);
+      if (existing) {
+        return textResult(
+          `Already exempt: the human granted ${describeExemptionScope(existing.scope)} ` +
+            `(${existing.lifetime === "once" ? "one command only" : "for this chat"}). ` +
+            "Just run your command.\n" +
+            JSON.stringify({ granted: true, scope: existing.scope, lifetime: existing.lifetime }),
+        );
+      }
+
+      let verdict: Awaited<ReturnType<ManagerMcpExemptions["request"]>>;
+      try {
+        verdict = await exemptions.request({ scope, command, reason });
+      } catch (e) {
+        // Fail CLOSED, exactly as the approve_pr override does: a question that
+        // couldn't be asked is not a yes.
+        verdict = { granted: false, message: e instanceof Error ? e.message : String(e) };
+      }
+
+      if (!verdict.granted) {
+        // Not an error: a refusal is a legitimate answer, and flagging it as one
+        // pushes the model into retrying the thing it was just told not to do.
+        return textResult(
+          `Not granted — the guard on ${describeExemptionScope(scope)} stands.` +
+            `${verdict.message ? ` They said: ${verdict.message}` : ""}\n` +
+            "This is their call, not yours: don't re-ask and don't work around the guard. " +
+            "Report that you're blocked, say what you'd need, and stop.\n" +
+            JSON.stringify({ granted: false, scope }),
+        );
+      }
+
+      const { exemption } = verdict;
+      const span =
+        exemption.lifetime === "once"
+          ? "for the NEXT command that trips it only — one shot, so get it right"
+          : "for the rest of this session";
+      return textResult(
+        `Granted: ${describeExemptionScope(exemption.scope)} is lifted for this chat, ` +
+          `${span}. It's visible on the chat header and can be revoked there. Use it for ` +
+          "what you asked for and nothing else.\n" +
+          JSON.stringify({
+            granted: true,
+            scope: exemption.scope,
+            lifetime: exemption.lifetime,
+          }),
       );
     },
   );
@@ -3851,6 +4114,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     requestReview,
     createPr,
     approvePr,
+    requestExemption,
     terminal,
     terminalOutput,
     worktree,
@@ -3890,6 +4154,7 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   request_review: "github",
   create_pr: "prCreate",
   approve_pr: "prApproval",
+  request_exemption: "exemptions",
   terminal: "terminals",
   terminal_output: "terminals",
   worktree: "worktrees",
@@ -3916,6 +4181,7 @@ export type ManagerToolBinding =
   | "github"
   | "prApproval"
   | "prCreate"
+  | "exemptions"
   | "terminals"
   | "worktrees"
   | "memory"
@@ -4003,6 +4269,7 @@ export function createManagerMcpServer(
     requestReview,
     createPr,
     approvePr,
+    requestExemption,
     terminal,
     terminalOutput,
     worktree,
@@ -4042,6 +4309,9 @@ export function createManagerMcpServer(
     ...(ctx.prCreate ? [createPr] : []),
     // Only when the project opted into auto-merge — no binding, no way to merge.
     ...(ctx.prApproval ? [approvePr] : []),
+    // Bound only where a guard is actually ENFORCING — the escape hatch exists
+    // exactly where the wall does, and nowhere else offers it as a thing to try.
+    ...(ctx.exemptions ? [requestExemption] : []),
     ...(ctx.terminals ? [terminal, terminalOutput] : []),
     // Bound whenever the session has a project to cut trees in — and the shell
     // guard's refusal of `git worktree add` points here, so the two ship together.

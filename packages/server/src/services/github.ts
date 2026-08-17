@@ -29,6 +29,9 @@ import type {
   CheckRun,
   ReviewThread,
   ReviewDecision,
+  PrReviewer,
+  PrReviewerKind,
+  PrReviewerState,
   WorkflowDef,
   WorkflowRun,
   WorkflowWithLastRun,
@@ -175,6 +178,54 @@ export interface PrCreatePreflight {
   existing: PRInfo | null;
 }
 
+/**
+ * ONE poll of a PR — everything the watchers and the PR registry need, read in a
+ * single GraphQL round trip.
+ *
+ * Before this, the same information cost FIVE `gh` subprocess spawns per PR per
+ * poll (`pr view` for merge state, `pr checks`, a graphql call for threads, and
+ * a graphql + `pr view` pair for the review queue), through two code paths —
+ * `watch_pr`'s and `PrReviewWatcher`'s — that had drifted into two dedup
+ * memories over the same four questions. One query, measured, costs 1 point of
+ * GitHub's 5000/hr GraphQL budget.
+ *
+ * It also reaches something the old reads could not see at all: see
+ * {@link PrReviewerState}'s `in_progress`.
+ */
+export interface PrPollSnapshot {
+  repo: string;
+  number: number;
+  url: string;
+  title: string;
+  branch: string;
+  baseBranch: string;
+  state: "open" | "closed" | "merged";
+  merged: boolean;
+  mergedAt?: string;
+  closedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  isDraft: boolean;
+  author?: string;
+  labels: string[];
+  /** false = merge CONFLICTS; null = GitHub hasn't computed it yet (`UNKNOWN`). */
+  mergeable: boolean | null;
+  mergeStateStatus?: string;
+  reviewDecision: ReviewDecision | null;
+  headRefOid?: string;
+  reviewers: PrReviewer[];
+  threads: ReviewThread[];
+  checks: CheckRun[];
+  commentCount?: number;
+  /**
+   * Logins with an OUTSTANDING review request, and the newest submitted review
+   * per author. Carried alongside `reviewers` because `watch_pr`'s stalled-queue
+   * signal is defined in exactly these terms — see {@link PrReviewState}.
+   */
+  requested: string[];
+  reported: Array<{ author: string; state: string }>;
+}
+
 /** A PR's review state: who was asked, and who has actually reported. */
 export interface PrReviewState {
   /** Reviewers with an OUTSTANDING request (they haven't reported yet). */
@@ -240,7 +291,14 @@ interface RawThreadNode {
   isOutdated?: boolean;
   path?: string;
   line?: number | null;
-  comments?: { nodes?: Array<{ author?: { login?: string } | null; body?: string }> };
+  comments?: {
+    nodes?: Array<{
+      author?: { login?: string } | null;
+      body?: string;
+      url?: string;
+      createdAt?: string;
+    }>;
+  };
 }
 /** `reviewRequests` via GraphQL — the only source that surfaces BOT reviewers. */
 interface RawGraphqlReviewRequests {
@@ -268,6 +326,58 @@ interface RawGraphqlThreads {
   data?: {
     repository?: {
       pullRequest?: { reviewThreads?: { nodes?: RawThreadNode[] } } | null;
+    } | null;
+  };
+}
+/** One reviewer union member, fragmented so BOTS and MANNEQUINS keep their login. */
+interface RawRequestedReviewer {
+  __typename?: string;
+  login?: string;
+  slug?: string;
+}
+/** A submitted OR pending review. `state: "PENDING"` is the in-progress signal. */
+interface RawReviewNode {
+  author?: { login?: string } | null;
+  state?: string;
+  isMinimized?: boolean;
+  submittedAt?: string | null;
+  commit?: { oid?: string } | null;
+}
+/** The whole PR poll payload — see {@link PrPollSnapshot}. */
+interface RawGraphqlPoll {
+  errors?: unknown[];
+  data?: {
+    repository?: {
+      pullRequest?: {
+        number?: number;
+        title?: string;
+        url?: string;
+        state?: string;
+        isDraft?: boolean;
+        merged?: boolean;
+        mergedAt?: string | null;
+        closedAt?: string | null;
+        createdAt?: string | null;
+        updatedAt?: string | null;
+        headRefOid?: string;
+        headRefName?: string;
+        baseRefName?: string;
+        mergeable?: string;
+        mergeStateStatus?: string;
+        reviewDecision?: string | null;
+        author?: { login?: string } | null;
+        labels?: { nodes?: Array<{ name?: string }> };
+        reviewRequests?: { nodes?: Array<{ requestedReviewer?: RawRequestedReviewer | null } | null> };
+        reviews?: { nodes?: RawReviewNode[] };
+        latestReviews?: { nodes?: RawReviewNode[] };
+        reviewThreads?: { nodes?: RawThreadNode[] };
+        comments?: { totalCount?: number };
+        commits?: {
+          nodes?: Array<{
+            commit?: { statusCheckRollup?: { contexts?: { nodes?: RawRollupEntry[] } } | null };
+          }>;
+        };
+      } | null;
     } | null;
   };
 }
@@ -411,6 +521,104 @@ function mapRollupEntry(e: RawRollupEntry): CheckRun {
     conclusion: mapConclusionString(e.conclusion),
     url: e.detailsUrl || undefined,
   });
+}
+
+/** GraphQL `__typename` of a requested reviewer → our reviewer kind. */
+function mapReviewerKind(typename: unknown): PrReviewerKind {
+  switch (String(typename ?? "")) {
+    case "Bot":
+      return "bot";
+    case "Team":
+      return "team";
+    case "Mannequin":
+      return "mannequin";
+    default:
+      return "user";
+  }
+}
+
+/** A submitted review's GraphQL state → our reviewer state. `PENDING` never
+ *  reaches here — it means "in progress" and is handled by the caller. */
+function mapSubmittedReviewState(state: unknown): PrReviewerState {
+  switch (String(state ?? "").toUpperCase()) {
+    case "APPROVED":
+      return "approved";
+    case "CHANGES_REQUESTED":
+      return "changes_requested";
+    case "DISMISSED":
+      return "dismissed";
+    default:
+      return "commented";
+  }
+}
+
+/**
+ * Fold GitHub's three reviewer sources into one list, per login.
+ *
+ * The three disagree on purpose and each is load-bearing:
+ *   - `reviewRequests` — who is ON THE HOOK. The ONLY source that reports bot
+ *     reviewers; `gh pr view --json reviewRequests` silently drops them, which
+ *     is the bug documented at length on {@link GitHubService.prReviewState}.
+ *   - `reviews` with `state: "PENDING"` — a review BEGUN and not submitted. This
+ *     is the "Copilot is reviewing…" spinner, and GraphQL is the only API that
+ *     shows another author's pending review at all (REST omits it).
+ *   - `latestReviews` — the newest SUBMITTED verdict per author, with GitHub's
+ *     own supersede-on-re-request semantics, which is what `approve_pr` wants.
+ *
+ * An in-progress review wins over a stale submitted one: "they're looking at it
+ * again" is more actionable than "they said something about an older commit".
+ */
+function foldReviewers(
+  requests: Array<{ requestedReviewer?: RawRequestedReviewer | null } | null>,
+  allReviews: RawReviewNode[],
+  latest: RawReviewNode[],
+  headRefOid?: string,
+): PrReviewer[] {
+  const out = new Map<string, PrReviewer>();
+
+  for (const n of requests) {
+    const r = n?.requestedReviewer;
+    const login = r?.login ?? r?.slug;
+    if (!login) continue;
+    out.set(login, { login, kind: mapReviewerKind(r?.__typename), state: "requested" });
+  }
+
+  for (const r of latest) {
+    const login = r.author?.login;
+    if (!login) continue;
+    // A minimized review has been folded away as outdated on the PR page; it is
+    // not the reviewer's live position and must not be rendered as one.
+    if (r.isMinimized) continue;
+    const prev = out.get(login);
+    out.set(login, {
+      login,
+      kind: prev?.kind ?? "user",
+      state: mapSubmittedReviewState(r.state),
+      submittedAt: r.submittedAt ?? undefined,
+      // Only claim staleness when we can actually compare — an absent head sha
+      // or an absent review commit means "don't know", which must not read as
+      // "up to date" OR as "stale".
+      stale:
+        headRefOid && r.commit?.oid ? r.commit.oid !== headRefOid : undefined,
+    });
+  }
+
+  for (const r of allReviews) {
+    if (String(r.state ?? "").toUpperCase() !== "PENDING") continue;
+    const login = r.author?.login;
+    if (!login) continue;
+    const prev = out.get(login);
+    out.set(login, {
+      login,
+      kind: prev?.kind ?? "user",
+      state: "in_progress",
+      // Keep what they last SAID; the point of this row is that they're saying
+      // something new, not that the old verdict vanished.
+      submittedAt: prev?.submittedAt,
+    });
+  }
+
+  return [...out.values()];
 }
 
 /** Whitelist a raw `workflow_dispatch` input type; unknown → undefined. */
@@ -717,6 +925,148 @@ export class GitHubService {
         merged && raw.mergedAt && !raw.mergedAt.startsWith("0001-01-01")
           ? raw.mergedAt
           : undefined,
+    };
+  }
+
+  /**
+   * ONE poll of a PR — {@link PrPollSnapshot}, in a single GraphQL round trip.
+   *
+   * This is THE poll body: `watch_pr` and the background `PrReviewWatcher` both
+   * run it, so the app and the agent can no longer hold different beliefs about
+   * the same PR. It replaces five `gh` subprocess spawns with one, and costs 1
+   * point of a 5000/hr GraphQL budget (measured).
+   *
+   * Returns **null** when no snapshot could be produced — an unknown PR, an
+   * unresolvable repo, a `gh` failure, or a GraphQL `errors` payload. Callers
+   * treat that exactly as they always treated a null {@link prMergeState}: as
+   * fatal to this watch, not as an empty read. That is deliberate and is not a
+   * regression in tolerance — `prMergeState` was ALREADY the read whose failure
+   * ended a watch, and it went through this same subprocess and network path;
+   * the secondary reads that used to degrade to "no news" now simply travel with
+   * it. `watch_pr`'s contract is "call again", so a transient failure costs one
+   * round trip, not the watch.
+   *
+   * `opts.cwd` is passed to `gh` only so it can pick up repo-local auth config;
+   * the repo itself is always explicit here, because GraphQL cannot auto-detect
+   * it the way `gh pr view` can.
+   */
+  async pollPrState(
+    repo: string,
+    prNumber: number,
+    opts: { cwd?: string } = {},
+  ): Promise<PrPollSnapshot | null> {
+    const { owner, name } = this.splitRepo(repo);
+    // `reviews` is fetched IN FULL (not just `latestReviews`) for one reason:
+    // it is the only place a PENDING — begun, unsubmitted — review appears.
+    const query =
+      "query($owner:String!,$repo:String!,$number:Int!)" +
+      "{repository(owner:$owner,name:$repo){pullRequest(number:$number){" +
+      "number title url state isDraft merged mergedAt closedAt createdAt updatedAt " +
+      "headRefOid headRefName baseRefName mergeable mergeStateStatus reviewDecision " +
+      "author{login} labels(first:50){nodes{name}} " +
+      "reviewRequests(first:50){nodes{requestedReviewer{__typename " +
+      "... on User{login} ... on Bot{login} ... on Mannequin{login} ... on Team{slug}}}} " +
+      "reviews(first:100){nodes{author{login} state isMinimized submittedAt commit{oid}}} " +
+      "latestReviews(first:50){nodes{author{login} state isMinimized submittedAt commit{oid}}} " +
+      "reviewThreads(first:100){nodes{id isResolved isOutdated path line " +
+      "comments(first:1){nodes{author{login} body url createdAt}}}} " +
+      "comments(first:1){totalCount} " +
+      "commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{__typename " +
+      "... on CheckRun{name status conclusion detailsUrl} " +
+      "... on StatusContext{context state targetUrl}}}}}}}" +
+      "}}}";
+    const raw = await this.ghJson<RawGraphqlPoll>(
+      [
+        "api", "graphql",
+        "-f", `query=${query}`,
+        "-f", `owner=${owner}`,
+        "-f", `repo=${name}`,
+        "-F", `number=${prNumber}`,
+      ],
+      { cwd: opts.cwd, allowFail: true },
+    ).catch(() => null);
+    // Same rule `prReviewState` documents: GraphQL reports failures IN the
+    // payload, and a body with `errors` and no `data` parses perfectly well
+    // while meaning "we learned nothing".
+    if (!raw || raw.errors?.length) return null;
+    const pr = raw.data?.repository?.pullRequest;
+    if (!pr || typeof pr.number !== "number") return null;
+
+    const rawState = String(pr.state ?? "").toUpperCase();
+    const merged = rawState === "MERGED" || !!pr.merged;
+    const state: PrPollSnapshot["state"] =
+      merged ? "merged" : rawState === "CLOSED" ? "closed" : "open";
+
+    const rollup =
+      pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ?? [];
+    let checks = rollup.map(mapRollupEntry);
+    // An empty rollup is ambiguous — no CI configured, or a rollup GitHub hasn't
+    // populated. `gh pr checks` disambiguates, and `watch_pr`'s "no checks
+    // configured" note is only honest once we've asked it. Same fallback
+    // `prDetail` makes, for the same reason.
+    if (checks.length === 0) {
+      checks = await this.prChecks(repo, prNumber).catch(() => []);
+    }
+
+    const allReviews = pr.reviews?.nodes ?? [];
+    const latestReviews = pr.latestReviews?.nodes ?? [];
+    const reviewers = foldReviewers(
+      pr.reviewRequests?.nodes ?? [],
+      allReviews,
+      latestReviews,
+      pr.headRefOid,
+    );
+
+    return {
+      repo: this.assertRepo(repo),
+      number: pr.number,
+      url: pr.url ?? "",
+      title: pr.title ?? "",
+      branch: pr.headRefName ?? "",
+      baseBranch: pr.baseRefName ?? "main",
+      state,
+      merged,
+      // gh/GitHub emit a zero-time sentinel for un-merged PRs; keep the same
+      // guard `prMergeState` uses so "merged at year 1" never reaches a UI.
+      mergedAt:
+        merged && pr.mergedAt && !pr.mergedAt.startsWith("0001-01-01")
+          ? pr.mergedAt
+          : undefined,
+      closedAt: pr.closedAt && !pr.closedAt.startsWith("0001-01-01") ? pr.closedAt : undefined,
+      createdAt: pr.createdAt ?? undefined,
+      updatedAt: pr.updatedAt ?? undefined,
+      isDraft: !!pr.isDraft,
+      author: pr.author?.login ?? undefined,
+      labels: (pr.labels?.nodes ?? []).map((l) => l?.name ?? "").filter(Boolean),
+      mergeable: mapMergeable(pr.mergeable),
+      mergeStateStatus: pr.mergeStateStatus ?? undefined,
+      reviewDecision: mapReviewDecision(pr.reviewDecision),
+      headRefOid: pr.headRefOid || undefined,
+      reviewers,
+      threads: (pr.reviewThreads?.nodes ?? []).map((t) => {
+        const first = t.comments?.nodes?.[0];
+        return ReviewThreadSchema.parse({
+          id: t.id,
+          isResolved: !!t.isResolved,
+          isOutdated: t.isOutdated ?? undefined,
+          path: t.path ?? undefined,
+          line: t.line ?? null,
+          author: first?.author?.login ?? undefined,
+          body: first?.body ?? undefined,
+          url: first?.url ?? undefined,
+          createdAt: first?.createdAt ?? undefined,
+        });
+      }),
+      checks,
+      commentCount: pr.comments?.totalCount,
+      requested: reviewers.filter((r) => r.state === "requested").map((r) => r.login),
+      reported: latestReviews
+        .filter((r) => !r.isMinimized)
+        .map((r) => ({
+          author: r.author?.login ?? "",
+          state: String(r.state ?? "").toUpperCase(),
+        }))
+        .filter((r) => r.author),
     };
   }
 

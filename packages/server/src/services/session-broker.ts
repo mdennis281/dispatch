@@ -75,7 +75,10 @@ import type {
   SkillConfig,
   ContextUsage,
   ResolvedWorkflow,
+  WorkflowExemption,
+  WorkflowExemptionScope,
   WorkflowMergeMethod,
+  WorkflowViolation,
   PRRef,
   HarnessKind,
 } from "@dispatch/shared";
@@ -83,6 +86,7 @@ import {
   DEFAULT_HARNESS,
   EffortSchema,
   classifyWorkflowViolation,
+  describeExemptionScope,
   isPrSettledIdle,
   resolveWorkflow,
 } from "@dispatch/shared";
@@ -99,12 +103,14 @@ import type {
   ReadChatQuery,
   ReadChatResult,
 } from "./inspect.js";
-import type { GitHubService } from "./github.js";
+import type { GitHubService, PrPollSnapshot } from "./github.js";
 import type { RunnerService } from "./runner.js";
 import type { WorktreeService } from "./worktree.js";
 import {
   createManagerMcpServer,
+  exemptionConsentQuestion,
   overrideConsentPrompt,
+  readExemptionAnswer,
   type ManagerAskQuestion,
   type ManagerAskResult,
   type ManagerMcpGitHub,
@@ -297,14 +303,60 @@ export function buildManagerToolsDirective(caps: {
 }
 
 /**
+ * Resolve this session's `owner/name` once — but only once it has actually
+ * resolved.
+ *
+ * Every manager-MCP GitHub binding needs the repo and none of them should shell
+ * out for it per call, so the promise is memoised. The trap is that
+ * `resolveRepo` runs `gh repo view`, which fails for reasons that say nothing
+ * about this checkout: a GitHub outage, a dropped network, an expired token.
+ * Caching those was caching one bad minute for the life of the session.
+ *
+ * That is not hypothetical. On 2026-08-17 GitHub's GraphQL API returned 503
+ * while a chat was open; the `create_pr` binding memoised the `null` and then
+ * refused every PR for hours after GitHub had recovered, with "could not resolve
+ * this chat's repo or branch" — pointing the agent at its worktree, which was
+ * fine throughout. It is the worst shape a cache can have: wrong, and unable to
+ * find out, because it never asks again.
+ *
+ * So the promise is shared while it is IN FLIGHT — concurrent callers must not
+ * each spawn a `gh` — and dropped the moment it settles as a failure, making the
+ * next call a retry. One helper rather than three copies because it was three
+ * copies, and the two that weren't fixed first would have gone on poisoning
+ * `watch_pr` and `approve_pr` in exactly the same way.
+ */
+export function makeRepoResolver(
+  github: GitHubService,
+  cwd: string | undefined,
+): (override?: string) => Promise<string | null> {
+  let repoP: Promise<string | null> | undefined;
+  return async (override?: string): Promise<string | null> => {
+    if (override) return override;
+    if (!cwd) return null; // no launch dir → can't auto-resolve the repo
+    const inflight = (repoP ??= github.resolveRepo(cwd).catch(() => null));
+    const repo = await inflight;
+    // Compare against the promise we awaited, not `repoP` as it stands now: a
+    // concurrent caller may already have installed a fresh attempt, and clearing
+    // that one would throw away a resolve that is about to succeed.
+    if (repo === null && repoP === inflight) repoP = undefined;
+    return repo;
+  };
+}
+
+/**
  * Adapt a {@link GitHubService} into the narrow {@link ManagerMcpGitHub} surface
  * the manager MCP's `watch_pr` tool needs, bound to one session's `cwd`.
- * `prMergeState` lets `gh` auto-detect the repo from cwd; `prChecks`,
- * `reviewThreads` and `prReviewState` require an explicit `owner/name`, so we
- * resolve it from cwd lazily and cache the promise (a per-session one-shot). Any
- * resolve/gh failure on those READS degrades to `null` — the watcher treats that
- * as "nothing new this poll" rather than aborting. An explicit `repo` override
- * always wins.
+ *
+ * The whole poll is ONE call now (`pollPrState`), which needs an explicit
+ * `owner/name` — GraphQL cannot auto-detect the repo the way `gh pr view` could
+ * — so we resolve it from cwd lazily through {@link makeRepoResolver}. An
+ * unresolvable repo or a failed read degrades to `null`, which the watch treats
+ * exactly as it always treated an unreadable merge state: as fatal to this
+ * watch, with "call watch_pr again" as the recovery.
+ *
+ * Every successful poll is also handed to {@link SessionBroker.onPrSnapshot}, so
+ * an agent watching its PR keeps the PR catalog current for free — the reason
+ * there is one poll body at all.
  *
  * The three ACTIONS (`requestReviewers`, `replyToThread`, `resolveThread`) throw
  * instead, because the failure they'd otherwise hide is the one that matters:
@@ -315,28 +367,25 @@ function makeGithubBinding(
   cwd: string | undefined,
   chatId: string,
   reviewers: readonly string[] = [],
+  onSnapshot?: (chatId: string, snapshot: PrPollSnapshot) => void,
 ): ManagerMcpGitHub {
-  let repoP: Promise<string | null> | undefined;
-  const repoFor = async (override?: string): Promise<string | null> => {
-    if (override) return override;
-    if (!cwd) return null; // no launch dir → can't auto-resolve the repo
-    return (repoP ??= github.resolveRepo(cwd).catch(() => null));
-  };
+  const repoFor = makeRepoResolver(github, cwd);
   return {
-    prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd }),
-    prChecks: async (n, repo) => {
+    pollPrState: async (n, repo) => {
       const r = await repoFor(repo);
-      return r ? github.prChecks(r, n).catch(() => null) : null;
-    },
-    reviewThreads: async (n, repo) => {
-      const r = await repoFor(repo);
-      return r ? github.reviewThreads(r, n).catch(() => null) : null;
-    },
-    // Same degrade-to-null contract as checks/threads: an unreadable queue is
-    // "no news this poll", never a claim that nobody is queued.
-    prReviewState: async (n, repo) => {
-      const r = await repoFor(repo);
-      return r ? github.prReviewState(r, n).catch(() => null) : null;
+      if (!r) return null;
+      const snap = await github.pollPrState(r, n, { cwd }).catch(() => null);
+      if (!snap) return null;
+      onSnapshot?.(chatId, snap);
+      return {
+        number: snap.number,
+        state: snap.state,
+        merged: snap.merged,
+        mergedAt: snap.mergedAt,
+        checks: snap.checks,
+        threads: snap.threads,
+        review: { requested: snap.requested, reported: snap.reported },
+      };
     },
     // These three THROW on failure rather than degrading — they are actions the
     // agent asked for, and silently doing nothing is how a thread stays open.
@@ -376,7 +425,7 @@ function makeGithubBinding(
  * re-create exactly the failure it exists to fix: each step individually
  * skippable, and nothing noticing when one was.
  */
-function makePrCreateBinding(
+export function makePrCreateBinding(
   github: GitHubService,
   cwd: string | undefined,
   chatId: string,
@@ -388,11 +437,7 @@ function makePrCreateBinding(
     arm?: (chatId: string, ref: PRRef) => void;
   },
 ): ManagerMcpPrCreate {
-  let repoP: Promise<string | null> | undefined;
-  const repoFor = async (): Promise<string | null> => {
-    if (!cwd) return null;
-    return (repoP ??= github.resolveRepo(cwd).catch(() => null));
-  };
+  const repoFor = makeRepoResolver(github, cwd);
 
   /**
    * Which directory to inspect: the caller's, if it is a worktree of the SAME
@@ -522,12 +567,7 @@ function makePrApprovalBinding(
    */
   confirmOverride: ManagerMcpPrApproval["confirmOverride"],
 ): ManagerMcpPrApproval {
-  let repoP: Promise<string | null> | undefined;
-  const repoFor = async (override?: string): Promise<string | null> => {
-    if (override) return override;
-    if (!cwd) return null;
-    return (repoP ??= github.resolveRepo(cwd).catch(() => null));
-  };
+  const repoFor = makeRepoResolver(github, cwd);
   const requireRepo = async (override?: string): Promise<string> => {
     const r = await repoFor(override);
     if (!r) throw new Error("could not resolve this chat's repo — pass `repo` as 'owner/name'");
@@ -859,6 +899,13 @@ function questionSummary(input: Record<string, unknown>): string {
 const SELF_GATED_TOOLS: ReadonlySet<string> = new Set([
   "mcp__manager__ask_user",
   "mcp__manager__spawn_chat",
+  // Its gate is UNCONDITIONAL — every call puts the exemption card in front of
+  // the human and waits — so a generic canUseTool prompt would just be a second
+  // dialog asking a weaker version of the same question, and the reflex it
+  // trains ("approve the tool call, then read the real one") is the last habit
+  // this particular gate can afford. Unlike `approve_pr`'s conditional override,
+  // there is no path through this tool that DOESN'T ask.
+  "mcp__manager__request_exemption",
 ]);
 
 /** Shorten text for a prompt card, marking that it was cut. */
@@ -1138,6 +1185,18 @@ interface LiveSession {
   branch?: string | null;
   /** True when the session cwd is a linked worktree rather than the checkout. */
   inWorktree?: boolean;
+  /**
+   * Human-approved lifts of the workflow guard, for THIS CHAT (see
+   * `mcp__manager__request_exemption`).
+   *
+   * In-memory on the live session, deliberately: it is not on the Chat record,
+   * not in project config, and not in app settings, so it cannot leak into
+   * another chat and cannot outlive the incident that justified it. A stop, a
+   * fork or a server restart clears it — which is the correct direction, because
+   * the failure mode this whole feature exists to avoid is a one-off escape
+   * quietly becoming the permanent rule.
+   */
+  exemptions: WorkflowExemption[];
   /** Model the SDK reported for the live session (display only). */
   model?: string;
   /** Model explicitly chosen by the user (pins new/resumed queries via options.model). */
@@ -1243,6 +1302,16 @@ export class SessionBroker {
    */
   armPrWatch?: (chatId: string, ref: PRRef) => void;
   /**
+   * Hand every `watch_pr` poll to the PR catalog. Settable after construction
+   * for the same reason as `armPrWatch`: the registry is built after the broker.
+   *
+   * This is what makes ONE poll body worth having. An agent watching its own PR
+   * is already asking GitHub the exact question the background sweep asks, at a
+   * far tighter interval; before this, that answer was read once and thrown
+   * away, and the app went on believing whatever the last sweep had seen.
+   */
+  onPrSnapshot?: (chatId: string, snapshot: PrPollSnapshot) => void;
+  /**
    * Create + start a chat on the agent's behalf, once the human has approved it
    * (see `mcp__manager__spawn_chat`). Settable after construction for the same
    * reason as `onTurnError`: creating a chat goes through the routes' `createChat`
@@ -1324,6 +1393,9 @@ export class SessionBroker {
         // this the green "PR done" dot silently downgraded to plain idle.
         prWatchSettled: isPrSettledIdle(chat) || undefined,
         started: false,
+        // Never rebuilt from the record — there is nothing to rebuild it from,
+        // and that is the design. See the field's docblock.
+        exemptions: [],
         outbox: [],
         pendingPermissions: new Map(),
         writeChain: Promise.resolve(),
@@ -3389,6 +3461,141 @@ export class SessionBroker {
       : { approved: false, message: result.message };
   }
 
+  /* --------------------------------------------------- guard exemptions */
+
+  /**
+   * This chat's live guard exemptions (empty when it has none, or isn't live).
+   *
+   * A COPY, not the session's own array: every grant, use and revoke goes
+   * through a method that also burns one-shots, publishes the new list and
+   * writes the notice, so a caller holding the real array could drop a guard
+   * with none of that happening — and the chip would still be showing the
+   * exemption it had just silently deleted.
+   */
+  listExemptions(chatId: string): WorkflowExemption[] {
+    return [...(this.sessions.get(chatId)?.exemptions ?? [])];
+  }
+
+  /**
+   * Ask the human to lift a workflow guard for ONE chat, and record the grant if
+   * they say yes (see `mcp__manager__request_exemption`).
+   *
+   * On the QUESTION card rather than the binary approve/deny one `approve_pr`'s
+   * override uses, because the LIFETIME is part of the decision and a two-button
+   * card has no room for it. The alternative is that the lifetime is decided by
+   * the agent (which would always propose the generous one) or by a constant
+   * (which would be wrong about half the time — "just this once" and "the
+   * sanctioned path is down all session" are both real, and only the human knows
+   * which they're in). Everything else is the same channel: same Attention entry,
+   * same notifier webhooks, same deny-all-pending teardown, so a stopped session
+   * can't strand the question.
+   *
+   * Fails CLOSED in every direction: a decline, a timeout, a free-form answer
+   * that matches no option, or no live session to ask through all leave the
+   * guard standing.
+   */
+  async requestExemption(
+    chatId: string,
+    input: { scope: WorkflowExemptionScope; command?: string; reason: string },
+  ): Promise<
+    { granted: true; exemption: WorkflowExemption } | { granted: false; message?: string }
+  > {
+    const session = this.sessions.get(chatId);
+    if (!session) return { granted: false, message: "no live session to ask through" };
+
+    const question = exemptionConsentQuestion(input);
+    const result = await this.askUser(chatId, [question]);
+    if (result.status !== "answered") return { granted: false, message: result.message };
+    const lifetime = readExemptionAnswer(result.answers[question.question]);
+    if (!lifetime) {
+      // They typed prose instead of picking a scope. That is not consent to any
+      // particular one — hand their words back as the refusal's reason.
+      return { granted: false, message: result.answers[question.question] };
+    }
+
+    const exemption: WorkflowExemption = {
+      id: this.genId(),
+      scope: input.scope,
+      lifetime,
+      reason: input.reason,
+      command: input.command,
+      grantedAt: this.now(),
+      uses: 0,
+    };
+    // A new grant REPLACES any narrower one it subsumes, so the chip and the
+    // matcher never carry two overlapping rows saying different things.
+    session.exemptions = [
+      ...session.exemptions.filter(
+        (e) => !(input.scope === "all" || e.scope === input.scope),
+      ),
+      exemption,
+    ];
+    this.publishExemptions(session);
+    this.bus.publish({
+      type: "notice",
+      chatId,
+      level: "warn",
+      text:
+        `Guard lifted for this chat: ${describeExemptionScope(exemption.scope)} ` +
+        `(${lifetime === "once" ? "one command" : "rest of the session"}).`,
+    });
+    return { granted: true, exemption };
+  }
+
+  /** Drop a grant early — the header chip's revoke. False when it's already gone. */
+  revokeExemption(chatId: string, exemptionId: string): boolean {
+    const session = this.sessions.get(chatId);
+    if (!session) return false;
+    const found = session.exemptions.find((e) => e.id === exemptionId);
+    if (!found) return false;
+    session.exemptions = session.exemptions.filter((e) => e.id !== exemptionId);
+    this.publishExemptions(session);
+    this.bus.publish({
+      type: "notice",
+      chatId,
+      level: "info",
+      text: `Guard restored: ${describeExemptionScope(found.scope)} is refused again.`,
+    });
+    return true;
+  }
+
+  /**
+   * A grant just let a blocked command through: burn it if it was one-shot, and
+   * SAY SO. The notice is the record of what the exemption actually bought —
+   * without it the only evidence a guard stood down is the absence of a refusal,
+   * which is precisely the thing nobody notices.
+   */
+  private consumeExemption(
+    session: LiveSession,
+    exemption: WorkflowExemption,
+    violation: WorkflowViolation,
+    command: string,
+  ): void {
+    const used = { ...exemption, uses: exemption.uses + 1 };
+    session.exemptions =
+      exemption.lifetime === "once"
+        ? session.exemptions.filter((e) => e.id !== exemption.id)
+        : session.exemptions.map((e) => (e.id === exemption.id ? used : e));
+    this.publishExemptions(session);
+    this.bus.publish({
+      type: "notice",
+      chatId: session.chatId,
+      level: "warn",
+      text:
+        `Exemption used (${violation.kind}): ${truncate(command, 120)}` +
+        (exemption.lifetime === "once" ? " — that was the one shot; the guard is back." : ""),
+    });
+  }
+
+  /** Push the FULL list, never a delta — see {@link ChatExemptionsEventSchema}. */
+  private publishExemptions(session: LiveSession): void {
+    this.bus.publish({
+      type: "chat-exemptions",
+      chatId: session.chatId,
+      exemptions: [...session.exemptions],
+    });
+  }
+
   /* ----------------------------------------------------- state helpers */
 
   private setStatus(session: LiveSession, status: ChatStatus, activity?: AgentActivity): void {
@@ -4012,6 +4219,13 @@ export class SessionBroker {
                     text: `${blocked ? "Blocked" : "Workflow warning"}: ${violation.reason}`,
                   });
                 },
+                // Read fresh per call, not captured: the agent asks for an
+                // exemption the moment it is refused and retries in the SAME
+                // turn, so a list snapshotted at turn start would never contain
+                // the grant that was the whole point of asking.
+                exemptions: () => session.exemptions,
+                onExempted: (exemption, violation, command) =>
+                  this.consumeExemption(session, exemption, violation, command),
               }),
             ],
           },
@@ -4190,14 +4404,20 @@ export class SessionBroker {
                   : undefined,
               }
             : undefined,
-        // Bind the PR watcher to this session's default cwd. `prMergeState` lets
-        // `gh` auto-detect the repo from cwd; `prChecks`/`reviewThreads` need an
-        // explicit owner/name, so resolve it from cwd ONCE (cached) and reuse it.
+        // Bind the PR watcher to this session's default cwd. The poll is one
+        // GraphQL call and needs an explicit owner/name, so resolve it from cwd
+        // ONCE (cached, and never cached as a failure — see makeRepoResolver).
         // The agent may still pass an explicit repo override on any call. The
         // project's reviewer list rides along so `request_review` has a default —
         // the same list `create_pr` asks on the first round.
         github: github
-          ? makeGithubBinding(github, cwd, session.chatId, workflow.pr.reviewers)
+          ? makeGithubBinding(
+              github,
+              cwd,
+              session.chatId,
+              workflow.pr.reviewers,
+              this.onPrSnapshot,
+            )
           : undefined,
         // The PR-landing surface — bound ONLY when this project's workflow opted
         // into auto-merge, which is what makes `approve_pr` absent (not merely
@@ -4354,6 +4574,17 @@ export class SessionBroker {
         // agent adds while working in a throwaway worktree has to land in the
         // real working copy or it vanishes with the worktree.
         mcpConfig: project?.repoPath ? createMcpConfigEditor(project.repoPath) : undefined,
+        // The escape hatch for a guard that has stranded this chat. Bound ONLY
+        // where the guard actually refuses things (`guard: "deny"`) — on `warn`
+        // or `off` nothing is blocked, so a tool for un-blocking it would be an
+        // invitation to ask for permission nobody needed to give.
+        exemptions:
+          workflow.guard === "deny"
+            ? {
+                request: (input) => this.requestExemption(session.chatId, input),
+                list: () => session.exemptions,
+              }
+            : undefined,
         // Read-only inspection of the whole store. Deliberately NOT scoped to
         // this chat's project — the point is to reach work that happened
         // somewhere else. Only `project_info`'s default is bound to the caller,

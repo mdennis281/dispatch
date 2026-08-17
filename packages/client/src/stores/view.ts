@@ -59,7 +59,9 @@ export type AppSettingsSection =
  * are now full views (see `AppView` above), which is also what let their
  * subpages become addressable.
  */
-export type AppOverlay = "workspace" | "prs" | "mcp" | "agents" | "processes";
+/* `prs` is gone: the PR roster is a tab of the Workspace modal now, so there
+ * is one list rather than two that answered the same question differently. */
+export type AppOverlay = "workspace" | "mcp" | "agents" | "processes";
 
 interface ViewStore {
   view: AppView;
@@ -92,7 +94,7 @@ export const useView = create<ViewStore>((set) => ({
 
 /**
  * Everything an overlay component needs, in the shape `<Modal>` already takes:
- * `const { open, close } = useOverlay("prs")`.
+ * `const { open, close } = useOverlay("mcp")`.
  *
  * Subscribing to the BOOLEAN rather than to `overlay` itself is the point — an
  * overlay re-renders when it opens or closes, not every time some other one does.
