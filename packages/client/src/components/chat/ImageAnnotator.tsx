@@ -97,16 +97,27 @@ export interface ImageAnnotatorProps {
  */
 const FULL_BLEED = "(max-width: 39.98rem)";
 
+/**
+ * One query for the whole app, resolved at module load and `null` where there
+ * is no DOM — the same shape as `lib/useBreakpoint`'s `mq()`, and for the same
+ * two reasons: a query per subscriber is a listener per subscriber, and the
+ * client's vitest runner is a plain node process where touching `window` throws
+ * before React can reach for the server snapshot.
+ */
+const fullBleedQuery =
+  typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia(FULL_BLEED)
+    : null;
+
 function useFullBleed(): boolean {
   return useSyncExternalStore(
     (onChange) => {
-      const m = window.matchMedia(FULL_BLEED);
-      m.addEventListener("change", onChange);
-      return () => m.removeEventListener("change", onChange);
+      fullBleedQuery?.addEventListener("change", onChange);
+      return () => fullBleedQuery?.removeEventListener("change", onChange);
     },
-    () => window.matchMedia(FULL_BLEED).matches,
-    // The client's vitest runner has no DOM; the desktop answer is the one a
-    // headless render should produce, matching `currentMode`'s fallback.
+    // No DOM means no phone: the desktop answer is the one a headless render
+    // should produce, matching `currentMode`'s fallback to `lg`.
+    () => fullBleedQuery?.matches ?? false,
     () => false,
   );
 }
