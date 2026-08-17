@@ -31,6 +31,31 @@ export function isWindowControlsOverlay(): boolean {
   return window.matchMedia(WCO_QUERY).matches;
 }
 
+/**
+ * The y below which the window is ours to draw on.
+ *
+ * With the overlay up, the top of the window is a drag strip with the system's
+ * buttons painted over it (see `TitleBar` in components/layout/TopBar). Anything
+ * that positions itself against the viewport — a tooltip flipping to the side
+ * with more room, a popover clamping to the edge — will happily use that band,
+ * because as far as `clientHeight` is concerned it is just more page. It isn't:
+ * a bubble there reads as floating in the OS chrome, and it lands on top of the
+ * window controls.
+ *
+ * MEASURED off the strip's own rect rather than computed from
+ * `env(titlebar-area-height)`. `getComputedStyle` on a custom property hands back
+ * the unresolved `env(...)` token rather than a length (the same reason
+ * stores/viewport measures with probes), and reading the element that IS the band
+ * also means this answers 0 in every case where the strip isn't rendered —
+ * browser tab, unsupported browser, fullscreen — without repeating the condition
+ * that decides it.
+ */
+export function usableTop(): number {
+  if (typeof document === "undefined") return 0;
+  const strip = document.querySelector(".cm-titlebar");
+  return strip ? Math.round(strip.getBoundingClientRect().bottom) : 0;
+}
+
 /** Live `isWindowControlsOverlay` — re-renders on entering/leaving fullscreen. */
 export function useWindowControlsOverlay(): boolean {
   const [overlay, setOverlay] = useState(isWindowControlsOverlay);
