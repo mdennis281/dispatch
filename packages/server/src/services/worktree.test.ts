@@ -9,6 +9,7 @@ import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import {
   WorktreeService,
+  canonicalWorktreePath,
   parseWorktreePorcelain,
   parseNumstat,
   resolveNumstatPath,
@@ -197,7 +198,12 @@ describe("WorktreeService.create (mocked exec)", () => {
     const info = await svc.create(project, "feat/y");
 
     expect(calls[0]).toEqual({ file: "pnpm", args: ["worktree", "feat/y"], cwd: "C:/repo" });
-    expect(info).toMatchObject({ path: "C:/wt/feat-y", branch: "feat/y" });
+    // The custom command decides the path, so it comes back from the porcelain —
+    // canonicalized, because that spelling is the registry's key.
+    expect(info).toMatchObject({
+      path: canonicalWorktreePath("C:/wt/feat-y"),
+      branch: "feat/y",
+    });
   });
 
   it("uses the project's defaultBranch for the base ref", async () => {
@@ -429,5 +435,166 @@ describe("WorktreeService on a real temp repo", () => {
     await expect(
       svc.create(project(), "feat/dup", { base: "main", noFetch: true }),
     ).rejects.toThrow(/already exists/);
+  });
+});
+
+/* ------------------------------------------------------- attribution registry */
+
+describe("WorktreeService — the attribution registry (real git)", () => {
+  let root: string;
+  let repo: string;
+  let wtRoot: string;
+  let store: Store;
+  let svc: WorktreeService;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "cm-wtreg-"));
+    repo = join(root, "repo");
+    wtRoot = join(root, "worktrees");
+    await mkdir(repo, { recursive: true });
+    await execa("git", ["-c", "init.defaultBranch=main", "init"], { cwd: repo });
+    await git(repo, "config", "user.email", "test@example.com");
+    await git(repo, "config", "user.name", "Test");
+    await git(repo, "config", "commit.gpgsign", "false");
+    await writeFile(join(repo, "keep.txt"), "one\n");
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-m", "init");
+
+    store = new Store(join(root, "data"));
+    await store.init();
+    svc = new WorktreeService({ store, bus: new EventBus() });
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  function project(over: Partial<Project> = {}): Project {
+    return mkProject({ repoPath: repo, worktreeRoot: wtRoot, ...over });
+  }
+
+  it("records the owning chat AT CREATION, not after the fact", async () => {
+    const info = await svc.create(project(), "feat/owned", {
+      base: "main",
+      noFetch: true,
+      chatId: "chat1",
+      origin: "tool",
+      label: "the work",
+    });
+
+    const rec = await store.getWorktreeRecord(info.path);
+    expect(rec).toMatchObject({
+      path: info.path,
+      projectId: "p1",
+      branch: "feat/owned",
+      chatId: "chat1",
+      origin: "tool",
+      label: "the work",
+    });
+    expect(info).toMatchObject({ chatId: "chat1", origin: "tool", label: "the work" });
+  });
+
+  it("merges the record onto every list() row and flags the primary checkout", async () => {
+    await svc.create(project(), "feat/listed", {
+      base: "main",
+      noFetch: true,
+      chatId: "chat1",
+      origin: "tool",
+    });
+
+    const listed = await svc.list(project());
+    const wt = listed.find((w) => w.branch === "feat/listed")!;
+    expect(wt).toMatchObject({ chatId: "chat1", origin: "tool", projectId: "p1" });
+
+    const primary = listed.find((w) => w.isPrimary)!;
+    expect(primary.path).toBe(canonicalWorktreePath(repo));
+    // The primary checkout is nobody's task worktree, whatever a row might say.
+    expect(primary.chatId).toBeUndefined();
+    expect(primary.origin).toBeUndefined();
+  });
+
+  it("back-fills a tree cut outside Dispatch as unattributed `external`", async () => {
+    const path = join(wtRoot, "rogue");
+    await git(repo, "worktree", "add", "-b", "feat/rogue", path, "main");
+
+    const listed = await svc.list(project());
+    const wt = listed.find((w) => w.branch === "feat/rogue")!;
+    // Visible, and honest about not knowing whose it is — which is the point.
+    expect(wt.origin).toBe("external");
+    expect(wt.chatId).toBeUndefined();
+  });
+
+  it("drops the row when git stops reporting the tree", async () => {
+    const info = await svc.create(project(), "feat/vanish", {
+      base: "main",
+      noFetch: true,
+      chatId: "chat1",
+    });
+    await git(repo, "worktree", "remove", "--force", info.path);
+
+    await svc.list(project());
+    expect(await store.getWorktreeRecord(info.path)).toBeNull();
+  });
+
+  it("forgets the row when WE remove the tree", async () => {
+    const info = await svc.create(project(), "feat/removed", {
+      base: "main",
+      noFetch: true,
+      chatId: "chat1",
+    });
+    await svc.remove(info.path, { chatId: "chat1" });
+    expect(await store.getWorktreeRecord(info.path)).toBeNull();
+  });
+
+  it("keeps the record's chatId in step with attach/detach", async () => {
+    const info = await svc.create(project(), "feat/moved", {
+      base: "main",
+      noFetch: true,
+    });
+    await store.saveChat({
+      id: "chatX",
+      projectId: "p1",
+      title: "t",
+      harness: "claude",
+      modeId: "default",
+      status: "idle",
+      effort: "medium",
+      worktrees: [],
+      prs: [],
+      createdAt: Date.now(),
+    });
+
+    await svc.attachToChat("chatX", info.path);
+    expect((await store.getWorktreeRecord(info.path))?.chatId).toBe("chatX");
+
+    await svc.detachFromChat("chatX", info.path);
+    expect((await store.getWorktreeRecord(info.path))?.chatId).toBeUndefined();
+  });
+
+  it("listAll applies the shared registry filter", async () => {
+    await svc.create(project(), "feat/alpha", {
+      base: "main",
+      noFetch: true,
+      chatId: "chat1",
+      origin: "tool",
+    });
+    await svc.create(project(), "feat/beta", {
+      base: "main",
+      noFetch: true,
+      chatId: "chat2",
+      origin: "tool",
+    });
+
+    const mine = await svc.listAll([project()], {
+      scope: "chat",
+      chatId: "chat1",
+    });
+    expect(mine.map((w) => w.branch)).toEqual(["feat/alpha"]);
+
+    const searched = await svc.listAll([project()], { scope: "all", q: "beta" });
+    expect(searched.map((w) => w.branch)).toEqual(["feat/beta"]);
+
+    // Scope "all" also sees the primary checkout; the narrow scopes don't.
+    const all = await svc.listAll([project()], { scope: "all" });
+    expect(all.some((w) => w.isPrimary)).toBe(true);
   });
 });

@@ -423,6 +423,50 @@ export function isPrSettledIdle(chat: Pick<Chat, "status" | "prs" | "updatedAt" 
 /* --------------------------------------------------------------- worktrees */
 
 /** Result of `git worktree` inspection + diff-vs-base stats. */
+/**
+ * How a worktree came to exist — the field that makes attribution auditable.
+ *
+ * `ui` and `tool` are the tracked paths: the record is written in the same call
+ * that runs `git worktree add`, so the owning chat is KNOWN rather than guessed.
+ * `harness` is the SDK's own `EnterWorktree` (which Dispatch can't intercept)
+ * and `external` is a tree that simply appeared in `git worktree list` — both
+ * are back-filled by the detector, and a `harness`/`external` row with no
+ * `chatId` is precisely the "whose worktree is this?" case that used to be
+ * invisible.
+ */
+export const WorktreeOriginSchema = z.enum(["ui", "tool", "harness", "external"]);
+export type WorktreeOrigin = z.infer<typeof WorktreeOriginSchema>;
+
+/**
+ * The persisted half of a worktree: who owns it and where it came from.
+ *
+ * Existence stays git's to answer (`git worktree list` is ground truth and can
+ * change under us — someone deletes a directory, another instance removes a
+ * tree). This record only holds what git cannot tell us, keyed by the worktree's
+ * canonical path.
+ */
+export const WorktreeRecordSchema = z.object({
+  /** Canonical absolute path — the primary key. */
+  path: z.string(),
+  projectId: z.string(),
+  branch: z.string(),
+  /** Owning chat, when one is known. Absent = unattributed, and shown as such. */
+  chatId: z.string().optional(),
+  origin: WorktreeOriginSchema,
+  /** Base ref the branch was cut from. */
+  base: z.string().optional(),
+  /** Optional human label, for a worktree cut for a named piece of work. */
+  label: z.string().optional(),
+  createdAt: z.number().int(),
+  /**
+   * Last time this path was seen in `git worktree list`. A row outlives neither
+   * the tree nor a reconcile pass, so this is a freshness stamp, not a tombstone.
+   */
+  lastSeenAt: z.number().int(),
+});
+export type WorktreeRecord = z.infer<typeof WorktreeRecordSchema>;
+
+/** A worktree as rendered: git's live view merged with its {@link WorktreeRecordSchema}. */
 export const WorktreeInfoSchema = z.object({
   path: z.string(),
   branch: z.string(),
@@ -437,6 +481,12 @@ export const WorktreeInfoSchema = z.object({
   projectId: z.string().optional(),
   chatId: z.string().optional(),
   createdAt: z.number().int().optional(),
+  /** From the record; absent for a tree seen before the registry knew of it. */
+  origin: WorktreeOriginSchema.optional(),
+  label: z.string().optional(),
+  lastSeenAt: z.number().int().optional(),
+  /** True for the project's primary checkout (never a disposable worktree). */
+  isPrimary: z.boolean().optional(),
 });
 export type WorktreeInfo = z.infer<typeof WorktreeInfoSchema>;
 

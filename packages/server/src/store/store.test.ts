@@ -385,3 +385,106 @@ describe("renameWithRetry — Windows destination contention", () => {
     expect((await readdir(dir)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 });
+
+describe("worktree records", () => {
+  const wtFile = () => join(dir, "worktrees.json");
+
+  it("applies `create` fields only on insert, `update` always", async () => {
+    await store.upsertWorktreeRecord("/wt/a", {
+      projectId: "p1",
+      branch: "feat/a",
+      chatId: "c1",
+      origin: "tool",
+    });
+    // A later caller that only re-saw the path must NOT restate it as external
+    // and orphan it — that was the whole reason for splitting the two arguments.
+    const after = await store.upsertWorktreeRecord("/wt/a", {
+      projectId: "p1",
+      branch: "feat/a",
+      origin: "external",
+    });
+    expect(after).toMatchObject({ origin: "tool", chatId: "c1" });
+
+    const updated = await store.upsertWorktreeRecord(
+      "/wt/a",
+      { projectId: "p1", branch: "feat/a", origin: "external" },
+      { chatId: "c2" },
+    );
+    expect(updated).toMatchObject({ origin: "tool", chatId: "c2" });
+  });
+
+  it("syncWorktreeRecords back-fills, drops the gone, and no-ops when unchanged", async () => {
+    const live = [{ path: "/wt/a", branch: "feat/a" }];
+    await store.syncWorktreeRecords("p1", live, { now: 1_000 });
+    expect(await store.listWorktreeRecords()).toMatchObject([
+      { path: "/wt/a", origin: "external", createdAt: 1_000, lastSeenAt: 1_000 },
+    ]);
+
+    // Nothing changed and the row isn't stale → the file must not be rewritten,
+    // because list() runs on every panel refresh and this is on that path.
+    const before = await readJson(wtFile());
+    await store.syncWorktreeRecords("p1", live, { now: 1_500 });
+    expect(await readJson(wtFile())).toEqual(before);
+
+    // Git stopped reporting it → the row goes. Git owns existence.
+    await store.syncWorktreeRecords("p1", [], { now: 2_000 });
+    expect(await store.listWorktreeRecords()).toEqual([]);
+  });
+
+  it("only reconciles the project it was given", async () => {
+    await store.upsertWorktreeRecord("/wt/other", {
+      projectId: "p2",
+      branch: "feat/other",
+      origin: "tool",
+    });
+    await store.syncWorktreeRecords("p1", [], { now: 1_000 });
+    expect((await store.listWorktreeRecords()).map((r) => r.path)).toEqual([
+      "/wt/other",
+    ]);
+  });
+
+  it("refreshes lastSeenAt on a branch change and on a stale row", async () => {
+    await store.syncWorktreeRecords("p1", [{ path: "/wt/a", branch: "feat/a" }], {
+      now: 1_000,
+    });
+    await store.syncWorktreeRecords("p1", [{ path: "/wt/a", branch: "feat/b" }], {
+      now: 1_100,
+    });
+    expect(await store.listWorktreeRecords()).toMatchObject([
+      { branch: "feat/b", lastSeenAt: 1_100 },
+    ]);
+
+    await store.syncWorktreeRecords("p1", [{ path: "/wt/a", branch: "feat/b" }], {
+      now: 1_100 + 10 * 60_000,
+    });
+    expect((await store.listWorktreeRecords())[0]!.lastSeenAt).toBe(1_100 + 10 * 60_000);
+  });
+
+  it("matches paths through the caller's key fn (case-folding on Windows)", async () => {
+    await store.upsertWorktreeRecord("/WT/A", {
+      projectId: "p1",
+      branch: "feat/a",
+      chatId: "c1",
+      origin: "tool",
+    });
+    const out = await store.syncWorktreeRecords(
+      "p1",
+      [{ path: "/wt/a", branch: "feat/a" }],
+      { now: 2_000, key: (p) => p.toLowerCase() },
+    );
+    // One row, still attributed — not a second, anonymous back-fill.
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ path: "/WT/A", chatId: "c1", origin: "tool" });
+  });
+
+  it("deletes a record by path", async () => {
+    await store.upsertWorktreeRecord("/wt/a", {
+      projectId: "p1",
+      branch: "feat/a",
+      origin: "ui",
+    });
+    expect(await store.getWorktreeRecord("/wt/a")).not.toBeNull();
+    await store.deleteWorktreeRecord("/wt/a");
+    expect(await store.getWorktreeRecord("/wt/a")).toBeNull();
+  });
+});
