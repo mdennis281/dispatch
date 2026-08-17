@@ -101,9 +101,14 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
   });
 
   app.get<{
-    Querystring: { worktreePath?: string; relPath?: string; ref?: string };
+    Querystring: {
+      worktreePath?: string;
+      relPath?: string;
+      ref?: string;
+      mergeBase?: string;
+    };
   }>("/api/worktrees/file", async (req, reply) => {
-    const { worktreePath, relPath, ref } = req.query;
+    const { worktreePath, relPath, ref, mergeBase } = req.query;
     if (!worktreePath || !relPath) {
       return reply
         .code(400)
@@ -112,6 +117,10 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
     try {
       return await worktrees.readFile(worktreePath, relPath, {
         ref: ref || undefined,
+        // Opt-in, not the default: this reads the base side of a BRANCH diff,
+        // where the merge-base is what the file list already used, but a caller
+        // asking for an exact rev must still get that exact rev.
+        mergeBase: mergeBase === "1" || mergeBase === "true",
       });
     } catch (err) {
       // relPath/ref guard failures are client errors; surface as 400.

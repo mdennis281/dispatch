@@ -571,10 +571,15 @@ export const api = {
       del<void>("/api/worktrees", body),
     diff: (worktreePath: string, base = "main") =>
       get<ServerWorktreeDiff>(`/api/worktrees/diff${qs({ worktreePath, base })}`),
-    /** Read one file (working tree, or at `ref` for the diff editor's base side). */
-    file: (worktreePath: string, relPath: string, ref?: string) =>
+    /**
+     * Read one file (working tree, or at `ref` for the diff editor's base side).
+     * `mergeBase` reads it at the fork point with `ref` instead of at its tip —
+     * the same history point `diff` uses, so the viewer and the changed-file
+     * list can't disagree about what this branch changed.
+     */
+    file: (worktreePath: string, relPath: string, ref?: string, mergeBase?: boolean) =>
       get<WorktreeFileContent>(
-        `/api/worktrees/file${qs({ worktreePath, relPath, ref })}`,
+        `/api/worktrees/file${qs({ worktreePath, relPath, ref, mergeBase: mergeBase ? "1" : undefined })}`,
       ),
     /** Save edited working-tree file content (editable Monaco). */
     writeFile: (worktreePath: string, relPath: string, content: string) =>

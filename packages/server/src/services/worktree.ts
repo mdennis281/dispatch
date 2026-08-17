@@ -467,6 +467,23 @@ export class WorktreeService {
     return base;
   }
 
+  /**
+   * The commit `git diff --merge-base <base>` would diff against: the fork
+   * point of HEAD and the (resolved) base ref. Falls back to the resolved ref
+   * itself when there is no common ancestor — an unrelated history still
+   * renders a diff rather than an error.
+   */
+  private async mergeBaseOf(worktreePath: string, base: string): Promise<string> {
+    const eff = await this.resolveDiffBase(worktreePath, base);
+    const r = await this.exec(
+      "git",
+      ["merge-base", "--end-of-options", "HEAD", eff],
+      { cwd: worktreePath },
+    );
+    const sha = r.stdout.trim();
+    return r.exitCode === 0 && sha ? sha : eff;
+  }
+
   /** True when `rev` resolves to a commit in the worktree's repo (read-only). */
   private async refExists(cwd: string, rev: string): Promise<boolean> {
     const r = await this.exec(
@@ -544,7 +561,7 @@ export class WorktreeService {
   async readFile(
     worktreePath: string,
     relPath: string,
-    opts: { ref?: string } = {},
+    opts: { ref?: string; mergeBase?: boolean } = {},
   ): Promise<WorktreeFile> {
     const rel = normalizeRelPath(relPath);
     if (rel === null) throw new Error(`invalid relPath: ${relPath}`);
@@ -552,11 +569,20 @@ export class WorktreeService {
     if (opts.ref) {
       const ref = opts.ref;
       if (!/^[\w.@/-]+$/.test(ref)) throw new Error(`invalid ref: ${ref}`);
+      // The viewer opens from the file list, which {@link diffVsMain} computes
+      // with `git diff --merge-base`. Reading the base side at the TIP of the
+      // ref made the two disagree: every commit that landed on `main` after the
+      // branch was cut rendered in the viewer as a hunk the branch never made,
+      // on files the list didn't even mention. `mergeBase` asks for the same
+      // point in history the list used.
+      const spec = opts.mergeBase
+        ? await this.mergeBaseOf(worktreePath, ref)
+        : ref;
       // `--end-of-options` pins the object spec so a crafted ref can't be read
       // as a flag. A non-zero exit = the path didn't exist at that ref.
       const r = await this.exec(
         "git",
-        ["show", "--end-of-options", `${ref}:${rel}`],
+        ["show", "--end-of-options", `${spec}:${rel}`],
         { cwd: worktreePath },
       );
       if (r.exitCode !== 0) {

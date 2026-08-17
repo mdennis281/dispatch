@@ -9,6 +9,7 @@ import * as monaco from "monaco-editor";
 import { loader } from "@monaco-editor/react";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import { useTheme } from "../../stores/theme.js";
+import { normalizeHex, withAlphaHex } from "./hex.js";
 
 // Only the base editor worker — read-only preview needs no TS/JSON/CSS services.
 (globalThis as unknown as { MonacoEnvironment?: unknown }).MonacoEnvironment = {
@@ -27,16 +28,19 @@ export const DISPATCH_THEME = "dispatch";
  * or the editor would be the single pane still painting the old palette.
  */
 function token(name: string): string {
-  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  // A missing token would hand Monaco "" and make it fall back to vs-dark's own
-  // colour for that slot, which is the confusing failure: mostly-right chrome
-  // with one wrong element. Magenta is chosen to be impossible to miss.
-  return v || "#ff00ff";
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name);
+  // Normalised, never raw: a production build ships `#fff` where the source
+  // said `#ffffff`, and Monaco's parser rejects anything it can't read as one
+  // of its four hex forms — answering with OPAQUE RED, not an error. See
+  // ./hex. A missing token would instead hand Monaco "" and make it fall back
+  // to vs-dark's own colour for that slot, which is the confusing failure:
+  // mostly-right chrome with one wrong element. Magenta is impossible to miss.
+  return normalizeHex(v);
 }
 
 /** Monaco's colour map wants #rrggbbaa; `alpha` is the two hex digits. */
 function withAlpha(name: string, alpha: string): string {
-  return token(name) + alpha;
+  return withAlphaHex(token(name), alpha);
 }
 
 /** Monaco's TOKEN rules (as opposed to its colour map) want bare hex, no `#`. */

@@ -322,12 +322,17 @@ export function deleteChat(chatId: string): Promise<void> {
 // see lib/assetSrc.ts.)
 export type { WorktreeFileContent, ServerWorktreeDiff, ServerFileDiff } from "./api.js";
 
-/** Read a worktree file (working tree, or at `ref` for the base side of a diff). */
+/**
+ * Read a worktree file (working tree, or at `ref` for the base side of a diff).
+ * Pass `mergeBase` for a branch diff: it reads the fork point rather than the
+ * ref's tip, matching the changed-file list.
+ */
 export const readWorktreeFile = (
   worktreePath: string,
   relPath: string,
   ref?: string,
-) => api.worktrees.file(worktreePath, relPath, ref);
+  mergeBase?: boolean,
+) => api.worktrees.file(worktreePath, relPath, ref, mergeBase);
 
 /** Save edited working-tree file content (editable Monaco config editor). */
 export const writeWorktreeFile = (
