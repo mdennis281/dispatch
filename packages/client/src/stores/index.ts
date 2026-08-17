@@ -58,7 +58,7 @@ export { useAttention, useAttentionCount } from "./attention.js";
 export { useRunners, useChatRunners } from "./runners.js";
 export { useTerminals, useChatTerminals } from "./terminals.js";
 export { usePanels } from "./panels.js";
-export { usePrs, selectPrs } from "./prs.js";
+export { usePrs, useAllPrs, selectPrs } from "./prs.js";
 export { useMemory, useProjectMemories } from "./memory.js";
 export { useGit, useGitChangeCount, changeCount } from "./git.js";
 export type { GitSelection, GitTab } from "./git.js";

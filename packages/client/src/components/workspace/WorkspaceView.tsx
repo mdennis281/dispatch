@@ -70,7 +70,7 @@ import { cn } from "../../lib/cn.js";
 import { useOverlay } from "../../stores/view.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
-import { usePrs, selectPrs } from "../../stores/prs.js";
+import { useAllPrs } from "../../stores/prs.js";
 import { selectChat } from "../../stores/navigation.js";
 import {
   useWorkspace,
@@ -598,7 +598,7 @@ export function WorkspaceView() {
   // PRs come from the STANDING catalog, not from a fetch when this opens — the
   // one thing the overlay this replaces could never do. Scope is applied here
   // for the same reason `q` is: the rows are already local.
-  const allPrs = usePrs(selectPrs);
+  const allPrs = useAllPrs();
 
   const refresh = useCallback(() => {
     void load({ projectId, chatId });
