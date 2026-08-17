@@ -8,7 +8,7 @@ import { Kbd } from "../ui/Kbd.js";
 import { StatusDot, type DotTone } from "../ui/StatusDot.js";
 import { DispatchMark } from "../ui/DispatchMark.js";
 import { useConnection, type ConnState } from "../../stores/connection.js";
-import { openOverlay } from "../../stores/view.js";
+import { openOverlay, openAppSettings, openProjectSettings } from "../../stores/view.js";
 import { useLayout } from "../../stores/layout.js";
 import { cn } from "../../lib/cn.js";
 
@@ -119,7 +119,11 @@ export function TopBar() {
         {!compact && (
           <>
             <AttentionPopover />
-            <IconButton tip="Project config" onClick={() => openOverlay("config")}>
+            {/* Two of these four are now full PAGES rather than overlays (see
+                stores/view) — they'd outgrown a dialog. They keep their slot in
+                this row because from here they're the same gesture: the thing
+                you were doing stays where it is, and you come back to it. */}
+            <IconButton tip="Project config" onClick={() => openProjectSettings()}>
               <FileCog />
             </IconButton>
             <IconButton tip="MCP tools" onClick={() => openOverlay("mcp")}>
@@ -128,7 +132,7 @@ export function TopBar() {
             <IconButton tip="Open pull requests" onClick={() => openOverlay("prs")}>
               <GitPullRequest />
             </IconButton>
-            <IconButton tip="Settings" onClick={() => openOverlay("settings")}>
+            <IconButton tip="Settings" onClick={() => openAppSettings()}>
               <Settings />
             </IconButton>
           </>

@@ -1,15 +1,40 @@
 import { create } from "zustand";
+import type { ConfigSection } from "@dispatch/shared";
 
 /** The app's primary surface. "chat" = the transcript workspace; "memory" = the
  *  top-level, chat-independent memory browser (list+search + viewer); "git" =
  *  the project's Source Control cockpit (changes, history, branches, stashes);
- *  "new-project" = the full-bleed project setup page.
+ *  "new-project" = the full-bleed project setup page;
+ *  "project-settings" / "app-settings" = the two settings pages.
  *
  *  "new-project" is the one view that also hides the SIDEBAR. It isn't scoped to
  *  the active project — it's how a project comes to exist — so a rail of the
  *  current project's chats and apps beside it is noise at best and a misread at
  *  worst ("am I editing that one?"). Everything else keeps its chrome. */
-export type AppView = "chat" | "memory" | "git" | "new-project";
+export type AppView =
+  | "chat"
+  | "memory"
+  | "git"
+  | "new-project"
+  | "project-settings"
+  | "app-settings";
+
+/**
+ * The app-settings subpages.
+ *
+ * Declared HERE rather than beside the registry that renders them because the
+ * selected subpage is navigation state — the command palette addresses it
+ * ("Stop Dispatch" lands on `system`), and a store that imported a component
+ * file to learn the union would be pointing the wrong way.
+ */
+export type AppSettingsSection =
+  | "appearance"
+  | "chat"
+  | "context"
+  | "notifications"
+  | "auth"
+  | "updates"
+  | "system";
 
 /**
  * The app's modal surfaces — project-scoped things that sit ON TOP of a view
@@ -27,17 +52,17 @@ export type AppView = "chat" | "memory" | "git" | "new-project";
  * also the fix for the old bug where two of these could be stacked on top of
  * each other with no way to tell which Esc would dismiss.
  */
-export type AppOverlay =
-  | "prs"
-  | "mcp"
-  | "config"
-  | "settings"
-  | "agents"
-  | "processes";
+export type AppOverlay = "prs" | "mcp" | "agents" | "processes";
 
 interface ViewStore {
   view: AppView;
   setView: (view: AppView) => void;
+  /** Which subpage of the project-settings view is showing. */
+  projectSection: ConfigSection;
+  setProjectSection: (section: ConfigSection) => void;
+  /** Which subpage of the app-settings view is showing. */
+  appSection: AppSettingsSection;
+  setAppSection: (section: AppSettingsSection) => void;
   overlay: AppOverlay | null;
   openOverlay: (overlay: AppOverlay) => void;
   closeOverlay: () => void;
@@ -49,6 +74,10 @@ interface ViewStore {
 export const useView = create<ViewStore>((set) => ({
   view: "chat",
   setView: (view) => set({ view }),
+  projectSection: "workflow",
+  setProjectSection: (projectSection) => set({ projectSection }),
+  appSection: "appearance",
+  setAppSection: (appSection) => set({ appSection }),
   overlay: null,
   openOverlay: (overlay) => set({ overlay }),
   closeOverlay: () => set({ overlay: null }),
@@ -75,4 +104,25 @@ export function openOverlay(overlay: AppOverlay): void {
 /** Switch the main surface from outside React. */
 export function setView(view: AppView): void {
   useView.getState().setView(view);
+}
+
+/**
+ * Open a settings page, optionally on a named subpage.
+ *
+ * Both pages remember which subpage you were last on, so omitting the argument
+ * puts you back where you left — but a caller that MEANS a particular one (the
+ * palette's "Stop Dispatch", a deep link) says so and wins.
+ */
+export function openProjectSettings(section?: ConfigSection): void {
+  useView.setState({
+    view: "project-settings",
+    ...(section ? { projectSection: section } : {}),
+  });
+}
+
+export function openAppSettings(section?: AppSettingsSection): void {
+  useView.setState({
+    view: "app-settings",
+    ...(section ? { appSection: section } : {}),
+  });
 }

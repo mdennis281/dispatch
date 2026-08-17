@@ -11,11 +11,11 @@ import { AgentRunHost } from "./components/agents/AgentRunHost.js";
 import { ProjectPRsView } from "./components/prs/ProjectPRsView.js";
 import { ProcessesOverlay } from "./components/panels/ProcessesOverlay.js";
 import { McpCatalogView } from "./components/mcp/McpCatalogView.js";
-import { ProjectConfigView } from "./components/config/ProjectConfigView.js";
+import { ProjectSettingsView } from "./components/config/ProjectSettingsView.js";
 import { NewProjectView } from "./components/project/NewProjectView.js";
 import { MemoryView } from "./components/memory/MemoryView.js";
 import { GitView } from "./components/git/GitView.js";
-import { SettingsPanel } from "./components/settings/SettingsPanel.js";
+import { AppSettingsView } from "./components/settings/AppSettingsView.js";
 import { ManageConfigDialog } from "./components/sidebar/ManageConfigDialog.js";
 import { Toasts } from "./components/Toasts.js";
 import { ShutdownScreen } from "./components/ShutdownScreen.js";
@@ -157,6 +157,10 @@ export default function App() {
             <MemoryView />
           ) : view === "git" ? (
             <GitView />
+          ) : view === "project-settings" ? (
+            <ProjectSettingsView />
+          ) : view === "app-settings" ? (
+            <AppSettingsView />
           ) : chat ? (
             <>
               <ChatView chat={chat} />
@@ -200,8 +204,6 @@ export default function App() {
       <ProjectPRsView />
       <ProcessesOverlay />
       <McpCatalogView />
-      <ProjectConfigView />
-      <SettingsPanel />
       <ManageConfigDialog />
       <Toasts />
       <ViewportDebug />

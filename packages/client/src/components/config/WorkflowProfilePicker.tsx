@@ -82,7 +82,13 @@ const MERGE_METHODS: { value: WorkflowMergeMethod; label: string }[] = [
   { value: "rebase", label: "Rebase" },
 ];
 
-/** A compact token-styled on/off switch (mirrors the one in SettingsPanel). */
+/**
+ * The switch's LOOK, with none of its behaviour — deliberately not `ui/Switch`.
+ * Every one of these sits inside a row that is itself the clickable control, so
+ * the real switch would be a nested interactive element: invalid markup, and two
+ * overlapping hit targets for one decision. This is a plain span that shows the
+ * state its row toggles.
+ */
 function Switch({ checked, disabled }: { checked: boolean; disabled?: boolean }) {
   return (
     <span
