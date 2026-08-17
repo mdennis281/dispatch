@@ -45,7 +45,21 @@ const indexHtml = join(clientRoot, "index.html");
 
 const BG = [20, 23, 27]; // #14171B — the app's dark shell
 const FG = [229, 163, 60]; // #E5A33C — signal amber
-export const THEME_COLOR = "#14171B";
+/**
+ * The window frame's color, which is NOT the icon plate's.
+ *
+ * Chromium paints an installed window's title bar — and, with the window controls
+ * overlay, the slab behind the minimise/maximise/close buttons — with this. So it
+ * has to be the color of the thing those buttons sit IN, which is the top bar:
+ * `--p-surface` from `src/theme/dark.css`. It was `BG` (the icon plate), and at
+ * the top-right corner of the header that read as a seam.
+ *
+ * Only the DARK value can go here, because a static meta tag cannot know the
+ * theme. `syncThemeColor` in `src/stores/theme.ts` overwrites it from the live
+ * palette as soon as the bundle runs; this is the value the frame has for the few
+ * ms before that, and dark is the default theme.
+ */
+export const THEME_COLOR = "#0e1114";
 
 /* --------------------------------------------------------------- png encode */
 

@@ -42,6 +42,38 @@ export function resolveTheme(pref: ThemePref): ResolvedTheme {
 }
 
 /**
+ * Repaint the window controls to match the header.
+ *
+ * Chromium draws the minimise/maximise/close buttons of an installed window on a
+ * slab of `theme_color`, and picks light or dark glyphs from it. The manifest can
+ * only state ONE colour, so a manifest value is wrong for one of the two themes
+ * by construction — on light it left a dark slab in the top-right corner of an
+ * otherwise pale header. `<meta name="theme-color">` is the live version of the
+ * same setting: Chromium re-reads it, so following the palette here is what makes
+ * the buttons sit in the header rather than on top of it.
+ *
+ * The colour is READ from `--p-surface` rather than restated: `bg-surface` is what
+ * the top bar is painted with (see components/layout/TopBar), and a second copy of
+ * that hex in TypeScript is a copy that goes stale the first time the palette is
+ * touched — silently, because nothing renders it side by side with the real one
+ * except the window frame.
+ *
+ * Also runs where there is no overlay at all: it colours the ordinary standalone
+ * title bar, the Android task switcher and the install splash, all of which want
+ * the same answer.
+ */
+export function syncThemeColor(): void {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) return;
+  const surface = getComputedStyle(document.documentElement)
+    .getPropertyValue("--p-surface")
+    .trim();
+  // Empty means the palette stylesheet has not landed yet. The generated meta in
+  // index.html already carries the dark default, so leaving it alone is right.
+  if (surface) meta.setAttribute("content", surface);
+}
+
+/**
  * Write the theme to the document. `color-scheme` is set alongside the
  * attribute even though `index.css` also sets it per-theme: the inline
  * pre-paint script has no stylesheet yet, and without it the browser paints its
@@ -52,6 +84,7 @@ export function applyTheme(pref: ThemePref): ResolvedTheme {
   const root = document.documentElement;
   root.dataset.theme = resolved;
   root.style.colorScheme = resolved;
+  syncThemeColor();
   return resolved;
 }
 

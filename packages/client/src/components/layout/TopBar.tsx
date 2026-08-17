@@ -10,6 +10,7 @@ import { DispatchMark } from "../ui/DispatchMark.js";
 import { useConnection, type ConnState } from "../../stores/connection.js";
 import { openOverlay, openAppSettings, openProjectSettings } from "../../stores/view.js";
 import { useLayout } from "../../stores/layout.js";
+import { useWindowControlsOverlay } from "../../lib/windowControls.js";
 import { cn } from "../../lib/cn.js";
 
 const CONN_META: Record<ConnState, { tone: DotTone; label: string; pulse: boolean; text: string }> = {
@@ -19,7 +20,41 @@ const CONN_META: Record<ConnState, { tone: DotTone; label: string; pulse: boolea
   closed: { tone: "muted", label: "Offline", pulse: false, text: "text-muted" },
 };
 
+/**
+ * The top bar, which is one row normally and two when it has to be a title bar.
+ *
+ * Installed in a Chromium window there is no title bar at all: the page owns the
+ * whole surface and the minimise/maximise/close buttons are painted on top of it.
+ * That is what put a close button through the right-hand end of this row. So when
+ * the overlay is up the bar grows a strip above itself that is exactly as tall as
+ * those buttons — draggable, holding nothing but the app's identity — and the row
+ * below it is then clear of them without knowing anything about where they are.
+ *
+ * `flex-col` here with the horizontal padding on the ROW rather than on this
+ * element: the strip has to reach the window's corners (see `.cm-titlebar`), and
+ * a `px-3` up here would inset it by 12px at each end — 12px of the window's own
+ * top-left corner that no longer drags it.
+ */
 export function TopBar() {
+  const overlay = useWindowControlsOverlay();
+
+  return (
+    <header className="flex shrink-0 flex-col border-b border-line bg-surface cm-safe-t">
+      {overlay && <TitleBar />}
+      <MainRow overlay={overlay} />
+    </header>
+  );
+}
+
+/**
+ * Everything the bar actually does. Split out so the drag strip above it can be a
+ * sibling rather than a first child, which is what lets that strip be full-bleed
+ * while this row keeps its padding.
+ *
+ * `overlay` only reaches here to suppress the mark and wordmark, which have moved
+ * up into the strip.
+ */
+function MainRow({ overlay }: { overlay: boolean }) {
   const conn = useConnection((s) => s.state);
   const c = CONN_META[conn];
 
@@ -31,11 +66,11 @@ export function TopBar() {
   // palette, and usage.
   const compact = useLayout((s) => s.mode) === "sm";
 
-  // `min-h-13` rather than `h-13`, plus `cm-safe-t`: with `viewport-fit=cover`
-  // and a black-translucent status bar (see index.html) the installed PWA draws
-  // under the clock, so the inset has to be added ON TOP of the bar's height — a
-  // fixed height would have carved the padding out of it and left the controls
-  // half under the notch.
+  // `min-h-13` rather than `h-13`: with `viewport-fit=cover` and a
+  // black-translucent status bar (see index.html) the installed PWA draws under
+  // the clock, so the inset — applied as `cm-safe-t` on the header above — has to
+  // be added ON TOP of this row's height. A fixed height would have carved the
+  // padding out of it and left the controls half under the notch.
   //
   // `pb-2` on top of that: the row was sitting hard against the hairline, so on
   // a phone the mark and the first chat row below it read as one crowded block.
@@ -44,7 +79,7 @@ export function TopBar() {
   // and leave the bar visibly lopsided on a flat one. 52 − 8 still leaves the
   // 44px touch row intact.
   return (
-    <header className="flex min-h-13 shrink-0 items-center gap-3 border-b border-line bg-surface px-3 pb-2 cm-safe-t">
+    <div className="flex min-h-13 shrink-0 items-center gap-3 px-3 pb-2">
       {/* mark — the real app icon, not a stand-in glyph: the thing in the
           top-left should be the thing you launched, matching the tab favicon
           and the taskbar icon exactly (see ui/DispatchMark).
@@ -54,21 +89,28 @@ export function TopBar() {
           as a badge someone had outlined rather than as the app icon, and it
           didn't appear on the favicon or the installed icon it's supposed to
           match. Dropping it also frees the 2px it was eating, so the mark goes
-          to 32px: same footprint in the bar, a bigger actual logo. */}
-      <div className="flex items-center gap-2 pr-1">
-        <DispatchMark platedTheme className="size-8 shrink-0" title="Dispatch" />
-        {/* No version here. `v0.1` was a hardcoded stand-in that never moved and
-            said nothing about the bundle you're running; the sidebar's build
-            stamp does, so a second, permanently-wrong number next to the logo is
-            worse than none.
+          to 32px: same footprint in the bar, a bigger actual logo.
 
-            The wordmark drops on a phone: the mark beside it is the same brand,
-            at a glance, in a quarter of the width — and on a home-screen PWA the
-            app's name is already under the icon you tapped. */}
-        {!compact && (
-          <span className="text-base font-semibold tracking-tight text-primary">Dispatch</span>
-        )}
-      </div>
+          Gone when there is a drag strip above, because the identity moved up
+          into it — the way VS Code and Teams put theirs in the title bar. Two app
+          icons in one corner, or a wordmark repeated directly under itself, is
+          what would make the taller header read as a mistake. */}
+      {!overlay && (
+        <div className="flex items-center gap-2 pr-1">
+          <DispatchMark platedTheme className="size-8 shrink-0" title="Dispatch" />
+          {/* No version here. `v0.1` was a hardcoded stand-in that never moved and
+              said nothing about the bundle you're running; the sidebar's build
+              stamp does, so a second, permanently-wrong number next to the logo is
+              worse than none.
+
+              The wordmark drops on a phone: the mark beside it is the same brand,
+              at a glance, in a quarter of the width — and on a home-screen PWA the
+              app's name is already under the icon you tapped. */}
+          {!compact && (
+            <span className="text-base font-semibold tracking-tight text-primary">Dispatch</span>
+          )}
+        </div>
+      )}
 
       {/* connection — the dot alone on a phone. `CONN_META` already carries the
           tone, so the label is a second encoding of the same fact, and it's the
@@ -146,6 +188,48 @@ export function TopBar() {
       </div>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
-    </header>
+    </div>
+  );
+}
+
+/**
+ * The row that only exists to be grabbed.
+ *
+ * With the window controls overlay there is nothing left to drag a window by:
+ * the title bar is gone and the only chrome remaining is four buttons in the
+ * corner. `app-region: drag` on this strip gives it back — and gives back the
+ * rest of the title bar's behaviour with it, since the OS handles a drag region
+ * the same way it handles its own bar: double-click maximises and restores,
+ * right-click opens the system window menu, and dragging to an edge snaps.
+ *
+ * The height is the overlay's own, read from `env(titlebar-area-height)`, so the
+ * row ends exactly where the buttons do and the row below is clear of them
+ * without knowing anything about them. It is 0 when there is no overlay, which is
+ * why this component is never rendered then — a `border-b` on a 0px box would
+ * still draw a stray hairline.
+ *
+ * Nothing in here is interactive, and that is a constraint rather than a
+ * shortage of ideas: draggability inherits to every descendant and swallows the
+ * clicks and text selection it inherits over, so a button here would need an
+ * explicit `app-region: no-drag` and would carve a hole in the drag target at the
+ * one width where the target is already thin.
+ */
+function TitleBar() {
+  return (
+    <div className="cm-titlebar">
+      {/* Clipped to the area the UA says is ours — on macOS that starts ~78px in,
+          because the buttons are on the LEFT there. `pl-3` inside it rather than
+          on the strip so the mark lines up with the row below on Windows without
+          being pushed off the far side of the controls on a Mac. */}
+      <div className="cm-titlebar-area flex items-center gap-2 pl-3">
+        <DispatchMark platedTheme className="size-5 shrink-0" title="Dispatch" />
+        {/* `select-none` is belt and braces — a drag region already suppresses
+            selection — but it also covers the moment before the property applies
+            and the case where only the prefixed spelling is understood. */}
+        <span className="select-none truncate text-xs font-semibold tracking-tight text-secondary">
+          Dispatch
+        </span>
+      </div>
+    </div>
   );
 }

@@ -217,6 +217,30 @@
     --cm-safe-left: env(safe-area-inset-left, 0px);
 
     /*
+     * The title bar we were given instead of a title bar.
+     *
+     * `display_override: ["window-controls-overlay"]` in the manifest means the
+     * installed window has NO title bar: the page gets the whole surface and the
+     * minimise/maximise/close buttons are painted on top of it, top-right on
+     * Windows and top-LEFT on macOS. These four `env()`s describe the strip the
+     * title bar would have occupied NEXT TO those buttons — so they are the only
+     * honest answer to "where may I draw?", and using them is the difference
+     * between a header and a header with a close button through it.
+     *
+     * `-h` is OS- and DPI-determined (~33px at 100% on Windows) and cannot be
+     * set by us, which is exactly why the drag row is sized from it rather than
+     * from a number that looked right on one machine.
+     *
+     * The fallbacks are the overlay-absent case and they are what makes these
+     * inert everywhere else: 0 height, so `.cm-titlebar` collapses; a full-width
+     * area starting at 0, so nothing gets indented. Note the `0px` rather than
+     * `0` — these are `calc()`'d and compared as lengths.
+     */
+    --cm-titlebar-h: env(titlebar-area-height, 0px);
+    --cm-titlebar-x: env(titlebar-area-x, 0px);
+    --cm-titlebar-w: env(titlebar-area-width, 100%);
+
+    /*
      * The mobile bottom nav, in three parts.
      *
      * `-h` is the slot height the touch targets need (52px clears the 44px
@@ -405,6 +429,44 @@
   .cm-safe-x {
     padding-left: var(--cm-safe-left);
     padding-right: var(--cm-safe-right);
+  }
+
+  /*
+   * The window's drag handle, in the space the title bar used to have.
+   *
+   * Two boxes, because the strip and the CONTENT of the strip want different
+   * widths. The outer one spans the whole window so the header's background is
+   * continuous behind the window controls — Chromium paints those buttons on a
+   * slab of the manifest's `theme_color`, and a strip that stopped short of them
+   * would put a visible seam a few pixels in from the corner. The inner one is
+   * clipped to `titlebar-area-*`, which is where drawing is actually allowed.
+   *
+   * Positioned with `left`/`width` off the env vars rather than by subtracting a
+   * gutter from `100%`: a percentage resolves against the containing block, so
+   * the moment anything above it grows a horizontal padding the arithmetic is
+   * quietly wrong by that much. Absolute lengths from the UA can't drift.
+   *
+   * `app-region: drag` is what buys the behaviour: not just moving the window,
+   * but double-click to maximise, right-click for the system menu, and snapping
+   * to a screen edge — everything a real title bar does, which is the whole
+   * argument for spending a row on this. Both spellings, because the unprefixed
+   * property is the standardisation of Chromium's `-webkit-` one and is not yet
+   * documented as shipped. Draggability INHERITS, and it eats clicks and text
+   * selection with it, so anything interactive placed in here would need
+   * `app-region: no-drag` — today nothing is, deliberately.
+   */
+  .cm-titlebar {
+    position: relative;
+    height: var(--cm-titlebar-h);
+    -webkit-app-region: drag;
+    app-region: drag;
+  }
+  .cm-titlebar-area {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: var(--cm-titlebar-x);
+    width: var(--cm-titlebar-w);
   }
 
   .cm-hairline-b {
