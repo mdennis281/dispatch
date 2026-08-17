@@ -473,6 +473,18 @@ export class FsExplorerService {
   }
 
   /**
+   * A native path in the forward-slashed wire form.
+   *
+   * Platform-aware, unlike the bare {@link fwd}: on POSIX a backslash is a legal
+   * FILENAME character, so converting one would hand the client a path that
+   * points somewhere else — and a file named `we\ird` could never be opened,
+   * renamed or deleted through this UI.
+   */
+  private toWire(nativePath: string): string {
+    return this.platform === "win32" ? fwd(nativePath) : nativePath;
+  }
+
+  /**
    * Wire form (absolute, forward-slashed) → the form `node:fs` wants.
    *
    * `resolve` is what converts `C:/a/b` back to `C:\a\b` on Windows; on POSIX it
@@ -559,7 +571,7 @@ export class FsExplorerService {
         modifiedAt: resolved ? resolved.mtimeMs : st.mtimeMs,
         createdAt: realBirthtime(resolved ? resolved.birthtimeMs : st.birthtimeMs),
         accessedAt: resolved ? resolved.atimeMs : st.atimeMs,
-        link: { target: target ? fwd(target) : null, broken: !resolved },
+        link: { target: target ? this.toWire(target) : null, broken: !resolved },
       };
     }
 
@@ -579,7 +591,7 @@ export class FsExplorerService {
   /** `enclosingRepoRoot` in wire form, for the listing's git column. */
   private repoRootOf(nativePath: string): string | null {
     const root = enclosingRepoRoot(nativePath);
-    return root ? fwd(root) : null;
+    return root ? this.toWire(root) : null;
   }
 
   /* --------------------------------------------------------------- roots */
@@ -594,21 +606,21 @@ export class FsExplorerService {
    */
   async roots(sources: RootSources = { projects: [], worktrees: [] }): Promise<FsRoot[]> {
     const out: FsRoot[] = [];
-    const home = fwd(this.home());
+    const home = this.toWire(this.home());
     out.push({ path: home, label: "Home", kind: "home", detail: home });
 
     for (const p of sources.projects) {
       if (!p.repoPath) continue;
       out.push({
-        path: fwd(resolve(p.repoPath)),
+        path: this.toWire(resolve(p.repoPath)),
         label: p.name,
         kind: "project",
-        detail: fwd(p.repoPath),
+        detail: this.toWire(p.repoPath),
       });
     }
     for (const w of sources.worktrees) {
       out.push({
-        path: fwd(resolve(w.path)),
+        path: this.toWire(resolve(w.path)),
         label: w.branch ?? basename(w.path),
         kind: "worktree",
         detail: w.projectName,
@@ -860,11 +872,17 @@ export class FsExplorerService {
     const queue: Array<{ wire: string; native: string; depth: number }> = [
       { wire: root, native: this.native(root), depth: 0 },
     ];
+    // A read CURSOR rather than `queue.shift()`. Shift reindexes the whole
+    // array, so draining a queue of N directories is O(n²) — on a tree with
+    // tens of thousands of directories that is real CPU stacked on top of the
+    // I/O. The queue is never long-lived enough for the abandoned prefix to be
+    // worth reclaiming.
+    let head = 0;
     let visits = 0;
 
-    while (queue.length) {
+    while (head < queue.length) {
       if (Date.now() > deadline) break;
-      const dir = queue.shift();
+      const dir = queue[head++];
       if (!dir) break;
 
       let dirents: Dirent[];
@@ -1180,7 +1198,10 @@ export class FsExplorerService {
         errors.push({ path: norm, message: message(err) });
       }
     }
-    if (!norms.length) return { ok: false, changed: [], errors, trashed: !permanent };
+    // `trashed: false` — nothing was deleted, so nothing reached the trash.
+    // Reporting the INTENT here would tell a caller its files are recoverable
+    // from the Recycle Bin when they were never touched.
+    if (!norms.length) return { ok: false, changed: [], errors, trashed: false };
 
     if (permanent) {
       for (const norm of norms) {
@@ -1210,7 +1231,9 @@ export class FsExplorerService {
         ok: false,
         changed: [],
         errors: [...errors, { path: norms[0], message: `could not move to trash: ${message(err)}` }],
-        trashed: true,
+        // The trash call THREW: nothing is in the trash. Saying otherwise sends
+        // someone to the Recycle Bin to recover a file that is still on disk.
+        trashed: false,
       };
     }
   }

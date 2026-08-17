@@ -56,9 +56,25 @@ describe("fsNormalize", () => {
   });
 
   it("treats a backslash as a literal character on POSIX", () => {
-    // Backslash is a legal POSIX filename character. Converting it would rename
-    // the file the user is pointing at.
-    expect(fsNormalize("/tmp/we\\ird", P)).toBe("/tmp/we/ird");
+    // Backslash is a legal POSIX filename character, so converting it points at
+    // a DIFFERENT path and makes the real file unreachable. This assertion
+    // originally said `/tmp/we/ird` — the comment was right and the code and
+    // test were both wrong.
+    expect(fsNormalize("/tmp/we\\ird", P)).toBe("/tmp/we\\ird");
+    // Same string on Windows, where it IS a separator.
+    expect(fsNormalize("C:/tmp/we\\ird", W)).toBe("C:/tmp/we/ird");
+  });
+
+  it("keeps a backslash out of POSIX root and parent arithmetic too", () => {
+    // Every path helper has to agree, or the file lists under one name and
+    // its parent link points at another.
+    expect(fsRootOf("/a\\b", P)).toBe("/");
+    expect(fsParent("/tmp/we\\ird", P)).toBe("/tmp");
+    expect(fsBasename("/tmp/we\\ird", P)).toBe("we\\ird");
+    // And a name containing one survives being joined on POSIX.
+    expect(fsJoin("/tmp", "we\\ird", P)).toBe("/tmp/we\\ird");
+    // On Windows the same name IS a traversal attempt, so it collapses.
+    expect(fsJoin("C:/tmp", "we\\ird", W)).toBe("C:/tmp/we/ird");
   });
 
   it("drops a trailing slash except at a root", () => {
@@ -330,6 +346,18 @@ describe("fsSortEntries", () => {
       { key: "name", desc: false },
     ).map((e) => e.name);
     expect(nat).toEqual(["file1", "file9", "file10"]);
+  });
+
+  it("sorts by extension under the key that says so", () => {
+    // The key is `ext`, not `kind`: an entry HAS a `kind` (file/directory), and
+    // a sort key of that name ordering by something else is a contract at odds
+    // with itself.
+    const mixed = [entry({ name: "b.ts" }), entry({ name: "a.zip" }), entry({ name: "c.md" })];
+    expect(fsSortEntries(mixed, { key: "ext", desc: false }).map((e) => e.ext)).toEqual([
+      "md",
+      "ts",
+      "zip",
+    ]);
   });
 
   it("sorts by size and by modified time", () => {

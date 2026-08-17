@@ -92,12 +92,24 @@ const SEARCH_DEBOUNCE_MS = 180;
 
 export function useFsBrowser(opts: UseFsBrowserOptions): FsBrowser {
   const platform = usePathPlatform();
+  // `usePathPlatform` returns a DEFAULT before the fetch lands, so it can't tell
+  // "the server is POSIX" from "we haven't asked yet". This can.
+  const platformKnown = useFsRoots((s) => s.platform) !== null;
   const home = useFsRoots((s) => s.home);
   const loadRoots = useFsRoots((s) => s.load);
 
-  const [cwd, setCwd] = useState(() =>
-    opts.initialPath ? fsNormalize(opts.initialPath, platform) : "",
-  );
+  /**
+   * Empty until the server's platform is known — deliberately NOT seeded from
+   * `initialPath` here.
+   *
+   * At first render `platform` is still the `posix` default, and normalizing a
+   * Windows path under POSIX rules leaves it non-canonical (`C:` never becomes
+   * `C:/`). That value then sticks: nothing re-normalizes it when the real
+   * platform arrives, so it fails equality against the roots list and produces
+   * breadcrumbs for a path the server never returns. Landing once, after the
+   * rules are known, means there is no wrong intermediate state to repair.
+   */
+  const [cwd, setCwd] = useState("");
   const [listing, setListing] = useState<FsListing | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -118,19 +130,30 @@ export function useFsBrowser(opts: UseFsBrowserOptions): FsBrowser {
     void loadRoots();
   }, [loadRoots]);
 
-  /** Land on the server's home directory once we know what it is. */
+  /**
+   * Land once, on `initialPath` or the server's home directory.
+   *
+   * Gated on `platformKnown` rather than on `home` so the path is normalized
+   * with the SERVER's rules the first and only time it is computed.
+   *
+   * It seeds `history` in the same breath, which is the other half of the fix:
+   * `cwd` used to be set here for the home case and in `useState` for the
+   * `initialPath` case, and only this branch pushed onto the stack — so a picker
+   * opened at a given directory started with an empty history, and Back could
+   * never return to where it opened.
+   */
   useEffect(() => {
-    if (!cwd && home) {
-      const start = fsNormalize(opts.initialPath || home, platform);
-      setCwd(start);
-      setHistory([start]);
-      setHistoryAt(0);
-    }
+    if (cwd || !platformKnown) return;
+    const start = fsNormalize(opts.initialPath || home || "", platform);
+    if (!start) return;
+    setCwd(start);
+    setHistory([start]);
+    setHistoryAt(0);
     // `opts.initialPath` deliberately absent: it is a STARTING point, and
     // re-running this when a caller re-renders with a new object identity would
     // yank the user back out of the folder they navigated to.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cwd, home, platform]);
+  }, [cwd, home, platform, platformKnown]);
 
   /**
    * Fetch the listing for `cwd`.

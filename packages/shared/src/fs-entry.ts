@@ -54,7 +54,11 @@ const WIN_UNC_ROOT = /^\/\/[^/]+\/[^/]+\/?$/;
  * and lose the selection when you arrived by the other route.
  */
 export function fsNormalize(input: string, platform: FsPlatform): string {
-  let p = input.replace(/\\/g, "/").trim();
+  // ONLY on Windows. A backslash is a separator there and a perfectly legal
+  // FILENAME character everywhere else — converting it unconditionally renames
+  // `/tmp/we\ird` to `/tmp/we/ird`, which is a different path, and makes the
+  // real file permanently unreachable through this UI.
+  let p = (platform === "win32" ? input.replace(/\\/g, "/") : input).trim();
   if (!p) return p;
 
   // Remember a UNC prefix before collapsing repeats, so `//server/share` doesn't
@@ -90,7 +94,8 @@ export function fsNormalize(input: string, platform: FsPlatform): string {
  * out of parents.
  */
 export function fsRootOf(path: string, platform: FsPlatform): string | null {
-  const p = path.replace(/\\/g, "/");
+  // Same rule as `fsNormalize`: a backslash is only a separator on Windows.
+  const p = platform === "win32" ? path.replace(/\\/g, "/") : path;
   if (platform === "win32") {
     const drive = /^([a-zA-Z]:)(\/|$)/.exec(p);
     if (drive) return `${drive[1]}/`;
@@ -144,7 +149,13 @@ export function fsBasename(path: string, platform: FsPlatform): string {
 /** Append one segment. `name` is treated as a literal name, never a sub-path. */
 export function fsJoin(dir: string, name: string, platform: FsPlatform): string {
   const base = fsNormalize(dir, platform);
-  const leaf = name.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  // Strip only the characters that ARE separators on this platform. Stripping
+  // backslashes on POSIX would silently rewrite a legal filename — the very
+  // thing this guard exists to prevent, aimed at the wrong character.
+  const leaf = (platform === "win32" ? name.replace(/\\/g, "/") : name).replace(
+    /^\/+|\/+$/g,
+    "",
+  );
   if (!leaf) return base;
   return fsNormalize(base.endsWith("/") ? base + leaf : `${base}/${leaf}`, platform);
 }
@@ -433,7 +444,17 @@ export function fsIsVisible(
 
 /* ------------------------------------------------------------------ sorting */
 
-export const FsSortKeySchema = z.enum(["name", "size", "modified", "created", "kind"]);
+/**
+ * `ext`, not `kind`.
+ *
+ * An `FsEntry` HAS a `kind` (file / directory / symlink), and a sort key of the
+ * same name that ordered by extension instead would be a contract disagreeing
+ * with itself. Sorting by `kind` would also be nearly inert here — directories
+ * are floated to the top regardless, so the only distinction left is one every
+ * row already shows with an icon. Extension is the grouping people actually
+ * want from a type column.
+ */
+export const FsSortKeySchema = z.enum(["name", "size", "modified", "created", "ext"]);
 export type FsSortKey = z.infer<typeof FsSortKeySchema>;
 
 export interface FsSort {
@@ -479,7 +500,7 @@ export function fsSortEntries(entries: FsEntry[], sort: FsSort): FsEntry[] {
         if (a[key] !== b[key]) return ((a[key] ?? 0) - (b[key] ?? 0)) * dir;
         break;
       }
-      case "kind": {
+      case "ext": {
         const cmp = a.ext.localeCompare(b.ext);
         if (cmp) return cmp * dir;
         break;
@@ -529,9 +550,13 @@ export const FsMutationResultSchema = z.object({
   /** Per-path failures, so the UI can name the two that didn't work. */
   errors: z.array(z.object({ path: z.string(), message: z.string() })),
   /**
-   * True when a delete actually reached the trash. False means it was permanent
-   * — either because it was asked for, or because this system has no trash. The
-   * UI says which BEFORE the click, and this confirms which happened.
+   * Whether anything actually reached the trash — an OUTCOME, not the intent.
+   *
+   * False covers all three ways nothing did: a permanent delete was asked for,
+   * the trash call failed, or no path survived validation. The UI says which it
+   * will do before the click; this says which happened, and a caller that took
+   * `true` on faith would send someone to the Recycle Bin for a file still
+   * sitting on disk.
    */
   trashed: z.boolean().optional(),
 });
