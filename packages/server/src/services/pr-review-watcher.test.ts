@@ -554,6 +554,37 @@ describe("PrReviewWatcher — the PR catalog", () => {
     expect(polls).toBe(2);
   });
 
+  it("asks the catalog what's due exactly ONCE per sweep", async () => {
+    // Both passes (owned PRs, then discovered ones) run off the same read. A
+    // second `due()` here would re-read the entire roster file mid-sweep, which
+    // is quadratic in the one dimension this feature grows in.
+    await makeChat("c1", [REF]);
+    let now = 1_000_000;
+    const registry = new PrRegistry({ store, bus, now: () => now });
+    let dueCalls = 0;
+    const counting = {
+      record: registry.record.bind(registry),
+      track: registry.track.bind(registry),
+      noteError: registry.noteError.bind(registry),
+      due: (t?: number) => {
+        dueCalls += 1;
+        return registry.due(t);
+      },
+    };
+    const watcher = new PrReviewWatcher({
+      store,
+      bus,
+      github: fakeGitHub(),
+      registry: counting,
+      now: () => now,
+      discover: async () => [{ projectId: "p1", ref: { ...REF, number: 99 } }],
+    });
+
+    await watcher.sweep();
+
+    expect(dueCalls).toBe(1);
+  });
+
   it("discovers open PRs no chat owns, and shows them unattributed", async () => {
     // Retiring the project-wide overlay must not lose sight of a human's PR or
     // a bot's — they are listed exactly as an `external` worktree is.

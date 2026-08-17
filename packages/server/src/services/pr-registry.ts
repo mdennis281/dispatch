@@ -346,36 +346,49 @@ export class PrRegistry {
 }
 
 /**
- * What counts as a CHANGE worth resetting the cadence for.
+ * What counts as a CHANGE worth announcing and resetting the cadence for.
  *
- * Deliberately excludes `updatedAt`: GitHub bumps it for things this catalog
- * doesn't show, and treating every bump as activity would pin every PR to the
- * hot cadence and make the backoff ornamental.
+ * The rule is: **everything the catalog RENDERS goes in here.** This value gates
+ * the `pr-record-update` broadcast, so a rendered field left out of it can move
+ * on the stored row without ever reaching a connected client — the roster would
+ * then sit stale until some unrelated change or a reconnect happened to flush
+ * it. `isOutdated` is in for exactly that reason: the roster's unresolved-thread
+ * count filters on it, so a thread going outdated is a visible change.
+ *
+ * `updatedAt` and `lastPolledAt` are deliberately OUT. GitHub bumps `updatedAt`
+ * for things this catalog doesn't show, and treating every bump as activity
+ * would pin every PR to the hot cadence and make the backoff ornamental.
  */
 function fingerprint(p: {
   state: string;
   isDraft: boolean;
   title: string;
+  branch: string;
+  baseBranch: string;
+  author?: string;
   labels: string[];
   mergeable: boolean | null;
   reviewDecision: string | null;
   headRefOid?: string;
   commentCount?: number;
   reviewers: Array<{ login: string; state: string; stale?: boolean }>;
-  threads: Array<{ id: string; isResolved: boolean }>;
+  threads: Array<{ id: string; isResolved: boolean; isOutdated?: boolean }>;
   checks: Array<{ name: string; status: string; conclusion?: string | null }>;
 }): string {
   return JSON.stringify([
     p.state,
     p.isDraft,
     p.title,
+    p.branch,
+    p.baseBranch,
+    p.author ?? "",
     [...p.labels].sort(),
     p.mergeable,
     p.reviewDecision,
     p.headRefOid ?? "",
     p.commentCount ?? 0,
     p.reviewers.map((r) => `${r.login}:${r.state}:${r.stale ? 1 : 0}`).sort(),
-    p.threads.map((t) => `${t.id}:${t.isResolved ? 1 : 0}`).sort(),
+    p.threads.map((t) => `${t.id}:${t.isResolved ? 1 : 0}:${t.isOutdated ? 1 : 0}`).sort(),
     p.checks.map((c) => `${c.name}:${c.status}:${c.conclusion ?? ""}`).sort(),
   ]);
 }

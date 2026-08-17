@@ -306,30 +306,34 @@ export class PrReviewWatcher {
       }
     }
 
-    // The due set is read ONCE per sweep. Asking the catalog per PR would mean
-    // re-reading the whole roster file for every PR in it, which is quadratic in
-    // the one dimension this feature is expected to grow in.
-    const due = await this.dueSet();
+    // The due rows are read ONCE per sweep and then serve BOTH passes below.
+    // Asking the catalog per PR would mean re-reading the whole roster file for
+    // every PR in it, which is quadratic in the one dimension this feature is
+    // expected to grow in.
+    const due = await this.dueRows();
 
     const out: PrReviewActivity[] = [];
     for (const { chat, ref, scope } of work) {
-      const activity = await this.checkOne(chat, ref, scope, due).catch(() => null);
+      const activity = await this.checkOne(chat, ref, scope, due?.keys ?? null).catch(() => null);
       if (activity) out.push(activity);
     }
-    await this.pollUnowned(owned, due).catch(() => undefined);
+    await this.pollUnowned(owned, due?.rows ?? []).catch(() => undefined);
     return out;
   }
 
   /**
-   * Which rows are due, as a `repo#number` set — or `null` when there is no
-   * catalog, which means "poll everything" and is exactly how this watcher
-   * behaved before the catalog existed.
+   * The rows due this pass, plus their `repo#number` keys for membership tests —
+   * or `null` when there is no catalog, which means "poll everything" and is
+   * exactly how this watcher behaved before the catalog existed.
    */
-  private async dueSet(): Promise<Set<string> | null> {
+  private async dueRows(): Promise<{
+    rows: Array<{ repo: string; number: number } & PrScope>;
+    keys: Set<string>;
+  } | null> {
     if (!this.registry) return null;
     const rows = await this.registry.due(this.now()).catch(() => null);
     if (!rows) return null;
-    return new Set(rows.map((r) => `${r.repo}#${r.number}`));
+    return { rows, keys: new Set(rows.map((r) => `${r.repo}#${r.number}`)) };
   }
 
   /**
@@ -356,12 +360,11 @@ export class PrReviewWatcher {
    */
   private async pollUnowned(
     covered: ReadonlySet<string>,
-    due: ReadonlySet<string> | null,
+    due: ReadonlyArray<{ repo: string; number: number } & PrScope>,
   ): Promise<void> {
     if (!this.registry) return;
-    for (const row of await this.registry.due(this.now())) {
+    for (const row of due) {
       if (covered.has(`${row.repo}#${row.number}`)) continue;
-      if (due && !due.has(`${row.repo}#${row.number}`)) continue;
       const snap = await this.github.pollPrState(row.repo, row.number).catch(() => null);
       if (!snap) {
         await this.registry

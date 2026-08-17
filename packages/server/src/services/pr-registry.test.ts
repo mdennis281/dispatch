@@ -129,6 +129,26 @@ describe("PrRegistry — rows", () => {
     expect(records()[1]!.reviewDecision).toBe("approved");
   });
 
+  // A rendered field missing from the fingerprint moves on the stored row
+  // WITHOUT reaching a client, so the roster sits stale until some unrelated
+  // change or a reconnect flushes it. Every field the catalog draws is here.
+  it.each([
+    ["branch", { branch: "feat/renamed" }],
+    ["baseBranch", { baseBranch: "release/2" }],
+    ["author", { author: "someone-else" }],
+    ["a thread going outdated", { threads: [{ id: "T_1", isResolved: false, isOutdated: true }] }],
+  ])("announces a change to %s", async (_label, over) => {
+    const reg = makeRegistry();
+    const before = snapshot({ threads: [{ id: "T_1", isResolved: false, isOutdated: false }] });
+    await reg.record(before);
+    events.length = 0;
+
+    now += PR_POLL_HOT_MS;
+    await reg.record({ ...before, ...(over as Partial<PrPollSnapshot>) });
+
+    expect(records()).toHaveLength(1);
+  });
+
   it("does not treat a bare `updatedAt` bump as activity", async () => {
     // GitHub bumps it for things this catalog doesn't show; counting it would
     // pin every PR to the hot cadence and make the backoff ornamental.
