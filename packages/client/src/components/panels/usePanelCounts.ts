@@ -79,8 +79,9 @@ export function usePanelCounts(chat: Chat | null): PanelCounts {
           .length
       : 0,
   );
-  // Same rule the panel expands a card by, so the badge and the layout agree:
-  // what's badged is what's open.
+  // Same rule the panel expands a card by DEFAULT. Not an equality with the
+  // number of open cards — a human can expand a finished shell to read it —
+  // but what the badge counts is exactly what opens on its own.
   const terminals = useTerminals((s) =>
     chat
       ? s.order

@@ -139,13 +139,18 @@ function TerminalCard({
     void useProcesses.getState().scan(projectId);
   };
 
-  // Open when the shell is DOING something; a one-line stub when it's an idle
-  // prompt. A chat that ran four setup commands used to hand you four full
-  // cards of finished output — a screen and a half of scrollback for work that
-  // already succeeded, with the shell that's actually serving pushed below the
-  // fold. The override lets you open a finished one to read what it said, and
-  // is dropped whenever `active` flips so a shell that starts running comes
-  // back on its own.
+  // Open by DEFAULT when the shell is DOING something; a one-line stub when
+  // it's an idle prompt. A chat that ran four setup commands used to hand you
+  // four full cards of finished output — a screen and a half of scrollback for
+  // work that already succeeded, with the shell that's actually serving pushed
+  // below the fold.
+  //
+  // The override runs BOTH ways on purpose: opening a finished shell to read
+  // what it said, and collapsing a server you've already seen are the same
+  // kind of decision, and a card you can't close is a card that owns the panel.
+  // It's dropped whenever `active` flips, so the state you chose lasts until
+  // the shell's own situation changes — a shell that starts running comes back
+  // on its own, and one that finishes tucks itself away again.
   const [override, setOverride] = useState<boolean | null>(null);
   useEffect(() => setOverride(null), [active]);
   const open = override ?? active;
