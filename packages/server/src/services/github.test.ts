@@ -926,6 +926,273 @@ describe("sameRepository — against real git", () => {
   });
 });
 
+/* ------------------------------------------------------- pollPrState (one poll) */
+
+/**
+ * A GraphQL poll payload. Everything defaults to "an ordinary open PR" so each
+ * test states only the thing it is about.
+ */
+function pollPayload(over: Record<string, unknown> = {}) {
+  return {
+    data: {
+      repository: {
+        pullRequest: {
+          number: 42,
+          title: "feat: thing",
+          url: "https://github.com/octocat/hello/pull/42",
+          state: "OPEN",
+          isDraft: false,
+          merged: false,
+          headRefOid: "HEAD_SHA",
+          headRefName: "feat/thing",
+          baseRefName: "main",
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          reviewDecision: null,
+          author: { login: "octocat" },
+          labels: { nodes: [] },
+          reviewRequests: { nodes: [] },
+          reviews: { nodes: [] },
+          latestReviews: { nodes: [] },
+          reviewThreads: { nodes: [] },
+          comments: { totalCount: 3 },
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  statusCheckRollup: {
+                    contexts: {
+                      nodes: [
+                        {
+                          __typename: "CheckRun",
+                          name: "build",
+                          status: "COMPLETED",
+                          conclusion: "SUCCESS",
+                          detailsUrl: "https://ci/build",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          ...over,
+        },
+      },
+    },
+  };
+}
+
+describe("pollPrState — the one poll body", () => {
+  let bus: EventBus;
+  beforeEach(() => {
+    bus = new EventBus();
+  });
+
+  it("reads the whole PR in ONE `gh api graphql`, with typed variables", async () => {
+    const { calls, exec, json } = makeExec();
+    json(pollPayload());
+    const gh = new GitHubService({ bus, exec });
+
+    const snap = await gh.pollPrState(REPO, 42);
+
+    // The point of the exercise: five subprocess spawns per poll became one.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args.slice(0, 2)).toEqual(["api", "graphql"]);
+    // Owner/repo/number go as VARIABLES, never interpolated into the query.
+    expect(calls[0]!.args).toContain("owner=octocat");
+    expect(calls[0]!.args).toContain("repo=hello");
+    expect(calls[0]!.args).toContain("number=42");
+    expect(snap?.number).toBe(42);
+    expect(snap?.state).toBe("open");
+    expect(snap?.branch).toBe("feat/thing");
+    expect(snap?.commentCount).toBe(3);
+    expect(snap?.checks).toEqual([
+      { name: "build", status: "completed", conclusion: "success", url: "https://ci/build" },
+    ]);
+  });
+
+  it("reports an UNSUBMITTED review as in_progress — the reviewing spinner", async () => {
+    // The state REST cannot see at all, and the reason this poll is GraphQL.
+    const { exec, json } = makeExec();
+    json(
+      pollPayload({
+        reviewRequests: {
+          nodes: [{ requestedReviewer: { __typename: "Bot", login: "copilot" } }],
+        },
+        reviews: { nodes: [{ author: { login: "copilot" }, state: "PENDING" }] },
+      }),
+    );
+    const gh = new GitHubService({ bus, exec });
+
+    const snap = await gh.pollPrState(REPO, 42);
+
+    expect(snap?.reviewers).toEqual([
+      { login: "copilot", kind: "bot", state: "in_progress", submittedAt: undefined },
+    ]);
+    // `requested` names who is on the hook but has NOT started; a reviewer who
+    // is mid-review is reported as such, not double-counted as merely queued.
+    expect(snap?.requested).toEqual([]);
+  });
+
+  it("marks a reviewer stale when their verdict is about an older commit", async () => {
+    const { exec, json } = makeExec();
+    json(
+      pollPayload({
+        latestReviews: {
+          nodes: [
+            {
+              author: { login: "human" },
+              state: "APPROVED",
+              submittedAt: "2026-08-01T00:00:00Z",
+              commit: { oid: "OLD_SHA" },
+            },
+          ],
+        },
+      }),
+    );
+    const gh = new GitHubService({ bus, exec });
+
+    const snap = await gh.pollPrState(REPO, 42);
+    expect(snap?.reviewers[0]).toMatchObject({ state: "approved", stale: true });
+  });
+
+  it("leaves staleness UNKNOWN rather than guessing when it can't compare", async () => {
+    const { exec, json } = makeExec();
+    json(
+      pollPayload({
+        headRefOid: undefined,
+        latestReviews: { nodes: [{ author: { login: "human" }, state: "APPROVED" }] },
+      }),
+    );
+    const gh = new GitHubService({ bus, exec });
+
+    const snap = await gh.pollPrState(REPO, 42);
+    expect(snap?.reviewers[0]!.stale).toBeUndefined();
+  });
+
+  it("ignores a MINIMIZED review — it isn't the reviewer's live position", async () => {
+    const { exec, json } = makeExec();
+    json(
+      pollPayload({
+        latestReviews: {
+          nodes: [{ author: { login: "copilot" }, state: "CHANGES_REQUESTED", isMinimized: true }],
+        },
+      }),
+    );
+    const gh = new GitHubService({ bus, exec });
+
+    const snap = await gh.pollPrState(REPO, 42);
+    expect(snap?.reviewers).toEqual([]);
+    expect(snap?.reported).toEqual([]);
+  });
+
+  it("reports merge CONFLICTS as false and an uncomputed answer as null", async () => {
+    const { exec, json } = makeExec();
+    json(pollPayload({ mergeable: "CONFLICTING" }));
+    json(pollPayload({ mergeable: "UNKNOWN" }));
+    const gh = new GitHubService({ bus, exec });
+
+    expect((await gh.pollPrState(REPO, 42))?.mergeable).toBe(false);
+    // UNKNOWN means GitHub hasn't worked it out yet — a PR opened a moment ago
+    // reads that way, and calling it conflicted would flag half of them.
+    expect((await gh.pollPrState(REPO, 42))?.mergeable).toBeNull();
+  });
+
+  it("falls back to `gh pr checks` when the rollup is empty", async () => {
+    // Otherwise an empty rollup and "no CI configured" are indistinguishable,
+    // and `watch_pr`'s no-checks note would be a guess.
+    const { calls, exec, json } = makeExec();
+    json(pollPayload({ commits: { nodes: [{ commit: { statusCheckRollup: null } }] } }));
+    json([{ name: "lint", state: "SUCCESS", bucket: "pass", link: "https://ci/lint" }]);
+    const gh = new GitHubService({ bus, exec });
+
+    const snap = await gh.pollPrState(REPO, 42);
+
+    expect(calls.map((c) => c.args.slice(0, 2))).toEqual([
+      ["api", "graphql"],
+      ["pr", "checks"],
+    ]);
+    expect(snap?.checks).toEqual([
+      { name: "lint", status: "completed", conclusion: "success", url: "https://ci/lint" },
+    ]);
+  });
+
+  it("returns null for a GraphQL `errors` payload — a failed read, not an empty one", async () => {
+    // GraphQL reports failures IN the body. Reading that as "no reviewers, no
+    // threads, no checks" is the false-confidence bug the review-queue code
+    // exists to prevent.
+    const { exec, json } = makeExec();
+    json({ errors: [{ message: "Something went wrong" }] });
+    const gh = new GitHubService({ bus, exec });
+
+    expect(await gh.pollPrState(REPO, 42)).toBeNull();
+  });
+
+  it("returns null for an unknown PR", async () => {
+    const { exec, json } = makeExec();
+    json({ data: { repository: { pullRequest: null } } });
+    const gh = new GitHubService({ bus, exec });
+
+    expect(await gh.pollPrState(REPO, 999)).toBeNull();
+  });
+
+  it("carries threads with their excerpt, link and resolve state", async () => {
+    const { exec, json } = makeExec();
+    json(
+      pollPayload({
+        reviewThreads: {
+          nodes: [
+            {
+              id: "PRRT_1",
+              isResolved: false,
+              isOutdated: false,
+              path: "src/app.ts",
+              line: 12,
+              comments: {
+                nodes: [
+                  {
+                    author: { login: "copilot" },
+                    body: "this leaks",
+                    url: "https://github.com/octocat/hello/pull/42#discussion_r1",
+                    createdAt: "2026-08-02T00:00:00Z",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+    );
+    const gh = new GitHubService({ bus, exec });
+
+    expect((await gh.pollPrState(REPO, 42))?.threads).toEqual([
+      {
+        id: "PRRT_1",
+        isResolved: false,
+        isOutdated: false,
+        path: "src/app.ts",
+        line: 12,
+        author: "copilot",
+        body: "this leaks",
+        url: "https://github.com/octocat/hello/pull/42#discussion_r1",
+        createdAt: "2026-08-02T00:00:00Z",
+      },
+    ]);
+  });
+
+  it("drops the zero-time sentinel GitHub emits for an unmerged PR", async () => {
+    const { exec, json } = makeExec();
+    json(pollPayload({ mergedAt: "0001-01-01T00:00:00Z", state: "MERGED", merged: true }));
+    const gh = new GitHubService({ bus, exec });
+
+    const snap = await gh.pollPrState(REPO, 42);
+    expect(snap?.state).toBe("merged");
+    expect(snap?.mergedAt).toBeUndefined();
+  });
+});
+
 const RUN_JSON_FIELDS_EXPECTED =
   "databaseId,name,workflowName,status,conclusion,event,headBranch,url,createdAt,updatedAt";
 const PR_LIST_JSON_FIELDS_EXPECTED =

@@ -9,6 +9,7 @@ import { StatusDot, type DotTone } from "../ui/StatusDot.js";
 import { DispatchMark } from "../ui/DispatchMark.js";
 import { useConnection, type ConnState } from "../../stores/connection.js";
 import { openOverlay, openAppSettings, openProjectSettings } from "../../stores/view.js";
+import { openWorkspace } from "../../stores/workspace.js";
 import { useLayout } from "../../stores/layout.js";
 import { useWindowControlsOverlay } from "../../lib/windowControls.js";
 import { cn } from "../../lib/cn.js";
@@ -177,7 +178,7 @@ function MainRow({ overlay }: { overlay: boolean }) {
             <IconButton tip="MCP tools" onClick={() => openOverlay("mcp")}>
               <Blocks />
             </IconButton>
-            <IconButton tip="Open pull requests" onClick={() => openOverlay("prs")}>
+            <IconButton tip="Pull requests" onClick={() => openWorkspace("prs")}>
               <GitPullRequest />
             </IconButton>
             <IconButton tip="Settings" onClick={() => openAppSettings()}>

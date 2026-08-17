@@ -26,8 +26,10 @@ import type {
   WorktreeInfo,
 } from "@dispatch/shared";
 import { api } from "../lib/api.js";
+import { usePrs } from "./prs.js";
+import { openOverlay } from "./view.js";
 
-/** Which catalog is on screen. `prs` is present but not yet implemented. */
+/** Which catalog is on screen. */
 export type WorkspaceKind = "worktrees" | "terminals" | "prs";
 
 /**
@@ -151,12 +153,18 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
 
   load: async ({ projectId, chatId }) => {
     const { kind } = get();
-    if (kind === "prs") return;
     const query = buildQuery(get(), { projectId, chatId });
     set({ loading: true, error: undefined });
     try {
       if (kind === "worktrees") {
         set({ worktrees: await api.worktrees.list(query), loading: false });
+      } else if (kind === "prs") {
+        // PRs live in their own STANDING store, fed by `pr-record-update`, so
+        // this is a resync of the roster rather than the fetch the tab depends
+        // on to render — it renders from what it already has. Deliberately
+        // unscoped: the store holds every tracked PR and the view narrows.
+        usePrs.getState().hydrate(await api.prs.list());
+        set({ loading: false });
       } else {
         set({ terminals: await api.terminals.list(query), loading: false });
       }
@@ -193,6 +201,20 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
     }
   },
 }));
+
+/**
+ * Open the Workspace modal on a specific catalog.
+ *
+ * The entry points that used to open a separate project-PR overlay (the top bar
+ * button, ⌘K, the chat header's PR badge, the mobile nav) all land here now.
+ * There is one PR list, and it is a tab of the one place long-lived resources
+ * are listed — two lists that answered the same question slightly differently
+ * was the state this replaced.
+ */
+export function openWorkspace(kind: WorkspaceKind): void {
+  useWorkspace.getState().setKind(kind);
+  openOverlay("workspace");
+}
 
 /**
  * The current view AS a `RegistryQuery`.

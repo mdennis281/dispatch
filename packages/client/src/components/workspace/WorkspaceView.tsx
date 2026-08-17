@@ -1,11 +1,18 @@
 /**
  * WorkspaceView — the one place every long-lived resource is listed.
  *
- * Worktrees, terminals and (later) PRs are all created by agents, all outlive
- * the turn that made them, and until now each was only visible from inside the
- * chat that happened to own it. So a worktree nobody claimed, or a shell left
- * running in a chat you closed, was effectively invisible: you found it by
- * noticing the disk filling up or the port being taken.
+ * Worktrees, terminals and PRs are all created by agents, all outlive the turn
+ * that made them, and until now each was only visible from inside the chat that
+ * happened to own it. So a worktree nobody claimed, or a shell left running in a
+ * chat you closed, was effectively invisible: you found it by noticing the disk
+ * filling up or the port being taken.
+ *
+ * The PRs tab is the odd one out in one respect: its rows come from a STANDING
+ * store fed by `pr-record-update`, not from a fetch when this opens. A PR's
+ * state changes while nobody is watching — CI finishes, a reviewer starts, a
+ * thread lands — so the answer has to be here already and has to keep moving.
+ * The project-wide PR overlay this replaced re-ran `gh pr list` on every open
+ * and could do neither.
  *
  * Two axes and one text box: WHAT (worktrees / terminals / PRs) × HOW WIDE (this
  * chat / this project / everything). The scope control is the point — "this
@@ -21,11 +28,17 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   ArrowDownWideNarrow,
   Check,
+  ExternalLink,
   FolderGit2,
+  GitMerge,
   GitPullRequest,
+  Loader2,
   MessageSquare,
+  Pause,
+  Play,
   RefreshCw,
   Search,
   SquareTerminal,
@@ -34,11 +47,15 @@ import {
   Zap,
 } from "lucide-react";
 import type {
+  CheckRun,
+  PrRecord,
+  PrReviewer,
   RegistryScope,
   RegistrySort,
   TerminalInfo,
   WorktreeInfo,
 } from "@dispatch/shared";
+import { matchesScope } from "@dispatch/shared";
 import { Modal, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { Chip, type Tone } from "../ui/Chip.js";
@@ -47,11 +64,13 @@ import { Spinner } from "../ui/Spinner.js";
 import { Tabs } from "../ui/Tabs.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { api } from "../../lib/api.js";
+import { actions } from "../../lib/actions.js";
 import { relTime } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
 import { useOverlay } from "../../stores/view.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
+import { usePrs, selectPrs } from "../../stores/prs.js";
 import { selectChat } from "../../stores/navigation.js";
 import {
   useWorkspace,
@@ -86,12 +105,22 @@ const SORT_LABELS: Record<WorkspaceKind, Record<RegistrySort, string>> = {
   prs: { recent: "Recent", created: "Created", name: "Title" },
 };
 
-/** Which toggles belong to which tab, and what each one says it does. */
-const FACETS: Record<"worktrees" | "terminals", Array<{
+/**
+ * Which toggles belong to which tab, and what each one says it does.
+ *
+ * A facet is a SERVER-side narrowing — it goes into the `RegistryQuery` the
+ * fetch sends, because `unmerged` isn't answerable in a browser at all. PRs have
+ * none for exactly that reason: their rows arrive over the socket rather than
+ * from a query, so a toggle here would have to mean something different on that
+ * tab than on the other two. The scope control and the text box narrow them, and
+ * "unattributed" is a chip on every row that needs it.
+ */
+const FACETS: Record<WorkspaceKind, Array<{
   key: keyof WorkspaceFilters;
   label: string;
   tip: string;
 }>> = {
+  prs: [],
   worktrees: [
     {
       key: "unmerged",
@@ -345,6 +374,202 @@ function KillAllButton({
   );
 }
 
+/* --------------------------------------------------------------- PR rows */
+
+/** Fold a PR's checks into one chip. Failing wins, then running, then green. */
+function ChecksChip({ checks }: { checks: CheckRun[] }) {
+  if (checks.length === 0) return <Chip tone="neutral">no checks</Chip>;
+  const running = checks.filter((c) => c.status !== "completed").length;
+  const failed = checks.filter(
+    (c) =>
+      c.status === "completed" &&
+      (c.conclusion === "failure" ||
+        c.conclusion === "timed_out" ||
+        c.conclusion === "cancelled" ||
+        c.conclusion === "action_required"),
+  ).length;
+  if (failed > 0) return <Chip tone="danger">{failed} failed</Chip>;
+  if (running > 0) return <Chip tone="accent">{running} running</Chip>;
+  return <Chip tone="success">{checks.length} passed</Chip>;
+}
+
+/** How a reviewer's state reads and colours. */
+const REVIEWER_META: Record<PrReviewer["state"], { label: string; tone: Tone }> = {
+  requested: { label: "requested", tone: "warn" },
+  // The state this whole registry exists to surface: GitHub's spinner, made
+  // legible. "Waiting on Copilot" and "Copilot is writing it now" are different
+  // situations, and only one of them means the wait is nearly over.
+  in_progress: { label: "reviewing…", tone: "accent" },
+  approved: { label: "approved", tone: "success" },
+  changes_requested: { label: "changes requested", tone: "danger" },
+  commented: { label: "commented", tone: "neutral" },
+  dismissed: { label: "dismissed", tone: "neutral" },
+};
+
+function ReviewerChip({ reviewer }: { reviewer: PrReviewer }) {
+  const meta = REVIEWER_META[reviewer.state];
+  return (
+    <Chip
+      tone={meta.tone}
+      icon={reviewer.state === "in_progress" ? <Loader2 className="animate-spin" /> : undefined}
+      // `stale` is why this is a title and not just a colour: a reviewer who
+      // approved a commit you've since replaced has NOT approved what's there.
+      title={
+        reviewer.stale
+          ? `${reviewer.login} ${meta.label} — but on an older commit than the current head`
+          : `${reviewer.login} ${meta.label}`
+      }
+    >
+      {reviewer.login.replace(/\[bot\]$/, "")} {meta.label}
+      {reviewer.stale ? " (stale)" : ""}
+    </Chip>
+  );
+}
+
+function PrRow({ pr, showProject }: { pr: PrRecord; showProject: boolean }) {
+  const link = pr.url && pr.url !== "#" ? pr.url : undefined;
+  const open = pr.state === "open";
+  const unresolved = pr.threads.filter((t) => !t.isResolved && !t.isOutdated).length;
+  // Only offered for a PR this app could act on. A discovered PR belongs to
+  // somebody else, and a Merge button on it is an invitation to a mistake.
+  const canAct = open && !!pr.projectId;
+
+  return (
+    <Row
+      muted={!open}
+      title={
+        <>
+          <span className="cm-mono text-muted">#{pr.number}</span>{" "}
+          {link ? (
+            <a
+              href={link}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-accent-hi"
+            >
+              {pr.title || pr.branch}
+            </a>
+          ) : (
+            (pr.title || pr.branch)
+          )}
+        </>
+      }
+      subtitle={
+        <>
+          {pr.branch} → {pr.baseBranch || "?"}
+          {pr.author ? ` · by ${pr.author}` : ""}
+          {/* A stale row says so rather than presenting old state as current. */}
+          {pr.pollError ? ` · ⚠ ${pr.pollError}` : ""}
+        </>
+      }
+      chips={
+        <>
+          <ProjectChip projectId={pr.projectId} show={showProject} />
+          <ChatChip chatId={pr.chatId} />
+          {pr.state === "merged" && <Chip tone="accent">merged</Chip>}
+          {pr.state === "closed" && <Chip tone="neutral">closed</Chip>}
+          {pr.isDraft && <Chip tone="neutral">draft</Chip>}
+          {pr.hold && <Chip tone="warn">hold</Chip>}
+          {/* null is "GitHub hasn't computed it yet", not "fine" — so only an
+              explicit false raises the conflict flag. */}
+          {open && pr.mergeable === false && (
+            <Chip tone="danger" icon={<AlertTriangle />}>
+              conflicts
+            </Chip>
+          )}
+          {open && <ChecksChip checks={pr.checks} />}
+          {pr.reviewDecision === "approved" && (
+            <Chip tone="success" icon={<Check />}>
+              approved
+            </Chip>
+          )}
+          {pr.reviewDecision === "changes_requested" && (
+            <Chip tone="danger">changes requested</Chip>
+          )}
+          {unresolved > 0 && (
+            <Chip tone="warn" icon={<MessageSquare />}>
+              {unresolved} unresolved
+            </Chip>
+          )}
+          {open && pr.reviewers.map((r) => <ReviewerChip key={r.login} reviewer={r} />)}
+        </>
+      }
+      actions={
+        <>
+          <span className="text-xs text-faint">{relTime(pr.lastChangedAt)}</span>
+          {open && (
+            <Button
+              variant="ghost"
+              size="sm"
+              // The escape hatch from the adaptive cadence: a parked PR is only
+              // polled every ten minutes, and a roster you can't force to look
+              // again is a roster you stop believing.
+              title="Poll GitHub for this PR now"
+              onClick={() => void api.prs.refresh(pr.key).catch(() => null)}
+            >
+              <RefreshCw size={13} />
+            </Button>
+          )}
+          {canAct &&
+            (pr.hold ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                title="Remove the hold label"
+                onClick={() =>
+                  actions.ghAction({ op: "unhold", projectId: pr.projectId, prNumber: pr.number })
+                }
+              >
+                <Play size={13} />
+              </Button>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                title="Park this PR with the hold label"
+                onClick={() =>
+                  actions.ghAction({ op: "hold", projectId: pr.projectId, prNumber: pr.number })
+                }
+              >
+                <Pause size={13} />
+              </Button>
+            ))}
+          {canAct && (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={pr.isDraft || pr.hold}
+              title={
+                pr.isDraft
+                  ? "Draft — mark ready first"
+                  : pr.hold
+                    ? "Held — unhold to merge"
+                    : "Merge this PR"
+              }
+              onClick={() =>
+                actions.ghAction({ op: "merge", projectId: pr.projectId, prNumber: pr.number })
+              }
+            >
+              <GitMerge size={13} />
+            </Button>
+          )}
+          {link && (
+            <a
+              href={link}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open on GitHub"
+              className="px-1 text-faint transition-colors hover:text-secondary"
+            >
+              <ExternalLink size={13} />
+            </a>
+          )}
+        </>
+      }
+    />
+  );
+}
+
 /* ------------------------------------------------------------------- view */
 
 export function WorkspaceView() {
@@ -370,6 +595,10 @@ export function WorkspaceView() {
   } = useWorkspace();
   const projectId = useProjects((s) => s.activeProjectId) ?? undefined;
   const chatId = useChats((s) => s.activeChatId) ?? undefined;
+  // PRs come from the STANDING catalog, not from a fetch when this opens — the
+  // one thing the overlay this replaces could never do. Scope is applied here
+  // for the same reason `q` is: the rows are already local.
+  const allPrs = usePrs(selectPrs);
 
   const refresh = useCallback(() => {
     void load({ projectId, chatId });
@@ -387,13 +616,24 @@ export function WorkspaceView() {
     const needle = q.trim().toLowerCase();
     const match = (fields: Array<string | undefined>) =>
       !needle || fields.some((f) => f && f.toLowerCase().includes(needle));
+    // The PR rows never went through the server's predicate — they arrived over
+    // the socket — so the scope filter is applied here, with the SHARED
+    // predicate rather than a second copy of it. That's what keeps "this chat's
+    // PRs" meaning the same thing here as it does on `/api/prs`, including the
+    // invariant that a narrow scope with a missing id shows nothing.
+    const query = { scope, projectId, chatId };
     return {
       worktrees: worktrees.filter((w) => match([w.path, w.branch, w.label, w.origin])),
       terminals: terminals.filter((t) => match([t.name, t.cwd, t.lastCommand])),
+      prs: allPrs.filter(
+        (p) => matchesScope(p, query) && match([p.title, p.branch, p.repo, p.author, `#${p.number}`]),
+      ),
     };
-  }, [q, worktrees, terminals]);
+  }, [q, worktrees, terminals, allPrs, scope, projectId, chatId]);
 
-  const list = kind === "worktrees" ? rows.worktrees : kind === "terminals" ? rows.terminals : [];
+  const list =
+    kind === "worktrees" ? rows.worktrees : kind === "terminals" ? rows.terminals : rows.prs;
+  const kindLabel = kind === "prs" ? "PRs" : kind;
   const showProject = scope === "all";
   // What "Kill all" would actually stop: a shell with a process behind it. The
   // count comes off the VISIBLE rows so the button and the list can't disagree.
@@ -420,7 +660,7 @@ export function WorkspaceView() {
       footer={
         <div className="flex w-full items-center justify-between gap-3">
           <span className="text-xs text-faint">
-            {loading ? "Loading…" : `${list.length} ${kind === "prs" ? "PRs" : kind}`}
+            {loading ? "Loading…" : `${list.length} ${kindLabel}`}
           </span>
           <Button variant="ghost" size="sm" onClick={refresh} disabled={loading}>
             <RefreshCw size={13} /> Refresh
@@ -446,7 +686,12 @@ export function WorkspaceView() {
                 icon: <SquareTerminal size={13} />,
                 count: rows.terminals.length,
               },
-              { id: "prs", label: "PRs", icon: <GitPullRequest size={13} /> },
+              {
+                id: "prs",
+                label: "PRs",
+                icon: <GitPullRequest size={13} />,
+                count: rows.prs.length,
+              },
             ]}
           />
           <SegmentedControl<RegistryScope>
@@ -516,7 +761,11 @@ export function WorkspaceView() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder={
-              kind === "terminals" ? "Filter by name, cwd or command…" : "Filter by path, branch or label…"
+              kind === "terminals"
+                ? "Filter by name, cwd or command…"
+                : kind === "prs"
+                  ? "Filter by title, branch, repo or #number…"
+                  : "Filter by path, branch or label…"
             }
             className="w-full bg-transparent text-sm text-primary outline-none placeholder:text-faint"
           />
@@ -525,12 +774,7 @@ export function WorkspaceView() {
         {error && <InlineError message={error} />}
 
         <div className="cm-scroll flex max-h-[55vh] flex-col gap-2 overflow-y-auto">
-          {kind === "prs" ? (
-            <EmptyState>
-              PRs land here next, with their live review state, comments and CI runs.
-              For now the project-wide roster is under ⌘K → “Pull requests”.
-            </EmptyState>
-          ) : loading && list.length === 0 ? (
+          {loading && list.length === 0 && kind !== "prs" ? (
             <div className="flex items-center gap-2 py-6 text-sm text-muted">
               <Spinner /> Loading…
             </div>
@@ -542,15 +786,17 @@ export function WorkspaceView() {
                   ? // Named separately from the scope hint because the fix is
                     // different: an empty filtered list means turn a toggle off,
                     // not widen the scope.
-                    `No ${kind} match these filters.`
+                    `No ${kindLabel} match these filters.`
                   : scope === "chat"
-                    ? `This chat has no ${kind}. Try a wider scope.`
-                    : `No ${kind} here yet.`}
+                    ? `This chat has no ${kindLabel}. Try a wider scope.`
+                    : `No ${kindLabel} here yet.`}
             </EmptyState>
           ) : kind === "worktrees" ? (
             rows.worktrees.map((w) => (
               <WorktreeRow key={w.path} wt={w} showProject={showProject} />
             ))
+          ) : kind === "prs" ? (
+            rows.prs.map((p) => <PrRow key={p.key} pr={p} showProject={showProject} />)
           ) : (
             rows.terminals.map((t) => (
               <TerminalRow key={t.id} term={t} showProject={showProject} onPurge={onPurge} />

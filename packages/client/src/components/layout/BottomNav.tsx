@@ -21,6 +21,7 @@ import { AttentionPopover } from "../attention/AttentionPopover.js";
 import { usePanelCounts } from "../panels/usePanelCounts.js";
 import { useLayout, type Pane } from "../../stores/layout.js";
 import { useView, openOverlay, type AppView } from "../../stores/view.js";
+import { openWorkspace } from "../../stores/workspace.js";
 import { useAttention } from "../../stores/attention.js";
 import { useProjectMemories } from "../../stores/memory.js";
 import { useProjects } from "../../stores/projects.js";
@@ -340,7 +341,12 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
           <SheetRow
             icon={<GitPullRequest />}
             label="Pull requests"
-            onClick={() => goOverlay("prs")}
+            onClick={() => {
+              // PRs are a Workspace tab now, not their own overlay — so this
+              // opens the same list every other entry point does.
+              openWorkspace("prs");
+              setMoreOpen(false);
+            }}
           />
           <SheetRow icon={<Blocks />} label="MCP tools" onClick={() => goOverlay("mcp")} />
           {/* Both settings surfaces are pages now, so they go through `goView`

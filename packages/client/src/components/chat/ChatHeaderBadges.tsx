@@ -4,7 +4,7 @@ import { describeExemptionScope } from "@dispatch/shared";
 import { Chip } from "../ui/Chip.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { Button } from "../ui/Button.js";
-import { openOverlay } from "../../stores/view.js";
+import { openWorkspace } from "../../stores/workspace.js";
 import { cn } from "../../lib/cn.js";
 
 /** Names only what the cluster actually shows — a chat can have either alone. */
@@ -237,7 +237,7 @@ export function ChatHeaderBadges({
                 icon={<GitPullRequest className="text-info-hi" />}
                 hint={pr.state}
                 onClick={() => {
-                  openOverlay("prs");
+                  openWorkspace("prs");
                   close();
                 }}
               >

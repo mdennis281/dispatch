@@ -7,6 +7,7 @@ import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { PrReviewWatcher, type PrReviewGitHub } from "./pr-review-watcher.js";
 import type { PrPollSnapshot } from "./github.js";
+import { PrRegistry, PR_POLL_HOT_MS } from "./pr-registry.js";
 
 let root: string;
 let bus: EventBus;
@@ -484,5 +485,127 @@ describe("PrReviewWatcher — arm", () => {
     await makeChat("c1", [REF]);
     const watcher = new PrReviewWatcher({ store, bus, github: fakeGitHub(NOISY) });
     await expect(watcher.arm("c1", { ...REF, repo: undefined })).resolves.toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------ feeding the PR catalog */
+
+describe("PrReviewWatcher — the PR catalog", () => {
+  /** Clock-injected so the catalog's cadence can be stepped rather than waited. */
+  function withRegistry(over: FakePrScript = {}, opts: { discover?: PRRef[] } = {}) {
+    let now = 1_000_000;
+    const registry = new PrRegistry({ store, bus, now: () => now });
+    const watcher = new PrReviewWatcher({
+      store,
+      bus,
+      github: fakeGitHub(over),
+      registry,
+      now: () => now,
+      discover: opts.discover
+        ? async () => opts.discover!.map((ref) => ({ projectId: "p1", ref }))
+        : undefined,
+    });
+    return { registry, watcher, advance: (ms: number) => (now += ms) };
+  }
+
+  it("records every poll it makes, so the catalog is a by-product of watching", async () => {
+    await makeChat("c1", [REF]);
+    const { registry, watcher } = withRegistry({
+      prChecks: async () => [{ name: "build", status: "completed", conclusion: "failure" }],
+    });
+
+    await watcher.sweep();
+
+    const rows = await registry.list();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ key: "octo/repo#42", chatId: "c1", projectId: "p1" });
+    expect(rows[0]!.checks[0]).toMatchObject({ name: "build", conclusion: "failure" });
+  });
+
+  it("puts a brand-new PR in the catalog AND polls it on the same sweep", async () => {
+    // Waiting a cadence it has no state to justify would leave a just-opened PR
+    // missing from the list for as long as the backoff said.
+    await makeChat("c1", [REF]);
+    const { registry, watcher } = withRegistry();
+
+    await watcher.sweep();
+
+    expect((await registry.list())[0]!.lastPolledAt).toBeGreaterThan(0);
+  });
+
+  it("honours the catalog's cadence — a parked PR is not re-polled every sweep", async () => {
+    await makeChat("c1", [REF]);
+    let polls = 0;
+    const { watcher, advance } = withRegistry({
+      prMergeState: async () => {
+        polls += 1;
+        return { state: "open" as const };
+      },
+    });
+
+    await watcher.sweep();
+    expect(polls).toBe(1);
+    // Immediately again: nothing is due, so nothing is asked of GitHub.
+    await watcher.sweep();
+    expect(polls).toBe(1);
+    // Once its turn comes round, it is polled again.
+    advance(PR_POLL_HOT_MS);
+    await watcher.sweep();
+    expect(polls).toBe(2);
+  });
+
+  it("discovers open PRs no chat owns, and shows them unattributed", async () => {
+    // Retiring the project-wide overlay must not lose sight of a human's PR or
+    // a bot's — they are listed exactly as an `external` worktree is.
+    const foreign: PRRef = { ...REF, number: 99, title: "somebody else's" };
+    const { registry, watcher } = withRegistry({}, { discover: [foreign] });
+
+    await watcher.sweep();
+
+    const rows = await registry.list();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ number: 99, projectId: "p1" });
+    expect(rows[0]!.chatId).toBeUndefined();
+  });
+
+  it("raises NO attention for a discovered PR — nobody owns it to wake", async () => {
+    const foreign: PRRef = { ...REF, number: 99 };
+    const { watcher } = withRegistry(
+      { reviewThreads: async () => [{ id: "T_1", isResolved: false, author: "someone" }] },
+      { discover: [foreign] },
+    );
+
+    expect(await watcher.sweep()).toEqual([]);
+    expect(reviewItems()).toEqual([]);
+  });
+
+  it("does not let discovery orphan a PR a chat owns", async () => {
+    await makeChat("c1", [REF]);
+    // The same PR turns up in the project-wide sweep, which knows no chat.
+    const { registry, watcher } = withRegistry({}, { discover: [REF] });
+
+    await watcher.sweep();
+
+    const rows = await registry.list();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.chatId).toBe("c1");
+  });
+
+  it("marks a row stale when the poll fails, rather than silently keeping old state", async () => {
+    await makeChat("c1", [REF]);
+    const { registry, watcher, advance } = withRegistry();
+    await watcher.sweep();
+
+    // Now GitHub goes dark.
+    const dark = new PrReviewWatcher({
+      store,
+      bus,
+      github: fakeGitHub({ prMergeState: async () => null }),
+      registry,
+    });
+    advance(PR_POLL_HOT_MS);
+    await dark.sweep();
+
+    expect((await registry.list())[0]!.pollError).toContain("could not be read");
   });
 });
