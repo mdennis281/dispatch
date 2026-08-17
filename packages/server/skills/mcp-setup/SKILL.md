@@ -1,6 +1,6 @@
 ---
 name: mcp-setup
-description: Add, configure, debug, or build an MCP server for this project. Use whenever the conversation turns to installing/adding/connecting an MCP server, wiring up a tool integration (Linear, Sentry, Postgres, Figma, Playwright, a company API…), editing mcpServers config, troubleshooting a server that won't connect or whose tools aren't showing up, or writing a new MCP server from scratch. Covers Dispatch's `.dispatch/project.yaml` config, the `cm mcp` CLI, the `mcp__manager__mcp_*` tools, and secret handling.
+description: Add, configure, debug, or build an MCP server for this project. Use whenever the conversation turns to installing/adding/connecting an MCP server, wiring up a tool integration (Linear, Sentry, Postgres, Figma, Playwright, a company API…), editing mcpServers config, troubleshooting a server that won't connect or whose tools aren't showing up, giving each git worktree its own MCP instance or fixing MCP port conflicts between parallel chats, returning a screenshot/video/file from a tool, or writing a new MCP server from scratch. Covers Dispatch's `.dispatch/project.yaml` config, the `cm mcp` CLI, the `mcp__manager__mcp_*` tools, and secret handling.
 ---
 
 # MCP setup in Dispatch
@@ -16,6 +16,18 @@ Do **not** configure MCP servers by writing `.mcp.json`, `~/.claude.json`,
 `.claude/settings.json`, or by hand-editing `project.yaml`. Those either won't be
 read, won't be shared with the team, or will skip validation. Use one of the two
 supported paths below.
+
+## Where to look
+
+This page covers adding a server and keeping its secrets out of the repo. The
+rest is split out — read the one you need, not all four.
+
+| If you're… | Read |
+|---|---|
+| Running several chats/worktrees and they fight over a port | [references/per-worktree.md](references/per-worktree.md) |
+| Returning a screenshot, video, or file from a tool | [references/outputs.md](references/outputs.md) |
+| Staring at a server that won't connect or shows no tools | [references/troubleshooting.md](references/troubleshooting.md) |
+| Writing a new MCP server | [references/authoring.md](references/authoring.md) |
 
 ## Adding a server
 
@@ -77,6 +89,11 @@ anonymous, check that its variable is actually set where the manager runs.
 If the user pastes a real key at you, put the placeholder in the config and tell
 them which variable to export. Don't write the literal key into `project.yaml`.
 
+> **`${VAR}` is resolved ONCE, when config loads** — from the manager's own
+> environment, shared by every chat in the project. It is the right tool for a
+> secret and the wrong one for anything that must differ per chat, such as a
+> port. For those, see [references/per-worktree.md](references/per-worktree.md).
+
 ## Verifying it worked
 
 1. `mcp__manager__mcp_list` (or `cm mcp list`) — confirms it's in the config.
@@ -86,80 +103,15 @@ them which variable to export. Don't write the literal key into `project.yaml`.
    but red there is a server that doesn't work yet.
 3. The tools reach the agent as `mcp__<name>__<tool>` on the next turn.
 
-## When a server won't connect
-
-Work down this list — the catalog's error message tells you which rung you're on.
-
-- **stdio, "command not found"** — the command must be on the manager's PATH.
-  `npx`/`uvx` need node/python available to the manager process, not just your
-  shell. Test it directly: `npx -y the-package --help`.
-- **stdio, exits immediately** — usually a missing required env var. Run the
-  command by hand with the same env and read its stderr.
-- **http/sse, 401/403** — the `${VAR}` didn't expand (unset where the manager
-  runs) or the header name is wrong. `cm mcp get <name>` shows exactly what's
-  stored.
-- **http/sse, connection refused / 404** — wrong transport. Some servers publish
-  an `/sse` endpoint and some a streamable `/mcp` one; they are not
-  interchangeable. Try the other with `--transport`.
-- **Connects, but no tools** — the server started but registered nothing; check
-  its own logs/version. This is a bug in that server, not in the config.
-- **Nothing changed after an edit** — config changes apply to the NEXT turn.
-  Finish the turn, or start a new one.
-
 ## Choosing a transport
 
 - **stdio** — a local subprocess. Use for anything that touches the local
-  filesystem, a local database, or a CLI. Runs as a child of the manager.
+  filesystem, a local database, or a CLI. Runs as a child of the manager, in the
+  chat's own directory.
 - **http** — a remote streamable-HTTP endpoint. The current standard for hosted
   servers.
 - **sse** — the older server-sent-events remote transport. Use only when the
   server explicitly documents an SSE endpoint.
-
-## Building a new MCP server
-
-When nothing off-the-shelf fits, write one. Use the official SDK
-(`@modelcontextprotocol/sdk` for TypeScript, `mcp` for Python) rather than
-implementing the protocol by hand.
-
-Sketch (TypeScript, stdio):
-
-```ts
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-
-const server = new McpServer({ name: "my-server", version: "1.0.0" });
-
-server.tool(
-  "search_orders",
-  "Search orders by customer email. Returns at most 20, newest first.",
-  { email: z.string().describe("Customer email address") },
-  async ({ email }) => ({ content: [{ type: "text", text: await search(email) }] }),
-);
-
-await server.connect(new StdioServerTransport());
-```
-
-Then register it against the local entrypoint while iterating:
-
-```bash
-cm mcp add my-server -- node ./tools/my-mcp/dist/index.js
-```
-
-What separates a good server from a bad one:
-
-- **Descriptions are the API.** The agent picks tools from the description alone.
-  Say what it does, what it returns, and when to use it — not just the noun.
-- **Name tools by action** (`search_orders`, not `orders`), and namespace them so
-  `mcp__<server>__<tool>` reads unambiguously.
-- **Constrain inputs with the schema.** Enums and `.describe()` on every field
-  prevent far more bad calls than prose does.
-- **Bound the output.** A tool that can return a 50k-token blob will poison the
-  context. Paginate, cap, and say in the description that it's capped.
-- **Return errors as text with `isError: true`**, explaining what to do
-  differently. Never throw raw stack traces at the agent.
-- **stdout is the protocol.** For a stdio server, anything you `console.log` goes
-  down the wire and corrupts the stream. Log to stderr.
 
 ## Scope note
 

@@ -34,10 +34,12 @@ import {
   mkdir,
   rm,
   stat,
+  copyFile,
   readFile as fsReadFile,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, createReadStream } from "node:fs";
+import type { Readable } from "node:stream";
 import * as z from "zod";
 import {
   ProjectSchema,
@@ -54,6 +56,8 @@ import {
   type RunnerInstance,
   CheckpointSchema,
   type Checkpoint,
+  McpPortLeaseSchema,
+  type McpPortLease,
   ShellTranscriptFilterSchema,
 } from "@dispatch/shared";
 import { HarnessSettingsSchema, UpdateChannelSchema } from "@dispatch/shared";
@@ -261,6 +265,15 @@ export class Store {
   }
   private runnersFile() {
     return join(this.dataDir, "runners.json");
+  }
+  /**
+   * Per-INSTANCE, like runners.json and for the same reason: it's a whole-file
+   * read-modify-write map guarded by an in-process mutex, so two processes
+   * sharing it would silently drop each other's leases and hand two checkouts
+   * one port — the exact collision the leases exist to prevent.
+   */
+  private mcpPortsFile() {
+    return join(this.dataDir, "mcp-ports.json");
   }
   private checkpointsFile() {
     return join(this.dataDir, "checkpoints.json");
@@ -574,6 +587,52 @@ export class Store {
     return fsReadFile(abs);
   }
 
+  /**
+   * Copy a file on disk into the chat's assets. Returns the relative path.
+   *
+   * `copyFile` rather than read-then-write: a referenced asset can be hundreds
+   * of megabytes, and buffering one into a Buffer purely to hand it back to the
+   * filesystem is an allocation nobody needs (and on some platforms this can be
+   * a copy-on-write clone that moves no bytes at all).
+   */
+  async copyChatAsset(chatId: string, name: string, srcPath: string): Promise<string> {
+    const abs = this.safeAssetPath(chatId, name);
+    if (!abs) throw new Error(`invalid asset name: ${name}`);
+    await mkdir(this.chatAssetsDir(chatId), { recursive: true });
+    await this.mutex.run(`asset:${chatId}:${basename(name)}`, () => copyFile(srcPath, abs));
+    return `assets/${basename(name)}`;
+  }
+
+  /** Size of a chat asset without reading it. Null when absent or escaping. */
+  async statChatAsset(chatId: string, name: string): Promise<{ size: number } | null> {
+    const abs = this.safeAssetPath(chatId, name);
+    if (!abs) return null;
+    try {
+      const s = await stat(abs);
+      return s.isFile() ? { size: s.size } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Stream a chat asset, optionally just `[start, end]`.
+   *
+   * Assets are no longer only thumbnails — a referenced video can be hundreds
+   * of megabytes, and answering a seek by loading the whole file into a Buffer
+   * to slice four bytes out of it would spike memory per request and undo the
+   * point of range support.
+   */
+  openChatAsset(
+    chatId: string,
+    name: string,
+    range?: { start: number; end: number },
+  ): Readable | null {
+    const abs = this.safeAssetPath(chatId, name);
+    if (!abs || !existsSync(abs)) return null;
+    return createReadStream(abs, range ? { start: range.start, end: range.end } : undefined);
+  }
+
   /* ----------------------------------------------------------- runners */
 
   async listRunners(): Promise<RunnerInstance[]> {
@@ -601,6 +660,38 @@ export class Store {
       const all = (await readJson<unknown[]>(this.runnersFile())) ?? [];
       const list = z.array(RunnerInstanceSchema).parse(all).filter((r) => r.id !== id);
       await writeJsonAtomic(this.runnersFile(), list);
+    });
+  }
+
+  /* ---------------------------------------------------- MCP port leases */
+
+  async listMcpPortLeases(): Promise<McpPortLease[]> {
+    const raw = (await readJson<unknown[]>(this.mcpPortsFile())) ?? [];
+    // Tolerate a partially-corrupt file: a bad row costs one lease (re-leased on
+    // next use), where a throw would cost every session in every project.
+    return raw.flatMap((r) => {
+      const p = McpPortLeaseSchema.safeParse(r);
+      return p.success ? [p.data] : [];
+    });
+  }
+
+  /**
+   * Read-modify-write the whole lease list under one lock. Allocation must see a
+   * consistent view — two concurrent sessions each picking "the lowest free
+   * port" from a stale read would pick the SAME one.
+   */
+  async updateMcpPortLeases<T>(
+    fn: (leases: McpPortLease[]) => { leases: McpPortLease[]; result: T } | Promise<{ leases: McpPortLease[]; result: T }>,
+  ): Promise<T> {
+    return this.mutex.run("mcp-ports", async () => {
+      const raw = (await readJson<unknown[]>(this.mcpPortsFile())) ?? [];
+      const current = raw.flatMap((r) => {
+        const p = McpPortLeaseSchema.safeParse(r);
+        return p.success ? [p.data] : [];
+      });
+      const { leases, result } = await fn(current);
+      await writeJsonAtomic(this.mcpPortsFile(), leases);
+      return result;
     });
   }
 

@@ -2,7 +2,7 @@ import { memo } from "react";
 import type { UserMessageRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { Chip } from "../../ui/Chip.js";
-import { ImageThumb } from "./ImageThumb.js";
+import { Attachment } from "./Attachment.js";
 import { ComposedParts } from "./ComposedParts.js";
 import { actions } from "../../../lib/actions.js";
 import { useHasCheckpoint } from "../../../stores/checkpoints.js";
@@ -58,7 +58,7 @@ export const UserRow = memo(function UserRow({
       {row.images && row.images.length > 0 && (
         <div className="mt-2 flex flex-wrap justify-end gap-2">
           {row.images.map((img) => (
-            <ImageThumb key={img.id} chatId={chatId} img={img} />
+            <Attachment key={img.id} chatId={chatId} asset={img} />
           ))}
         </div>
       )}

@@ -165,3 +165,111 @@ describe("chat checkpoints snapshot", () => {
     expect(res.json()).toEqual([]);
   });
 });
+
+describe("asset range requests", () => {
+  /**
+   * `<video>` refuses to expose a seek bar unless the server answers 206, so
+   * these are the difference between "a recording plays" and "a recording is
+   * watchable".
+   */
+  const BODY = Buffer.from("0123456789");
+  const B64 = BODY.toString("base64");
+
+  async function upload(): Promise<{ chatId: string; name: string }> {
+    const chatId = await makeChat();
+    const up = await app.inject({
+      method: "POST",
+      url: `/api/chats/${chatId}/assets`,
+      payload: { data: B64, mimeType: "video/mp4", filename: "clip.mp4" },
+    });
+    expect(up.statusCode).toBe(201);
+    const ref = up.json() as { path: string };
+    return { chatId, name: ref.path.split("/").pop()! };
+  }
+
+  it("stores a video under its own extension and media type", async () => {
+    const { chatId, name } = await upload();
+    expect(name.endsWith(".mp4")).toBe(true);
+    const got = await app.inject({ method: "GET", url: `/api/chats/${chatId}/assets/${name}` });
+    expect(got.headers["content-type"]).toContain("video/mp4");
+  });
+
+  it("advertises accept-ranges on the FIRST, rangeless response", async () => {
+    // A browser decides whether to seek by looking for this header here; omit
+    // it and it never asks for a range at all.
+    const { chatId, name } = await upload();
+    const got = await app.inject({ method: "GET", url: `/api/chats/${chatId}/assets/${name}` });
+    expect(got.statusCode).toBe(200);
+    expect(got.headers["accept-ranges"]).toBe("bytes");
+  });
+
+  it("answers a closed range with 206 and just those bytes", async () => {
+    const { chatId, name } = await upload();
+    const got = await app.inject({
+      method: "GET",
+      url: `/api/chats/${chatId}/assets/${name}`,
+      headers: { range: "bytes=2-5" },
+    });
+    expect(got.statusCode).toBe(206);
+    expect(got.headers["content-range"]).toBe("bytes 2-5/10");
+    expect(got.rawPayload.toString()).toBe("2345");
+  });
+
+  it("answers an open-ended range to the end of the file", async () => {
+    const { chatId, name } = await upload();
+    const got = await app.inject({
+      method: "GET",
+      url: `/api/chats/${chatId}/assets/${name}`,
+      headers: { range: "bytes=7-" },
+    });
+    expect(got.statusCode).toBe(206);
+    expect(got.headers["content-range"]).toBe("bytes 7-9/10");
+    expect(got.rawPayload.toString()).toBe("789");
+  });
+
+  it("reads a suffix range as the LAST n bytes, not the first", async () => {
+    const { chatId, name } = await upload();
+    const got = await app.inject({
+      method: "GET",
+      url: `/api/chats/${chatId}/assets/${name}`,
+      headers: { range: "bytes=-3" },
+    });
+    expect(got.statusCode).toBe(206);
+    expect(got.rawPayload.toString()).toBe("789");
+  });
+
+  it("clamps an end past EOF instead of failing", async () => {
+    const { chatId, name } = await upload();
+    const got = await app.inject({
+      method: "GET",
+      url: `/api/chats/${chatId}/assets/${name}`,
+      headers: { range: "bytes=8-99" },
+    });
+    expect(got.statusCode).toBe(206);
+    expect(got.headers["content-range"]).toBe("bytes 8-9/10");
+  });
+
+  it("416s a start past EOF", async () => {
+    const { chatId, name } = await upload();
+    const got = await app.inject({
+      method: "GET",
+      url: `/api/chats/${chatId}/assets/${name}`,
+      headers: { range: "bytes=50-60" },
+    });
+    expect(got.statusCode).toBe(416);
+    expect(got.headers["content-range"]).toBe("bytes */10");
+  });
+
+  it("falls back to the whole file for a malformed or multi-range header", async () => {
+    const { chatId, name } = await upload();
+    for (const range of ["rows=1-2", "bytes=abc", "bytes=0-1,4-5"]) {
+      const got = await app.inject({
+        method: "GET",
+        url: `/api/chats/${chatId}/assets/${name}`,
+        headers: { range },
+      });
+      expect(got.statusCode).toBe(200);
+      expect(got.rawPayload.length).toBe(BODY.length);
+    }
+  });
+});
