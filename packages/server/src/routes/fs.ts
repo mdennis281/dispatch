@@ -25,8 +25,17 @@ import {
   CONFIG_DIR_NAME,
   LEGACY_CONFIG_DIR_NAME,
   MANIFEST_FILE,
+  FsMutationSchema,
+  FsSelectKindSchema,
   type Project,
 } from "@dispatch/shared";
+import { enclosingRepoRoot, fwd } from "../services/fs-explorer.js";
+
+// Both of these started life here, beside the probe that first needed them, and
+// moved into the explorer service once the browser needed them too — a service
+// cannot import from `routes/`. Re-exported because `routes/projects.ts` and the
+// existing tests import them from this module.
+export { enclosingRepoRoot, fwd };
 
 /** How much of an existing manifest is worth shipping to a preview pane. */
 const MANIFEST_PREVIEW_LIMIT = 64_000;
@@ -69,34 +78,11 @@ export interface PathProbe {
   dispatchWorktreeRoot: string | null;
 }
 
-/** Forward slashes everywhere the UI shows a path, on every platform. */
-export const fwd = (p: string): string => p.replace(/\\/g, "/");
-
 /** Walk up until something exists (or the root runs out). */
 function nearestExisting(path: string): string | null {
   let cur = resolve(path);
   for (let i = 0; i < 64; i++) {
     if (existsSync(cur)) return cur;
-    const up = dirname(cur);
-    if (up === cur) return null;
-    cur = up;
-  }
-  return null;
-}
-
-/**
- * The top level of the git repo containing `path`, or null.
- *
- * Walks UP rather than checking for `.git` in one directory, because "is this
- * already tracked?" is a question about the whole ancestry: `apps/new-service`
- * inside a monorepo is already in a repo, and `git init`-ing it there would
- * produce a nested one whose worktrees and diffs describe an empty tree while
- * the real code lives in the outer checkout.
- */
-export function enclosingRepoRoot(path: string): string | null {
-  let cur = resolve(path);
-  for (let i = 0; i < 64; i++) {
-    if (existsSync(join(cur, ".git"))) return cur;
     const up = dirname(cur);
     if (up === cur) return null;
     cur = up;
@@ -236,16 +222,57 @@ export function inferProjectsRoot(projects: Project[], home: string): string {
   return fwd(existsSync(conventional) ? conventional : home);
 }
 
+/** `?showHidden=true` / `?showHidden=1` — query strings have no booleans. */
+const flag = (v: string | undefined): boolean => v === "true" || v === "1";
+
+/** `?ext=png,jpg` or `?ext=.PNG` → `["png","jpg"]`. */
+const extList = (v: string | undefined): string[] | undefined => {
+  const parts = (v ?? "")
+    .split(",")
+    .map((e) => e.trim().replace(/^\./, "").toLowerCase())
+    .filter(Boolean);
+  return parts.length ? parts : undefined;
+};
+
 export function registerFsRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
+  const { fsExplorer, worktrees } = app.services;
 
+  /**
+   * Everywhere worth starting from.
+   *
+   * `home`/`projectsRoot`/`sep` are the original three fields, still here
+   * because the new-project form reads them; `platform` and `roots` are
+   * additive. Keeping the old keys means this endpoint didn't need a version.
+   */
   app.get("/api/fs/roots", async () => {
     const home = homedir();
     const projects = await store.listProjects().catch(() => [] as Project[]);
+    // Worktrees are best-effort: they cost a `git worktree list` per project,
+    // and a picker that fails to open because one repo is mid-rebase would be a
+    // bad trade for a few extra shortcuts.
+    const trees = await worktrees
+      .listAll(projects)
+      .catch(() => [] as Array<{ path: string; branch?: string; projectId?: string }>);
+    const nameOf = new Map(projects.map((p) => [p.id, p.name]));
     return {
       home: fwd(home),
       projectsRoot: inferProjectsRoot(projects, home),
       sep: pathSep,
+      // The client needs this to compute breadcrumbs and parents without a
+      // round trip, and it is the SERVER's platform — the browser's is
+      // irrelevant to a disk it can't see.
+      platform: fsExplorer.pathPlatform,
+      roots: await fsExplorer.roots({
+        projects: projects
+          .filter((p) => p.repoPath)
+          .map((p) => ({ id: p.id, name: p.name, repoPath: p.repoPath })),
+        worktrees: trees.map((w) => ({
+          path: w.path,
+          branch: w.branch,
+          projectName: w.projectId ? nameOf.get(w.projectId) : undefined,
+        })),
+      }),
     };
   });
 
@@ -253,5 +280,86 @@ export function registerFsRoutes(app: FastifyInstance): void {
     const path = (req.query.path ?? "").trim();
     if (!path) return reply.code(400).send({ error: "path required" });
     return probePath(path);
+  });
+
+  app.get<{ Querystring: { path?: string; limit?: string } }>(
+    "/api/fs/list",
+    async (req, reply) => {
+      const path = (req.query.path ?? "").trim();
+      if (!path) return reply.code(400).send({ error: "path required" });
+      try {
+        const limit = Number(req.query.limit);
+        return await fsExplorer.list(path, {
+          limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+        });
+      } catch (err) {
+        // A path that isn't there, or that this process can't read, is a normal
+        // thing for a browser to ask about (a stale bookmark, someone else's
+        // home directory) — 404 so the UI can say so, not 500.
+        return reply.code(404).send({ error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
+
+  app.get<{ Querystring: { path?: string } }>("/api/fs/details", async (req, reply) => {
+    const path = (req.query.path ?? "").trim();
+    if (!path) return reply.code(400).send({ error: "path required" });
+    try {
+      return await fsExplorer.details(path);
+    } catch (err) {
+      return reply.code(404).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get<{
+    Querystring: {
+      root?: string;
+      q?: string;
+      limit?: string;
+      select?: string;
+      ext?: string;
+      showHidden?: string;
+      includeIgnored?: string;
+    };
+  }>("/api/fs/search", async (req, reply) => {
+    const root = (req.query.root ?? "").trim();
+    if (!root) return reply.code(400).send({ error: "root required" });
+    const select = FsSelectKindSchema.safeParse(req.query.select);
+    const limit = Number(req.query.limit);
+    try {
+      const results = await fsExplorer.search(root, req.query.q ?? "", {
+        limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+        includeIgnored: flag(req.query.includeIgnored),
+        filter: {
+          select: select.success ? select.data : "any",
+          extensions: extList(req.query.ext),
+          showHidden: flag(req.query.showHidden),
+        },
+      });
+      return { root, results };
+    } catch (err) {
+      return reply.code(404).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Every write, behind one route.
+   *
+   * A discriminated union rather than six endpoints because these all share the
+   * same result shape (partial success, per-path errors) and the same guards,
+   * and because the UI dispatches them from one place — an undo stack that had
+   * to know which URL each operation lived at would be six times the wiring for
+   * no extra clarity.
+   */
+  app.post("/api/fs/mutate", async (req, reply) => {
+    const parsed = FsMutationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "invalid mutation" });
+    }
+    const result = await fsExplorer.mutate(parsed.data);
+    // 200 even for a failed mutation: the body carries per-path errors, and a
+    // non-2xx would collapse "two of five files were locked" into "the request
+    // failed", which is exactly the distinction the caller needs.
+    return result;
   });
 }

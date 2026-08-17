@@ -18,6 +18,7 @@ export * from "./auth.js";
 export * from "./limits.js";
 export * from "./mcp.js";
 export * from "./file-tools.js";
+export * from "./fs-entry.js";
 export * from "./messages.js";
 export * from "./titles.js";
 export * from "./version.js";

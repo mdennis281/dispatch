@@ -45,6 +45,7 @@ import { ResumeScheduler } from "./resume-scheduler.js";
 import { TrunkSyncService } from "./trunk-sync.js";
 import { PrReviewWatcher } from "./pr-review-watcher.js";
 import { FileIndexService } from "./file-index.js";
+import { FsExplorerService } from "./fs-explorer.js";
 import { HarnessRegistry } from "../harness/index.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
 
@@ -82,6 +83,7 @@ export interface ServiceOverrides {
   release?: ReleaseService;
   resume?: ResumeScheduler;
   fileIndex?: FileIndexService;
+  fsExplorer?: FsExplorerService;
   trunkSync?: TrunkSyncService;
   prReviewWatcher?: PrReviewWatcher;
 }
@@ -122,6 +124,8 @@ export interface Services extends ServiceBase {
   /** Schedules a chat to continue itself once a usage limit lifts. */
   resume: ResumeScheduler;
   fileIndex: FileIndexService;
+  /** Directory listings, stats, drives/mounts and writes for the file explorer. */
+  fsExplorer: FsExplorerService;
   /** Fast-forwards a project's primary checkout after its PRs land. */
   trunkSync: TrunkSyncService;
   /** Raises `review` attention (and wakes the owning chat) on PR activity. */
@@ -324,6 +328,11 @@ export function createServices(
   // Backs the composer's file-path picker: the browser can't see the filesystem,
   // so real paths have to be listed server-side.
   const fileIndex = overrides.fileIndex ?? new FileIndexService();
+  // Backs the file explorer (modal picker + full page). Distinct from
+  // `fileIndex` on purpose: that one is git-backed and repo-scoped, which is
+  // right for "@-mention a file in this project" and useless for "find the CSV
+  // on the D: drive".
+  const fsExplorer = overrides.fsExplorer ?? new FsExplorerService();
   // Usage-limit auto-resume. Constructed AFTER the broker (it sends through it)
   // and hooked back in below, since a limit is only visible on the broker's
   // errored turn-end. `send` goes through the same lazy session path the routes
@@ -449,6 +458,7 @@ export function createServices(
     release,
     resume,
     fileIndex,
+    fsExplorer,
     trunkSync,
     prReviewWatcher,
 
