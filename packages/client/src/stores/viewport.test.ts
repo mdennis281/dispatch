@@ -1,71 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { keyboardInset, standaloneShellHeight } from "./viewport.js";
+import { keyboardInset } from "./viewport.js";
 
-// A device whose UA has already taken the status bar out of the viewport: no
-// top inset to add back, so only the shrink correction can fire.
-const noTopInset = (standalone: boolean, inner: number, max: number) =>
-  standaloneShellHeight(standalone, inner, max, 0, 932);
-
-describe("standaloneShellHeight", () => {
-  it("stays out of the way in a browser tab", () => {
-    // A shrinking window there means the URL bar came back, which the shell
-    // must follow. 0 tells the caller to leave it on `100dvh`.
-    expect(noTopInset(false, 873, 932)).toBe(0);
-  });
-
-  it("stays out of the way until a shrink is actually observed", () => {
-    expect(noTopInset(true, 932, 932)).toBe(0);
-  });
-
-  it("pins to the pre-shrink height once the window drops", () => {
-    // The iOS standalone bug: ~59px gone the first time the keyboard opens,
-    // never returned. This is the whole fix — 932, not the reported 873.
-    expect(noTopInset(true, 873, 932)).toBe(932);
-  });
-
-  it("ignores a rounding-sized wobble", () => {
-    // Pinning the shell a pixel taller than the window would make the document
-    // scrollable for no reason.
-    expect(noTopInset(true, 929, 932)).toBe(0);
-  });
-
-  it("keeps the correction while the keyboard is up", () => {
-    // `innerHeight` does not move with the keyboard, so the deficit — and the
-    // correction — persist across the whole typing session.
-    expect(noTopInset(true, 873, 932)).toBe(932);
-  });
-
-  it("adds the status bar back when we are being charged for it twice", () => {
-    // The measured iPhone: 873 of window inside a 932 screen, with a 59 top
-    // inset to pad around. Both numbers describe the SAME band, so the shell
-    // has to span the whole screen or that band is dead space at the bottom.
-    expect(standaloneShellHeight(true, 873, 873, 59, 932)).toBe(932);
-  });
-
-  it("adds it back on top of the shrink correction, not instead of it", () => {
-    // First keyboard open has taken another 59 off the window. The pre-shrink
-    // maximum is still short of the screen by the status bar.
-    expect(standaloneShellHeight(true, 814, 873, 59, 932)).toBe(932);
-  });
-
-  it("declines when the band it would add isn't there", () => {
-    // A UA that reports a top inset but has NOT taken it out of the window:
-    // adding it would pin the shell past the bottom of the screen and hand
-    // back the overflow the fixed shell exists to remove.
-    expect(standaloneShellHeight(true, 932, 932, 59, 932)).toBe(0);
-  });
-
-  it("does not touch a browser tab that has a top inset", () => {
-    // Landscape Safari on a notched phone: the URL bar owns the bottom edge
-    // and the shell must keep following `dvh`.
-    expect(standaloneShellHeight(false, 873, 932, 59, 932)).toBe(0);
-  });
-});
-
-// An uncorrected shell — it IS the window, which is every platform where the
-// standalone status-bar bug doesn't apply.
+// The shell IS the window — `height: 100dvh`, no correction. There used to be a
+// `standaloneShellHeight` that pinned it to the tallest window ever seen and
+// added the status bar back on top; both are gone. See
+// docs/ios-pwa-viewport-findings.md for why neither could work.
 const plain = (windowHeight: number, vvHeight: number, vvOffsetTop: number) =>
-  keyboardInset(windowHeight, windowHeight, vvHeight, vvOffsetTop);
+  keyboardInset(windowHeight, vvHeight, vvOffsetTop);
 
 describe("keyboardInset", () => {
   it("is zero with no keyboard up", () => {
@@ -92,27 +33,26 @@ describe("keyboardInset", () => {
     expect(plain(932, 596, 40)).toBe(296);
   });
 
-  it("charges the keyboard for the band the shell recovered", () => {
-    // Shell 932 because the status bar was added back; the window still says
-    // 873 and the keyboard leaves 519 of it visible. The keyboard is drawn up
-    // from the bottom of the SCREEN, so it covers the recovered band too —
-    // measured against the window alone this is 354 and the composer floats a
-    // status bar's worth above the keys.
-    expect(keyboardInset(932, 873, 519, 0)).toBe(413);
+  it("measures the keyboard against the window, not a remembered height", () => {
+    // The iOS standalone shrink has taken the window to 873 and the keyboard
+    // leaves 519 of it visible. That is the whole inset: the shell is 873 too,
+    // so there is no band below it for the keyboard to also be covering. The
+    // old code added the difference between a 932 pinned shell and this window
+    // and returned 413, which padded a status bar's worth of nothing off the
+    // bottom of a shell that was already wrong.
+    expect(plain(873, 519, 0)).toBe(354);
   });
 
-  it("is zero at rest even when the shell is taller than the window", () => {
-    // The regression this replaces: `visualViewport` is capped at the layout
-    // viewport, so it can NEVER account for the recovered band and reported it
-    // as covered with no keyboard anywhere. A permanent phantom keyboard reads
-    // downstream as "typing" and took the bottom nav off screen for good.
-    expect(keyboardInset(932, 873, 873, 0)).toBe(0);
+  it("is zero at rest after the standalone shrink", () => {
+    // `visualViewport` is capped at the layout viewport, so with the shell
+    // pinned taller than the window this used to read the difference as
+    // permanently covered — a phantom keyboard, which reads downstream as
+    // "typing" and took the bottom nav off screen for good.
+    expect(plain(873, 873, 0)).toBe(0);
   });
 
-  it("does not amplify a rounding wobble into a status bar", () => {
-    // 1px of disagreement between two viewports is not a keyboard, and the
-    // recovered band must not be added on the strength of it.
-    expect(keyboardInset(932, 873, 872, 0)).toBe(0);
+  it("does not amplify a rounding wobble into a keyboard", () => {
+    expect(plain(873, 872, 0)).toBe(0);
   });
 
   it("never goes negative", () => {

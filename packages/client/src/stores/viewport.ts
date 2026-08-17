@@ -10,11 +10,6 @@
  * the only way to see these on the device where they misbehave.
  */
 import { create } from "zustand";
-// Whether we're installed is the same question the install card asks, so it
-// gets the same answer — including `window-controls-overlay`, which this
-// manifest requests FIRST, and iOS's pre-standard `navigator.standalone`. Two
-// definitions of "installed" would disagree exactly where it matters.
-import { isStandalone } from "../lib/pwaInstall.js";
 
 export interface ViewportMetrics {
   /** What the shell subtracts — see `keyboardInset`. */
@@ -30,12 +25,20 @@ export interface ViewportMetrics {
   clientHeight: number;
   /** What `100dvh` currently evaluates to, measured with a probe element. */
   dvh: number;
-  /** `env(safe-area-inset-bottom)`, likewise measured rather than guessed. */
+  /**
+   * `env(safe-area-inset-bottom)`, likewise measured rather than guessed.
+   *
+   * Careful: iOS reports the insets against the SCREEN, and in an installed PWA
+   * the layout viewport can be ~59px shorter than the screen. When it is, the
+   * home indicator this describes is below the viewport entirely and the 34px
+   * is clearing something that isn't there. `screenHeight - clientHeight` is
+   * how you tell. See docs/ios-pwa-viewport-findings.md §1.2.
+   */
   safeBottom: number;
   /**
-   * `env(safe-area-inset-top)`. Non-zero means the viewport we were given
-   * INCLUDES the status bar — which is what makes the same band missing from
-   * `innerHeight` a double charge rather than an honest measurement.
+   * `env(safe-area-inset-top)` — how much of the top of the viewport the status
+   * bar covers, which is what a top bar has to pad around. It describes the
+   * SCREEN, not the (possibly shrunk) layout viewport: see `safeBottom`.
    */
   safeTop: number;
   /** The height the shell is actually laid out at, fallbacks resolved. */
@@ -55,7 +58,6 @@ export interface ViewportMetrics {
 }
 
 export function keyboardInset(
-  shellHeight: number,
   windowHeight: number,
   vvHeight: number,
   vvOffsetTop: number,
@@ -66,20 +68,15 @@ export function keyboardInset(
   // (`offsetTop`), so the gap below it shrinks by exactly that much; the shell
   // is anchored to the window's top and has scrolled with it.
   //
-  // Two viewports, and the order matters. WHETHER anything is down there is a
-  // question only the window can answer: `visualViewport` is expressed in
-  // layout-viewport terms and can never exceed it, so it is blind to the band
-  // the shell recovers BELOW the window and would report that band as covered
-  // forever — a permanent phantom keyboard, which reads downstream as "the user
-  // is typing" and takes the bottom nav off screen for good.
+  // The shell IS the window (`height: 100dvh`), so this is the whole story.
+  // There used to be a second term adding back however much the shell had been
+  // pinned ABOVE the window height, on the theory that the keyboard covers that
+  // recovered band too — it went with the pinning that created the band. See
+  // docs/ios-pwa-viewport-findings.md.
   const covered = Math.round(windowHeight - vvHeight - vvOffsetTop);
-  // A pixel or two is rounding between two viewports, not a keyboard — and it
-  // would be amplified into a whole status bar by the line below.
+  // A pixel or two is rounding between two viewports, not a keyboard.
   if (covered <= 2) return 0;
-  // Something IS down there, and a keyboard is drawn up from the bottom of the
-  // SCREEN — so it covers the recovered band too. `visualViewport` can't see
-  // that band, so it has to be added rather than measured.
-  return Math.max(0, covered + Math.max(0, Math.round(shellHeight - windowHeight)));
+  return Math.max(0, covered);
 }
 
 const EMPTY: ViewportMetrics = {
@@ -99,8 +96,14 @@ const EMPTY: ViewportMetrics = {
 
 interface ViewportStore extends ViewportMetrics {
   /**
-   * The tallest `innerHeight` seen at the current width — the shell's height in
-   * a standalone PWA. See `standaloneShellHeight`.
+   * The tallest `innerHeight` seen at the current width. DIAGNOSTIC ONLY — the
+   * readout shows `inner` against it so the iOS standalone shrink is visible as
+   * it happens.
+   *
+   * It used to SIZE the shell, which is what cut the bottom off every window
+   * you made shorter: an installed desktop PWA is `standalone` too, and
+   * dragging the bottom edge up leaves the width — and therefore this maximum —
+   * untouched, so the shell stayed pinned at the height you no longer had.
    */
   maxInnerHeight: number;
   debug: boolean;
@@ -117,60 +120,6 @@ export const useViewport = create<ViewportStore>((set) => ({
   toggleDebug: () => set((s) => ({ debug: !s.debug })),
   set: (m, maxInnerHeight) => set({ ...m, maxInnerHeight }),
 }));
-
-/**
- * How tall the shell should be, given everything seen so far.
- *
- * The iOS standalone bug shrinks `innerHeight` — and `100dvh` with it — by ~59px
- * the first time the keyboard opens, permanently. Nothing recovers it, and the
- * shell can't detect it in the moment because every number it can read moves
- * together. What DOESN'T move is the tallest value seen before the keyboard was
- * ever raised, so that becomes the height and the post-shrink readings are
- * discarded as the lie they are.
- *
- * Returns 0 when there's nothing to correct — the caller then leaves the shell
- * on plain `100dvh`, which is right everywhere the bug isn't.
- *
- * `standalone` decides whether a shrink is a bug at all: in a browser tab it
- * means the URL bar came back, which the shell must FOLLOW or the composer ends
- * up underneath it. Installed, there is no URL bar and nothing that can
- * legitimately take the height, so the same shrink is the WebKit bug.
- *
- * The SECOND correction is the status bar, and it is the one that left the band
- * of dead black under the bottom nav. With `black-translucent`, the web view
- * covers the whole screen and the status bar is described to us as an inset —
- * that is the entire meaning of `env(safe-area-inset-top)` being non-zero. But
- * WebKit also subtracts that same band from `innerHeight`/`100dvh`, so a shell
- * sized in `dvh` and then padded by `safe-area-inset-top` pays for the status
- * bar TWICE: once at the top as padding, once at the bottom as a shell that
- * stops short of the screen. Adding the top inset back is what makes the shell
- * reach the bottom of the display.
- *
- * The evidence for that double-charge is `safeTop` itself, so this is
- * self-limiting rather than a guess about a device: a UA that has already taken
- * the status bar out of the viewport reports a top inset of 0 and gets no
- * correction. `screenHeight` is the sanity check — the recovered band has to
- * actually exist between the window and the panel, or we'd pin the shell taller
- * than the screen and re-create the overflow #60 just removed.
- */
-export function standaloneShellHeight(
-  standalone: boolean,
-  innerHeight: number,
-  maxInnerHeight: number,
-  safeTop: number,
-  screenHeight: number,
-): number {
-  if (!standalone) return 0;
-  // A 1-2px wobble is rounding, not the bug, and pinning the shell a pixel
-  // taller than the window would make the document scrollable for no reason.
-  const shrunk = maxInnerHeight - innerHeight > 4;
-  const base = shrunk ? maxInnerHeight : innerHeight;
-  // `- 2` for the same rounding: these are two independently rounded CSS
-  // lengths and an exact-equality gate would fail on a half-pixel.
-  const statusBar = safeTop > 0 && screenHeight - base >= safeTop - 2 ? safeTop : 0;
-  if (!statusBar) return shrunk ? base : 0;
-  return base + statusBar;
-}
 
 /**
  * A hidden element whose only job is to be measured.
@@ -195,13 +144,11 @@ export function startViewportTracking(): () => void {
   const safeProbe = makeProbe("env(safe-area-inset-bottom, 0px)");
   const safeTopProbe = makeProbe("env(safe-area-inset-top, 0px)");
 
-  const standalone = isStandalone();
   let frame = 0;
   let lastInset = -1;
-  let lastVh = -1;
-  // Reset per width: a rotation swaps the dimensions, so a portrait maximum is
-  // not a landscape one and carrying it over would pin the shell taller than
-  // the screen.
+  // Diagnostic only — nothing is SIZED from this any more (see the note on
+  // `maxInnerHeight`). Reset per width so a rotation's portrait maximum isn't
+  // reported against a landscape window.
   let maxWidth = window.innerWidth;
   let maxInnerHeight = 0;
   // Cached: `apply` runs every frame for 600ms after each focus change, and a
@@ -242,24 +189,7 @@ export function startViewportTracking(): () => void {
     }
     maxInnerHeight = Math.max(maxInnerHeight, innerHeight);
 
-    // `--cm-vh` is the shell's height, and it is DELIBERATELY absent unless the
-    // window has demonstrably shrunk under us: `height: var(--cm-vh, 100dvh)`
-    // then falls back to the unit that is correct everywhere the bug isn't.
-    const vh = standaloneShellHeight(
-      standalone,
-      innerHeight,
-      maxInnerHeight,
-      safeTop,
-      window.screen.height,
-    );
-    // What the shell is ACTUALLY laid out at — the CSS fallback resolved here,
-    // because that is the edge the keyboard has to be measured against.
-    const inset = keyboardInset(vh || dvh || innerHeight, innerHeight, vvHeight, vvOffsetTop);
-    if (vh !== lastVh) {
-      lastVh = vh;
-      if (vh > 0) document.documentElement.style.setProperty("--cm-vh", `${vh}px`);
-      else document.documentElement.style.removeProperty("--cm-vh");
-    }
+    const inset = keyboardInset(innerHeight, vvHeight, vvOffsetTop);
 
     if (inset !== lastInset) {
       // Sub-pixel churn during the keyboard animation would otherwise write a
@@ -284,7 +214,7 @@ export function startViewportTracking(): () => void {
         dvh,
         safeBottom: Math.round(safeProbe.getBoundingClientRect().height),
         safeTop,
-        shell: vh || dvh || innerHeight,
+        shell: dvh || innerHeight,
         // Read, not derived — see `shellBottom`. Absent element (first frame,
         // or a test that never mounts App) reports 0 rather than a fake edge.
         shellBottom: shellRect(),
@@ -347,6 +277,5 @@ export function startViewportTracking(): () => void {
     safeProbe.remove();
     safeTopProbe.remove();
     document.documentElement.style.removeProperty("--cm-kb");
-    document.documentElement.style.removeProperty("--cm-vh");
   };
 }

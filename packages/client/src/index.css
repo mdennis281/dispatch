@@ -301,10 +301,11 @@
 
   /*
    * The app is a fixed-height shell that scrolls its own panes; the DOCUMENT
-   * never scrolls. Saying so matters once `--cm-vh` is in play: that height is
-   * deliberately taller than the window WebKit is currently reporting, so
-   * without this the recovered ~59px become a scrollable overflow and the whole
-   * app slides under the status bar the moment you flick it.
+   * never scrolls. This was load-bearing back when the shell was pinned taller
+   * than the window: those extra pixels became a scrollable overflow and the
+   * whole app slid under the status bar the moment you flicked it. The shell
+   * follows the window now, but iOS will still rubber-band a document that can
+   * scroll at all, so saying so stays worth it.
    */
   html,
   body {
