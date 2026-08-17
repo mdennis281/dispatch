@@ -23,7 +23,7 @@
 import { execa } from "execa";
 import { existsSync } from "node:fs";
 import { mkdir, readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
-import { join, resolve, relative, isAbsolute, dirname } from "node:path";
+import { basename, join, resolve, relative, isAbsolute, dirname } from "node:path";
 import {
   WorktreeInfoSchema,
   BranchInfoSchema,
@@ -194,6 +194,23 @@ export class WorktreeService {
    */
   onWorktreeRemoved?: (path: string) => void;
 
+  /**
+   * MCP port leases, so removing a worktree hands its ports back. Settable after
+   * construction because the broker that owns the lease service is built after
+   * this one; unset in standalone/tests, where the reclaim-on-allocate path in
+   * `McpPortLeaseService` covers it.
+   */
+  mcpPorts?: { releaseCheckout(path: string): Promise<void> };
+
+  /** Boots each MCP server's `prewarm` command in a newly created worktree.
+   *  Settable after construction for the same reason as {@link mcpPorts}. */
+  mcpPrewarm?: {
+    prewarm(
+      project: Project,
+      worktreePath: string,
+    ): Promise<{ server: string; ok: boolean; error?: string }[]>;
+  };
+
   constructor(deps: WorktreeServiceDeps = {}) {
     this.bus = deps.bus;
     this.store = deps.store;
@@ -247,7 +264,7 @@ export class WorktreeService {
         base,
         opts,
       );
-      await this.publishCreated(info, opts.chatId);
+      await this.publishCreated(info, opts.chatId, project);
       return info;
     }
 
@@ -277,7 +294,7 @@ export class WorktreeService {
       repo,
     );
     const info = await this.buildInfo(project, wtPath, branch, base, opts);
-    await this.publishCreated(info, opts.chatId);
+    await this.publishCreated(info, opts.chatId, project);
     return info;
   }
 
@@ -481,6 +498,10 @@ export class WorktreeService {
     // undetectable.
     this.onWorktreeRemoved?.(worktreePath);
     await this.forgetRecord(worktreePath);
+    // Hand back this checkout's MCP ports. The lease service also reclaims leases
+    // whose directory has vanished, so a missed release self-heals — but only on
+    // the next allocation, which is too late for the run that finds the band full.
+    await this.mcpPorts?.releaseCheckout(worktreePath).catch(() => {});
     if (this.store && opts.chatId) {
       await this.detachFromChat(opts.chatId, worktreePath);
     }
@@ -838,11 +859,40 @@ export class WorktreeService {
   private async publishCreated(
     info: WorktreeInfo,
     chatId?: string,
+    project?: Project,
   ): Promise<void> {
     this.bus?.publish({ type: "worktree-update", chatId, worktree: info });
     if (this.store && chatId) {
       await this.attachToChat(chatId, info.path);
     }
+    if (project) this.startPrewarm(info, chatId, project);
+  }
+
+  /**
+   * Kick off MCP prewarm for a new worktree. Deliberately NOT awaited: a prewarm
+   * typically boots a dev server, which by design does not exit — awaiting it
+   * would hold worktree creation open until the timeout. The caller gets its
+   * worktree immediately and each server reports through a notice when it
+   * settles.
+   */
+  private startPrewarm(info: WorktreeInfo, chatId: string | undefined, project: Project): void {
+    if (!this.mcpPrewarm) return;
+    void this.mcpPrewarm
+      .prewarm(project, info.path)
+      .then((results) => {
+        for (const r of results) {
+          this.bus?.publish({
+            type: "notice",
+            chatId,
+            level: r.ok ? "info" : "warn",
+            text: r.ok
+              ? `Prewarmed MCP "${r.server}" in ${basename(info.path)}`
+              : `Prewarm for MCP "${r.server}" failed: ${r.error ?? "unknown error"}`,
+          });
+        }
+      })
+      // A prewarm must never take the worktree down with it.
+      .catch(() => {});
   }
 
   /**

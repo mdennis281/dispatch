@@ -943,6 +943,16 @@ export interface ManagerMcpRunner {
   stop(input: { chatId: string; subAppId: string; branch?: string }): Promise<boolean>;
 }
 
+/**
+ * On-demand MCP prewarm for this session's checkout (omitted → no
+ * `prewarm_mcp` tool). Creating a worktree warms it automatically; this is the
+ * re-warm for when the warmed server later died.
+ */
+export interface ManagerMcpPrewarm {
+  /** Warm every server declaring a `prewarm`, in THIS chat's checkout. */
+  run(): Promise<{ server: string; ok: boolean; error?: string }[]>;
+}
+
 /** What an agent asks for when it calls `spawn_chat`. */
 export interface SpawnChatRequest {
   /** The first message the new chat receives (its whole brief). */
@@ -1054,6 +1064,8 @@ export interface ManagerMcpContext {
   prCreate?: ManagerMcpPrCreate;
   /** SubApp launcher for this session (omitted → no `run_subapp` tool). */
   runner?: ManagerMcpRunner;
+  /** MCP prewarm for this session's checkout (omitted → no `prewarm_mcp` tool). */
+  prewarm?: ManagerMcpPrewarm;
   /** Chat spawner for this session (omitted → no `spawn_chat` tool). */
   chats?: ManagerMcpChats;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
@@ -3486,6 +3498,42 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
+  const prewarmMcp = tool(
+    "prewarm_mcp",
+    "Boot the dev servers this project's MCP servers depend on, in THIS chat's " +
+      "checkout, on the ports this checkout leased. Creating a worktree already does " +
+      "this automatically — reach for it when a warmed server has since died, or when " +
+      "you want the next MCP tool call to be fast instead of paying a cold boot. " +
+      "Safe to call repeatedly: a server that adopts an already-healthy one is a no-op.",
+    {},
+    async (): Promise<CallToolResult> => {
+      if (!ctx.prewarm) {
+        return textResult("The prewarm_mcp tool is not available in this session.", true);
+      }
+      try {
+        const results = await ctx.prewarm.run();
+        if (!results.length) {
+          return textResult(
+            "No MCP server in this project declares a `prewarm` command, so there is " +
+              "nothing to warm. Add one under its `mcpServers` entry in .dispatch/project.yaml.",
+          );
+        }
+        const lines = results.map((r) =>
+          r.ok ? `  • ${r.server}: warmed` : `  • ${r.server}: FAILED — ${r.error ?? "unknown"}`,
+        );
+        return textResult(
+          `Prewarmed ${results.filter((r) => r.ok).length}/${results.length}:\n${lines.join("\n")}`,
+          results.some((r) => !r.ok),
+        );
+      } catch (err) {
+        return textResult(
+          `Prewarm failed: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
   const mcpAdd = tool(
     "mcp_add",
     "Add an MCP server to THIS project's `.dispatch/project.yaml` — the committable " +
@@ -3814,6 +3862,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     memoryHistory,
     memorySimilar,
     runSubapp,
+    prewarmMcp,
     spawnChat,
     mcpList,
     mcpAdd,
@@ -3852,6 +3901,7 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   memory_history: "memory",
   memory_similar: "memory",
   run_subapp: "runner",
+  prewarm_mcp: "prewarm",
   spawn_chat: "chats",
   mcp_list: "mcpConfig",
   mcp_add: "mcpConfig",
@@ -3870,6 +3920,7 @@ export type ManagerToolBinding =
   | "worktrees"
   | "memory"
   | "runner"
+  | "prewarm"
   | "chats"
   | "mcpConfig"
   | "inspect";
@@ -3963,6 +4014,7 @@ export function createManagerMcpServer(
     memoryHistory,
     memorySimilar,
     runSubapp,
+    prewarmMcp,
     spawnChat,
     mcpList,
     mcpAdd,
@@ -4000,6 +4052,7 @@ export function createManagerMcpServer(
       ? [remember, recall, forget, memoryList, memorySearch, memoryHistory, memorySimilar]
       : []),
     ...(ctx.runner ? [runSubapp] : []),
+    ...(ctx.prewarm ? [prewarmMcp] : []),
     // Spawning a sibling chat needs a project to spawn INTO and a live session to
     // route the consent prompt through; both are bound together or not at all.
     ...(ctx.chats ? [spawnChat] : []),

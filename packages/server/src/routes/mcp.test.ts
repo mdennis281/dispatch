@@ -53,6 +53,7 @@ describe("mcp-catalog — builder", () => {
         chats: true,
         mcpConfig: true,
         inspect: true,
+        prewarm: true,
       },
     });
 
@@ -77,6 +78,7 @@ describe("mcp-catalog — builder", () => {
         "recall",
         "forget",
         "run_subapp",
+        "prewarm_mcp",
         "spawn_chat",
         "mcp_list",
         "mcp_add",
@@ -90,7 +92,12 @@ describe("mcp-catalog — builder", () => {
     // Tools that legitimately take no arguments (they act on the calling chat's
     // own state, or on the project's config as a whole) carry an empty schema;
     // every other tool has flattened params.
-    const NO_ARG_TOOLS = new Set(["context_usage", "compact_context", "mcp_list"]);
+    const NO_ARG_TOOLS = new Set([
+      "context_usage",
+      "compact_context",
+      "mcp_list",
+      "prewarm_mcp",
+    ]);
     for (const tool of manager.tools) {
       expect(tool.qualifiedName).toBe(`mcp__manager__${tool.name}`);
       expect(tool.description.length).toBeGreaterThan(0);
@@ -317,12 +324,13 @@ describe("GET /api/projects/:projectId/mcp", () => {
     const manager = catalog.servers.find((s) => s.name === "manager")!;
     expect(manager.kind).toBe("custom");
     expect(manager.tools.map((t) => t.name)).toContain("watch_pr");
-    // No-arg tools (context_usage/compact_context/mcp_list) carry an empty param list.
+    // No-arg tools carry an empty param list: each acts on the calling chat's
+    // own state (or the project's config as a whole), so there is nothing to ask for.
     expect(
       manager.tools.every(
         (t) =>
           t.params.length > 0 ||
-          ["context_usage", "compact_context", "mcp_list"].includes(t.name),
+          ["context_usage", "compact_context", "mcp_list", "prewarm_mcp"].includes(t.name),
       ),
     ).toBe(true);
 

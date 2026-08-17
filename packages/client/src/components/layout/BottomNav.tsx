@@ -343,8 +343,20 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
             onClick={() => goOverlay("prs")}
           />
           <SheetRow icon={<Blocks />} label="MCP tools" onClick={() => goOverlay("mcp")} />
-          <SheetRow icon={<FileCog />} label="Project config" onClick={() => goOverlay("config")} />
-          <SheetRow icon={<Settings />} label="Settings" onClick={() => goOverlay("settings")} />
+          {/* Both settings surfaces are pages now, so they go through `goView`
+              with the rest of the destinations rather than `goOverlay` — which
+              is also what makes them toggle back to the transcript on a second
+              tap, the way Memory and Source Control already did. */}
+          <SheetRow
+            icon={<FileCog />}
+            label="Project config"
+            onClick={() => goView(view === "project-settings" ? "chat" : "project-settings")}
+          />
+          <SheetRow
+            icon={<Settings />}
+            label="Settings"
+            onClick={() => goView(view === "app-settings" ? "chat" : "app-settings")}
+          />
           <div className="my-1 h-px bg-line-soft" />
           {/* An iPhone can't be inspected remotely from Windows, and the shell
               bugs this diagnoses only happen in the installed PWA — no console,

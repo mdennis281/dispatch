@@ -202,6 +202,14 @@ export function parseFrontmatter(raw: string): Frontmatter {
  * expands to "" and is collected in `missing` — the server still gets built (one
  * unset key must not stop a project's sessions from starting) and the caller
  * turns the gap into a visible config warning.
+ *
+ * This is the ${VAR} pass, and it happens ONCE per config load — so whatever it
+ * produces is shared by every chat in the project. Anything that must differ
+ * BETWEEN chats (a per-worktree port, the worktree path) cannot be expressed
+ * here; it uses the `{token}` placeholders resolved per session by
+ * `resolveMcpServer` in `mcp-session.ts`. Writing `${SIM_PORT:-5273}` and
+ * expecting each worktree to get its own is the exact trap that motivated that
+ * split: it bakes one literal into all of them.
  */
 function transportToMcpConfig(
   transport: {
@@ -209,14 +217,21 @@ function transportToMcpConfig(
     command?: string;
     args?: string[];
     env?: Record<string, string>;
+    cwd?: string;
     url?: string;
     headers?: Record<string, string>;
   },
   missing?: Set<string>,
+  extras?: Pick<McpServerConfig, "ports" | "portRange" | "prewarm">,
 ): McpServerConfig {
   const opts = { onMissing: (name: string) => missing?.add(name) };
   const str = (v: string | undefined): string | undefined =>
     v === undefined ? undefined : expandEnvVars(v, opts);
+  const dispatchOnly = {
+    ...(extras?.ports !== undefined ? { ports: extras.ports } : {}),
+    ...(extras?.portRange !== undefined ? { portRange: extras.portRange } : {}),
+    ...(extras?.prewarm !== undefined ? { prewarm: str(extras.prewarm) } : {}),
+  };
 
   if (transport.type === "stdio") {
     return {
@@ -224,12 +239,15 @@ function transportToMcpConfig(
       command: str(transport.command),
       args: expandEnvList(transport.args, opts),
       env: expandEnvRecord(transport.env, opts),
+      ...(transport.cwd !== undefined ? { cwd: str(transport.cwd) } : {}),
+      ...dispatchOnly,
     };
   }
   return {
     type: transport.type,
     url: str(transport.url),
     headers: expandEnvRecord(transport.headers, opts),
+    ...dispatchOnly,
   };
 }
 
@@ -550,7 +568,11 @@ export class ProjectConfigService {
       // worth SHOWING (the server will just fail to authenticate otherwise), but
       // not worth failing the load over — so it lands in `errors`, not a throw.
       const missing = new Set<string>();
-      mcpServers[server.name] = transportToMcpConfig(server.transport, missing);
+      mcpServers[server.name] = transportToMcpConfig(server.transport, missing, {
+        ports: server.ports,
+        portRange: server.portRange,
+        prewarm: server.prewarm,
+      });
       if (missing.size) {
         errors.push({
           scope: "manifest",

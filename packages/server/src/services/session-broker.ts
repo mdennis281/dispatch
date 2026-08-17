@@ -25,7 +25,25 @@
  * subprocess or network.
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
-import { join } from "node:path";
+import { basename, extname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
+import { McpPrewarmService } from "./mcp-prewarm.js";
+import { tmpdir } from "node:os";
+import {
+  parseAssetReference,
+  isPathWithinRoots,
+  approxBase64Bytes,
+  MAX_INLINE_ASSET_BYTES,
+  MAX_REFERENCED_ASSET_BYTES,
+  type AssetReference,
+} from "./mcp-assets.js";
+import {
+  extFromMediaType,
+  mediaTypeFromName,
+  mediaKind,
+  formatBytes,
+} from "./media-types.js";
 import type {
   Options,
   Query,
@@ -803,52 +821,6 @@ function contextTokensOf(usage: unknown): number | null {
   return sum > 0 ? sum : null;
 }
 
-/** Pick a file extension for a stored asset from its media type (inverse of
- *  {@link mediaTypeFromName}); defaults to `.png` for anything unrecognized. */
-function extFromMediaType(mime: string | undefined): string {
-  switch ((mime ?? "").toLowerCase()) {
-    case "image/png":
-      return ".png";
-    case "image/jpeg":
-    case "image/jpg":
-      return ".jpg";
-    case "image/gif":
-      return ".gif";
-    case "image/webp":
-      return ".webp";
-    case "image/svg+xml":
-      return ".svg";
-    case "image/avif":
-      return ".avif";
-    case "image/bmp":
-      return ".bmp";
-    default:
-      return ".png";
-  }
-}
-
-/** Guess an image media type from a stored asset filename. */
-function mediaTypeFromName(name: string): string {
-  const dot = name.lastIndexOf(".");
-  switch (dot >= 0 ? name.slice(dot).toLowerCase() : "") {
-    case ".png":
-      return "image/png";
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    case ".gif":
-      return "image/gif";
-    case ".webp":
-      return "image/webp";
-    case ".svg":
-      return "image/svg+xml";
-    case ".avif":
-      return "image/avif";
-    default:
-      return "image/png";
-  }
-}
-
 /** Best-effort "what is the tool acting on" for the working-state label. */
 function deriveTarget(input: Record<string, unknown>): string | undefined {
   const fp = input.file_path ?? input.path ?? input.notebook_path;
@@ -1251,6 +1223,14 @@ export class SessionBroker {
   private readonly runner?: RunnerService;
   private readonly worktrees?: WorktreeService;
   private readonly projectConfig?: BrokerProjectConfig;
+  /** Per-checkout MCP port leases. Built from the store, not injected — it has
+   *  no configuration of its own and every session needs it. Public so the
+   *  catalog route and the worktree prewarm resolve the SAME leases a session
+   *  would, rather than each computing their own answer. */
+  readonly mcpPorts: McpPortLeaseService;
+  /** Warms the servers those leases belong to. Built here, beside the leases, so
+   *  a prewarm and a session can never disagree about which port a checkout got. */
+  readonly mcpPrewarm?: McpPrewarmService;
   private readonly harnesses?: HarnessRegistry;
   private readonly managerMcp?: ManagerMcpBridge;
   private readonly inspect?: BrokerInspect;
@@ -1286,6 +1266,14 @@ export class SessionBroker {
 
   constructor(opts: SessionBrokerOptions) {
     this.store = opts.store;
+    this.mcpPorts = new McpPortLeaseService(opts.store);
+    if (opts.projectConfig) {
+      const pc = opts.projectConfig;
+      this.mcpPrewarm = new McpPrewarmService({
+        getMcpServers: (id: string) => pc.getMcpServers(id) as Record<string, McpServerConfig>,
+        leases: this.mcpPorts,
+      });
+    }
     this.bus = opts.bus;
     this.cap = Math.max(1, opts.maxActiveSessions ?? 6);
     this.terminals = opts.terminals;
@@ -1524,7 +1512,10 @@ export class SessionBroker {
         if (buf) {
           out.push({
             type: "base64",
-            media_type: img.mimeType ?? mediaTypeFromName(name),
+            // These become `image` blocks in the request, so an unrecognized
+            // extension must still guess an IMAGE type — the shared default
+            // (application/octet-stream) would be rejected by the API.
+            media_type: img.mimeType ?? mediaTypeFromName(name, "image/png"),
             data: buf.toString("base64"),
           });
         }
@@ -2985,6 +2976,22 @@ export class SessionBroker {
     const out: unknown[] = [];
     for (const raw of content) {
       const block = raw as Record<string, unknown> | null;
+      // A REFERENCE to a file on disk — the route a video takes, because its
+      // bytes must never enter the model's context. Ingest it and replace the
+      // block with one short line naming what the human can now watch.
+      const ref = parseAssetReference(raw);
+      if (ref) {
+        const ingested = await this.ingestAssetReference(session, ref);
+        if (ingested) {
+          images.push(ingested.image);
+          out.push({ type: "text", text: ingested.summary });
+          continue;
+        }
+        // Unreadable/oversized → say so where the agent will see it, rather than
+        // dropping the block and leaving it to believe the file was delivered.
+        out.push(raw);
+        continue;
+      }
       if (!block || typeof block !== "object" || block.type !== "image") {
         if (
           block?.type === "text" &&
@@ -3022,11 +3029,30 @@ export class SessionBroker {
                 ? block.mime_type
                 : "image/png";
         try {
-          const name = `${this.genId()}${extFromMediaType(mime)}`;
-          const buf = Buffer.from(base64, "base64");
-          const relPath = await this.store.writeChatAsset(session.chatId, name, buf);
-          images.push({ id: this.genId(), path: relPath, mimeType: mime });
-          out.push({ type: "image", media_type: mime, asset: relPath });
+          // Sized from the STRING, before decoding: `Buffer.from` would already
+          // have made the allocation this cap exists to prevent, so a server
+          // returning a gigabyte of base64 could exhaust memory on a payload
+          // that was always going to be refused.
+          const approx = approxBase64Bytes(base64);
+          if (approx > MAX_INLINE_ASSET_BYTES) {
+            // Refuse rather than store it: something this big came through the
+            // model's context to get here, and silently accepting teaches the
+            // server that inlining video works. Point it at the cheap route.
+            out.push({
+              type: "text",
+              text:
+                `[dispatch: refused a ${formatBytes(approx)} inline ${mime} attachment ` +
+                `(limit ${formatBytes(MAX_INLINE_ASSET_BYTES)}). Return a resource_link or ` +
+                `{"dispatch":"asset","path":"…"} instead — the file is then shown to the ` +
+                `user without its bytes entering the context window.]`,
+            });
+          } else {
+            const buf = Buffer.from(base64, "base64");
+            const name = `${this.genId()}${extFromMediaType(mime)}`;
+            const relPath = await this.store.writeChatAsset(session.chatId, name, buf);
+            images.push({ id: this.genId(), path: relPath, mimeType: mime });
+            out.push({ type: "image", media_type: mime, asset: relPath });
+          }
         } catch {
           // Persist failed (bad base64 / disk) → keep the raw block, no ref.
           out.push(raw);
@@ -3044,6 +3070,63 @@ export class SessionBroker {
       }
     }
     return { images, content: out };
+  }
+
+  /**
+   * Copy a file an MCP pointed at into the chat's assets, and produce the ONE
+   * LINE the model sees in its place. The bytes reach the human through the
+   * asset route; the context window only ever learns that a file exists, what
+   * kind it is, and how big.
+   *
+   * Returns null when the file can't be delivered — the caller then leaves the
+   * original block alone rather than pretending the handoff worked.
+   */
+  private async ingestAssetReference(
+    session: LiveSession,
+    ref: AssetReference,
+  ): Promise<{ image: ImageRef; summary: string } | null> {
+    try {
+      // Resolve against the session's own directory, so a server that returns a
+      // path relative to its cwd lands in the right worktree.
+      //
+      // The fallback order matters, because `base` is also the allowed ROOT
+      // below. The manager's `process.cwd()` is wherever Dispatch happened to be
+      // launched from — a home directory, or `/` under a service manager — and
+      // using it would hand a remote server a far wider tree to reference than
+      // the project it is working in. So: the chat's worktree, else the
+      // project's checkout, and only then cwd.
+      const project = await this.projectForChat(session.chatId).catch(() => null);
+      const base = session.worktreeCwd ?? project?.repoPath ?? process.cwd();
+      const abs = isAbsolute(ref.path) ? ref.path : resolvePath(base, ref.path);
+      // Follow symlinks BEFORE deciding: a link inside the worktree pointing at
+      // /etc/passwd would otherwise pass a check on the pre-resolution path.
+      const real = await realpath(abs);
+      const info = await stat(real);
+      if (!info.isFile()) return null;
+      if (info.size > MAX_REFERENCED_ASSET_BYTES) return null;
+      // Confine the read. A REMOTE MCP server has no filesystem access of its
+      // own, so without this it could name any path and borrow the manager's.
+      const roots = await Promise.all(
+        [base, tmpdir()].map((r) => realpath(r).catch(() => r)),
+      );
+      if (!isPathWithinRoots(real, roots)) return null;
+
+      const mime = ref.mimeType ?? mediaTypeFromName(real);
+      const name = `${this.genId()}${extFromMediaType(mime, extname(real) || ".bin")}`;
+      // Copy `real`, NOT `abs` — every check above was made against the resolved
+      // path, so using the unresolved one would let a symlink swapped in after
+      // the check redirect this read straight back out of the allowed roots.
+      // A file-to-file copy, so a 256 MB video never lands in a Buffer.
+      const relPath = await this.store.copyChatAsset(session.chatId, name, real);
+      const label = ref.alt ?? basename(real);
+      return {
+        image: { id: this.genId(), path: relPath, mimeType: mime, alt: label },
+        summary: `[${mediaKind(mime)}: ${label} — ${formatBytes(info.size)}, shown to the user]`,
+      };
+    } catch {
+      // Missing/unreadable file. Not fatal: the tool's own text still stands.
+      return null;
+    }
   }
 
   /* --------------------------------------------------------- permission */
@@ -4002,12 +4085,29 @@ export class SessionBroker {
     // `manager` LAST so it's never clobbered (even by a config server named
     // "manager"). Consulting the config directly (not just the store-synced copy)
     // keeps a live watcher edit effective for this session.
-    const configMcp = (
-      this.projectConfig && projectId ? this.projectConfig.getMcpServers(projectId) : {}
-    ) as unknown as Record<string, SdkMcpServerConfig>;
+    const configMcp =
+      this.projectConfig && projectId ? this.projectConfig.getMcpServers(projectId) : {};
+    // Resolve for THIS session before handing anything to the SDK: stamp each
+    // stdio server's cwd to the chat's own directory and expand `{mcpPort}` &
+    // friends. Without this every worktree's server runs in the primary
+    // checkout on one shared port — and a server that adopts a healthy dev
+    // server on that port then reports on the WRONG tree's code.
+    const externalMcp =
+      projectId && cwd
+        ? await resolveMcpServers(
+            { ...(project?.mcpServers ?? {}), ...configMcp },
+            {
+              projectId,
+              cwd,
+              repoRoot: project?.repoPath ?? cwd,
+              chatId: session.chatId,
+              branch: session.worktreeCwd ? basename(session.worktreeCwd) : undefined,
+            },
+            this.mcpPorts,
+          )
+        : { ...(project?.mcpServers ?? {}), ...configMcp };
     options.mcpServers = {
-      ...(project?.mcpServers as unknown as Record<string, SdkMcpServerConfig> | undefined),
-      ...configMcp,
+      ...(externalMcp as unknown as Record<string, SdkMcpServerConfig>),
       manager: createManagerMcpServer({
         chatId: session.chatId,
         bus: this.bus,
@@ -4147,6 +4247,18 @@ export class SessionBroker {
             : undefined,
         // Bind the subApp launcher to this session's project so `run_subapp` can
         // list/start/stop apps and resolve (or create) a worktree per branch.
+        // Re-warm this chat's OWN checkout — the same servers, resolved against
+        // the same cwd and leased ports the session's MCPs use, so what it boots
+        // is what they then adopt.
+        prewarm:
+          this.mcpPrewarm && projectId && cwd
+            ? {
+                run: async () => {
+                  const proj = await this.projectForChat(session.chatId);
+                  return proj ? this.mcpPrewarm!.prewarm(proj, cwd) : [];
+                },
+              }
+            : undefined,
         runner:
           runner && worktrees
             ? {
