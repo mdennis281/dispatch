@@ -212,8 +212,10 @@ function TerminalCard({
           aria-expanded
           title="Collapse"
           onClick={() => setOverride(false)}
-          // `text-left`: a <button> inherits the UA's centred text, and the name
-          // and status inside this one are a block, not a label.
+          // `text-left`: a button element inherits the UA's centred text, and
+          // the name and status inside this one are a block, not a label.
+          // (Spelling that as a tag would trip the raw-button ratchet, which
+          // greps for the literal element — see ui/rawButtons.test.ts.)
           className="min-w-0 flex-1 !h-auto !justify-start !px-0 !py-0 !gap-2 text-left hover:!bg-transparent"
         >
           <span
