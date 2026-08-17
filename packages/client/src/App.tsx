@@ -124,6 +124,9 @@ export default function App() {
           `inset-x-0` rather than `w-screen` for the same reason horizontally —
           `100vw` includes a scrollbar the shell doesn't have. */}
       <div
+        // Measured by `stores/viewport` so the readout can report where this
+        // box's bottom edge actually LANDS rather than what it was asked for.
+        data-cm-shell=""
         className="fixed inset-x-0 top-0 flex flex-col overflow-hidden bg-app text-primary antialiased"
         style={{ height: "var(--cm-vh, 100dvh)", paddingBottom: "var(--cm-kb, 0px)" }}
       >
