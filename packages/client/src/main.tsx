@@ -10,7 +10,7 @@ import { ws } from "./lib/ws.js";
 import { RunnerLogWindow } from "./components/panels/RunnerLogWindow.js";
 import { capturePwaInstall } from "./lib/pwaInstall.js";
 import { focusAttentionTarget } from "./components/attention/focus.js";
-import { watchSystemTheme } from "./stores/theme.js";
+import { watchSystemTheme, syncThemeColor } from "./stores/theme.js";
 import "./index.css";
 import { initializeAuth, useAuth } from "./stores/auth.js";
 import type { AuthSessionResponse } from "@dispatch/shared";
@@ -20,6 +20,13 @@ import { startLiveApp } from "./lib/live.js";
 // first paint); this only subscribes to later OS changes, which matters solely
 // while the preference is "system".
 watchSystemTheme();
+// …and once for the window frame, which the pre-paint script CANNOT do: the
+// `theme-color` meta it would have to edit is parsed after that script runs, so
+// on a light theme the window buttons keep the dark slab from the generated
+// default until something re-applies. `applyTheme` covers every later change;
+// this covers the load. Runs after `./index.css` above (imports are evaluated
+// first), so the palette it reads from is present.
+syncThemeColor();
 
 // A detached log window (opened via openRunnerLogWindow) loads this same bundle
 // with `?logs=<runnerId>` — render only the read-only log terminal for it.
