@@ -3081,13 +3081,16 @@ export class SessionBroker {
       if (!isPathWithinRoots(real, roots)) return null;
 
       const mime = ref.mimeType ?? mediaTypeFromName(real);
-      const name = `${this.genId()}${extFromMediaType(mime, extname(abs) || ".bin")}`;
+      const name = `${this.genId()}${extFromMediaType(mime, extname(real) || ".bin")}`;
+      // Read `real`, NOT `abs` — every check above was made against the resolved
+      // path, so reading the unresolved one would let a symlink swapped in after
+      // the check redirect this read straight back out of the allowed roots.
       const relPath = await this.store.writeChatAsset(
         session.chatId,
         name,
-        await readFile(abs),
+        await readFile(real),
       );
-      const label = ref.alt ?? basename(abs);
+      const label = ref.alt ?? basename(real);
       return {
         image: { id: this.genId(), path: relPath, mimeType: mime, alt: label },
         summary: `[${mediaKind(mime)}: ${label} — ${formatBytes(info.size)}, shown to the user]`,
