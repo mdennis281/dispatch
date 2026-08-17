@@ -331,15 +331,71 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
 /* -------------------------------------------------- watch_pr: real GitHubService */
 
 /** Wire the manager github surface to a real GitHubService, cwd-bound (mirrors
- *  SessionBroker.makeGithubBinding). Terminal PRs never reach checks/threads. */
+ *  SessionBroker.makeGithubBinding). One poll, one call. */
 function realBinding(github: GitHubService, cwd: string): ManagerMcpGitHub {
   const repoFor = async (override?: string): Promise<string> =>
     override ?? github.resolveRepo(cwd);
   return {
-    prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd }),
-    prChecks: async (n, repo) => github.prChecks(await repoFor(repo), n),
-    reviewThreads: async (n, repo) => github.reviewThreads(await repoFor(repo), n),
+    pollPrState: async (n, repo) => {
+      const snap = await github.pollPrState(await repoFor(repo), n, { cwd });
+      if (!snap) return null;
+      return {
+        number: snap.number,
+        state: snap.state,
+        merged: snap.merged,
+        mergedAt: snap.mergedAt,
+        checks: snap.checks,
+        threads: snap.threads,
+        review: { requested: snap.requested, reported: snap.reported },
+      };
+    },
   };
+}
+
+/** A GraphQL poll response body, with only the fields a test cares about set. */
+function pollBody(pr: Record<string, unknown>): string {
+  return JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          title: "",
+          url: "",
+          headRefName: "feat/x",
+          baseRefName: "main",
+          isDraft: false,
+          labels: { nodes: [] },
+          reviewRequests: { nodes: [] },
+          reviews: { nodes: [] },
+          latestReviews: { nodes: [] },
+          reviewThreads: { nodes: [] },
+          comments: { totalCount: 0 },
+          // A non-empty rollup, so the poll never falls back to `gh pr checks`
+          // and the call count in these tests stays the one call under test.
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  statusCheckRollup: {
+                    contexts: {
+                      nodes: [
+                        {
+                          __typename: "CheckRun",
+                          name: "build",
+                          status: "COMPLETED",
+                          conclusion: "SUCCESS",
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          ...pr,
+        },
+      },
+    },
+  });
 }
 
 describe("manager-mcp integration — watch_pr over a real GitHubService", () => {
@@ -352,11 +408,13 @@ describe("manager-mcp integration — watch_pr over a real GitHubService", () =>
       options?: { cwd?: string },
     ): Promise<ExecResult> => {
       calls.push({ file, args, cwd: options?.cwd });
+      // The repo resolve, then the poll itself.
+      if (args[0] === "repo") return { stdout: "octo/repo", exitCode: 0 };
       return {
-        // gh has no `merged` field — merged-ness is derived from `state`.
-        stdout: JSON.stringify({
+        stdout: pollBody({
           number: 79,
           state: "MERGED",
+          merged: true,
           mergedAt: "2026-07-05T21:51:59Z",
         }),
         exitCode: 0,
@@ -364,8 +422,8 @@ describe("manager-mcp integration — watch_pr over a real GitHubService", () =>
     };
     const github = new GitHubService({ bus, exec });
 
-    // Bind exactly as SessionBroker.buildOptions does — cwd baked in so `gh`
-    // auto-detects the repo; the agent supplies only the number.
+    // Bind exactly as SessionBroker.buildOptions does — cwd baked in so the repo
+    // resolves from it; the agent supplies only the number.
     const { watchPr } = createManagerTools({
       chatId: "c1",
       bus,
@@ -380,27 +438,28 @@ describe("manager-mcp integration — watch_pr over a real GitHubService", () =>
     expect(resultText(res)).toContain('"merged":true');
     expect(resultText(res)).toContain('"done":true');
     expect(resultText(res)).toContain('"mergedAt":"2026-07-05T21:51:59Z"');
-    // A merged PR short-circuits before checks/threads: exactly one `gh pr view`
-    // with the minimal merge-state field list, in the bound cwd.
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.file).toBe("gh");
-    expect(calls[0]!.args).toEqual([
-      "pr",
-      "view",
-      "79",
-      "--json",
-      "number,state,mergedAt",
+    // The whole poll is ONE `gh api graphql`, in the bound cwd — this is the
+    // five-subprocess-per-poll cost that motivated the shared poll body. The
+    // only other call is the repo resolve, which GraphQL requires because it
+    // cannot auto-detect a repository the way `gh pr view` could.
+    expect(calls.map((c) => c.args.slice(0, 2))).toEqual([
+      ["repo", "view"],
+      ["api", "graphql"],
     ]);
-    expect(calls[0]!.cwd).toBe("C:\\repo");
+    expect(calls[1]!.file).toBe("gh");
+    expect(calls[1]!.args).toContain("owner=octo");
+    expect(calls[1]!.args).toContain("repo=repo");
+    expect(calls[1]!.args).toContain("number=79");
+    expect(calls[1]!.cwd).toBe("C:\\repo");
   });
 
-  it("scopes to an explicit owner/name override via --repo", async () => {
+  it("scopes to an explicit owner/name override", async () => {
     const bus = new EventBus();
     const calls: { args: readonly string[] }[] = [];
     const exec = async (_file: string, args: readonly string[] = []): Promise<ExecResult> => {
       calls.push({ args });
       return {
-        stdout: JSON.stringify({ number: 12, state: "CLOSED", merged: false }),
+        stdout: pollBody({ number: 12, state: "CLOSED", merged: false }),
         exitCode: 0,
       };
     };
@@ -419,8 +478,11 @@ describe("manager-mcp integration — watch_pr over a real GitHubService", () =>
 
     expect(resultText(res)).toContain('reached terminal state "closed"');
     expect(resultText(res)).toContain('"done":true');
-    expect(calls[0]!.args).toContain("--repo");
-    expect(calls[0]!.args).toContain("octo/demo");
+    // The override skips the repo resolve entirely and goes straight to the
+    // poll, scoped to the owner/name the agent named.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args).toContain("owner=octo");
+    expect(calls[0]!.args).toContain("repo=demo");
   });
 });
 

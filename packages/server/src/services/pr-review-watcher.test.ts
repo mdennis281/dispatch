@@ -6,20 +6,64 @@ import type { Chat, PRRef, WsServerEvent } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { PrReviewWatcher, type PrReviewGitHub } from "./pr-review-watcher.js";
+import type { PrPollSnapshot } from "./github.js";
 
 let root: string;
 let bus: EventBus;
 let store: Store;
 let events: WsServerEvent[];
 
-/** A scriptable GitHub surface whose per-PR answers each test mutates in place. */
-function fakeGitHub(over: Partial<PrReviewGitHub> = {}): PrReviewGitHub {
+/**
+ * The per-signal script a test writes, assembled into the ONE snapshot the
+ * watcher now polls.
+ *
+ * Deliberately still expressed per signal — "a review landed", "a check went
+ * red" — because that is what each test is about, and because the signals do
+ * still arrive independently from GitHub; they just arrive in one response now.
+ * A script fn that THROWS stands for a read that failed, which must sink the
+ * whole poll: with one query there is no such thing as half an answer.
+ */
+interface FakePrScript {
+  prMergeState?: () => Promise<{ state: "open" | "closed" | "merged" } | null>;
+  prChecks?: () => Promise<Array<{ name: string; status: string; conclusion?: string | null }>>;
+  reviewThreads?: () => Promise<
+    Array<{ id: string; isResolved: boolean; isOutdated?: boolean; path?: string; author?: string }>
+  >;
+  prReviewState?: () => Promise<{
+    requested: string[];
+    reported: Array<{ author: string; state: string }>;
+  } | null>;
+}
+
+function fakeGitHub(over: FakePrScript = {}): PrReviewGitHub {
   return {
-    prMergeState: async () => ({ state: "open" as const }),
-    prChecks: async () => [],
-    reviewThreads: async () => [],
-    prReviewState: async () => ({ requested: [], reported: [] }),
-    ...over,
+    pollPrState: async (repo, number) => {
+      const merge = await (over.prMergeState ?? (async () => ({ state: "open" as const })))();
+      if (!merge) return null;
+      const checks = await (over.prChecks ?? (async () => []))();
+      const threads = await (over.reviewThreads ?? (async () => []))();
+      const review = await (over.prReviewState ??
+        (async () => ({ requested: [], reported: [] })))();
+      return {
+        repo,
+        number,
+        url: `https://github.com/${repo}/pull/${number}`,
+        title: "",
+        branch: "feat/x",
+        baseBranch: "main",
+        state: merge.state,
+        merged: merge.state === "merged",
+        isDraft: false,
+        labels: [],
+        mergeable: null,
+        reviewDecision: null,
+        reviewers: [],
+        threads: threads as PrPollSnapshot["threads"],
+        checks: checks as PrPollSnapshot["checks"],
+        requested: review?.requested ?? [],
+        reported: review?.reported ?? [],
+      };
+    },
   };
 }
 

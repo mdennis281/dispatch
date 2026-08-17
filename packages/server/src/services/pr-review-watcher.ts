@@ -35,6 +35,8 @@
 import type { AttentionItem, Chat, PRRef } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
+import type { PrPollSnapshot } from "./github.js";
+import type { PrScope } from "./pr-registry.js";
 
 /** How often the watcher sweeps every chat's open PRs. */
 export const PR_REVIEW_POLL_MS = 90_000;
@@ -51,35 +53,43 @@ const FAILING_CONCLUSIONS: ReadonlySet<string> = new Set([
   "stale",
 ]);
 
-/** The narrow GitHub surface this watcher needs (kept decoupled for tests). */
+/**
+ * How often discovery runs — the pass that finds open PRs NO chat owns.
+ *
+ * Deliberately far slower than the activity sweep. A PR nobody in Dispatch
+ * opened has no chat to wake and raises no attention item; discovery exists so
+ * it is VISIBLE in the catalog, and a PR appearing in a list within five minutes
+ * is not a latency anyone can feel.
+ */
+export const PR_DISCOVER_MS = 5 * 60_000;
+
+/**
+ * The narrow GitHub surface this watcher needs (kept decoupled for tests).
+ *
+ * One method, because there is now one poll: `GitHubService.pollPrState` reads
+ * merge state, checks, threads and the reviewer queue in a single GraphQL round
+ * trip. This used to be four methods with four independent failure modes, and
+ * `watch_pr` had its own four — the same questions asked twice, with two dedup
+ * memories that could disagree about the same PR.
+ *
+ * `null` = no snapshot this pass. Unlike the old per-signal nulls, this is
+ * all-or-nothing: say nothing rather than raise a badge on a partial read, which
+ * is the same rule as before, just expressed once.
+ */
 export interface PrReviewGitHub {
-  /** Open/closed/merged state; null = unreadable this pass. */
-  prMergeState(
-    prNumber: number,
-    opts: { repo?: string },
-  ): Promise<{ state: "open" | "closed" | "merged" } | null>;
-  /** CI checks; throwing/rejecting is treated as "couldn't read". */
-  prChecks(repo: string, prNumber: number): Promise<Array<{
-    name: string;
-    status: string;
-    conclusion?: string | null;
-  }>>;
-  /** Review threads; same failure handling. */
-  reviewThreads(repo: string, prNumber: number): Promise<Array<{
-    id: string;
-    isResolved: boolean;
-    isOutdated?: boolean;
-    path?: string;
-    author?: string;
-  }>>;
-  /**
-   * Who was asked and who reported (submitted reviews are the signal here).
-   * null = unreadable this pass, same contract as the other reads.
-   */
-  prReviewState(repo: string, prNumber: number): Promise<{
-    requested: string[];
-    reported: Array<{ author: string; state: string }>;
-  } | null>;
+  pollPrState(repo: string, prNumber: number): Promise<PrPollSnapshot | null>;
+}
+
+/**
+ * The PR catalog, as this watcher needs it. Structural so the watcher stays
+ * testable without a Store, and so the sweep's cadence questions
+ * (`due`) live with the rows rather than here.
+ */
+export interface PrReviewRegistry {
+  record(snapshot: PrPollSnapshot, scope: PrScope): Promise<unknown>;
+  track(ref: PRRef, scope: PrScope): Promise<unknown>;
+  noteError(repo: string, number: number, error: string): Promise<void>;
+  due(now?: number): Promise<Array<{ repo: string; number: number } & PrScope>>;
 }
 
 /** Per-(chat, PR) dedup memory — what we have ALREADY told this chat about. */
@@ -116,7 +126,24 @@ export interface PrReviewWatcherOptions {
    * whatever it's doing. It still gets the badge.
    */
   isBusy?: (chatId: string) => boolean;
+  /**
+   * The PR catalog. Every poll this sweep makes is handed to it, and its `due`
+   * answers decide which rows get polled at all — that's where the adaptive
+   * cadence lives. Absent → the watcher behaves exactly as it did before the
+   * catalog existed.
+   */
+  registry?: PrReviewRegistry;
+  /**
+   * Find open PRs across the projects, including ones no chat owns.
+   *
+   * A function rather than a GitHub method because resolving project → repo →
+   * open PRs needs the Store and the GitHub service together; doing it in the
+   * container keeps this class's GitHub surface at one method. Absent →
+   * discovery is off and the catalog holds only what chats own.
+   */
+  discover?: () => Promise<Array<{ projectId: string; ref: PRRef }>>;
   intervalMs?: number;
+  discoverMs?: number;
   now?: () => number;
   genId?: () => string;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -129,7 +156,12 @@ export class PrReviewWatcher {
   private readonly github: PrReviewGitHub;
   private readonly resumeFn?: (chatId: string, text: string) => Promise<void>;
   private readonly isBusy: (chatId: string) => boolean;
+  private readonly registry?: PrReviewRegistry;
+  private readonly discoverFn?: () => Promise<Array<{ projectId: string; ref: PRRef }>>;
   private readonly intervalMs: number;
+  private readonly discoverMs: number;
+  /** When discovery last ran; 0 = never, so the first sweep discovers. */
+  private lastDiscoverAt = 0;
   private readonly now: () => number;
   private readonly genId: () => string;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
@@ -147,7 +179,10 @@ export class PrReviewWatcher {
     this.github = opts.github;
     this.resumeFn = opts.resume;
     this.isBusy = opts.isBusy ?? (() => false);
+    this.registry = opts.registry;
+    this.discoverFn = opts.discover;
     this.intervalMs = opts.intervalMs ?? PR_REVIEW_POLL_MS;
+    this.discoverMs = opts.discoverMs ?? PR_DISCOVER_MS;
     this.now = opts.now ?? (() => Date.now());
     this.genId = opts.genId ?? (() => Math.random().toString(36).slice(2, 11));
     this.setTimer =
@@ -206,22 +241,24 @@ export class PrReviewWatcher {
     const st = this.stateFor(chatId, ref);
     const repo = ref.repo;
     if (!repo) return;
-    const [checks, threads, reviews] = await Promise.all([
-      this.github.prChecks(repo, ref.number).catch(() => null),
-      this.github.reviewThreads(repo, ref.number).catch(() => null),
-      this.github.prReviewState(repo, ref.number).catch(() => null),
-    ]);
+    const snap = await this.github.pollPrState(repo, ref.number).catch(() => null);
+    if (!snap) return;
     // Fingerprints must match `checkOne` EXACTLY, or arming shifts the noise
     // rather than removing it.
-    for (const c of checks ?? []) st.checks.set(c.name, c.conclusion ?? c.status);
-    for (const t of threads ?? []) {
+    for (const c of snap.checks) st.checks.set(c.name, c.conclusion ?? c.status);
+    for (const t of snap.threads) {
       if (t.isResolved || t.isOutdated) continue;
       st.threads.add(t.id);
     }
-    for (const r of reviews?.reported ?? []) {
+    for (const r of snap.reported) {
       if (r.state === "PENDING") continue;
       st.reviews.add(`${r.author}:${r.state}`);
     }
+    // The catalog gets the arming poll too — a PR opened seconds ago should show
+    // its real state, not sit blank until the first sweep comes round.
+    await this.registry
+      ?.record(snap, { chatId })
+      .catch(() => undefined);
   }
 
   /**
@@ -240,43 +277,137 @@ export class PrReviewWatcher {
   /* --------------------------------------------------------------- internals */
 
   private async runSweep(): Promise<PrReviewActivity[]> {
+    // Discovery FIRST, so a PR found this pass is polled on this pass rather
+    // than waiting a full interval to be looked at.
+    await this.discoverUnowned().catch(() => undefined);
+
     const chats = await this.store.listChats().catch(() => [] as Chat[]);
-    const out: PrReviewActivity[] = [];
+    /** Every PR an owning chat covered — so the unowned pass doesn't re-poll it. */
+    const owned = new Set<string>();
+    const work: Array<{ chat: Chat; ref: PRRef; scope: PrScope }> = [];
     for (const chat of chats) {
       for (const ref of chat.prs ?? []) {
         // A merged/closed PR is over. Note the state on the REF rather than
         // re-polling it forever — a chat with a year of landed PRs must not cost
         // a `gh` call per PR per sweep.
         if (ref.state === "merged" || ref.state === "closed") continue;
-        const activity = await this.checkOne(chat, ref).catch(() => null);
-        if (activity) out.push(activity);
+        const scope: PrScope = { chatId: chat.id, projectId: chat.projectId || undefined };
+        work.push({ chat, ref, scope });
+        // The row is created from the ref alone, ALWAYS — even when the poll
+        // won't be due. A PR the catalog has never heard of must appear at once;
+        // waiting for its turn in the cadence would leave a just-opened PR
+        // missing from the list for as long as the backoff said. Creating them
+        // BEFORE the due set is read is what makes a brand-new row (nextPollAt
+        // 0) get its first poll on this very pass rather than the next one.
+        if (ref.repo) {
+          owned.add(`${ref.repo}#${ref.number}`);
+          await this.registry?.track(ref, scope).catch(() => undefined);
+        }
       }
     }
+
+    // The due set is read ONCE per sweep. Asking the catalog per PR would mean
+    // re-reading the whole roster file for every PR in it, which is quadratic in
+    // the one dimension this feature is expected to grow in.
+    const due = await this.dueSet();
+
+    const out: PrReviewActivity[] = [];
+    for (const { chat, ref, scope } of work) {
+      const activity = await this.checkOne(chat, ref, scope, due).catch(() => null);
+      if (activity) out.push(activity);
+    }
+    await this.pollUnowned(owned, due).catch(() => undefined);
     return out;
   }
 
-  private async checkOne(chat: Chat, ref: PRRef): Promise<PrReviewActivity | null> {
+  /**
+   * Which rows are due, as a `repo#number` set — or `null` when there is no
+   * catalog, which means "poll everything" and is exactly how this watcher
+   * behaved before the catalog existed.
+   */
+  private async dueSet(): Promise<Set<string> | null> {
+    if (!this.registry) return null;
+    const rows = await this.registry.due(this.now()).catch(() => null);
+    if (!rows) return null;
+    return new Set(rows.map((r) => `${r.repo}#${r.number}`));
+  }
+
+  /**
+   * Find open PRs no chat owns and put them in the catalog, unattributed.
+   *
+   * They raise no attention and wake nobody — there is no owning chat, and
+   * badging a human's PR is the nuisance this module's docblock rules out. They
+   * are here to be SEEN, which is the same reason a worktree that appeared from
+   * outside is listed as `external` rather than hidden.
+   */
+  private async discoverUnowned(): Promise<void> {
+    if (!this.discoverFn || !this.registry) return;
+    const now = this.now();
+    if (now - this.lastDiscoverAt < this.discoverMs) return;
+    this.lastDiscoverAt = now;
+    for (const { projectId, ref } of await this.discoverFn()) {
+      await this.registry.track(ref, { projectId }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Refresh catalog rows that no chat's sweep covered — the discovered ones.
+   * Same due-based cadence, no attention side effects.
+   */
+  private async pollUnowned(
+    covered: ReadonlySet<string>,
+    due: ReadonlySet<string> | null,
+  ): Promise<void> {
+    if (!this.registry) return;
+    for (const row of await this.registry.due(this.now())) {
+      if (covered.has(`${row.repo}#${row.number}`)) continue;
+      if (due && !due.has(`${row.repo}#${row.number}`)) continue;
+      const snap = await this.github.pollPrState(row.repo, row.number).catch(() => null);
+      if (!snap) {
+        await this.registry
+          .noteError(row.repo, row.number, "GitHub could not be read for this PR")
+          .catch(() => undefined);
+        continue;
+      }
+      await this.registry.record(snap, { projectId: row.projectId }).catch(() => undefined);
+    }
+  }
+
+  private async checkOne(
+    chat: Chat,
+    ref: PRRef,
+    scope: PrScope,
+    due: ReadonlySet<string> | null,
+  ): Promise<PrReviewActivity | null> {
     const repo = ref.repo;
-    const merge = await this.github
-      .prMergeState(ref.number, { repo })
-      .catch(() => null);
+    // Without an owner/repo there is nothing pollable: the poll is one GraphQL
+    // query, and GraphQL cannot auto-detect a repository the way `gh pr view`
+    // could. A ref that old predates `repo` being recorded.
+    if (!repo) return null;
+    // The catalog decides WHEN, via its adaptive cadence: a PR with a reviewer on
+    // the hook or CI in flight stays on the sweep's own interval, and only a
+    // genuinely parked one backs off.
+    if (due && !due.has(`${repo}#${ref.number}`)) return null;
+
+    const snap = await this.github.pollPrState(repo, ref.number).catch(() => null);
     // Unreadable this pass → say nothing. A badge raised on a failed read is a
     // false alarm, and false alarms are how a queue stops being read.
-    if (!merge) return null;
-    if (merge.state !== "open") {
-      await this.markSettled(chat.id, ref, merge.state);
+    if (!snap) {
+      await this.registry
+        ?.noteError(repo, ref.number, "GitHub could not be read for this PR")
+        .catch(() => undefined);
       return null;
     }
-    // Without an owner/repo we can't read checks/threads/reviews at all; the
-    // merge-state probe above auto-detects, but these three don't.
-    if (!repo) return null;
+    await this.registry?.record(snap, scope).catch(() => undefined);
+    if (snap.state !== "open") {
+      await this.markSettled(chat.id, ref, snap.state);
+      return null;
+    }
 
     const st = this.stateFor(chat.id, ref);
-    const [checks, threads, reviews] = await Promise.all([
-      this.github.prChecks(repo, ref.number).catch(() => null),
-      this.github.reviewThreads(repo, ref.number).catch(() => null),
-      this.github.prReviewState(repo, ref.number).catch(() => null),
-    ]);
+    const checks = snap.checks;
+    const threads = snap.threads;
+    const reviews = { reported: snap.reported };
 
     const reasons: string[] = [];
 

@@ -322,36 +322,47 @@ export interface PrPollResult {
 }
 
 /**
- * The narrow GitHub surface the manager MCP needs to watch a PR — its merge/close
- * state, its CI checks, and its review threads — already bound to this session's
- * default repo (its worktree cwd, else the project root) by the broker. `repo` is
- * an optional `owner/name` override.
+ * ONE poll of a PR: its merge/close state plus every signal the watch reacts to,
+ * read together.
  *
- * `prMergeState` null = the PR/repo couldn't be resolved (unknown PR / gh error)
- * and ENDS the watch as an error. `prChecks`/`reviewThreads` null = that signal
- * couldn't be read THIS poll (a transient gh hiccup); the watch treats it as "no
- * new activity of that kind" and keeps going rather than aborting. Omitted from
- * the ctx → the `watch_pr` tool isn't offered.
+ * They travel together because they are now READ together — one GraphQL query
+ * rather than the five `gh` subprocess spawns this tool used to make per poll
+ * (see `GitHubService.pollPrState`). The same body feeds the background sweep
+ * and the PR catalog, so the app and the agent can no longer hold different
+ * beliefs about the same pull request.
+ *
+ * The three signal fields stay INDEPENDENTLY nullable even though the real
+ * binding always fills them in. `null` means "this poll carried no read of that
+ * signal", which is a different claim from an empty array — an empty check list
+ * is what makes `no-checks` honest, and an empty reviewer queue is what makes
+ * `review-stalled` fire. Collapsing the two would turn a failed read into a
+ * confident false alarm, which is the exact bug the review-queue code exists to
+ * prevent.
+ */
+export interface PrWatchSnapshot extends PrPollResult {
+  /* Structurally a subset of `GitHubService`'s PrPollSnapshot; kept separate so
+     this module stays decoupled from that service, as the rest of it is. */
+  checks: CheckRun[] | null;
+  threads: ReviewThread[] | null;
+  review: {
+    requested: string[];
+    reported: Array<{ author: string; state: string }>;
+  } | null;
+}
+
+/**
+ * The narrow GitHub surface the manager MCP needs to watch a PR — already bound
+ * to this session's default repo (its worktree cwd, else the project root) by
+ * the broker. `repo` is an optional `owner/name` override.
+ *
+ * `pollPrState` null = no snapshot could be produced (unknown PR, unresolvable
+ * repo, gh/GraphQL failure) and ENDS the watch as an error — the same contract
+ * the merge-state read has always had, now covering the whole poll because the
+ * whole poll is one call. Omitted from the ctx → the `watch_pr` tool isn't
+ * offered.
  */
 export interface ManagerMcpGitHub {
-  prMergeState(prNumber: number, repo?: string): Promise<PrPollResult | null>;
-  prChecks(prNumber: number, repo?: string): Promise<CheckRun[] | null>;
-  reviewThreads(prNumber: number, repo?: string): Promise<ReviewThread[] | null>;
-  /**
-   * Who is CURRENTLY on the hook to review, and who has already reported. null =
-   * couldn't read this poll (treated like a failed checks read: no news, not an
-   * abort).
-   *
-   * The watch needs this because GitHub CLEARS a reviewer's request the moment
-   * they submit a review, and pushing fix commits does not re-queue them. Without
-   * it, `watch_pr` cannot tell "the reviewer is working on it" from "nobody will
-   * ever look at this again" — and it spent the whole quiet window on the second
-   * one, reporting it as waiting.
-   */
-  prReviewState?(
-    prNumber: number,
-    repo?: string,
-  ): Promise<{ requested: string[]; reported: Array<{ author: string; state: string }> } | null>;
+  pollPrState(prNumber: number, repo?: string): Promise<PrWatchSnapshot | null>;
   /** Put reviewers back on the hook. Omitted → the `request_review` tool isn't offered. */
   requestReviewers?(
     prNumber: number,
@@ -1524,9 +1535,9 @@ async function watchForPrActivity(
   for (;;) {
     if (aborted()) return { kind: "aborted" };
 
-    let merge: PrPollResult | null;
+    let merge: PrWatchSnapshot | null;
     try {
-      merge = await gh.prMergeState(number, repo);
+      merge = await gh.pollPrState(number, repo);
     } catch (err) {
       return { kind: "error", error: err instanceof Error ? err.message : String(err) };
     }
@@ -1541,13 +1552,10 @@ async function watchForPrActivity(
       return { kind: "terminal", state: merge };
     }
 
-    // Checks + threads are best-effort: a transient gh failure on either yields
-    // null, which we treat as "no new activity of that kind" (not fatal).
-    const [checks, threads, review] = await Promise.all([
-      gh.prChecks(number, repo).catch(() => null),
-      gh.reviewThreads(number, repo).catch(() => null),
-      gh.prReviewState?.(number, repo).catch(() => null) ?? Promise.resolve(null),
-    ]);
+    // One read, so these arrive together. A `null` on any of them still means
+    // "no read of that signal this poll" — see {@link PrWatchSnapshot} — which
+    // every branch below already distinguishes from an empty read.
+    const { checks, threads, review } = merge;
 
     const events: WatchPrEvent[] = [];
     const runs = checks ?? [];
@@ -2245,8 +2253,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       // had already reported: exit 0, `requested_reviewers: []`. Reporting that as
       // success is the worst possible outcome here, because it sends the agent
       // back to watch_pr to wait on the empty queue this tool exists to refill.
-      const queue = await gh.prReviewState?.(number, repo).catch(() => null);
-      const onHook = queue?.requested ?? null;
+      const queue = await gh.pollPrState(number, repo).catch(() => null);
+      const onHook = queue?.review?.requested ?? null;
       if (onHook !== null) {
         lines.push(
           onHook.length

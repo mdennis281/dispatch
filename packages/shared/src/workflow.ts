@@ -134,6 +134,29 @@ export type ResolvedPrPolicy = z.infer<typeof ResolvedPrPolicySchema>;
 export const MERGE_HOLD_LABEL = "hold";
 
 /**
+ * Every label this app reads as "parked", not just the one it writes.
+ *
+ * `MERGE_HOLD_LABEL` is what `hold()` applies; these are the conventions a HUMAN
+ * may have applied instead, and a PR carrying `do-not-merge` must not be
+ * rendered as ready to land just because the label isn't spelled `hold`. The
+ * client had this set duplicated in two components with no shared definition —
+ * which is how "held" came to mean something slightly different in each panel.
+ */
+export const HOLD_LABELS: readonly string[] = [
+  MERGE_HOLD_LABEL,
+  "no-automerge",
+  "do-not-merge",
+  "wip",
+];
+
+/** Is this PR parked by a hold label? Case-insensitive, like `approve_pr`'s gate. */
+export function isHeldByLabel(labels: readonly string[] | undefined): boolean {
+  if (!labels?.length) return false;
+  const held = new Set(HOLD_LABELS);
+  return labels.some((l) => held.has(l.trim().toLowerCase()));
+}
+
+/**
  * GitHub's Copilot code reviewer. The `review` profile's default reviewer, and
  * the login every hand-rolled ship path in this repo already requested.
  *

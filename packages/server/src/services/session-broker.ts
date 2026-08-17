@@ -103,7 +103,7 @@ import type {
   ReadChatQuery,
   ReadChatResult,
 } from "./inspect.js";
-import type { GitHubService } from "./github.js";
+import type { GitHubService, PrPollSnapshot } from "./github.js";
 import type { RunnerService } from "./runner.js";
 import type { WorktreeService } from "./worktree.js";
 import {
@@ -346,12 +346,17 @@ export function makeRepoResolver(
 /**
  * Adapt a {@link GitHubService} into the narrow {@link ManagerMcpGitHub} surface
  * the manager MCP's `watch_pr` tool needs, bound to one session's `cwd`.
- * `prMergeState` lets `gh` auto-detect the repo from cwd; `prChecks`,
- * `reviewThreads` and `prReviewState` require an explicit `owner/name`, so we
- * resolve it from cwd lazily and cache the promise (a per-session one-shot). Any
- * resolve/gh failure on those READS degrades to `null` — the watcher treats that
- * as "nothing new this poll" rather than aborting. An explicit `repo` override
- * always wins.
+ *
+ * The whole poll is ONE call now (`pollPrState`), which needs an explicit
+ * `owner/name` — GraphQL cannot auto-detect the repo the way `gh pr view` could
+ * — so we resolve it from cwd lazily through {@link makeRepoResolver}. An
+ * unresolvable repo or a failed read degrades to `null`, which the watch treats
+ * exactly as it always treated an unreadable merge state: as fatal to this
+ * watch, with "call watch_pr again" as the recovery.
+ *
+ * Every successful poll is also handed to {@link SessionBroker.onPrSnapshot}, so
+ * an agent watching its PR keeps the PR catalog current for free — the reason
+ * there is one poll body at all.
  *
  * The three ACTIONS (`requestReviewers`, `replyToThread`, `resolveThread`) throw
  * instead, because the failure they'd otherwise hide is the one that matters:
@@ -362,23 +367,25 @@ function makeGithubBinding(
   cwd: string | undefined,
   chatId: string,
   reviewers: readonly string[] = [],
+  onSnapshot?: (chatId: string, snapshot: PrPollSnapshot) => void,
 ): ManagerMcpGitHub {
   const repoFor = makeRepoResolver(github, cwd);
   return {
-    prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd }),
-    prChecks: async (n, repo) => {
+    pollPrState: async (n, repo) => {
       const r = await repoFor(repo);
-      return r ? github.prChecks(r, n).catch(() => null) : null;
-    },
-    reviewThreads: async (n, repo) => {
-      const r = await repoFor(repo);
-      return r ? github.reviewThreads(r, n).catch(() => null) : null;
-    },
-    // Same degrade-to-null contract as checks/threads: an unreadable queue is
-    // "no news this poll", never a claim that nobody is queued.
-    prReviewState: async (n, repo) => {
-      const r = await repoFor(repo);
-      return r ? github.prReviewState(r, n).catch(() => null) : null;
+      if (!r) return null;
+      const snap = await github.pollPrState(r, n, { cwd }).catch(() => null);
+      if (!snap) return null;
+      onSnapshot?.(chatId, snap);
+      return {
+        number: snap.number,
+        state: snap.state,
+        merged: snap.merged,
+        mergedAt: snap.mergedAt,
+        checks: snap.checks,
+        threads: snap.threads,
+        review: { requested: snap.requested, reported: snap.reported },
+      };
     },
     // These three THROW on failure rather than degrading — they are actions the
     // agent asked for, and silently doing nothing is how a thread stays open.
@@ -1294,6 +1301,16 @@ export class SessionBroker {
    * Absent → `create_pr` says so out loud rather than implying it's watched.
    */
   armPrWatch?: (chatId: string, ref: PRRef) => void;
+  /**
+   * Hand every `watch_pr` poll to the PR catalog. Settable after construction
+   * for the same reason as `armPrWatch`: the registry is built after the broker.
+   *
+   * This is what makes ONE poll body worth having. An agent watching its own PR
+   * is already asking GitHub the exact question the background sweep asks, at a
+   * far tighter interval; before this, that answer was read once and thrown
+   * away, and the app went on believing whatever the last sweep had seen.
+   */
+  onPrSnapshot?: (chatId: string, snapshot: PrPollSnapshot) => void;
   /**
    * Create + start a chat on the agent's behalf, once the human has approved it
    * (see `mcp__manager__spawn_chat`). Settable after construction for the same
@@ -4387,14 +4404,20 @@ export class SessionBroker {
                   : undefined,
               }
             : undefined,
-        // Bind the PR watcher to this session's default cwd. `prMergeState` lets
-        // `gh` auto-detect the repo from cwd; `prChecks`/`reviewThreads` need an
-        // explicit owner/name, so resolve it from cwd ONCE (cached) and reuse it.
+        // Bind the PR watcher to this session's default cwd. The poll is one
+        // GraphQL call and needs an explicit owner/name, so resolve it from cwd
+        // ONCE (cached, and never cached as a failure — see makeRepoResolver).
         // The agent may still pass an explicit repo override on any call. The
         // project's reviewer list rides along so `request_review` has a default —
         // the same list `create_pr` asks on the first round.
         github: github
-          ? makeGithubBinding(github, cwd, session.chatId, workflow.pr.reviewers)
+          ? makeGithubBinding(
+              github,
+              cwd,
+              session.chatId,
+              workflow.pr.reviewers,
+              this.onPrSnapshot,
+            )
           : undefined,
         // The PR-landing surface — bound ONLY when this project's workflow opted
         // into auto-merge, which is what makes `approve_pr` absent (not merely

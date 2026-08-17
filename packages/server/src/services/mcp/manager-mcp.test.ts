@@ -29,6 +29,7 @@ import {
   type ManagerMcpPrApproval,
   type ManagerMcpPrCreate,
   type PrPollResult,
+  type PrWatchSnapshot,
   type PrReadiness,
   type PrLandingPolicy,
   type PrLandingBlocker,
@@ -325,9 +326,13 @@ interface PollSnap {
 }
 
 /**
- * A scriptable ManagerMcpGitHub. `prMergeState` advances to the next snapshot on
- * each call (the watcher polls it first every iteration); `prChecks`/
- * `reviewThreads` read the CURRENT snapshot, so one snapshot = one poll cycle.
+ * A scriptable ManagerMcpGitHub. Each `pollPrState` call advances to the next
+ * snapshot, so one snapshot = one poll cycle — which is now literally true, the
+ * whole poll being one call.
+ *
+ * A snapshot that scripts no `review` yields `review: null`, i.e. "this poll
+ * carried no read of the reviewer queue". That's the path a narrower binding
+ * takes, and it must stay silent rather than reporting a stall it cannot see.
  */
 function fakeGitHub(
   snaps: PollSnap[],
@@ -335,24 +340,30 @@ function fakeGitHub(
   const calls: { number: number; repo?: string }[] = [];
   let idx = -1;
   const cur = (): PollSnap => snaps[Math.min(Math.max(idx, 0), snaps.length - 1)]!;
+  const scriptsReview = snaps.some((s) => s.review !== undefined);
   return {
     calls,
-    prMergeState: async (n, repo) => {
+    pollPrState: async (n, repo) => {
       calls.push({ number: n, repo });
       idx = Math.min(idx + 1, snaps.length - 1);
-      return cur().merge;
+      const snap = cur();
+      if (!snap.merge) return null;
+      return {
+        ...snap.merge,
+        checks: snap.checks === undefined ? [] : snap.checks,
+        threads: snap.threads === undefined ? [] : snap.threads,
+        review: scriptsReview ? (snap.review ?? null) : null,
+      };
     },
-    prChecks: async () => (cur().checks === undefined ? [] : cur().checks!),
-    reviewThreads: async () => (cur().threads === undefined ? [] : cur().threads!),
-    // Only bound when at least one snapshot scripts a queue, so the "no
-    // prReviewState on this binding" path is exercised by every other test.
-    ...(snaps.some((s) => s.review !== undefined)
-      ? { prReviewState: async () => cur().review ?? null }
-      : {}),
   };
 }
 
 const OPEN: PrPollResult = { number: 83, state: "open", merged: false };
+
+/** One `pollPrState` answer, built from just the pieces a test cares about. */
+function snap(over: Partial<PrWatchSnapshot> = {}): PrWatchSnapshot {
+  return { ...OPEN, checks: [], threads: [], review: null, ...over };
+}
 const FAIL_BUILD: CheckRun = {
   name: "build",
   status: "completed",
@@ -596,10 +607,7 @@ describe("manager-mcp — watch_pr", () => {
       reported: [{ author: "Copilot", state: "APPROVED" }],
     };
     const gh: ManagerMcpGitHub = {
-      prMergeState: async () => OPEN,
-      prChecks: async () => [RUNNING_BUILD],
-      reviewThreads: async () => [],
-      prReviewState: async () => queue,
+      pollPrState: async () => snap({ checks: [RUNNING_BUILD], review: queue }),
     };
     const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
@@ -646,16 +654,15 @@ describe("manager-mcp — watch_pr", () => {
     expect(resultText(await p)).not.toContain("review-stalled");
   });
 
-  // A binding with no `prReviewState` at all (an older/narrower GitHub surface)
-  // must watch normally and never mention a stall. Most tests in this file run
-  // on such a binding; this one states the contract by name.
-  it("watches normally when the binding has no prReviewState at all", async () => {
+  // A poll that carries NO read of the reviewer queue (an older/narrower GitHub
+  // surface) must watch normally and never mention a stall. Most tests in this
+  // file run on such a poll; this one states the contract by name.
+  it("watches normally when the poll carries no reviewer queue", async () => {
     const gh: ManagerMcpGitHub = {
-      prMergeState: async () => OPEN,
-      prChecks: async () => [PASS_BUILD],
-      reviewThreads: async () => [THREAD_A],
-      // no prReviewState — `gh.prReviewState?.(…)` short-circuits the whole chain
-      // (including the `.catch`), so this is a quiet no-op, not a crash.
+      // `review: null` — no queue read this poll, which is a different claim
+      // from an empty queue and must not be reported as a stall.
+      pollPrState: async () =>
+        snap({ checks: [PASS_BUILD], threads: [THREAD_A], review: null }),
     };
     const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
@@ -675,10 +682,7 @@ describe("manager-mcp — watch_pr", () => {
     let review: { requested: string[]; reported: Array<{ author: string; state: string }> } | null =
       { requested: [], reported: [] };
     const gh: ManagerMcpGitHub = {
-      prMergeState: async () => OPEN,
-      prChecks: async () => [RUNNING_BUILD],
-      reviewThreads: async () => [],
-      prReviewState: async () => review,
+      pollPrState: async () => snap({ checks: [RUNNING_BUILD], review }),
     };
     const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
@@ -848,13 +852,11 @@ describe("manager-mcp — watch_pr", () => {
     expect(resultText(res)).toContain("cancelled");
   });
 
-  it("returns an informative error when the merge poll throws (gh error)", async () => {
+  it("returns an informative error when the poll throws (gh error)", async () => {
     const gh: ManagerMcpGitHub = {
-      prMergeState: async () => {
+      pollPrState: async () => {
         throw new Error("gh: not authenticated");
       },
-      prChecks: async () => [],
-      reviewThreads: async () => [],
     };
     const { watchPr } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), github: gh });
 
@@ -916,9 +918,7 @@ function fakeThreadGitHub(
   return {
     replies,
     resolved,
-    prMergeState: async () => OPEN,
-    prChecks: async () => [],
-    reviewThreads: async () => [],
+    pollPrState: async () => snap(),
     replyToThread: async (id, body) => {
       if (opts.replyThrows) throw new Error(opts.replyThrows);
       replies.push([id, body]);
@@ -1096,11 +1096,9 @@ describe("manager-mcp — request_review", () => {
     const queued = verify === undefined ? result.requested : verify;
     return {
       asked,
-      prMergeState: async () => OPEN,
-      prChecks: async () => [],
-      reviewThreads: async () => [],
       defaultReviewers: defaults,
-      prReviewState: async () => (queued === null ? null : { requested: queued, reported: [] }),
+      pollPrState: async () =>
+        snap({ review: queued === null ? null : { requested: queued, reported: [] } }),
       requestReviewers: async (n, list) => {
         asked.push({ n, list });
         return result;
