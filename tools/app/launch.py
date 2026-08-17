@@ -273,6 +273,7 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
         "utf-8",
     )
 
+    stranded = False
     try:
         while proc.poll() is None:
             if paths.stop_request.exists():
@@ -285,10 +286,30 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
         try:
             proc.wait(timeout=STOP_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            _kill_tree(proc)
+            if not _kill_tree(proc):
+                # We could not prove the server is dead, so we must not behave
+                # as though it is. Reporting a clean stop here is the exact
+                # failure _release_runtime() exists to prevent, reached from the
+                # other end: runtime.json would go, `--status` and publish.mjs
+                # would report NOT RUNNING, and publish.mjs would rebuild the
+                # payload underneath a live process. A stale runtime.json is the
+                # milder failure, every time.
+                stranded = True
+                print(
+                    f"could not kill server pid {proc.pid} - it is STILL RUNNING.\n"
+                    f"  Leaving {paths.runtime} in place so nothing treats this box as idle.\n"
+                    f"  Kill it by hand:  taskkill /PID {proc.pid} /T /F"
+                    if IS_WINDOWS
+                    else f"could not kill server pid {proc.pid} - it is STILL RUNNING.\n"
+                    f"  Leaving {paths.runtime} in place so nothing treats this box as idle.\n"
+                    f"  Kill it by hand:  kill -9 {proc.pid}",
+                    file=sys.stderr,
+                )
+                return 1
         return proc.returncode or 0
     finally:
-        _release_runtime(paths)
+        if not stranded:
+            _release_runtime(paths)
 
 
 def _release_runtime(paths: Paths) -> None:
@@ -320,9 +341,18 @@ def _release_runtime(paths: Paths) -> None:
     paths.stop_request.unlink(missing_ok=True)
 
 
-def _kill_tree(proc: subprocess.Popen) -> None:
+def _exited(proc: subprocess.Popen, timeout_s: float) -> bool:
+    """Did it actually go? Reaps the child on the way, so no zombie is left."""
+    try:
+        proc.wait(timeout=timeout_s)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _kill_tree(proc: subprocess.Popen) -> bool:
     """
-    Last resort: kill the server AND everything under it.
+    Last resort: kill the server AND everything under it. True if it is GONE.
 
     `proc.kill()` is `TerminateProcess` on Windows and it kills exactly one
     process. The server is the parent of every `powershell.exe` the persistent
@@ -334,11 +364,14 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
     Only reached when the server ignored the polite stop for STOP_TIMEOUT_S, so
     by definition its own teardown is not going to do this for us.
+
+    The RETURN VALUE is load-bearing: what taskkill printed is not evidence, and
+    the caller is about to decide whether to delete runtime.json on the strength
+    of it. Only "the process object says it exited" counts.
     """
     if IS_WINDOWS:
         try:
-            # /T = the tree, /F = force. Ignore the result: a race with an exit
-            # that finally landed is a success, not something to report.
+            # /T = the tree, /F = force.
             subprocess.run(
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                 capture_output=True,
@@ -346,20 +379,28 @@ def _kill_tree(proc: subprocess.Popen) -> None:
                 check=False,
             )
         except (OSError, subprocess.SubprocessError):
-            proc.kill()
-    else:
-        # NOT a process-group kill. `start()` gives this SUPERVISOR its own
-        # session and the server inherits that group, so `killpg` would take us
-        # down with it — before the `finally` that releases runtime.json, which
-        # is how a live instance ends up reported as not running. POSIX also
-        # needs this far less: SIGTERM is really delivered there, so the
-        # server's own handler runs and reaps its shells before we get here.
-        proc.kill()
-    # Whatever route we took, don't leave a zombie behind.
+            pass  # nothing to report yet — the check below is the report
+        # Deliberately not `returncode == 0`: taskkill exits non-zero for "no
+        # such process", which is a SUCCESS here, and can exit zero having
+        # killed only part of a tree. Ask the OS instead.
+        if _exited(proc, 10):
+            return True
+        # taskkill failed, or finished the children and not the parent. Fall
+        # through to the single-process kill rather than give up.
+
+    # POSIX comes straight here, and Windows arrives as the escalation.
+    #
+    # NOT a process-group kill. `start()` gives this SUPERVISOR its own session
+    # and the server inherits that group, so `killpg` would take us down with it
+    # — before the `finally` that releases runtime.json, which is how a live
+    # instance ends up reported as not running. POSIX also needs the tree walk
+    # far less: SIGTERM is really delivered there, so the server's own handler
+    # runs and reaps its shells before we ever get here.
     try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        pass
+        proc.kill()
+    except OSError:
+        pass  # already gone, most likely — `_exited` settles it
+    return _exited(proc, 5)
 
 
 def _ask_to_stop(proc: subprocess.Popen) -> None:
