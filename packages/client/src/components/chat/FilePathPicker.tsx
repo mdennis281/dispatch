@@ -118,7 +118,12 @@ export function FilePathPicker({
   return createPortal(
     <div
       style={{ zIndex: LAYER.palette }}
-      className="fixed inset-0 flex items-start justify-center bg-scrim pt-[12vh] backdrop-blur-[2px]"
+      className={
+        // 12vh clears the status bar on a tall phone and not on a short one, so
+        // the offset is the larger of the two rather than the guess.
+        "fixed inset-0 flex items-start justify-center bg-scrim backdrop-blur-[2px] " +
+        "pt-[max(12vh,var(--cm-safe-top))] pb-[var(--cm-safe-bottom)]"
+      }
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}

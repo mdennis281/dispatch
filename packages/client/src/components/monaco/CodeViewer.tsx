@@ -183,7 +183,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   return createPortal(
     <div
       style={{ zIndex: z }}
-      className="fixed inset-0 flex items-center justify-center p-4 sm:p-6"
+      className="fixed inset-0 flex items-center justify-center cm-safe-pad [--cm-gutter:1rem] sm:[--cm-gutter:1.5rem]"
       role="dialog"
       aria-modal="true"
     >
@@ -194,7 +194,9 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
         className="absolute inset-0 cursor-default bg-scrim backdrop-blur-[2px] cm-anim-rise"
       />
 
-      <div className="relative flex h-[86vh] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-lg border border-line-strong bg-panel shadow-[var(--shadow-pop)] cm-anim-rise">
+      {/* `max-h-full` so the fixed 86vh can't outgrow what the safe-area gutters
+          leave behind on a notched phone and push its own header off screen. */}
+      <div className="relative flex h-[86vh] max-h-full w-[min(1180px,94vw)] flex-col overflow-hidden rounded-lg border border-line-strong bg-panel shadow-[var(--shadow-pop)] cm-anim-rise">
         {/* header */}
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-3">
           <FileCode2 className="size-4 shrink-0 text-accent-hi" />

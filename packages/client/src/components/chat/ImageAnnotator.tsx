@@ -120,7 +120,10 @@ export default function ImageAnnotator(props: ImageAnnotatorProps) {
   }, [props.src]);
 
   return createPortal(
-    <div style={{ zIndex: z }} className="fixed inset-0 flex items-center justify-center p-0 sm:p-6">
+    <div
+      style={{ zIndex: z }}
+      className="fixed inset-0 flex items-center justify-center sm:cm-safe-pad sm:[--cm-gutter:1.5rem]"
+    >
       <div className="fixed inset-0 bg-scrim backdrop-blur-[2px]" aria-hidden />
       <div
         role="dialog"
@@ -130,6 +133,12 @@ export default function ImageAnnotator(props: ImageAnnotatorProps) {
           // Full-bleed on a phone. A centred card with margins wastes the only
           // dimension a phone is short on, and the canvas is the whole point.
           "relative z-10 flex h-full w-full flex-col overflow-hidden bg-overlay",
+          // Being full-bleed is exactly what put the header under the status bar,
+          // so the insets are paid HERE rather than on the root: as padding on
+          // the panel the background still reaches the screen edges and only the
+          // chrome moves clear. At `sm` this is a centred card and the root's
+          // gutter has already done it.
+          "max-sm:cm-safe-pad",
           "sm:h-auto sm:max-h-full sm:max-w-[1180px] sm:rounded-lg sm:border sm:border-line-strong",
           "sm:shadow-[var(--shadow-pop)] sm:backdrop-blur-md sm:cm-anim-rise",
         )}

@@ -468,6 +468,32 @@
 }
 
 /*
+ * Safe-area gutters for OVERLAYS.
+ *
+ * Every dialog in the app is `position: fixed; inset: 0`, and `fixed` resolves
+ * against the layout viewport — which under `viewport-fit=cover` runs edge to
+ * edge. So an overlay's own top row lands UNDER the iOS status bar: the image
+ * editor's Cancel/Apply buttons sat inside the clock in the installed PWA, with
+ * no way to leave the editor. The centred dialogs were a few pixels from the
+ * same fate, since a 24px gutter is less than half a 59px inset.
+ *
+ * Each side is the LARGER of the design gutter (`--cm-gutter`, set at the call
+ * site) and that side's inset, so nothing moves anywhere the insets are 0 —
+ * which is everywhere but a notched display.
+ *
+ * A `@utility` rather than a plain class in `@layer components`: it has to sit
+ * in the utilities layer to outrank the `p-*` it replaces (a layered class
+ * loses to a utility no matter the source order), and only a real utility can
+ * take the `sm:` / `max-sm:` variants the full-bleed dialogs need.
+ */
+@utility cm-safe-pad {
+  padding-top: max(var(--cm-gutter, 0px), var(--cm-safe-top));
+  padding-right: max(var(--cm-gutter, 0px), var(--cm-safe-right));
+  padding-bottom: max(var(--cm-gutter, 0px), var(--cm-safe-bottom));
+  padding-left: max(var(--cm-gutter, 0px), var(--cm-safe-left));
+}
+
+/*
  * Hover affordances that must not be hover-only on touch.
  *
  * `ChatRow`'s rename/delete (`Sidebar.tsx`) and `SubAppRow`'s Run are
