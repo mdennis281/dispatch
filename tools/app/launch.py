@@ -219,6 +219,21 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
         "DISPATCH_CONFIG_DIR": str(paths.config_dir),
     }
 
+    node_kwargs: dict = {}
+    if IS_WINDOWS:
+        # CREATE_NO_WINDOW, and it is the difference between a console window
+        # sitting on the desktop for the entire life of the app and no window at
+        # all. This supervisor is started DETACHED_PROCESS under pythonw, so it
+        # owns no console — and a console-subsystem child spawned from a
+        # console-less parent gets a NEW one, with a visible window, which is
+        # then the thing that "sticks around after an upgrade". Note this cannot
+        # be fixed at the supervisor: it is node, not python, that Windows is
+        # allocating the console for.
+        #
+        # Nothing is lost. stdout/stderr were already going nowhere here (see
+        # below), so this only stops Windows from drawing the void.
+        node_kwargs["creationflags"] = 0x08000000
+
     proc = subprocess.Popen(
         [node, "dist/index.js"],
         cwd=str(app / "packages" / "server"),
@@ -226,6 +241,7 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
         stdin=subprocess.PIPE,
         # stdout/stderr are inherited: under pythonw there is no console, so
         # they go nowhere, and the server's own log files remain the record.
+        **node_kwargs,
     )
 
     url = f"http://127.0.0.1:{port}"

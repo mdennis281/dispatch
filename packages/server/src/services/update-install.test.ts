@@ -77,6 +77,25 @@ describe("launchUpdate", () => {
     expect(spawnImpl.unref).toHaveBeenCalledOnce();
   });
 
+  it("tells the installer not to open a browser, by env rather than by flag", async () => {
+    const appDir = await payload();
+    const spawnImpl = fakeSpawn();
+    await launchUpdate({
+      tag: "v2026.08.14.85068",
+      appDir,
+      env: {},
+      fetchImpl: vi.fn(async () => textResponse(OK_INSTALLER)) as unknown as typeof fetch,
+      spawnImpl: spawnImpl.impl,
+    });
+
+    const [, args, options] = spawnImpl.calls()[0] as [string, string[], Record<string, unknown>];
+    expect((options.env as Record<string, string>).DISPATCH_INSTALL_NO_OPEN).toBe("1");
+    // A flag would be fatal when the target release predates it: the installer
+    // is fetched from that release, and its parseArgs throws on the unknown
+    // argument. An unknown env var is ignored.
+    expect(args).not.toContain("--no-open");
+  });
+
   it("captures installer output to update.log, not to a console that is about to die", async () => {
     const appDir = await payload();
     const spawnImpl = fakeSpawn();

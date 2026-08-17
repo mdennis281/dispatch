@@ -85,6 +85,20 @@ async function withRelease(manifest: unknown, latestTag: string | null): Promise
   return release;
 }
 
+/**
+ * Wait out the deferred launch a successful install schedules.
+ *
+ * The route spawns 150ms AFTER the reply is flushed, so a test that ends at the
+ * 200 leaves a timer armed — and it fires during whichever test runs next. The
+ * `mockReset` below is not enough on its own: it zeroes the call count, and the
+ * late call then increments the FRESH mock, so the next
+ * `expect(launchUpdate).not.toHaveBeenCalled()` sees one call it did not make.
+ * That is a load-dependent failure (it only shows up when the whole suite runs
+ * together), so every test that legitimately launches consumes its own launch
+ * here rather than leaving it for a neighbour.
+ */
+const settleLaunch = () => vi.waitFor(() => expect(launchUpdate).toHaveBeenCalled());
+
 beforeEach(async () => {
   // A full reset, not `mockClear`: the install route spawns 150ms AFTER its
   // reply is flushed, so a previous test's launch can land during this one and
@@ -155,6 +169,7 @@ describe("POST /api/update/install", () => {
     // contract; a caller that gets a dropped socket cannot tell start from fail.
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.85068" });
+    await settleLaunch();
   });
 
   it("un-latches when the installer never actually launches", async () => {
@@ -193,6 +208,7 @@ describe("POST /api/update/install", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.79778" });
+    await settleLaunch();
   });
 
   it("refuses any tag that is not the channel head", async () => {

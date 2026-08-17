@@ -48,6 +48,7 @@ Usage: node install.mjs [options]
   --repo <owner/name> release repository (default: ${DEFAULT_REPO})
   --target <path>     installation root (default: the platform user-data dir)
   --no-start          install without starting Dispatch
+  --no-open           start Dispatch without opening it in a browser
   --no-shortcut       do not create a Start-menu/PATH launcher
   --dry-run           resolve and verify the release without changing the install
   --help              show this help
@@ -61,6 +62,15 @@ export function parseArgs(argv) {
     repo: process.env.DISPATCH_INSTALL_REPO || DEFAULT_REPO,
     channel: "stable",
     start: true,
+    // A self-update is the one caller that must NOT open a browser: the tab
+    // that asked for it is already sitting on the updating screen waiting to
+    // reload itself. Honouring an env var as well as the flag is deliberate —
+    // `services/update-install.ts` fetches the installer from the TARGET
+    // release, so installing an older tag runs an older install.mjs, and an
+    // unknown `--no-open` there is a hard `unknown argument` failure where an
+    // unknown env var is simply ignored. The server passes the variable; the
+    // flag is for people.
+    open: process.env.DISPATCH_INSTALL_NO_OPEN !== "1",
     shortcut: true,
     dryRun: false,
   };
@@ -69,6 +79,7 @@ export function parseArgs(argv) {
     if (arg === "--") continue;
     if (arg === "--help" || arg === "-h") out.help = true;
     else if (arg === "--no-start") out.start = false;
+    else if (arg === "--no-open") out.open = false;
     else if (arg === "--no-shortcut") out.shortcut = false;
     else if (arg === "--dry-run") out.dryRun = true;
     else if (arg === "--version") out.version = requiredValue(argv, ++i, arg);
@@ -291,6 +302,15 @@ export function run(command, args, options = {}) {
     encoding: "utf8",
     stdio: options.quiet ? "pipe" : "inherit",
     shell: useShell,
+    // A self-update runs this installer detached with `windowsHide`, so the
+    // process has NO console of its own — and Windows then allocates a brand
+    // new console WINDOW for every console-subsystem child it spawns. That is
+    // ~20 of them per update (tar twice, the pnpm/corepack/npx probes, two
+    // installs, the python probes, launch.py --stop, launch.py --no-window),
+    // each flashing up and vanishing on the user's desktop while they watch the
+    // progress screen. CREATE_NO_WINDOW gives the child its console without the
+    // window; nothing about the captured output changes.
+    windowsHide: true,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -421,7 +441,9 @@ function openBrowser(url) {
         : [["xdg-open", [url]]];
   for (const [command, args] of commands) {
     try {
-      const result = spawnSync(command, args, { stdio: "ignore" });
+      // `windowsHide` for the same reason as `run()`: this is `powershell` on
+      // Windows, and from a console-less installer it would flash its own.
+      const result = spawnSync(command, args, { stdio: "ignore", windowsHide: true });
       if (result.status === 0) return;
     } catch {
       // The URL printed below is the dependable fallback on headless machines.
@@ -546,7 +568,7 @@ async function main() {
         if (args.start) {
           const launcher = join(app, "tools", "app", "launch.py");
           launch(python, launcher, ["--no-window", "--target", root]);
-          openBrowser("http://127.0.0.1:4318");
+          if (args.open) openBrowser("http://127.0.0.1:4318");
         }
 
         console.log(`\nDispatch ${selected.release.tag_name} is installed.`);
