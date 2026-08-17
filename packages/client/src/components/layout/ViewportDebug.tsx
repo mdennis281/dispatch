@@ -66,6 +66,7 @@ export function ViewportDebug() {
 function PaintRuler() {
   const client = useViewport((s) => s.clientHeight);
   const screen = useViewport((s) => s.screenHeight);
+  const safeTop = useViewport((s) => s.safeTop);
   if (!client || !screen) return null;
 
   // Straddle the edge: a couple above (which MUST be visible, proving the ruler
@@ -73,6 +74,19 @@ function PaintRuler() {
   const marks = [client - 40, client - 20, client, client + 20, client + 40, screen - 2]
     // A device where the two agree would otherwise draw the same line 3 times.
     .filter((y, i, all) => y > 0 && y < screen && all.indexOf(y) === i);
+
+  // The SAME question at the other end, which the bottom ruler cannot answer:
+  // where does `top: 0` of a fixed box actually land on the glass?
+  //
+  // A modal is `fixed inset-0` and pads itself by the top inset, which should
+  // put its first row of controls at `safeTop`. It didn't — the buttons stayed
+  // under the clock through a shipped fix — and layout numbers cannot tell
+  // "the padding never applied" apart from "the box starts higher up the screen
+  // than 0". Two marks settle it by eye against the status bar: `0` and the
+  // inset. If `0` is visible ABOVE the clock, the fixed origin is the glass and
+  // the padding is the suspect; if `0` is level with the clock and `safe`
+  // is below it, the geometry is right and something ate the padding.
+  const top = [0, safeTop].filter((y, i, all) => y >= 0 && all.indexOf(y) === i);
 
   return (
     <div
@@ -86,6 +100,16 @@ function PaintRuler() {
           <span className="bg-black/80 px-1 font-mono text-2xs leading-none text-fuchsia-300">
             {y}
             {y === client ? " client" : ""}
+          </span>
+        </div>
+      ))}
+      {/* Right-aligned and cyan so they can't be confused with the bottom ruler
+          in a screenshot, and clear of the readout box on the left. */}
+      {top.map((y) => (
+        <div key={`t${y}`} className="absolute inset-x-0 flex items-center" style={{ top: `${y}px` }}>
+          <div className="h-px flex-1 bg-cyan-400" />
+          <span className="bg-black/80 px-1 font-mono text-2xs leading-none text-cyan-300">
+            {y === 0 ? "0 fixed-top" : `${y} safe`}
           </span>
         </div>
       ))}
