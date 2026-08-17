@@ -31,7 +31,6 @@ import { makeFakeQuery } from "./fake-sdk.js";
 import { TitleService, makeFakeTitleGenerator } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
 import { WorktreeService } from "./worktree.js";
-import { McpPrewarmService } from "./mcp-prewarm.js";
 import { WorktreeDetector } from "./worktree-detector.js";
 import { GitService } from "./git.js";
 import { CommitMessageService } from "./commit-message.js";
