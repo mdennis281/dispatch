@@ -44,8 +44,16 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import treeKill from "tree-kill";
 import { nanoid } from "nanoid";
-import type { TerminalInfo } from "@dispatch/shared";
+import {
+  applyRegistryQuery,
+  type RegistryQuery,
+  type TerminalInfo,
+  type TerminalLineRecord,
+  type TerminalOrigin,
+  type TerminalRecord,
+} from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
+import type { Store } from "../store/index.js";
 
 /* ------------------------------------------------------------------ spawn seam */
 
@@ -116,6 +124,15 @@ export interface TerminalServiceOptions {
   maxPerChat?: number;
   /** Retained output lines per terminal for reconnect scrollback (default 500). */
   scrollbackCap?: number;
+  /**
+   * Durable roster + transcripts. Without it the service behaves exactly as it
+   * did before — in-memory only — which is what every unit test wants.
+   */
+  store?: Store;
+  /** How long a transcript is kept before the sweep drops it (default 7 days). */
+  retentionMs?: number;
+  /** Write-behind flush cadence for output lines (default 1s). */
+  flushIntervalMs?: number;
   deps?: TerminalServiceDeps;
 }
 
@@ -129,6 +146,10 @@ export interface TerminalLine {
 /** Arguments for a single `run`. */
 export interface RunTerminalArgs {
   chatId: string;
+  /** Project the chat belongs to — recorded so the catalog can scope by it. */
+  projectId?: string;
+  /** Who is opening this shell. Default `"agent"` (the MCP tool's caller). */
+  origin?: TerminalOrigin;
   name: string;
   command: string;
   /** Default cwd for a first-time spawn of this terminal (worktree / repo). */
@@ -167,6 +188,9 @@ const SENTINEL_PREFIX = "CMTERMSENTINEL_";
 /** Default per-command timeout (10 min) — a runaway build shouldn't wedge a run. */
 const DEFAULT_TIMEOUT_MS = 600_000;
 
+/** How long a terminal's transcript is kept before the sweep drops it. */
+export const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60_000;
+
 /** Shorten a command for a one-line error message. */
 function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -177,7 +201,11 @@ function truncate(s: string, max: number): string {
 
 interface Terminal {
   id: string;
+  /** Filename-safe id for this shell's persisted transcript. */
+  logId: string;
   chatId: string;
+  projectId?: string;
+  origin: TerminalOrigin;
   name: string;
   cwd: string;
   status: "live" | "exited";
@@ -186,6 +214,13 @@ interface Terminal {
   lastExitCode: number | null;
   createdAt: number;
   updatedAt: number;
+  /** Last output/command touch — what `since` filters and the sweep read. */
+  lastActivityAt: number;
+  /** Retained transcript size, counting what's already on disk. */
+  lines: number;
+  bytes: number;
+  /** Output lines written but not yet flushed to the transcript. */
+  unflushed: TerminalLineRecord[];
   proc: ShellProcess;
   /** Partial line buffers per stream (chunks split mid-line). */
   stdoutBuf: string;
@@ -214,7 +249,17 @@ export class TerminalService {
   private readonly scrollbackCap: number;
   private readonly killTree: KillTreeFn;
 
+  private readonly store?: Store;
+  private readonly retentionMs: number;
+  private readonly flushIntervalMs: number;
+
   private readonly terminals = new Map<string, Terminal>();
+  /**
+   * Rows whose shell this process does not own — restored at boot, or left
+   * behind by a shell that has since exited. Readable, not runnable.
+   */
+  private readonly archived = new Map<string, TerminalRecord>();
+  private flushTimer?: ReturnType<typeof setInterval>;
 
   constructor(opts: TerminalServiceOptions) {
     this.bus = opts.bus;
@@ -224,6 +269,9 @@ export class TerminalService {
     this.killTree = opts.deps?.killTree ?? defaultKillTree;
     this.maxPerChat = Math.max(1, opts.maxPerChat ?? 8);
     this.scrollbackCap = Math.max(1, opts.scrollbackCap ?? 500);
+    this.store = opts.store;
+    this.retentionMs = Math.max(60_000, opts.retentionMs ?? DEFAULT_RETENTION_MS);
+    this.flushIntervalMs = Math.max(100, opts.flushIntervalMs ?? 1_000);
   }
 
   private static key(chatId: string, name: string): string {
@@ -256,7 +304,7 @@ export class TerminalService {
           error: this.capMessage(),
         };
       }
-      term = this.open(key, args.chatId, name, args.cwd ?? process.cwd());
+      term = this.open(key, name, args.cwd ?? process.cwd(), args);
     }
 
     // A background command owns its shell until it exits. Queueing behind it
@@ -316,7 +364,12 @@ export class TerminalService {
    * existing shell rather than a second one, so a double-click can't strand a
    * powershell process the UI has no handle on.
    */
-  create(chatId: string, name: string, cwd: string): { terminal?: TerminalInfo; error?: string } {
+  create(
+    chatId: string,
+    name: string,
+    cwd: string,
+    opts: { projectId?: string; origin?: TerminalOrigin } = {},
+  ): { terminal?: TerminalInfo; error?: string } {
     const trimmed = name.trim() || "main";
     const key = TerminalService.key(chatId, trimmed);
     const existing = this.terminals.get(key);
@@ -324,30 +377,57 @@ export class TerminalService {
     // Same rule as `run()`: reviving an EXITED name still spawns a live shell,
     // so it has to clear the cap too — `atCap` counts live only.
     if (this.atCap(chatId)) return { error: this.capMessage() };
-    return { terminal: this.view(this.open(key, chatId, trimmed, cwd)) };
+    return {
+      terminal: this.view(
+        this.open(key, trimmed, cwd, {
+          chatId,
+          projectId: opts.projectId,
+          origin: opts.origin ?? "ui",
+        }),
+      ),
+    };
   }
 
   /** Spawn + register a shell for `key`. */
-  private open(key: string, chatId: string, name: string, cwd: string): Terminal {
+  private open(
+    key: string,
+    name: string,
+    cwd: string,
+    ident: { chatId: string; projectId?: string; origin?: TerminalOrigin },
+  ): Terminal {
     const proc = this.spawn(cwd);
     const now = this.now();
+    // Re-opening a name whose transcript we still hold keeps writing to the SAME
+    // log: a shell that died and was restarted under one name is one story, and
+    // splitting it in two would lose exactly the "what happened before it died?"
+    // the persistence is for.
+    const prior = this.archived.get(key);
     const term: Terminal = {
       id: key,
-      chatId,
+      logId: prior?.logId ?? this.genId(),
+      chatId: ident.chatId,
+      projectId: ident.projectId ?? prior?.projectId,
+      origin: ident.origin ?? "agent",
       name,
       cwd,
       status: "live",
       busy: false,
       lastExitCode: null,
-      createdAt: now,
+      createdAt: prior?.createdAt ?? now,
       updatedAt: now,
+      lastActivityAt: now,
+      lines: prior?.lines ?? 0,
+      bytes: prior?.bytes ?? 0,
+      unflushed: [],
       proc,
       stdoutBuf: "",
       stderrBuf: "",
       scrollback: [],
       queue: Promise.resolve(),
     };
+    this.archived.delete(key);
     this.terminals.set(key, term);
+    void this.persist(term);
 
     proc.stdout.on("data", (c) => this.onData(term, "stdout", c.toString()));
     proc.stderr.on("data", (c) => this.onData(term, "stderr", c.toString()));
@@ -534,12 +614,23 @@ export class TerminalService {
     this.record(term, stream, line);
   }
 
-  /** Append to scrollback + fan out a `terminal-output` event. */
+  /** Append to scrollback, queue it for the transcript, fan out the event. */
   private record(term: Terminal, stream: TerminalLine["stream"], chunk: string): void {
     const ts = this.now();
     term.scrollback.push({ stream, chunk, ts });
     if (term.scrollback.length > this.scrollbackCap) {
       term.scrollback.splice(0, term.scrollback.length - this.scrollbackCap);
+    }
+    term.lastActivityAt = ts;
+    term.lines += 1;
+    term.bytes += chunk.length;
+    // Write-behind. A dev server can emit hundreds of lines a second and an
+    // fsync per line would make the shell the slowest thing in the app; the
+    // in-memory scrollback is what the UI reads live, so the transcript only has
+    // to be eventually right.
+    if (this.store) {
+      term.unflushed.push({ stream, chunk, ts });
+      this.ensureFlushTimer();
     }
     this.bus.publish({
       type: "terminal-output",
@@ -549,6 +640,130 @@ export class TerminalService {
       chunk,
       ts,
     });
+  }
+
+  /* --------------------------------------------------------- persistence */
+
+  /** Start the write-behind timer on first output. `unref` — never holds the process open. */
+  private ensureFlushTimer(): void {
+    if (this.flushTimer || !this.store) return;
+    this.flushTimer = setInterval(() => {
+      void this.flush().catch(() => {});
+    }, this.flushIntervalMs);
+    this.flushTimer.unref?.();
+  }
+
+  /**
+   * Drain every terminal's queued output to its transcript and refresh its row.
+   * Public so teardown and the tests can force a settled state.
+   */
+  async flush(): Promise<void> {
+    if (!this.store) return;
+    for (const term of this.terminals.values()) {
+      if (term.unflushed.length === 0) continue;
+      const batch = term.unflushed;
+      term.unflushed = [];
+      try {
+        await this.store.appendTerminalLines(term.logId, batch);
+        await this.persist(term);
+      } catch {
+        /* a transcript we couldn't write is not worth failing a command over */
+      }
+    }
+  }
+
+  /** Write this terminal's row. Best-effort; the shell is unaffected either way. */
+  private async persist(term: Terminal): Promise<void> {
+    if (!this.store) return;
+    try {
+      await this.store.saveTerminalRecord({
+        id: term.id,
+        logId: term.logId,
+        chatId: term.chatId,
+        projectId: term.projectId,
+        name: term.name,
+        cwd: term.cwd,
+        origin: term.origin,
+        lastCommand: term.lastCommand,
+        lastExitCode: term.lastExitCode,
+        createdAt: term.createdAt,
+        updatedAt: term.updatedAt,
+        lastActivityAt: term.lastActivityAt,
+        lines: term.lines,
+        bytes: term.bytes,
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /**
+   * Adopt the persisted roster at boot.
+   *
+   * Every row loads as ARCHIVED: this process owns no shells yet, and a pid from
+   * a previous run is somebody else's process now. The transcripts are readable
+   * immediately, which is the point — a build that failed before a restart is
+   * still there to read. Same swallow-everything posture as
+   * `RunnerService.reconcile`: a corrupt roster must never block boot.
+   */
+  async reconcile(): Promise<void> {
+    if (!this.store) return;
+    try {
+      for (const rec of await this.store.listTerminalRecords()) {
+        if (this.terminals.has(rec.id)) continue;
+        this.archived.set(rec.id, rec);
+      }
+    } catch {
+      /* no roster, or an unreadable one — start empty */
+    }
+  }
+
+  /**
+   * Drop transcript lines past the retention window, and forget rows whose whole
+   * transcript has aged out. A LIVE shell keeps its row however old it is —
+   * retention is about output nobody will read again, not about closing shells
+   * out from under their owner.
+   */
+  async sweep(nowMs = this.now()): Promise<{ pruned: number; dropped: number }> {
+    if (!this.store) return { pruned: 0, dropped: 0 };
+    const cutoff = nowMs - this.retentionMs;
+    let pruned = 0;
+    let dropped = 0;
+    let records: TerminalRecord[];
+    try {
+      records = await this.store.listTerminalRecords();
+    } catch {
+      return { pruned: 0, dropped: 0 };
+    }
+    for (const rec of records) {
+      const live = this.terminals.get(rec.id);
+      if (!live && rec.lastActivityAt < cutoff) {
+        await this.store.deleteTerminalRecord(rec.id).catch(() => null);
+        this.archived.delete(rec.id);
+        this.bus.publish({
+          type: "terminal-closed",
+          terminalId: rec.id,
+          chatId: rec.chatId,
+        });
+        dropped += 1;
+        continue;
+      }
+      const { lines, bytes } = await this.store
+        .pruneTerminalLog(rec.logId, cutoff)
+        .catch(() => ({ lines: rec.lines, bytes: rec.bytes }));
+      if (lines === rec.lines) continue;
+      pruned += rec.lines - lines;
+      if (live) {
+        live.lines = lines;
+        live.bytes = bytes;
+        await this.persist(live);
+      } else {
+        const next = { ...rec, lines, bytes };
+        this.archived.set(rec.id, next);
+        await this.store.saveTerminalRecord(next).catch(() => null);
+      }
+    }
+    return { pruned, dropped };
   }
 
   private onExit(term: Terminal): void {
@@ -561,6 +776,7 @@ export class TerminalService {
       term.pending.resolve({ exitCode: null, cwd: term.cwd });
     }
     this.publishUpdate(term);
+    void this.flush().catch(() => {});
   }
 
   /* ----------------------------------------------------------- teardown */
@@ -576,8 +792,50 @@ export class TerminalService {
     if (!term) return false;
     this.terminals.delete(terminalId);
     this.killProc(term);
+    // Killing the shell does NOT discard what it printed. The row moves to the
+    // archive and the transcript stays readable until retention takes it —
+    // "close the terminal" and "forget what the build said" are different asks,
+    // and conflating them is what made a failed run unrecoverable.
+    void this.archiveOnClose(term);
     this.bus.publish({ type: "terminal-closed", terminalId: term.id, chatId: term.chatId });
     return true;
+  }
+
+  /** Flush a closed shell's tail and keep its row as an archived one. */
+  private async archiveOnClose(term: Terminal): Promise<void> {
+    if (!this.store) return;
+    const batch = term.unflushed;
+    term.unflushed = [];
+    try {
+      if (batch.length) await this.store.appendTerminalLines(term.logId, batch);
+      const rec: TerminalRecord = {
+        id: term.id,
+        logId: term.logId,
+        chatId: term.chatId,
+        projectId: term.projectId,
+        name: term.name,
+        cwd: term.cwd,
+        origin: term.origin,
+        lastCommand: term.lastCommand,
+        lastExitCode: term.lastExitCode,
+        createdAt: term.createdAt,
+        updatedAt: this.now(),
+        lastActivityAt: term.lastActivityAt,
+        lines: term.lines,
+        bytes: term.bytes,
+      };
+      this.archived.set(rec.id, rec);
+      await this.store.saveTerminalRecord(rec);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /** Forget a shell AND its transcript outright (an explicit "delete this"). */
+  async purge(terminalId: string): Promise<void> {
+    this.kill(terminalId);
+    this.archived.delete(terminalId);
+    await this.store?.deleteTerminalRecord(terminalId).catch(() => null);
   }
 
   /** Kill + forget every terminal owned by a chat (chat deleted / teardown). */
@@ -589,6 +847,12 @@ export class TerminalService {
 
   /** Kill every terminal (process teardown). */
   dispose(): void {
+    if (this.flushTimer) clearInterval(this.flushTimer);
+    this.flushTimer = undefined;
+    // Fire-and-forget: teardown can't await, but the queued tail is usually the
+    // most interesting part of the transcript — it's what was on screen when
+    // whatever prompted the shutdown happened.
+    void this.flush().catch(() => {});
     for (const term of this.terminals.values()) this.killProc(term);
     this.terminals.clear();
   }
@@ -621,6 +885,7 @@ export class TerminalService {
 
   /* -------------------------------------------------------- introspection */
 
+  /** Shells this process owns. Live-only — `catalog()` is the fuller view. */
   list(): TerminalInfo[] {
     return [...this.terminals.values()].map((t) => this.view(t));
   }
@@ -629,26 +894,82 @@ export class TerminalService {
     return this.list().filter((t) => t.chatId === chatId);
   }
 
-  /** Retained scrollback for a terminal (reconnect hydration). */
-  scrollback(terminalId: string): TerminalLine[] {
-    return this.terminals.get(terminalId)?.scrollback.slice() ?? [];
+  /**
+   * The CATALOG: this process's shells plus every archived row, filtered by the
+   * shared registry predicate — the same one the REST route parses and the
+   * Workspace view drives its controls from, so "what the modal shows" and "what
+   * an agent's `list` returns" cannot disagree.
+   *
+   * Sorted most-recently-active first: a roster is read to find what just
+   * happened far more often than to find what happened first.
+   */
+  catalog(query: RegistryQuery): TerminalInfo[] {
+    const all = [
+      ...this.list(),
+      ...[...this.archived.values()]
+        .filter((r) => !this.terminals.has(r.id))
+        .map((r) => this.archivedView(r)),
+    ];
+    const filtered = applyRegistryQuery(all, query, {
+      text: (t) => [t.name, t.cwd, t.lastCommand],
+      touchedAt: (t) => t.lastActivityAt ?? t.updatedAt ?? t.createdAt,
+    });
+    return filtered.sort(
+      (a, b) =>
+        (b.lastActivityAt ?? b.updatedAt ?? b.createdAt) -
+        (a.lastActivityAt ?? a.updatedAt ?? a.createdAt),
+    );
+  }
+
+  /**
+   * Retained scrollback for a terminal (reconnect hydration).
+   *
+   * In-memory for a live shell — that buffer is the freshest and is capped for a
+   * reason. For an archived one it comes off disk, which is the whole point of
+   * persisting it: a shell whose process is long gone can still be read.
+   */
+  async scrollback(
+    terminalId: string,
+    opts: { tail?: number; since?: number; q?: string; stream?: TerminalLine["stream"] } = {},
+  ): Promise<TerminalLine[]> {
+    const live = this.terminals.get(terminalId);
+    if (live) return filterLines(live.scrollback, opts);
+    const rec = this.archived.get(terminalId);
+    if (!rec || !this.store) return [];
+    try {
+      return await this.store.readTerminalLines(rec.logId, opts);
+    } catch {
+      return [];
+    }
   }
 
   /**
    * The last `lines` of a named shell's output — how the agent reads a command
    * it backgrounded. Without this a background start would be write-only: the
    * output goes to the Terminals tab, which the agent cannot see.
+   *
+   * `grep`/`since`/`stream` exist because a watcher's tail is mostly noise: the
+   * question is almost always "did it print an error since I last looked", and
+   * answering it by returning 50 lines and hoping wastes a turn.
    */
-  tail(chatId: string, name: string, lines = 50): { output: string; found: boolean } {
-    const term = this.terminals.get(TerminalService.key(chatId, name.trim() || "main"));
-    if (!term) return { output: "", found: false };
+  async tail(
+    chatId: string,
+    name: string,
+    lines = 50,
+    opts: { q?: string; since?: number; stream?: TerminalLine["stream"] } = {},
+  ): Promise<{ output: string; found: boolean }> {
+    const id = TerminalService.key(chatId, name.trim() || "main");
+    if (!this.terminals.has(id) && !this.archived.has(id)) {
+      return { output: "", found: false };
+    }
     const n = Math.max(1, Math.min(lines, this.scrollbackCap));
-    const out = term.scrollback
-      .filter((l) => l.stream !== "command")
-      .slice(-n)
-      .map((l) => l.chunk)
-      .join("\n");
-    return { output: out, found: true };
+    // Window AFTER dropping the echoed commands, so `lines: 50` means fifty
+    // lines of OUTPUT rather than fifty rows of which some are the input.
+    const rows = (await this.scrollback(id, opts)).filter((l) => l.stream !== "command");
+    return {
+      output: rows.slice(-n).map((l) => l.chunk).join("\n"),
+      found: true,
+    };
   }
 
   /**
@@ -671,6 +992,8 @@ export class TerminalService {
     return {
       id: t.id,
       chatId: t.chatId,
+      projectId: t.projectId,
+      origin: t.origin,
       name: t.name,
       cwd: t.cwd,
       status: t.status,
@@ -679,12 +1002,51 @@ export class TerminalService {
       lastExitCode: t.lastExitCode,
       createdAt: t.createdAt,
       updatedAt: t.updatedAt,
+      lastActivityAt: t.lastActivityAt,
+      lines: t.lines,
+      bytes: t.bytes,
       ...(t.background ? { background: t.background } : {}),
       ...(typeof t.proc.pid === "number" ? { pid: t.proc.pid } : {}),
+    };
+  }
+
+  /** A row with no process behind it: readable, marked, never `busy`. */
+  private archivedView(r: TerminalRecord): TerminalInfo {
+    return {
+      id: r.id,
+      chatId: r.chatId,
+      projectId: r.projectId,
+      origin: r.origin,
+      name: r.name,
+      cwd: r.cwd,
+      status: "exited",
+      archived: true,
+      lastCommand: r.lastCommand,
+      lastExitCode: r.lastExitCode,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      lastActivityAt: r.lastActivityAt,
+      lines: r.lines,
+      bytes: r.bytes,
     };
   }
 
   private publishUpdate(term: Terminal): void {
     this.bus.publish({ type: "terminal-update", terminal: this.view(term) });
   }
+}
+
+/** Apply the same line filters in memory that the store applies on disk. */
+function filterLines(
+  lines: TerminalLine[],
+  opts: { tail?: number; since?: number; q?: string; stream?: TerminalLine["stream"] },
+): TerminalLine[] {
+  let out = lines;
+  if (opts.since !== undefined) out = out.filter((l) => l.ts >= opts.since!);
+  if (opts.stream) out = out.filter((l) => l.stream === opts.stream);
+  if (opts.q) {
+    const needle = opts.q.toLowerCase();
+    out = out.filter((l) => l.chunk.toLowerCase().includes(needle));
+  }
+  return opts.tail && opts.tail > 0 ? out.slice(-opts.tail) : out.slice();
 }

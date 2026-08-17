@@ -1,10 +1,10 @@
 /**
  * REST for persistent terminals (named shells).
- *   GET    /api/terminals?chatId=       → TerminalInfo[] (all, or one chat's)
- *   GET    /api/terminals/:id/output    → TerminalLine[] (retained scrollback)
+ *   GET    /api/terminals?scope=&projectId=&chatId=&q= → TerminalInfo[] (catalog)
+ *   GET    /api/terminals/:id/output?tail=&since=&q=&stream= → TerminalLine[]
  *   POST   /api/terminals               → open an empty named shell
  *   POST   /api/terminals/run           → run a command in one
- *   DELETE /api/terminals/:id           → kill one
+ *   DELETE /api/terminals/:id?purge=1   → kill one (purge also drops its transcript)
  *
  * The GETs are read-only snapshots so a (re)connecting client re-materializes the
  * live Terminals view; live output rides the `terminal-output` / `terminal-update`
@@ -20,34 +20,51 @@
  * agent-opened one are the same object, visible to both.
  */
 import type { FastifyInstance } from "fastify";
+import { parseRegistryQuery } from "@dispatch/shared";
 import { chatRoot } from "./files.js";
 
 /** Resolve the chat + its default shell cwd, or an HTTP-shaped failure. */
 async function resolveCwd(
   app: FastifyInstance,
   chatId: string | undefined,
-): Promise<{ cwd: string } | { code: number; error: string }> {
+): Promise<{ cwd: string; projectId: string } | { code: number; error: string }> {
   if (!chatId) return { code: 400, error: "chatId required" };
   const chat = await app.cm.store.getChat(chatId);
   if (!chat) return { code: 404, error: "chat not found" };
   const project = await app.cm.store.getProject(chat.projectId);
   if (!project) return { code: 404, error: "project not found" };
-  return { cwd: chatRoot(chat, project) };
+  return { cwd: chatRoot(chat, project), projectId: project.id };
 }
 
 export function registerTerminalRoutes(app: FastifyInstance): void {
   const { terminals } = app.services;
 
-  app.get<{ Querystring: { chatId?: string } }>(
-    "/api/terminals",
-    async (req) =>
-      req.query.chatId ? terminals.listChat(req.query.chatId) : terminals.list(),
+  // The catalog read. `?chatId=` keeps its old meaning; with no ids it sweeps
+  // app-wide, and it includes ARCHIVED shells — ones whose process is gone but
+  // whose transcript is still readable, which is the point of persisting them.
+  app.get("/api/terminals", async (req) =>
+    terminals.catalog(parseRegistryQuery(req.query as Record<string, unknown>)),
   );
 
-  app.get<{ Params: { id: string } }>(
-    "/api/terminals/:id/output",
-    async (req) => terminals.scrollback(req.params.id),
-  );
+  app.get<{
+    Params: { id: string };
+    Querystring: { tail?: string; since?: string; q?: string; stream?: string };
+  }>("/api/terminals/:id/output", async (req) => {
+    const num = (v?: string): number | undefined => {
+      const n = Number(v);
+      return v !== undefined && Number.isFinite(n) ? n : undefined;
+    };
+    const stream = req.query.stream;
+    return terminals.scrollback(req.params.id, {
+      tail: num(req.query.tail),
+      since: num(req.query.since),
+      q: req.query.q || undefined,
+      stream:
+        stream === "stdout" || stream === "stderr" || stream === "command"
+          ? stream
+          : undefined,
+    });
+  });
 
   app.post<{ Body: { chatId?: string; name?: string } }>(
     "/api/terminals",
@@ -57,7 +74,10 @@ export function registerTerminalRoutes(app: FastifyInstance): void {
       const name = (req.body?.name ?? "").trim();
       if (!name) return reply.code(400).send({ error: "name required" });
 
-      const { terminal, error } = terminals.create(req.body!.chatId!, name, resolved.cwd);
+      const { terminal, error } = terminals.create(req.body!.chatId!, name, resolved.cwd, {
+        projectId: resolved.projectId,
+        origin: "ui",
+      });
       // The cap is a 409, not a 500: nothing is broken, the caller just has to
       // close a shell first — and the UI shows the message verbatim.
       if (!terminal) return reply.code(409).send({ error: error ?? "could not open terminal" });
@@ -89,6 +109,8 @@ export function registerTerminalRoutes(app: FastifyInstance): void {
 
     return terminals.run({
       chatId: req.body!.chatId!,
+      projectId: resolved.projectId,
+      origin: "ui",
       name,
       command,
       cwd: resolved.cwd,
@@ -97,10 +119,21 @@ export function registerTerminalRoutes(app: FastifyInstance): void {
     });
   });
 
-  app.delete<{ Params: { id: string } }>("/api/terminals/:id", async (req, reply) => {
-    if (!terminals.kill(req.params.id)) {
-      return reply.code(404).send({ error: "terminal not found" });
-    }
-    return { ok: true };
-  });
+  // Closing a shell keeps its transcript (retention will take it eventually);
+  // `?purge=1` is the explicit "and forget what it said", for a human who means
+  // both. Conflating them is how a failed build's output used to become
+  // unrecoverable the moment someone tidied up the tab.
+  app.delete<{ Params: { id: string }; Querystring: { purge?: string } }>(
+    "/api/terminals/:id",
+    async (req, reply) => {
+      if (req.query.purge === "1" || req.query.purge === "true") {
+        await terminals.purge(req.params.id);
+        return { ok: true };
+      }
+      if (!terminals.kill(req.params.id)) {
+        return reply.code(404).send({ error: "terminal not found" });
+      }
+      return { ok: true };
+    },
+  );
 }

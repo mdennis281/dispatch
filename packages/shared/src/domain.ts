@@ -550,6 +550,19 @@ export type RunnerInstance = z.infer<typeof RunnerInstanceSchema>;
 export const TerminalStatusSchema = z.enum(["live", "exited"]);
 export type TerminalStatus = z.infer<typeof TerminalStatusSchema>;
 
+/** Who opened a shell — an agent via `mcp__manager__terminal`, or a human. */
+export const TerminalOriginSchema = z.enum(["agent", "ui"]);
+export type TerminalOrigin = z.infer<typeof TerminalOriginSchema>;
+
+/** One retained output line of a terminal transcript. */
+export const TerminalLineSchema = z.object({
+  /** `command` is the echoed input; the piped shell doesn't echo it itself. */
+  stream: z.enum(["command", "stdout", "stderr"]),
+  chunk: z.string(),
+  ts: z.number().int(),
+});
+export type TerminalLineRecord = z.infer<typeof TerminalLineSchema>;
+
 /**
  * A persistent, named shell whose cwd/env survive across commands — the agent's
  * `mcp__manager__terminal` sessions, visualized read-only in the UI. Keyed by
@@ -582,8 +595,59 @@ export const TerminalInfoSchema = z.object({
     .optional(),
   /** OS pid of the shell process (absent in tests / after exit). */
   pid: z.number().int().optional(),
+  /**
+   * Project the owning chat belongs to. A terminal has always BEEN in a project
+   * — its cwd is a worktree of one — but it never said so, which made "every
+   * shell in this project" a question the app could not answer.
+   */
+  projectId: z.string().optional(),
+  /** Who opened it: an agent through the MCP tool, or a human in the UI. */
+  origin: TerminalOriginSchema.optional(),
+  /** Last time output or a command touched this shell (drives `since` filters). */
+  lastActivityAt: z.number().int().optional(),
+  /** Retained line count / byte size of this shell's transcript. */
+  lines: z.number().int().optional(),
+  bytes: z.number().int().optional(),
+  /**
+   * True when the shell is only a RECORD — its transcript survived, but the
+   * process did not (a server restart, or a sweep that outlived the shell). You
+   * can still read it; you cannot run in it.
+   */
+  archived: z.boolean().optional(),
 });
 export type TerminalInfo = z.infer<typeof TerminalInfoSchema>;
+
+/**
+ * The persisted half of a terminal.
+ *
+ * Terminals used to live entirely in a `Map` — a restart lost every shell AND
+ * every transcript, so "what did that build actually print?" was answerable only
+ * while the process that ran it was still up. This is the row that outlives it;
+ * the output itself goes to `terminals/<logId>.jsonl`.
+ */
+export const TerminalRecordSchema = z.object({
+  /** `${chatId}::${name}` — the same key the live map uses. */
+  id: z.string(),
+  /**
+   * Filename-safe id for this terminal's JSONL transcript. Separate from `id`
+   * because `id` embeds an agent-chosen name that may contain anything at all,
+   * and `::` is not a legal Windows filename to begin with.
+   */
+  logId: z.string(),
+  chatId: z.string(),
+  projectId: z.string().optional(),
+  name: z.string(),
+  cwd: z.string(),
+  origin: TerminalOriginSchema,
+  lastCommand: z.string().optional(),
+  lastExitCode: z.number().int().nullable().optional(),
+  createdAt: z.number().int(),
+  updatedAt: z.number().int(),
+  lastActivityAt: z.number().int(),
+  lines: z.number().int().default(0),
+  bytes: z.number().int().default(0),
+});
+export type TerminalRecord = z.infer<typeof TerminalRecordSchema>;
 
 /* -------------------------------------------------- checkpoints / workflow */
 

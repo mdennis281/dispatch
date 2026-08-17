@@ -21,9 +21,11 @@
  *   runners.json                 — RunnerInstance[]
  *   checkpoints.json             — { [chatId]: { [messageId]: Checkpoint } }
  *   worktrees.json               — WorktreeRecord[] (attribution, keyed by path)
+ *   terminals.json               — TerminalRecord[] (shell roster)
+ *   terminals/<logId>.jsonl      — that shell's retained output
  *
- * `runners.json`, `checkpoints.json` and `worktrees.json` are whole-file
- * read-modify-write maps
+ * `runners.json`, `checkpoints.json`, `worktrees.json` and `terminals.json` are
+ * whole-file read-modify-write maps
  * guarded only by this process's {@link KeyedMutex}, so two processes sharing
  * them would silently lose each other's entries — that's the reason for the
  * split, and the reason chats stay per-instance even though sharing them would
@@ -58,6 +60,10 @@ import {
   type Checkpoint,
   WorktreeRecordSchema,
   type WorktreeRecord,
+  TerminalRecordSchema,
+  type TerminalRecord,
+  TerminalLineSchema,
+  type TerminalLineRecord,
   ShellTranscriptFilterSchema,
 } from "@dispatch/shared";
 import { HarnessSettingsSchema, UpdateChannelSchema } from "@dispatch/shared";
@@ -66,6 +72,7 @@ import {
   readJson,
   writeJsonAtomic,
   appendJsonl,
+  readJsonl,
   readJsonlLines,
 } from "./fsq.js";
 
@@ -271,6 +278,20 @@ export class Store {
   }
   private worktreesFile() {
     return join(this.dataDir, "worktrees.json");
+  }
+  private terminalsFile() {
+    return join(this.dataDir, "terminals.json");
+  }
+  private terminalLogsDir() {
+    return join(this.dataDir, "terminals");
+  }
+  /**
+   * A terminal's transcript. Keyed by `logId` rather than by the terminal's own
+   * id, which is `${chatId}::${agentChosenName}` — neither `::` nor an arbitrary
+   * agent-supplied string is a safe filename.
+   */
+  private terminalLogFile(logId: string) {
+    return join(this.terminalLogsDir(), `${logId}.jsonl`);
   }
   private settingsFile() {
     return join(this.configDir, "config.json");
@@ -766,6 +787,124 @@ export class Store {
       await writeJsonAtomic(this.worktreesFile(), list);
     });
     return result;
+  }
+
+  /* --------------------------------------------------------- terminals */
+
+  /**
+   * Terminal ROWS. The transcripts live beside them as JSONL (see
+   * {@link appendTerminalLines}) because output is high-volume and a whole-file
+   * rewrite per line would be absurd; the row is small and changes rarely.
+   */
+  async listTerminalRecords(): Promise<TerminalRecord[]> {
+    const raw = (await readJson<unknown[]>(this.terminalsFile())) ?? [];
+    return z.array(TerminalRecordSchema).parse(raw);
+  }
+  async saveTerminalRecord(rec: TerminalRecord): Promise<TerminalRecord> {
+    const validated = TerminalRecordSchema.parse(rec);
+    await this.mutex.run("terminals", async () => {
+      const raw = (await readJson<unknown[]>(this.terminalsFile())) ?? [];
+      const list = z.array(TerminalRecordSchema).parse(raw);
+      const idx = list.findIndex((t) => t.id === validated.id);
+      if (idx >= 0) list[idx] = validated;
+      else list.push(validated);
+      await writeJsonAtomic(this.terminalsFile(), list);
+    });
+    return validated;
+  }
+  /** Drop a row AND its transcript. Returns the row that was removed, if any. */
+  async deleteTerminalRecord(id: string): Promise<TerminalRecord | null> {
+    let removed: TerminalRecord | null = null;
+    await this.mutex.run("terminals", async () => {
+      const raw = (await readJson<unknown[]>(this.terminalsFile())) ?? [];
+      const list = z.array(TerminalRecordSchema).parse(raw);
+      removed = list.find((t) => t.id === id) ?? null;
+      if (!removed) return;
+      await writeJsonAtomic(
+        this.terminalsFile(),
+        list.filter((t) => t.id !== id),
+      );
+    });
+    if (removed) await this.deleteTerminalLog((removed as TerminalRecord).logId);
+    return removed;
+  }
+
+  /** Append output lines to a terminal's transcript. */
+  async appendTerminalLines(logId: string, lines: TerminalLineRecord[]): Promise<void> {
+    if (lines.length === 0) return;
+    await mkdir(this.terminalLogsDir(), { recursive: true });
+    await this.mutex.run(`terminal-log:${logId}`, async () => {
+      for (const line of lines) {
+        await appendJsonl(this.terminalLogFile(logId), line);
+      }
+    });
+  }
+
+  /**
+   * Read a transcript back, filtered.
+   *
+   * The filters are here rather than in the caller because this is also the
+   * programmatic read — `terminal_output({ grep, since })` and the Workspace
+   * view's search both land on it, and a `tail` that windows AFTER filtering is
+   * the only one that means "the last 50 lines that matched".
+   */
+  async readTerminalLines(
+    logId: string,
+    opts: {
+      tail?: number;
+      since?: number;
+      q?: string;
+      stream?: TerminalLineRecord["stream"];
+    } = {},
+  ): Promise<TerminalLineRecord[]> {
+    const raw = await readJsonl(this.terminalLogFile(logId));
+    let lines: TerminalLineRecord[] = [];
+    for (const row of raw) {
+      const parsed = TerminalLineSchema.safeParse(row);
+      if (parsed.success) lines.push(parsed.data);
+    }
+    if (opts.since !== undefined) lines = lines.filter((l) => l.ts >= opts.since!);
+    if (opts.stream) lines = lines.filter((l) => l.stream === opts.stream);
+    if (opts.q) {
+      const needle = opts.q.toLowerCase();
+      lines = lines.filter((l) => l.chunk.toLowerCase().includes(needle));
+    }
+    return opts.tail && opts.tail > 0 ? lines.slice(-opts.tail) : lines;
+  }
+
+  /**
+   * Drop transcript lines older than `cutoff`, returning what's left.
+   *
+   * A rewrite, not an append — which is why it belongs on the retention sweep
+   * and nowhere near the write path.
+   */
+  async pruneTerminalLog(
+    logId: string,
+    cutoff: number,
+  ): Promise<{ lines: number; bytes: number }> {
+    let kept: TerminalLineRecord[] = [];
+    await this.mutex.run(`terminal-log:${logId}`, async () => {
+      const file = this.terminalLogFile(logId);
+      if (!existsSync(file)) return;
+      const raw = await readJsonl(file);
+      for (const row of raw) {
+        const parsed = TerminalLineSchema.safeParse(row);
+        if (parsed.success && parsed.data.ts >= cutoff) kept.push(parsed.data);
+      }
+      if (kept.length === raw.length) return;
+      const body = kept.map((l) => `${JSON.stringify(l)}\n`).join("");
+      await fsWriteFile(file, body, "utf8");
+    });
+    return {
+      lines: kept.length,
+      bytes: kept.reduce((n, l) => n + l.chunk.length, 0),
+    };
+  }
+
+  async deleteTerminalLog(logId: string): Promise<void> {
+    await this.mutex.run(`terminal-log:${logId}`, () =>
+      rm(this.terminalLogFile(logId), { force: true }),
+    );
   }
 
   /* ------------------------------------------------------- checkpoints */

@@ -77,6 +77,7 @@ import {
   type ReviewDecision,
   type ReviewThread,
   type RegistryScope,
+  type TerminalInfo,
   type WorkflowMergeMethod,
   type WorktreeInfo,
 } from "@dispatch/shared";
@@ -209,7 +210,17 @@ export interface ManagerMcpTerminals {
     backgrounded?: boolean;
   }>;
   /** Recent output of a named shell — how a backgrounded command is read back. */
-  tail(args: { name: string; lines?: number }): { output: string; found: boolean };
+  tail(args: {
+    name: string;
+    lines?: number;
+    /** Substring filter; a watcher's tail is mostly noise without one. */
+    q?: string;
+    /** Only lines at/after this epoch-ms — "what's new since I last looked". */
+    since?: number;
+    stream?: "stdout" | "stderr";
+  }): Promise<{ output: string; found: boolean }>;
+  /** The shell roster, filtered — how an agent finds a terminal it has lost. */
+  list(args: { scope?: RegistryScope; q?: string }): TerminalInfo[];
 }
 
 /**
@@ -2584,28 +2595,75 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     "terminal_output",
     "Read the recent output of a named terminal — how you check on a command you " +
       "started with `terminal({ background: true })` (did the dev server come up? " +
-      "what did the watcher print?). Returns the tail of that shell's output.",
+      "what did the watcher print?). Returns the tail of that shell's output.\n" +
+      "Narrow it rather than reading 50 lines and hoping: `grep` for a substring, " +
+      "`since` for an epoch-ms watermark ('what's new since I last looked'), " +
+      "`stream: \"stderr\"` for errors only. Omit `name` to list this chat's " +
+      "terminals instead — including ones whose shell has exited, whose output is " +
+      "still readable.",
     {
-      name: z.string().describe("The terminal name to read."),
+      name: z
+        .string()
+        .optional()
+        .describe("The terminal name to read. Omit to list terminals instead."),
       lines: z
         .number()
         .optional()
         .describe("How many trailing lines to return (default 50)."),
+      grep: z.string().optional().describe("Only lines containing this substring."),
+      since: z
+        .number()
+        .optional()
+        .describe("Only lines at or after this epoch-ms timestamp."),
+      stream: z
+        .enum(["stdout", "stderr"])
+        .optional()
+        .describe("Restrict to one stream — 'stderr' to see just the errors."),
+      scope: z
+        .enum(["chat", "project", "all"])
+        .optional()
+        .describe("When listing: how wide. Default 'chat'."),
     },
     async (args): Promise<CallToolResult> => {
       if (!ctx.terminals) {
         return textResult("The terminal tool is not available in this session.", true);
       }
       const name = typeof args.name === "string" ? args.name.trim() : "";
-      if (!name) return textResult("terminal_output requires a non-empty name.", true);
-      const res = ctx.terminals.tail({
+      if (!name) {
+        const rows = ctx.terminals.list({ scope: args.scope, q: args.grep });
+        if (rows.length === 0) {
+          return textResult(`No terminals for scope '${args.scope ?? "chat"}'.`);
+        }
+        return textResult(
+          `${rows.length} terminal(s):\n${JSON.stringify(
+            rows.map((t) => ({
+              name: t.name,
+              chatId: t.chatId,
+              cwd: t.cwd,
+              status: t.status,
+              archived: t.archived,
+              busy: t.busy,
+              background: t.background?.command,
+              lastCommand: t.lastCommand,
+              lastExitCode: t.lastExitCode,
+              lines: t.lines,
+            })),
+            null,
+            2,
+          )}`,
+        );
+      }
+      const res = await ctx.terminals.tail({
         name,
         lines: typeof args.lines === "number" ? args.lines : undefined,
+        q: args.grep,
+        since: typeof args.since === "number" ? args.since : undefined,
+        stream: args.stream,
       });
       if (!res.found) {
         return textResult(`No terminal named '${name}' in this chat.`, true);
       }
-      return textResult(res.output ? `[${name}]\n${res.output}` : `[${name}] (no output yet)`);
+      return textResult(res.output ? `[${name}]\n${res.output}` : `[${name}] (no output matched)`);
     },
   );
 

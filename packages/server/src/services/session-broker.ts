@@ -4017,9 +4017,26 @@ export class SessionBroker {
         terminals: terminals
           ? {
               run: (a) =>
-                terminals.run({ chatId: session.chatId, cwd, ...a }),
+                terminals.run({
+                  chatId: session.chatId,
+                  projectId: session.projectId,
+                  origin: "agent",
+                  cwd,
+                  ...a,
+                }),
               tail: (a) =>
-                terminals.tail(session.chatId, a.name, a.lines),
+                terminals.tail(session.chatId, a.name, a.lines, {
+                  q: a.q,
+                  since: a.since,
+                  stream: a.stream,
+                }),
+              list: (a) =>
+                terminals.catalog({
+                  scope: a.scope ?? "chat",
+                  chatId: session.chatId,
+                  projectId: session.projectId,
+                  q: a.q,
+                }),
             }
           : undefined,
         // Bind the worktree catalog to this session's chat + project. `create`

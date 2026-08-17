@@ -297,6 +297,7 @@ describe("manager-mcp integration — terminal over a real TerminalService", () 
       terminals: {
         run: (a) => svc.run({ chatId: "c1", cwd: "C:\\start", ...a }),
         tail: (a) => svc.tail("c1", a.name, a.lines),
+        list: (a) => svc.catalog({ scope: a.scope ?? "chat", chatId: "c1", q: a.q }),
       },
     });
 

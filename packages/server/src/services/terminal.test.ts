@@ -1,8 +1,11 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
-import { win32 as pathWin32 } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, win32 as pathWin32 } from "node:path";
 import type { WsServerEvent } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
+import { Store } from "../store/index.js";
 import {
   TerminalService,
   type ShellProcess,
@@ -13,6 +16,16 @@ import {
 
 let bus: EventBus;
 let events: WsServerEvent[];
+/** Every service `makeService` built this test, so it can be torn down. */
+let liveServices: TerminalService[] = [];
+
+afterEach(async () => {
+  for (const svc of liveServices) {
+    await svc.flush().catch(() => {});
+    svc.dispose();
+  }
+  liveServices = [];
+});
 
 beforeEach(() => {
   bus = new EventBus();
@@ -140,6 +153,9 @@ function makeService(
     maxPerChat?: number;
     spawn?: SpawnShell;
     killTree?: (pid: number) => void;
+    store?: Store;
+    retentionMs?: number;
+    now?: () => number;
   } = {},
 ) {
   let n = 0;
@@ -149,8 +165,19 @@ function makeService(
   const svc = new TerminalService({
     bus,
     maxPerChat: over.maxPerChat,
-    deps: { spawn, genId: () => `t${++n}`, now: () => 1000, killTree: over.killTree },
+    store: over.store,
+    retentionMs: over.retentionMs,
+    deps: {
+      spawn,
+      genId: () => `t${++n}`,
+      now: over.now ?? (() => 1000),
+      killTree: over.killTree,
+    },
   });
+  // Tracked so `afterEach` can stop the write-behind timer. Left running, it
+  // keeps writing into the temp dir the next `rm` is trying to delete — which
+  // surfaces as a bare ENOTEMPTY with no hint of where it came from.
+  liveServices.push(svc);
   return { svc, shells };
 }
 
@@ -430,14 +457,14 @@ describe("TerminalService — background commands", () => {
       cwd: "C:\\repo",
       background: true,
     });
-    const tail = svc.tail("c1", "server");
+    const tail = await svc.tail("c1", "server");
     expect(tail.found).toBe(true);
     expect(tail.output).toContain("listening on 47820");
   });
 
-  it("tail reports a name that was never opened", () => {
+  it("tail reports a name that was never opened", async () => {
     const { svc } = makeService();
-    expect(svc.tail("c1", "nope")).toEqual({ output: "", found: false });
+    expect(await svc.tail("c1", "nope")).toEqual({ output: "", found: false });
   });
 
   it("refuses a second command on a shell a background one holds", async () => {
@@ -572,5 +599,173 @@ describe("TerminalService — livePids", () => {
     const { svc } = makeService();
     svc.create("c1", "server", "C:\\repo");
     expect(svc.livePids()).toEqual([]);
+  });
+});
+
+/* ------------------------------------------------- durability + retention */
+
+describe("TerminalService — durable roster and transcripts", () => {
+  let dir: string;
+  let store: Store;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "cm-term-"));
+    store = new Store(dir);
+    await store.init();
+  });
+  afterEach(async () => {
+    // Stop the write-behind timers BEFORE removing the dir they write into —
+    // hooks unwind innermost-first, so this cannot be left to the file-level one.
+    for (const svc of liveServices) {
+      await svc.flush().catch(() => {});
+      svc.dispose();
+    }
+    liveServices = [];
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("persists the row and the transcript, and outlives the process that ran it", async () => {
+    const { svc } = makeService({ store });
+    await svc.run({
+      chatId: "c1",
+      projectId: "p1",
+      origin: "agent",
+      name: "build",
+      command: "printout compiled 3 files",
+      cwd: "C:\\repo",
+    });
+    await svc.flush();
+
+    const [rec] = await store.listTerminalRecords();
+    expect(rec).toMatchObject({
+      id: "c1::build",
+      chatId: "c1",
+      projectId: "p1",
+      origin: "agent",
+      name: "build",
+      lastCommand: "printout compiled 3 files",
+    });
+    expect(await store.readTerminalLines(rec!.logId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ stream: "command", chunk: "printout compiled 3 files" }),
+        expect.objectContaining({ stream: "stdout", chunk: "compiled 3 files" }),
+      ]),
+    );
+
+    // A brand-new service (as after a restart) adopts the row as archived, and
+    // the transcript is still readable even though the shell is long gone.
+    const { svc: restarted } = makeService({ store });
+    await restarted.reconcile();
+    const listed = restarted.catalog({ scope: "chat", chatId: "c1" });
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({ name: "build", status: "exited", archived: true });
+    const back = await restarted.scrollback("c1::build");
+    expect(back.map((l) => l.chunk)).toContain("compiled 3 files");
+  });
+
+  it("keeps the transcript when a shell is killed, and drops it on purge", async () => {
+    const { svc } = makeService({ store });
+    await svc.run({ chatId: "c1", name: "build", command: "printout hi", cwd: "C:\\repo" });
+    await svc.flush();
+
+    svc.kill("c1::build");
+    await new Promise((r) => setImmediate(r));
+    expect(svc.catalog({ scope: "chat", chatId: "c1" })[0]).toMatchObject({
+      archived: true,
+    });
+    expect((await svc.scrollback("c1::build")).map((l) => l.chunk)).toContain("hi");
+
+    await svc.purge("c1::build");
+    expect(svc.catalog({ scope: "chat", chatId: "c1" })).toEqual([]);
+    expect(await store.listTerminalRecords()).toEqual([]);
+  });
+
+  it("re-opening an archived name continues the SAME transcript", async () => {
+    const { svc } = makeService({ store });
+    await svc.run({ chatId: "c1", name: "build", command: "printout before", cwd: "C:\\repo" });
+    await svc.flush();
+    svc.kill("c1::build");
+    await new Promise((r) => setImmediate(r));
+
+    await svc.run({ chatId: "c1", name: "build", command: "printout after", cwd: "C:\\repo" });
+    await svc.flush();
+
+    const [rec] = await store.listTerminalRecords();
+    const chunks = (await store.readTerminalLines(rec!.logId)).map((l) => l.chunk);
+    expect(chunks).toContain("before");
+    expect(chunks).toContain("after");
+  });
+
+  it("the sweep prunes aged output and drops rows nothing is left of", async () => {
+    let clock = 1_000;
+    const { svc } = makeService({
+      store,
+      retentionMs: 60_000,
+      now: () => clock,
+    });
+    await svc.run({ chatId: "c1", name: "build", command: "printout old line", cwd: "C:\\repo" });
+    await svc.flush();
+    svc.kill("c1::build");
+    await new Promise((r) => setImmediate(r));
+
+    // Inside the window: nothing goes.
+    clock = 30_000;
+    expect(await svc.sweep(clock)).toMatchObject({ dropped: 0 });
+    expect(svc.catalog({ scope: "all" })).toHaveLength(1);
+
+    // Past it: the row and its transcript go together.
+    clock = 200_000;
+    expect((await svc.sweep(clock)).dropped).toBe(1);
+    expect(svc.catalog({ scope: "all" })).toEqual([]);
+    expect(await store.listTerminalRecords()).toEqual([]);
+  });
+
+  it("a LIVE shell is never swept out from under its owner", async () => {
+    let clock = 1_000;
+    const { svc } = makeService({ store, retentionMs: 60_000, now: () => clock });
+    await svc.run({
+      chatId: "c1",
+      name: "server",
+      command: "serve listening",
+      cwd: "C:\\repo",
+      background: true,
+    });
+    await svc.flush();
+
+    clock = 10_000_000;
+    await svc.sweep(clock);
+    expect(svc.catalog({ scope: "all" }).map((t) => t.status)).toEqual(["live"]);
+  });
+
+  it("catalog and tail apply the shared filters", async () => {
+    const { svc } = makeService({ store });
+    await svc.run({
+      chatId: "c1",
+      projectId: "p1",
+      name: "build",
+      command: "printout compiled\nprinterr warning: deprecated",
+      cwd: "C:\\repo",
+    });
+    await svc.run({
+      chatId: "c2",
+      projectId: "p2",
+      name: "test",
+      command: "printout tested",
+      cwd: "C:\\other",
+    });
+
+    expect(svc.catalog({ scope: "chat", chatId: "c1" }).map((t) => t.name)).toEqual(["build"]);
+    expect(svc.catalog({ scope: "project", projectId: "p2" }).map((t) => t.name)).toEqual([
+      "test",
+    ]);
+    expect(svc.catalog({ scope: "all" })).toHaveLength(2);
+    expect(svc.catalog({ scope: "all", q: "other" }).map((t) => t.name)).toEqual(["test"]);
+
+    // stderr-only is the filter that matters: "did it print an error" shouldn't
+    // cost a turn of reading 50 lines of build chatter.
+    const errs = await svc.tail("c1", "build", 50, { stream: "stderr" });
+    expect(errs.output).toBe("warning: deprecated");
+    const grepped = await svc.tail("c1", "build", 50, { q: "compil" });
+    expect(grepped.output).toBe("compiled");
   });
 });

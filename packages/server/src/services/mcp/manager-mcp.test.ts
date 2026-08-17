@@ -2296,7 +2296,8 @@ describe("manager-mcp — terminal", () => {
           calls.push({ name, command });
           return { output: "build ok", exitCode: 0, cwd: "C:\\repo" };
         },
-        tail: () => ({ output: "", found: false }),
+        tail: async () => ({ output: "", found: false }),
+        list: () => [],
       },
     });
 
@@ -2321,7 +2322,8 @@ describe("manager-mcp — terminal", () => {
           cwd: "",
           error: "Terminal cap reached (8 shells for this chat).",
         }),
-        tail: () => ({ output: "", found: false }),
+        tail: async () => ({ output: "", found: false }),
+        list: () => [],
       },
     });
     const res = await terminal.handler({ name: "x", command: "ls", timeoutMs: undefined, background: undefined }, {});
@@ -2343,7 +2345,8 @@ describe("manager-mcp — terminal", () => {
       broker: fakeBroker({}),
       terminals: {
         run: async () => ({ output: "", exitCode: 0, cwd: "" }),
-        tail: () => ({ output: "", found: false }),
+        tail: async () => ({ output: "", found: false }),
+        list: () => [],
       },
     });
     const res = await terminal.handler({ name: "x", command: "   ", timeoutMs: undefined, background: undefined }, {});

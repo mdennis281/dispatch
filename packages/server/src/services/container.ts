@@ -166,8 +166,15 @@ export function createServices(
   // and unit tests (which inject their own broker) are untouched.
   const brokerDeps =
     process.env.DISPATCH_FAKE_SDK === "1" ? { query: makeFakeQuery() } : undefined;
+  /** Retention sweep handle, armed in `start()` and cleared in `dispose()`. */
+  let terminalSweep: ReturnType<typeof setInterval> | undefined;
+  // How often the terminal retention sweep runs. Hourly: the window it enforces
+  // is measured in days, so anything tighter is just disk churn.
+  const TERMINAL_SWEEP_MS = 60 * 60_000;
   // Persistent named shells exposed to sessions as `mcp__manager__terminal`.
-  const terminals = overrides.terminals ?? new TerminalService({ bus });
+  // The store makes them durable: the roster and each shell's transcript survive
+  // a restart, so "what did that build print?" outlives the process that ran it.
+  const terminals = overrides.terminals ?? new TerminalService({ bus, store });
   // Self-contained `.dispatch/` project config: discovers + validates the
   // authored config in a managed repo, syncs it into the project store (authored
   // overrides `.data`), and watches it for live reload. Projects without a
@@ -539,6 +546,20 @@ export function createServices(
       } catch {
         /* a missing runners.json / dead pid probe must never block boot */
       }
+
+      // Adopt the persisted terminal roster (as archived — this process owns no
+      // shells yet) and start the retention sweep. `unref` so a timer can never
+      // be the reason the process won't exit.
+      try {
+        await terminals.reconcile();
+        await terminals.sweep();
+      } catch {
+        /* an unreadable terminals.json must never block boot either */
+      }
+      terminalSweep = setInterval(() => {
+        void terminals.sweep().catch(() => {});
+      }, TERMINAL_SWEEP_MS);
+      terminalSweep.unref?.();
     },
 
     async dispose(): Promise<void> {
@@ -573,7 +594,12 @@ export function createServices(
       await runner.stopAll().catch(() => {});
       await broker.dispose().catch(() => {});
       await harnesses.dispose().catch(() => {});
-      // Kill any lingering persistent shells after the broker unwinds.
+      if (terminalSweep) clearInterval(terminalSweep);
+      terminalSweep = undefined;
+      // Kill any lingering persistent shells after the broker unwinds. Flush
+      // their queued output FIRST — the tail of a transcript is usually the part
+      // that explains why anyone is reading it.
+      await terminals.flush().catch(() => {});
       terminals.dispose();
     },
   };
