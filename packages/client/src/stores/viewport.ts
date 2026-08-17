@@ -204,6 +204,16 @@ export function startViewportTracking(): () => void {
   // the screen.
   let maxWidth = window.innerWidth;
   let maxInnerHeight = 0;
+  // Cached: `apply` runs every frame for 600ms after each focus change, and a
+  // `querySelector` per frame is a real cost paid by every user for a number
+  // only the debug readout reads. `isConnected` is the re-lookup trigger — the
+  // shell unmounts and remounts across an auth gate, and a stale detached node
+  // measures 0 forever.
+  let shellEl: Element | null = null;
+  const shellRect = (): number => {
+    if (!shellEl?.isConnected) shellEl = document.querySelector("[data-cm-shell]");
+    return shellEl ? Math.round(shellEl.getBoundingClientRect().bottom) : 0;
+  };
 
   const apply = () => {
     // Cancel rather than just forget: the burst loop calls `apply` directly, so
@@ -277,9 +287,7 @@ export function startViewportTracking(): () => void {
         shell: vh || dvh || innerHeight,
         // Read, not derived — see `shellBottom`. Absent element (first frame,
         // or a test that never mounts App) reports 0 rather than a fake edge.
-        shellBottom: Math.round(
-          document.querySelector("[data-cm-shell]")?.getBoundingClientRect().bottom ?? 0,
-        ),
+        shellBottom: shellRect(),
         screenHeight: window.screen.height,
       },
       maxInnerHeight,
