@@ -405,7 +405,62 @@ function Toolbar({
   );
 }
 
+/**
+ * Breadcrumbs, or — on ⌘/Ctrl-L, or a click on the empty space beside them — an
+ * editable path.
+ *
+ * Crumbs only walk UP. Getting to a path you already know (one you copied from a
+ * terminal, or an error message) means clicking down through six folders, and
+ * every file manager solves that with the same shortcut. This is also the answer
+ * for a location with no crumb at all: a UNC share, or a drive that isn't in the
+ * Places list.
+ */
 function Breadcrumbs({ browser }: { browser: ReturnType<typeof useFsBrowser> }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const begin = useCallback(() => {
+    setDraft(browser.cwd);
+    setEditing(true);
+  }, [browser.cwd]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "l" || e.key === "L")) {
+        e.preventDefault();
+        begin();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [begin]);
+
+  if (editing) {
+    return (
+      <div className="px-3 py-1.5 cm-hairline-b">
+        <TextInput
+          mono
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => setEditing(false)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              browser.navigate(draft);
+              setEditing(false);
+            } else if (e.key === "Escape") {
+              // Stop it before a parent dialog sees it — Escape here means
+              // "never mind the path", not "close the app's overlay".
+              e.stopPropagation();
+              setEditing(false);
+            }
+          }}
+          placeholder="Type or paste a path, then Enter"
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="cm-scroll flex items-center gap-0.5 overflow-x-auto px-3 py-1.5 cm-hairline-b">
       {browser.crumbs.map((crumb, i) => (
@@ -423,18 +478,50 @@ function Breadcrumbs({ browser }: { browser: ReturnType<typeof useFsBrowser> }) 
           </Button>
         </span>
       ))}
+      {/* The dead space after the last crumb is the click target every file
+          manager uses to get an editable path. */}
+      <div
+        className="h-6 min-w-[3rem] flex-1 cursor-text"
+        onClick={begin}
+        title="Edit path (Ctrl+L)"
+      />
     </div>
   );
 }
 
 /* -------------------------------------------------------------------- table */
 
-const COLUMNS: Array<{ key: FsSortKey; label: string; className: string }> = [
-  { key: "name", label: "Name", className: "min-w-0 flex-1" },
-  { key: "size", label: "Size", className: "w-[9ch] text-right" },
-  { key: "modified", label: "Modified", className: "hidden w-[14ch] lg:block" },
-  { key: "created", label: "Created", className: "hidden w-[14ch] xl:block" },
+/**
+ * One width and one alignment per column, shared by the header and the cells —
+ * they are declared together because a header that doesn't sit over its own
+ * column is worse than no header at all, and two separate class strings drift
+ * the moment either is touched.
+ *
+ * `lg:flex`, not `lg:block`: the header cell is a `Button`, which is
+ * `inline-flex`. Un-hiding it as `block` overrides that and collapses the
+ * label-plus-sort-arrow layout — which is exactly how these ended up sitting
+ * beside their columns instead of above them.
+ */
+const COLUMNS: Array<{ key: FsSortKey; label: string; cell: string; head: string }> = [
+  { key: "name", label: "Name", cell: "min-w-0 flex-1", head: "min-w-0 flex-1 justify-start" },
+  { key: "size", label: "Size", cell: "w-[9ch] text-right", head: "w-[9ch] justify-end" },
+  {
+    key: "modified",
+    label: "Modified",
+    cell: "hidden w-[14ch] lg:block",
+    head: "hidden w-[14ch] justify-start lg:flex",
+  },
+  {
+    key: "created",
+    label: "Created",
+    cell: "hidden w-[14ch] xl:block",
+    head: "hidden w-[14ch] justify-start xl:flex",
+  },
 ];
+
+/** The width/alignment a cell must use to sit under its own header. */
+const cellClass = (key: FsSortKey): string =>
+  COLUMNS.find((c) => c.key === key)?.cell ?? "";
 
 function ColumnHeader({ browser }: { browser: ReturnType<typeof useFsBrowser> }) {
   // Search results carry the server's ranking, and re-sorting would throw away
@@ -455,8 +542,8 @@ function ColumnHeader({ browser }: { browser: ReturnType<typeof useFsBrowser> })
             ) : undefined
           }
           className={cn(
-            "!h-5 !justify-start !px-0 !text-2xs !font-medium uppercase tracking-wide",
-            col.className,
+            "!h-5 !px-0 !text-2xs !font-medium uppercase tracking-wide",
+            col.head,
             browser.sort.key === col.key && !searching ? "text-secondary" : "text-faint",
           )}
         >
@@ -548,13 +635,15 @@ function FileTable({
                 </span>
               )}
             </span>
-            <span className="w-[9ch] shrink-0 text-right cm-mono text-2xs text-faint">
+            {/* Widths come from COLUMNS so a cell cannot drift out from under
+                its own header. */}
+            <span className={cn(cellClass("size"), "shrink-0 cm-mono text-2xs text-faint")}>
               {isDir ? "—" : formatBytes(entry.size)}
             </span>
-            <span className="hidden w-[14ch] shrink-0 cm-mono text-2xs text-faint lg:block">
+            <span className={cn(cellClass("modified"), "shrink-0 cm-mono text-2xs text-faint")}>
               {formatStamp(entry.modifiedAt)}
             </span>
-            <span className="hidden w-[14ch] shrink-0 cm-mono text-2xs text-faint xl:block">
+            <span className={cn(cellClass("created"), "shrink-0 cm-mono text-2xs text-faint")}>
               {formatStamp(entry.createdAt)}
             </span>
           </div>

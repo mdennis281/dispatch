@@ -32,6 +32,7 @@ import {
   Check,
   FileCog,
   FolderGit2,
+  FolderOpen,
   FolderPlus,
   Info,
   Plus,
@@ -54,6 +55,7 @@ import { Spinner } from "../ui/Spinner.js";
 import { WorkflowProfilePicker } from "../config/WorkflowProfilePicker.js";
 import { TaskLauncher } from "../tasks/TaskLauncher.js";
 import { ManifestPreview } from "./ManifestPreview.js";
+import { pickOnePath } from "../files/filePicker.js";
 import { api, type PathProbe } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
 import { useProjects } from "../../stores/projects.js";
@@ -423,17 +425,42 @@ export function NewProjectView() {
                   required
                   hint={draft.touched.repoPath ? "edited" : "auto"}
                 >
-                  <TextInput
-                    mono
-                    value={draft.repoPath}
-                    onChange={(e) =>
-                      patch({
-                        repoPath: e.target.value,
-                        touched: { ...draft.touched, repoPath: true },
-                      })
-                    }
-                    placeholder={projectsRoot ? `${projectsRoot}/acme-billing` : "…/acme-billing"}
-                  />
+                  {/* Typing an absolute path from memory is the one step of this
+                      form with no feedback until you get it wrong, and the OS
+                      file dialog can't help — it hands a web page a basename,
+                      never a path. Browse is the server-side picker. */}
+                  <div className="flex gap-1.5">
+                    <TextInput
+                      mono
+                      className="min-w-0 flex-1"
+                      value={draft.repoPath}
+                      onChange={(e) =>
+                        patch({
+                          repoPath: e.target.value,
+                          touched: { ...draft.touched, repoPath: true },
+                        })
+                      }
+                      placeholder={projectsRoot ? `${projectsRoot}/acme-billing` : "…/acme-billing"}
+                    />
+                    <Button
+                      size="md"
+                      leftIcon={<FolderOpen />}
+                      onClick={async () => {
+                        const picked = await pickOnePath({
+                          select: "directory",
+                          title: "Choose the project directory",
+                          // Open where the path already points, else where this
+                          // human keeps their projects.
+                          initialPath: draft.repoPath.trim() || projectsRoot || undefined,
+                        });
+                        if (picked) {
+                          patch({ repoPath: picked, touched: { ...draft.touched, repoPath: true } });
+                        }
+                      }}
+                    >
+                      Browse
+                    </Button>
+                  </div>
                 </Field>
 
                 {draft.repoPath.trim() && (

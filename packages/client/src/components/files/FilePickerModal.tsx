@@ -82,6 +82,22 @@ function FilePickerModal() {
       ?.scrollIntoView({ block: "nearest" });
   }, [browser.cursor]);
 
+  // Past every hook, so the early return below is safe.
+  if (!request || !filter) return null;
+
+  const heading = request.title ?? describeFilter(filter);
+  /**
+   * With nothing picked, a folder picker answers with the folder you're IN.
+   *
+   * This is what every OS folder dialog does, and without it choosing
+   * `C:/Users/me/projects` means navigating to its PARENT and clicking it —
+   * i.e. leaving the place you already are to point at it from outside. Files
+   * get no equivalent: there is no "current file" to fall back to.
+   */
+  const canPickCwd = filter.select !== "file" && !browser.selected.length && !!browser.cwd;
+  const canSelect = browser.selected.length > 0 || canPickCwd;
+  const commit = () => (canPickCwd ? settle?.([browser.cwd]) : browser.commit());
+
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();
@@ -104,7 +120,7 @@ function FilePickerModal() {
       // one key doing the two things the mouse does with a double-click and the
       // Select button, which is what makes the whole flow keyboard-only.
       if (at) browser.activate(at);
-      else if (browser.selected.length) browser.commit();
+      else if (canSelect) commit();
     } else if (e.key === "Backspace" && !browser.query) {
       // Only when the search box is empty — otherwise this eats the character
       // the user was trying to delete.
@@ -112,11 +128,6 @@ function FilePickerModal() {
       browser.up();
     }
   };
-
-  if (!request || !filter) return null;
-
-  const canSelect = browser.selected.length > 0;
-  const heading = request.title ?? describeFilter(filter);
 
   return createPortal(
     <div
@@ -137,7 +148,11 @@ function FilePickerModal() {
           "border border-line-strong bg-overlay/98 backdrop-blur-md shadow-[var(--shadow-pop)] cm-anim-rise"
         }
       >
-        <header className="flex items-center gap-2.5 px-4 py-3 cm-hairline-b">
+        {/* Every row outside the list is `shrink-0`. A flex child's default is
+            `shrink: 1`, so a tall listing squeezed the header, the roots strip
+            and the nav row — the chips lost half their height and the footer
+            crept up. Only the list may give ground. */}
+        <header className="flex shrink-0 items-center gap-2.5 px-4 py-3 cm-hairline-b">
           <div className="min-w-0 flex-1">
             <h2 className="truncate text-base font-semibold text-primary">{heading}</h2>
             <p className="mt-px truncate text-xs text-muted cm-mono">{browser.cwd || "…"}</p>
@@ -151,7 +166,7 @@ function FilePickerModal() {
             the picker is 620px wide and a column of drives would cost a third of
             it to show something you click once. */}
         {roots.length > 0 && (
-          <div className="cm-scroll flex gap-1 overflow-x-auto px-3 py-2 cm-hairline-b">
+          <div className="cm-scroll flex shrink-0 gap-1 overflow-x-auto px-3 py-2 cm-hairline-b">
             {roots.map((root) => {
               const Icon = rootIcon(root);
               return (
@@ -175,7 +190,7 @@ function FilePickerModal() {
         )}
 
         {/* Nav + search */}
-        <div className="flex items-center gap-1.5 px-3 py-2 cm-hairline-b [&_svg]:size-4">
+        <div className="flex shrink-0 items-center gap-1.5 px-3 py-2 cm-hairline-b [&_svg]:size-4">
           <IconButton tip="Back" onClick={browser.back} disabled={!browser.canGoBack}>
             <ArrowLeft />
           </IconButton>
@@ -213,7 +228,7 @@ function FilePickerModal() {
           <EntryList browser={browser} />
         </div>
 
-        <footer className="flex items-center gap-2 px-3.5 py-2.5 cm-hairline-t">
+        <footer className="flex shrink-0 items-center gap-2 px-3.5 py-2.5 cm-hairline-t">
           <span className="min-w-0 flex-1 truncate text-xs text-muted">
             {browser.selected.length > 1
               ? `${browser.selected.length} selected`
@@ -228,8 +243,14 @@ function FilePickerModal() {
           <Button variant="ghost" onClick={cancel}>
             Cancel
           </Button>
-          <Button variant="primary" disabled={!canSelect} onClick={browser.commit}>
-            Select{browser.selected.length > 1 ? ` (${browser.selected.length})` : ""}
+          <Button variant="primary" disabled={!canSelect} onClick={commit}>
+            {/* The label says WHICH thing is about to be returned, because
+                "Select" beside an empty selection reads as a broken button. */}
+            {canPickCwd
+              ? "Select this folder"
+              : browser.selected.length > 1
+                ? `Select (${browser.selected.length})`
+                : "Select"}
           </Button>
         </footer>
       </div>
@@ -335,7 +356,9 @@ function Row({
       {!isDir && (
         <span className="shrink-0 cm-mono text-2xs text-faint">{formatBytes(entry.size)}</span>
       )}
-      <span className="hidden w-[7ch] shrink-0 text-right cm-mono text-2xs text-faint sm:block">
+      {/* `nowrap` + enough width for "Jun 17, 2023": an older file's date wrapped
+          onto two lines and made its row taller than every other one. */}
+      <span className="hidden w-[10ch] shrink-0 whitespace-nowrap text-right cm-mono text-2xs text-faint sm:block">
         {formatStamp(entry.modifiedAt)}
       </span>
       {isDir ? (

@@ -877,6 +877,23 @@ describe("search", () => {
     expect(hits).toHaveLength(2);
   });
 
+  it("stops early on a broad query but still returns the shallowest matches", async () => {
+    // A broad query over a big tree used to spend the whole time budget finding
+    // its ten-thousandth match to then discard all but a page of them. The walk
+    // is breadth-first and the ranking prefers short paths, so the early-stopped
+    // result is the same top slice — which is what this pins.
+    const deep = join(dir, "a", "b", "c", "d");
+    await mkdir(deep, { recursive: true });
+    await writeFile(join(dir, "match-shallow.txt"), "");
+    await Promise.all(
+      Array.from({ length: 60 }, (_, i) => writeFile(join(deep, `match-deep-${i}.txt`), "")),
+    );
+    const hits = await svc().search(wire, "match", { limit: 3 });
+    expect(hits).toHaveLength(3);
+    // The one at the root outranks sixty buried four levels down.
+    expect(hits[0].name).toBe("match-shallow.txt");
+  });
+
   it("returns an empty list rather than throwing on a missing root", async () => {
     // A stale bookmark shouldn't 500; the UI just shows no matches.
     expect(await svc().search(`${wire}/gone`, "x")).toEqual([]);

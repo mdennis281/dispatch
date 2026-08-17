@@ -624,8 +624,15 @@ export function CommandPalette({
             </Kbd>
             run
           </span>
+          {/* "commands" stopped being true once files joined the list, and a
+              count that names the wrong thing is how you conclude the file
+              search isn't running when it is. */}
           <span className="ml-auto cm-mono">
-            {results.length} command{results.length === 1 ? "" : "s"}
+            {fileCommands.length > 0
+              ? `${results.length - fileCommands.length} command${
+                  results.length - fileCommands.length === 1 ? "" : "s"
+                } · ${fileCommands.length} file${fileCommands.length === 1 ? "" : "s"}`
+              : `${results.length} command${results.length === 1 ? "" : "s"}`}
           </span>
         </div>
       </div>
