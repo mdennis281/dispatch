@@ -340,6 +340,29 @@ describe("WorktreeService on a real temp repo", () => {
     expect(diff.deletions).toBe(0);
   });
 
+  it("reads the diff's base side at the merge-base, not at the base ref's tip", async () => {
+    const info = await svc.create(project(), "feat/viewer", {
+      base: "main",
+      noFetch: true,
+    });
+    // Same stale-base scenario as the diff test above, but this is the side the
+    // Monaco viewer renders: read at main's TIP it would show main's rewrite as
+    // the branch's own deletion, disagreeing with the (empty) changed-file list.
+    await writeFile(join(repo, "keep.txt"), "one\ntwo\nthree\nFOUR-ON-MAIN\n");
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-m", "advance main");
+
+    const forked = await svc.readFile(info.path, "keep.txt", {
+      ref: "main",
+      mergeBase: true,
+    });
+    expect(forked.content).toBe("one\ntwo\nthree\n");
+
+    // Without the flag the exact rev is still honoured — other callers rely on it.
+    const tip = await svc.readFile(info.path, "keep.txt", { ref: "main" });
+    expect(tip.content).toBe("one\ntwo\nthree\nFOUR-ON-MAIN\n");
+  });
+
   it("links the worktree onto its owning chat when a Store is provided", async () => {
     const store = new Store(join(root, "data"));
     await store.init();

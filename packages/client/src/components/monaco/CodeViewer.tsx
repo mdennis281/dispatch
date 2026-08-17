@@ -96,7 +96,11 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
     setOriginal(null);
     Promise.all([
       readWorktreeFile(worktreePath, relPath),
-      readWorktreeFile(worktreePath, relPath, base).catch(() => ({
+      // `true` = read the base side at the fork point, not at `base`'s tip.
+      // Otherwise a branch cut before `main` moved shows every commit that
+      // landed since as its own deletion — hunks it never made, on files the
+      // worktree panel's list (which is merge-base'd) doesn't even mention.
+      readWorktreeFile(worktreePath, relPath, base, true).catch(() => ({
         ...EMPTY_FILE,
         path: relPath,
         ref: base,
