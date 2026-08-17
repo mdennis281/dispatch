@@ -10,6 +10,8 @@ import { isPrSettledIdle } from "@dispatch/shared";
 import {
   SessionBroker,
   EFFORT_THINKING_TOKENS,
+  makePrCreateBinding,
+  makeRepoResolver,
   statusForTool,
   type QueryFn,
 } from "./session-broker.js";
@@ -2513,5 +2515,131 @@ describe("SessionBroker — settled PRs", () => {
     const stored = await store.getChat("c1");
     expect(stored?.lastUserMessageAt).toBeGreaterThan(500);
     expect(isPrSettledIdle(stored!)).toBe(false);
+  });
+});
+
+/**
+ * `resolveRepo` shells out to `gh repo view`, so it fails for reasons that say
+ * nothing about this checkout — a GitHub outage, a dropped network, an expired
+ * token. The binding memoises the answer, and it used to memoise those too.
+ *
+ * That is what happened on 2026-08-17: GitHub's GraphQL API returned 503 while a
+ * chat was open, the binding cached `null`, and every `create_pr` for the rest of
+ * that session refused with "could not resolve this chat's repo or branch" —
+ * hours after GitHub had recovered. It could not discover it was wrong, because
+ * a cached answer never asks again.
+ */
+describe("makeRepoResolver", () => {
+  /**
+   * Matches `GitHubService.resolveRepo(cwd: string)` rather than taking no
+   * arguments: a stub with a looser signature than the thing it stands in for
+   * still passes when the caller stops passing `cwd` at all, which is precisely
+   * the regression that would make every resolve fail on a real service.
+   */
+  function fakeGitHub(resolveRepo: (cwd: string) => Promise<string>) {
+    return { resolveRepo } as unknown as Parameters<typeof makeRepoResolver>[0];
+  }
+
+  it("retries after a failure instead of answering null for the rest of the session", async () => {
+    const seen: string[] = [];
+    const repoFor = makeRepoResolver(
+      fakeGitHub(async (cwd) => {
+        seen.push(cwd);
+        // The outage, then the recovery.
+        if (seen.length === 1) throw new Error("HTTP 503: No server is currently available");
+        return "mdennis281/dispatch";
+      }),
+      "/repo",
+    );
+
+    expect(await repoFor()).toBeNull();
+    // The whole point: the second call goes back to `gh` rather than replaying
+    // the 503, so the tools work again the moment GitHub is back.
+    expect(await repoFor()).toBe("mdennis281/dispatch");
+    expect(seen).toEqual(["/repo", "/repo"]);
+  });
+
+  it("still resolves only once when it succeeds", async () => {
+    let calls = 0;
+    const repoFor = makeRepoResolver(
+      fakeGitHub(async () => {
+        calls += 1;
+        return "mdennis281/dispatch";
+      }),
+      "/repo",
+    );
+
+    await repoFor();
+    await repoFor();
+    await repoFor();
+    expect(calls).toBe(1);
+  });
+
+  it("shares one in-flight resolve between concurrent callers", async () => {
+    let calls = 0;
+    let release: (v: string) => void = () => {};
+    const repoFor = makeRepoResolver(
+      fakeGitHub(() => {
+        calls += 1;
+        return new Promise<string>((ok) => (release = ok));
+      }),
+      "/repo",
+    );
+
+    const both = Promise.all([repoFor(), repoFor()]);
+    release("mdennis281/dispatch");
+    expect(await both).toEqual(["mdennis281/dispatch", "mdennis281/dispatch"]);
+    // One `gh` for two callers — the memo still has to do its actual job.
+    expect(calls).toBe(1);
+  });
+
+  it("prefers an explicit override and never shells out for it", async () => {
+    let calls = 0;
+    const repoFor = makeRepoResolver(
+      fakeGitHub(async () => {
+        calls += 1;
+        return "resolved/from-cwd";
+      }),
+      "/repo",
+    );
+
+    expect(await repoFor("someone/else")).toBe("someone/else");
+    expect(calls).toBe(0);
+  });
+});
+
+/**
+ * The binding-level half: proving `create_pr`'s preflight actually recovers, not
+ * just that the helper it delegates to does. This is the path that spent an
+ * afternoon refusing PRs.
+ */
+describe("makePrCreateBinding — repo resolution", () => {
+  it("opens the PR on the next call once GitHub comes back", async () => {
+    let calls = 0;
+    const github = {
+      resolveRepo: async (_cwd: string) => {
+        calls += 1;
+        if (calls === 1) throw new Error("HTTP 503: No server is currently available");
+        return "mdennis281/dispatch";
+      },
+      sameRepository: async () => true,
+      prCreatePreflight: async () => ({
+        branch: "feat/x",
+        trunk: "main",
+        base: "main",
+        aheadOfBase: 1,
+        dirty: false,
+        existing: null,
+      }),
+    } as unknown as Parameters<typeof makePrCreateBinding>[0];
+
+    const binding = makePrCreateBinding(github, "/repo", "c1", {
+      trunk: "main",
+      reviewers: [],
+      draft: false,
+    });
+
+    expect(await binding.preflight()).toBeNull();
+    expect(await binding.preflight()).toMatchObject({ branch: "feat/x" });
   });
 });

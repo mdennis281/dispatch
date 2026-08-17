@@ -297,6 +297,47 @@ export function buildManagerToolsDirective(caps: {
 }
 
 /**
+ * Resolve this session's `owner/name` once — but only once it has actually
+ * resolved.
+ *
+ * Every manager-MCP GitHub binding needs the repo and none of them should shell
+ * out for it per call, so the promise is memoised. The trap is that
+ * `resolveRepo` runs `gh repo view`, which fails for reasons that say nothing
+ * about this checkout: a GitHub outage, a dropped network, an expired token.
+ * Caching those was caching one bad minute for the life of the session.
+ *
+ * That is not hypothetical. On 2026-08-17 GitHub's GraphQL API returned 503
+ * while a chat was open; the `create_pr` binding memoised the `null` and then
+ * refused every PR for hours after GitHub had recovered, with "could not resolve
+ * this chat's repo or branch" — pointing the agent at its worktree, which was
+ * fine throughout. It is the worst shape a cache can have: wrong, and unable to
+ * find out, because it never asks again.
+ *
+ * So the promise is shared while it is IN FLIGHT — concurrent callers must not
+ * each spawn a `gh` — and dropped the moment it settles as a failure, making the
+ * next call a retry. One helper rather than three copies because it was three
+ * copies, and the two that weren't fixed first would have gone on poisoning
+ * `watch_pr` and `approve_pr` in exactly the same way.
+ */
+export function makeRepoResolver(
+  github: GitHubService,
+  cwd: string | undefined,
+): (override?: string) => Promise<string | null> {
+  let repoP: Promise<string | null> | undefined;
+  return async (override?: string): Promise<string | null> => {
+    if (override) return override;
+    if (!cwd) return null; // no launch dir → can't auto-resolve the repo
+    const inflight = (repoP ??= github.resolveRepo(cwd).catch(() => null));
+    const repo = await inflight;
+    // Compare against the promise we awaited, not `repoP` as it stands now: a
+    // concurrent caller may already have installed a fresh attempt, and clearing
+    // that one would throw away a resolve that is about to succeed.
+    if (repo === null && repoP === inflight) repoP = undefined;
+    return repo;
+  };
+}
+
+/**
  * Adapt a {@link GitHubService} into the narrow {@link ManagerMcpGitHub} surface
  * the manager MCP's `watch_pr` tool needs, bound to one session's `cwd`.
  * `prMergeState` lets `gh` auto-detect the repo from cwd; `prChecks`,
@@ -316,12 +357,7 @@ function makeGithubBinding(
   chatId: string,
   reviewers: readonly string[] = [],
 ): ManagerMcpGitHub {
-  let repoP: Promise<string | null> | undefined;
-  const repoFor = async (override?: string): Promise<string | null> => {
-    if (override) return override;
-    if (!cwd) return null; // no launch dir → can't auto-resolve the repo
-    return (repoP ??= github.resolveRepo(cwd).catch(() => null));
-  };
+  const repoFor = makeRepoResolver(github, cwd);
   return {
     prMergeState: (n, repo) => github.prMergeState(n, { repo, cwd }),
     prChecks: async (n, repo) => {
@@ -376,7 +412,7 @@ function makeGithubBinding(
  * re-create exactly the failure it exists to fix: each step individually
  * skippable, and nothing noticing when one was.
  */
-function makePrCreateBinding(
+export function makePrCreateBinding(
   github: GitHubService,
   cwd: string | undefined,
   chatId: string,
@@ -388,11 +424,7 @@ function makePrCreateBinding(
     arm?: (chatId: string, ref: PRRef) => void;
   },
 ): ManagerMcpPrCreate {
-  let repoP: Promise<string | null> | undefined;
-  const repoFor = async (): Promise<string | null> => {
-    if (!cwd) return null;
-    return (repoP ??= github.resolveRepo(cwd).catch(() => null));
-  };
+  const repoFor = makeRepoResolver(github, cwd);
 
   /**
    * Which directory to inspect: the caller's, if it is a worktree of the SAME
@@ -522,12 +554,7 @@ function makePrApprovalBinding(
    */
   confirmOverride: ManagerMcpPrApproval["confirmOverride"],
 ): ManagerMcpPrApproval {
-  let repoP: Promise<string | null> | undefined;
-  const repoFor = async (override?: string): Promise<string | null> => {
-    if (override) return override;
-    if (!cwd) return null;
-    return (repoP ??= github.resolveRepo(cwd).catch(() => null));
-  };
+  const repoFor = makeRepoResolver(github, cwd);
   const requireRepo = async (override?: string): Promise<string> => {
     const r = await repoFor(override);
     if (!r) throw new Error("could not resolve this chat's repo — pass `repo` as 'owner/name'");
