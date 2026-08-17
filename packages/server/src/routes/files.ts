@@ -22,14 +22,12 @@
  * the one that can look outside a checkout.
  */
 import type { FastifyInstance } from "fastify";
+import { chatRoot } from "@dispatch/shared";
 
-/** Where a chat's agent actually runs: its worktree, else the project repo. */
-export function chatRoot(
-  chat: { worktrees: string[] },
-  project: { repoPath: string },
-): string {
-  return chat.worktrees[0] ?? project.repoPath;
-}
+// Moved to `@dispatch/shared` once the composer's picker needed to open at the
+// same directory: two copies would be two chances for the picker to browse
+// somewhere the agent isn't. Re-exported for the callers that already had it.
+export { chatRoot };
 
 export function registerFileRoutes(app: FastifyInstance): void {
   const { store } = app.cm;

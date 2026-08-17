@@ -35,8 +35,12 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * them — the project-config section rail and a private on/off switch, now
  * `ui/Switch` — against one bare element added back, the settings rail row,
  * which is a whole row that happens to be clickable.
+ *
+ * 84 → 83: `chat/FilePathPicker` was deleted. The composer's "Insert file path"
+ * now opens the file explorer's picker modal, whose result rows are `role=option`
+ * inside a listbox rather than a stack of buttons.
  */
-const BASELINE = 84;
+const BASELINE = 83;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

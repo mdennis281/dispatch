@@ -6,6 +6,7 @@ import {
   formatStamp,
   formatCapacity,
   describeFilter,
+  fsToNative,
 } from "./fsMeta.js";
 import type { FsEntry } from "@dispatch/shared";
 
@@ -95,6 +96,25 @@ describe("formatStamp", () => {
 
   it("renders an unknown time as a dash", () => {
     expect(formatStamp(null, now)).toBe("—");
+  });
+});
+
+describe("fsToNative", () => {
+  it("uses backslashes on Windows", () => {
+    // What the composer inserts ends up in shell commands on the SERVER's
+    // machine, so it should look like a path from that machine's own Explorer.
+    expect(fsToNative("C:/Users/me/notes.md", "win32")).toBe("C:\\Users\\me\\notes.md");
+  });
+
+  it("converts a UNC path whole", () => {
+    expect(fsToNative("//server/share/x", "win32")).toBe("\\\\server\\share\\x");
+  });
+
+  it("leaves a POSIX path exactly alone", () => {
+    // A backslash is a legal POSIX filename character, so there is nothing here
+    // that could safely be rewritten.
+    expect(fsToNative("/home/me/notes.md", "posix")).toBe("/home/me/notes.md");
+    expect(fsToNative("/tmp/we\\ird", "posix")).toBe("/tmp/we\\ird");
   });
 });
 
