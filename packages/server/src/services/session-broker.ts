@@ -3071,7 +3071,15 @@ export class SessionBroker {
     try {
       // Resolve against the session's own directory, so a server that returns a
       // path relative to its cwd lands in the right worktree.
-      const base = session.worktreeCwd ?? process.cwd();
+      //
+      // The fallback order matters, because `base` is also the allowed ROOT
+      // below. The manager's `process.cwd()` is wherever Dispatch happened to be
+      // launched from — a home directory, or `/` under a service manager — and
+      // using it would hand a remote server a far wider tree to reference than
+      // the project it is working in. So: the chat's worktree, else the
+      // project's checkout, and only then cwd.
+      const project = await this.projectForChat(session.chatId).catch(() => null);
+      const base = session.worktreeCwd ?? project?.repoPath ?? process.cwd();
       const abs = isAbsolute(ref.path) ? ref.path : resolvePath(base, ref.path);
       // Follow symlinks BEFORE deciding: a link inside the worktree pointing at
       // /etc/passwd would otherwise pass a check on the pre-resolution path.
