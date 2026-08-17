@@ -171,10 +171,16 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
   killAll: async (ids) => {
     set({ killing: true, error: undefined });
     try {
-      // The same query the list was fetched with — so what dies is what the
-      // human can see, including the scope. `killing` gates the button rather
-      // than `loading`, which the refetch below owns.
-      const { killed } = await api.terminals.killAll(buildQuery(get(), ids));
+      // The same question the list is showing — scope, facets AND the text box.
+      // `q` is the one the fetch deliberately leaves out (it filters the rows in
+      // hand, so typing costs no requests), which means the visible list can be
+      // narrower than the fetched one. The button's count comes off the VISIBLE
+      // rows, so a kill without `q` would stop shells the human filtered away
+      // and had no idea were selected.
+      //
+      // Safe to send: the server matches `q` over name/cwd/lastCommand, exactly
+      // the fields the view filters on.
+      const { killed } = await api.terminals.killAll(buildQuery(get(), ids, { withText: true }));
       set({ killing: false });
       await get().load(ids);
       return killed;
@@ -196,12 +202,15 @@ export const useWorkspace = create<WorkspaceStore>((set, get) => ({
  * facet it has no accessor for rather than silently dropping it), so leaking a
  * worktree toggle into a terminals query would empty the list.
  *
- * `q` stays OUT deliberately — it's applied to the rows already in hand, so
- * typing in the box costs no requests.
+ * `q` stays out of the FETCH deliberately — it's applied to the rows already in
+ * hand, so typing in the box costs no requests. `withText` puts it back for the
+ * callers that must act on exactly what is visible rather than on what was
+ * fetched; see `killAll`.
  */
 function buildQuery(
-  s: Pick<WorkspaceStore, "kind" | "scope" | "sort" | "filters">,
+  s: Pick<WorkspaceStore, "kind" | "scope" | "sort" | "filters" | "q">,
   ids: { projectId?: string; chatId?: string },
+  opts: { withText?: boolean } = {},
 ): Partial<RegistryQuery> {
   const query: Partial<RegistryQuery> = {
     scope: s.scope,
@@ -209,6 +218,7 @@ function buildQuery(
     chatId: ids.chatId,
     sort: s.sort,
   };
+  if (opts.withText && s.q.trim()) query.q = s.q.trim();
   if (s.kind === "terminals") {
     if (s.filters.active) query.active = true;
     if (s.filters.hideArchived) query.archived = false;

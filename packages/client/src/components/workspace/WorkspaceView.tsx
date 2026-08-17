@@ -300,11 +300,14 @@ function KillAllButton({
   onKill: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
-  // A refetch that drops the count to zero (or a tab switch) must not leave a
-  // primed confirm behind for the next thing that lands in this spot.
+  // Disarm whenever the TARGET changes, not just when it empties. Arming for
+  // "3 in this chat", flipping the scope to Everything, and confirming would
+  // otherwise stop a different — and much larger — set of processes than the
+  // one the first click agreed to. A two-click guard that survives a change of
+  // subject is not a guard.
   useEffect(() => {
-    if (count === 0) setConfirming(false);
-  }, [count]);
+    setConfirming(false);
+  }, [count, scopeLabel]);
 
   if (count === 0) return null;
   if (!confirming) {

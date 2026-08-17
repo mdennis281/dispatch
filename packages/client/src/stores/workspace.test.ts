@@ -102,6 +102,12 @@ describe("workspace store — the query it sends", () => {
     expect(worktreesList.mock.calls[0]![0]).not.toHaveProperty("unmerged");
   });
 
+  it("keeps `q` out of the FETCH — typing must not cost a request per keystroke", async () => {
+    useWorkspace.getState().setQ("build");
+    await useWorkspace.getState().load(IDS);
+    expect(worktreesList.mock.calls[0]![0]).not.toHaveProperty("q");
+  });
+
   it("never fetches for the PRs tab", async () => {
     useWorkspace.getState().setKind("prs");
     await useWorkspace.getState().load(IDS);
@@ -111,9 +117,13 @@ describe("workspace store — the query it sends", () => {
 });
 
 describe("workspace store — kill all", () => {
-  it("kills with the SAME query the list was fetched with, then refetches", async () => {
+  it("kills with the SAME question the list is SHOWING, including the text box", async () => {
     useWorkspace.getState().setKind("terminals");
     useWorkspace.getState().toggleFilter("active");
+    // `q` is applied client-side, so the visible list is narrower than the
+    // fetched one — and the button counts what's VISIBLE. Killing without it
+    // would stop shells the human had filtered out of sight.
+    useWorkspace.getState().setQ("  build  ");
     killAll.mockResolvedValue({ killed: 2, ids: ["c1::a", "c1::b"] });
 
     const killed = await useWorkspace.getState().killAll(IDS);
@@ -125,6 +135,7 @@ describe("workspace store — kill all", () => {
       chatId: "c1",
       sort: "recent",
       active: true,
+      q: "build",
     });
     // A list left showing shells that no longer exist is worse than a spinner.
     expect(terminalsList).toHaveBeenCalledTimes(1);
