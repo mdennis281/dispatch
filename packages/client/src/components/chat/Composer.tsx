@@ -299,8 +299,15 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const [error, setError] = useState<string | null>(null);
   // Where the file picker opens: this chat's own working directory, so the
   // paths it inserts are paths the agent for THIS chat can open.
+  //
+  // The project record can be missing for a moment (first hydration, a
+  // reconnect), and falling straight through to the picker's default would land
+  // you in the server's HOME directory — the one place this is guaranteed not
+  // to mean. `chat.worktrees[0]` is the half of `chatRoot` that lives on the
+  // chat itself, so a chat with a worktree still opens correctly regardless;
+  // only a chat with no worktree AND no loaded project is left to the default.
   const project = useProjects((s) => s.projects.find((p) => p.id === chat.projectId));
-  const pickerRoot = project ? chatRoot(chat, project) : undefined;
+  const pickerRoot = project ? chatRoot(chat, project) : chat.worktrees[0];
   const [model, setModelState] = useState<string>(
     () => modelByChat.get(chat.id) ?? chat.model ?? DEFAULT_MODEL,
   );
