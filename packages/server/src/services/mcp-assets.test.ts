@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { parseAssetReference, pathFromFileUri, isPathWithinRoots } from "./mcp-assets.js";
+import {
+  parseAssetReference,
+  pathFromFileUri,
+  isPathWithinRoots,
+  approxBase64Bytes,
+  MAX_INLINE_ASSET_BYTES,
+} from "./mcp-assets.js";
 import { mediaKind, formatBytes } from "@dispatch/shared";
 import { extFromMediaType, mediaTypeFromName } from "./media-types.js";
 
@@ -123,6 +129,37 @@ describe("isPathWithinRoots", () => {
     const mixed = `${ROOT.toUpperCase()}/OUT/a.mp4`;
     const folds = process.platform === "win32" || process.platform === "darwin";
     expect(isPathWithinRoots(mixed, roots)).toBe(folds);
+  });
+});
+
+describe("approxBase64Bytes", () => {
+  it("matches the real decoded length, padding included", () => {
+    for (const s of ["a", "ab", "abc", "abcd", "hello world", "x".repeat(1000)]) {
+      const b64 = Buffer.from(s).toString("base64");
+      expect(approxBase64Bytes(b64)).toBe(Buffer.byteLength(s));
+    }
+  });
+
+  it("sizes an over-cap payload from the string alone, without decoding it", () => {
+    // The whole point: the answer comes from `.length`, so the allocation the
+    // cap exists to prevent never happens. Sized just past MAX_INLINE_ASSET_BYTES
+    // rather than at some heroic size — the test would otherwise allocate the
+    // very buffer it is proving we avoid.
+    const chars = Math.ceil((MAX_INLINE_ASSET_BYTES + 1_000_000) * 4 / 3);
+    const over = "A".repeat(chars);
+    expect(approxBase64Bytes(over)).toBeGreaterThan(MAX_INLINE_ASSET_BYTES);
+  });
+
+  it("never under-estimates, so a borderline payload is refused not admitted", () => {
+    // Whitespace decodes to nothing, so a prettified payload reads LARGER than
+    // it is. That is the safe direction for a cap.
+    const real = Buffer.from("x".repeat(600));
+    const pretty = real.toString("base64").replace(/(.{76})/g, "$1\n");
+    expect(approxBase64Bytes(pretty)).toBeGreaterThanOrEqual(real.length);
+  });
+
+  it("handles the empty string", () => {
+    expect(approxBase64Bytes("")).toBe(0);
   });
 });
 

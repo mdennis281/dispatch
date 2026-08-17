@@ -34,6 +34,7 @@ import {
   mkdir,
   rm,
   stat,
+  copyFile,
   readFile as fsReadFile,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
@@ -584,6 +585,22 @@ export class Store {
     const abs = this.safeAssetPath(chatId, name);
     if (!abs || !existsSync(abs)) return null;
     return fsReadFile(abs);
+  }
+
+  /**
+   * Copy a file on disk into the chat's assets. Returns the relative path.
+   *
+   * `copyFile` rather than read-then-write: a referenced asset can be hundreds
+   * of megabytes, and buffering one into a Buffer purely to hand it back to the
+   * filesystem is an allocation nobody needs (and on some platforms this can be
+   * a copy-on-write clone that moves no bytes at all).
+   */
+  async copyChatAsset(chatId: string, name: string, srcPath: string): Promise<string> {
+    const abs = this.safeAssetPath(chatId, name);
+    if (!abs) throw new Error(`invalid asset name: ${name}`);
+    await mkdir(this.chatAssetsDir(chatId), { recursive: true });
+    await this.mutex.run(`asset:${chatId}:${basename(name)}`, () => copyFile(srcPath, abs));
+    return `assets/${basename(name)}`;
   }
 
   /** Size of a chat asset without reading it. Null when absent or escaping. */

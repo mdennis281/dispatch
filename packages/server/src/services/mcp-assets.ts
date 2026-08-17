@@ -121,6 +121,24 @@ export const MAX_INLINE_ASSET_BYTES = 8 * 1024 * 1024;
 export const MAX_REFERENCED_ASSET_BYTES = 256 * 1024 * 1024;
 
 /**
+ * Decoded byte count a base64 string WOULD produce, without decoding it.
+ *
+ * Checking the size after `Buffer.from(s, "base64")` is too late: the
+ * allocation the cap exists to prevent has already happened, so a server
+ * returning a gigabyte of base64 could exhaust memory on a payload that was
+ * always going to be refused. Every 4 input characters become 3 output bytes,
+ * less one per `=` of padding.
+ *
+ * Whitespace inside the string decodes to nothing, so this OVER-estimates a
+ * prettified payload — deliberately: over-estimating refuses something
+ * borderline, under-estimating admits the allocation this is here to stop.
+ */
+export function approxBase64Bytes(s: string): number {
+  const padding = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((s.length * 3) / 4) - padding);
+}
+
+/**
  * Decide whether a resolved path may be ingested.
  *
  * WITHOUT this, "copy the file an MCP names" is an arbitrary local-file read.

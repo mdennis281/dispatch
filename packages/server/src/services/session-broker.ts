@@ -26,13 +26,14 @@
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { basename, extname, isAbsolute, join, resolve as resolvePath } from "node:path";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
 import { McpPrewarmService } from "./mcp-prewarm.js";
 import { tmpdir } from "node:os";
 import {
   parseAssetReference,
   isPathWithinRoots,
+  approxBase64Bytes,
   MAX_INLINE_ASSET_BYTES,
   MAX_REFERENCED_ASSET_BYTES,
   type AssetReference,
@@ -3011,20 +3012,25 @@ export class SessionBroker {
                 ? block.mime_type
                 : "image/png";
         try {
-          const buf = Buffer.from(base64, "base64");
-          if (buf.length > MAX_INLINE_ASSET_BYTES) {
+          // Sized from the STRING, before decoding: `Buffer.from` would already
+          // have made the allocation this cap exists to prevent, so a server
+          // returning a gigabyte of base64 could exhaust memory on a payload
+          // that was always going to be refused.
+          const approx = approxBase64Bytes(base64);
+          if (approx > MAX_INLINE_ASSET_BYTES) {
             // Refuse rather than store it: something this big came through the
             // model's context to get here, and silently accepting teaches the
             // server that inlining video works. Point it at the cheap route.
             out.push({
               type: "text",
               text:
-                `[dispatch: refused a ${formatBytes(buf.length)} inline ${mime} attachment ` +
+                `[dispatch: refused a ${formatBytes(approx)} inline ${mime} attachment ` +
                 `(limit ${formatBytes(MAX_INLINE_ASSET_BYTES)}). Return a resource_link or ` +
                 `{"dispatch":"asset","path":"…"} instead — the file is then shown to the ` +
                 `user without its bytes entering the context window.]`,
             });
           } else {
+            const buf = Buffer.from(base64, "base64");
             const name = `${this.genId()}${extFromMediaType(mime)}`;
             const relPath = await this.store.writeChatAsset(session.chatId, name, buf);
             images.push({ id: this.genId(), path: relPath, mimeType: mime });
@@ -3082,14 +3088,11 @@ export class SessionBroker {
 
       const mime = ref.mimeType ?? mediaTypeFromName(real);
       const name = `${this.genId()}${extFromMediaType(mime, extname(real) || ".bin")}`;
-      // Read `real`, NOT `abs` — every check above was made against the resolved
-      // path, so reading the unresolved one would let a symlink swapped in after
+      // Copy `real`, NOT `abs` — every check above was made against the resolved
+      // path, so using the unresolved one would let a symlink swapped in after
       // the check redirect this read straight back out of the allowed roots.
-      const relPath = await this.store.writeChatAsset(
-        session.chatId,
-        name,
-        await readFile(real),
-      );
+      // A file-to-file copy, so a 256 MB video never lands in a Buffer.
+      const relPath = await this.store.copyChatAsset(session.chatId, name, real);
       const label = ref.alt ?? basename(real);
       return {
         image: { id: this.genId(), path: relPath, mimeType: mime, alt: label },
