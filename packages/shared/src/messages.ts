@@ -23,8 +23,10 @@ const MessageBase = {
   turn: z.number().int().optional(),
   sessionId: z.string().optional(),
   /**
-   * The provider that PRODUCED this row, stamped when it was written — for the
-   * same reason `model` is per-row rather than read off the chat.
+   * The harness this row BELONGS TO: the provider the chat was set to when the
+   * row was written — the agent that produced an assistant/tool row, or the one
+   * a user row was sent to. Stamped once at write time in `SessionBroker.emit()`,
+   * for the same reason `model` is per-row rather than read off the chat.
    *
    * `chat.harness` is the CURRENT pick, so rendering the sender from it rewrote
    * history the moment someone switched agents mid-chat: a turn Codex wrote
