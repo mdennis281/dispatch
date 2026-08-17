@@ -5,6 +5,7 @@
  */
 export * from "./common.js";
 export * from "./runtime-config.js";
+export * from "./registry.js";
 export * from "./domain.js";
 export * from "./git.js";
 export * from "./project-config.js";

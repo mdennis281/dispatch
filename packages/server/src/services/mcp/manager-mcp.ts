@@ -76,7 +76,10 @@ import {
   type ProjectMemory,
   type ReviewDecision,
   type ReviewThread,
+  type RegistryScope,
+  type TerminalInfo,
   type WorkflowMergeMethod,
+  type WorktreeInfo,
 } from "@dispatch/shared";
 import type { EventBus } from "../../bus.js";
 import { clampBody } from "../memory.js";
@@ -207,7 +210,32 @@ export interface ManagerMcpTerminals {
     backgrounded?: boolean;
   }>;
   /** Recent output of a named shell — how a backgrounded command is read back. */
-  tail(args: { name: string; lines?: number }): { output: string; found: boolean };
+  tail(args: {
+    name: string;
+    lines?: number;
+    /** Substring filter; a watcher's tail is mostly noise without one. */
+    q?: string;
+    /** Only lines at/after this epoch-ms — "what's new since I last looked". */
+    since?: number;
+    stream?: "stdout" | "stderr";
+  }): Promise<{ output: string; found: boolean }>;
+  /** The shell roster, filtered — how an agent finds a terminal it has lost. */
+  list(args: { scope?: RegistryScope; q?: string }): TerminalInfo[];
+}
+
+/**
+ * The narrow worktree surface, bound to this session's chat + project.
+ *
+ * This exists so an agent NEVER has to run `git worktree add` — which the shell
+ * guard now refuses. Going through here is what puts a row in the catalog with
+ * this chat's id on it at the moment of creation, instead of leaving the
+ * detector to work out afterwards whose tree it was.
+ */
+export interface ManagerMcpWorktrees {
+  create(args: { branch: string; base?: string; label?: string }): Promise<WorktreeInfo>;
+  /** Defaults to this chat's worktrees; widen with `scope`. */
+  list(args: { scope?: RegistryScope; q?: string }): Promise<WorktreeInfo[]>;
+  remove(args: { path: string; force?: boolean }): Promise<void>;
 }
 
 /**
@@ -1015,6 +1043,8 @@ export interface ManagerMcpContext {
   broker: ManagerMcpBroker;
   /** Persistent-terminal runner for this session (omitted → no `terminal` tool). */
   terminals?: ManagerMcpTerminals;
+  /** Worktree catalog for this session (omitted → no `worktree` tool). */
+  worktrees?: ManagerMcpWorktrees;
   /** Project-memory runner for this session (omitted → no memory tools). */
   memory?: ManagerMcpMemory;
   /** GitHub PR watcher for this session (omitted → no `watch_pr` tool). */
@@ -2577,28 +2607,164 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     "terminal_output",
     "Read the recent output of a named terminal — how you check on a command you " +
       "started with `terminal({ background: true })` (did the dev server come up? " +
-      "what did the watcher print?). Returns the tail of that shell's output.",
+      "what did the watcher print?). Returns the tail of that shell's output.\n" +
+      "Narrow it rather than reading 50 lines and hoping: `grep` for a substring, " +
+      "`since` for an epoch-ms watermark ('what's new since I last looked'), " +
+      "`stream: \"stderr\"` for errors only. Omit `name` to list this chat's " +
+      "terminals instead — including ones whose shell has exited, whose output is " +
+      "still readable.",
     {
-      name: z.string().describe("The terminal name to read."),
+      name: z
+        .string()
+        .optional()
+        .describe("The terminal name to read. Omit to list terminals instead."),
       lines: z
         .number()
         .optional()
         .describe("How many trailing lines to return (default 50)."),
+      grep: z.string().optional().describe("Only lines containing this substring."),
+      since: z
+        .number()
+        .optional()
+        .describe("Only lines at or after this epoch-ms timestamp."),
+      stream: z
+        .enum(["stdout", "stderr"])
+        .optional()
+        .describe("Restrict to one stream — 'stderr' to see just the errors."),
+      scope: z
+        .enum(["chat", "project", "all"])
+        .optional()
+        .describe("When listing: how wide. Default 'chat'."),
     },
     async (args): Promise<CallToolResult> => {
       if (!ctx.terminals) {
         return textResult("The terminal tool is not available in this session.", true);
       }
       const name = typeof args.name === "string" ? args.name.trim() : "";
-      if (!name) return textResult("terminal_output requires a non-empty name.", true);
-      const res = ctx.terminals.tail({
+      if (!name) {
+        const rows = ctx.terminals.list({ scope: args.scope, q: args.grep });
+        if (rows.length === 0) {
+          return textResult(`No terminals for scope '${args.scope ?? "chat"}'.`);
+        }
+        return textResult(
+          `${rows.length} terminal(s):\n${JSON.stringify(
+            rows.map((t) => ({
+              name: t.name,
+              chatId: t.chatId,
+              cwd: t.cwd,
+              status: t.status,
+              archived: t.archived,
+              busy: t.busy,
+              background: t.background?.command,
+              lastCommand: t.lastCommand,
+              lastExitCode: t.lastExitCode,
+              lines: t.lines,
+            })),
+            null,
+            2,
+          )}`,
+        );
+      }
+      const res = await ctx.terminals.tail({
         name,
         lines: typeof args.lines === "number" ? args.lines : undefined,
+        q: args.grep,
+        since: typeof args.since === "number" ? args.since : undefined,
+        stream: args.stream,
       });
       if (!res.found) {
         return textResult(`No terminal named '${name}' in this chat.`, true);
       }
-      return textResult(res.output ? `[${name}]\n${res.output}` : `[${name}] (no output yet)`);
+      return textResult(res.output ? `[${name}]\n${res.output}` : `[${name}] (no output matched)`);
+    },
+  );
+
+  const worktree = tool(
+    "worktree",
+    "Create, list or remove a git worktree — the ONLY way to do so in Dispatch " +
+      "(`git worktree add` in a shell is refused). A worktree created here is " +
+      "recorded against THIS chat the moment it exists, so it shows up correlated " +
+      "in the Workspace view instead of as somebody's anonymous directory.\n" +
+      "  action='create' — cuts <branch> off the project's default base and " +
+      "returns its path. Work there; it is not this session's cwd.\n" +
+      "  action='list'   — this chat's worktrees by default; scope='project' or " +
+      "'all' to see everyone's, with `q` as a substring filter over path/branch/label.\n" +
+      "  action='remove' — removes the worktree at `path` (use force for a dirty tree).",
+    {
+      action: z
+        .enum(["create", "list", "remove"])
+        .describe("What to do. Defaults to 'list'.")
+        .optional(),
+      branch: z.string().optional().describe("Branch to cut (action='create')."),
+      base: z
+        .string()
+        .optional()
+        .describe("Base ref to branch from. Default: the project's default branch on origin."),
+      label: z
+        .string()
+        .optional()
+        .describe("Short human label for what this worktree is for."),
+      path: z.string().optional().describe("Worktree path (action='remove')."),
+      force: z
+        .boolean()
+        .optional()
+        .describe("Remove even with uncommitted changes (action='remove')."),
+      scope: z
+        .enum(["chat", "project", "all"])
+        .optional()
+        .describe("How wide to list. Default 'chat'."),
+      q: z.string().optional().describe("Substring filter over path, branch and label."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.worktrees) {
+        return textResult("The worktree tool is not available in this session.", true);
+      }
+      const action = args.action ?? "list";
+      try {
+        if (action === "create") {
+          const branch = typeof args.branch === "string" ? args.branch.trim() : "";
+          if (!branch) return textResult("worktree create requires a branch.", true);
+          const info = await ctx.worktrees.create({
+            branch,
+            base: args.base,
+            label: args.label,
+          });
+          return textResult(
+            `Created worktree for ${info.branch} at ${info.path} (base ${info.base ?? "default"}). ` +
+              `It is recorded against this chat. Run commands there with ` +
+              `terminal({ name: "…", command: "cd '${info.path}' && …" }).`,
+          );
+        }
+        if (action === "remove") {
+          const path = typeof args.path === "string" ? args.path.trim() : "";
+          if (!path) return textResult("worktree remove requires a path.", true);
+          await ctx.worktrees.remove({ path, force: args.force === true });
+          return textResult(`Removed worktree ${path}.`);
+        }
+        const list = await ctx.worktrees.list({ scope: args.scope, q: args.q });
+        if (list.length === 0) {
+          return textResult(
+            `No worktrees for scope '${args.scope ?? "chat"}'${args.q ? ` matching '${args.q}'` : ""}.`,
+          );
+        }
+        const rows = list.map((w) => ({
+          path: w.path,
+          branch: w.branch,
+          chatId: w.chatId,
+          origin: w.origin,
+          label: w.label,
+          mine: w.chatId === ctx.chatId || undefined,
+          primary: w.isPrimary,
+        }));
+        return textResult(
+          `${rows.length} worktree(s):\n${JSON.stringify(rows, null, 2)}`,
+        );
+      } catch (err) {
+        return textResult(
+          `worktree ${action} failed: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
     },
   );
 
@@ -3687,6 +3853,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     approvePr,
     terminal,
     terminalOutput,
+    worktree,
     remember,
     recall,
     forget,
@@ -3725,6 +3892,7 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   approve_pr: "prApproval",
   terminal: "terminals",
   terminal_output: "terminals",
+  worktree: "worktrees",
   remember: "memory",
   recall: "memory",
   forget: "memory",
@@ -3749,6 +3917,7 @@ export type ManagerToolBinding =
   | "prApproval"
   | "prCreate"
   | "terminals"
+  | "worktrees"
   | "memory"
   | "runner"
   | "prewarm"
@@ -3836,6 +4005,7 @@ export function createManagerMcpServer(
     approvePr,
     terminal,
     terminalOutput,
+    worktree,
     remember,
     recall,
     forget,
@@ -3873,6 +4043,9 @@ export function createManagerMcpServer(
     // Only when the project opted into auto-merge — no binding, no way to merge.
     ...(ctx.prApproval ? [approvePr] : []),
     ...(ctx.terminals ? [terminal, terminalOutput] : []),
+    // Bound whenever the session has a project to cut trees in — and the shell
+    // guard's refusal of `git worktree add` points here, so the two ship together.
+    ...(ctx.worktrees ? [worktree] : []),
     // The write surface plus the curation reads — all bound to the same project,
     // so a session either has memory or it doesn't.
     ...(ctx.memory

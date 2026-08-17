@@ -27,9 +27,13 @@ import { basename, join, resolve, relative, isAbsolute, dirname } from "node:pat
 import {
   WorktreeInfoSchema,
   BranchInfoSchema,
+  applyRegistryQuery,
   type Project,
   type WorktreeInfo,
+  type WorktreeOrigin,
+  type WorktreeRecord,
   type BranchInfo,
+  type RegistryQuery,
 } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
@@ -164,6 +168,10 @@ export interface CreateWorktreeOptions {
   base?: string;
   /** Skip the `git fetch` of the base branch. */
   noFetch?: boolean;
+  /** How this creation was requested. Default `"ui"` (the panel's form). */
+  origin?: WorktreeOrigin;
+  /** Optional human label stored on the record. */
+  label?: string;
 }
 
 export interface RemoveWorktreeOptions {
@@ -254,7 +262,7 @@ export class WorktreeService {
         found?.path ?? wtPath,
         branch,
         base,
-        opts.chatId,
+        opts,
       );
       await this.publishCreated(info, opts.chatId, project);
       return info;
@@ -285,20 +293,116 @@ export class WorktreeService {
       ["worktree", "add", "-b", branch, wtPath, "--end-of-options", base],
       repo,
     );
-    const info = await this.buildInfo(project, wtPath, branch, base, opts.chatId);
+    const info = await this.buildInfo(project, wtPath, branch, base, opts);
     await this.publishCreated(info, opts.chatId, project);
     return info;
   }
 
-  /** List every worktree registered for the project's repo. */
+  /**
+   * List every worktree registered for the project's repo, each merged with its
+   * attribution record.
+   *
+   * Git answers EXISTENCE (it is the only thing that can — a tree can be removed
+   * by another instance, or by hand), the registry answers OWNERSHIP. Every
+   * sighting also stamps `lastSeenAt`, which is what lets `removedAt` mean
+   * "git stopped reporting this" rather than "nobody looked recently".
+   */
   async list(project: Project): Promise<WorktreeInfo[]> {
     const out = await this.git(
       ["worktree", "list", "--porcelain"],
       project.repoPath,
     );
-    return parseWorktreePorcelain(out).map((w) =>
-      WorktreeInfoSchema.parse({ ...w, projectId: project.id }),
+    const live = parseWorktreePorcelain(out).map((w) => ({
+      ...w,
+      path: canonicalWorktreePath(w.path),
+    }));
+    // The primary checkout is a worktree to git but not a disposable one to us:
+    // it is never attributed to a chat and must never be catalogued as removable.
+    const disposable = live.filter((w) => !samePath(w.path, project.repoPath));
+    const records = await this.sync(project, disposable);
+    return live.map((w) => {
+      const rec = findRecord(records, w.path);
+      const isPrimary = samePath(w.path, project.repoPath);
+      return WorktreeInfoSchema.parse({
+        ...w,
+        projectId: rec?.projectId ?? project.id,
+        chatId: isPrimary ? undefined : rec?.chatId,
+        origin: isPrimary ? undefined : rec?.origin,
+        label: rec?.label,
+        base: rec?.base,
+        createdAt: rec?.createdAt,
+        lastSeenAt: rec?.lastSeenAt,
+        isPrimary: isPrimary || undefined,
+      });
+    });
+  }
+
+  /**
+   * Every worktree across every project, for the app-wide catalog scope.
+   *
+   * A project whose repo has gone missing yields nothing rather than failing the
+   * whole sweep — one broken project must not blank the modal.
+   */
+  async listAll(projects: Project[], query?: RegistryQuery): Promise<WorktreeInfo[]> {
+    const per = await Promise.all(
+      projects.map((p) => this.list(p).catch(() => [] as WorktreeInfo[])),
     );
+    const all = per.flat();
+    if (!query) return all;
+    return applyRegistryQuery(all, query, {
+      text: (w) => [w.path, w.branch, w.label, w.origin],
+      touchedAt: (w) => w.lastSeenAt ?? w.createdAt,
+    });
+  }
+
+  /**
+   * Reconcile the registry against what git just reported, and hand back the
+   * rows to merge. Degrades to `[]` (no store, or a store error) so listing a
+   * project's worktrees never fails because the CATALOG is unhappy.
+   */
+  private async sync(
+    project: Project,
+    live: Array<{ path: string; branch: string }>,
+  ): Promise<WorktreeRecord[]> {
+    if (!this.store) return [];
+    try {
+      return await this.store.syncWorktreeRecords(project.id, live, { key: pathKey });
+    } catch {
+      return [];
+    }
+  }
+
+  /** All attribution records; `[]` when there's no store (standalone/tests). */
+  private async records(): Promise<WorktreeRecord[]> {
+    if (!this.store) return [];
+    try {
+      return await this.store.listWorktreeRecords();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Write (or update) the attribution for a path. PUBLIC so the detector can
+   * back-fill a harness-created tree through the same door `create()` uses —
+   * one writer, one shape, one place to look when a row is wrong.
+   */
+  async recordWorktree(
+    path: string,
+    create: Omit<WorktreeRecord, "path" | "createdAt" | "lastSeenAt">,
+    update: Partial<Omit<WorktreeRecord, "path">> = {},
+  ): Promise<WorktreeRecord | null> {
+    if (!this.store) return null;
+    try {
+      return await this.store.upsertWorktreeRecord(
+        canonicalWorktreePath(path),
+        create,
+        update,
+      );
+    } catch {
+      /* attribution is best-effort; the worktree itself is unaffected */
+      return null;
+    }
   }
 
   /**
@@ -357,6 +461,15 @@ export class WorktreeService {
     // Add an isolated worktree that checks out the EXISTING branch (no `-b`).
     const path = this.worktreePath(project, branch);
     await this.git(["worktree", "add", path, branch], project.repoPath);
+    // Attributed to no chat on purpose: this tree exists to host a subApp for a
+    // branch, and claiming it for whichever chat happened to press Launch would
+    // be a guess of exactly the kind the registry replaces.
+    await this.recordWorktree(path, {
+      projectId: project.id,
+      branch,
+      origin: "tool",
+      label: `launch: ${branch}`,
+    });
     this.bus?.publish({
       type: "notice",
       level: "info",
@@ -384,6 +497,7 @@ export class WorktreeService {
     // must evict the path from its baseline or a recreation at the same path stays
     // undetectable.
     this.onWorktreeRemoved?.(worktreePath);
+    await this.forgetRecord(worktreePath);
     // Hand back this checkout's MCP ports. The lease service also reclaims leases
     // whose directory has vanished, so a missed release self-heals — but only on
     // the next allocation, which is too late for the run that finds the band full.
@@ -692,7 +806,7 @@ export class WorktreeService {
     wtPath: string,
     branch: string,
     base: string,
-    chatId?: string,
+    opts: CreateWorktreeOptions,
   ): Promise<WorktreeInfo> {
     let head: string | undefined;
     try {
@@ -700,15 +814,30 @@ export class WorktreeService {
     } catch {
       head = undefined;
     }
+    const path = canonicalWorktreePath(wtPath);
+    // The record is written HERE, in the same call that ran `git worktree add` —
+    // that is the entire fix. Attribution stops being something the detector has
+    // to reconstruct from shell commands and transcripts after the fact.
+    const rec = await this.recordWorktree(path, {
+      projectId: project.id,
+      branch,
+      chatId: opts.chatId,
+      origin: opts.origin ?? "ui",
+      base,
+      label: opts.label,
+    });
     return WorktreeInfoSchema.parse({
-      path: wtPath,
+      path,
       branch,
       head,
       base,
       isDirty: false,
       projectId: project.id,
-      chatId,
-      createdAt: Date.now(),
+      chatId: opts.chatId,
+      origin: opts.origin ?? "ui",
+      label: opts.label,
+      createdAt: rec?.createdAt ?? Date.now(),
+      lastSeenAt: rec?.lastSeenAt,
     } satisfies WorktreeInfo);
   }
 
@@ -774,6 +903,10 @@ export class WorktreeService {
    */
   async attachToChat(chatId: string, path: string): Promise<boolean> {
     if (!this.store) return false;
+    // The record is the catalog's answer to "whose is this?", so it is updated
+    // even when the chat already listed the path — the two used to be able to
+    // disagree, and only one of them is visible in the Workspace view.
+    await this.setRecordChat(path, chatId);
     try {
       const chat = await this.store.getChat(chatId);
       if (!chat || chat.worktrees.includes(path)) return false;
@@ -797,6 +930,7 @@ export class WorktreeService {
    */
   async detachFromChat(chatId: string, path: string): Promise<boolean> {
     if (!this.store) return false;
+    await this.setRecordChat(path, undefined);
     try {
       const chat = await this.store.getChat(chatId);
       if (!chat || !chat.worktrees.includes(path)) return false;
@@ -812,6 +946,37 @@ export class WorktreeService {
       return false;
     }
   }
+
+  /**
+   * Point an existing row at a chat (or clear it). Silent when the registry has
+   * never heard of the path: attribution for a tree we don't track yet is the
+   * detector's job, and inventing a row here would guess its origin.
+   */
+  private async setRecordChat(path: string, chatId?: string): Promise<void> {
+    if (!this.store) return;
+    try {
+      const rec = findRecord(await this.records(), path);
+      if (!rec || rec.chatId === chatId) return;
+      await this.store.upsertWorktreeRecord(
+        rec.path,
+        { projectId: rec.projectId, branch: rec.branch, origin: rec.origin },
+        { chatId, lastSeenAt: rec.lastSeenAt },
+      );
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /** Drop a row entirely (a removal we performed). Best-effort. */
+  private async forgetRecord(path: string): Promise<void> {
+    if (!this.store) return;
+    try {
+      const rec = findRecord(await this.records(), path);
+      if (rec) await this.store.deleteWorktreeRecord(rec.path);
+    } catch {
+      /* best-effort */
+    }
+  }
 }
 
 /* =========================================================== pure parsers */
@@ -819,10 +984,38 @@ export class WorktreeService {
 /** Cap file reads so a huge/binary file can't blow up memory or the wire. */
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
+/**
+ * The form a worktree path is STORED and compared in: absolute, no trailing
+ * separator, original case preserved.
+ *
+ * Case is preserved because the path is shown to a human and used verbatim as a
+ * cwd; case-insensitivity belongs in the comparison ({@link pathKey}), not in
+ * the value. git's porcelain, `worktreePath()` and a hand-typed API argument
+ * can all disagree about trailing slashes and about `..` segments, and a
+ * registry keyed by path cannot afford three spellings of one tree.
+ */
+export function canonicalWorktreePath(p: string): string {
+  return resolve(p).replace(/[\\/]+$/, "");
+}
+
+/** Comparison key for a path — case-folded on Windows, where NTFS is. */
+export function pathKey(p: string): string {
+  const c = canonicalWorktreePath(p);
+  return process.platform === "win32" ? c.toLowerCase() : c;
+}
+
 /** Two filesystem paths point at the same location (case-insensitive on Windows). */
-function samePath(a: string, b: string): boolean {
-  const n = (p: string) => resolve(p).replace(/[\\/]+$/, "").toLowerCase();
-  return n(a) === n(b);
+export function samePath(a: string, b: string): boolean {
+  return pathKey(a) === pathKey(b);
+}
+
+/** Find a record by path, tolerating case/trailing-separator differences. */
+function findRecord(
+  records: WorktreeRecord[],
+  path: string,
+): WorktreeRecord | undefined {
+  const k = pathKey(path);
+  return records.find((r) => pathKey(r.path) === k);
 }
 
 /** Normalize a request relPath → forward-slashed, no leading `/`, no `..` segs. */

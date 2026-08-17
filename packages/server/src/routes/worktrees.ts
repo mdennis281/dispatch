@@ -1,6 +1,6 @@
 /**
  * REST for git worktrees.
- *   GET    /api/worktrees?projectId=              → WorktreeInfo[]
+ *   GET    /api/worktrees?scope=&projectId=&chatId=&q= → WorktreeInfo[] (catalog)
  *   GET    /api/branches?projectId=               → BranchInfo[] (launch picker)
  *   POST   /api/worktrees {projectId,branch,chatId?} → create
  *   DELETE /api/worktrees {worktreePath,chatId?,force?} → remove
@@ -12,28 +12,37 @@
  * actions use (publishing `worktree-update` / `chat-update` / `notice`).
  */
 import type { FastifyInstance } from "fastify";
+import { parseRegistryQuery, RegistryQueryError } from "@dispatch/shared";
 
 export function registerWorktreeRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
   const { worktrees, worktreeDetector } = app.services;
 
-  app.get<{ Querystring: { projectId?: string } }>(
-    "/api/worktrees",
-    async (req, reply) => {
-      if (!req.query.projectId) {
-        return reply.code(400).send({ error: "projectId required" });
+  // The catalog read. `?projectId=` keeps its old meaning (one project's trees);
+  // with no projectId it sweeps every project, which is the app-wide scope the
+  // Workspace view and the `worktree` MCP tool both ask for. `scope`/`chatId`/`q`
+  // narrow it through the same predicate the client filters with.
+  app.get("/api/worktrees", async (req, reply) => {
+    try {
+      // Inside the try: a filter we can't parse is a 400, not the 500 an escaped
+      // zod error would produce.
+      const query = parseRegistryQuery(req.query as Record<string, unknown>);
+      if (query.scope === "project" || query.projectId) {
+        if (!query.projectId) return [];
+        const project = await store.getProject(query.projectId);
+        if (!project) return reply.code(404).send({ error: "project not found" });
+        return await worktrees.listAll([project], query);
       }
-      const project = await store.getProject(req.query.projectId);
-      if (!project) return reply.code(404).send({ error: "project not found" });
-      try {
-        return await worktrees.list(project);
-      } catch (err) {
-        return reply
-          .code(502)
-          .send({ error: err instanceof Error ? err.message : String(err) });
+      return await worktrees.listAll(await store.listProjects(), query);
+    } catch (err) {
+      if (err instanceof RegistryQueryError) {
+        return reply.code(400).send({ error: err.message });
       }
-    },
-  );
+      return reply
+        .code(502)
+        .send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
 
   app.get<{ Querystring: { projectId?: string } }>(
     "/api/branches",

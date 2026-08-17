@@ -154,6 +154,21 @@ export async function appendJsonl(path: string, obj: unknown): Promise<void> {
 }
 
 /**
+ * Append MANY objects in ONE write.
+ *
+ * The per-object form in a loop is a syscall per row, which is fine for a
+ * transcript that grows a line at a time and ruinous for a write-behind flush of
+ * a dev server's output — a batch of a thousand lines becomes a thousand
+ * appends. One string, one append; a partial write still tears only the last
+ * line, which {@link readJsonl} already tolerates.
+ */
+export async function appendJsonlBatch(path: string, rows: unknown[]): Promise<void> {
+  if (rows.length === 0) return;
+  await ensureDir(path);
+  await appendFile(path, rows.map((r) => `${JSON.stringify(r)}\n`).join(""), "utf8");
+}
+
+/**
  * Read a JSONL file into raw parsed rows. Tolerates a blank/partial trailing
  * line. Throws on a malformed interior line (surfaces real corruption).
  */

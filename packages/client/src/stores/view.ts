@@ -57,7 +57,7 @@ export type AppSettingsSection =
  * are now full views (see `AppView` above), which is also what let their
  * subpages become addressable.
  */
-export type AppOverlay = "prs" | "mcp" | "agents" | "processes";
+export type AppOverlay = "workspace" | "prs" | "mcp" | "agents" | "processes";
 
 interface ViewStore {
   view: AppView;

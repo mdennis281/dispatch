@@ -20,8 +20,12 @@
  *   chats/<id>/assets/           — pasted/received images
  *   runners.json                 — RunnerInstance[]
  *   checkpoints.json             — { [chatId]: { [messageId]: Checkpoint } }
+ *   worktrees.json               — WorktreeRecord[] (attribution, keyed by path)
+ *   terminals.json               — TerminalRecord[] (shell roster)
+ *   terminals/<logId>.jsonl      — that shell's retained output
  *
- * `runners.json` and `checkpoints.json` are whole-file read-modify-write maps
+ * `runners.json`, `checkpoints.json`, `worktrees.json` and `terminals.json` are
+ * whole-file read-modify-write maps
  * guarded only by this process's {@link KeyedMutex}, so two processes sharing
  * them would silently lose each other's entries — that's the reason for the
  * split, and the reason chats stay per-instance even though sharing them would
@@ -56,6 +60,12 @@ import {
   type RunnerInstance,
   CheckpointSchema,
   type Checkpoint,
+  WorktreeRecordSchema,
+  type WorktreeRecord,
+  TerminalRecordSchema,
+  type TerminalRecord,
+  TerminalLineSchema,
+  type TerminalLineRecord,
   McpPortLeaseSchema,
   type McpPortLease,
   ShellTranscriptFilterSchema,
@@ -66,6 +76,8 @@ import {
   readJson,
   writeJsonAtomic,
   appendJsonl,
+  appendJsonlBatch,
+  readJsonl,
   readJsonlLines,
 } from "./fsq.js";
 
@@ -277,6 +289,23 @@ export class Store {
   }
   private checkpointsFile() {
     return join(this.dataDir, "checkpoints.json");
+  }
+  private worktreesFile() {
+    return join(this.dataDir, "worktrees.json");
+  }
+  private terminalsFile() {
+    return join(this.dataDir, "terminals.json");
+  }
+  private terminalLogsDir() {
+    return join(this.dataDir, "terminals");
+  }
+  /**
+   * A terminal's transcript. Keyed by `logId` rather than by the terminal's own
+   * id, which is `${chatId}::${agentChosenName}` — neither `::` nor an arbitrary
+   * agent-supplied string is a safe filename.
+   */
+  private terminalLogFile(logId: string) {
+    return join(this.terminalLogsDir(), `${logId}.jsonl`);
   }
   private settingsFile() {
     return join(this.configDir, "config.json");
@@ -693,6 +722,282 @@ export class Store {
       await writeJsonAtomic(this.mcpPortsFile(), leases);
       return result;
     });
+  }
+
+  /* --------------------------------------------------------- worktrees */
+
+  /** How stale a worktree's `lastSeenAt` may get before a sighting rewrites it. */
+  private static readonly LAST_SEEN_REFRESH_MS = 5 * 60_000;
+
+  /**
+   * Worktree ATTRIBUTION records, keyed by canonical path.
+   *
+   * Deliberately not a cache of `git worktree list` — existence is git's
+   * answer, re-read on every list. What lives here is what git can't tell us:
+   * which chat cut the tree, how (ui/tool/harness/external), and when. Callers
+   * canonicalize the path before it gets here; the store treats it as opaque.
+   *
+   * STATE root, same as runners.json: whole-file read-modify-write under this
+   * process's mutex, so two instances sharing it would lose each other's rows.
+   */
+  async listWorktreeRecords(): Promise<WorktreeRecord[]> {
+    const raw = (await readJson<unknown[]>(this.worktreesFile())) ?? [];
+    return z.array(WorktreeRecordSchema).parse(raw);
+  }
+  async getWorktreeRecord(path: string): Promise<WorktreeRecord | null> {
+    const all = await this.listWorktreeRecords();
+    return all.find((w) => w.path === path) ?? null;
+  }
+  async saveWorktreeRecord(rec: WorktreeRecord): Promise<WorktreeRecord> {
+    const validated = WorktreeRecordSchema.parse(rec);
+    await this.mutex.run("worktrees", async () => {
+      const all = (await readJson<unknown[]>(this.worktreesFile())) ?? [];
+      const list = z.array(WorktreeRecordSchema).parse(all);
+      const idx = list.findIndex((w) => w.path === validated.path);
+      if (idx >= 0) list[idx] = validated;
+      else list.push(validated);
+      await writeJsonAtomic(this.worktreesFile(), list);
+    });
+    return validated;
+  }
+  async deleteWorktreeRecord(path: string): Promise<void> {
+    await this.mutex.run("worktrees", async () => {
+      const all = (await readJson<unknown[]>(this.worktreesFile())) ?? [];
+      const list = z
+        .array(WorktreeRecordSchema)
+        .parse(all)
+        .filter((w) => w.path !== path);
+      await writeJsonAtomic(this.worktreesFile(), list);
+    });
+  }
+
+  /**
+   * Reconcile one project's rows against what git currently reports.
+   *
+   * A single read-modify-write for the whole project, and a NO-OP when nothing
+   * changed — `list()` runs on every panel refresh, branch lookup and subApp
+   * launch, so a per-path write here would rewrite the file dozens of times a
+   * minute to change nothing.
+   *
+   * A path git has never reported before is back-filled as `external`
+   * (unattributed, but VISIBLE — the whole point). A row for this project that
+   * git no longer reports is DELETED: git is the authority on existence, and a
+   * tombstone would only accumulate and then collide with a path that gets
+   * reused. `live` is always the parse of a SUCCESSFUL `git worktree list`, so
+   * a repo we merely failed to read never reaches this method.
+   */
+  async syncWorktreeRecords(
+    projectId: string,
+    live: Array<{ path: string; branch: string }>,
+    opts: { now?: number; key?: (p: string) => string } = {},
+  ): Promise<WorktreeRecord[]> {
+    const now = opts.now ?? Date.now();
+    const key = opts.key ?? ((p: string) => p);
+    let result: WorktreeRecord[] = [];
+    await this.mutex.run("worktrees", async () => {
+      const raw = (await readJson<unknown[]>(this.worktreesFile())) ?? [];
+      const list = z.array(WorktreeRecordSchema).parse(raw);
+      const byKey = new Map(list.map((r) => [key(r.path), r] as const));
+      const liveKeys = new Set(live.map((w) => key(w.path)));
+      let dirty = false;
+
+      for (const w of live) {
+        const prev = byKey.get(key(w.path));
+        if (!prev) {
+          const rec = WorktreeRecordSchema.parse({
+            path: w.path,
+            projectId,
+            branch: w.branch,
+            origin: "external",
+            createdAt: now,
+            lastSeenAt: now,
+          });
+          list.push(rec);
+          byKey.set(key(w.path), rec);
+          dirty = true;
+          continue;
+        }
+        // Bumping `lastSeenAt` on every sighting would make every list() a write.
+        // Refresh it only when the row is stale or has changed branch (a worktree
+        // can be re-pointed with `git switch`).
+        const stale = now - prev.lastSeenAt > Store.LAST_SEEN_REFRESH_MS;
+        if (prev.branch !== w.branch || stale) {
+          const idx = list.findIndex((r) => r.path === prev.path);
+          list[idx] = WorktreeRecordSchema.parse({
+            ...prev,
+            branch: w.branch,
+            lastSeenAt: now,
+          });
+          dirty = true;
+        }
+      }
+
+      const kept = list.filter(
+        (r) => r.projectId !== projectId || liveKeys.has(key(r.path)),
+      );
+      if (kept.length !== list.length) dirty = true;
+
+      if (dirty) await writeJsonAtomic(this.worktreesFile(), kept);
+      result = kept;
+    });
+    return result;
+  }
+
+  /**
+   * Upsert by path: `create` fields apply ONLY when the row is new, `update`
+   * always.
+   *
+   * The split is what stops the detector's sweep from downgrading a row it
+   * didn't write — a tree created through the tool is `origin: "tool"` with a
+   * known chat, and a later reconcile pass that merely re-saw it in
+   * `git worktree list` must not restate it as `external` and orphan it.
+   *
+   * One mutex hold covers the read AND the write; the read-then-save shape a
+   * caller would otherwise hand-roll interleaves with that same sweep and loses
+   * whichever attribution lost the race.
+   */
+  async upsertWorktreeRecord(
+    path: string,
+    create: Omit<WorktreeRecord, "path" | "createdAt" | "lastSeenAt">,
+    update: Partial<Omit<WorktreeRecord, "path">> = {},
+  ): Promise<WorktreeRecord> {
+    let result!: WorktreeRecord;
+    await this.mutex.run("worktrees", async () => {
+      const all = (await readJson<unknown[]>(this.worktreesFile())) ?? [];
+      const list = z.array(WorktreeRecordSchema).parse(all);
+      const idx = list.findIndex((w) => w.path === path);
+      const now = Date.now();
+      const prev = idx >= 0 ? list[idx] : undefined;
+      result = WorktreeRecordSchema.parse({
+        ...(prev ?? { ...create, createdAt: now }),
+        lastSeenAt: now,
+        ...update,
+        path,
+      });
+      if (idx >= 0) list[idx] = result;
+      else list.push(result);
+      await writeJsonAtomic(this.worktreesFile(), list);
+    });
+    return result;
+  }
+
+  /* --------------------------------------------------------- terminals */
+
+  /**
+   * Terminal ROWS. The transcripts live beside them as JSONL (see
+   * {@link appendTerminalLines}) because output is high-volume and a whole-file
+   * rewrite per line would be absurd; the row is small and changes rarely.
+   */
+  async listTerminalRecords(): Promise<TerminalRecord[]> {
+    const raw = (await readJson<unknown[]>(this.terminalsFile())) ?? [];
+    return z.array(TerminalRecordSchema).parse(raw);
+  }
+  async saveTerminalRecord(rec: TerminalRecord): Promise<TerminalRecord> {
+    const validated = TerminalRecordSchema.parse(rec);
+    await this.mutex.run("terminals", async () => {
+      const raw = (await readJson<unknown[]>(this.terminalsFile())) ?? [];
+      const list = z.array(TerminalRecordSchema).parse(raw);
+      const idx = list.findIndex((t) => t.id === validated.id);
+      if (idx >= 0) list[idx] = validated;
+      else list.push(validated);
+      await writeJsonAtomic(this.terminalsFile(), list);
+    });
+    return validated;
+  }
+  /** Drop a row AND its transcript. Returns the row that was removed, if any. */
+  async deleteTerminalRecord(id: string): Promise<TerminalRecord | null> {
+    let removed: TerminalRecord | null = null;
+    await this.mutex.run("terminals", async () => {
+      const raw = (await readJson<unknown[]>(this.terminalsFile())) ?? [];
+      const list = z.array(TerminalRecordSchema).parse(raw);
+      removed = list.find((t) => t.id === id) ?? null;
+      if (!removed) return;
+      await writeJsonAtomic(
+        this.terminalsFile(),
+        list.filter((t) => t.id !== id),
+      );
+    });
+    if (removed) await this.deleteTerminalLog((removed as TerminalRecord).logId);
+    return removed;
+  }
+
+  /** Append output lines to a terminal's transcript. */
+  async appendTerminalLines(logId: string, lines: TerminalLineRecord[]): Promise<void> {
+    if (lines.length === 0) return;
+    await mkdir(this.terminalLogsDir(), { recursive: true });
+    // ONE write for the whole batch. A write-behind flush of a dev server's
+    // output is routinely hundreds of lines, and a syscall each would make the
+    // batching pointless.
+    await this.mutex.run(`terminal-log:${logId}`, () =>
+      appendJsonlBatch(this.terminalLogFile(logId), lines),
+    );
+  }
+
+  /**
+   * Read a transcript back, filtered.
+   *
+   * The filters are here rather than in the caller because this is also the
+   * programmatic read — `terminal_output({ grep, since })` and the Workspace
+   * view's search both land on it, and a `tail` that windows AFTER filtering is
+   * the only one that means "the last 50 lines that matched".
+   */
+  async readTerminalLines(
+    logId: string,
+    opts: {
+      tail?: number;
+      since?: number;
+      q?: string;
+      stream?: TerminalLineRecord["stream"];
+    } = {},
+  ): Promise<TerminalLineRecord[]> {
+    const raw = await readJsonl(this.terminalLogFile(logId));
+    let lines: TerminalLineRecord[] = [];
+    for (const row of raw) {
+      const parsed = TerminalLineSchema.safeParse(row);
+      if (parsed.success) lines.push(parsed.data);
+    }
+    if (opts.since !== undefined) lines = lines.filter((l) => l.ts >= opts.since!);
+    if (opts.stream) lines = lines.filter((l) => l.stream === opts.stream);
+    if (opts.q) {
+      const needle = opts.q.toLowerCase();
+      lines = lines.filter((l) => l.chunk.toLowerCase().includes(needle));
+    }
+    return opts.tail && opts.tail > 0 ? lines.slice(-opts.tail) : lines;
+  }
+
+  /**
+   * Drop transcript lines older than `cutoff`, returning what's left.
+   *
+   * A rewrite, not an append — which is why it belongs on the retention sweep
+   * and nowhere near the write path.
+   */
+  async pruneTerminalLog(
+    logId: string,
+    cutoff: number,
+  ): Promise<{ lines: number; bytes: number }> {
+    let kept: TerminalLineRecord[] = [];
+    await this.mutex.run(`terminal-log:${logId}`, async () => {
+      const file = this.terminalLogFile(logId);
+      if (!existsSync(file)) return;
+      const raw = await readJsonl(file);
+      for (const row of raw) {
+        const parsed = TerminalLineSchema.safeParse(row);
+        if (parsed.success && parsed.data.ts >= cutoff) kept.push(parsed.data);
+      }
+      if (kept.length === raw.length) return;
+      const body = kept.map((l) => `${JSON.stringify(l)}\n`).join("");
+      await fsWriteFile(file, body, "utf8");
+    });
+    return {
+      lines: kept.length,
+      bytes: kept.reduce((n, l) => n + l.chunk.length, 0),
+    };
+  }
+
+  async deleteTerminalLog(logId: string): Promise<void> {
+    await this.mutex.run(`terminal-log:${logId}`, () =>
+      rm(this.terminalLogFile(logId), { force: true }),
+    );
   }
 
   /* ------------------------------------------------------- checkpoints */

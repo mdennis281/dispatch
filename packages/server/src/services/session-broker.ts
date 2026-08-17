@@ -120,7 +120,10 @@ import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
 import { bundledSkills } from "./bundled-skills.js";
 import { buildWorkflowDirective, createWorkflowGuardHook, inspectCwd } from "./workflow.js";
-import { createBackgroundShellGuardHook } from "./shell-guard.js";
+import {
+  createBackgroundShellGuardHook,
+  createWorktreeGuardHook,
+} from "./shell-guard.js";
 import { AgentCwdTracker } from "./agent-cwd.js";
 import { claudeExecutableOption } from "./runtime.js";
 import type {
@@ -144,6 +147,7 @@ import { managerMcpContextOf } from "./mcp/manager-mcp.js";
 export function buildManagerToolsDirective(caps: {
   github: boolean;
   terminals: boolean;
+  worktrees: boolean;
   memory: boolean;
   runner: boolean;
   mcpConfig?: boolean;
@@ -231,6 +235,19 @@ export function buildManagerToolsDirective(caps: {
         "long-running process: a Bash/PowerShell `run_in_background` spawns outside the " +
         "server's process tree, so Dispatch can neither show it nor stop it, and it is " +
         "left holding its port when this chat ends. The guard refuses that flag.",
+    );
+  }
+  if (caps.worktrees) {
+    lines.push(
+      "- `mcp__manager__worktree` — create, list and remove git worktrees. **`git worktree " +
+        "add` in a shell is refused**, including through `mcp__manager__terminal`: a tree " +
+        "cut that way carries no record of who owns it, so it lands in the Workspace view " +
+        "attributed to nobody and the manager is left guessing. `worktree({ action: " +
+        "\"create\", branch })` runs the same git command and records THIS chat as the " +
+        "owner. Prefer it over the harness's own `EnterWorktree` too — that one Dispatch " +
+        "cannot intercept, so its trees have to be reconciled after the fact. " +
+        "`action: \"list\"` shows this chat's trees, or everyone's with `scope: \"project\"` " +
+        "/ `\"all\"`.",
     );
   }
   if (caps.memory) {
@@ -3859,6 +3876,7 @@ export class SessionBroker {
       buildManagerToolsDirective({
         github: Boolean(this.github),
         terminals: Boolean(this.terminals),
+        worktrees: Boolean(this.worktrees && session.projectId),
         memory: Boolean(this.memory && session.projectId),
         runner: Boolean(this.runner && this.worktrees),
         mcpConfig: Boolean(session.projectId),
@@ -3928,6 +3946,35 @@ export class SessionBroker {
                     text:
                       "Blocked a background shell — redirected to " +
                       "mcp__manager__terminal({ background: true }), which is tracked.",
+                  });
+                },
+              }),
+            ],
+          },
+        ],
+      };
+    }
+
+    // …and refuse a shell-cut worktree, which lands in the catalog attributed to
+    // nobody. Gated on the same service the `worktree` tool is bound from, so
+    // the refusal always has a tool to name.
+    if (this.worktrees) {
+      options.hooks = {
+        ...options.hooks,
+        PreToolUse: [
+          ...(options.hooks?.PreToolUse ?? []),
+          {
+            hooks: [
+              createWorktreeGuardHook({
+                enabled: () => Boolean(this.worktrees),
+                onBlocked: () => {
+                  this.bus.publish({
+                    type: "notice",
+                    chatId: session.chatId,
+                    level: "info",
+                    text:
+                      "Blocked a shell-created worktree — redirected to " +
+                      "mcp__manager__worktree, which records the owning chat.",
                   });
                 },
               }),
@@ -4070,11 +4117,59 @@ export class SessionBroker {
         terminals: terminals
           ? {
               run: (a) =>
-                terminals.run({ chatId: session.chatId, cwd, ...a }),
+                terminals.run({
+                  chatId: session.chatId,
+                  projectId: session.projectId,
+                  origin: "agent",
+                  cwd,
+                  ...a,
+                }),
               tail: (a) =>
-                terminals.tail(session.chatId, a.name, a.lines),
+                terminals.tail(session.chatId, a.name, a.lines, {
+                  q: a.q,
+                  since: a.since,
+                  stream: a.stream,
+                }),
+              list: (a) =>
+                terminals.catalog({
+                  scope: a.scope ?? "chat",
+                  chatId: session.chatId,
+                  projectId: session.projectId,
+                  q: a.q,
+                }),
             }
           : undefined,
+        // Bind the worktree catalog to this session's chat + project. `create`
+        // records THIS chat as the owner, which is the whole reason the tool
+        // exists; `list` defaults to this chat and widens on request.
+        worktrees:
+          worktrees && project
+            ? {
+                create: (a) =>
+                  worktrees.create(project, a.branch, {
+                    chatId: session.chatId,
+                    base: a.base,
+                    label: a.label,
+                    origin: "tool",
+                  }),
+                list: async (a) => {
+                  const scope = a.scope ?? "chat";
+                  const projects =
+                    scope === "all" ? await this.store.listProjects() : [project];
+                  return worktrees.listAll(projects, {
+                    scope,
+                    projectId: project.id,
+                    chatId: session.chatId,
+                    q: a.q,
+                  });
+                },
+                remove: (a) =>
+                  worktrees.remove(a.path, {
+                    force: a.force,
+                    chatId: session.chatId,
+                  }),
+              }
+            : undefined,
         // Bind the memory runner to this session's project, so remember/recall/
         // forget just name the fact (scoped to the chat's project).
         memory:

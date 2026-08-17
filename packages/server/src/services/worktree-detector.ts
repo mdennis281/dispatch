@@ -13,23 +13,40 @@
  * path `create()` uses (saveChat + chat-update + worktree-update). Worktrees the
  * agent has torn down are detached.
  *
- * ATTRIBUTION (bug fix). Detection is project-wide, not "whatever chat's turn
- * just completed". Ownership is reconstructed from each chat's OWN transcript:
- * we scan its persisted `tool_use` rows (+ the live `chat-message` bus) for a
- * worktree-CREATE command (`git worktree add -b <branch>` / `pnpm worktree
- * <branch>`) and record `chatId → branch → earliest-ts`. That yields a global
- * `branch → owning-chat` map (earliest creator wins a tie); fallbacks cover a
- * branch with no create-command (a chat whose history referenced the worktree
- * PATH, then a chat whose persisted `prs[]` carries the branch, then an existing
- * unambiguous attribution — never overriding a stronger signal). A branch with
- * no owner is LEFT UNATTACHED rather than dumped on an arbitrary chat.
+ * THE REGISTRY OUTRANKS ALL OF THIS. `worktrees.json` records who owns a tree at
+ * the moment it is created — by the panel, or by `mcp__manager__worktree`, which
+ * is now the only path an agent is allowed to take (`git worktree add` in a
+ * shell is refused; see shell-guard.ts). For those trees there is nothing to
+ * infer, and a recorded `chatId` is treated as fact. What remains below is the
+ * RECOVERY path, for the two cases the registry cannot cover: the harness's own
+ * `EnterWorktree`, which Dispatch does not mediate, and a tree that predates the
+ * registry or was cut outside Dispatch entirely.
  *
- * ENTERWORKTREE (bug fix). The harness's `EnterWorktree` tool creates the tree
- * ITSELF — there is no shell command to parse, so command-based detection saw
- * NOTHING and the worktree stayed unattached until some later signal landed. In
- * practice that was tier 3, the PR: which is exactly why an agent's worktree
- * only showed up in the sidebar once it opened one. We now claim by PATH from
- * the tool call — its `path` input (entering an existing tree), its `name` input
+ * ATTRIBUTION. Detection is project-wide, not "whatever chat's turn just
+ * completed". Ownership is reconstructed from each chat's OWN transcript: we scan
+ * its persisted `tool_use` rows (+ the live `chat-message` bus) for a
+ * worktree-CREATE command (`git worktree add -b <branch>` / `pnpm worktree
+ * <branch>`) and record `chatId → branch → earliest-ts`, yielding a global
+ * `branch → owning-chat` map (earliest creator wins a tie), then an
+ * `EnterWorktree` claim on the path, then an existing unambiguous
+ * `chat.worktrees[]` link (how a tree that predates the registry keeps its
+ * owner). Whatever is recovered is WRITTEN BACK to the registry, so each of
+ * these derivations happens once rather than on every pass forever.
+ *
+ * The two weakest tiers are GONE. "A chat whose history mentioned this path" and
+ * "a chat with a PR on this branch" were guesses that read as facts: a chat that
+ * merely `cd`-ed into a colleague's tree, or opened a PR on a branch it didn't
+ * cut, took ownership of it. With creation now recorded, a tree with no evidence
+ * is LEFT UNATTACHED — and the Workspace view shows it as unattributed, which is
+ * a state someone can see and fix, rather than a wrong owner nobody questions.
+ *
+ * ENTERWORKTREE. The harness's `EnterWorktree` tool creates the tree ITSELF —
+ * there is no shell command to parse, so command-based detection saw NOTHING and
+ * the worktree stayed unattached until some later signal landed. In practice that
+ * was the PR tier, which is exactly why an agent's worktree only showed up in the
+ * sidebar once it opened one — and exactly why that tier had to go rather than
+ * stay as a crutch. We claim by PATH from the tool call — its `path` input
+ * (entering an existing tree), its `name` input
  * (→ `<repo>/.claude/worktrees/<name>`), and the path its RESULT reports
  * ("Created worktree at <path> on branch <branch>"). Earliest claimant wins, and
  * a real create-command still outranks a claim, so a chat that merely switched
@@ -183,8 +200,6 @@ export class WorktreeDetector {
   private readonly seeded = new Set<string>();
   /** chatId → (branch → earliest epoch ms it CREATED it), from history + live tool_use. */
   private readonly chatBranches = new Map<string, Map<string, number>>();
-  /** chatId → canonical worktree paths its history referenced (fallback attribution). */
-  private readonly chatPathRefs = new Map<string, Set<string>>();
   /** chatId → (canonical worktree path → earliest ts it CLAIMED via `EnterWorktree`). */
   private readonly chatWorktreePaths = new Map<string, Map<string, number>>();
   /** chatId → (`EnterWorktree` name → earliest ts), resolved against repoPath at reconcile. */
@@ -510,10 +525,10 @@ export class WorktreeDetector {
 
   /**
    * Scan a chat's persisted transcript ONCE and fold its worktree-CREATE commands
-   * into `chatBranches` (branch→earliest-ts) + `chatPathRefs` (referenced worktree
-   * paths, for fallback attribution). This is what rebuilds ownership from history
-   * on a fresh boot — the in-memory `chatBranches` is empty after a restart, so
-   * without this the persisted (possibly-wrong) attribution could never re-heal.
+   * into `chatBranches` (branch→earliest-ts) and its `EnterWorktree` calls into
+   * the path claims. This is what rebuilds ownership from history on a fresh boot
+   * for trees the registry has no record of — the in-memory maps are empty after
+   * a restart, so without this a pre-registry attribution could never re-heal.
    */
   private async ensureHistoryLoaded(project: Project, chatId: string): Promise<void> {
     if (this.historyLoaded.has(chatId)) return;
@@ -524,9 +539,6 @@ export class WorktreeDetector {
     } catch {
       return;
     }
-    const rootCanon = canonPath(
-      resolve(project.repoPath, project.worktreeRoot),
-    );
     // `EnterWorktree` calls we've seen but whose result row hasn't come up yet.
     // Scoped to this scan (messages are in order) — the live map is for the bus.
     const openEnters = new Set<string>();
@@ -545,20 +557,6 @@ export class WorktreeDetector {
       if (m.kind !== "tool_use") continue;
       const command = (m.input as { command?: unknown } | undefined)?.command;
       if (typeof command !== "string" || !command) continue;
-      // Path references (`cd <worktree>` …): any token under the worktree root is
-      // a signal this chat worked in that worktree (tier-2 fallback).
-      for (const token of command.split(/\s+/)) {
-        const t = token.replace(/^["']|["']$/g, "");
-        if (!t) continue;
-        const c = canonPath(t);
-        if (c === rootCanon || !c.startsWith(rootCanon)) continue;
-        let refs = this.chatPathRefs.get(chatId);
-        if (!refs) {
-          refs = new Set<string>();
-          this.chatPathRefs.set(chatId, refs);
-        }
-        refs.add(c);
-      }
       if (!looksLikeWorktreeCreate(command)) continue;
       this.recordChatBranches(
         chatId,
@@ -638,9 +636,27 @@ export class WorktreeDetector {
     for (const info of infoByCanon.values()) {
       const owner = owners.get(info.branch);
       if (!owner) continue;
-      const arr = desiredByChat.get(owner) ?? [];
+      const arr = desiredByChat.get(owner.chatId) ?? [];
       arr.push(info.path);
-      desiredByChat.set(owner, arr);
+      desiredByChat.set(owner.chatId, arr);
+      // Push the recovered attribution INTO the registry, so the next pass reads
+      // it as fact (tier 0) instead of re-deriving it from transcripts that a
+      // future compaction may no longer contain. `via: "record"` is already
+      // there; a tier-2 claim also tells us the harness cut this tree, which the
+      // back-fill would otherwise have filed as an anonymous `external`.
+      if (owner.via === "record") continue;
+      await this.worktrees.recordWorktree(
+        info.path,
+        {
+          projectId: project.id,
+          branch: info.branch,
+          chatId: owner.chatId,
+          origin: owner.via === "enter" ? "harness" : "external",
+        },
+        owner.via === "enter"
+          ? { chatId: owner.chatId, origin: "harness" }
+          : { chatId: owner.chatId },
+      );
     }
 
     // Rewrite each chat to its desired set (add owned, drop wrong/vanished).
@@ -684,25 +700,30 @@ export class WorktreeDetector {
   }
 
   /**
-   * Build the authoritative `branch → owning-chatId` map for a project from each
-   * chat's OWN signals, in priority order:
+   * Build the authoritative `branch → owner` map for a project, in priority
+   * order:
+   *   0. The REGISTRY's recorded `chatId` — written when the tree was created, so
+   *      there is nothing to infer and nothing may override it.
    *   1. Create-command (history + live tool_use) — EARLIEST creator wins a tie.
    *   2. An `EnterWorktree` claim on the worktree PATH — earliest claimant wins.
    *      Ranked below 1 so switching into another agent's tree can't take it from
    *      whoever's command created it.
-   *   3. A chat whose history referenced the worktree PATH (`cd <path>` …).
-   *   4. A chat whose persisted `prs[]` carries a PR on that branch.
-   *   5. An existing, UNAMBIGUOUS attribution (covers manager-created worktrees
-   *      with no transcript signal) — only reached when 1–4 are silent, so it can
-   *      never override a real creator and re-introduce the mis-attribution bug.
-   * A branch no chat claims is absent from the map → left unattached.
+   *   3. An existing, unambiguous `chat.worktrees[]` link — how a pre-registry
+   *      tree keeps its owner. Recorded on adoption, so it is derived once.
+   * A branch no chat claims is absent from the map → left unattached, and shown
+   * that way.
+   *
+   * `via` travels with the owner so the caller can record HOW a tree was
+   * attributed: a tier-2 claim means the harness cut it, which is worth knowing
+   * when you are looking at a `.claude/worktrees/` tree and wondering why the
+   * manager didn't make it.
    */
   private buildBranchOwners(
     project: Project,
     projectChats: Chat[],
     infos: WorktreeInfo[],
-  ): Map<string, string> {
-    const owners = new Map<string, string>();
+  ): Map<string, BranchOwner> {
+    const owners = new Map<string, BranchOwner>();
     const projectChatIds = new Set(projectChats.map((c) => c.id));
 
     // Resolve every `EnterWorktree` claim to a canonical path now that we have a
@@ -729,8 +750,8 @@ export class WorktreeDetector {
       }
     }
 
-    // Existing attribution: canonPath → chatId, but only when a single chat claims
-    // it (an ambiguous path is dropped from the tier-4 fallback).
+    // Existing attribution: canonPath → chatId, but only when a single chat
+    // claims it (an ambiguous path is dropped from the tier-3 adoption).
     const currentOwner = new Map<string, string>();
     const ambiguous = new Set<string>();
     for (const c of projectChats) {
@@ -745,6 +766,13 @@ export class WorktreeDetector {
     }
 
     for (const info of infos) {
+      // 0. A recorded owner. `list()` merges the registry onto every info, so
+      //    this is simply what the tree's creator wrote down.
+      if (info.chatId && projectChatIds.has(info.chatId)) {
+        owners.set(info.branch, { chatId: info.chatId, via: "record" });
+        continue;
+      }
+
       // 1. Earliest create-command owner (scoped to this project's chats).
       let bestChat: string | undefined;
       let bestTs = Number.POSITIVE_INFINITY;
@@ -758,7 +786,7 @@ export class WorktreeDetector {
         }
       }
       if (bestChat) {
-        owners.set(info.branch, bestChat);
+        owners.set(info.branch, { chatId: bestChat, via: "command" });
         continue;
       }
 
@@ -774,35 +802,27 @@ export class WorktreeDetector {
         claimChat = chatId;
       }
       if (claimChat) {
-        owners.set(info.branch, claimChat);
+        owners.set(info.branch, { chatId: claimChat, via: "enter" });
         continue;
       }
 
-      // 3. A chat whose history referenced this worktree path.
-      const pathRef = projectChats.find((c) =>
-        this.chatPathRefs.get(c.id)?.has(cp),
-      );
-      if (pathRef) {
-        owners.set(info.branch, pathRef.id);
-        continue;
-      }
-
-      // 4. A chat with a persisted PR on this branch.
-      const prOwner = projectChats.find((c) =>
-        (c.prs ?? []).some((r) => r.branch === info.branch),
-      );
-      if (prOwner) {
-        owners.set(info.branch, prOwner.id);
-        continue;
-      }
-
-      // 5. Preserve an existing, unambiguous attribution.
+      // 3. An existing, UNAMBIGUOUS `chat.worktrees[]` entry. Not a guess: some
+      //    earlier code path wrote that link down because it knew. This is how a
+      //    tree that predates the registry keeps its owner — and because the
+      //    reconcile then records it, the adoption happens ONCE and the next pass
+      //    reads it as tier 0 rather than re-deriving it forever.
       if (!ambiguous.has(cp) && currentOwner.has(cp)) {
-        owners.set(info.branch, currentOwner.get(cp)!);
+        owners.set(info.branch, { chatId: currentOwner.get(cp)!, via: "adopt" });
       }
     }
     return owners;
   }
+}
+
+/** Who owns a branch's worktree, and which tier said so. */
+interface BranchOwner {
+  chatId: string;
+  via: "record" | "command" | "enter" | "adopt";
 }
 
 /* =========================================================== command parsing */

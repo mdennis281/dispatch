@@ -385,3 +385,147 @@ describe("renameWithRetry — Windows destination contention", () => {
     expect((await readdir(dir)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 });
+
+describe("worktree records", () => {
+  const wtFile = () => join(dir, "worktrees.json");
+
+  it("applies `create` fields only on insert, `update` always", async () => {
+    await store.upsertWorktreeRecord("/wt/a", {
+      projectId: "p1",
+      branch: "feat/a",
+      chatId: "c1",
+      origin: "tool",
+    });
+    // A later caller that only re-saw the path must NOT restate it as external
+    // and orphan it — that was the whole reason for splitting the two arguments.
+    const after = await store.upsertWorktreeRecord("/wt/a", {
+      projectId: "p1",
+      branch: "feat/a",
+      origin: "external",
+    });
+    expect(after).toMatchObject({ origin: "tool", chatId: "c1" });
+
+    const updated = await store.upsertWorktreeRecord(
+      "/wt/a",
+      { projectId: "p1", branch: "feat/a", origin: "external" },
+      { chatId: "c2" },
+    );
+    expect(updated).toMatchObject({ origin: "tool", chatId: "c2" });
+  });
+
+  it("syncWorktreeRecords back-fills, drops the gone, and no-ops when unchanged", async () => {
+    const live = [{ path: "/wt/a", branch: "feat/a" }];
+    await store.syncWorktreeRecords("p1", live, { now: 1_000 });
+    expect(await store.listWorktreeRecords()).toMatchObject([
+      { path: "/wt/a", origin: "external", createdAt: 1_000, lastSeenAt: 1_000 },
+    ]);
+
+    // Nothing changed and the row isn't stale → the file must not be rewritten,
+    // because list() runs on every panel refresh and this is on that path.
+    const before = await readJson(wtFile());
+    await store.syncWorktreeRecords("p1", live, { now: 1_500 });
+    expect(await readJson(wtFile())).toEqual(before);
+
+    // Git stopped reporting it → the row goes. Git owns existence.
+    await store.syncWorktreeRecords("p1", [], { now: 2_000 });
+    expect(await store.listWorktreeRecords()).toEqual([]);
+  });
+
+  it("only reconciles the project it was given", async () => {
+    await store.upsertWorktreeRecord("/wt/other", {
+      projectId: "p2",
+      branch: "feat/other",
+      origin: "tool",
+    });
+    await store.syncWorktreeRecords("p1", [], { now: 1_000 });
+    expect((await store.listWorktreeRecords()).map((r) => r.path)).toEqual([
+      "/wt/other",
+    ]);
+  });
+
+  it("refreshes lastSeenAt on a branch change and on a stale row", async () => {
+    await store.syncWorktreeRecords("p1", [{ path: "/wt/a", branch: "feat/a" }], {
+      now: 1_000,
+    });
+    await store.syncWorktreeRecords("p1", [{ path: "/wt/a", branch: "feat/b" }], {
+      now: 1_100,
+    });
+    expect(await store.listWorktreeRecords()).toMatchObject([
+      { branch: "feat/b", lastSeenAt: 1_100 },
+    ]);
+
+    await store.syncWorktreeRecords("p1", [{ path: "/wt/a", branch: "feat/b" }], {
+      now: 1_100 + 10 * 60_000,
+    });
+    expect((await store.listWorktreeRecords())[0]!.lastSeenAt).toBe(1_100 + 10 * 60_000);
+  });
+
+  it("matches paths through the caller's key fn (case-folding on Windows)", async () => {
+    await store.upsertWorktreeRecord("/WT/A", {
+      projectId: "p1",
+      branch: "feat/a",
+      chatId: "c1",
+      origin: "tool",
+    });
+    const out = await store.syncWorktreeRecords(
+      "p1",
+      [{ path: "/wt/a", branch: "feat/a" }],
+      { now: 2_000, key: (p) => p.toLowerCase() },
+    );
+    // One row, still attributed — not a second, anonymous back-fill.
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ path: "/WT/A", chatId: "c1", origin: "tool" });
+  });
+
+  it("appends a large batch and reads every line back", async () => {
+    // A write-behind flush of a dev server's output is routinely this size,
+    // which is why `appendTerminalLines` makes it ONE write rather than one per
+    // line. What's observable from here is that the batch round-trips intact.
+    const rows = Array.from({ length: 500 }, (_, i) => ({
+      stream: "stdout" as const,
+      chunk: `line ${i}`,
+      ts: 1_000 + i,
+    }));
+    await store.appendTerminalLines("log1", rows);
+    const back = await store.readTerminalLines("log1");
+    expect(back).toHaveLength(500);
+    expect(back[0]!.chunk).toBe("line 0");
+    expect(back[499]!.chunk).toBe("line 499");
+  });
+
+  it("round-trips a batch and filters it on the way back", async () => {
+    await store.appendTerminalLines("log2", [
+      { stream: "command", chunk: "pnpm build", ts: 1_000 },
+      { stream: "stdout", chunk: "compiled", ts: 1_100 },
+      { stream: "stderr", chunk: "deprecated", ts: 1_200 },
+    ]);
+    expect(await store.readTerminalLines("log2")).toHaveLength(3);
+    expect(
+      (await store.readTerminalLines("log2", { stream: "stderr" })).map((l) => l.chunk),
+    ).toEqual(["deprecated"]);
+    expect(
+      (await store.readTerminalLines("log2", { since: 1_100 })).map((l) => l.chunk),
+    ).toEqual(["compiled", "deprecated"]);
+    expect((await store.readTerminalLines("log2", { q: "compil" })).map((l) => l.chunk)).toEqual([
+      "compiled",
+    ]);
+    expect((await store.readTerminalLines("log2", { tail: 1 })).map((l) => l.chunk)).toEqual([
+      "deprecated",
+    ]);
+
+    // Retention rewrites the file, keeping only what's inside the window.
+    expect(await store.pruneTerminalLog("log2", 1_150)).toMatchObject({ lines: 1 });
+    expect((await store.readTerminalLines("log2")).map((l) => l.chunk)).toEqual(["deprecated"]);
+  });
+
+  it("deletes a record by path", async () => {
+    await store.upsertWorktreeRecord("/wt/a", {
+      projectId: "p1",
+      branch: "feat/a",
+      origin: "ui",
+    });
+    expect(await store.getWorktreeRecord("/wt/a")).not.toBeNull();
+    await store.deleteWorktreeRecord("/wt/a");
+    expect(await store.getWorktreeRecord("/wt/a")).toBeNull();
+  });
+});

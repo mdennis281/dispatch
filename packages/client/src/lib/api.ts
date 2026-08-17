@@ -14,6 +14,7 @@ import type {
   AttentionItem,
   PermissionRequest,
   RunnerInstance,
+  RegistryQuery,
   TerminalInfo,
   WorktreeInfo,
   BranchInfo,
@@ -514,11 +515,19 @@ export const api = {
   /* persistent named shells — opened by the agent (mcp__manager__terminal) OR
      by a human from the Terminals panel; both land on the same shells. */
   terminals: {
-    list: (chatId?: string) =>
-      get<TerminalInfo[]>(`/api/terminals${qs({ chatId })}`),
-    output: (id: string) =>
+    /**
+     * The catalog. Passing nothing sweeps app-wide; the scope/q filters are the
+     * same predicate the server applies to `mcp__manager__terminal_output`'s
+     * list, so what the Workspace view shows and what an agent sees agree.
+     */
+    list: (query: Partial<RegistryQuery> = {}) =>
+      get<TerminalInfo[]>(`/api/terminals${qs({ ...query })}`),
+    output: (
+      id: string,
+      opts: { tail?: number; since?: number; q?: string; stream?: string } = {},
+    ) =>
       get<{ stream: "command" | "stdout" | "stderr"; chunk: string; ts: number }[]>(
-        `/api/terminals/${encodeURIComponent(id)}/output`,
+        `/api/terminals/${encodeURIComponent(id)}/output${qs(opts)}`,
       ),
     /** Open an empty shell (cwd = the chat's worktree, else the project checkout). */
     create: (chatId: string, name: string) =>
@@ -537,7 +546,11 @@ export const api = {
         error?: string;
         backgrounded?: boolean;
       }>("/api/terminals/run", { chatId, name, command, background }),
+    /** Close the shell. Its transcript stays readable until retention takes it. */
     kill: (id: string) => del<{ ok: true }>(`/api/terminals/${encodeURIComponent(id)}`),
+    /** Close it AND forget what it printed. */
+    purge: (id: string) =>
+      del<{ ok: true }>(`/api/terminals/${encodeURIComponent(id)}?purge=1`),
   },
 
   /* file-path picker (the browser can't see the filesystem; the server can) */
@@ -560,8 +573,15 @@ export const api = {
 
   /* worktrees */
   worktrees: {
-    list: (projectId: string) =>
-      get<WorktreeInfo[]>(`/api/worktrees${qs({ projectId })}`),
+    /**
+     * The catalog. A bare `projectId` keeps its original meaning (that project's
+     * trees); a full query widens to the chat or the whole app, through the same
+     * predicate the server applies to the `worktree` MCP tool's `list`.
+     */
+    list: (query: string | Partial<RegistryQuery>) =>
+      get<WorktreeInfo[]>(
+        `/api/worktrees${qs(typeof query === "string" ? { projectId: query } : { ...query })}`,
+      ),
     /** Local branches (recency-sorted) for the launch picker. */
     branches: (projectId: string) =>
       get<BranchInfo[]>(`/api/branches${qs({ projectId })}`),

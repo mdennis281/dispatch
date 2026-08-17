@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, Settings, GitPullRequest, Blocks, FileCog } from "lucide-react";
+import { Search, Settings, GitPullRequest, Blocks, FileCog, FolderGit2 } from "lucide-react";
 import { AttentionPopover } from "../attention/AttentionPopover.js";
 import { UsageMeter } from "./UsageMeter.js";
 import { CommandPalette } from "../command/CommandPalette.js";
@@ -119,10 +119,16 @@ export function TopBar() {
         {!compact && (
           <>
             <AttentionPopover />
-            {/* Two of these four are now full PAGES rather than overlays (see
+            {/* Two of these five are now full PAGES rather than overlays (see
                 stores/view) — they'd outgrown a dialog. They keep their slot in
                 this row because from here they're the same gesture: the thing
                 you were doing stays where it is, and you come back to it. */}
+            <IconButton
+              tip="Workspace — worktrees, terminals, PRs"
+              onClick={() => openOverlay("workspace")}
+            >
+              <FolderGit2 />
+            </IconButton>
             <IconButton tip="Project config" onClick={() => openProjectSettings()}>
               <FileCog />
             </IconButton>
