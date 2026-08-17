@@ -43,6 +43,8 @@ import { IconButton } from "../ui/IconButton.js";
 import { Spinner } from "../ui/Spinner.js";
 import { cn } from "../../lib/cn.js";
 import { useDialogLayer } from "../../lib/layers.js";
+import { useLayoutMode } from "../../stores/layout.js";
+import { useViewport } from "../../stores/viewport.js";
 import { uploadChatImage } from "../../lib/actions.js";
 import { useAnnotatorPrefs } from "../../lib/annotatorPrefs.js";
 import {
@@ -76,6 +78,76 @@ export interface ImageAnnotatorProps {
   onApply: (ref: ImageRef) => void;
 }
 
+/**
+ * Why the editor's header is where it is — on the device, in the editor.
+ *
+ * The overlap has now survived one shipped fix, and every number that could
+ * have caught it is only readable in a Web Inspector this phone cannot be
+ * attached to. Layout alone can't tell the two candidate causes apart: padding
+ * that never applied, and padding that applied to a box whose origin isn't the
+ * top of the glass. So read both at once, off the real elements:
+ *
+ *  - `pad-t`  what the panel's padding-top COMPUTED to. 0 means the inset never
+ *             reached the box, whatever the stylesheet says.
+ *  - `var-t`  what `--cm-safe-top` resolves to on that same box — the CSS path
+ *             the shipped fix used.
+ *  - `js-t`   the same inset as measured by the probe, which is what the inline
+ *             style now pays. `var-t` ≠ `js-t` indicts `env()` in a variable.
+ *  - `hdr-t`  where the header's top edge actually IS. If this equals `pad-t`
+ *             and the buttons are still in the clock, the box starts above the
+ *             glass and no amount of padding will ever move them.
+ *
+ * Rides the same switch as the rest of the viewport debug (More → toggle), so
+ * it is off for everyone by default and never persisted.
+ */
+function AnnotatorGeometryDebug({ panelRef }: { panelRef: React.RefObject<HTMLDivElement | null> }) {
+  const debug = useViewport((s) => s.debug);
+  const jsTop = useViewport((s) => s.safeTop);
+  const [read, setRead] = useState<{ pad: string; varTop: string; hdr: number; panel: number } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!debug) return;
+    // After paint, and again on the next frame: the panel mounts before the
+    // Konva stage sizes itself, and a first-frame read would report the box it
+    // had rather than the one it settles at.
+    const read1 = () => {
+      const el = panelRef.current;
+      if (!el) return;
+      const cs = getComputedStyle(el);
+      const header = el.querySelector("header");
+      setRead({
+        pad: cs.paddingTop,
+        varTop: cs.getPropertyValue("--cm-safe-top").trim() || "(unset)",
+        hdr: Math.round(header?.getBoundingClientRect().top ?? -1),
+        panel: Math.round(el.getBoundingClientRect().top),
+      });
+    };
+    const id = requestAnimationFrame(() => requestAnimationFrame(read1));
+    return () => cancelAnimationFrame(id);
+  }, [debug, panelRef]);
+
+  if (!debug || !read) return null;
+  const rows: Array<[string, string]> = [
+    ["pad-t", read.pad],
+    ["var-t", read.varTop],
+    ["js-t", `${jsTop}`],
+    ["panel-t", `${read.panel}`],
+    ["hdr-t", `${read.hdr}`],
+  ];
+  return (
+    <div className="pointer-events-none absolute right-1 top-1 z-50 rounded border border-line-strong bg-black/80 px-1.5 py-1 font-mono text-2xs leading-tight text-white">
+      {rows.map(([k, v]) => (
+        <div key={k} className="flex gap-1.5">
+          <span className="w-11 shrink-0 text-white/45">{k}</span>
+          <span className="text-cyan-300">{v}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** Screen-pixel radius for grabbing a crop corner. Sized for a fingertip. */
 const CROP_GRAB = 28;
 /**
@@ -107,6 +179,11 @@ export default function ImageAnnotator(props: ImageAnnotatorProps) {
   const z = useDialogLayer();
   const [base, setBase] = useState<Bitmap | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // Full-bleed on a phone means this panel, not its root, owns the insets.
+  const phone = useLayoutMode() === "sm";
+  const safeTop = useViewport((s) => s.safeTop);
+  const safeBottom = useViewport((s) => s.safeBottom);
 
   useEffect(() => {
     let live = true;
@@ -126,23 +203,28 @@ export default function ImageAnnotator(props: ImageAnnotatorProps) {
     >
       <div className="fixed inset-0 bg-scrim backdrop-blur-[2px]" aria-hidden />
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label="Edit image"
+        // MEASURED insets, applied inline, rather than the `cm-safe-pad` class
+        // this used to carry. The class demonstrably reaches the stylesheet and
+        // `--cm-safe-top` demonstrably resolves (the debug readout is positioned
+        // by it), yet the header stayed under the clock on a real installed PWA
+        // — so the CSS path has one unknown too many to keep betting on. These
+        // are the same numbers the probe in `stores/viewport` reads out of the
+        // engine, and an inline style cannot be out-ordered, out-layered or
+        // out-specified by anything.
+        style={phone ? { paddingTop: safeTop, paddingBottom: safeBottom } : undefined}
         className={cn(
           // Full-bleed on a phone. A centred card with margins wastes the only
           // dimension a phone is short on, and the canvas is the whole point.
           "relative z-10 flex h-full w-full flex-col overflow-hidden bg-overlay",
-          // Being full-bleed is exactly what put the header under the status bar,
-          // so the insets are paid HERE rather than on the root: as padding on
-          // the panel the background still reaches the screen edges and only the
-          // chrome moves clear. At `sm` this is a centred card and the root's
-          // gutter has already done it.
-          "max-sm:cm-safe-pad",
           "sm:h-auto sm:max-h-full sm:max-w-[1180px] sm:rounded-lg sm:border sm:border-line-strong",
           "sm:shadow-[var(--shadow-pop)] sm:backdrop-blur-md sm:cm-anim-rise",
         )}
       >
+        <AnnotatorGeometryDebug panelRef={panelRef} />
         {base ? (
           <Editor {...props} base={base} />
         ) : (
