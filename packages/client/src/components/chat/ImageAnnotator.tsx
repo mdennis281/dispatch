@@ -20,7 +20,15 @@
  * through the existing asset flow (POST /api/chats/:id/assets → ImageRef),
  * returned to the Composer which swaps it in place of the original attachment.
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { createPortal } from "react-dom";
 import { Group, Image as KonvaImage, Layer, Stage } from "react-konva";
 import type Konva from "konva";
@@ -43,7 +51,6 @@ import { IconButton } from "../ui/IconButton.js";
 import { Spinner } from "../ui/Spinner.js";
 import { cn } from "../../lib/cn.js";
 import { useDialogLayer } from "../../lib/layers.js";
-import { useLayoutMode } from "../../stores/layout.js";
 import { useViewport } from "../../stores/viewport.js";
 import { uploadChatImage } from "../../lib/actions.js";
 import { useAnnotatorPrefs } from "../../lib/annotatorPrefs.js";
@@ -76,6 +83,32 @@ export interface ImageAnnotatorProps {
   alt?: string;
   onCancel: () => void;
   onApply: (ref: ImageRef) => void;
+}
+
+/**
+ * Is this dialog full-bleed right now?
+ *
+ * Deliberately NOT `useLayoutMode() === "sm"`. The shell's `sm` ends at 768px
+ * and Tailwind's ends at 640px, and in the 128px between them this panel is
+ * already a centred card whose root has cleared the insets with its own gutter
+ * — paying them inline as well would push the editor down by a second status
+ * bar. The boundary that matters here is the one the `sm:` classes on this very
+ * element use, so read exactly that.
+ */
+const FULL_BLEED = "(max-width: 39.98rem)";
+
+function useFullBleed(): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      const m = window.matchMedia(FULL_BLEED);
+      m.addEventListener("change", onChange);
+      return () => m.removeEventListener("change", onChange);
+    },
+    () => window.matchMedia(FULL_BLEED).matches,
+    // The client's vitest runner has no DOM; the desktop answer is the one a
+    // headless render should produce, matching `currentMode`'s fallback.
+    () => false,
+  );
 }
 
 /**
@@ -124,8 +157,16 @@ function AnnotatorGeometryDebug({ panelRef }: { panelRef: React.RefObject<HTMLDi
         panel: Math.round(el.getBoundingClientRect().top),
       });
     };
-    const id = requestAnimationFrame(() => requestAnimationFrame(read1));
-    return () => cancelAnimationFrame(id);
+    // Both ids, or closing the dialog inside two frames leaves the inner frame
+    // armed to `setRead` on an unmounted component.
+    let inner = 0;
+    const outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(read1);
+    });
+    return () => {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+    };
   }, [debug, panelRef]);
 
   if (!debug || !read) return null;
@@ -180,8 +221,8 @@ export default function ImageAnnotator(props: ImageAnnotatorProps) {
   const [base, setBase] = useState<Bitmap | null>(null);
   const [error, setError] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  // Full-bleed on a phone means this panel, not its root, owns the insets.
-  const phone = useLayoutMode() === "sm";
+  // Full-bleed means this panel, not its root, owns the insets.
+  const phone = useFullBleed();
   const safeTop = useViewport((s) => s.safeTop);
   const safeBottom = useViewport((s) => s.safeBottom);
 
