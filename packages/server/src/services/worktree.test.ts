@@ -597,4 +597,100 @@ describe("WorktreeService — the attribution registry (real git)", () => {
     const all = await svc.listAll([project()], { scope: "all" });
     expect(all.some((w) => w.isPrimary)).toBe(true);
   });
+
+  /* ------------------------------------------------- merged / unmerged */
+
+  /** A fresh service, because the merged answer is TTL-cached per instance. */
+  const freshSvc = (): WorktreeService => new WorktreeService({ store, bus: new EventBus() });
+
+  it("reports a branch git can see on the trunk as merged", async () => {
+    const info = await svc.create(project(), "feat/lands", { base: "main", noFetch: true });
+    await writeFile(join(info.path, "new.txt"), "x\n");
+    await git(info.path, "add", "-A");
+    await git(info.path, "commit", "-m", "work");
+
+    const before = (await svc.list(project())).find((w) => w.branch === "feat/lands")!;
+    expect(before.merged).toBe(false);
+
+    // A real (non-squash) merge — git's own ancestry answers this one.
+    await git(repo, "merge", "--no-ff", "-m", "merge", "feat/lands");
+    const after = (await freshSvc().list(project())).find((w) => w.branch === "feat/lands")!;
+    expect(after.merged).toBe(true);
+  });
+
+  it("counts a SQUASH-merged branch as merged, off the recorded PR", async () => {
+    // The case git cannot see: a squash rewrites the commits, so the branch is
+    // not an ancestor of the trunk and `--merged` calls it unmerged forever.
+    // This repo squash-merges, so without the PR join the filter would select
+    // nearly every worktree.
+    const info = await svc.create(project(), "feat/squashed", { base: "main", noFetch: true });
+    await writeFile(join(info.path, "sq.txt"), "x\n");
+    await git(info.path, "add", "-A");
+    await git(info.path, "commit", "-m", "work");
+    await git(repo, "merge", "--squash", "feat/squashed");
+    await git(repo, "commit", "-m", "feat: squashed (#1)");
+
+    expect((await svc.list(project())).find((w) => w.branch === "feat/squashed")!.merged).toBe(
+      false,
+    );
+
+    await store.saveChat({
+      id: "chatMerged",
+      projectId: "p1",
+      title: "T",
+      modeId: "auto",
+      effort: "medium",
+      worktrees: [],
+      prs: [{ number: 1, url: "u", branch: "feat/squashed", state: "merged" }],
+      createdAt: Date.now(),
+    });
+    expect(
+      (await freshSvc().list(project())).find((w) => w.branch === "feat/squashed")!.merged,
+    ).toBe(true);
+  });
+
+  it("leaves the primary checkout's merged state unknown", async () => {
+    const primary = (await svc.list(project())).find((w) => w.isPrimary)!;
+    // "Is the trunk merged into itself" is a category error, not a `false`.
+    expect(primary.merged).toBeUndefined();
+  });
+
+  it("filters unmerged and unattributed, and never returns the primary for either", async () => {
+    await svc.create(project(), "feat/mine", {
+      base: "main",
+      noFetch: true,
+      chatId: "chat1",
+    });
+    const orphan = await svc.create(project(), "feat/orphan", { base: "main", noFetch: true });
+    await writeFile(join(orphan.path, "o.txt"), "x\n");
+    await git(orphan.path, "add", "-A");
+    await git(orphan.path, "commit", "-m", "work");
+
+    const unattributed = await freshSvc().listAll([project()], {
+      scope: "all",
+      unattributed: true,
+    });
+    expect(unattributed.map((w) => w.branch)).toEqual(["feat/orphan"]);
+
+    // `feat/mine` has no commits of its own, so git already counts it as
+    // merged; only the branch that diverged is selected.
+    const unmerged = await freshSvc().listAll([project()], { scope: "all", unmerged: true });
+    expect(unmerged.map((w) => w.branch)).toEqual(["feat/orphan"]);
+    expect(unmerged.some((w) => w.isPrimary)).toBe(false);
+  });
+
+  it("sorts by the query rather than by whatever order git listed", async () => {
+    await svc.create(project(), "feat/zulu", { base: "main", noFetch: true });
+    await svc.create(project(), "feat/alpha", { base: "main", noFetch: true });
+    const branches = async (query: Parameters<typeof svc.listAll>[1]): Promise<string[]> =>
+      (await freshSvc().listAll([project()], query)).map((w) => w.branch);
+
+    expect(await branches({ scope: "all", sort: "name", unattributed: true })).toEqual([
+      "feat/alpha",
+      "feat/zulu",
+    ]);
+    expect(
+      await branches({ scope: "all", sort: "name", order: "desc", unattributed: true }),
+    ).toEqual(["feat/zulu", "feat/alpha"]);
+  });
 });

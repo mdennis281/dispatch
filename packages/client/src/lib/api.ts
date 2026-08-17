@@ -293,7 +293,11 @@ const post = <T>(path: string, body?: unknown) => request<T>("POST", path, body)
 const put = <T>(path: string, body?: unknown) => request<T>("PUT", path, body);
 const del = <T>(path: string, body?: unknown) => request<T>("DELETE", path, body);
 
-function qs(params: Record<string, string | number | undefined>): string {
+// `boolean` is in the union for the registry's facet flags: `false` is a real
+// filter ("only the ones that aren't"), so it must serialize rather than be
+// mistaken for "unset" — which is why the guard below tests `undefined`, not
+// falsiness.
+function qs(params: Record<string, string | number | boolean | undefined>): string {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== "") p.set(k, String(v));
@@ -561,6 +565,13 @@ export const api = {
     /** Close it AND forget what it printed. */
     purge: (id: string) =>
       del<{ ok: true }>(`/api/terminals/${encodeURIComponent(id)}?purge=1`),
+    /**
+     * Close every LIVE shell the query selects — the same query the catalog was
+     * read with, so this kills exactly the rows on screen. Transcripts survive;
+     * this reclaims ports, it doesn't forget output.
+     */
+    killAll: (query: Partial<RegistryQuery> = {}) =>
+      post<{ killed: number; ids: string[] }>("/api/terminals/kill-all", query),
   },
 
   /* file-path picker (the browser can't see the filesystem; the server can) */
