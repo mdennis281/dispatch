@@ -614,6 +614,11 @@ function launcher(script, argv, { cwd, log }) {
       cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
+      // The swap half is detached and console-less, so each of these python
+      // invocations (--stop, then the start) would otherwise pop its own
+      // console window mid-upgrade. Its output is piped into upgrade.log
+      // regardless.
+      windowsHide: true,
     });
     child.stdout.on("data", (b) => log(String(b)));
     child.stderr.on("data", (b) => log(String(b)));

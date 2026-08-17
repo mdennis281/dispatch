@@ -167,6 +167,17 @@ export async function launchUpdate(opts: LaunchUpdateOptions): Promise<LaunchUpd
         stdio: ["ignore", log.fd, log.fd],
         env: {
           ...(opts.env ?? process.env),
+          // Do not open a browser when the update finishes. The tab that
+          // clicked Update is already on the updating screen and reloads itself
+          // the moment the new build answers (see UpdatingScreen), so the
+          // installer's `openBrowser` only ever adds a duplicate — and someone
+          // updating remotely comes back to one stray tab per update.
+          //
+          // An env var rather than `--no-open`: the installer is fetched from
+          // the TARGET release, so installing an older tag runs an older
+          // install.mjs that would reject the unknown flag outright and fail
+          // the whole update. An unknown env var is ignored.
+          DISPATCH_INSTALL_NO_OPEN: "1",
           // Belt and braces for the cwd hazard above: the installer resolves a
           // relative --target against this, and we are handing it an absolute
           // one, but a future installer that consults it must not be pointed
