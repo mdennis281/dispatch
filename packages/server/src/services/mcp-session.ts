@@ -50,7 +50,14 @@ export interface McpPortStore {
  * the precise failure this whole module exists to prevent.
  */
 export function checkoutKey(root: string, platform: NodeJS.Platform = process.platform): string {
-  const norm = String(root).replace(/\\/g, "/").replace(/\/+$/, "");
+  const slashed = String(root).replace(/\\/g, "/");
+  // Strip trailing slashes so `/srv/a` and `/srv/a/` are one key — but not past
+  // a filesystem ROOT, where the slash is the path. Without the guard `"/"`
+  // collapses to `""` and `"C:/"` to `"C:"`: two keys that no longer name a
+  // directory, so the stale-lease reclaim (which tests the key with existsSync)
+  // would treat every such lease as dead and hand its port out twice.
+  const trimmed = slashed.replace(/\/+$/, "");
+  const norm = trimmed === "" ? "/" : /^[a-zA-Z]:$/.test(trimmed) ? `${trimmed}/` : trimmed;
   return platform === "win32" || platform === "darwin" ? norm.toLowerCase() : norm;
 }
 

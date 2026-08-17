@@ -59,6 +59,18 @@ describe("checkoutKey", () => {
     expect(checkoutKey("/srv/a/", "linux")).toBe(checkoutKey("/srv/a", "linux"));
     expect(checkoutKey("C:\\r\\", "win32")).toBe(checkoutKey("C:/r", "win32"));
   });
+
+  it("does not collapse a filesystem ROOT into a key that names no directory", () => {
+    // "/" → "" and "C:/" → "C:" would both fail the existsSync used by the
+    // stale-lease reclaim, so every such lease would look dead and its port
+    // would be handed out a second time.
+    expect(checkoutKey("/", "linux")).toBe("/");
+    expect(checkoutKey("///", "linux")).toBe("/");
+    expect(checkoutKey("C:/", "win32")).toBe("c:/");
+    expect(checkoutKey("C:\\", "win32")).toBe("c:/");
+    // …and a root must still be distinct from a child of it.
+    expect(checkoutKey("/", "linux")).not.toBe(checkoutKey("/srv", "linux"));
+  });
 });
 
 describe("substituteMcpTokens", () => {

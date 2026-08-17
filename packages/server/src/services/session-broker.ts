@@ -26,11 +26,13 @@
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { basename, extname, isAbsolute, join, resolve as resolvePath } from "node:path";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
 import { McpPrewarmService } from "./mcp-prewarm.js";
+import { tmpdir } from "node:os";
 import {
   parseAssetReference,
+  isPathWithinRoots,
   MAX_INLINE_ASSET_BYTES,
   MAX_REFERENCED_ASSET_BYTES,
   type AssetReference,
@@ -3065,11 +3067,20 @@ export class SessionBroker {
       // path relative to its cwd lands in the right worktree.
       const base = session.worktreeCwd ?? process.cwd();
       const abs = isAbsolute(ref.path) ? ref.path : resolvePath(base, ref.path);
-      const info = await stat(abs);
+      // Follow symlinks BEFORE deciding: a link inside the worktree pointing at
+      // /etc/passwd would otherwise pass a check on the pre-resolution path.
+      const real = await realpath(abs);
+      const info = await stat(real);
       if (!info.isFile()) return null;
       if (info.size > MAX_REFERENCED_ASSET_BYTES) return null;
+      // Confine the read. A REMOTE MCP server has no filesystem access of its
+      // own, so without this it could name any path and borrow the manager's.
+      const roots = await Promise.all(
+        [base, tmpdir()].map((r) => realpath(r).catch(() => r)),
+      );
+      if (!isPathWithinRoots(real, roots)) return null;
 
-      const mime = ref.mimeType ?? mediaTypeFromName(abs);
+      const mime = ref.mimeType ?? mediaTypeFromName(real);
       const name = `${this.genId()}${extFromMediaType(mime, extname(abs) || ".bin")}`;
       const relPath = await this.store.writeChatAsset(
         session.chatId,

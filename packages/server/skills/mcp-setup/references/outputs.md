@@ -50,6 +50,13 @@ return {
 
 Notes:
 
+- **Write inside the chat's directory or the OS temp dir.** A reference is only
+  ingested if it resolves (after following symlinks) inside one of those two
+  roots. Anything else is refused and your original block is left as-is.
+  Otherwise "copy the file this server names" would be an arbitrary local-file
+  read — harmless-ish for a stdio server, which already runs with the manager's
+  filesystem access, but a *remote* http/sse server has none of its own and
+  could return `file:///etc/passwd` to borrow it.
 - A relative path resolves against the chat's own directory, so a path relative
   to your server's cwd lands in the right worktree.
 - `mimeType` is optional — it's inferred from the extension otherwise. Supply it

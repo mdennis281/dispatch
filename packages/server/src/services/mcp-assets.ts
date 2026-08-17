@@ -119,3 +119,38 @@ export const MAX_INLINE_ASSET_BYTES = 8 * 1024 * 1024;
 
 /** Cap for a referenced file Dispatch will copy into the chat's assets. */
 export const MAX_REFERENCED_ASSET_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Decide whether a resolved path may be ingested.
+ *
+ * WITHOUT this, "copy the file an MCP names" is an arbitrary local-file read.
+ * That is nearly harmless for a stdio server — it already runs as a local child
+ * with the manager's own filesystem access, so it could read the file itself —
+ * but a REMOTE http/sse server has no such access, and returning
+ * `file:///etc/passwd` (or `../../…`, or a symlink pointing there) would borrow
+ * the manager's. The file lands in the chat's assets, where a human reads it.
+ *
+ * So a reference must resolve INSIDE one of the roots the caller nominates:
+ * the chat's own directory (where a server writes its output) and the OS temp
+ * directory (where plenty of tools stage a capture). Everything else is
+ * refused, and the tool's original block is left intact.
+ *
+ * `resolved` is expected to be REALPATH'd by the caller — comparing the
+ * pre-symlink path would let a link inside the worktree point anywhere.
+ */
+export function isPathWithinRoots(resolved: string, roots: string[]): boolean {
+  const norm = (p: string): string => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const target = norm(resolved);
+  // Case-insensitive where the filesystem is: on Windows a differently-cased
+  // spelling of an allowed root is the SAME directory and must still pass.
+  const fold = (s: string): string =>
+    process.platform === "win32" || process.platform === "darwin" ? s.toLowerCase() : s;
+  const t = fold(target);
+  return roots.some((root) => {
+    const r = fold(norm(root));
+    if (!r) return false;
+    // Exact match, or a genuine child. The trailing "/" matters: without it
+    // `/repo-secrets` would pass as a child of `/repo`.
+    return t === r || t.startsWith(`${r}/`);
+  });
+}

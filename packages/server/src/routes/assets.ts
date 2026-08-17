@@ -127,8 +127,11 @@ export function registerAssetRoutes(app: FastifyInstance): void {
   app.get<{ Params: { id: string; name: string } }>(
     "/api/chats/:id/assets/:name",
     async (req, reply) => {
-      const buf = await store.readChatAsset(req.params.id, req.params.name);
-      if (!buf) return reply.code(404).send({ error: "not found" });
+      // Size first, bytes second. An asset can now be a referenced video of a
+      // few hundred MB, so reading the whole file to slice four bytes out of it
+      // would spike memory per request — and undo the point of range support.
+      const info = await store.statChatAsset(req.params.id, req.params.name);
+      if (!info) return reply.code(404).send({ error: "not found" });
       reply.header("content-type", mediaTypeFromName(req.params.name));
       reply.header("cache-control", "private, max-age=31536000, immutable");
       // Advertised unconditionally: a browser decides whether to seek by looking
@@ -136,16 +139,25 @@ export function registerAssetRoutes(app: FastifyInstance): void {
       // never asks for a range at all.
       reply.header("accept-ranges", "bytes");
 
-      const range = parseByteRange(req.headers.range, buf.length);
+      const range = parseByteRange(req.headers.range, info.size);
       if (range === "unsatisfiable") {
-        reply.header("content-range", `bytes */${buf.length}`);
+        reply.header("content-range", `bytes */${info.size}`);
         return reply.code(416).send();
       }
+      const stream = store.openChatAsset(
+        req.params.id,
+        req.params.name,
+        range ?? undefined,
+      );
+      // Raced with a delete between the stat and the open.
+      if (!stream) return reply.code(404).send({ error: "not found" });
       if (range) {
-        reply.header("content-range", `bytes ${range.start}-${range.end}/${buf.length}`);
-        return reply.code(206).send(buf.subarray(range.start, range.end + 1));
+        reply.header("content-range", `bytes ${range.start}-${range.end}/${info.size}`);
+        reply.header("content-length", String(range.end - range.start + 1));
+        return reply.code(206).send(stream);
       }
-      return reply.send(buf);
+      reply.header("content-length", String(info.size));
+      return reply.send(stream);
     },
   );
 }

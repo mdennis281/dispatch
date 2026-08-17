@@ -37,7 +37,8 @@ import {
   readFile as fsReadFile,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, createReadStream } from "node:fs";
+import type { Readable } from "node:stream";
 import * as z from "zod";
 import {
   ProjectSchema,
@@ -583,6 +584,36 @@ export class Store {
     const abs = this.safeAssetPath(chatId, name);
     if (!abs || !existsSync(abs)) return null;
     return fsReadFile(abs);
+  }
+
+  /** Size of a chat asset without reading it. Null when absent or escaping. */
+  async statChatAsset(chatId: string, name: string): Promise<{ size: number } | null> {
+    const abs = this.safeAssetPath(chatId, name);
+    if (!abs) return null;
+    try {
+      const s = await stat(abs);
+      return s.isFile() ? { size: s.size } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Stream a chat asset, optionally just `[start, end]`.
+   *
+   * Assets are no longer only thumbnails — a referenced video can be hundreds
+   * of megabytes, and answering a seek by loading the whole file into a Buffer
+   * to slice four bytes out of it would spike memory per request and undo the
+   * point of range support.
+   */
+  openChatAsset(
+    chatId: string,
+    name: string,
+    range?: { start: number; end: number },
+  ): Readable | null {
+    const abs = this.safeAssetPath(chatId, name);
+    if (!abs || !existsSync(abs)) return null;
+    return createReadStream(abs, range ? { start: range.start, end: range.end } : undefined);
   }
 
   /* ----------------------------------------------------------- runners */

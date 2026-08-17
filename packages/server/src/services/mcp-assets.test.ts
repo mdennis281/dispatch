@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseAssetReference, pathFromFileUri } from "./mcp-assets.js";
+import { parseAssetReference, pathFromFileUri, isPathWithinRoots } from "./mcp-assets.js";
 import { mediaKind, formatBytes } from "@dispatch/shared";
 import { extFromMediaType, mediaTypeFromName } from "./media-types.js";
 
@@ -81,6 +81,48 @@ describe("parseAssetReference", () => {
     expect(parseAssetReference(null)).toBeNull();
     expect(parseAssetReference("nope")).toBeNull();
     expect(parseAssetReference(undefined)).toBeNull();
+  });
+});
+
+describe("isPathWithinRoots", () => {
+  // Platform-rooted: a literal "C:/…" is a RELATIVE path on the Linux runner.
+  const ROOT = process.platform === "win32" ? "C:/wt" : "/wt";
+  const TMP = process.platform === "win32" ? "C:/tmp" : "/tmp";
+  const roots = [ROOT, TMP];
+
+  it("allows the root itself and anything under it", () => {
+    expect(isPathWithinRoots(ROOT, roots)).toBe(true);
+    expect(isPathWithinRoots(`${ROOT}/out/run.mp4`, roots)).toBe(true);
+    expect(isPathWithinRoots(`${TMP}/capture.webm`, roots)).toBe(true);
+  });
+
+  it("refuses a path outside every root", () => {
+    // The attack this exists for: a REMOTE mcp server has no filesystem access
+    // of its own, so naming this path would borrow the manager's.
+    const outside = process.platform === "win32" ? "C:/Windows/win.ini" : "/etc/passwd";
+    expect(isPathWithinRoots(outside, roots)).toBe(false);
+  });
+
+  it("refuses a sibling whose name merely STARTS with a root", () => {
+    // Without the trailing separator, "/wt-secrets" reads as a child of "/wt".
+    expect(isPathWithinRoots(`${ROOT}-secrets/x`, roots)).toBe(false);
+    expect(isPathWithinRoots(`${ROOT}extra`, roots)).toBe(false);
+  });
+
+  it("tolerates trailing slashes and backslashes on either side", () => {
+    expect(isPathWithinRoots(`${ROOT}/out/`, [`${ROOT}/`])).toBe(true);
+    expect(isPathWithinRoots(ROOT.replace(/\//g, "\\") + "\\a", roots)).toBe(true);
+  });
+
+  it("refuses everything when no root is supplied", () => {
+    expect(isPathWithinRoots(`${ROOT}/x`, [])).toBe(false);
+    expect(isPathWithinRoots(`${ROOT}/x`, [""])).toBe(false);
+  });
+
+  it("matches case-insensitively only where the filesystem does", () => {
+    const mixed = `${ROOT.toUpperCase()}/OUT/a.mp4`;
+    const folds = process.platform === "win32" || process.platform === "darwin";
+    expect(isPathWithinRoots(mixed, roots)).toBe(folds);
   });
 });
 
