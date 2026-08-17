@@ -18,7 +18,9 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { HookCallback, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import {
   classifyWorkflowViolation,
+  exemptionCovers,
   type ResolvedWorkflow,
+  type WorkflowExemption,
   type WorkflowViolation,
 } from "@dispatch/shared";
 
@@ -287,6 +289,19 @@ export interface WorkflowGuardDeps {
   context: () => WorkflowGuardContext | null;
   /** Called for every detected violation, including ones that are let through. */
   onViolation?: (violation: WorkflowViolation, blocked: boolean) => void;
+  /**
+   * This chat's live, human-approved exemptions (see
+   * {@link WorkflowExemptionSchema}). Read fresh per call, not captured: a grant
+   * can land mid-turn, which is the whole point — the agent asks the instant it
+   * is blocked and retries in the same turn.
+   */
+  exemptions?: () => readonly WorkflowExemption[];
+  /**
+   * A grant just let a command through. The broker does the side effects (burn a
+   * one-shot, publish the notice, push the new list to the UI) so this hook stays
+   * a pure decision; matching lives here so it is testable without a broker.
+   */
+  onExempted?: (exemption: WorkflowExemption, violation: WorkflowViolation, command: string) => void;
 }
 
 /** Pass-through result: the hook takes no position on this call. */
@@ -332,6 +347,22 @@ export function createWorkflowGuardHook(deps: WorkflowGuardDeps): HookCallback {
     if (!violation) return ALLOW;
 
     const blocked = ctx.workflow.guard === "deny";
+
+    // A human-approved exemption for THIS chat stands the refusal down. Only
+    // consulted on the `deny` rung: under `warn` nothing was going to be blocked
+    // anyway, so consulting it there would burn a one-shot grant on a command
+    // that never needed it.
+    if (blocked) {
+      const exemption = deps.exemptions?.().find((e) => exemptionCovers(e, violation.kind));
+      if (exemption) {
+        // Deliberately NOT also reported as a violation: `onViolation` publishes
+        // "Blocked: …", and an exempted command was not blocked. The broker's
+        // own notice says what the grant just bought instead.
+        deps.onExempted?.(exemption, violation, command);
+        return ALLOW;
+      }
+    }
+
     deps.onViolation?.(violation, blocked);
     if (!blocked) return ALLOW;
 
@@ -339,7 +370,20 @@ export function createWorkflowGuardHook(deps: WorkflowGuardDeps): HookCallback {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: `${violation.reason} (blocked by the \`${ctx.workflow.profile}\` workflow profile)`,
+        permissionDecisionReason:
+          `${violation.reason} (blocked by the \`${ctx.workflow.profile}\` workflow profile)` +
+          // Discoverability where it actually matters. The 2026-08-17 incident's
+          // agent was stuck between a broken sanctioned tool and this refusal
+          // with no third option it knew about — and this sentence is the only
+          // text it is guaranteed to read at that moment. Naming `violation.kind`
+          // means it can ask for exactly the guard it just tripped rather than
+          // guessing, or reaching for `all`.
+          (deps.exemptions
+            ? `\n\nIf the sanctioned path is genuinely BROKEN — not merely inconvenient — you ` +
+              `can ask the human to lift this one guard for THIS CHAT: ` +
+              `mcp__manager__request_exemption({ guard: "${violation.kind}", command: "…", ` +
+              `reason: "…" }). They decide, not you, and a denial is final.`
+            : ""),
       },
     };
   };

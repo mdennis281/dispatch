@@ -31,6 +31,7 @@ import {
 } from "./messages.js";
 import { ProjectConfigSchema, ProjectConfigErrorSchema } from "./project-config.js";
 import { UsageSnapshotSchema } from "./usage.js";
+import { WorkflowExemptionSchema } from "./workflow.js";
 
 /* =============================================================== server → client */
 
@@ -76,6 +77,18 @@ export const ChatStatusEventSchema = z.object({
    * only reads as green once `status` is also back to `idle` (no active agent).
    */
   prSettled: z.boolean().optional(),
+});
+
+/**
+ * This chat's live guard exemptions changed — one was granted, used up, or
+ * revoked. Always the FULL list, never a delta: the client renders a persistent
+ * chip off it, and a chip that drifts from what the server is actually enforcing
+ * is worse than no chip. Empty array = back to fully guarded.
+ */
+export const ChatExemptionsEventSchema = z.object({
+  type: z.literal("chat-exemptions"),
+  chatId: z.string(),
+  exemptions: z.array(WorkflowExemptionSchema),
 });
 
 /** A permission decision is required (from canUseTool). */
@@ -417,6 +430,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   ChatMessageEventSchema,
   MessageChunkEventSchema,
   ChatStatusEventSchema,
+  ChatExemptionsEventSchema,
   PermissionRequestEventSchema,
   PermissionResolvedEventSchema,
   AttentionAddEventSchema,

@@ -10,6 +10,8 @@
  *                                   → ChatMessage[] (a window; lean unless full=1)
  *   GET    /api/chats/:id/messages/full?ids=a,b → ChatMessage[] (verbatim rows)
  *   GET    /api/chats/:id/checkpoints → Checkpoint[] (rollback anchors)
+ *   GET    /api/chats/:id/exemptions → WorkflowExemption[] (live guard lifts)
+ *   DELETE /api/chats/:id/exemptions/:exemptionId → revoke one
  */
 import type { FastifyInstance } from "fastify";
 import { ChatSchema } from "@dispatch/shared";
@@ -173,6 +175,35 @@ export function registerChatRoutes(app: FastifyInstance): void {
       const saved = await app.services.resume.cancel(req.params.id);
       if (!saved) return reply.code(409).send({ error: "no pending auto-resume" });
       return saved;
+    },
+  );
+
+  /**
+   * This chat's live guard exemptions, and the revoke behind the header chip.
+   *
+   * Live-session state, so it comes from the broker rather than the store — same
+   * shape as `context-usage` above, and for the same reason: an exemption
+   * deliberately has nowhere persistent to live (see `LiveSession.exemptions`).
+   * A chat that isn't live answers `[]`, which is the truth — nothing is being
+   * let through.
+   *
+   * There is deliberately no POST. Granting happens only through the agent's
+   * `request_exemption` and the card it raises; an endpoint that minted one
+   * would be a second consent path with none of the first one's record.
+   */
+  app.get<{ Params: { id: string } }>(
+    "/api/chats/:id/exemptions",
+    async (req) => broker.listExemptions(req.params.id),
+  );
+
+  app.delete<{ Params: { id: string; exemptionId: string } }>(
+    "/api/chats/:id/exemptions/:exemptionId",
+    async (req, reply) => {
+      const revoked = broker.revokeExemption(req.params.id, req.params.exemptionId);
+      // 404 rather than a cheerful no-op: "revoke" reporting success for a grant
+      // that was never dropped is the one wrong answer this endpoint can give.
+      if (!revoked) return reply.code(404).send({ error: "no such exemption" });
+      return reply.code(204).send();
     },
   );
 

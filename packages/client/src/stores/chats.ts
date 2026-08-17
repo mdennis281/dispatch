@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { Chat, ChatStatus, AgentActivity } from "@dispatch/shared";
+import type { Chat, ChatStatus, AgentActivity, WorkflowExemption } from "@dispatch/shared";
 import { isPrSettledIdle } from "@dispatch/shared";
 import { clearDraft } from "../lib/composerDrafts.js";
 
@@ -20,6 +20,16 @@ interface ChatsStore {
    * renders the sidebar dot green ("PR done") instead of the neutral idle gray.
    */
   prSettled: Record<string, boolean>;
+  /**
+   * chatId → the human-approved guard lifts live on that chat's session.
+   *
+   * Server-authoritative and always the FULL list: a `chat-exemptions` event
+   * replaces the entry wholesale, and a reconnect clears the map rather than
+   * carrying claims we can no longer verify. A chip that says a guard is lifted
+   * when it isn't is worse than no chip at all — the whole point of it is that
+   * you can trust what it says at a glance.
+   */
+  exemptions: Record<string, WorkflowExemption[]>;
   /**
    * chatId → epoch-ms of last observed activity (message/chunk/status/update).
    * Drives the sidebar's recency order + its "age" label. Seeded from the
@@ -49,6 +59,7 @@ interface ChatsStore {
     queued?: number,
     prSettled?: boolean,
   ) => void;
+  setExemptions: (chatId: string, exemptions: WorkflowExemption[]) => void;
 }
 
 export const useChats = create<ChatsStore>((set) => ({
@@ -58,6 +69,7 @@ export const useChats = create<ChatsStore>((set) => ({
   activity: {},
   queued: {},
   prSettled: {},
+  exemptions: {},
   lastActivity: {},
 
   setActiveChat: (id) => set({ activeChatId: id }),
@@ -86,7 +98,10 @@ export const useChats = create<ChatsStore>((set) => ({
       // put the selection back.
       const activeChatId =
         s.activeChatId && byId[s.activeChatId] ? s.activeChatId : (order[0] ?? null);
-      return { byId, order, lastActivity, prSettled, activeChatId };
+      // Deliberately dropped, not carried: a reconnect means the sessions that
+      // held these may not exist any more (an exemption dies with its session),
+      // and `loadExemptions` re-reads the open chat's straight afterwards.
+      return { byId, order, lastActivity, prSettled, exemptions: {}, activeChatId };
     }),
 
   upsertChat: (chat) =>
@@ -131,6 +146,8 @@ export const useChats = create<ChatsStore>((set) => ({
       delete queued[chatId];
       const prSettled = { ...s.prSettled };
       delete prSettled[chatId];
+      const exemptions = { ...s.exemptions };
+      delete exemptions[chatId];
       const lastActivity = { ...s.lastActivity };
       delete lastActivity[chatId];
       const order = s.order.filter((id) => id !== chatId);
@@ -141,7 +158,7 @@ export const useChats = create<ChatsStore>((set) => ({
         s.activeChatId === chatId
           ? (order.find((id) => byId[id]?.projectId === removed.projectId) ?? null)
           : s.activeChatId;
-      return { byId, order, activity, queued, prSettled, lastActivity, activeChatId };
+      return { byId, order, activity, queued, prSettled, exemptions, lastActivity, activeChatId };
     });
   },
 
@@ -154,6 +171,9 @@ export const useChats = create<ChatsStore>((set) => ({
       queued: { ...s.queued, [chatId]: queued ?? 0 },
       prSettled: { ...s.prSettled, [chatId]: prSettled ?? false },
     })),
+
+  setExemptions: (chatId, exemptions) =>
+    set((s) => ({ exemptions: { ...s.exemptions, [chatId]: exemptions } })),
 }));
 
 /**

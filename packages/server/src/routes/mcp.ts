@@ -86,6 +86,10 @@ export function registerMcpRoutes(app: FastifyInstance): void {
           // Prewarm exists wherever the broker could build one, which needs the
           // project config that names each server's `prewarm` command.
           prewarm: !!services.broker.mcpPrewarm,
+          // `request_exemption` exists only where a guard actually REFUSES
+          // things — the same condition the broker binds on. On `warn`/`off`
+          // nothing is blocked, so there is nothing to ask to have lifted.
+          exemptions: resolveWorkflow(project).guard === "deny",
         },
         mcpServers,
       });

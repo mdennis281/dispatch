@@ -6,6 +6,7 @@ import type {
   ReviewThread,
   WsServerEvent,
   ProjectMemory,
+  WorkflowExemption,
 } from "@dispatch/shared";
 import { EventBus } from "../../bus.js";
 import { memorySimilarity } from "../memory.js";
@@ -14,6 +15,9 @@ import {
   createManagerMcpServer,
   prLandingBlockers,
   overrideConsentPrompt,
+  exemptionConsentQuestion,
+  readExemptionAnswer,
+  EXEMPTION_ANSWERS,
   prCreateBlockers,
   WAIT_CAP_SECONDS,
   PR_POLL_INTERVAL_MS,
@@ -31,6 +35,7 @@ import {
   type PrCreateState,
   type PrCreateResult,
   type ManagerMcpChats,
+  type ManagerMcpExemptions,
   type SpawnChatConsent,
   type SpawnChatRequest,
   type SpawnChatTarget,
@@ -1637,6 +1642,217 @@ describe("prCreateBlockers", () => {
   });
 });
 
+/* ------------------------------------------------------ request_exemption */
+
+/** A scriptable exemption binding recording exactly what it was asked for. */
+function fakeExemptions(
+  opts: {
+    verdict?: Awaited<ReturnType<ManagerMcpExemptions["request"]>>;
+    throws?: string;
+    existing?: WorkflowExemption[];
+  } = {},
+) {
+  const asked: Parameters<ManagerMcpExemptions["request"]>[0][] = [];
+  const binding: ManagerMcpExemptions = {
+    request: async (input) => {
+      asked.push(input);
+      if (opts.throws) throw new Error(opts.throws);
+      return opts.verdict ?? { granted: false };
+    },
+    list: () => opts.existing ?? [],
+  };
+  return { binding, asked };
+}
+
+function granted(over: Partial<WorkflowExemption> = {}): WorkflowExemption {
+  return {
+    id: "x1",
+    scope: "pr-create-by-hand",
+    lifetime: "session",
+    reason: "create_pr keeps refusing with 'Could not resolve this chat's repo or branch'",
+    grantedAt: 1,
+    uses: 0,
+    ...over,
+  };
+}
+
+describe("manager-mcp — request_exemption", () => {
+  it("reports the grant and its lifetime when the human says yes", async () => {
+    const { binding, asked } = fakeExemptions({
+      verdict: { granted: true, exemption: granted({ lifetime: "once" }) },
+    });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    const res = await requestExemption.handler(
+      { guard: "pr-create-by-hand", reason: "create_pr is down", command: "gh pr create --fill" },
+      {},
+    );
+    expect(asked).toEqual([
+      {
+        scope: "pr-create-by-hand",
+        reason: "create_pr is down",
+        command: "gh pr create --fill",
+      },
+    ]);
+    const text = resultText(res);
+    expect(text).toContain("Granted");
+    expect(text).toContain("one shot");
+    expect(JSON.parse(text.slice(text.lastIndexOf("{")))).toMatchObject({
+      granted: true,
+      lifetime: "once",
+    });
+  });
+
+  it("treats a refusal as an ANSWER, not an error, and says don't re-ask", async () => {
+    // Same shape as the approve_pr override decline: flagging it as an error is
+    // what pushes a model into retrying the thing it was just told not to do.
+    const { binding } = fakeExemptions({
+      verdict: { granted: false, message: "fix create_pr instead" },
+    });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    const res = await requestExemption.handler(
+      { guard: "pr-create-by-hand", reason: "blocked", command: undefined },
+      {},
+    );
+    expect(res.isError).toBeFalsy();
+    const text = resultText(res);
+    expect(text).toContain("fix create_pr instead");
+    expect(text).toMatch(/don't re-ask/i);
+    expect(JSON.parse(text.slice(text.lastIndexOf("{")))).toMatchObject({ granted: false });
+  });
+
+  it("fails CLOSED when the card can't be raised at all", async () => {
+    const { binding } = fakeExemptions({ throws: "no live session to ask through" });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    const text = resultText(
+      await requestExemption.handler({ guard: "all", reason: "everything is broken", command: undefined }, {}),
+    );
+    expect(text).toContain("Not granted");
+    expect(text).toContain("no live session");
+  });
+
+  it("doesn't spend a second card on a guard that's already lifted", async () => {
+    const { binding, asked } = fakeExemptions({ existing: [granted()] });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    const text = resultText(
+      await requestExemption.handler(
+        { guard: "pr-create-by-hand", reason: "still stuck", command: undefined },
+        {},
+      ),
+    );
+    expect(asked).toEqual([]);
+    expect(text).toContain("Already exempt");
+  });
+
+  it("counts an existing `all` grant as covering a narrower ask", async () => {
+    const { binding, asked } = fakeExemptions({ existing: [granted({ scope: "all" })] });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    await requestExemption.handler({ guard: "push-to-trunk", reason: "x", command: undefined }, {});
+    expect(asked).toEqual([]);
+  });
+
+  it("still asks for `all` when only a narrow grant is held", async () => {
+    const { binding, asked } = fakeExemptions({ existing: [granted()] });
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    await requestExemption.handler({ guard: "all", reason: "x", command: undefined }, {});
+    expect(asked).toHaveLength(1);
+  });
+
+  it("refuses a request with no reason — that's the whole basis for the decision", async () => {
+    const { binding, asked } = fakeExemptions();
+    const { requestExemption } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      exemptions: binding,
+    });
+    const res = await requestExemption.handler(
+      { guard: "pr-create-by-hand", reason: "   ", command: undefined },
+      {},
+    );
+    expect(res.isError).toBe(true);
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("exemptionConsentQuestion / readExemptionAnswer", () => {
+  it("quotes the command and the agent's reason — the two things worth reading", () => {
+    const q = exemptionConsentQuestion({
+      scope: "pr-create-by-hand",
+      command: "gh pr create --fill --base main",
+      reason: "create_pr returns 'Could not resolve this chat's repo or branch'",
+    });
+    expect(q.question).toContain("gh pr create --fill --base main");
+    expect(q.question).toContain("Could not resolve");
+    expect(q.question).toContain("THIS CHAT");
+    expect(q.options.map((o) => o.label)).toEqual([
+      EXEMPTION_ANSWERS.once,
+      EXEMPTION_ANSWERS.session,
+      EXEMPTION_ANSWERS.no,
+    ]);
+  });
+
+  it("shouts about `all`, which is the grant that covers guards nobody discussed", () => {
+    const q = exemptionConsentQuestion({ scope: "all", reason: "several guards at once" });
+    expect(q.question).toContain("EVERY workflow guard");
+    // …and doesn't shout on a narrow one, or the warning means nothing.
+    expect(
+      exemptionConsentQuestion({ scope: "push-to-trunk", reason: "x" }).question,
+    ).not.toContain("EVERY workflow guard");
+  });
+
+  it("maps only the two YES labels to a lifetime; everything else is a NO", () => {
+    expect(readExemptionAnswer(EXEMPTION_ANSWERS.once)).toBe("once");
+    expect(readExemptionAnswer(EXEMPTION_ANSWERS.session)).toBe("session");
+    expect(readExemptionAnswer(EXEMPTION_ANSWERS.no)).toBeNull();
+    expect(readExemptionAnswer(undefined)).toBeNull();
+    // Free-form prose is NOT consent to a particular scope — reading it as one
+    // is exactly the inference that produced the unreviewed merge confirmOverride
+    // exists to prevent.
+    expect(readExemptionAnswer("yeah go on then")).toBeNull();
+  });
+
+  it("still reads a picked option when the human attached a note to it", () => {
+    // The card appends notes as `<label> — additional instructions: …`. An
+    // exact-match read would turn a yes-with-a-caveat into a silent denial.
+    expect(
+      readExemptionAnswer(`${EXEMPTION_ANSWERS.session} — additional instructions: only for #93`),
+    ).toBe("session");
+    expect(
+      readExemptionAnswer(`${EXEMPTION_ANSWERS.no} — additional instructions: fix create_pr`),
+    ).toBeNull();
+  });
+});
+
 /** A scriptable create binding that records exactly what it was asked to do. */
 function fakePrCreate(
   st: PrCreateState | null,
@@ -3053,6 +3269,27 @@ describe("manager-mcp — server factory", () => {
         prCreate: fakePrCreate(readyBranch()).binding,
       }),
     ).toContain("create_pr");
+  });
+
+  it("registers request_exemption ONLY when the exemptions binding is present", () => {
+    // Bound only where a guard is actually enforcing. Offering it anywhere else
+    // invites the agent to ask for permission nobody needed to give.
+    const names = (ctx: Parameters<typeof createManagerMcpServer>[0]) =>
+      Object.keys(
+        (createManagerMcpServer(ctx) as unknown as {
+          instance: { _registeredTools?: Record<string, unknown> };
+        }).instance._registeredTools ?? {},
+      );
+
+    expect(names({ chatId: "c1", bus, broker: fakeBroker({}) })).not.toContain("request_exemption");
+    expect(
+      names({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({}),
+        exemptions: fakeExemptions().binding,
+      }),
+    ).toContain("request_exemption");
   });
 
   it("registers spawn_chat ONLY when the chats binding is present", () => {
