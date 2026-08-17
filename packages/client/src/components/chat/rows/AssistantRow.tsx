@@ -11,7 +11,7 @@ import { useHasCheckpoint } from "../../../stores/checkpoints.js";
 import { useChats } from "../../../stores/chats.js";
 import { usePanels } from "../../../stores/panels.js";
 import { useProjects } from "../../../stores/projects.js";
-import { harnessLabel } from "../../../lib/harness.js";
+import { rowHarnessLabel } from "../../../lib/harness.js";
 
 /**
  * An assistant turn: optional collapsed reasoning + rendered markdown body.
@@ -47,7 +47,7 @@ export const AssistantRow = memo(function AssistantRow({
   return (
     <RowShell
       tint="assistant"
-      who={harnessLabel(chat?.harness)}
+      who={rowHarnessLabel(row.harness, chat?.harness)}
       ts={row.ts}
       rollback={canRollback}
       onRollback={() => actions.rollback(chatId, row.id)}

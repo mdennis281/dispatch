@@ -8,7 +8,7 @@ import { cn } from "../../../lib/cn.js";
 import { actions } from "../../../lib/actions.js";
 import { useChats } from "../../../stores/chats.js";
 import { attentionCardId } from "../../attention/focus.js";
-import { harnessLabel } from "../../../lib/harness.js";
+import { rowHarnessLabel } from "../../../lib/harness.js";
 
 interface QuestionOption {
   id: string;
@@ -160,7 +160,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
   const multi = questions.length > 1;
 
   const chatStatus = useChats((s) => s.byId[row.chatId]?.status);
-  const provider = harnessLabel(useChats((s) => s.byId[row.chatId]?.harness));
+  const provider = rowHarnessLabel(row.harness, useChats((s) => s.byId[row.chatId]?.harness));
 
   // Re-answering a resolved question: the card goes interactive again, but the
   // answer leaves as a message rather than a (long-gone) permission result.

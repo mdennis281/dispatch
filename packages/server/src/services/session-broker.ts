@@ -4465,11 +4465,16 @@ export class SessionBroker {
   /* ------------------------------------------------------ persistence */
 
   private emit(session: LiveSession, msg: ChatMessage): Promise<void> {
+    // Stamp the producing provider here, once, rather than at each of the ~20
+    // call sites: every row this session writes belongs to the harness it ran.
+    // Without it the transcript reads the CURRENT `chat.harness` for its sender
+    // labels and retroactively re-attributes a switched-away-from agent's turns.
+    const row: ChatMessage = { ...msg, harness: msg.harness ?? session.harnessKind };
     session.writeChain = session.writeChain
       .catch(() => {})
       .then(async () => {
         try {
-          const saved = await this.store.appendMessage(msg);
+          const saved = await this.store.appendMessage(row);
           this.bus.publish({ type: "chat-message", chatId: saved.chatId, message: saved });
         } catch (err) {
           this.bus.publish({

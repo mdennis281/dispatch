@@ -38,12 +38,12 @@ import {
   Send,
   Sparkles,
 } from "lucide-react";
-import type { MessagePart } from "@dispatch/shared";
+import type { HarnessKind, MessagePart } from "@dispatch/shared";
 import { Markdown } from "../Markdown.js";
 import { cn } from "../../../lib/cn.js";
 import { useInjectedContext } from "../../../lib/injectedContext.js";
 import { useChats } from "../../../stores/chats.js";
-import { harnessLabel } from "../../../lib/harness.js";
+import { rowHarnessLabel } from "../../../lib/harness.js";
 
 /** Compact size note for a block, so "how much was injected" is visible. */
 function sizeNote(text: string): string {
@@ -190,9 +190,18 @@ function SpokenPart({ part }: { part: MessagePart }) {
   );
 }
 
-export function ComposedParts({ chatId, parts }: { chatId: string; parts: MessagePart[] }) {
+export function ComposedParts({
+  chatId,
+  parts,
+  harness,
+}: {
+  chatId: string;
+  parts: MessagePart[];
+  /** The provider this turn was sent TO, from its own row (see MessageBase). */
+  harness?: HarnessKind;
+}) {
   const injected = useInjectedContext(chatId);
-  const provider = harnessLabel(useChats((s) => s.byId[chatId]?.harness));
+  const provider = rowHarnessLabel(harness, useChats((s) => s.byId[chatId]?.harness));
   const visible = parts.filter((p) => p.kind !== "context" || injected.show);
   return (
     <div className="flex flex-col items-end">
