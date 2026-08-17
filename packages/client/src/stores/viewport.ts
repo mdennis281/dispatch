@@ -40,6 +40,16 @@ export interface ViewportMetrics {
   safeTop: number;
   /** The height the shell is actually laid out at, fallbacks resolved. */
   shell: number;
+  /**
+   * Where the shell's bottom edge actually LANDS, read off the element.
+   *
+   * `shell` above is arithmetic — the same expression that sets the height — so
+   * a readout derived from it can only ever confirm that the formula ran. That
+   * is how four PRs shipped against a `dead` of 0 while the bar was visibly
+   * wrong. This one is `getBoundingClientRect().bottom` on the real box, so it
+   * disagrees whenever the box does not get the height it asked for.
+   */
+  shellBottom: number;
   /** The physical screen, which nothing should be able to change. */
   screenHeight: number;
 }
@@ -83,6 +93,7 @@ const EMPTY: ViewportMetrics = {
   safeBottom: 0,
   safeTop: 0,
   shell: 0,
+  shellBottom: 0,
   screenHeight: 0,
 };
 
@@ -193,6 +204,16 @@ export function startViewportTracking(): () => void {
   // the screen.
   let maxWidth = window.innerWidth;
   let maxInnerHeight = 0;
+  // Cached: `apply` runs every frame for 600ms after each focus change, and a
+  // `querySelector` per frame is a real cost paid by every user for a number
+  // only the debug readout reads. `isConnected` is the re-lookup trigger — the
+  // shell unmounts and remounts across an auth gate, and a stale detached node
+  // measures 0 forever.
+  let shellEl: Element | null = null;
+  const shellRect = (): number => {
+    if (!shellEl?.isConnected) shellEl = document.querySelector("[data-cm-shell]");
+    return shellEl ? Math.round(shellEl.getBoundingClientRect().bottom) : 0;
+  };
 
   const apply = () => {
     // Cancel rather than just forget: the burst loop calls `apply` directly, so
@@ -264,6 +285,9 @@ export function startViewportTracking(): () => void {
         safeBottom: Math.round(safeProbe.getBoundingClientRect().height),
         safeTop,
         shell: vh || dvh || innerHeight,
+        // Read, not derived — see `shellBottom`. Absent element (first frame,
+        // or a test that never mounts App) reports 0 rather than a fake edge.
+        shellBottom: shellRect(),
         screenHeight: window.screen.height,
       },
       maxInnerHeight,

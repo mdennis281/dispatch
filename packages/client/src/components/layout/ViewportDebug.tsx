@@ -35,7 +35,62 @@ export function ViewportDebug() {
   // subscribing to the whole store would re-render the app's last child on
   // every one of those frames to render null.
   const debug = useViewport((s) => s.debug);
-  return debug ? <ViewportReadout /> : null;
+  return debug ? (
+    <>
+      <ViewportReadout />
+      <PaintRuler />
+    </>
+  ) : null;
+}
+
+/**
+ * Where does painting actually STOP?
+ *
+ * Every number the page can read is a LAYOUT number, and layout happily hands a
+ * fixed box the 932px it asked for on a device whose layout viewport is 873 —
+ * `getBoundingClientRect()` will report a bottom edge of 932 either way. So no
+ * amount of measurement distinguishes "the shell reaches the glass" from "the
+ * shell overshoots and the last 59px are never painted". The only instrument
+ * that can tell them apart is paint itself.
+ *
+ * So: draw labelled hairlines at known absolute offsets straddling the layout
+ * viewport's bottom edge, and look at a screenshot. The lowest line you can see
+ * IS the paintable edge, in the units to fix it with — which settles whether
+ * the bar has to be clamped to `clientHeight` or the shell is right and the
+ * clipping is somewhere else entirely.
+ *
+ * `fixed` to the layout viewport, like the readout, so it does not move with
+ * the thing it is measuring. Diagnostic only — it renders solely while the
+ * readout is toggled on, which is never by default and never persisted.
+ */
+function PaintRuler() {
+  const client = useViewport((s) => s.clientHeight);
+  const screen = useViewport((s) => s.screenHeight);
+  if (!client || !screen) return null;
+
+  // Straddle the edge: a couple above (which MUST be visible, proving the ruler
+  // itself paints) and the rest marching past it to the bottom of the glass.
+  const marks = [client - 40, client - 20, client, client + 20, client + 40, screen - 2]
+    // A device where the two agree would otherwise draw the same line 3 times.
+    .filter((y, i, all) => y > 0 && y < screen && all.indexOf(y) === i);
+
+  return (
+    <div
+      style={{ zIndex: LAYER.shutdown + 1 }}
+      className="pointer-events-none fixed inset-x-0 top-0"
+      aria-hidden
+    >
+      {marks.map((y) => (
+        <div key={y} className="absolute inset-x-0 flex items-center" style={{ top: `${y}px` }}>
+          <div className="h-px flex-1 bg-fuchsia-500" />
+          <span className="bg-black/80 px-1 font-mono text-2xs leading-none text-fuchsia-300">
+            {y}
+            {y === client ? " client" : ""}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function ViewportReadout() {
@@ -49,18 +104,30 @@ function ViewportReadout() {
     m.safeTop,
     m.screenHeight,
   );
-  // The one number that says whether the shell reaches the bottom of the
-  // display: how much of the screen nothing is drawn on. The shell starts at
-  // the top of the screen — the status bar is padding INSIDE it, not an offset
-  // above it, which is the whole point of the correction — so the status bar
-  // must not be subtracted here as well. Installed, this should read 0; in a
-  // browser tab it is legitimately the URL bar.
-  const dead = m.screenHeight - m.shell;
+  // How much of the screen nothing is drawn on. The shell starts at the top of
+  // the screen — the status bar is padding INSIDE it, not an offset above it,
+  // which is the whole point of the correction — so the status bar must not be
+  // subtracted here as well.
+  //
+  // MEASURED, from the shell's own rect. It used to be `screenHeight - shell`,
+  // and `shell` is the expression that SETS the height: the check could only
+  // ever report that the formula had run, so it read 0 both for a shell that
+  // reaches the glass and for one that overshoots it by 59px. Four PRs shipped
+  // against that 0. Falls back to the arithmetic only before the first frame,
+  // when there is no element to read.
+  const dead = m.screenHeight - (m.shellBottom || m.shell);
+  // The overshoot the old `dead` was blind to: layout gave the box its full
+  // height, but everything past the layout viewport is off the paintable area,
+  // so the bar's bottom is cut rather than merely low.
+  const over = (m.shellBottom || m.shell) - m.clientHeight;
   const rows: Array<[string, string, boolean]> = [
     // What the shell is ACTUALLY sized to, and why — the one line that says
     // whether the correction is engaged.
     ["shell", vh > 0 ? `${vh} (fixed)` : `${m.dvh} (dvh)`, vh > 0],
     ["dead", `${dead}`, Math.abs(dead) > 2],
+    // Non-zero means the shell is asking for more room than the layout viewport
+    // has. That is the bottom nav being CLIPPED, not sitting short.
+    ["over", `${over}`, over > 2],
     ["kb", `${m.inset}`, m.inset > 0],
     ["inner", `${m.innerHeight}${shrunk > 2 ? ` (-${shrunk} of ${m.maxInnerHeight})` : ""}`, shrunk > 2],
     ["vv", `${m.vvHeight}`, false],
