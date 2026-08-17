@@ -24,7 +24,7 @@ import {
   Settings2,
   type LucideIcon,
 } from "lucide-react";
-import type { FsEntry, FsRoot } from "@dispatch/shared";
+import type { FsEntry, FsPlatform, FsRoot } from "@dispatch/shared";
 
 /**
  * Extension → icon. Grouped by what the file IS to a person rather than by
@@ -139,6 +139,20 @@ export function formatCapacity(
 ): string | null {
   if (!totalBytes || freeBytes === null || freeBytes === undefined) return null;
   return `${formatBytes(freeBytes)} free of ${formatBytes(totalBytes)}`;
+}
+
+/**
+ * A wire path in the separators the SERVER's own shell and tools use.
+ *
+ * Everything crossing the wire is forward-slashed, which is right for display
+ * and for comparison but not always for INSERTION: a path handed to an agent
+ * ends up in shell commands and tool calls on that machine, and the composer's
+ * picker has always inserted the native form. Windows tolerates `/` in most
+ * places and not all of them, so this keeps the paths people paste identical to
+ * the ones they'd get from Explorer.
+ */
+export function fsToNative(path: string, platform: FsPlatform): string {
+  return platform === "win32" ? path.replace(/\//g, "\\") : path;
 }
 
 /**

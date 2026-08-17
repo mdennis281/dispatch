@@ -36,6 +36,8 @@ export interface UseFsBrowserOptions {
   initialPath?: string;
   /** What the surface will accept — drives greying, and the search's filter. */
   filter: FsFilter;
+  /** Seed the search box (see `pickPath`'s `initialQuery`). */
+  initialQuery?: string;
   /** Fired when a selection is committed (double-click, Enter, Select button). */
   onCommit?: (paths: string[]) => void;
 }
@@ -117,7 +119,7 @@ export function useFsBrowser(opts: UseFsBrowserOptions): FsBrowser {
   const [cursor, setCursor] = useState<string | null>(null);
   const [sort, setSortState] = useState<FsSort>({ key: "name", desc: false });
   const [showHidden, setShowHidden] = useState(opts.filter.showHidden);
-  const [query, setQueryState] = useState("");
+  const [query, setQueryState] = useState(opts.initialQuery ?? "");
   const [results, setResults] = useState<FsEntry[] | null>(null);
   const [searching, setSearching] = useState(false);
   /** Visited directories and where we are in them — the back/forward stack. */

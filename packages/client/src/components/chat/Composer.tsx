@@ -34,7 +34,7 @@ import {
   Mic,
 } from "lucide-react";
 import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef } from "@dispatch/shared";
-import { DEFAULT_MODEL, findModel } from "@dispatch/shared";
+import { DEFAULT_MODEL, findModel, chatRoot } from "@dispatch/shared";
 import { api, type IndexedFile } from "../../lib/api.js";
 import { pathsFromDrop, basenameOf, dropIntent, type DropIntent } from "../../lib/dropPaths.js";
 import { useFileDrag } from "../../lib/useFileDrag.js";
@@ -45,7 +45,10 @@ import {
   clearDraft,
   appendDraftImage,
 } from "../../lib/composerDrafts.js";
-import { FilePathPicker } from "./FilePathPicker.js";
+import { pickPath } from "../files/filePicker.js";
+import { fsToNative } from "../files/fsMeta.js";
+import { useFsRoots } from "../../stores/fsRoots.js";
+import { useProjects } from "../../stores/projects.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Button } from "../ui/Button.js";
 import { Select, type SelectOption } from "../ui/Select.js";
@@ -293,10 +296,18 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // "release now".
   const fileDrag = useFileDrag();
   const [over, setOver] = useState<DropIntent>(null);
-  // The file-path picker, and the query it opens with (a dropped file's basename
-  // when a drop was ambiguous, "" for a cold open from the paperclip).
-  const [picker, setPicker] = useState<{ query: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Where the file picker opens: this chat's own working directory, so the
+  // paths it inserts are paths the agent for THIS chat can open.
+  //
+  // The project record can be missing for a moment (first hydration, a
+  // reconnect), and falling straight through to the picker's default would land
+  // you in the server's HOME directory — the one place this is guaranteed not
+  // to mean. `chat.worktrees[0]` is the half of `chatRoot` that lives on the
+  // chat itself, so a chat with a worktree still opens correctly regardless;
+  // only a chat with no worktree AND no loaded project is left to the default.
+  const project = useProjects((s) => s.projects.find((p) => p.id === chat.projectId));
+  const pickerRoot = project ? chatRoot(chat, project) : chat.worktrees[0];
   const [model, setModelState] = useState<string>(
     () => modelByChat.get(chat.id) ?? chat.model ?? DEFAULT_MODEL,
   );
@@ -563,6 +574,41 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   };
 
   /**
+   * Browse for files and insert their paths.
+   *
+   * Opens the explorer's picker AT THIS CHAT'S working directory — its worktree
+   * when it has one, else the project checkout (`chatRoot`, shared with the
+   * server so the two cannot disagree about where a chat runs). That is the
+   * whole point of the surface: the paths it inserts have to be paths the agent
+   * for THIS chat can actually open.
+   *
+   * Multi-select, because `insertPaths` already lays several out one per line
+   * and "here are the three files" is the common ask. The picker it replaced
+   * could only ever answer with one.
+   *
+   * Inserted in the SERVER's native separators. Everything crossing the wire is
+   * forward-slashed, but what lands in the message becomes shell commands and
+   * tool calls on that machine, so it should read like a path from that
+   * machine's own file manager — which is what the old picker inserted too.
+   */
+  const pickAndInsertPaths = async (initialQuery = "") => {
+    const picked = await pickPath({
+      select: "file",
+      multiple: true,
+      initialPath: pickerRoot,
+      initialQuery,
+      title: "Insert file paths",
+    });
+    if (!picked?.length) return;
+    // Read the platform AFTER the await, not from the enclosing render.
+    // The fetch that establishes it is kicked off by the picker itself, so at
+    // the moment this handler was created the store still held its pre-load
+    // default — which inserted `C:/Users/…` instead of `C:\Users\…`.
+    const platform = useFsRoots.getState().platform ?? "posix";
+    insertPaths(picked.map((p) => fsToNative(p, platform)));
+  };
+
+  /**
    * The drop gave us basenames only (a file-manager drag, which discloses no
    * path) — ask the server which project files could be meant.
    */
@@ -586,7 +632,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
       // guessing. With several files in flight, a modal per file would be worse
       // than the ranked best guess, which is right there in the box to correct.
       if (matches.length > 1 && names.length === 1) {
-        setPicker({ query: name });
+        void pickAndInsertPaths(name);
         return;
       }
       resolved.push(matches[0]?.abs ?? name);
@@ -932,8 +978,10 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         icon={<FileIcon />}
         hint="as text"
         onClick={() => {
-          setPicker({ query: "" });
+          // Close FIRST: the menu is a Popover that traps focus, and the picker
+          // autofocuses its search box the frame it mounts.
           close();
+          void pickAndInsertPaths();
         }}
       >
         Insert file path…
@@ -1548,18 +1596,6 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             {configSurface(closeMore, false)}
           </div>
         </Drawer>
-      )}
-
-      {picker && (
-        <FilePathPicker
-          chatId={chat.id}
-          initialQuery={picker.query}
-          onPick={(f) => {
-            setPicker(null);
-            insertPaths([f.abs]);
-          }}
-          onClose={() => setPicker(null)}
-        />
       )}
 
       {editing && editingSrc && (

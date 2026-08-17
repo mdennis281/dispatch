@@ -32,6 +32,15 @@ export interface PickPathOptions {
   showHidden?: boolean;
   /** Where to open. Defaults to the server's home directory. */
   initialPath?: string;
+  /**
+   * Seed the search box.
+   *
+   * For the case where the caller already knows what is being looked for but
+   * not where it is — dropping a file from a file manager discloses only its
+   * basename, so the picker opens already searching for that name rather than
+   * making you retype what you just dragged.
+   */
+  initialQuery?: string;
   /** Dialog heading. Defaults to a sentence derived from the filter. */
   title?: string;
 }
@@ -40,6 +49,7 @@ export interface PickRequest {
   id: number;
   filter: FsFilter;
   initialPath?: string;
+  initialQuery?: string;
   title?: string;
   /** Resolves the awaiting `pickPath` call. Null means cancelled. */
   settle: (paths: string[] | null) => void;
@@ -83,6 +93,7 @@ export function pickPath(opts: PickPathOptions = {}): Promise<string[] | null> {
       id,
       title: opts.title,
       initialPath: opts.initialPath,
+      initialQuery: opts.initialQuery,
       filter: {
         select: opts.select ?? "file",
         extensions: opts.extensions?.map((e) => e.replace(/^\./, "").toLowerCase()),

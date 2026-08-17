@@ -58,6 +58,7 @@ function FilePickerModal() {
   const filter = request?.filter;
   const browser = useFsBrowser({
     initialPath: request?.initialPath,
+    initialQuery: request?.initialQuery,
     // `useMemo` so the filter object is stable — `useFsBrowser` keys its search
     // effect off it, and a fresh object each render would re-search forever.
     filter: useMemo(
@@ -70,9 +71,15 @@ function FilePickerModal() {
 
   /* Focus the search box on open: typing is the fastest way to a known file. */
   useEffect(() => {
-    const id = requestAnimationFrame(() => inputRef.current?.focus());
+    const id = requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      // A SEEDED query is a guess the caller made on your behalf (the basename
+      // of a dropped file), so it starts selected — one keystroke replaces it,
+      // rather than appending to a word you didn't type.
+      if (request?.initialQuery) inputRef.current?.select();
+    });
     return () => cancelAnimationFrame(id);
-  }, []);
+  }, [request?.initialQuery]);
 
   /** Keep the cursor row on screen as ↑/↓ move it. */
   useEffect(() => {

@@ -857,3 +857,18 @@ export const WorkflowRunRequestSchema = z.object({
   createdAt: z.number().int(),
 });
 export type WorkflowRunRequest = z.infer<typeof WorkflowRunRequestSchema>;
+
+/**
+ * Where a chat's agent actually runs: its worktree, else the project checkout.
+ *
+ * Shared rather than server-local because the CLIENT needs the same answer —
+ * the composer's file picker opens here, so that the paths it inserts are the
+ * paths the agent for THAT chat will resolve. Two copies of this one-liner is
+ * two chances for the picker to browse a directory the agent isn't in.
+ */
+export function chatRoot(
+  chat: Pick<Chat, "worktrees">,
+  project: Pick<Project, "repoPath">,
+): string {
+  return chat.worktrees[0] ?? project.repoPath;
+}
