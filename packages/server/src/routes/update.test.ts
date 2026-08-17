@@ -85,6 +85,13 @@ async function withRelease(manifest: unknown, latestTag: string | null): Promise
   return release;
 }
 
+/**
+ * Comfortably past the route's own SETTLE_MS (150), so a deferred spawn has
+ * landed before the next test resets the mock. Not imported from the route:
+ * the point is to outlast it, not to match it.
+ */
+const SETTLE_DRAIN_MS = 250;
+
 beforeEach(async () => {
   // A full reset, not `mockClear`: the install route spawns 150ms AFTER its
   // reply is flushed, so a previous test's launch can land during this one and
@@ -98,6 +105,18 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await app?.close().catch(() => {});
+  // Drain the install route's deferred spawn before the next test starts.
+  //
+  // The route schedules `launchUpdate` SETTLE_MS after the reply flushes, so a
+  // test that installs successfully leaves a timer armed. It fires during the
+  // NEXT test — after `beforeEach` reset the call count — and any assertion of
+  // `not.toHaveBeenCalled()` then sees 1. That made this file fail
+  // intermittently, on whichever "refuses…" case happened to follow an install,
+  // which is why it passed when run alone and failed under a full suite.
+  //
+  // `mockReset` in beforeEach can't fix it: the problem is a call that arrives
+  // AFTER the reset, not stale state before it.
+  await new Promise((r) => setTimeout(r, SETTLE_DRAIN_MS));
   await rm(dir, { recursive: true, force: true });
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
 });
