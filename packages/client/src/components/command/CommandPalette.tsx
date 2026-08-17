@@ -416,7 +416,12 @@ export function CommandPalette({
   return createPortal(
     <div
       style={{ zIndex: LAYER.palette }}
-      className="fixed inset-0 flex items-start justify-center p-6 sm:pt-[12vh]"
+      className={
+        // Top-anchored: on a phone the 24px gutter alone would put the search
+        // field under the status bar. See `cm-safe-pad` in index.css.
+        "fixed inset-0 flex items-start justify-center " +
+        "cm-safe-pad [--cm-gutter:1.5rem] sm:pt-[max(12vh,var(--cm-safe-top))]"
+      }
     >
       <div className="fixed inset-0 bg-scrim backdrop-blur-[2px]" onClick={close} aria-hidden />
       <div

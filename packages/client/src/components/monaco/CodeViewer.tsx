@@ -183,7 +183,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   return createPortal(
     <div
       style={{ zIndex: z }}
-      className="fixed inset-0 flex items-center justify-center p-4 sm:p-6"
+      className="fixed inset-0 flex items-center justify-center cm-safe-pad [--cm-gutter:1rem] sm:[--cm-gutter:1.5rem]"
       role="dialog"
       aria-modal="true"
     >
@@ -194,7 +194,12 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
         className="absolute inset-0 cursor-default bg-scrim backdrop-blur-[2px] cm-anim-rise"
       />
 
-      <div className="relative flex h-[86vh] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-lg border border-line-strong bg-panel shadow-[var(--shadow-pop)] cm-anim-rise">
+      {/* Height as `full` capped at 86vh, not a flat 86vh: `full` is 100% of the
+          overlay's CONTENT box, so whatever the safe-area gutters take comes off
+          the panel automatically. A flat `86vh` is measured against the large
+          viewport instead and can't see the insets at all. The cap is what keeps
+          the desktop card off the window edges, as before. */}
+      <div className="relative flex h-full max-h-[86vh] w-[min(1180px,94vw)] flex-col overflow-hidden rounded-lg border border-line-strong bg-panel shadow-[var(--shadow-pop)] cm-anim-rise">
         {/* header */}
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-3">
           <FileCode2 className="size-4 shrink-0 text-accent-hi" />

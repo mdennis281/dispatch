@@ -118,5 +118,5 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const user = useAuth((state) => state.user);
   if (!ready || !status) return <div className="grid h-screen place-items-center bg-app text-sm text-muted">Starting Dispatch…</div>;
   if (status.enabled && !user) return <div className="grid min-h-screen place-items-center bg-app p-5"><Login /></div>;
-  return <>{children}{!status.enabled && !status.configured && !status.firstRunDismissed && <div role="dialog" aria-modal="true" aria-label="First-run authentication setup" className="fixed inset-0 z-[500] grid place-items-center bg-scrim p-5 backdrop-blur-sm"><FirstRun status={status} /></div>}</>;
+  return <>{children}{!status.enabled && !status.configured && !status.firstRunDismissed && <div role="dialog" aria-modal="true" aria-label="First-run authentication setup" className="fixed inset-0 z-[500] grid place-items-center bg-scrim backdrop-blur-sm cm-safe-pad [--cm-gutter:1.25rem]"><FirstRun status={status} /></div>}</>;
 }

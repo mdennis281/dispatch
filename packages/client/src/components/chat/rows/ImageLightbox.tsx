@@ -30,10 +30,13 @@ export function ImageLightbox({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // `cm-safe-pad`: the scrim is this element, so the insets go on as padding —
+  // the dim still covers the whole screen and only the header and the image
+  // move clear of the status bar and the home indicator.
   return createPortal(
     <div
       style={{ zIndex: z }}
-      className="fixed inset-0 flex flex-col bg-scrim-strong backdrop-blur-[2px]"
+      className="fixed inset-0 flex flex-col bg-scrim-strong backdrop-blur-[2px] cm-safe-pad"
       onClick={onClose}
     >
       <header

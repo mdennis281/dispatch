@@ -56,7 +56,14 @@ export function Modal({
   return createPortal(
     <div
       style={{ zIndex: z }}
-      className="fixed inset-0 flex items-start justify-center overflow-y-auto p-6 sm:pt-[9vh]"
+      className={
+        // Top-anchored, so the 24px gutter is all that stands between the title
+        // row and the status bar on a phone — `cm-safe-pad` makes each side the
+        // larger of the two. The `sm` offset gets the same treatment for the
+        // short viewport where 9vh is the smaller number.
+        "fixed inset-0 flex items-start justify-center overflow-y-auto " +
+        "cm-safe-pad [--cm-gutter:1.5rem] sm:pt-[max(9vh,var(--cm-safe-top))]"
+      }
     >
       <div
         className="fixed inset-0 bg-scrim backdrop-blur-[2px]"
