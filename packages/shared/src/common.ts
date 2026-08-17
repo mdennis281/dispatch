@@ -104,15 +104,65 @@ export const McpServerConfigSchema = z.looseObject({
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
   /**
-   * Working directory for a stdio server. Defaults to the project's repo path,
-   * so relative `args` (e.g. `./tools/sim-mcp/index.mjs`) resolve against the
-   * repo — not against wherever the manager itself happens to be running.
+   * Working directory for a stdio server. Defaults to the CHAT'S directory — its
+   * worktree when it has one, else the project repo path — so relative `args`
+   * (e.g. `./tools/sim-mcp/index.mjs`) resolve against the tree the chat is
+   * actually working in, not against wherever the manager happens to be running.
+   *
+   * That default is what makes a server launched from a worktree serve THAT
+   * worktree. An explicit value here opts out and pins every chat to one dir.
    */
   cwd: z.string().optional(),
   url: z.string().optional(),
   headers: z.record(z.string(), z.string()).optional(),
+
+  /* ---- Dispatch-only knobs. Stripped by `resolveMcpServer` before the config
+     reaches a harness, so they never ride along into an SDK that would choke on
+     an unknown key. ---- */
+
+  /**
+   * How many ports this server needs. Each is LEASED per (project, server,
+   * checkout) and substituted into `env`/`args`/`url` as `{mcpPort}` /
+   * `{mcpPortN}`, so two worktrees running the same server never collide.
+   * Absent → no leases, and the placeholders stay literal.
+   */
+  ports: z.number().int().min(1).max(8).optional(),
+  /** Inclusive [min, max] band to lease from. Defaults to {@link DEFAULT_MCP_PORT_RANGE}. */
+  portRange: z.tuple([z.number().int(), z.number().int()]).optional(),
+  /**
+   * Command run after a worktree is created, in that worktree, with this
+   * server's fully-expanded env (leased ports included). For a server that
+   * fronts a dev server this boots it so the first tool call isn't cold.
+   * Best-effort: its failure never fails worktree creation.
+   */
+  prewarm: z.string().optional(),
 });
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
+
+/**
+ * Default band for leased MCP ports. Deliberately clear of the 5173/4318/4319
+ * range that Vite and Dispatch's own two instances live in.
+ */
+export const DEFAULT_MCP_PORT_RANGE: readonly [number, number] = [5400, 5499];
+
+/** Keys that are Dispatch's own and must not be forwarded to a harness SDK. */
+export const MCP_DISPATCH_ONLY_KEYS = ["ports", "portRange", "prewarm"] as const;
+
+/**
+ * One checkout's claim on a set of ports for one MCP server. Persisted so the
+ * SAME worktree gets the SAME ports across restarts — a server that adopts an
+ * already-healthy dev server (rather than spawning a second) depends on that
+ * stability, and a port that moved every boot would strand the old one.
+ */
+export const McpPortLeaseSchema = z.object({
+  projectId: z.string(),
+  server: z.string(),
+  /** Normalized checkout path; the identity the lease is really keyed on. */
+  checkout: z.string(),
+  ports: z.array(z.number().int()),
+  leasedAt: z.number(),
+});
+export type McpPortLease = z.infer<typeof McpPortLeaseSchema>;
 
 /** A permission decision returned from an attention/permission card. */
 export const PermissionDecisionSchema = z.enum(["allow", "deny"]);

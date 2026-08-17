@@ -102,6 +102,12 @@ export const ManifestMcpStdioTransportSchema = z.object({
   command: z.string(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  /**
+   * Pin the working directory. Omit it — the default (the chat's worktree, else
+   * the repo root) is what gives each worktree its own server. Setting this puts
+   * every chat in the project back on one directory.
+   */
+  cwd: z.string().optional(),
 });
 
 /** An HTTP/SSE MCP transport (connects to a URL). */
@@ -122,6 +128,21 @@ export type ManifestMcpTransport = z.infer<typeof ManifestMcpTransportSchema>;
 export const ManifestMcpServerSchema = z.object({
   name: z.string(),
   transport: ManifestMcpTransportSchema,
+  /**
+   * How many ports to LEASE per checkout for this server, substituted into the
+   * transport as `{mcpPort}` / `{mcpPortN}`. This is the answer to "two chats
+   * in two worktrees both start this server and fight over one port": write the
+   * placeholder instead of a number and each checkout gets its own, stable
+   * across restarts. See `mcp-ports.ts`.
+   */
+  ports: z.number().int().min(1).max(8).optional(),
+  /** Inclusive [min, max] band to lease from. Defaults to 5400-5499. */
+  portRange: z.tuple([z.number().int(), z.number().int()]).optional(),
+  /**
+   * Command run in a newly created worktree to warm this server up (typically
+   * booting the dev server it fronts). Best-effort — never fails the worktree.
+   */
+  prewarm: z.string().optional(),
 });
 export type ManifestMcpServer = z.infer<typeof ManifestMcpServerSchema>;
 

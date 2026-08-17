@@ -17,6 +17,7 @@ import type { FastifyInstance } from "fastify";
 import type { McpCatalog } from "@dispatch/shared";
 import { resolveWorkflow } from "@dispatch/shared";
 import { buildProjectMcpCatalog } from "../services/mcp/mcp-catalog.js";
+import { resolveMcpServers } from "../services/mcp-session.js";
 
 /** How long an assembled catalog is reused before a re-probe. */
 const CACHE_TTL_MS = 15_000;
@@ -41,10 +42,24 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       // repo's `.dispatch/` config-sourced servers (config wins per-name),
       // mirroring the broker's `buildOptions` merge — so a config-declared server
       // shows up here with its live probe status.
-      const mcpServers = {
-        ...(project.mcpServers ?? {}),
-        ...services.projectConfig.getMcpServers(project.id),
-      };
+      // Resolved the same way a session resolves them, against the PRIMARY
+      // checkout — this catalog is project-scoped, so the primary is the only
+      // checkout it can honestly describe. Without resolving, a server whose
+      // port is written `{mcpPort}` would be probed with the placeholder still
+      // in its env and report a startup failure that no session would ever hit.
+      const mcpServers = await resolveMcpServers(
+        {
+          ...(project.mcpServers ?? {}),
+          ...services.projectConfig.getMcpServers(project.id),
+        },
+        {
+          projectId: project.id,
+          cwd: project.repoPath,
+          repoRoot: project.repoPath,
+          branch: project.defaultBranch ?? "main",
+        },
+        services.broker.mcpPorts,
+      );
       const catalog = await buildProjectMcpCatalog(project, {
         // terminal/memory/github are all wired in production, so their manager
         // tools show as available; a missing binding flips the tool to unavailable.

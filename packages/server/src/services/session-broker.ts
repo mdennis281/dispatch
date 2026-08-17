@@ -25,7 +25,8 @@
  * subprocess or network.
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
 import type {
   Options,
   Query,
@@ -1234,6 +1235,11 @@ export class SessionBroker {
   private readonly runner?: RunnerService;
   private readonly worktrees?: WorktreeService;
   private readonly projectConfig?: BrokerProjectConfig;
+  /** Per-checkout MCP port leases. Built from the store, not injected — it has
+   *  no configuration of its own and every session needs it. Public so the
+   *  catalog route and the worktree prewarm resolve the SAME leases a session
+   *  would, rather than each computing their own answer. */
+  readonly mcpPorts: McpPortLeaseService;
   private readonly harnesses?: HarnessRegistry;
   private readonly managerMcp?: ManagerMcpBridge;
   private readonly inspect?: BrokerInspect;
@@ -1269,6 +1275,7 @@ export class SessionBroker {
 
   constructor(opts: SessionBrokerOptions) {
     this.store = opts.store;
+    this.mcpPorts = new McpPortLeaseService(opts.store);
     this.bus = opts.bus;
     this.cap = Math.max(1, opts.maxActiveSessions ?? 6);
     this.terminals = opts.terminals;
@@ -3955,12 +3962,29 @@ export class SessionBroker {
     // `manager` LAST so it's never clobbered (even by a config server named
     // "manager"). Consulting the config directly (not just the store-synced copy)
     // keeps a live watcher edit effective for this session.
-    const configMcp = (
-      this.projectConfig && projectId ? this.projectConfig.getMcpServers(projectId) : {}
-    ) as unknown as Record<string, SdkMcpServerConfig>;
+    const configMcp =
+      this.projectConfig && projectId ? this.projectConfig.getMcpServers(projectId) : {};
+    // Resolve for THIS session before handing anything to the SDK: stamp each
+    // stdio server's cwd to the chat's own directory and expand `{mcpPort}` &
+    // friends. Without this every worktree's server runs in the primary
+    // checkout on one shared port — and a server that adopts a healthy dev
+    // server on that port then reports on the WRONG tree's code.
+    const externalMcp =
+      projectId && cwd
+        ? await resolveMcpServers(
+            { ...(project?.mcpServers ?? {}), ...configMcp },
+            {
+              projectId,
+              cwd,
+              repoRoot: project?.repoPath ?? cwd,
+              chatId: session.chatId,
+              branch: session.worktreeCwd ? basename(session.worktreeCwd) : undefined,
+            },
+            this.mcpPorts,
+          )
+        : { ...(project?.mcpServers ?? {}), ...configMcp };
     options.mcpServers = {
-      ...(project?.mcpServers as unknown as Record<string, SdkMcpServerConfig> | undefined),
-      ...configMcp,
+      ...(externalMcp as unknown as Record<string, SdkMcpServerConfig>),
       manager: createManagerMcpServer({
         chatId: session.chatId,
         bus: this.bus,

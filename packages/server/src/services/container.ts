@@ -283,6 +283,9 @@ export function createServices(
   // detaches the chat record outside the detector, so evict the path from `known`
   // or a worktree recreated at the same path would never be re-attributed.
   worktrees.onWorktreeRemoved = (path) => worktreeDetector.forget(path);
+  // Removing a worktree hands its MCP ports back. Assigned here rather than
+  // injected because the broker that owns the leases is constructed above this.
+  worktrees.mcpPorts = broker.mcpPorts;
   const notifier = overrides.notifier ?? new Notifier({ bus, store });
   const attention = overrides.attention ?? new AttentionQueue({ bus });
   // Subscription usage (5h + weekly) for the header meter. Polls the account

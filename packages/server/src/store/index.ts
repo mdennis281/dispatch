@@ -54,6 +54,8 @@ import {
   type RunnerInstance,
   CheckpointSchema,
   type Checkpoint,
+  McpPortLeaseSchema,
+  type McpPortLease,
   ShellTranscriptFilterSchema,
 } from "@dispatch/shared";
 import { HarnessSettingsSchema, UpdateChannelSchema } from "@dispatch/shared";
@@ -261,6 +263,15 @@ export class Store {
   }
   private runnersFile() {
     return join(this.dataDir, "runners.json");
+  }
+  /**
+   * Per-INSTANCE, like runners.json and for the same reason: it's a whole-file
+   * read-modify-write map guarded by an in-process mutex, so two processes
+   * sharing it would silently drop each other's leases and hand two checkouts
+   * one port — the exact collision the leases exist to prevent.
+   */
+  private mcpPortsFile() {
+    return join(this.dataDir, "mcp-ports.json");
   }
   private checkpointsFile() {
     return join(this.dataDir, "checkpoints.json");
@@ -601,6 +612,38 @@ export class Store {
       const all = (await readJson<unknown[]>(this.runnersFile())) ?? [];
       const list = z.array(RunnerInstanceSchema).parse(all).filter((r) => r.id !== id);
       await writeJsonAtomic(this.runnersFile(), list);
+    });
+  }
+
+  /* ---------------------------------------------------- MCP port leases */
+
+  async listMcpPortLeases(): Promise<McpPortLease[]> {
+    const raw = (await readJson<unknown[]>(this.mcpPortsFile())) ?? [];
+    // Tolerate a partially-corrupt file: a bad row costs one lease (re-leased on
+    // next use), where a throw would cost every session in every project.
+    return raw.flatMap((r) => {
+      const p = McpPortLeaseSchema.safeParse(r);
+      return p.success ? [p.data] : [];
+    });
+  }
+
+  /**
+   * Read-modify-write the whole lease list under one lock. Allocation must see a
+   * consistent view — two concurrent sessions each picking "the lowest free
+   * port" from a stale read would pick the SAME one.
+   */
+  async updateMcpPortLeases<T>(
+    fn: (leases: McpPortLease[]) => { leases: McpPortLease[]; result: T } | Promise<{ leases: McpPortLease[]; result: T }>,
+  ): Promise<T> {
+    return this.mutex.run("mcp-ports", async () => {
+      const raw = (await readJson<unknown[]>(this.mcpPortsFile())) ?? [];
+      const current = raw.flatMap((r) => {
+        const p = McpPortLeaseSchema.safeParse(r);
+        return p.success ? [p.data] : [];
+      });
+      const { leases, result } = await fn(current);
+      await writeJsonAtomic(this.mcpPortsFile(), leases);
+      return result;
     });
   }
 
