@@ -7,9 +7,16 @@
  * reason those functions don't read `process.platform` themselves.
  *
  * The I/O half runs against a real temp directory on whatever platform is
- * hosting, with the platform-sensitive service dependencies (trash, PowerShell,
- * git, `/etc/*`) injected — which lets even `details()`' POSIX ownership branch
- * and its Windows ACL branch both be asserted from one machine.
+ * hosting, with the shellouts (trash, PowerShell, git) injected.
+ *
+ * Those two halves are drawn where they are because a service told
+ * `platform: "linux"` now — correctly — rejects `C:/…` as not absolute, and a
+ * Windows box cannot produce a real POSIX path to hand it instead. So anything
+ * that needs a live path is tested against the HOST platform, and the logic that
+ * differs per platform is pulled out into pure functions (`resolvePosixOwner`,
+ * `quotePs`, `parseLinuxMounts`, `formatPosixMode`) that run everywhere. The
+ * few genuinely OS-bound assertions — the drive probe, `Get-Acl` — are gated on
+ * the host and covered by CI's Windows leg.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile, readFile, symlink, stat, readdir } from "node:fs/promises";
@@ -30,6 +37,9 @@ import {
   toFsPlatform,
   enclosingRepoRoot,
   fwd,
+  FsPathError,
+  resolvePosixOwner,
+  quotePs,
   MAX_ENTRIES,
   SEARCH_SKIP_DIRS,
   type TrashFn,
@@ -39,6 +49,15 @@ import type { ExecFn } from "./worktree.js";
 let dir: string;
 /** The temp dir in the wire form the service speaks (absolute, forward slashes). */
 let wire: string;
+
+/**
+ * The NUL `git log --format=%an%x00%at` puts between the author and the date.
+ *
+ * Named rather than embedded: a raw NUL byte in a source file is legal, totally
+ * invisible in an editor, and makes the file read as binary to `grep` — and it
+ * is the exact character this assertion is about, so it should be stated.
+ */
+const NUL = "\u0000";
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "cm-fsx-"));
@@ -398,78 +417,128 @@ describe("list", () => {
   });
 });
 
+describe("relative paths", () => {
+  // `resolve()` anchors a relative path to the SERVER process's cwd, so without
+  // a guard `list("packages")` quietly lists the Dispatch install's own source
+  // tree. Writes refused this from the start; the reads did not, which meant two
+  // halves of one API disagreed about what a path is. The check now lives in
+  // `native()` — the single point where a wire string becomes a disk location —
+  // so a future method cannot forget it.
+  const svc = () => new FsExplorerService();
+
+  it("are refused by every read, not just by writes", async () => {
+    await expect(svc().list("packages")).rejects.toThrow(/absolute/);
+    await expect(svc().details("packages/shared")).rejects.toThrow(/absolute/);
+    await expect(svc().search("packages", "x")).rejects.toThrow(/absolute/);
+  });
+
+  it("are refused as an empty path too", async () => {
+    await expect(svc().list("")).rejects.toThrow(/required/);
+    await expect(svc().list("   ")).rejects.toThrow(/required/);
+  });
+
+  it("are reported as a caller error, so a route can answer 400 not 404", async () => {
+    // A malformed request and a missing file are different problems; collapsing
+    // them sends whoever is debugging it hunting for a file that never existed.
+    await expect(svc().list("packages")).rejects.toBeInstanceOf(FsPathError);
+    // A path that IS absolute and simply absent stays an ordinary error.
+    await expect(svc().list(`${wire}/nope`)).rejects.not.toBeInstanceOf(FsPathError);
+  });
+
+  it("still refuse a relative mutation, before the batch reports anything", async () => {
+    const r = await svc().mutate({ op: "mkdir", path: "relative/dir" });
+    expect(r.ok).toBe(false);
+    expect(r.changed).toEqual([]);
+    expect(r.errors[0].message).toMatch(/absolute/);
+  });
+
+  it("do not reject a legitimately absolute path on this platform", async () => {
+    await expect(svc().list(wire)).resolves.toBeTruthy();
+  });
+});
+
+/* ============================================================== I/O: details */
+
+describe("ownership resolution", () => {
+  // Asserted as PURE functions rather than through `details()`.
+  //
+  // Forcing `platform: "linux"` on a Windows host used to work, but a service
+  // told it is on POSIX now (correctly) rejects `C:/…` as not absolute — and a
+  // Windows box cannot produce a real POSIX path to stat instead. Splitting the
+  // resolution out means both platforms' logic runs everywhere, and `details()`
+  // is only tested against the host it is actually on.
+  it("maps uid and gid to names", () => {
+    const users = parsePasswd("michael:x:1000:1000:M:/home/michael:/bin/bash");
+    const groups = parseGroup("staff:x:1000:");
+    expect(resolvePosixOwner({ uid: 1000, gid: 1000 }, users, groups)).toEqual([
+      "michael",
+      "staff",
+    ]);
+  });
+
+  it("falls back to the raw id for a user not in /etc/passwd", () => {
+    // An LDAP/SSSD uid is a true and useful answer even unresolved — much more
+    // so than "unknown".
+    expect(resolvePosixOwner({ uid: 4242, gid: 77 }, new Map(), new Map())).toEqual([
+      "4242",
+      "77",
+    ]);
+  });
+
+  it("single-quotes a path for PowerShell, doubling an apostrophe", () => {
+    // `Michael's Files` otherwise terminates the string and the remainder is
+    // interpreted as PowerShell.
+    expect(quotePs("C:\\Users\\Michael's Files")).toBe("'C:\\Users\\Michael''s Files'");
+    expect(quotePs("C:/plain")).toBe("'C:/plain'");
+  });
+});
+
 /* ============================================================== I/O: details */
 
 describe("details", () => {
-  it("resolves POSIX ownership from /etc/passwd without a subprocess", async () => {
+  it("reports ownership for a real file on THIS platform", async () => {
     await writeFile(join(dir, "f.txt"), "x");
-    const st = await stat(join(dir, "f.txt"));
-    // Forcing the POSIX branch with injected `/etc/*` bodies is what makes this
-    // assertion runnable on a Windows dev box.
-    const svc = new FsExplorerService({
-      platform: "linux",
-      readPasswd: async () => `michael:x:${st.uid}:${st.gid}:M:/home/michael:/bin/bash`,
-      readGroups: async () => `staff:x:${st.gid}:`,
-      exec: async () => ({ stdout: "", stderr: "", exitCode: 1 }),
-    });
-    const d = await svc.details(`${fwd(dir)}/f.txt`);
-    expect(d.owner).toBe("michael");
-    expect(d.group).toBe("staff");
-    expect(d.mode).toMatch(/^[rwx-]{9}$/);
+    const d = await new FsExplorerService().details(`${fwd(dir)}/f.txt`);
+    // Whoever is running the suite owns the file they just wrote.
+    expect(d.owner).toBeTruthy();
+    expect(d.writable).toBe(true);
+    if (process.platform === "win32") {
+      // Windows carries a fake mode where everything is 0666/0777. Reporting it
+      // would be noise dressed up as information.
+      expect(d.mode).toBeNull();
+      expect(d.group).toBeNull();
+    } else {
+      expect(d.mode).toMatch(/^[rwx-]{9}$/);
+      expect(d.group).toBeTruthy();
+    }
   });
 
-  it("falls back to the raw uid for a user not in /etc/passwd", async () => {
-    // An LDAP/SSSD uid is a true and useful answer even unresolved — much more
-    // so than "unknown".
-    await writeFile(join(dir, "f.txt"), "x");
-    const st = await stat(join(dir, "f.txt"));
-    const svc = new FsExplorerService({
-      platform: "linux",
-      readPasswd: async () => "",
-      readGroups: async () => "",
-      exec: async () => ({ stdout: "", stderr: "", exitCode: 1 }),
-    });
-    const d = await svc.details(`${fwd(dir)}/f.txt`);
-    expect(d.owner).toBe(String(st.uid));
-  });
-
-  it("reads Windows ownership from Get-Acl and reports no POSIX mode", async () => {
-    await writeFile(join(dir, "f.txt"), "x");
-    const exec = vi.fn<ExecFn>(async (file) =>
-      file === "powershell"
-        ? { stdout: "DESKTOP-A1\\Michael\n", stderr: "", exitCode: 0 }
-        : { stdout: "", stderr: "", exitCode: 1 },
-    );
-    const svc = new FsExplorerService({ platform: "win32", exec });
-    const d = await svc.details(`${fwd(dir)}/f.txt`);
-    expect(d.owner).toBe("Michael");
-    // Windows carries a fake mode where everything is 0666/0777. Reporting it
-    // would be noise dressed up as information.
-    expect(d.mode).toBeNull();
-    expect(d.group).toBeNull();
-  });
-
-  it("single-quotes the path it hands PowerShell", async () => {
-    // A path with an apostrophe (`Michael's Files`) otherwise terminates the
-    // string and the rest of the path is interpreted as PowerShell.
-    const odd = join(dir, "Michael's");
-    await mkdir(odd);
-    const exec = vi.fn<ExecFn>(async () => ({ stdout: "X\\me", stderr: "", exitCode: 0 }));
-    await new FsExplorerService({ platform: "win32", exec }).details(fwd(odd));
-    const cmd = exec.mock.calls[0][1].at(-1) as string;
-    expect(cmd).toContain("Michael''s");
-  });
+  it.skipIf(process.platform !== "win32")(
+    "asks Get-Acl for the owner, with the path quoted",
+    async () => {
+      await writeFile(join(dir, "f.txt"), "x");
+      const exec = vi.fn<ExecFn>(async (file) =>
+        file === "powershell"
+          ? { stdout: "DESKTOP-A1\\Michael\n", stderr: "", exitCode: 0 }
+          : { stdout: "", stderr: "", exitCode: 1 },
+      );
+      const d = await new FsExplorerService({ exec }).details(`${fwd(dir)}/f.txt`);
+      expect(d.owner).toBe("Michael");
+      const cmd = exec.mock.calls[0][1].at(-1) as string;
+      expect(cmd).toContain("Get-Acl");
+      expect(cmd).toContain("'");
+    },
+  );
 
   it("reports git authorship as the only honest 'edited by'", async () => {
     await mkdir(join(dir, ".git"));
     await writeFile(join(dir, "f.txt"), "x");
     const exec = vi.fn<ExecFn>(async (file, args) =>
       file === "git" && args[0] === "log"
-        ? { stdout: "Ada Lovelace\u00001700000000", stderr: "", exitCode: 0 }
+        ? { stdout: `Ada Lovelace${NUL}1700000000`, stderr: "", exitCode: 0 }
         : { stdout: "", stderr: "", exitCode: 1 },
     );
-    const svc = new FsExplorerService({ platform: "linux", exec, readPasswd: async () => "" , readGroups: async () => ""});
-    const d = await svc.details(`${fwd(dir)}/f.txt`);
+    const d = await new FsExplorerService({ exec }).details(`${fwd(dir)}/f.txt`);
     expect(d.lastEditedBy).toBe("Ada Lovelace");
     // git prints seconds; everything else in this app is epoch-ms.
     expect(d.lastEditedAt).toBe(1_700_000_000_000);
@@ -478,11 +547,10 @@ describe("details", () => {
   it("reports no author outside a checkout, rather than pretending", async () => {
     await writeFile(join(dir, "f.txt"), "x");
     const exec = vi.fn<ExecFn>(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
-    const svc = new FsExplorerService({ platform: "linux", exec, readPasswd: async () => "", readGroups: async () => "" });
-    const d = await svc.details(`${fwd(dir)}/f.txt`);
+    const d = await new FsExplorerService({ exec }).details(`${fwd(dir)}/f.txt`);
     expect(d.lastEditedBy).toBeNull();
     // No repo means git was never even asked.
-    expect(exec).not.toHaveBeenCalled();
+    expect(exec.mock.calls.filter((c) => c[0] === "git")).toHaveLength(0);
   });
 
   it("counts a directory's children so a delete can be warned about", async () => {

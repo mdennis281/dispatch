@@ -298,6 +298,36 @@ export function parseGroup(text: string): Map<number, string> {
 }
 
 /**
+ * uid/gid → names, given the maps parsed out of `/etc/passwd` and `/etc/group`.
+ *
+ * Pulled out as a pure function because the alternative — asserting it through
+ * `details()` with an injected `platform: "linux"` — needs a real POSIX path on
+ * disk, which a Windows dev box cannot produce. This way the resolution logic
+ * (including the raw-id fallback) is verified on every platform and `details()`
+ * only has to be tested against the host it's actually running on.
+ */
+export function resolvePosixOwner(
+  st: { uid: number; gid: number },
+  users: Map<number, string>,
+  groups: Map<number, string>,
+): [string, string] {
+  // The raw id is the fallback, not "unknown": a uid from a network directory
+  // (LDAP/SSSD) that isn't in /etc/passwd is still a true and useful answer.
+  return [users.get(st.uid) ?? String(st.uid), groups.get(st.gid) ?? String(st.gid)];
+}
+
+/**
+ * Single-quote a path for a PowerShell `-Command`, doubling embedded quotes.
+ *
+ * Exported for its own test: a path containing an apostrophe (`Michael's Files`)
+ * otherwise terminates the string and the remainder is interpreted as
+ * PowerShell.
+ */
+export function quotePs(p: string): string {
+  return `'${p.replace(/'/g, "''")}'`;
+}
+
+/**
  * Windows `Get-Acl` prints the owner as `BUILTIN\Administrators` or
  * `DESKTOP-1\Michael`. Show the account, drop the machine name — the domain is
  * the same for every file on the box and only steals column width.
@@ -382,6 +412,20 @@ const realExec: ExecFn = async (file, args, opts) => {
     return { stdout: e.stdout ?? "", stderr: e.stderr ?? e.message ?? "", exitCode: 1 };
   }
 };
+
+/**
+ * A path the caller got wrong — relative, or empty.
+ *
+ * A distinct type so the routes can answer 400 (you sent something malformed)
+ * rather than 404 (it isn't there). Those are different problems with different
+ * fixes, and collapsing them makes a client bug look like a missing file.
+ */
+export class FsPathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FsPathError";
+  }
+}
 
 /** Move a path to the OS trash. Swapped for a spy in tests. */
 export type TrashFn = (paths: string[]) => Promise<void>;
@@ -489,9 +533,25 @@ export class FsExplorerService {
    *
    * `resolve` is what converts `C:/a/b` back to `C:\a\b` on Windows; on POSIX it
    * is a no-op for an already-absolute path.
+   *
+   * It also REFUSES a relative path, and this is the right place for that check
+   * because it is the single chokepoint where a wire string becomes a real disk
+   * location — every read and every write goes through here, so no future method
+   * can forget to validate. `resolve()` anchors a relative path to the server
+   * process's own cwd, so without this `list("packages")` quietly lists the
+   * Dispatch install's own source tree: not a location any UI asked for, and not
+   * one a user could navigate back out of sensibly.
+   *
+   * Writes had this guard from the start (`assertMutable`); reads did not, which
+   * meant the two halves of the same API disagreed about what a path is.
    */
   private native(wirePath: string): string {
-    return resolve(fsNormalize(wirePath, this.fsPlatform));
+    const norm = fsNormalize(wirePath, this.fsPlatform);
+    if (!norm) throw new FsPathError("path required");
+    if (!fsIsAbsolute(norm, this.fsPlatform)) {
+      throw new FsPathError(`not an absolute path: ${norm}`);
+    }
+    return resolve(norm);
   }
 
   /* ------------------------------------------------------------- listing */
@@ -791,12 +851,7 @@ export class FsExplorerService {
     if (!st) return [null, null];
     if (!this.users) this.users = parsePasswd((await this.readPasswd()) ?? "");
     if (!this.groups) this.groups = parseGroup((await this.readGroups()) ?? "");
-    // The raw id is the fallback, not "unknown": a uid from a network directory
-    // that isn't in /etc/passwd is still a true and useful answer.
-    return [
-      this.users.get(st.uid) ?? String(st.uid),
-      this.groups.get(st.gid) ?? String(st.gid),
-    ];
+    return resolvePosixOwner(st, this.users, this.groups);
   }
 
   /**
@@ -1037,13 +1092,17 @@ export class FsExplorerService {
    * none of them execute.
    */
   private assertMutable(norm: string): void {
-    if (!norm) throw new Error("path required");
+    // Absoluteness is enforced by `native()`, the chokepoint every path crosses
+    // on its way to the disk — but it is checked here TOO, because a mutation
+    // that fails late has already been partly reported as a `changed` path in a
+    // batch. Failing before the batch starts keeps the result honest.
+    if (!norm) throw new FsPathError("path required");
     // `fsIsAbsolute`, not "does it have a parent" — `relative/dir` HAS a parent
     // (`relative`), so the weaker check let a relative path through to
     // `resolve()`, which silently anchored it to the server's own cwd. That's
     // how a "New folder" click lands inside the Dispatch install.
     if (!fsIsAbsolute(norm, this.fsPlatform)) {
-      throw new Error(`not an absolute path: ${norm}`);
+      throw new FsPathError(`not an absolute path: ${norm}`);
     }
     if (fsIsRoot(norm, this.fsPlatform)) {
       throw new Error(`refusing to modify a filesystem root: ${norm}`);
@@ -1237,11 +1296,6 @@ export class FsExplorerService {
       };
     }
   }
-}
-
-/** Single-quote a path for a PowerShell `-Command`, doubling embedded quotes. */
-function quotePs(p: string): string {
-  return `'${p.replace(/'/g, "''")}'`;
 }
 
 async function pathExists(nativePath: string): Promise<boolean> {

@@ -29,7 +29,7 @@ import {
   FsSelectKindSchema,
   type Project,
 } from "@dispatch/shared";
-import { enclosingRepoRoot, fwd } from "../services/fs-explorer.js";
+import { enclosingRepoRoot, fwd, FsPathError } from "../services/fs-explorer.js";
 
 // Both of these started life here, beside the probe that first needed them, and
 // moved into the explorer service once the browser needed them too — a service
@@ -225,6 +225,20 @@ export function inferProjectsRoot(projects: Project[], home: string): string {
 /** `?showHidden=true` / `?showHidden=1` — query strings have no booleans. */
 const flag = (v: string | undefined): boolean => v === "true" || v === "1";
 
+/**
+ * A failed read, as a status code.
+ *
+ * 400 for a path the caller got wrong (relative, empty) and 404 for one that's
+ * simply not there or not readable. Both are normal things for a browser to hit
+ * — a stale bookmark, someone else's home directory — and neither is a 500. But
+ * they are different problems: collapsing a client bug into "not found" sends
+ * whoever is debugging it looking for a missing file.
+ */
+const readError = (err: unknown): { code: number; error: string } => ({
+  code: err instanceof FsPathError ? 400 : 404,
+  error: err instanceof Error ? err.message : String(err),
+});
+
 /** `?ext=png,jpg` or `?ext=.PNG` → `["png","jpg"]`. */
 const extList = (v: string | undefined): string[] | undefined => {
   const parts = (v ?? "")
@@ -293,10 +307,8 @@ export function registerFsRoutes(app: FastifyInstance): void {
           limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
         });
       } catch (err) {
-        // A path that isn't there, or that this process can't read, is a normal
-        // thing for a browser to ask about (a stale bookmark, someone else's
-        // home directory) — 404 so the UI can say so, not 500.
-        return reply.code(404).send({ error: err instanceof Error ? err.message : String(err) });
+        const { code, error } = readError(err);
+        return reply.code(code).send({ error });
       }
     },
   );
@@ -307,7 +319,8 @@ export function registerFsRoutes(app: FastifyInstance): void {
     try {
       return await fsExplorer.details(path);
     } catch (err) {
-      return reply.code(404).send({ error: err instanceof Error ? err.message : String(err) });
+      const { code, error } = readError(err);
+      return reply.code(code).send({ error });
     }
   });
 
@@ -338,7 +351,8 @@ export function registerFsRoutes(app: FastifyInstance): void {
       });
       return { root, results };
     } catch (err) {
-      return reply.code(404).send({ error: err instanceof Error ? err.message : String(err) });
+      const { code, error } = readError(err);
+      return reply.code(code).send({ error });
     }
   });
 
