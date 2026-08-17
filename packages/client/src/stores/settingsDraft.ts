@@ -47,13 +47,64 @@ export const useAppSettingsDraft = create<AppDraftStore>((set) => ({
   commit: (settings) => set({ saved: settings, draft: settings }),
 }));
 
-/** Field-by-field, over the shape the server round-trips. Both sides go through
- *  the same normalizer on load, so this is an honest comparison rather than
- *  "did any control render its effective value". */
-export function appSettingsDirty(s: {
+interface AppDraftPair {
   saved: AppSettings | null;
   draft: AppSettings | null;
-}): boolean {
+}
+
+/**
+ * Which slice of the settings object each editable section owns.
+ *
+ * This exists so the rail's warn dot can point at the section you actually
+ * edited. Comparing the whole object per section would light up all four the
+ * moment any one of them changed, which tells you there are unsaved edits
+ * somewhere — the thing the save bar already says — while implying it about
+ * three sections that are untouched.
+ *
+ * `harness` is deliberately split: the model/effort defaults are a Chat
+ * decision and the token limits are a Context one, even though the server
+ * stores them under one key.
+ */
+const SECTION_SLICE: Record<
+  "appearance" | "chat" | "context" | "notifications",
+  (s: AppSettings) => unknown
+> = {
+  appearance: (s) => s.theme,
+  chat: (s) => [
+    s.defaultModeId,
+    s.showInjectedContext,
+    s.shellFilter,
+    s.spawnChat,
+    s.harness?.defaultHarness,
+    s.harness?.defaults,
+  ],
+  context: (s) => [s.autoCompact, s.harness?.contextLimits],
+  notifications: (s) => s.webhook,
+};
+
+/** The sections with unsaved edits. Empty when nothing has changed. */
+export function dirtyAppSections(s: AppDraftPair): Set<string> {
+  const out = new Set<string>();
+  const { saved, draft } = s;
+  if (!saved || !draft) return out;
+  for (const [id, slice] of Object.entries(SECTION_SLICE)) {
+    if (JSON.stringify(slice(saved)) !== JSON.stringify(slice(draft))) out.add(id);
+  }
+  return out;
+}
+
+/**
+ * Whether ANYTHING is unsaved — what the save bar keys off.
+ *
+ * Deliberately a whole-object comparison rather than the union of the slices
+ * above: a field added to `AppSettings` and not yet routed to a section would
+ * otherwise be editable, unsaved, and invisible. This way the worst case is a
+ * save bar with no dot beside it, not an edit you can't save.
+ *
+ * Both sides go through the same normalizer on load, so this is an honest
+ * comparison rather than "did any control render its effective value".
+ */
+export function appSettingsDirty(s: AppDraftPair): boolean {
   if (!s.saved || !s.draft) return false;
   return JSON.stringify(s.saved) !== JSON.stringify(s.draft);
 }

@@ -40,17 +40,22 @@ export type AppSettingsSection =
  * The app's modal surfaces — project-scoped things that sit ON TOP of a view
  * rather than replacing it.
  *
- * These used to be opened three different ways: `prs`/`mcp`/`config` each had
- * their own `*Bus.ts` module firing a bespoke window CustomEvent that the
- * always-mounted overlay listened for, while `settings` and `agents` were plain
- * `useState` in whichever component happened to render the trigger. Same class
- * of thing, three mechanisms — so nothing could tell what was open, only one
- * could be addressed by the command palette without special-casing, and closing
- * behaviour was whatever each site remembered to wire.
+ * These used to be opened three different ways: each of `prs`/`mcp` and the old
+ * `config` overlay had its own `*Bus.ts` module firing a bespoke window
+ * CustomEvent that the always-mounted overlay listened for, while `agents` and
+ * the old `settings` overlay were plain `useState` in whichever component
+ * happened to render the trigger. Same class of thing, three mechanisms — so
+ * nothing could tell what was open, only one could be addressed by the command
+ * palette without special-casing, and closing behaviour was whatever each site
+ * remembered to wire.
  *
  * One field, one setter. Opening any overlay closes the previous one, which is
  * also the fix for the old bug where two of these could be stacked on top of
  * each other with no way to tell which Esc would dismiss.
+ *
+ * `config` and `settings` are no longer in this list: both outgrew a dialog and
+ * are now full views (see `AppView` above), which is also what let their
+ * subpages become addressable.
  */
 export type AppOverlay = "prs" | "mcp" | "agents" | "processes";
 

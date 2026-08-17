@@ -17,7 +17,7 @@
  * Only the settings the server actually stores are exposed (see
  * AppSettingsSchema); saving merges + revalidates server-side.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { SlidersHorizontal, Save, Undo2 } from "lucide-react";
 import { SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
 import type { HarnessKind, ModelOption } from "@dispatch/shared";
@@ -29,7 +29,11 @@ import { useNotices } from "../../stores/notices.js";
 import { useSettings } from "../../stores/settings.js";
 import { useTheme } from "../../stores/theme.js";
 import { useView, type AppSettingsSection } from "../../stores/view.js";
-import { useAppSettingsDraft, appSettingsDirty } from "../../stores/settingsDraft.js";
+import {
+  useAppSettingsDraft,
+  appSettingsDirty,
+  dirtyAppSections,
+} from "../../stores/settingsDraft.js";
 import { SettingsShell } from "./SettingsShell.js";
 import { APP_SECTIONS, APP_SECTION_BY_ID } from "./appSections.js";
 import { AppearanceSection } from "./sections/AppearanceSection.js";
@@ -71,14 +75,6 @@ function normalize(s: AppSettings): AppSettings {
   };
 }
 
-/** The sections whose edits go through the save bar. */
-const SERVER_BACKED = new Set<AppSettingsSection>([
-  "appearance",
-  "chat",
-  "context",
-  "notifications",
-]);
-
 export function AppSettingsView() {
   const section = useView((s) => s.appSection);
   const setSection = useView((s) => s.setAppSection);
@@ -89,6 +85,11 @@ export function AppSettingsView() {
   const draft = useAppSettingsDraft((s) => s.draft);
   const patch = useAppSettingsDraft((s) => s.patch);
   const dirty = useAppSettingsDraft(appSettingsDirty);
+  // Derived here rather than through a selector: `dirtyAppSections` builds a new
+  // Set each call, and a selector that never returns a referentially-equal value
+  // re-renders on every unrelated store write (and trips React's
+  // "getSnapshot should be cached" guard).
+  const dirtySections = useMemo(() => dirtyAppSections({ saved, draft }), [saved, draft]);
 
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -191,9 +192,10 @@ export function AppSettingsView() {
         icon: s.icon,
         label: s.label,
         blurb: s.blurb,
-        // Only the four server-backed sections can be dirty; auth, updates and
-        // system all act immediately and have nothing to save.
-        dirty: dirty && SERVER_BACKED.has(s.id),
+        // Per section, so the dot points at what you actually edited. Auth,
+        // updates and system never appear here — they act immediately and have
+        // nothing to save.
+        dirty: dirtySections.has(s.id),
       }))}
       active={section}
       onSelect={setSection}

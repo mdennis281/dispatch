@@ -100,6 +100,11 @@ export function SettingsShell<Id extends string>({
                 key={s.id}
                 type="button"
                 title={s.blurb}
+                // The rail is navigation, so "which one am I on" has to be
+                // available as more than a background colour. At `sm` nothing
+                // is current — the rail IS the index, and the detail it would
+                // point at isn't on screen.
+                aria-current={selected ? "page" : undefined}
                 onClick={() => {
                   onSelect(s.id);
                   setShowIndex(false);
