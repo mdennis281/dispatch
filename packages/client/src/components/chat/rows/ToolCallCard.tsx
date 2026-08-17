@@ -3,7 +3,7 @@ import { ChevronRight, Check, X, FileDiff, FileCode2, Square, Moon } from "lucid
 import type { ToolUseRow, ToolResultRow, TaskStatusRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { toolIcon } from "../toolIcon.js";
-import { ImageThumb } from "./ImageThumb.js";
+import { Attachment } from "./Attachment.js";
 import { ImageLightbox } from "./ImageLightbox.js";
 import { PlanBody, parsePlan } from "./PlanCard.js";
 import { ackTaskId } from "../../../lib/subagentRuns.js";
@@ -205,7 +205,7 @@ export const ToolCallCard = memo(function ToolCallCard({
         {result?.images && result.images.length > 0 && (
           <div className="flex flex-wrap gap-2 border-t border-line-soft px-3 py-2.5">
             {result.images.map((img) => (
-              <ImageThumb key={img.id} chatId={use.chatId} img={img} />
+              <Attachment key={img.id} chatId={use.chatId} asset={img} />
             ))}
           </div>
         )}

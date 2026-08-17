@@ -94,6 +94,31 @@ export const ImageRefSchema = z.object({
 export type ImageRef = z.infer<typeof ImageRefSchema>;
 
 /**
+ * How an attachment should be PRESENTED. `ImageRef` long predates chats
+ * carrying anything but images; rather than rename it (and every call site) it
+ * now also carries video, audio and plain files, distinguished by `mimeType`.
+ * Lives here because the server picks the kind when ingesting and the client
+ * picks the element to render — one table, or the two drift.
+ */
+export type MediaKind = "image" | "video" | "audio" | "file";
+
+export function mediaKind(mime: string | undefined): MediaKind {
+  const m = (mime ?? "").toLowerCase();
+  if (m.startsWith("image/")) return "image";
+  if (m.startsWith("video/")) return "video";
+  if (m.startsWith("audio/")) return "audio";
+  return "file";
+}
+
+/** Human-readable byte size, for captions and for the summary the model sees. */
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+/**
  * MCP server config, forwarded verbatim to the SDK's `mcpServers`. Kept a loose
  * object (unknown keys preserved) so any SDK-supported transport shape passes
  * through unmodified from filesystem config.

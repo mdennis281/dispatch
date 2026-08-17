@@ -10,30 +10,44 @@ import type { FastifyInstance } from "fastify";
 import { extname } from "node:path";
 import { nanoid } from "nanoid";
 import { ImageRefSchema } from "@dispatch/shared";
+import { extFromMediaType, mediaTypeFromName } from "../services/media-types.js";
 
 /** Cap a single upload so a runaway paste can't fill the disk / RAM. */
 const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
 
-const EXT_BY_MIME: Record<string, string> = {
-  "image/png": ".png",
-  "image/jpeg": ".jpg",
-  "image/gif": ".gif",
-  "image/webp": ".webp",
-  "image/svg+xml": ".svg",
-  "image/avif": ".avif",
-  "image/bmp": ".bmp",
-};
-
-const MIME_BY_EXT: Record<string, string> = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".svg": "image/svg+xml",
-  ".avif": "image/avif",
-  ".bmp": "image/bmp",
-};
+/**
+ * Parse a single-range `Range: bytes=…` header against a known size.
+ *
+ * `<video>` will not let you SEEK unless the server answers 206 — without this
+ * a chat recording plays from the start and nowhere else. Only the single-range
+ * form is honored; a multi-range request falls back to the whole file, which is
+ * a legal (if unhelpful) response and far simpler than multipart/byteranges.
+ */
+export function parseByteRange(
+  header: string | undefined,
+  size: number,
+): { start: number; end: number } | null | "unsatisfiable" {
+  if (!header) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m) return null;
+  const [, rawStart, rawEnd] = m;
+  if (rawStart === "" && rawEnd === "") return null;
+  let start: number;
+  let end: number;
+  if (rawStart === "") {
+    // `bytes=-N` — the LAST n bytes, not a range starting at zero.
+    const n = Number(rawEnd);
+    if (n <= 0) return "unsatisfiable";
+    start = Math.max(0, size - n);
+    end = size - 1;
+  } else {
+    start = Number(rawStart);
+    end = rawEnd === "" ? size - 1 : Math.min(Number(rawEnd), size - 1);
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  if (start >= size || start > end) return "unsatisfiable";
+  return { start, end };
+}
 
 /** Only keep a positive integer dimension (ImageRefSchema is strict). */
 function posInt(v: unknown): number | undefined {
@@ -82,12 +96,15 @@ export function registerAssetRoutes(app: FastifyInstance): void {
         return reply.code(413).send({ error: "image too large" });
       }
 
-      const ext =
-        EXT_BY_MIME[mime ?? ""] ??
-        (body.filename ? extname(body.filename).toLowerCase() : "") ??
-        ".png";
+      // Prefer the declared type's canonical extension; fall back to the
+      // uploaded filename's, then to .png (this route is the composer's paste
+      // path, so an image is the overwhelmingly likely truth).
+      const ext = extFromMediaType(
+        mime,
+        body.filename ? extname(body.filename).toLowerCase() : ".png",
+      );
       const safeExt = /^\.[a-z0-9]+$/.test(ext) ? ext : ".png";
-      mime = mime ?? MIME_BY_EXT[safeExt] ?? "application/octet-stream";
+      mime = mime ?? mediaTypeFromName(safeExt);
 
       const name = `${nanoid()}${safeExt}`;
       const relPath = await store.writeChatAsset(req.params.id, name, buf);
@@ -112,9 +129,22 @@ export function registerAssetRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const buf = await store.readChatAsset(req.params.id, req.params.name);
       if (!buf) return reply.code(404).send({ error: "not found" });
-      const ext = extname(req.params.name).toLowerCase();
-      reply.header("content-type", MIME_BY_EXT[ext] ?? "application/octet-stream");
+      reply.header("content-type", mediaTypeFromName(req.params.name));
       reply.header("cache-control", "private, max-age=31536000, immutable");
+      // Advertised unconditionally: a browser decides whether to seek by looking
+      // for this on the FIRST (rangeless) response, so omitting it here means it
+      // never asks for a range at all.
+      reply.header("accept-ranges", "bytes");
+
+      const range = parseByteRange(req.headers.range, buf.length);
+      if (range === "unsatisfiable") {
+        reply.header("content-range", `bytes */${buf.length}`);
+        return reply.code(416).send();
+      }
+      if (range) {
+        reply.header("content-range", `bytes ${range.start}-${range.end}/${buf.length}`);
+        return reply.code(206).send(buf.subarray(range.start, range.end + 1));
+      }
       return reply.send(buf);
     },
   );

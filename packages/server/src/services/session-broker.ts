@@ -25,9 +25,22 @@
  * subprocess or network.
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
-import { basename, join } from "node:path";
+import { basename, extname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { readFile, stat } from "node:fs/promises";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
 import { McpPrewarmService } from "./mcp-prewarm.js";
+import {
+  parseAssetReference,
+  MAX_INLINE_ASSET_BYTES,
+  MAX_REFERENCED_ASSET_BYTES,
+  type AssetReference,
+} from "./mcp-assets.js";
+import {
+  extFromMediaType,
+  mediaTypeFromName,
+  mediaKind,
+  formatBytes,
+} from "./media-types.js";
 import type {
   Options,
   Query,
@@ -788,52 +801,6 @@ function contextTokensOf(usage: unknown): number | null {
   return sum > 0 ? sum : null;
 }
 
-/** Pick a file extension for a stored asset from its media type (inverse of
- *  {@link mediaTypeFromName}); defaults to `.png` for anything unrecognized. */
-function extFromMediaType(mime: string | undefined): string {
-  switch ((mime ?? "").toLowerCase()) {
-    case "image/png":
-      return ".png";
-    case "image/jpeg":
-    case "image/jpg":
-      return ".jpg";
-    case "image/gif":
-      return ".gif";
-    case "image/webp":
-      return ".webp";
-    case "image/svg+xml":
-      return ".svg";
-    case "image/avif":
-      return ".avif";
-    case "image/bmp":
-      return ".bmp";
-    default:
-      return ".png";
-  }
-}
-
-/** Guess an image media type from a stored asset filename. */
-function mediaTypeFromName(name: string): string {
-  const dot = name.lastIndexOf(".");
-  switch (dot >= 0 ? name.slice(dot).toLowerCase() : "") {
-    case ".png":
-      return "image/png";
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    case ".gif":
-      return "image/gif";
-    case ".webp":
-      return "image/webp";
-    case ".svg":
-      return "image/svg+xml";
-    case ".avif":
-      return "image/avif";
-    default:
-      return "image/png";
-  }
-}
-
 /** Best-effort "what is the tool acting on" for the working-state label. */
 function deriveTarget(input: Record<string, unknown>): string | undefined {
   const fp = input.file_path ?? input.path ?? input.notebook_path;
@@ -1525,7 +1492,10 @@ export class SessionBroker {
         if (buf) {
           out.push({
             type: "base64",
-            media_type: img.mimeType ?? mediaTypeFromName(name),
+            // These become `image` blocks in the request, so an unrecognized
+            // extension must still guess an IMAGE type — the shared default
+            // (application/octet-stream) would be rejected by the API.
+            media_type: img.mimeType ?? mediaTypeFromName(name, "image/png"),
             data: buf.toString("base64"),
           });
         }
@@ -2986,6 +2956,22 @@ export class SessionBroker {
     const out: unknown[] = [];
     for (const raw of content) {
       const block = raw as Record<string, unknown> | null;
+      // A REFERENCE to a file on disk — the route a video takes, because its
+      // bytes must never enter the model's context. Ingest it and replace the
+      // block with one short line naming what the human can now watch.
+      const ref = parseAssetReference(raw);
+      if (ref) {
+        const ingested = await this.ingestAssetReference(session, ref);
+        if (ingested) {
+          images.push(ingested.image);
+          out.push({ type: "text", text: ingested.summary });
+          continue;
+        }
+        // Unreadable/oversized → say so where the agent will see it, rather than
+        // dropping the block and leaving it to believe the file was delivered.
+        out.push(raw);
+        continue;
+      }
       if (!block || typeof block !== "object" || block.type !== "image") {
         if (
           block?.type === "text" &&
@@ -3023,11 +3009,25 @@ export class SessionBroker {
                 ? block.mime_type
                 : "image/png";
         try {
-          const name = `${this.genId()}${extFromMediaType(mime)}`;
           const buf = Buffer.from(base64, "base64");
-          const relPath = await this.store.writeChatAsset(session.chatId, name, buf);
-          images.push({ id: this.genId(), path: relPath, mimeType: mime });
-          out.push({ type: "image", media_type: mime, asset: relPath });
+          if (buf.length > MAX_INLINE_ASSET_BYTES) {
+            // Refuse rather than store it: something this big came through the
+            // model's context to get here, and silently accepting teaches the
+            // server that inlining video works. Point it at the cheap route.
+            out.push({
+              type: "text",
+              text:
+                `[dispatch: refused a ${formatBytes(buf.length)} inline ${mime} attachment ` +
+                `(limit ${formatBytes(MAX_INLINE_ASSET_BYTES)}). Return a resource_link or ` +
+                `{"dispatch":"asset","path":"…"} instead — the file is then shown to the ` +
+                `user without its bytes entering the context window.]`,
+            });
+          } else {
+            const name = `${this.genId()}${extFromMediaType(mime)}`;
+            const relPath = await this.store.writeChatAsset(session.chatId, name, buf);
+            images.push({ id: this.genId(), path: relPath, mimeType: mime });
+            out.push({ type: "image", media_type: mime, asset: relPath });
+          }
         } catch {
           // Persist failed (bad base64 / disk) → keep the raw block, no ref.
           out.push(raw);
@@ -3045,6 +3045,46 @@ export class SessionBroker {
       }
     }
     return { images, content: out };
+  }
+
+  /**
+   * Copy a file an MCP pointed at into the chat's assets, and produce the ONE
+   * LINE the model sees in its place. The bytes reach the human through the
+   * asset route; the context window only ever learns that a file exists, what
+   * kind it is, and how big.
+   *
+   * Returns null when the file can't be delivered — the caller then leaves the
+   * original block alone rather than pretending the handoff worked.
+   */
+  private async ingestAssetReference(
+    session: LiveSession,
+    ref: AssetReference,
+  ): Promise<{ image: ImageRef; summary: string } | null> {
+    try {
+      // Resolve against the session's own directory, so a server that returns a
+      // path relative to its cwd lands in the right worktree.
+      const base = session.worktreeCwd ?? process.cwd();
+      const abs = isAbsolute(ref.path) ? ref.path : resolvePath(base, ref.path);
+      const info = await stat(abs);
+      if (!info.isFile()) return null;
+      if (info.size > MAX_REFERENCED_ASSET_BYTES) return null;
+
+      const mime = ref.mimeType ?? mediaTypeFromName(abs);
+      const name = `${this.genId()}${extFromMediaType(mime, extname(abs) || ".bin")}`;
+      const relPath = await this.store.writeChatAsset(
+        session.chatId,
+        name,
+        await readFile(abs),
+      );
+      const label = ref.alt ?? basename(abs);
+      return {
+        image: { id: this.genId(), path: relPath, mimeType: mime, alt: label },
+        summary: `[${mediaKind(mime)}: ${label} — ${formatBytes(info.size)}, shown to the user]`,
+      };
+    } catch {
+      // Missing/unreadable file. Not fatal: the tool's own text still stands.
+      return null;
+    }
   }
 
   /* --------------------------------------------------------- permission */

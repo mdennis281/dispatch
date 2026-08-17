@@ -3733,6 +3733,7 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   memory_history: "memory",
   memory_similar: "memory",
   run_subapp: "runner",
+  prewarm_mcp: "prewarm",
   spawn_chat: "chats",
   mcp_list: "mcpConfig",
   mcp_add: "mcpConfig",
@@ -3750,6 +3751,7 @@ export type ManagerToolBinding =
   | "terminals"
   | "memory"
   | "runner"
+  | "prewarm"
   | "chats"
   | "mcpConfig"
   | "inspect";

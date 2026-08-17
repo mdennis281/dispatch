@@ -83,6 +83,9 @@ export function registerMcpRoutes(app: FastifyInstance): void {
           // The MCP-config tools only need the project's repo path, which every
           // project has — so they're offered wherever the catalog is viewable.
           mcpConfig: !!project.repoPath,
+          // Prewarm exists wherever the broker could build one, which needs the
+          // project config that names each server's `prewarm` command.
+          prewarm: !!services.broker.mcpPrewarm,
         },
         mcpServers,
       });
