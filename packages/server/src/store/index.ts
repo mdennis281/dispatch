@@ -72,6 +72,7 @@ import {
   readJson,
   writeJsonAtomic,
   appendJsonl,
+  appendJsonlBatch,
   readJsonl,
   readJsonlLines,
 } from "./fsq.js";
@@ -833,11 +834,12 @@ export class Store {
   async appendTerminalLines(logId: string, lines: TerminalLineRecord[]): Promise<void> {
     if (lines.length === 0) return;
     await mkdir(this.terminalLogsDir(), { recursive: true });
-    await this.mutex.run(`terminal-log:${logId}`, async () => {
-      for (const line of lines) {
-        await appendJsonl(this.terminalLogFile(logId), line);
-      }
-    });
+    // ONE write for the whole batch. A write-behind flush of a dev server's
+    // output is routinely hundreds of lines, and a syscall each would make the
+    // batching pointless.
+    await this.mutex.run(`terminal-log:${logId}`, () =>
+      appendJsonlBatch(this.terminalLogFile(logId), lines),
+    );
   }
 
   /**

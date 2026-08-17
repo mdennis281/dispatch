@@ -4,6 +4,7 @@ import {
   matchesScope,
   matchesText,
   parseRegistryQuery,
+  RegistryQueryError,
   RegistryQuerySchema,
 } from "./registry.js";
 
@@ -35,6 +36,16 @@ describe("parseRegistryQuery", () => {
       since: 1700,
     });
     expect(parseRegistryQuery({ limit: "abc" }).limit).toBeUndefined();
+  });
+
+  it("rejects a malformed filter rather than coercing it", () => {
+    // A scope we quietly "fixed" would answer a different question than the one
+    // asked — for a scope, that means showing somebody else's rows. Routes turn
+    // this into a 400.
+    expect(() => parseRegistryQuery({ scope: "nope" })).toThrow(RegistryQueryError);
+    expect(() => parseRegistryQuery({ since: "1.2" })).toThrow(RegistryQueryError);
+    expect(() => parseRegistryQuery({ limit: "-4" })).toThrow(RegistryQueryError);
+    expect(() => parseRegistryQuery({ limit: "99999" })).toThrow(RegistryQueryError);
   });
 
   it("reads a URLSearchParams the same way", () => {

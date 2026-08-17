@@ -20,7 +20,7 @@
  * agent-opened one are the same object, visible to both.
  */
 import type { FastifyInstance } from "fastify";
-import { parseRegistryQuery } from "@dispatch/shared";
+import { parseRegistryQuery, RegistryQueryError } from "@dispatch/shared";
 import { chatRoot } from "./files.js";
 
 /** Resolve the chat + its default shell cwd, or an HTTP-shaped failure. */
@@ -42,9 +42,17 @@ export function registerTerminalRoutes(app: FastifyInstance): void {
   // The catalog read. `?chatId=` keeps its old meaning; with no ids it sweeps
   // app-wide, and it includes ARCHIVED shells — ones whose process is gone but
   // whose transcript is still readable, which is the point of persisting them.
-  app.get("/api/terminals", async (req) =>
-    terminals.catalog(parseRegistryQuery(req.query as Record<string, unknown>)),
-  );
+  app.get("/api/terminals", async (req, reply) => {
+    try {
+      return terminals.catalog(parseRegistryQuery(req.query as Record<string, unknown>));
+    } catch (err) {
+      // A filter we can't parse is the CALLER's mistake, not a server fault.
+      if (err instanceof RegistryQueryError) {
+        return reply.code(400).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
 
   app.get<{
     Params: { id: string };

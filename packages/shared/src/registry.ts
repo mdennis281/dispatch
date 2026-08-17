@@ -50,6 +50,20 @@ interface QueryLike {
 }
 
 /**
+ * A malformed filter, as a value rather than an exception.
+ *
+ * `parseRegistryQuery` validates with zod and therefore THROWS on `?scope=nope`
+ * — which, called inline in a route handler, surfaces as a 500 for what is
+ * plainly a client error. Routes use this and answer 400.
+ */
+export class RegistryQueryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RegistryQueryError";
+  }
+}
+
+/**
  * Parse a request's query params into a RegistryQuery.
  *
  * Takes either the plain object Fastify hands a handler or anything with a
@@ -80,7 +94,7 @@ export function parseRegistryQuery(
   const chatId = get("chatId");
   const projectId = get("projectId");
   const scope = get("scope") ?? (chatId ? "chat" : projectId ? "project" : "all");
-  return RegistryQuerySchema.parse({
+  const parsed = RegistryQuerySchema.safeParse({
     scope,
     projectId,
     chatId,
@@ -88,6 +102,15 @@ export function parseRegistryQuery(
     since: num("since"),
     limit: num("limit"),
   });
+  if (!parsed.success) {
+    // Rejected rather than coerced: a filter we quietly "fixed" would answer a
+    // different question than the one asked, which for a scope means showing
+    // somebody else's shells.
+    throw new RegistryQueryError(
+      `invalid query: ${parsed.error.issues.map((i) => `${i.path.join(".") || "?"} ${i.message}`).join("; ")}`,
+    );
+  }
+  return parsed.data;
 }
 
 /** True when `rec` falls inside the query's scope. */

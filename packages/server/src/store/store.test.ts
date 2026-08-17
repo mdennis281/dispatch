@@ -477,6 +477,47 @@ describe("worktree records", () => {
     expect(out[0]).toMatchObject({ path: "/WT/A", chatId: "c1", origin: "tool" });
   });
 
+  it("appends a large batch and reads every line back", async () => {
+    // A write-behind flush of a dev server's output is routinely this size,
+    // which is why `appendTerminalLines` makes it ONE write rather than one per
+    // line. What's observable from here is that the batch round-trips intact.
+    const rows = Array.from({ length: 500 }, (_, i) => ({
+      stream: "stdout" as const,
+      chunk: `line ${i}`,
+      ts: 1_000 + i,
+    }));
+    await store.appendTerminalLines("log1", rows);
+    const back = await store.readTerminalLines("log1");
+    expect(back).toHaveLength(500);
+    expect(back[0]!.chunk).toBe("line 0");
+    expect(back[499]!.chunk).toBe("line 499");
+  });
+
+  it("round-trips a batch and filters it on the way back", async () => {
+    await store.appendTerminalLines("log2", [
+      { stream: "command", chunk: "pnpm build", ts: 1_000 },
+      { stream: "stdout", chunk: "compiled", ts: 1_100 },
+      { stream: "stderr", chunk: "deprecated", ts: 1_200 },
+    ]);
+    expect(await store.readTerminalLines("log2")).toHaveLength(3);
+    expect(
+      (await store.readTerminalLines("log2", { stream: "stderr" })).map((l) => l.chunk),
+    ).toEqual(["deprecated"]);
+    expect(
+      (await store.readTerminalLines("log2", { since: 1_100 })).map((l) => l.chunk),
+    ).toEqual(["compiled", "deprecated"]);
+    expect((await store.readTerminalLines("log2", { q: "compil" })).map((l) => l.chunk)).toEqual([
+      "compiled",
+    ]);
+    expect((await store.readTerminalLines("log2", { tail: 1 })).map((l) => l.chunk)).toEqual([
+      "deprecated",
+    ]);
+
+    // Retention rewrites the file, keeping only what's inside the window.
+    expect(await store.pruneTerminalLog("log2", 1_150)).toMatchObject({ lines: 1 });
+    expect((await store.readTerminalLines("log2")).map((l) => l.chunk)).toEqual(["deprecated"]);
+  });
+
   it("deletes a record by path", async () => {
     await store.upsertWorktreeRecord("/wt/a", {
       projectId: "p1",
