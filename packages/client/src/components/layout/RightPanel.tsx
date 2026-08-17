@@ -69,7 +69,10 @@ export function RightPanel({ chat }: { chat: Chat }) {
   // no port until something unrelated happened to rescan.
   useEffect(() => {
     void useProcesses.getState().scan(chat.projectId);
-  }, [chat.projectId, counts.runners, counts.terminals, counts.background]);
+    // `shells`, not `terminals`: the badge counts only ACTIVE shells now, so an
+    // idle shell opening or closing wouldn't move it — and that edge is exactly
+    // when a port appears or is released.
+  }, [chat.projectId, counts.runners, counts.shells, counts.background]);
 
   const shipTabs: TabDef[] = [
     { id: "worktrees", label: "Worktrees", icon: <GitBranch />, count: counts.worktrees },

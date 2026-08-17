@@ -14,7 +14,7 @@ import { useMemo } from "react";
 import type { Chat } from "@dispatch/shared";
 import { usePanels } from "../../stores/panels.js";
 import { useRunners, belongsToChat } from "../../stores/runners.js";
-import { isLiveChatTerminal, useTerminals } from "../../stores/terminals.js";
+import { isActiveTerminal, isLiveChatTerminal, useTerminals } from "../../stores/terminals.js";
 import { useOrphanCount } from "../../stores/processes.js";
 import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
 import { worktreeMatchesChat } from "./panelBus.js";
@@ -23,7 +23,19 @@ export interface PanelCounts {
   worktrees: number;
   prs: number;
   agents: number;
+  /**
+   * Shells that are running a command or hosting a background server — the
+   * Terminals tab badge. Deliberately NOT every live shell: see
+   * `isActiveTerminal`.
+   */
   terminals: number;
+  /**
+   * Every live shell, idle ones included. Not a badge: it's the edge that has to
+   * trigger the orphan re-scan, because a shell opening or closing is when a
+   * port appears or is released — and `terminals` no longer moves for an idle
+   * one.
+   */
+  shells: number;
   /**
    * Running sub-apps only. Kept separate from `apps` because it is the correct
    * trigger for the orphan re-scan: `apps` INCLUDES the orphan count, so an
@@ -67,7 +79,16 @@ export function usePanelCounts(chat: Chat | null): PanelCounts {
           .length
       : 0,
   );
+  // Same rule the panel expands a card by, so the badge and the layout agree:
+  // what's badged is what's open.
   const terminals = useTerminals((s) =>
+    chat
+      ? s.order
+          .map((id) => s.byId[id])
+          .filter((t) => isLiveChatTerminal(t, chat.id) && isActiveTerminal(t)).length
+      : 0,
+  );
+  const shells = useTerminals((s) =>
     chat
       ? s.order.map((id) => s.byId[id]).filter((t) => isLiveChatTerminal(t, chat.id)).length
       : 0,
@@ -97,6 +118,7 @@ export function usePanelCounts(chat: Chat | null): PanelCounts {
     prs,
     agents,
     terminals,
+    shells,
     runners: runnerCount,
     apps,
     orphans,
