@@ -662,11 +662,17 @@ export function createServices(
       await harnesses.dispose().catch(() => {});
       if (terminalSweep) clearInterval(terminalSweep);
       terminalSweep = undefined;
-      // Kill any lingering persistent shells after the broker unwinds. Flush
-      // their queued output FIRST — the tail of a transcript is usually the part
-      // that explains why anyone is reading it.
-      await terminals.flush().catch(() => {});
-      terminals.dispose();
+      // Kill any lingering persistent shells after the broker unwinds — flushing
+      // their queued output first, because the tail of a transcript is usually
+      // the part that explains why anyone is reading it.
+      //
+      // Normally a no-op by the time we get here: `installShutdown` reaps the
+      // shells BEFORE `app.close()` precisely because this position — last,
+      // behind three slower awaits, inside a 20s grace window — is the one that
+      // gets cut off and leaves a dev server holding its port. This stays for
+      // the teardowns that don't come through there (a test's `dispose()`, an
+      // embedded server), and `reap()` is idempotent.
+      await terminals.reap().catch(() => {});
     },
   };
 

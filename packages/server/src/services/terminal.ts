@@ -105,11 +105,19 @@ export const defaultSpawnShell: SpawnShell = (cwd) =>
 
 /* ---------------------------------------------------------------------- deps */
 
-/** Tree-kills a process and every descendant (Windows-safe). */
-export type KillTreeFn = (pid: number) => void;
+/**
+ * Tree-kills a process and every descendant (Windows-safe).
+ *
+ * Returns a promise where the caller needs to know the tree walk has FINISHED —
+ * see the ordering note in `killProc`, where not knowing that was letting a dev
+ * server outlive the shell that started it. Allowed to return `void` so a test
+ * fake can stay a one-liner.
+ */
+export type KillTreeFn = (pid: number) => void | Promise<void>;
 
 /** Default: `tree-kill`, same primitive RunnerService and ProcessService use. */
-const defaultKillTree: KillTreeFn = (pid) => treeKill(pid, "SIGTERM", () => {});
+const defaultKillTree: KillTreeFn = (pid) =>
+  new Promise<void>((resolve) => treeKill(pid, "SIGTERM", () => resolve()));
 
 export interface TerminalServiceDeps {
   spawn?: SpawnShell;
@@ -270,6 +278,8 @@ export class TerminalService {
    * tail of a dying shell to reach disk before the process went away.
    */
   private readonly pendingWrites = new Set<Promise<unknown>>();
+  /** In-flight tree-kills, so {@link reap} can prove the trees actually went. */
+  private readonly pendingKills = new Set<Promise<unknown>>();
 
   constructor(opts: TerminalServiceOptions) {
     this.bus = opts.bus;
@@ -640,7 +650,11 @@ export class TerminalService {
     // to be eventually right.
     if (this.store) {
       term.unflushed.push({ stream, chunk, ts });
-      this.ensureFlushTimer();
+      // Only for a shell we still hold. `flush()` walks `this.terminals`, so a
+      // killed one's buffer is drained by its own `archiveOnClose` instead —
+      // arming the ticker for it would start a timer that can never empty this
+      // particular buffer, and could re-arm the one `reap()` just cleared.
+      if (this.terminals.has(term.id)) this.ensureFlushTimer();
     }
     this.bus.publish({
       type: "terminal-output",
@@ -691,11 +705,13 @@ export class TerminalService {
         /* a transcript we couldn't write is not worth failing a command over */
       }
     }
-    // Looped, not a single await: a tracked write can start another (a purge
-    // kills first, then deletes), and settling the set we captured on entry
-    // would leave that one in flight.
-    while (this.pendingWrites.size > 0) {
-      await Promise.allSettled([...this.pendingWrites]);
+    // Kills too, not just writes: a kill ends in an `archiveOnClose`, so a
+    // `flush()` that ignored them would return before the row it is responsible
+    // for had been written. Looped, not a single await, because tracked work
+    // can start more of it (a kill queues an archive; a purge kills then
+    // deletes) and settling the set captured on entry would miss that.
+    while (this.pendingWrites.size > 0 || this.pendingKills.size > 0) {
+      await Promise.allSettled([...this.pendingWrites, ...this.pendingKills]);
     }
   }
 
@@ -818,12 +834,19 @@ export class TerminalService {
     const term = this.terminals.get(terminalId);
     if (!term) return false;
     this.terminals.delete(terminalId);
-    this.killProc(term);
     // Killing the shell does NOT discard what it printed. The row moves to the
     // archive and the transcript stays readable until retention takes it —
     // "close the terminal" and "forget what the build said" are different asks,
     // and conflating them is what made a failed run unrecoverable.
-    this.track(this.archiveOnClose(term));
+    //
+    // Archived AFTER the process is actually dead, not alongside the kill. The
+    // shell is off `this.terminals` from the line above and `flush()` only
+    // walks the terminals it still holds, so anything the shell prints while
+    // the tree-kill is in flight lands in a `term.unflushed` nothing else will
+    // ever drain. Waiting means those lines are in the batch instead — and
+    // they are the interesting ones, since they are what it said on the way
+    // out.
+    this.trackKill(this.killProc(term).then(() => this.archiveOnClose(term)));
     this.bus.publish({ type: "terminal-closed", terminalId: term.id, chatId: term.chatId });
     return true;
   }
@@ -872,7 +895,54 @@ export class TerminalService {
     }
   }
 
-  /** Kill every terminal (process teardown). */
+  /**
+   * REAP: get the tail of every shell onto disk, then kill every one of them.
+   *
+   * This is the awaitable form of {@link dispose}, and the one every stop path
+   * should use. Two things it guarantees that `dispose()` cannot:
+   *
+   *   1. THE TAIL LANDS. Output is written behind a 1s timer, so a shell that
+   *      printed the reason it is dying — the port conflict, the stack trace —
+   *      loses exactly that in a fire-and-forget teardown. `flush()` is a real
+   *      barrier, so awaiting this means the transcript agrees with what was on
+   *      screen.
+   *   2. THE ROWS ARCHIVE. `kill()` keeps each transcript readable rather than
+   *      dropping the shell on the floor; reaping is about PROCESSES, never
+   *      about forgetting output.
+   *
+   * Idempotent — a second call finds nothing to do — so the belt-and-braces
+   * callers on the shutdown path can't double-charge for it.
+   */
+  async reap(): Promise<number> {
+    if (this.flushTimer) clearInterval(this.flushTimer);
+    this.flushTimer = undefined;
+    // BEFORE the kills: a killed shell's stdout never arrives, so anything not
+    // yet buffered is gone either way — but everything already buffered has to
+    // get out while there is still a process to write it.
+    await this.flush().catch(() => {});
+    const ids = [...this.terminals.keys()];
+    for (const id of ids) this.kill(id);
+    // Wait for the tree walks to COMPLETE. `taskkill /T` is a spawned process,
+    // so returning before it has run means returning before anything died —
+    // and the caller's next move is usually to exit, taking the pending walk
+    // with it. This is what makes "the port is free" true on return.
+    while (this.pendingKills.size > 0) {
+      await Promise.allSettled([...this.pendingKills]);
+    }
+    // The kills queued their own archive writes. Wait for those too, or the
+    // process can exit between "row archived in memory" and "row on disk".
+    await this.flush().catch(() => {});
+    return ids.length;
+  }
+
+  /**
+   * Kill every terminal, synchronously (process teardown).
+   *
+   * Kept for the callers that genuinely cannot await — Fastify's `onClose` runs
+   * behind three slower awaits and a grace timer that can cut it off, which is
+   * why {@link reap} exists and runs FIRST. This stays as the backstop for a
+   * teardown that reached here anyway.
+   */
   dispose(): void {
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = undefined;
@@ -880,7 +950,10 @@ export class TerminalService {
     // most interesting part of the transcript — it's what was on screen when
     // whatever prompted the shutdown happened.
     void this.flush().catch(() => {});
-    for (const term of this.terminals.values()) this.killProc(term);
+    // `killProc` never rejects (see its docblock), so floating it here is safe —
+    // and floating is all a synchronous teardown can do. `reap()` is the caller
+    // that gets to wait for the trees to actually go.
+    for (const term of this.terminals.values()) void this.killProc(term);
     this.terminals.clear();
   }
 
@@ -889,25 +962,52 @@ export class TerminalService {
    *
    * `proc.kill()` alone only reaps the powershell: a shell that launched a dev
    * server leaves that server holding its port, which is precisely the orphan
-   * the Ports & processes panel was built to clean up after. So tree-kill by pid
-   * first (same primitive RunnerService uses) and keep `proc.kill()` as the
+   * the Ports & processes panel was built to clean up after. So tree-kill by
+   * pid (same primitive RunnerService uses), and keep `proc.kill()` as the
    * fallback for a shell with no pid — every test fake, and any spawn that
    * failed before the OS gave it one.
+   *
+   * ── The ORDER is the whole thing ────────────────────────────────────────────
+   * These two used to run back to back, tree-kill first: `tree-kill` SPAWNS
+   * `taskkill /pid <pid> /T /F` and reports through a callback, so it had not
+   * even started when the `proc.kill()` on the next line ran `TerminateProcess`
+   * on the shell. Windows then reparents the shell's children, and a `/T` walk
+   * that arrives at a dead parent finds nothing to descend into. The dev server
+   * survived every kill, every dispose and every shutdown.
+   *
+   * Measured 2026-08-17: a background shell started `node …listen(4455)`; after
+   * a clean `POST /api/shutdown` the powershell was gone and node was still
+   * listening on 4455. So the direct kill now waits for the tree walk to
+   * finish, and is belt-and-braces rather than a race against it.
    */
-  private killProc(term: Terminal): void {
+  private killProc(term: Terminal): Promise<void> {
+    const hardKill = (): void => {
+      try {
+        term.proc.kill();
+      } catch {
+        /* already dead */
+      }
+    };
     const pid = term.proc.pid;
     if (typeof pid === "number" && pid > 0) {
       try {
-        this.killTree(pid);
+        // Never rejects: both arms of `then` are `hardKill`, so a killTree that
+        // fails still gets the direct kill and still settles. Callers can
+        // therefore chain onto it without a second error path.
+        return Promise.resolve(this.killTree(pid)).then(hardKill, hardKill);
       } catch {
-        /* fall through to the direct kill */
+        /* a killTree that threw synchronously — fall through */
       }
     }
-    try {
-      term.proc.kill();
-    } catch {
-      /* already dead */
-    }
+    hardKill();
+    return Promise.resolve();
+  }
+
+  /** Remember an in-flight tree-kill so {@link reap} can wait for it. */
+  private trackKill(p: Promise<unknown>): void {
+    const done = p.catch(() => {});
+    this.pendingKills.add(done);
+    void done.finally(() => this.pendingKills.delete(done));
   }
 
   /* -------------------------------------------------------- introspection */
