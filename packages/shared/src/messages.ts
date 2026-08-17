@@ -8,6 +8,7 @@ import {
   ImageRefSchema,
   MessageOriginSchema,
   EffortSchema,
+  HarnessKindSchema,
   PermissionDecisionSchema,
 } from "./common.js";
 import { FileToolStatSchema } from "./file-tools.js";
@@ -21,6 +22,20 @@ const MessageBase = {
   /** Turn index within the session (0-based). */
   turn: z.number().int().optional(),
   sessionId: z.string().optional(),
+  /**
+   * The provider that PRODUCED this row, stamped when it was written — for the
+   * same reason `model` is per-row rather than read off the chat.
+   *
+   * `chat.harness` is the CURRENT pick, so rendering the sender from it rewrote
+   * history the moment someone switched agents mid-chat: a turn Codex wrote
+   * re-labelled itself "Claude" (while still showing its `gpt-…` model chip),
+   * and every past permission card started saying "Claude wants to…" about a
+   * tool call Claude never made.
+   *
+   * Absent on rows written before this existed — the client falls back to
+   * `chat.harness` for those, which is what it always did.
+   */
+  harness: HarnessKindSchema.optional(),
 };
 
 /* ------------------------------------------------------------ message parts */

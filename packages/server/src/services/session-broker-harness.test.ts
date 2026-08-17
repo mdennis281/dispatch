@@ -143,6 +143,33 @@ describe("SessionBroker neutral harness path", () => {
     ]);
   });
 
+  it("stamps the producing provider on each row, so a later switch can't relabel it", async () => {
+    const chat = await store.saveChat({
+      id: "chat-stamp",
+      projectId: "project-1",
+      title: "Codex",
+      modeId: "plan",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "say hello");
+    await broker.waitFor(chat.id, "idle");
+
+    const before = await store.readMessages(chat.id);
+    expect(before.length).toBeGreaterThan(0);
+    expect(before.map((row) => row.harness)).toEqual(before.map(() => "codex"));
+
+    // The whole point: switching the chat to Claude must not rewrite who wrote
+    // the turns Codex already produced.
+    await broker.setHarness(chat.id, "claude");
+    const after = await store.readMessages(chat.id);
+    expect(after.map((row) => row.harness)).toEqual(before.map(() => "codex"));
+  });
+
   it("resolves chat-relative image refs before sending them to Codex", async () => {
     const chat = await store.saveChat({
       id: "chat-image",

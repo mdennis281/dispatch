@@ -10,7 +10,7 @@ import { safeJson } from "../../../lib/format.js";
 import { actions } from "../../../lib/actions.js";
 import { attentionCardId } from "../../attention/focus.js";
 import { useChats } from "../../../stores/chats.js";
-import { harnessLabel } from "../../../lib/harness.js";
+import { rowHarnessLabel } from "../../../lib/harness.js";
 
 /** One pre-approval the plan asks for up front (`{ tool, prompt }`). */
 export interface AllowedPrompt {
@@ -125,7 +125,7 @@ export interface PlanCardProps {
  * optional feedback, which the agent receives as the denial message).
  */
 export function PlanCard({ row }: PlanCardProps) {
-  const provider = harnessLabel(useChats((s) => s.byId[row.chatId]?.harness));
+  const provider = rowHarnessLabel(row.harness, useChats((s) => s.byId[row.chatId]?.harness));
   const parsed = parsePlan(row.input);
   const pending = row.decision === "pending";
   const [answered, setAnswered] = useState(false);

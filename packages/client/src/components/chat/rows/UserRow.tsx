@@ -47,7 +47,7 @@ export const UserRow = memo(function UserRow({
       }
     >
       {composed ? (
-        <ComposedParts chatId={chatId} parts={composed} />
+        <ComposedParts chatId={chatId} parts={composed} harness={row.harness} />
       ) : (
         row.text && (
           <div className="inline-block max-w-full rounded-2xl rounded-tr-sm border border-bubble-line bg-bubble px-3 py-1.5 text-left align-top text-base leading-[1.6] text-primary whitespace-pre-wrap">

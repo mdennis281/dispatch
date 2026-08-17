@@ -11,7 +11,7 @@ import { safeJson } from "../../../lib/format.js";
 import { actions } from "../../../lib/actions.js";
 import { attentionCardId } from "../../attention/focus.js";
 import { useChats } from "../../../stores/chats.js";
-import { harnessLabel } from "../../../lib/harness.js";
+import { rowHarnessLabel } from "../../../lib/harness.js";
 
 export interface PermissionCardProps {
   row: PermissionRow;
@@ -36,7 +36,7 @@ function parseDraft(draft: string): Record<string, unknown> | null {
 
 /** A permission decision card — the key "needs input" surface, inline in chat. */
 export function PermissionCard({ row }: PermissionCardProps) {
-  const provider = harnessLabel(useChats((s) => s.byId[row.chatId]?.harness));
+  const provider = rowHarnessLabel(row.harness, useChats((s) => s.byId[row.chatId]?.harness));
   // Hooks first (unconditionally) — the AskUserQuestion branch below returns early.
   const [refine, setRefine] = useState(false);
   const [draft, setDraft] = useState("");
