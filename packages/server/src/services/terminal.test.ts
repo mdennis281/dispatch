@@ -545,36 +545,95 @@ describe("TerminalService — background commands", () => {
 });
 
 describe("TerminalService — kill reaps the whole tree", () => {
-  it("tree-kills by pid, not just the shell", () => {
+  it("tree-kills by pid, not just the shell", async () => {
     const killed: number[] = [];
-    const { svc, shells } = makeService({ killTree: (pid) => killed.push(pid) });
+    const { svc, shells } = makeService({ killTree: (pid) => void killed.push(pid) });
     svc.create("c1", "server", "C:\\repo");
     shells[0].pid = 4242;
 
     svc.kill("c1::server");
     // Without this the shell dies and the dev server it started keeps the port.
     expect(killed).toEqual([4242]);
+    await svc.reap();
     expect(shells[0].killed).toBe(true);
+  });
+
+  it("kills the shell only AFTER the tree walk, never racing it", async () => {
+    // The bug this ordering fixes: `taskkill /T` is a spawned process, and
+    // `TerminateProcess` on the shell before it lands reparents the children —
+    // so the walk arrives at a dead parent and descends into nothing. Measured
+    // 2026-08-17 with a real node server left listening on 4455.
+    const order: string[] = [];
+    let release!: () => void;
+    const walk = new Promise<void>((r) => {
+      release = r;
+    });
+    const { svc, shells } = makeService({
+      killTree: () => {
+        order.push("tree-kill started");
+        return walk;
+      },
+    });
+    svc.create("c1", "server", "C:\\repo");
+    shells[0].pid = 4242;
+
+    svc.kill("c1::server");
+    await Promise.resolve();
+    expect(shells[0].killed).toBe(false);
+
+    order.push("tree-kill finished");
+    release();
+    await svc.reap();
+
+    expect(shells[0].killed).toBe(true);
+    expect(order).toEqual(["tree-kill started", "tree-kill finished"]);
   });
 
   it("still kills a shell that never got a pid", () => {
     const killed: number[] = [];
-    const { svc, shells } = makeService({ killTree: (pid) => killed.push(pid) });
+    const { svc, shells } = makeService({ killTree: (pid) => void killed.push(pid) });
     svc.create("c1", "server", "C:\\repo");
     svc.kill("c1::server");
+    // No pid = nothing to walk, so the direct kill is immediate rather than
+    // deferred behind a tree walk that would never happen.
     expect(killed).toEqual([]);
     expect(shells[0].killed).toBe(true);
   });
 
   it("dispose tree-kills every shell", () => {
     const killed: number[] = [];
-    const { svc, shells } = makeService({ killTree: (pid) => killed.push(pid) });
+    const { svc, shells } = makeService({ killTree: (pid) => void killed.push(pid) });
     svc.create("c1", "a", "C:\\repo");
     svc.create("c2", "b", "C:\\repo");
     shells[0].pid = 11;
     shells[1].pid = 22;
     svc.dispose();
     expect(killed.sort((a, b) => a - b)).toEqual([11, 22]);
+  });
+
+  it("reap does not return until the tree walks have finished", async () => {
+    // `reap()`'s caller exits next. A pending `taskkill` at that moment is a
+    // taskkill that never runs.
+    let walking = 0;
+    const { svc, shells } = makeService({
+      killTree: () =>
+        new Promise<void>((r) => {
+          walking++;
+          setTimeout(() => {
+            walking--;
+            r();
+          }, 20);
+        }),
+    });
+    svc.create("c1", "a", "C:\\repo");
+    svc.create("c2", "b", "C:\\repo");
+    shells[0].pid = 11;
+    shells[1].pid = 22;
+
+    await svc.reap();
+
+    expect(walking).toBe(0);
+    expect(shells.every((s) => s.killed)).toBe(true);
   });
 });
 
@@ -872,6 +931,45 @@ describe("TerminalService — durable roster and transcripts", () => {
     await svc.run({ chatId: "c1", name: "server", command: "printout up", cwd: "C:\\repo" });
     expect(svc.killMatching({ scope: "chat" })).toEqual({ killed: 0, ids: [] });
     expect(svc.catalog({ scope: "all" }).map((t) => t.status)).toEqual(["live"]);
+  });
+
+  it("reap gets the tail onto disk, kills the tree, and keeps the transcript", async () => {
+    const killedPids: number[] = [];
+    const { svc, shells } = makeService({ store, killTree: (pid) => killedPids.push(pid) });
+    await svc.run({
+      chatId: "c1",
+      name: "server",
+      command: "serve listening on 4319",
+      cwd: "C:\\repo",
+      background: true,
+    });
+    shells[0]!.pid = 4242;
+    // Deliberately NOT flushed: this is the state a real shutdown finds, with
+    // the last thing a dying dev server printed still sitting in the 1s
+    // write-behind buffer. That line is usually the reason anyone is reading.
+    expect(await svc.reap()).toBe(1);
+
+    expect(shells[0]!.killed).toBe(true);
+    // The tree, not just the shell — the dev server underneath is the thing
+    // that would otherwise keep the port.
+    expect(killedPids).toEqual([4242]);
+
+    const [rec] = await store.listTerminalRecords();
+    const chunks = (await store.readTerminalLines(rec!.logId)).map((l) => l.chunk);
+    expect(chunks).toContain("listening on 4319");
+    // Reaping is about the process. The row stays, readable.
+    expect(svc.catalog({ scope: "all" })[0]).toMatchObject({
+      archived: true,
+      status: "exited",
+    });
+  });
+
+  it("reap is idempotent — the shutdown path calls it more than once", async () => {
+    const { svc } = makeService({ store });
+    await svc.run({ chatId: "c1", name: "build", command: "printout x", cwd: "C:\\repo" });
+    expect(await svc.reap()).toBe(1);
+    expect(await svc.reap()).toBe(0);
+    expect(svc.livePids()).toEqual([]);
   });
 
   it("skips rows with no process behind them", async () => {

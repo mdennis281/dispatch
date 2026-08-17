@@ -14,17 +14,77 @@
  * desktop shell — which owns this process — asks over stdin instead, and only
  * escalates to a tree-kill if the grace window expires. SIGINT/SIGTERM are still
  * wired for the terminal (`pnpm start`) and POSIX cases.
+ *
+ * ── Why the shells are reaped FIRST, and then again on `exit` ───────────────
+ * `services.dispose()` did kill the persistent shells — as its LAST step, behind
+ * `runner.stopAll()`, `broker.dispose()` and `harnesses.dispose()`, inside the
+ * grace window below. Miss that window and `exit(1)` fires with every shell
+ * still running; `launch.py` then waits its own 25s and calls `proc.kill()`,
+ * which on Windows is a `TerminateProcess` on the SERVER ALONE. Every
+ * `powershell.exe` it spawned, and every dev server under those, survives —
+ * holding its port, invisible, with nothing left that knows it exists.
+ *
+ * That makes the shells the one teardown step whose omission is externally
+ * visible, so they go first (`reapTerminals`, awaited with its own budget) and
+ * again from a synchronous `exit` handler that no async teardown can outrun.
+ * Both are idempotent; running the reap twice costs nothing and skipping it
+ * costs a port.
  */
+import { execFileSync } from "node:child_process";
 import type { FastifyInstance } from "fastify";
 import { envVar } from "./config.js";
 
 /** How long teardown gets before we stop being polite. */
 export const SHUTDOWN_GRACE_MS = 20_000;
 
+/**
+ * How long the shell reap gets before the rest of teardown starts anyway.
+ *
+ * Deliberately a fraction of the grace window: this is a `taskkill` per shell
+ * plus a flush of buffered output, all local, and the point of moving it to the
+ * front is that it finishes long before anything slow. A reap that somehow
+ * wedges must not become the new reason teardown is cut off — the `exit`
+ * backstop covers whatever it didn't reach.
+ */
+export const REAP_BUDGET_MS = 5_000;
+
 export interface ShutdownOptions {
   graceMs?: number;
   /** Injected for tests so nothing actually exits the process. */
   exit?: (code: number) => void;
+  /**
+   * Injected for tests. Real implementation tree-kills SYNCHRONOUSLY — see
+   * {@link syncKillTree} for why an `exit` handler leaves no other option.
+   */
+  killTreeSync?: (pid: number) => void;
+}
+
+/**
+ * Tree-kill a pid with a BLOCKING call.
+ *
+ * `tree-kill` (what everything else in the app uses) spawns `taskkill` and
+ * reports back through a callback — so from inside a `process.on("exit")`
+ * handler it never runs at all: the event loop is finished, and the process is
+ * gone before the spawn is serviced. `execFileSync` is the only shape that
+ * completes there, which is exactly why this duplicates a primitive that
+ * already exists rather than reusing it.
+ */
+function syncKillTree(pid: number): void {
+  try {
+    if (process.platform === "win32") {
+      // `/T` is the whole point: without it this kills the shell and leaves the
+      // dev server it started holding the port.
+      execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        timeout: 2_000,
+      });
+    } else {
+      // Negative pid = the process GROUP, the POSIX equivalent of `/T`.
+      process.kill(-pid, "SIGKILL");
+    }
+  } catch {
+    /* already dead, never existed, or not ours — nothing better to try */
+  }
 }
 
 /**
@@ -38,7 +98,41 @@ export function installShutdown(
 ): () => Promise<void> {
   const graceMs = opts.graceMs ?? SHUTDOWN_GRACE_MS;
   const exit = opts.exit ?? ((code: number) => process.exit(code));
+  const killTreeSync = opts.killTreeSync ?? syncKillTree;
   let closing: Promise<void> | undefined;
+
+  /**
+   * Flush every shell's buffered output and kill it — the first thing teardown
+   * does, and bounded so it can never be the step that eats the grace window.
+   * A server built without services (the unit tests) simply has nothing to reap.
+   */
+  const reapTerminals = async (): Promise<void> => {
+    const terminals = app.services?.terminals;
+    if (!terminals) return;
+    try {
+      await Promise.race([
+        terminals.reap(),
+        new Promise((r) => setTimeout(r, REAP_BUDGET_MS).unref?.()),
+      ]);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[dispatch] error reaping shells:", err);
+    }
+  };
+
+  /**
+   * The last line of defence: whatever pids the service still reports LIVE when
+   * this process is on its way out, killed synchronously.
+   *
+   * Registered unconditionally because the paths that reach here are the ones
+   * that skipped everything else — the grace timer's `exit(1)`, a `process.exit`
+   * from elsewhere, a normal end after teardown already ran (where this finds an
+   * empty list and does nothing).
+   */
+  process.on("exit", () => {
+    const live = app.services?.terminals?.livePids?.() ?? [];
+    for (const { pid } of live) killTreeSync(pid);
+  });
 
   const close = (reason: string): Promise<void> => {
     if (closing) return closing;
@@ -64,6 +158,9 @@ export function installShutdown(
         exit(1);
       }, graceMs);
       timer.unref();
+      // BEFORE `app.close()`, deliberately. Inside it, this is the last step of
+      // `services.dispose()` and the first casualty of the timer above.
+      await reapTerminals();
       try {
         await app.close();
       } catch (err) {

@@ -105,11 +105,19 @@ export const defaultSpawnShell: SpawnShell = (cwd) =>
 
 /* ---------------------------------------------------------------------- deps */
 
-/** Tree-kills a process and every descendant (Windows-safe). */
-export type KillTreeFn = (pid: number) => void;
+/**
+ * Tree-kills a process and every descendant (Windows-safe).
+ *
+ * Returns a promise where the caller needs to know the tree walk has FINISHED —
+ * see the ordering note in `killProc`, where not knowing that was letting a dev
+ * server outlive the shell that started it. Allowed to return `void` so a test
+ * fake can stay a one-liner.
+ */
+export type KillTreeFn = (pid: number) => void | Promise<void>;
 
 /** Default: `tree-kill`, same primitive RunnerService and ProcessService use. */
-const defaultKillTree: KillTreeFn = (pid) => treeKill(pid, "SIGTERM", () => {});
+const defaultKillTree: KillTreeFn = (pid) =>
+  new Promise<void>((resolve) => treeKill(pid, "SIGTERM", () => resolve()));
 
 export interface TerminalServiceDeps {
   spawn?: SpawnShell;
@@ -270,6 +278,8 @@ export class TerminalService {
    * tail of a dying shell to reach disk before the process went away.
    */
   private readonly pendingWrites = new Set<Promise<unknown>>();
+  /** In-flight tree-kills, so {@link reap} can prove the trees actually went. */
+  private readonly pendingKills = new Set<Promise<unknown>>();
 
   constructor(opts: TerminalServiceOptions) {
     this.bus = opts.bus;
@@ -872,7 +882,54 @@ export class TerminalService {
     }
   }
 
-  /** Kill every terminal (process teardown). */
+  /**
+   * REAP: get the tail of every shell onto disk, then kill every one of them.
+   *
+   * This is the awaitable form of {@link dispose}, and the one every stop path
+   * should use. Two things it guarantees that `dispose()` cannot:
+   *
+   *   1. THE TAIL LANDS. Output is written behind a 1s timer, so a shell that
+   *      printed the reason it is dying — the port conflict, the stack trace —
+   *      loses exactly that in a fire-and-forget teardown. `flush()` is a real
+   *      barrier, so awaiting this means the transcript agrees with what was on
+   *      screen.
+   *   2. THE ROWS ARCHIVE. `kill()` keeps each transcript readable rather than
+   *      dropping the shell on the floor; reaping is about PROCESSES, never
+   *      about forgetting output.
+   *
+   * Idempotent — a second call finds nothing to do — so the belt-and-braces
+   * callers on the shutdown path can't double-charge for it.
+   */
+  async reap(): Promise<number> {
+    if (this.flushTimer) clearInterval(this.flushTimer);
+    this.flushTimer = undefined;
+    // BEFORE the kills: a killed shell's stdout never arrives, so anything not
+    // yet buffered is gone either way — but everything already buffered has to
+    // get out while there is still a process to write it.
+    await this.flush().catch(() => {});
+    const ids = [...this.terminals.keys()];
+    for (const id of ids) this.kill(id);
+    // Wait for the tree walks to COMPLETE. `taskkill /T` is a spawned process,
+    // so returning before it has run means returning before anything died —
+    // and the caller's next move is usually to exit, taking the pending walk
+    // with it. This is what makes "the port is free" true on return.
+    while (this.pendingKills.size > 0) {
+      await Promise.allSettled([...this.pendingKills]);
+    }
+    // The kills queued their own archive writes. Wait for those too, or the
+    // process can exit between "row archived in memory" and "row on disk".
+    await this.flush().catch(() => {});
+    return ids.length;
+  }
+
+  /**
+   * Kill every terminal, synchronously (process teardown).
+   *
+   * Kept for the callers that genuinely cannot await — Fastify's `onClose` runs
+   * behind three slower awaits and a grace timer that can cut it off, which is
+   * why {@link reap} exists and runs FIRST. This stays as the backstop for a
+   * teardown that reached here anyway.
+   */
   dispose(): void {
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = undefined;
@@ -889,25 +946,49 @@ export class TerminalService {
    *
    * `proc.kill()` alone only reaps the powershell: a shell that launched a dev
    * server leaves that server holding its port, which is precisely the orphan
-   * the Ports & processes panel was built to clean up after. So tree-kill by pid
-   * first (same primitive RunnerService uses) and keep `proc.kill()` as the
+   * the Ports & processes panel was built to clean up after. So tree-kill by
+   * pid (same primitive RunnerService uses), and keep `proc.kill()` as the
    * fallback for a shell with no pid — every test fake, and any spawn that
    * failed before the OS gave it one.
+   *
+   * ── The ORDER is the whole thing ────────────────────────────────────────────
+   * These two used to run back to back, tree-kill first: `tree-kill` SPAWNS
+   * `taskkill /pid <pid> /T /F` and reports through a callback, so it had not
+   * even started when the `proc.kill()` on the next line ran `TerminateProcess`
+   * on the shell. Windows then reparents the shell's children, and a `/T` walk
+   * that arrives at a dead parent finds nothing to descend into. The dev server
+   * survived every kill, every dispose and every shutdown.
+   *
+   * Measured 2026-08-17: a background shell started `node …listen(4455)`; after
+   * a clean `POST /api/shutdown` the powershell was gone and node was still
+   * listening on 4455. So the direct kill now waits for the tree walk to
+   * finish, and is belt-and-braces rather than a race against it.
    */
   private killProc(term: Terminal): void {
+    const hardKill = (): void => {
+      try {
+        term.proc.kill();
+      } catch {
+        /* already dead */
+      }
+    };
     const pid = term.proc.pid;
     if (typeof pid === "number" && pid > 0) {
       try {
-        this.killTree(pid);
+        this.trackKill(Promise.resolve(this.killTree(pid)).then(hardKill, hardKill));
+        return;
       } catch {
-        /* fall through to the direct kill */
+        /* a killTree that threw synchronously — fall through */
       }
     }
-    try {
-      term.proc.kill();
-    } catch {
-      /* already dead */
-    }
+    hardKill();
+  }
+
+  /** Remember an in-flight tree-kill so {@link reap} can wait for it. */
+  private trackKill(p: Promise<unknown>): void {
+    const done = p.catch(() => {});
+    this.pendingKills.add(done);
+    void done.finally(() => this.pendingKills.delete(done));
   }
 
   /* -------------------------------------------------------- introspection */

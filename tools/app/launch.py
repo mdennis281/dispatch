@@ -285,7 +285,7 @@ def supervise(paths: Paths, app: Path, port: int) -> int:
         try:
             proc.wait(timeout=STOP_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            _kill_tree(proc)
         return proc.returncode or 0
     finally:
         _release_runtime(paths)
@@ -318,6 +318,48 @@ def _release_runtime(paths: Paths) -> None:
         return
     paths.runtime.unlink(missing_ok=True)
     paths.stop_request.unlink(missing_ok=True)
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """
+    Last resort: kill the server AND everything under it.
+
+    `proc.kill()` is `TerminateProcess` on Windows and it kills exactly one
+    process. The server is the parent of every `powershell.exe` the persistent
+    terminals run in, and those are the parents of the dev servers agents start
+    — so a bare kill here left the whole subtree alive, each piece still holding
+    its port, with the one process that knew they existed now gone. That is the
+    same orphaning the background-shell guard exists to prevent, arriving
+    through the supported stop path.
+
+    Only reached when the server ignored the polite stop for STOP_TIMEOUT_S, so
+    by definition its own teardown is not going to do this for us.
+    """
+    if IS_WINDOWS:
+        try:
+            # /T = the tree, /F = force. Ignore the result: a race with an exit
+            # that finally landed is a success, not something to report.
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            proc.kill()
+    else:
+        # NOT a process-group kill. `start()` gives this SUPERVISOR its own
+        # session and the server inherits that group, so `killpg` would take us
+        # down with it — before the `finally` that releases runtime.json, which
+        # is how a live instance ends up reported as not running. POSIX also
+        # needs this far less: SIGTERM is really delivered there, so the
+        # server's own handler runs and reaps its shells before we get here.
+        proc.kill()
+    # Whatever route we took, don't leave a zombie behind.
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _ask_to_stop(proc: subprocess.Popen) -> None:
