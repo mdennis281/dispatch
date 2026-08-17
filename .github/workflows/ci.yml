@@ -194,10 +194,15 @@ jobs:
   # resolve from their dist/. Net: the Windows leg went 5m31s → 1m10s.
   #
   # The subset below is the set of test files that either branch on
-  # `process.platform` or touch a real filesystem — 137 tests in ~7 seconds.
+  # `process.platform` or touch a real filesystem — ~230 tests in ~10 seconds.
   # Everything else is platform-agnostic and is covered by the Linux gate.
   # If you add a test that asserts Windows-specific behaviour, add its file here
   # or it will only ever run on a developer's machine.
+  #
+  # `fs-explorer.test.ts` is the one that most needs BOTH legs: its pure helpers
+  # are platform-parameterized so each OS's branches run everywhere, but the
+  # drive probe, the `Get-Acl` owner lookup and the Recycle Bin path can only be
+  # exercised for real on this runner.
   # ---------------------------------------------------------------------------
   windows:
     name: windows-specific tests
@@ -238,6 +243,7 @@ jobs:
           src/services/file-index.test.ts
           src/services/runner.test.ts
           src/routes/fs.test.ts
+          src/services/fs-explorer.test.ts
           src/services/mcp/manager-mcp.integration.test.ts
 
       - name: Test release installer (Windows)

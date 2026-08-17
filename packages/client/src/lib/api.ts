@@ -47,6 +47,14 @@ import type {
   HarnessKind,
   Effort,
   ShellTranscriptFilter,
+  FsEntry,
+  FsListing,
+  FsDetails,
+  FsRoot,
+  FsPlatform,
+  FsSelectKind,
+  FsMutation,
+  FsMutationResult,
 } from "@dispatch/shared";
 import { sessionFetch } from "../stores/auth.js";
 
@@ -597,14 +605,75 @@ export const api = {
      */
     search: (chatId: string, q = "", limit?: number) =>
       get<FileSearchResult>(`/api/files${qs({ chatId, q, limit })}`),
+    /**
+     * The same search rooted at a PROJECT's checkout, for the command palette —
+     * which is reachable with no chat open, and is the first thing you touch
+     * after switching projects.
+     */
+    searchProject: (projectId: string, q = "", limit?: number) =>
+      get<FileSearchResult>(`/api/files${qs({ projectId, q, limit })}`),
   },
 
-  /* filesystem questions the new-project form has to ask before it can act */
+  /* the filesystem itself — listings, stats, drives, and writes */
   fs: {
-    /** Where this human keeps projects (learned from the ones they already have). */
-    roots: () => get<{ home: string; projectsRoot: string; sep: string }>("/api/fs/roots"),
+    /**
+     * Where to start. `home`/`projectsRoot`/`sep` are what the new-project form
+     * has always read; `platform` and `roots` are what the explorer needs.
+     *
+     * `platform` is the SERVER's, and the client must use it for every path
+     * computation — the browser's own platform is irrelevant to a disk it
+     * cannot see, and a Windows browser pointed at a Linux Dispatch would
+     * otherwise compute `C:`-shaped breadcrumbs for `/home/me`.
+     */
+    roots: () =>
+      get<{
+        home: string;
+        projectsRoot: string;
+        sep: string;
+        platform: FsPlatform;
+        roots: FsRoot[];
+      }>("/api/fs/roots"),
     /** What's at a path right now: exists / directory / git repo / has code. */
     probe: (path: string) => get<PathProbe>(`/api/fs/probe${qs({ path })}`),
+    /** One directory's contents, with the stats every row shows. */
+    list: (path: string, limit?: number) =>
+      get<FsListing>(`/api/fs/list${qs({ path, limit })}`),
+    /** The expensive facts for ONE path — ownership, mode, git authorship. */
+    details: (path: string) => get<FsDetails>(`/api/fs/details${qs({ path })}`),
+    /**
+     * Walk `root` for names matching `q`. Bounded (results, visits, depth and
+     * wall-clock) and never follows symlinks — see the service for why each
+     * bound exists.
+     */
+    search: (
+      root: string,
+      q = "",
+      opts: {
+        limit?: number;
+        select?: FsSelectKind;
+        /** Dot-less, e.g. `["png","jpg"]`. */
+        ext?: string[];
+        showHidden?: boolean;
+        includeIgnored?: boolean;
+      } = {},
+    ) =>
+      get<{ root: string; results: FsEntry[] }>(
+        `/api/fs/search${qs({
+          root,
+          q,
+          limit: opts.limit,
+          select: opts.select,
+          ext: opts.ext?.join(","),
+          showHidden: opts.showHidden ? "true" : undefined,
+          includeIgnored: opts.includeIgnored ? "true" : undefined,
+        })}`,
+      ),
+    /**
+     * Every write, behind one call. Resolves even when the mutation failed —
+     * the result carries per-path errors, because "two of five files were
+     * locked" is information a thrown error would destroy.
+     */
+    mutate: (m: FsMutation) => post<FsMutationResult>("/api/fs/mutate", m),
   },
 
   /* worktrees */

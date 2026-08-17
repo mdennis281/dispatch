@@ -6,6 +6,7 @@ import {
   Play,
   MoreHorizontal,
   Brain,
+  FolderOpen,
   GitBranch,
   Settings,
   Blocks,
@@ -336,6 +337,11 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
             label="Source Control"
             count={changeCount}
             onClick={() => goView(view === "git" ? "chat" : "git")}
+          />
+          <SheetRow
+            icon={<FolderOpen />}
+            label="Files"
+            onClick={() => goView(view === "files" ? "chat" : "files")}
           />
           <div className="my-1 h-px bg-line-soft" />
           <SheetRow

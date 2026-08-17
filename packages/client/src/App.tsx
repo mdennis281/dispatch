@@ -15,6 +15,8 @@ import { ProjectSettingsView } from "./components/config/ProjectSettingsView.js"
 import { NewProjectView } from "./components/project/NewProjectView.js";
 import { MemoryView } from "./components/memory/MemoryView.js";
 import { GitView } from "./components/git/GitView.js";
+import { FilesView } from "./components/files/FilesView.js";
+import { FilePickerHost } from "./components/files/FilePickerModal.js";
 import { AppSettingsView } from "./components/settings/AppSettingsView.js";
 import { ManageConfigDialog } from "./components/sidebar/ManageConfigDialog.js";
 import { Toasts } from "./components/Toasts.js";
@@ -161,6 +163,8 @@ export default function App() {
             <MemoryView />
           ) : view === "git" ? (
             <GitView />
+          ) : view === "files" ? (
+            <FilesView />
           ) : view === "project-settings" ? (
             <ProjectSettingsView />
           ) : view === "app-settings" ? (
@@ -205,6 +209,9 @@ export default function App() {
           window-event buses and two stray useStates this used to take. */}
       <CodeViewerHost />
       <AgentRunHost />
+      {/* The file dialog the browser won't give us. Mounted here so `pickPath()`
+          works from anywhere without each call site rendering a modal. */}
+      <FilePickerHost />
       <WorkspaceView />
       <ProcessesOverlay />
       <McpCatalogView />
