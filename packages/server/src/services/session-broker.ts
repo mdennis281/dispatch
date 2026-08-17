@@ -3419,9 +3419,17 @@ export class SessionBroker {
 
   /* --------------------------------------------------- guard exemptions */
 
-  /** This chat's live guard exemptions (empty when it has none, or isn't live). */
+  /**
+   * This chat's live guard exemptions (empty when it has none, or isn't live).
+   *
+   * A COPY, not the session's own array: every grant, use and revoke goes
+   * through a method that also burns one-shots, publishes the new list and
+   * writes the notice, so a caller holding the real array could drop a guard
+   * with none of that happening — and the chip would still be showing the
+   * exemption it had just silently deleted.
+   */
   listExemptions(chatId: string): WorkflowExemption[] {
-    return this.sessions.get(chatId)?.exemptions ?? [];
+    return [...(this.sessions.get(chatId)?.exemptions ?? [])];
   }
 
   /**
