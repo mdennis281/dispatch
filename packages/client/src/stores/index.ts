@@ -142,6 +142,10 @@ export function applyServerEvent(evt: WsServerEvent): void {
       }
       return;
 
+    case "chat-exemptions":
+      useChats.getState().setExemptions(evt.chatId, evt.exemptions);
+      return;
+
     case "permission-request":
       // Synthesize the inline pending permission card immediately (the server
       // only persists the `permission` row once it's resolved). The attention
@@ -429,12 +433,32 @@ export async function hydrateFromServer(): Promise<boolean> {
   if (activeProject) void loadProjectPanels(activeProject);
   const activeChat = useChats.getState().activeChatId;
   if (activeChat) void ensureChatMessages(activeChat);
+  // …and re-read whether that chat is running with a guard lifted. The store
+  // dropped every exemption on hydrate (see `useChats.hydrate`), so without this
+  // a reconnect leaves an unguarded chat looking guarded until the next grant.
+  if (activeChat) void loadExemptions(activeChat);
 
   // Re-materialize open permission/question cards dropped by the transcript wipe
   // above (see {@link restorePendingPermissions}).
   void restorePendingPermissions();
 
   return true;
+}
+
+/**
+ * Re-read one chat's live guard exemptions from the server.
+ *
+ * A REST read rather than something the WS snapshot carries, for the same reason
+ * `context-usage` is one: this is live-session state with no persistent home, so
+ * the only place it exists is the broker. Best-effort — a failed read leaves the
+ * previous answer rather than falsely clearing the chip.
+ */
+export async function loadExemptions(chatId: string): Promise<void> {
+  try {
+    useChats.getState().setExemptions(chatId, await api.chats.exemptions(chatId));
+  } catch {
+    /* keep whatever we last knew */
+  }
 }
 
 /**

@@ -1,5 +1,6 @@
-import { GitBranch, GitMerge, GitPullRequest } from "lucide-react";
-import type { PRRef } from "@dispatch/shared";
+import { GitBranch, GitMerge, GitPullRequest, ShieldOff } from "lucide-react";
+import type { PRRef, WorkflowExemption } from "@dispatch/shared";
+import { describeExemptionScope } from "@dispatch/shared";
 import { Chip } from "../ui/Chip.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { Button } from "../ui/Button.js";
@@ -13,6 +14,89 @@ function triggerLabel(branchCount: number, hasPr: boolean): string {
   return branchPart ?? "Pull request";
 }
 
+/** Short enough for a header chip; the full sentence lives in the popover. */
+function shortScope(exemption: WorkflowExemption): string {
+  return exemption.scope === "all" ? "all guards" : exemption.scope;
+}
+
+/**
+ * The "this chat is running with a guard lifted" badge.
+ *
+ * Deliberately its OWN chip rather than a line inside the worktree/PR popover,
+ * and deliberately `danger` rather than `warn`: everything else in this header
+ * describes where the work is, while this one says a rule that normally holds
+ * has stopped holding. The 2026-08-17 incident that produced exemptions was
+ * survivable because the guard was loud; an exemption that was quiet would just
+ * move the same failure one level up. Clicking it reads what was granted and why
+ * — and revokes, because a lift you can see but not undo is only half a control.
+ */
+function ExemptionBadge({
+  exemptions,
+  onRevoke,
+}: {
+  exemptions: WorkflowExemption[];
+  onRevoke: (id: string) => void;
+}) {
+  const [first] = exemptions;
+  if (!first) return null;
+  return (
+    <Popover
+      align="end"
+      width={300}
+      className="p-2"
+      trigger={({ open, toggle }) => (
+        // `Button variant="danger"` rather than a Chip wrapped in a bare
+        // element: this one is meant to be pressed (it's how you revoke), and
+        // the primitive kit's danger tone is the same ink a Chip would use.
+        <Button
+          size="sm"
+          variant="danger"
+          onClick={toggle}
+          aria-expanded={open}
+          aria-label={`Guard lifted: ${describeExemptionScope(first.scope)}`}
+          leftIcon={<ShieldOff className="size-3" />}
+          className={cn("cm-mono !text-2xs", open && "bg-danger/20")}
+        >
+          {exemptions.length > 1 ? `${exemptions.length} guards off` : shortScope(first)}
+        </Button>
+      )}
+    >
+      {(close) => (
+        <div className="flex flex-col gap-2">
+          <p className="text-2xs font-medium uppercase tracking-wide text-faint">
+            Guard lifted for this chat
+          </p>
+          {exemptions.map((e) => (
+            <div key={e.id} className="flex flex-col gap-1">
+              <p className="text-xs text-primary">{describeExemptionScope(e.scope)}</p>
+              <p className="text-2xs leading-4 text-muted">
+                {e.lifetime === "once"
+                  ? "Next matching command only"
+                  : "Until this session ends"}
+                {e.uses > 0 && ` · used ${e.uses}×`}
+              </p>
+              {e.command && (
+                <p className="cm-mono break-all text-2xs leading-4 text-secondary">{e.command}</p>
+              )}
+              <p className="text-2xs leading-4 text-muted">{e.reason}</p>
+              <MenuItem
+                dense={false}
+                icon={<ShieldOff className="text-danger" />}
+                onClick={() => {
+                  onRevoke(e.id);
+                  close();
+                }}
+              >
+                Revoke
+              </MenuItem>
+            </div>
+          ))}
+        </div>
+      )}
+    </Popover>
+  );
+}
+
 export interface ChatHeaderBadgesProps {
   /** Phone width: collapse to icons, put the words behind a tap. */
   compact: boolean;
@@ -20,6 +104,9 @@ export interface ChatHeaderBadgesProps {
   primaryMerged: boolean;
   extraBranches: string[];
   pr: PRRef | undefined;
+  /** Human-approved guard lifts live on this chat (usually none). */
+  exemptions: WorkflowExemption[];
+  onRevokeExemption: (id: string) => void;
 }
 
 /**
@@ -42,12 +129,19 @@ export function ChatHeaderBadges({
   primaryMerged,
   extraBranches,
   pr,
+  exemptions,
+  onRevokeExemption,
 }: ChatHeaderBadgesProps) {
-  if (!primaryBranch && !pr) return null;
+  // The exemption badge survives the early return the others share: a chat can
+  // be running with a guard lifted and no worktree or PR yet — which is exactly
+  // the state a `commit-on-trunk` or `pr-create-by-hand` lift leaves it in.
+  const exempt = <ExemptionBadge exemptions={exemptions} onRevoke={onRevokeExemption} />;
+  if (!primaryBranch && !pr) return exempt;
 
   if (!compact) {
     return (
       <>
+        {exempt}
         {primaryBranch && (
           <Chip
             tone={primaryMerged ? "success" : "info"}
@@ -75,7 +169,12 @@ export function ChatHeaderBadges({
 
   const branches = [...(primaryBranch ? [primaryBranch] : []), ...extraBranches];
 
+  // On a phone the branch/PR facts collapse behind one tap, but the exemption
+  // stays its own chip: folding "a guard is off" in with "here's the branch"
+  // would make the loudest fact the one you have to go looking for.
   return (
+    <>
+    {exempt}
     <Popover
       align="end"
       width={260}
@@ -149,5 +248,6 @@ export function ChatHeaderBadges({
         </div>
       )}
     </Popover>
+    </>
   );
 }

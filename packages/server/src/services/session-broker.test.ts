@@ -7,6 +7,7 @@ import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
 import { isPrSettledIdle } from "@dispatch/shared";
+import { EXEMPTION_ANSWERS } from "./mcp/manager-mcp.js";
 import {
   SessionBroker,
   EFFORT_THINKING_TOKENS,
@@ -2437,6 +2438,118 @@ describe("SessionBroker — spawn_chat consent", () => {
     await expect(
       broker.consentToSpawn("nobody", { prompt: "go" }, { id: "p1", name: "Dispatch" }),
     ).resolves.toMatchObject({ approved: false, auto: false });
+  });
+});
+
+describe("SessionBroker — guard exemptions", () => {
+  async function liveSession(chatId = "c1"): Promise<SessionBroker> {
+    const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+    await store.saveChat(chatFor(chatId));
+    broker.create(chatFor(chatId));
+    return broker;
+  }
+
+  /** Drive one card to a chosen option, returning the broker's verdict. */
+  async function ask(
+    broker: SessionBroker,
+    chatId: string,
+    pick: string | null,
+    scope: "pr-create-by-hand" | "all" = "pr-create-by-hand",
+  ) {
+    const reqP = nextPermissionId();
+    const verdictP = broker.requestExemption(chatId, {
+      scope,
+      command: "gh pr create --fill",
+      reason: "create_pr refuses: could not resolve this chat's repo or branch",
+    });
+    const reqId = await reqP;
+    if (pick === null) broker.declineQuestion(reqId, "fix create_pr instead");
+    else {
+      broker.answerQuestion(reqId, {
+        answers: [{ questionIndex: 0, optionId: pick, answer: pick }],
+      });
+    }
+    return { verdict: await verdictP, reqId };
+  }
+
+  it("cannot be self-granted: the agent's call raises a card and waits", async () => {
+    const broker = await liveSession();
+    const { verdict, reqId } = await ask(broker, "c1", EXEMPTION_ANSWERS.session);
+
+    // It rides the ordinary permission channel — same card, same triage entry.
+    expect(
+      events.some((e) => e.type === "attention-add" && e.item.permissionRequestId === reqId),
+    ).toBe(true);
+    const card = events.find(
+      (e): e is Extract<WsServerEvent, { type: "permission-request" }> =>
+        e.type === "permission-request" && e.request.id === reqId,
+    );
+    // The command and the reason are ON the card: "lift a guard?" without them
+    // is a rubber stamp with extra steps.
+    expect(JSON.stringify(card?.request.input)).toContain("gh pr create --fill");
+    expect(JSON.stringify(card?.request.input)).toContain("could not resolve");
+
+    expect(verdict).toMatchObject({ granted: true });
+    expect(broker.listExemptions("c1")).toHaveLength(1);
+  });
+
+  it("a decline leaves the guard standing and grants nothing", async () => {
+    const broker = await liveSession();
+    const { verdict } = await ask(broker, "c1", null);
+    expect(verdict).toMatchObject({ granted: false, message: "fix create_pr instead" });
+    expect(broker.listExemptions("c1")).toEqual([]);
+  });
+
+  it("reads prose as a NO — free-form text is not consent to a scope", async () => {
+    const broker = await liveSession();
+    const { verdict } = await ask(broker, "c1", "maybe, be careful");
+    expect(verdict).toMatchObject({ granted: false });
+    expect(broker.listExemptions("c1")).toEqual([]);
+  });
+
+  it("fails closed with no live session to ask through", async () => {
+    const broker = makeBroker(makeFakeQuery(() => []).fn);
+    await expect(
+      broker.requestExemption("nobody", { scope: "all", reason: "x" }),
+    ).resolves.toMatchObject({ granted: false });
+  });
+
+  it("is scoped to ONE chat — a grant in c1 has no effect on c2", async () => {
+    // The whole reason this isn't project config: an exemption is a response to
+    // one chat's incident, and it must not become anybody else's rule.
+    const broker = await liveSession("c1");
+    await store.saveChat(chatFor("c2"));
+    broker.create(chatFor("c2"));
+    await ask(broker, "c1", EXEMPTION_ANSWERS.session);
+    expect(broker.listExemptions("c1")).toHaveLength(1);
+    expect(broker.listExemptions("c2")).toEqual([]);
+  });
+
+  it("publishes the full list on every change so the chip can't drift", async () => {
+    const broker = await liveSession();
+    await ask(broker, "c1", EXEMPTION_ANSWERS.session);
+    const [granted] = events.filter(
+      (e): e is Extract<WsServerEvent, { type: "chat-exemptions" }> =>
+        e.type === "chat-exemptions",
+    );
+    expect(granted?.exemptions).toHaveLength(1);
+
+    const id = broker.listExemptions("c1")[0]!.id;
+    expect(broker.revokeExemption("c1", id)).toBe(true);
+    expect(broker.listExemptions("c1")).toEqual([]);
+    const last = events.filter((e) => e.type === "chat-exemptions").at(-1);
+    expect(last).toMatchObject({ exemptions: [] });
+    // Revoking something already gone must not report success.
+    expect(broker.revokeExemption("c1", id)).toBe(false);
+  });
+
+  it("replaces a narrower grant rather than stacking a second, disagreeing one", async () => {
+    const broker = await liveSession();
+    await ask(broker, "c1", EXEMPTION_ANSWERS.once);
+    await ask(broker, "c1", EXEMPTION_ANSWERS.session, "all");
+    const live = broker.listExemptions("c1");
+    expect(live).toHaveLength(1);
+    expect(live[0]!.scope).toBe("all");
   });
 });
 

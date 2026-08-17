@@ -40,6 +40,7 @@ import type {
   ContextUsage,
   ModelOption,
   WorkflowConfig,
+  WorkflowExemption,
   LaunchAgentTaskInput,
   MessagePart,
   HarnessKind,
@@ -356,6 +357,15 @@ export const api = {
         `/api/chats/${id}/messages/full${qs({ ids: ids.join(",") })}`,
       ),
     checkpoints: (id: string) => get<Checkpoint[]>(`/api/chats/${id}/checkpoints`),
+    /**
+     * Human-approved guard lifts live on this chat's session. Live-session
+     * state, so a chat that isn't running answers `[]` — there is nowhere for an
+     * exemption to persist, by design.
+     */
+    exemptions: (id: string) => get<WorkflowExemption[]>(`/api/chats/${id}/exemptions`),
+    /** Revoke one (the header chip's action). 404 when it's already gone. */
+    revokeExemption: (id: string, exemptionId: string) =>
+      del<void>(`/api/chats/${id}/exemptions/${exemptionId}`),
     /** Cancel the auto-resume scheduled after a usage limit (409 if none). */
     cancelResume: (id: string) => post<Chat>(`/api/chats/${id}/resume/cancel`),
     /** Live context-window breakdown (null when the subprocess isn't live). */

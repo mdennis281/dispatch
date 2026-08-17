@@ -3,7 +3,13 @@ import { execa } from "execa";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveWorkflow, type ResolvedWorkflow, type WorkflowViolation } from "@dispatch/shared";
+import {
+  resolveWorkflow,
+  type ResolvedWorkflow,
+  type WorkflowExemption,
+  type WorkflowExemptionScope,
+  type WorkflowViolation,
+} from "@dispatch/shared";
 import type {
   PreToolUseHookInput,
   PreToolUseHookSpecificOutput,
@@ -196,12 +202,29 @@ function preToolUse(command: string, cwd: string): PreToolUseHookInput {
   };
 }
 
-function guardFor(workflow: ResolvedWorkflow, inWorktree: boolean, seen: WorkflowViolation[] = []) {
+/** A grant as the broker would have recorded it after the human said yes. */
+function grant(
+  scope: WorkflowExemptionScope,
+  lifetime: WorkflowExemption["lifetime"] = "session",
+): WorkflowExemption {
+  return { id: `x-${scope}`, scope, lifetime, reason: "create_pr is down", grantedAt: 0, uses: 0 };
+}
+
+function guardFor(
+  workflow: ResolvedWorkflow,
+  inWorktree: boolean,
+  seen: WorkflowViolation[] = [],
+  exemptions: WorkflowExemption[] = [],
+) {
+  const used: WorkflowExemption[] = [];
   return {
     seen,
+    used,
     hook: createWorkflowGuardHook({
       context: () => ({ workflow, trunk: "main", inWorktree }),
       onViolation: (v) => seen.push(v),
+      exemptions: () => exemptions,
+      onExempted: (e) => used.push(e),
     }),
   };
 }
@@ -310,5 +333,78 @@ describe("createWorkflowGuardHook", () => {
     const readInput = { ...preToolUse("", worktree), tool_name: "Read" };
     expect(await hook(readInput, "t1", { signal: new AbortController().signal })).toEqual({});
     expect(await run(hook, "   ", repo)).toEqual({});
+  });
+
+  it("tells a blocked agent it can ASK for an exemption, naming the guard it tripped", async () => {
+    // The 2026-08-17 incident's agent was stuck between a broken create_pr and
+    // this refusal because it had no idea a third option existed. This sentence
+    // is the only text it is guaranteed to read at that moment.
+    const { hook } = guardFor(review, true);
+    const reason = (await run(hook, "gh pr create --fill", worktree)).hookSpecificOutput
+      ?.permissionDecisionReason;
+    expect(reason).toContain("mcp__manager__request_exemption");
+    expect(reason).toContain('guard: "pr-create-by-hand"');
+  });
+
+  it("omits the exemption offer when no exemption surface is wired in", async () => {
+    const hook = createWorkflowGuardHook({
+      context: () => ({ workflow: review, trunk: "main", inWorktree: true }),
+    });
+    const reason = (await run(hook, "gh pr create --fill", worktree)).hookSpecificOutput
+      ?.permissionDecisionReason;
+    expect(reason).not.toContain("request_exemption");
+  });
+});
+
+describe("createWorkflowGuardHook — human-approved exemptions", () => {
+  const review = resolveWorkflow({ workflow: { profile: "review" } });
+
+  it("lets the exempted command through and reports the grant that did it", async () => {
+    const g = grant("pr-create-by-hand");
+    const { hook, seen, used } = guardFor(review, true, [], [g]);
+    expect(await run(hook, "gh pr create --fill", worktree)).toEqual({});
+    expect(used).toEqual([g]);
+    // Not ALSO a violation: `onViolation` publishes "Blocked: …", and this
+    // command was not blocked. One event per outcome.
+    expect(seen).toEqual([]);
+  });
+
+  it("is narrow — a grant for one guard does not lift another", async () => {
+    const { hook, used } = guardFor(review, true, [], [grant("pr-create-by-hand")]);
+    const out = await run(hook, "git push origin main", worktree);
+    expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(used).toEqual([]);
+  });
+
+  it("`all` covers every kind", async () => {
+    const { hook, used } = guardFor(review, true, [], [grant("all")]);
+    expect(await run(hook, "gh pr create --fill", worktree)).toEqual({});
+    expect(await run(hook, "git push origin main", worktree)).toEqual({});
+    expect(await run(hook, "gh pr merge 3 --squash", worktree)).toEqual({});
+    expect(used).toHaveLength(3);
+  });
+
+  it("never burns a grant under `warn`, where nothing was going to be blocked", async () => {
+    // A one-shot spent on a command that would have run anyway is a grant the
+    // human paid for and the agent never got.
+    const warn = resolveWorkflow({ workflow: { profile: "review", guard: "warn" } });
+    const { hook, seen, used } = guardFor(warn, true, [], [grant("pr-create-by-hand", "once")]);
+    expect(await run(hook, "gh pr create --fill", worktree)).toEqual({});
+    expect(used).toEqual([]);
+    expect(seen).toHaveLength(1);
+  });
+
+  it("reads the list fresh, so a grant that lands mid-turn applies immediately", async () => {
+    // The agent asks the instant it is refused and retries in the SAME turn.
+    const live: WorkflowExemption[] = [];
+    const hook = createWorkflowGuardHook({
+      context: () => ({ workflow: review, trunk: "main", inWorktree: true }),
+      exemptions: () => live,
+    });
+    expect(
+      (await run(hook, "gh pr create --fill", worktree)).hookSpecificOutput?.permissionDecision,
+    ).toBe("deny");
+    live.push(grant("pr-create-by-hand"));
+    expect(await run(hook, "gh pr create --fill", worktree)).toEqual({});
   });
 });
