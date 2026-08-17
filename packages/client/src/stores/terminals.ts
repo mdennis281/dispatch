@@ -70,6 +70,22 @@ export function isLiveChatTerminal(
 }
 
 /**
+ * A shell that is actually DOING something right now — running a command, or
+ * hosting a background dev server.
+ *
+ * "Live" is the wrong bar for attention: a shell stays live for the rest of the
+ * chat after its one `npm install` finished, so badging live shells meant the
+ * Terminals tab wore a permanent "7" made entirely of idle prompts. A count you
+ * can't act on is a count you learn to ignore. This drives the badge and the
+ * card's DEFAULT expansion, so the two agree until a human says otherwise —
+ * `TerminalsPanel` lets you open a finished shell to read it, which is a
+ * deliberate exception, not drift.
+ */
+export function isActiveTerminal(terminal: TerminalInfo | undefined): boolean {
+  return !!terminal && terminal.status === "live" && Boolean(terminal.busy || terminal.background);
+}
+
+/**
  * A free name for a human-opened shell: `shell`, then `shell 2`, `shell 3`…
  *
  * Shells are keyed by `${chatId}::${name}`, so re-using a live name silently

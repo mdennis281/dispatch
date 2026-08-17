@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import type { TerminalInfo } from "@dispatch/shared";
-import { isLiveChatTerminal, nextShellName } from "./terminals.js";
+import { isActiveTerminal, isLiveChatTerminal, nextShellName } from "./terminals.js";
 
 const terminal = (over: Partial<TerminalInfo> = {}): TerminalInfo => ({
   id: "chat-1::qa",
@@ -43,5 +43,24 @@ describe("isLiveChatTerminal", () => {
     expect(isLiveChatTerminal(terminal(), "chat-1")).toBe(true);
     expect(isLiveChatTerminal(terminal({ status: "exited" }), "chat-1")).toBe(false);
     expect(isLiveChatTerminal(terminal({ chatId: "chat-2" }), "chat-1")).toBe(false);
+  });
+});
+
+describe("isActiveTerminal", () => {
+  it("counts a shell that is running a command or hosting a server", () => {
+    expect(isActiveTerminal(terminal({ busy: true }))).toBe(true);
+    expect(
+      isActiveTerminal(terminal({ background: { command: "pnpm dev", since: 1 } })),
+    ).toBe(true);
+  });
+
+  it("does NOT count an idle prompt — the whole point of the badge", () => {
+    // Live, finished, exit 0 sitting there: nothing to act on.
+    expect(isActiveTerminal(terminal({ lastExitCode: 0 }))).toBe(false);
+  });
+
+  it("does not count a dead shell, however busy it looked", () => {
+    expect(isActiveTerminal(terminal({ status: "exited", busy: true }))).toBe(false);
+    expect(isActiveTerminal(undefined)).toBe(false);
   });
 });

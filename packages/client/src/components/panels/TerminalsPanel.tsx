@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { TerminalSquare, FolderClosed, Plus, X, CornerDownLeft, Activity } from "lucide-react";
+import {
+  TerminalSquare,
+  FolderClosed,
+  Plus,
+  X,
+  CornerDownLeft,
+  Activity,
+  ChevronRight,
+} from "lucide-react";
 import type { Chat, TerminalInfo } from "@dispatch/shared";
 import {
+  isActiveTerminal,
   isLiveChatTerminal,
   useTerminals,
   nextShellName,
@@ -102,6 +111,16 @@ function CommandInput({ terminal }: { terminal: TerminalInfo }) {
   );
 }
 
+/** What the shell is doing, in the two words the header and the collapsed row share. */
+function statusText(terminal: TerminalInfo): string {
+  // A shell held by a dev server is busy FOREVER by design. Saying "running…"
+  // for six hours reads as wedged; naming the command it is hosting is the
+  // difference between a bug and a fact.
+  if (terminal.background) return `serving · ${terminal.background.command}`;
+  if (terminal.busy) return "running…";
+  return terminal.status === "live" ? "ready" : "exited";
+}
+
 function TerminalCard({
   terminal,
   projectId,
@@ -113,62 +132,119 @@ function TerminalCard({
   useScrollbackFetch(terminal.id, lines.length > 0);
 
   const live = terminal.status === "live";
+  const active = isActiveTerminal(terminal);
   const ports = useTerminalPorts(projectId, terminal.id);
   const killPort = async (pid: number) => {
     await api.processes.kill(projectId, [pid]).catch(() => []);
     void useProcesses.getState().scan(projectId);
   };
 
+  // Open by DEFAULT when the shell is DOING something; a one-line stub when
+  // it's an idle prompt. A chat that ran four setup commands used to hand you
+  // four full cards of finished output — a screen and a half of scrollback for
+  // work that already succeeded, with the shell that's actually serving pushed
+  // below the fold.
+  //
+  // The override runs BOTH ways on purpose: opening a finished shell to read
+  // what it said, and collapsing a server you've already seen are the same
+  // kind of decision, and a card you can't close is a card that owns the panel.
+  // It's dropped whenever `active` flips, so the state you chose lasts until
+  // the shell's own situation changes — a shell that starts running comes back
+  // on its own, and one that finishes tucks itself away again.
+  const [override, setOverride] = useState<boolean | null>(null);
+  useEffect(() => setOverride(null), [active]);
+  const open = override ?? active;
+
   // Follow the tail as output streams in.
   const logRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = logRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [lines]);
+  }, [lines, open]);
+
+  const exitChip = terminal.lastExitCode !== undefined && terminal.lastExitCode !== null && (
+    <Chip tone={terminal.lastExitCode === 0 ? "success" : "danger"} mono>
+      exit {terminal.lastExitCode}
+    </Chip>
+  );
+
+  const closeButton = (
+    <IconButton
+      size="sm"
+      tip="Close shell"
+      onClick={() => void api.terminals.kill(terminal.id).catch(() => {})}
+    >
+      <X />
+    </IconButton>
+  );
+
+  if (!open) {
+    return (
+      <div className="flex items-center gap-1.5 rounded-md border border-line-soft bg-panel-2/30 pl-2 pr-1">
+        <Button
+          variant="ghost"
+          aria-expanded={false}
+          title={`${terminal.name} — ${statusText(terminal)}`}
+          onClick={() => setOverride(true)}
+          className="min-w-0 flex-1 !justify-start !px-1 !gap-1.5 text-left !text-muted [&_svg]:shrink-0"
+        >
+          <ChevronRight className="size-3 text-faint" />
+          <TerminalSquare className="size-3 text-faint" />
+          <span className="truncate">{terminal.name}</span>
+          <StatusDot tone={live ? "success" : "muted"} size={4} />
+          <span className="truncate text-2xs text-faint">{statusText(terminal)}</span>
+        </Button>
+        {/* A collapsed shell can still be holding a port — the one thing about
+            it that isn't recoverable by expanding it later, because it's what
+            makes the next launch fail. */}
+        {ports.length > 0 && (
+          <Chip tone="info" mono>
+            :{ports[0]!.port}
+            {ports.length > 1 && ` +${ports.length - 1}`}
+          </Chip>
+        )}
+        {exitChip}
+        {closeButton}
+      </div>
+    );
+  }
 
   return (
     <div className="overflow-hidden rounded-md border border-line bg-panel-2/50">
       <div className="flex items-center gap-2 px-3 py-2">
-        <span
-          className={cn(
-            "flex size-6 items-center justify-center rounded-md ring-1 [&_svg]:size-3.5",
-            live ? "bg-accent-ghost text-accent-hi ring-accent-line" : "bg-panel-2 text-muted ring-line",
-          )}
+        <Button
+          variant="ghost"
+          aria-expanded
+          title="Collapse"
+          onClick={() => setOverride(false)}
+          // `text-left`: a button element inherits the UA's centred text, and
+          // the name and status inside this one are a block, not a label.
+          // (Spelling that as a tag would trip the raw-button ratchet, which
+          // greps for the literal element — see ui/rawButtons.test.ts.)
+          className="min-w-0 flex-1 !h-auto !justify-start !px-0 !py-0 !gap-2 text-left hover:!bg-transparent"
         >
-          <TerminalSquare />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium text-primary">{terminal.name}</span>
-          <span className="flex items-center gap-1.5 text-2xs text-faint">
-            <StatusDot
-              tone={terminal.busy ? "working" : live ? "success" : "muted"}
-              pulse={terminal.busy}
-              size={5}
-            />
-            {/* A shell held by a dev server is busy FOREVER by design. Saying
-                "running…" for six hours reads as wedged; naming the command it
-                is hosting is the difference between a bug and a fact. */}
-            {terminal.background
-              ? `serving · ${terminal.background.command}`
-              : terminal.busy
-                ? "running…"
-                : live
-                  ? "ready"
-                  : "exited"}
+          <span
+            className={cn(
+              "flex size-6 shrink-0 items-center justify-center rounded-md ring-1 [&_svg]:size-3.5",
+              live ? "bg-accent-ghost text-accent-hi ring-accent-line" : "bg-panel-2 text-muted ring-line",
+            )}
+          >
+            <TerminalSquare />
           </span>
-        </span>
-        {terminal.lastExitCode !== undefined && terminal.lastExitCode !== null && (
-          <Chip tone={terminal.lastExitCode === 0 ? "success" : "danger"} mono>
-            exit {terminal.lastExitCode}
-          </Chip>
-        )}
-        <IconButton
-          size="sm"
-          tip="Close shell"
-          onClick={() => void api.terminals.kill(terminal.id).catch(() => {})}
-        >
-          <X />
-        </IconButton>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium text-primary">{terminal.name}</span>
+            <span className="flex items-center gap-1.5 text-2xs text-faint">
+              <StatusDot
+                tone={terminal.busy ? "working" : live ? "success" : "muted"}
+                pulse={terminal.busy}
+                size={5}
+              />
+              <span className="truncate">{statusText(terminal)}</span>
+            </span>
+          </span>
+        </Button>
+        {exitChip}
+        {closeButton}
       </div>
 
       <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-2xs text-faint">
@@ -273,7 +349,10 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
   }
 
   return (
-    <div className="space-y-2.5 p-3">
+    // `gap-2`, not the old `space-y-2.5`: most rows in here are now one-line
+    // stubs, and card spacing wider than the row itself reads as a gap in the
+    // list rather than a list of small things.
+    <div className="flex flex-col gap-2 p-3">
       {live.map((t) => (
         <TerminalCard key={t.id} terminal={t} projectId={chat.projectId} />
       ))}
