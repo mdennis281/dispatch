@@ -1,5 +1,4 @@
-import { useViewport, standaloneShellHeight } from "../../stores/viewport.js";
-import { isStandalone } from "../../lib/pwaInstall.js";
+import { useViewport } from "../../stores/viewport.js";
 import { LAYER } from "../../lib/layers.js";
 
 /**
@@ -22,12 +21,17 @@ import { LAYER } from "../../lib/layers.js";
  *    and it skews `kb` directly.
  *  - `kb` staying 0 while the keyboard is visibly up means the shell is never
  *    being told to shrink at all.
- *  - `dead` is how much of the screen the shell does NOT cover. Installed,
- *    anything but 0 is the band of nothing under the bottom nav, in the units
- *    to fix it with. In a browser tab it is just the URL bar.
- *  - `safe-t` non-zero means the status bar is ours to pad around; if `inner`
- *    is ALSO short of `screen` by about that much, we are being charged for it
- *    twice and the shell has to add it back.
+ *  - `over` MUST be 0. Non-zero means the shell is asking for more room than
+ *    the layout viewport has, and everything past that edge is never painted —
+ *    which looks like the bottom of the app being cut off. This is the one that
+ *    matters; it is what four PRs shipped against a `dead` of 0 while missing.
+ *  - `dead` is how much of the screen the shell does NOT cover. On iOS after
+ *    the standalone shrink this is legitimately ~59, because that band is not
+ *    paintable by anything. In a browser tab it is just the URL bar.
+ *  - `safe-t` non-zero means the status bar is ours to pad around. It describes
+ *    the SCREEN, not the layout viewport, so `safe-b` can be reserving space
+ *    for a home indicator that is below the viewport entirely — compare
+ *    `screen` with `client` to tell. See docs/ios-pwa-viewport-findings.md.
  */
 export function ViewportDebug() {
   // Subscribes to `debug` ALONE. The tracker writes the store every frame for
@@ -121,17 +125,9 @@ function ViewportReadout() {
   const m = useViewport();
 
   const shrunk = m.maxInnerHeight - m.innerHeight;
-  const vh = standaloneShellHeight(
-    isStandalone(),
-    m.innerHeight,
-    m.maxInnerHeight,
-    m.safeTop,
-    m.screenHeight,
-  );
   // How much of the screen nothing is drawn on. The shell starts at the top of
-  // the screen — the status bar is padding INSIDE it, not an offset above it,
-  // which is the whole point of the correction — so the status bar must not be
-  // subtracted here as well.
+  // the screen — the status bar is padding INSIDE it, not an offset above it —
+  // so the status bar must not be subtracted here as well.
   //
   // MEASURED, from the shell's own rect. It used to be `screenHeight - shell`,
   // and `shell` is the expression that SETS the height: the check could only
@@ -139,16 +135,18 @@ function ViewportReadout() {
   // reaches the glass and for one that overshoots it by 59px. Four PRs shipped
   // against that 0. Falls back to the arithmetic only before the first frame,
   // when there is no element to read.
+  //
+  // On iOS this is EXPECTED to be ~59 now, and that is not a bug to fix: the
+  // shell follows the layout viewport, and the band below it is not paintable
+  // by anything. `over` is the number that means something.
   const dead = m.screenHeight - (m.shellBottom || m.shell);
   // The overshoot the old `dead` was blind to: layout gave the box its full
   // height, but everything past the layout viewport is off the paintable area,
-  // so the bar's bottom is cut rather than merely low.
+  // so the bar's bottom is cut rather than merely low. This must be 0.
   const over = (m.shellBottom || m.shell) - m.clientHeight;
   const rows: Array<[string, string, boolean]> = [
-    // What the shell is ACTUALLY sized to, and why — the one line that says
-    // whether the correction is engaged.
-    ["shell", vh > 0 ? `${vh} (fixed)` : `${m.dvh} (dvh)`, vh > 0],
-    ["dead", `${dead}`, Math.abs(dead) > 2],
+    ["shell", `${m.dvh} (dvh)`, false],
+    ["dead", `${dead}`, false],
     // Non-zero means the shell is asking for more room than the layout viewport
     // has. That is the bottom nav being CLIPPED, not sitting short.
     ["over", `${over}`, over > 2],

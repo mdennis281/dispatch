@@ -103,24 +103,25 @@ export default function App() {
           directly on top of the keyboard instead of stranding it mid-screen.
           It is 0px whenever no keyboard is up, so desktop is untouched.
 
-          …and `dvh` itself lies in an installed iOS PWA. The first time the
-          keyboard opens, WebKit shrinks the window by ~59px and never gives it
-          back — `innerHeight`, `visualViewport` and `100dvh` all move together,
-          so the shell has no way to notice in the moment and just renders 59px
-          short of the screen for the rest of the session. That is the dead band
-          at the bottom, and it's also why the composer sat 60px above the
-          keyboard: `--cm-kb` was right, but it was being subtracted from a
-          height that was already wrong. `--cm-vh` is the tallest the window has
-          ever been (see stores/viewport), and it is only set once a shrink has
-          actually been observed — everywhere else this falls back to `dvh`. */}
-      {/* `fixed`, not in flow. `--cm-vh` is deliberately TALLER than the height
-          WebKit is currently reporting, so in flow this box overflows the
-          document by those ~59px — and `overflow: hidden` on html/body does not
-          stop iOS touch-panning that overflow. You could drag the whole app up
-          and down, which slid the bottom nav around and let Safari's URL bar
-          collapse and expand under you. A fixed box does not contribute to the
-          document's scrollable overflow at all, so there is nothing left to pan:
-          the shell is clipped to the window and stays where it is put.
+          …and it is JUST `100dvh`. This used to be `var(--cm-vh, 100dvh)`,
+          where `--cm-vh` was the tallest the window had ever been — an attempt
+          to out-guess the iOS standalone bug that shrinks the window by ~59px
+          on first keyboard open and never restores it. It cannot work, in
+          either direction. On iOS, paint is clipped to the layout viewport, so
+          a shell pinned past it isn't taller, it's cut off — the bottom nav's
+          labels landed in a band the device never draws. And an installed
+          DESKTOP window is `standalone` too: drag its bottom edge up and the
+          width never changes, so the remembered maximum never resets and the
+          shell stayed pinned at a height the window no longer had, cutting off
+          everything below the fold until you happened to resize sideways.
+          The shell follows the window. See docs/ios-pwa-viewport-findings.md. */}
+      {/* `fixed`, not in flow. `overflow: hidden` on html/body does not stop iOS
+          touch-panning a document that overflows, and this box used to overflow
+          it — you could drag the whole app up and down, which slid the bottom
+          nav around and let Safari's URL bar collapse and expand under you. It
+          no longer overflows, but `fixed` is still what guarantees that: a fixed
+          box contributes no scrollable overflow at all, whatever its height, so
+          there is nothing to pan even if this is mis-sized again.
           `inset-x-0` rather than `w-screen` for the same reason horizontally —
           `100vw` includes a scrollbar the shell doesn't have. */}
       <div
@@ -128,7 +129,7 @@ export default function App() {
         // box's bottom edge actually LANDS rather than what it was asked for.
         data-cm-shell=""
         className="fixed inset-x-0 top-0 flex flex-col overflow-hidden bg-app text-primary antialiased"
-        style={{ height: "var(--cm-vh, 100dvh)", paddingBottom: "var(--cm-kb, 0px)" }}
+        style={{ height: "100dvh", paddingBottom: "var(--cm-kb, 0px)" }}
       >
       <TopBar />
       {/* `relative` so the two side drawers can be `absolute` to THIS box rather
