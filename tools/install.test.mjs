@@ -119,6 +119,22 @@ test("--channel defaults to stable and rejects anything but the two channels", (
   assert.throws(() => parseArgs(["--channel", "nightly"]), /--channel must be stable or unstable/);
 });
 
+test("the browser opens by default, and DISPATCH_INSTALL_NO_OPEN suppresses it like --no-open", () => {
+  assert.equal(parseArgs([]).open, true);
+  assert.equal(parseArgs(["--no-open"]).open, false);
+
+  const previous = process.env.DISPATCH_INSTALL_NO_OPEN;
+  process.env.DISPATCH_INSTALL_NO_OPEN = "1";
+  try {
+    // The env var is how a self-update asks for silence: unlike a flag, an
+    // installer from an older release ignores it instead of failing the update.
+    assert.equal(parseArgs([]).open, false);
+  } finally {
+    if (previous === undefined) delete process.env.DISPATCH_INSTALL_NO_OPEN;
+    else process.env.DISPATCH_INSTALL_NO_OPEN = previous;
+  }
+});
+
 test("compareStamps orders build stamps and refuses to order anything else", () => {
   assert.equal(compareStamps("v2026.08.14.81160", "v2026.08.14.85068"), -1);
   assert.equal(compareStamps("2026.08.16.63367", "v2026.08.15.10000"), 1);

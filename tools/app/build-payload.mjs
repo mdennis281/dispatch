@@ -93,7 +93,11 @@ export function run(cmd, cmdArgs, cwd, log = defaultLog) {
   const label = `${cmd} ${cmdArgs.join(" ")}`;
   log(`  $ ${label}\n`);
   return new Promise((res, rej) => {
-    const child = spawn(cmd, cmdArgs, { cwd, shell: needsShell(cmd) });
+    // `windowsHide` because the upgrade's swap phase runs detached with no
+    // console of its own, and Windows hands every console-subsystem child of a
+    // console-less parent a NEW console window. Without this, a staging build
+    // flashes one up per pnpm/tsc/vite invocation. Output is piped either way.
+    const child = spawn(cmd, cmdArgs, { cwd, shell: needsShell(cmd), windowsHide: true });
     const tail = [];
     let pending = "";
 

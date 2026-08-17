@@ -86,11 +86,18 @@ async function withRelease(manifest: unknown, latestTag: string | null): Promise
 }
 
 /**
- * Comfortably past the route's own SETTLE_MS (150), so a deferred spawn has
- * landed before the next test resets the mock. Not imported from the route:
- * the point is to outlast it, not to match it.
+ * Wait out the deferred launch a successful install schedules.
+ *
+ * The route spawns 150ms AFTER the reply is flushed, so a test that ends at the
+ * 200 leaves a timer armed — and it fires during whichever test runs next. The
+ * `mockReset` below is not enough on its own: it zeroes the call count, and the
+ * late call then increments the FRESH mock, so the next
+ * `expect(launchUpdate).not.toHaveBeenCalled()` sees one call it did not make.
+ * That is a load-dependent failure (it only shows up when the whole suite runs
+ * together), so every test that legitimately launches consumes its own launch
+ * here rather than leaving it for a neighbour.
  */
-const SETTLE_DRAIN_MS = 250;
+const settleLaunch = () => vi.waitFor(() => expect(launchUpdate).toHaveBeenCalled());
 
 beforeEach(async () => {
   // A full reset, not `mockClear`: the install route spawns 150ms AFTER its
@@ -105,18 +112,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await app?.close().catch(() => {});
-  // Drain the install route's deferred spawn before the next test starts.
-  //
-  // The route schedules `launchUpdate` SETTLE_MS after the reply flushes, so a
-  // test that installs successfully leaves a timer armed. It fires during the
-  // NEXT test — after `beforeEach` reset the call count — and any assertion of
-  // `not.toHaveBeenCalled()` then sees 1. That made this file fail
-  // intermittently, on whichever "refuses…" case happened to follow an install,
-  // which is why it passed when run alone and failed under a full suite.
-  //
-  // `mockReset` in beforeEach can't fix it: the problem is a call that arrives
-  // AFTER the reset, not stale state before it.
-  await new Promise((r) => setTimeout(r, SETTLE_DRAIN_MS));
   await rm(dir, { recursive: true, force: true });
   await Promise.all(roots.splice(0).map((r) => rm(r, { recursive: true, force: true })));
 });
@@ -174,6 +169,7 @@ describe("POST /api/update/install", () => {
     // contract; a caller that gets a dropped socket cannot tell start from fail.
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.85068" });
+    await settleLaunch();
   });
 
   it("un-latches when the installer never actually launches", async () => {
@@ -212,6 +208,7 @@ describe("POST /api/update/install", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.79778" });
+    await settleLaunch();
   });
 
   it("refuses any tag that is not the channel head", async () => {

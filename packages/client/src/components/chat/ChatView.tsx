@@ -1,8 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  GitBranch,
-  GitPullRequest,
-  GitMerge,
   MoreHorizontal,
   Activity,
   Skull,
@@ -22,10 +19,10 @@ import type { AgentActivity, Chat, HarnessKind, WorktreeInfo } from "@dispatch/s
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Popover, MenuItem } from "../ui/Popover.js";
-import { Chip } from "../ui/Chip.js";
 import { StatusDot, statusMeta } from "../ui/StatusDot.js";
 import { TitleText } from "../ui/TitleText.js";
 import { Spinner } from "../ui/Spinner.js";
+import { ChatHeaderBadges } from "./ChatHeaderBadges.js";
 import { MessageList } from "./MessageList.js";
 import { StreamingTail } from "./StreamingTail.js";
 import { TodosStrip } from "./TodosStrip.js";
@@ -41,6 +38,7 @@ import { useChats } from "../../stores/chats.js";
 import { useHarnesses } from "../../stores/harnesses.js";
 import { useProjects } from "../../stores/projects.js";
 import { usePanels } from "../../stores/panels.js";
+import { useLayoutMode } from "../../stores/layout.js";
 import { worktreeMatchesChat, samePath } from "../panels/panelBus.js";
 import { useNotices } from "../../stores/notices.js";
 import { useChatProcessPids, useProcesses } from "../../stores/processes.js";
@@ -125,6 +123,12 @@ export function ChatView({ chat }: { chat: Chat }) {
   const modes = useProjects((s) => s.modes);
   const worktrees = usePanels((s) => s.worktrees);
   const prs = usePanels((s) => s.prs);
+  // The chat's OWN project, not the active one: a chat is bound to the project
+  // it was started in, and on a phone this header is the only thing that says so.
+  const projectName = useProjects(
+    (s) => s.projects.find((p) => p.id === chat.projectId)?.name,
+  );
+  const compact = useLayoutMode() === "sm";
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
@@ -267,9 +271,13 @@ export function ChatView({ chat }: { chat: Chat }) {
   const pendingWtPaths = chat.worktrees.filter((p) => !mineWts.some((w) => samePath(w.path, p)));
   const primaryBranch = primaryWt?.branch ?? branchName(chat.worktrees[0]);
   const primaryMerged = primaryWt ? isMerged(primaryWt.branch) : false;
+  // `slice(1)` when the primary came from the FALLBACK: with no matching live
+  // worktree the chip's branch is derived from `chat.worktrees[0]`, which is
+  // also still in `pendingWtPaths` — so a chat with exactly one worktree was
+  // showing its branch and a "+1" counting that same branch again.
   const extraBranches = [
     ...mineWts.filter((w) => w.path !== primaryWt?.path).map((w) => w.branch),
-    ...pendingWtPaths.map((p) => branchName(p) ?? p),
+    ...(primaryWt ? pendingWtPaths : pendingWtPaths.slice(1)).map((p) => branchName(p) ?? p),
   ];
 
   const workingLabel = workingLabelFor(activity);
@@ -442,8 +450,23 @@ export function ChatView({ chat }: { chat: Chat }) {
       <div className="relative shrink-0">
         <div className="flex h-12 items-center gap-3 px-4 cm-hairline-b">
           <StatusDot tone={meta.tone} pulse={meta.pulse} size={8} />
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              {/* Which project this chat is in. On a phone the left sidebar is
+                  off-canvas, so the header is the ONLY place the project name
+                  can appear — without it a chat titled "Active Terminal Count"
+                  says nothing about which repo it is about to change. Muted and
+                  a size down, so the pair reads as `project | title` with the
+                  title still the loud half, and capped at 40% so a long repo
+                  name can't eat the title it's meant to qualify. */}
+              {compact && projectName && !rename.editing && (
+                <>
+                  <span className="max-w-[40%] shrink-0 truncate text-sm font-medium text-muted">
+                    {projectName}
+                  </span>
+                  <span className="shrink-0 text-sm text-faint">|</span>
+                </>
+              )}
               {rename.editing ? (
                 <input
                   {...rename.inputProps}
@@ -454,7 +477,10 @@ export function ChatView({ chat }: { chat: Chat }) {
                 <h1
                   onDoubleClick={rename.start}
                   title="Double-click to rename"
-                  className="truncate text-lg font-semibold tracking-tight text-primary"
+                  className={cn(
+                    "min-w-0 truncate font-semibold tracking-tight text-primary",
+                    compact ? "text-base" : "text-lg",
+                  )}
                 >
                   <TitleText title={chat.title} />
                 </h1>
@@ -476,28 +502,14 @@ export function ChatView({ chat }: { chat: Chat }) {
               composer keeps it: mid-turn that's where the eye already is, and
               it's beside Send where the turn was started. The header says what
               the turn IS doing; the composer is where you act on it. */}
-          <div className="ml-auto flex items-center gap-1.5">
-            {primaryBranch && (
-              <Chip
-                tone={primaryMerged ? "success" : "info"}
-                icon={primaryMerged ? <GitMerge /> : <GitBranch />}
-                mono
-              >
-                {primaryBranch}
-              </Chip>
-            )}
-            {extraBranches.length > 0 && (
-              <span title={extraBranches.join(", ")}>
-                <Chip tone="muted" mono>
-                  +{extraBranches.length}
-                </Chip>
-              </span>
-            )}
-            {pr && (
-              <Chip tone="info" icon={<GitPullRequest />}>
-                #{pr.number}
-              </Chip>
-            )}
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            <ChatHeaderBadges
+              compact={compact}
+              primaryBranch={primaryBranch}
+              primaryMerged={primaryMerged}
+              extraBranches={extraBranches}
+              pr={pr}
+            />
             <Popover
               align="end"
               width={200}
