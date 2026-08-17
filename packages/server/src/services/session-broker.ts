@@ -27,6 +27,7 @@
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { basename, join } from "node:path";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
+import { McpPrewarmService } from "./mcp-prewarm.js";
 import type {
   Options,
   Query,
@@ -1240,6 +1241,9 @@ export class SessionBroker {
    *  catalog route and the worktree prewarm resolve the SAME leases a session
    *  would, rather than each computing their own answer. */
   readonly mcpPorts: McpPortLeaseService;
+  /** Warms the servers those leases belong to. Built here, beside the leases, so
+   *  a prewarm and a session can never disagree about which port a checkout got. */
+  readonly mcpPrewarm?: McpPrewarmService;
   private readonly harnesses?: HarnessRegistry;
   private readonly managerMcp?: ManagerMcpBridge;
   private readonly inspect?: BrokerInspect;
@@ -1276,6 +1280,13 @@ export class SessionBroker {
   constructor(opts: SessionBrokerOptions) {
     this.store = opts.store;
     this.mcpPorts = new McpPortLeaseService(opts.store);
+    if (opts.projectConfig) {
+      const pc = opts.projectConfig;
+      this.mcpPrewarm = new McpPrewarmService({
+        getMcpServers: (id: string) => pc.getMcpServers(id) as Record<string, McpServerConfig>,
+        leases: this.mcpPorts,
+      });
+    }
     this.bus = opts.bus;
     this.cap = Math.max(1, opts.maxActiveSessions ?? 6);
     this.terminals = opts.terminals;
@@ -4076,6 +4087,18 @@ export class SessionBroker {
             : undefined,
         // Bind the subApp launcher to this session's project so `run_subapp` can
         // list/start/stop apps and resolve (or create) a worktree per branch.
+        // Re-warm this chat's OWN checkout — the same servers, resolved against
+        // the same cwd and leased ports the session's MCPs use, so what it boots
+        // is what they then adopt.
+        prewarm:
+          this.mcpPrewarm && projectId && cwd
+            ? {
+                run: async () => {
+                  const proj = await this.projectForChat(session.chatId);
+                  return proj ? this.mcpPrewarm!.prewarm(proj, cwd) : [];
+                },
+              }
+            : undefined,
         runner:
           runner && worktrees
             ? {

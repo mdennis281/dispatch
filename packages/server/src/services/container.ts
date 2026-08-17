@@ -31,6 +31,7 @@ import { makeFakeQuery } from "./fake-sdk.js";
 import { TitleService, makeFakeTitleGenerator } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
 import { WorktreeService } from "./worktree.js";
+import { McpPrewarmService } from "./mcp-prewarm.js";
 import { WorktreeDetector } from "./worktree-detector.js";
 import { GitService } from "./git.js";
 import { CommitMessageService } from "./commit-message.js";
@@ -286,6 +287,11 @@ export function createServices(
   // Removing a worktree hands its MCP ports back. Assigned here rather than
   // injected because the broker that owns the leases is constructed above this.
   worktrees.mcpPorts = broker.mcpPorts;
+  // …and creating one warms its MCP servers, on the port that checkout just
+  // leased, so the first tool call in a fresh worktree isn't a cold boot. Taken
+  // FROM the broker rather than built here, so the worktree hook and the
+  // `prewarm_mcp` tool can never disagree about which port a checkout got.
+  worktrees.mcpPrewarm = broker.mcpPrewarm;
   const notifier = overrides.notifier ?? new Notifier({ bus, store });
   const attention = overrides.attention ?? new AttentionQueue({ bus });
   // Subscription usage (5h + weekly) for the header meter. Polls the account

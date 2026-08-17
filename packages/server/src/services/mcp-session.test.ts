@@ -9,7 +9,7 @@ import {
   type McpPortStore,
   type McpSessionContext,
 } from "./mcp-session.js";
-import type { McpPortLease } from "@dispatch/shared";
+import type { McpPortLease, McpServerConfig } from "@dispatch/shared";
 
 /**
  * Absolute-path fixtures root from the PLATFORM, never a literal "C:/…": on the
@@ -87,14 +87,14 @@ describe("substituteMcpTokens", () => {
 });
 
 describe("resolveMcpServer", () => {
-  const base = {
+  const base: McpServerConfig = {
     type: "stdio",
     command: "node",
     args: ["./tools/sim-mcp/index.mjs"],
     env: { SIM_PORT: "{mcpPort}", SIM_ROOT: "{worktree}" },
     ports: 1,
     prewarm: "npm run dev",
-  } as const;
+  };
 
   it("strips Dispatch-only keys so they never reach a harness SDK", () => {
     const out = resolveMcpServer({ ...base }, ctx(), [5401]);

@@ -23,7 +23,7 @@
 import { execa } from "execa";
 import { existsSync } from "node:fs";
 import { mkdir, readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
-import { join, resolve, relative, isAbsolute, dirname } from "node:path";
+import { basename, join, resolve, relative, isAbsolute, dirname } from "node:path";
 import {
   WorktreeInfoSchema,
   BranchInfoSchema,
@@ -194,6 +194,15 @@ export class WorktreeService {
    */
   mcpPorts?: { releaseCheckout(path: string): Promise<void> };
 
+  /** Boots each MCP server's `prewarm` command in a newly created worktree.
+   *  Settable after construction for the same reason as {@link mcpPorts}. */
+  mcpPrewarm?: {
+    prewarm(
+      project: Project,
+      worktreePath: string,
+    ): Promise<{ server: string; ok: boolean; error?: string }[]>;
+  };
+
   constructor(deps: WorktreeServiceDeps = {}) {
     this.bus = deps.bus;
     this.store = deps.store;
@@ -247,7 +256,7 @@ export class WorktreeService {
         base,
         opts.chatId,
       );
-      await this.publishCreated(info, opts.chatId);
+      await this.publishCreated(info, opts.chatId, project);
       return info;
     }
 
@@ -277,7 +286,7 @@ export class WorktreeService {
       repo,
     );
     const info = await this.buildInfo(project, wtPath, branch, base, opts.chatId);
-    await this.publishCreated(info, opts.chatId);
+    await this.publishCreated(info, opts.chatId, project);
     return info;
   }
 
@@ -721,11 +730,40 @@ export class WorktreeService {
   private async publishCreated(
     info: WorktreeInfo,
     chatId?: string,
+    project?: Project,
   ): Promise<void> {
     this.bus?.publish({ type: "worktree-update", chatId, worktree: info });
     if (this.store && chatId) {
       await this.attachToChat(chatId, info.path);
     }
+    if (project) this.startPrewarm(info, chatId, project);
+  }
+
+  /**
+   * Kick off MCP prewarm for a new worktree. Deliberately NOT awaited: a prewarm
+   * typically boots a dev server, which by design does not exit — awaiting it
+   * would hold worktree creation open until the timeout. The caller gets its
+   * worktree immediately and each server reports through a notice when it
+   * settles.
+   */
+  private startPrewarm(info: WorktreeInfo, chatId: string | undefined, project: Project): void {
+    if (!this.mcpPrewarm) return;
+    void this.mcpPrewarm
+      .prewarm(project, info.path)
+      .then((results) => {
+        for (const r of results) {
+          this.bus?.publish({
+            type: "notice",
+            chatId,
+            level: r.ok ? "info" : "warn",
+            text: r.ok
+              ? `Prewarmed MCP "${r.server}" in ${basename(info.path)}`
+              : `Prewarm for MCP "${r.server}" failed: ${r.error ?? "unknown error"}`,
+          });
+        }
+      })
+      // A prewarm must never take the worktree down with it.
+      .catch(() => {});
   }
 
   /**
