@@ -55,13 +55,17 @@ function fakeTerminals(over: { reap?: () => Promise<number>; pids?: number[] } =
  * with them, which it then re-registers, producing a different leak warning
  * instead of removing one.
  */
-let preExisting: ReturnType<typeof process.listeners<"exit">> = [];
+const HOOKED = ["exit", "SIGINT", "SIGTERM"] as const;
+const preExisting = new Map<string, unknown[]>();
 beforeEach(() => {
-  preExisting = process.listeners("exit");
+  for (const ev of HOOKED) preExisting.set(ev, process.listeners(ev));
 });
 afterEach(() => {
-  for (const fn of process.listeners("exit")) {
-    if (!preExisting.includes(fn)) process.off("exit", fn);
+  for (const ev of HOOKED) {
+    const before = preExisting.get(ev) ?? [];
+    for (const fn of process.listeners(ev)) {
+      if (!before.includes(fn)) process.off(ev, fn as never);
+    }
   }
 });
 
@@ -150,6 +154,38 @@ describe("installShutdown — reaping the persistent shells", () => {
       expect(close).toHaveBeenCalledOnce();
       expect(exit).toHaveBeenCalledWith(0);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a reap that fails AFTER its budget cannot surface as an unhandled rejection", async () => {
+    vi.useFakeTimers();
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      // The budget wins the race, so nothing is looking at `reap()` any more —
+      // and `installCrashNet` would record its late rejection as a CRASH, which
+      // is a much worse thing to report than a slow shutdown.
+      let boom!: (e: Error) => void;
+      const terminals = fakeTerminals({
+        reap: () => new Promise<number>((_, reject) => (boom = reject)),
+      });
+      const done = installShutdown(fakeApp(async () => {}, terminals), {
+        exit: vi.fn(),
+        graceMs: 60_000,
+      })();
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      boom(new Error("taskkill exploded"));
+      await vi.advanceTimersByTimeAsync(10);
+      await done;
+      // Rejections are reported a turn later; give the real microtask queue one.
+      vi.useRealTimers();
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
       vi.useRealTimers();
     }
   });

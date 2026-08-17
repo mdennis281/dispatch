@@ -650,7 +650,11 @@ export class TerminalService {
     // to be eventually right.
     if (this.store) {
       term.unflushed.push({ stream, chunk, ts });
-      this.ensureFlushTimer();
+      // Only for a shell we still hold. `flush()` walks `this.terminals`, so a
+      // killed one's buffer is drained by its own `archiveOnClose` instead —
+      // arming the ticker for it would start a timer that can never empty this
+      // particular buffer, and could re-arm the one `reap()` just cleared.
+      if (this.terminals.has(term.id)) this.ensureFlushTimer();
     }
     this.bus.publish({
       type: "terminal-output",
@@ -701,11 +705,13 @@ export class TerminalService {
         /* a transcript we couldn't write is not worth failing a command over */
       }
     }
-    // Looped, not a single await: a tracked write can start another (a purge
-    // kills first, then deletes), and settling the set we captured on entry
-    // would leave that one in flight.
-    while (this.pendingWrites.size > 0) {
-      await Promise.allSettled([...this.pendingWrites]);
+    // Kills too, not just writes: a kill ends in an `archiveOnClose`, so a
+    // `flush()` that ignored them would return before the row it is responsible
+    // for had been written. Looped, not a single await, because tracked work
+    // can start more of it (a kill queues an archive; a purge kills then
+    // deletes) and settling the set captured on entry would miss that.
+    while (this.pendingWrites.size > 0 || this.pendingKills.size > 0) {
+      await Promise.allSettled([...this.pendingWrites, ...this.pendingKills]);
     }
   }
 
@@ -828,12 +834,19 @@ export class TerminalService {
     const term = this.terminals.get(terminalId);
     if (!term) return false;
     this.terminals.delete(terminalId);
-    this.killProc(term);
     // Killing the shell does NOT discard what it printed. The row moves to the
     // archive and the transcript stays readable until retention takes it —
     // "close the terminal" and "forget what the build said" are different asks,
     // and conflating them is what made a failed run unrecoverable.
-    this.track(this.archiveOnClose(term));
+    //
+    // Archived AFTER the process is actually dead, not alongside the kill. The
+    // shell is off `this.terminals` from the line above and `flush()` only
+    // walks the terminals it still holds, so anything the shell prints while
+    // the tree-kill is in flight lands in a `term.unflushed` nothing else will
+    // ever drain. Waiting means those lines are in the batch instead — and
+    // they are the interesting ones, since they are what it said on the way
+    // out.
+    this.trackKill(this.killProc(term).then(() => this.archiveOnClose(term)));
     this.bus.publish({ type: "terminal-closed", terminalId: term.id, chatId: term.chatId });
     return true;
   }
@@ -937,7 +950,10 @@ export class TerminalService {
     // most interesting part of the transcript — it's what was on screen when
     // whatever prompted the shutdown happened.
     void this.flush().catch(() => {});
-    for (const term of this.terminals.values()) this.killProc(term);
+    // `killProc` never rejects (see its docblock), so floating it here is safe —
+    // and floating is all a synchronous teardown can do. `reap()` is the caller
+    // that gets to wait for the trees to actually go.
+    for (const term of this.terminals.values()) void this.killProc(term);
     this.terminals.clear();
   }
 
@@ -964,7 +980,7 @@ export class TerminalService {
    * listening on 4455. So the direct kill now waits for the tree walk to
    * finish, and is belt-and-braces rather than a race against it.
    */
-  private killProc(term: Terminal): void {
+  private killProc(term: Terminal): Promise<void> {
     const hardKill = (): void => {
       try {
         term.proc.kill();
@@ -975,13 +991,16 @@ export class TerminalService {
     const pid = term.proc.pid;
     if (typeof pid === "number" && pid > 0) {
       try {
-        this.trackKill(Promise.resolve(this.killTree(pid)).then(hardKill, hardKill));
-        return;
+        // Never rejects: both arms of `then` are `hardKill`, so a killTree that
+        // fails still gets the direct kill and still settles. Callers can
+        // therefore chain onto it without a second error path.
+        return Promise.resolve(this.killTree(pid)).then(hardKill, hardKill);
       } catch {
         /* a killTree that threw synchronously — fall through */
       }
     }
     hardKill();
+    return Promise.resolve();
   }
 
   /** Remember an in-flight tree-kill so {@link reap} can wait for it. */

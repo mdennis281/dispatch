@@ -964,6 +964,37 @@ describe("TerminalService — durable roster and transcripts", () => {
     });
   });
 
+  it("keeps output the shell printed WHILE the tree-kill was in flight", async () => {
+    // `kill()` drops the shell from `this.terminals` immediately, and `flush()`
+    // only walks the terminals it still holds — so anything printed during the
+    // tree walk lands in a buffer nothing else would ever drain. The archive
+    // therefore waits for the process to actually die. These are the most
+    // interesting lines there are: they are what it said on the way out.
+    let release!: () => void;
+    const walk = new Promise<void>((r) => {
+      release = r;
+    });
+    const { svc, shells } = makeService({ store, killTree: () => walk });
+    await svc.run({
+      chatId: "c1",
+      name: "server",
+      command: "serve up",
+      cwd: "C:\\repo",
+      background: true,
+    });
+    shells[0]!.pid = 4242;
+
+    const reaped = svc.reap();
+    await Promise.resolve();
+    shells[0]!.stdout.emit("data", "port 4455 released\n");
+    release();
+    await reaped;
+
+    const [rec] = await store.listTerminalRecords();
+    const chunks = (await store.readTerminalLines(rec!.logId)).map((l) => l.chunk);
+    expect(chunks).toContain("port 4455 released");
+  });
+
   it("reap is idempotent — the shutdown path calls it more than once", async () => {
     const { svc } = makeService({ store });
     await svc.run({ chatId: "c1", name: "build", command: "printout x", cwd: "C:\\repo" });

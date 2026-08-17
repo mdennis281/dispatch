@@ -109,15 +109,19 @@ export function installShutdown(
   const reapTerminals = async (): Promise<void> => {
     const terminals = app.services?.terminals;
     if (!terminals) return;
-    try {
-      await Promise.race([
-        terminals.reap(),
-        new Promise((r) => setTimeout(r, REAP_BUDGET_MS).unref?.()),
-      ]);
-    } catch (err) {
+    // The catch goes on the reap ITSELF, not around the race. If the budget
+    // wins, the race stops looking at this promise but the promise keeps
+    // running — and a rejection arriving after that is an unhandled rejection,
+    // which `installCrashNet` records as a crash. A shutdown that reports
+    // itself as a crash is worse than the slow reap it was reporting.
+    const reaped = terminals.reap().catch((err: unknown) => {
       // eslint-disable-next-line no-console
       console.error("[dispatch] error reaping shells:", err);
-    }
+    });
+    await Promise.race([
+      reaped,
+      new Promise((r) => setTimeout(r, REAP_BUDGET_MS).unref?.()),
+    ]);
   };
 
   /**
