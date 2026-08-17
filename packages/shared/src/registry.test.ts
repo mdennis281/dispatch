@@ -46,6 +46,40 @@ describe("parseRegistryQuery", () => {
     expect(() => parseRegistryQuery({ since: "1.2" })).toThrow(RegistryQueryError);
     expect(() => parseRegistryQuery({ limit: "-4" })).toThrow(RegistryQueryError);
     expect(() => parseRegistryQuery({ limit: "99999" })).toThrow(RegistryQueryError);
+    expect(() => parseRegistryQuery({ sort: "oldest" })).toThrow(RegistryQueryError);
+    expect(() => parseRegistryQuery({ order: "up" })).toThrow(RegistryQueryError);
+  });
+
+  it("reads the facet flags, and rejects anything it can't read", () => {
+    expect(parseRegistryQuery({ active: "1", archived: "false" })).toMatchObject({
+      active: true,
+      archived: false,
+    });
+    expect(parseRegistryQuery({ unmerged: "TRUE", unattributed: "0" })).toMatchObject({
+      unmerged: true,
+      unattributed: false,
+    });
+    expect(parseRegistryQuery({}).active).toBeUndefined();
+    // `Boolean("no")` is `true` — which is exactly why this is a 400 instead.
+    expect(() => parseRegistryQuery({ active: "no" })).toThrow(RegistryQueryError);
+    expect(() => parseRegistryQuery({ unmerged: "yes" })).toThrow(RegistryQueryError);
+  });
+
+  it("takes real booleans from a programmatic caller unchanged", () => {
+    expect(parseRegistryQuery({ active: true, archived: false })).toMatchObject({
+      active: true,
+      archived: false,
+    });
+  });
+
+  it("leaves sort unset rather than defaulting it into the parsed query", () => {
+    // The default is resolved where it's used, so a hand-built query never has
+    // to restate a sort it doesn't care about.
+    expect(parseRegistryQuery({}).sort).toBeUndefined();
+    expect(parseRegistryQuery({ sort: "name", order: "desc" })).toMatchObject({
+      sort: "name",
+      order: "desc",
+    });
   });
 
   it("reads a URLSearchParams the same way", () => {
@@ -121,5 +155,78 @@ describe("applyRegistryQuery", () => {
       touchedAt: () => undefined,
     });
     expect(out).toEqual([]);
+  });
+
+  const names = (out: Array<{ name: string }>) => out.map((i) => i.name);
+
+  it("sorts newest-first by default, and honours the other keys", () => {
+    const sorted = { ...opts, createdAt: (i: (typeof items)[number]) => i.at, name: (i: (typeof items)[number]) => i.name };
+    expect(names(applyRegistryQuery(items, RegistryQuerySchema.parse({}), sorted))).toEqual([
+      "orphan",
+      "test",
+      "build",
+    ]);
+    expect(
+      names(applyRegistryQuery(items, RegistryQuerySchema.parse({ sort: "recent", order: "asc" }), sorted)),
+    ).toEqual(["build", "test", "orphan"]);
+    // `name` reverses its default: A→Z is what a human means by "by name".
+    expect(names(applyRegistryQuery(items, RegistryQuerySchema.parse({ sort: "name" }), sorted))).toEqual([
+      "build",
+      "orphan",
+      "test",
+    ]);
+  });
+
+  it("sorts BEFORE limiting, so `limit` means the newest N", () => {
+    const out = applyRegistryQuery(items, RegistryQuerySchema.parse({ limit: 2 }), opts);
+    expect(names(out)).toEqual(["orphan", "test"]);
+  });
+
+  it("sorts a record with no stamp last, whichever direction is asked", () => {
+    const mixed = [{ name: "dated", at: 5 }, { name: "undated" }] as Array<{
+      name: string;
+      at?: number;
+    }>;
+    const o = { touchedAt: (i: (typeof mixed)[number]) => i.at };
+    expect(names(applyRegistryQuery(mixed, RegistryQuerySchema.parse({}), o))).toEqual([
+      "dated",
+      "undated",
+    ]);
+    expect(
+      names(applyRegistryQuery(mixed, RegistryQuerySchema.parse({ order: "asc" }), o)),
+    ).toEqual(["dated", "undated"]);
+  });
+
+  it("leaves the order alone when the catalog can't supply the sort key", () => {
+    const out = applyRegistryQuery(items, RegistryQuerySchema.parse({ sort: "created" }), opts);
+    expect(names(out)).toEqual(["build", "test", "orphan"]);
+  });
+
+  it("applies a facet through the catalog's own accessor", () => {
+    const withFacets = {
+      ...opts,
+      facets: { active: (i: (typeof items)[number]) => i.at >= 200 },
+    };
+    expect(
+      names(applyRegistryQuery(items, RegistryQuerySchema.parse({ active: true }), withFacets)),
+    ).toEqual(["orphan", "test"]);
+    // `false` is a filter in its own right, not "unset".
+    expect(
+      names(applyRegistryQuery(items, RegistryQuerySchema.parse({ active: false }), withFacets)),
+    ).toEqual(["build"]);
+  });
+
+  it("returns NOTHING for a facet the catalog can't answer — never silently drops it", () => {
+    // Same class of mistake as a narrow scope with no id: answering an
+    // unfiltered list would present it as a filtered one.
+    expect(applyRegistryQuery(items, RegistryQuerySchema.parse({ unmerged: true }), opts)).toEqual([]);
+    expect(applyRegistryQuery(items, RegistryQuerySchema.parse({ origin: "ui" }), opts)).toEqual([]);
+  });
+
+  it("matches `origin` exactly, through its accessor", () => {
+    const withOrigin = { ...opts, origin: (i: (typeof items)[number]) => (i.at > 100 ? "ui" : "agent") };
+    expect(
+      names(applyRegistryQuery(items, RegistryQuerySchema.parse({ origin: "agent" }), withOrigin)),
+    ).toEqual(["build"]);
   });
 });

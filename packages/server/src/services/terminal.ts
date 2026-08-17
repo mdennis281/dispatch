@@ -260,6 +260,16 @@ export class TerminalService {
    */
   private readonly archived = new Map<string, TerminalRecord>();
   private flushTimer?: ReturnType<typeof setInterval>;
+  /**
+   * Writes started but not awaited — the row a shell writes when it opens, and
+   * the archive a `kill` fires and forgets.
+   *
+   * Tracked so {@link flush} is a real BARRIER rather than "everything I knew
+   * about a tick ago". Without it, "the transcript survived the kill" was true
+   * only if you looked late enough, and teardown had no way to wait for the
+   * tail of a dying shell to reach disk before the process went away.
+   */
+  private readonly pendingWrites = new Set<Promise<unknown>>();
 
   constructor(opts: TerminalServiceOptions) {
     this.bus = opts.bus;
@@ -427,7 +437,7 @@ export class TerminalService {
     };
     this.archived.delete(key);
     this.terminals.set(key, term);
-    void this.persist(term);
+    this.track(this.persist(term));
 
     proc.stdout.on("data", (c) => this.onData(term, "stdout", c.toString()));
     proc.stderr.on("data", (c) => this.onData(term, "stderr", c.toString()));
@@ -653,9 +663,20 @@ export class TerminalService {
     this.flushTimer.unref?.();
   }
 
+  /** Remember a fire-and-forget write so {@link flush} can wait for it. */
+  private track(p: Promise<unknown>): void {
+    const done = p.catch(() => {});
+    this.pendingWrites.add(done);
+    void done.finally(() => this.pendingWrites.delete(done));
+  }
+
   /**
-   * Drain every terminal's queued output to its transcript and refresh its row.
-   * Public so teardown and the tests can force a settled state.
+   * Drain every terminal's queued output to its transcript and refresh its row,
+   * then wait for the writes nobody awaited.
+   *
+   * Public so teardown and the tests can force a settled state — and it has to
+   * be a real barrier for either to mean anything: teardown flushes so the tail
+   * of a dying dev server reaches disk before the process exits.
    */
   async flush(): Promise<void> {
     if (!this.store) return;
@@ -669,6 +690,12 @@ export class TerminalService {
       } catch {
         /* a transcript we couldn't write is not worth failing a command over */
       }
+    }
+    // Looped, not a single await: a tracked write can start another (a purge
+    // kills first, then deletes), and settling the set we captured on entry
+    // would leave that one in flight.
+    while (this.pendingWrites.size > 0) {
+      await Promise.allSettled([...this.pendingWrites]);
     }
   }
 
@@ -796,7 +823,7 @@ export class TerminalService {
     // archive and the transcript stays readable until retention takes it —
     // "close the terminal" and "forget what the build said" are different asks,
     // and conflating them is what made a failed run unrecoverable.
-    void this.archiveOnClose(term);
+    this.track(this.archiveOnClose(term));
     this.bus.publish({ type: "terminal-closed", terminalId: term.id, chatId: term.chatId });
     return true;
   }
@@ -900,8 +927,9 @@ export class TerminalService {
    * Workspace view drives its controls from, so "what the modal shows" and "what
    * an agent's `list` returns" cannot disagree.
    *
-   * Sorted most-recently-active first: a roster is read to find what just
-   * happened far more often than to find what happened first.
+   * Ordering is the query's now (default: most-recently-active first) rather
+   * than a `.sort()` bolted on here, so the caller can ask for something else
+   * and get it.
    */
   catalog(query: RegistryQuery): TerminalInfo[] {
     const all = [
@@ -910,15 +938,43 @@ export class TerminalService {
         .filter((r) => !this.terminals.has(r.id))
         .map((r) => this.archivedView(r)),
     ];
-    const filtered = applyRegistryQuery(all, query, {
+    return applyRegistryQuery(all, query, {
       text: (t) => [t.name, t.cwd, t.lastCommand],
       touchedAt: (t) => t.lastActivityAt ?? t.updatedAt ?? t.createdAt,
+      createdAt: (t) => t.createdAt,
+      name: (t) => t.name,
+      origin: (t) => t.origin,
+      facets: {
+        // Deliberately the same bar as `isActiveTerminal` in
+        // packages/client/src/stores/terminals.ts, and narrower than "live":
+        // a shell stays live for the rest of the chat after its one `npm
+        // install` finished, so filtering on liveness returns mostly idle
+        // prompts. If that definition changes, change it in both places.
+        active: (t) => t.status === "live" && Boolean(t.busy || t.background),
+        archived: (t) => Boolean(t.archived),
+      },
     });
-    return filtered.sort(
-      (a, b) =>
-        (b.lastActivityAt ?? b.updatedAt ?? b.createdAt) -
-        (a.lastActivityAt ?? a.updatedAt ?? a.createdAt),
-    );
+  }
+
+  /**
+   * Kill every LIVE shell the query selects, and report what went.
+   *
+   * The selection runs through `catalog()`, so this reaps exactly the rows the
+   * Workspace view is showing when a human presses the button — including its
+   * scope invariants: `scope: "chat"` with no `chatId` selects nothing rather
+   * than quietly widening to every shell on the machine, which is the one
+   * mistake a bulk kill must not make.
+   *
+   * `kill()`, never `purge()`: each row archives and its transcript stays
+   * readable. Reclaiming a port and forgetting what the dev server printed on
+   * its way out are different asks.
+   */
+  killMatching(query: RegistryQuery): { killed: number; ids: string[] } {
+    const ids = this.catalog(query)
+      .filter((t) => t.status === "live" && !t.archived)
+      .map((t) => t.id);
+    const killed = ids.filter((id) => this.kill(id));
+    return { killed: killed.length, ids: killed };
   }
 
   /**

@@ -487,6 +487,18 @@ export const WorktreeInfoSchema = z.object({
   lastSeenAt: z.number().int().optional(),
   /** True for the project's primary checkout (never a disposable worktree). */
   isPrimary: z.boolean().optional(),
+  /**
+   * Whether this branch's work has landed on the trunk. UNDEFINED means nobody
+   * could tell — no resolvable trunk ref, or no store to read PRs from — which
+   * is a third answer, not a `false`.
+   *
+   * Two sources, OR'd, because neither alone is enough (see
+   * `WorktreeService.mergedBranches`): git's own ancestry, and the merged PRs
+   * Dispatch recorded. A squash merge rewrites history, so a landed branch is
+   * NOT an ancestor of the trunk and git will call it unmerged forever — which
+   * on a squash-merging repo would be almost every branch here.
+   */
+  merged: z.boolean().optional(),
 });
 export type WorktreeInfo = z.infer<typeof WorktreeInfoSchema>;
 

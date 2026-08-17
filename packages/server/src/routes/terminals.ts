@@ -4,6 +4,7 @@
  *   GET    /api/terminals/:id/output?tail=&since=&q=&stream= → TerminalLine[]
  *   POST   /api/terminals               → open an empty named shell
  *   POST   /api/terminals/run           → run a command in one
+ *   POST   /api/terminals/kill-all      → kill every live shell a query selects
  *   DELETE /api/terminals/:id?purge=1   → kill one (purge also drops its transcript)
  *
  * The GETs are read-only snapshots so a (re)connecting client re-materializes the
@@ -125,6 +126,31 @@ export function registerTerminalRoutes(app: FastifyInstance): void {
       timeoutMs: typeof req.body?.timeoutMs === "number" ? req.body.timeoutMs : undefined,
       background: req.body?.background === true,
     });
+  });
+
+  /**
+   * Bulk close, scoped by the SAME query the catalog is read with — so the
+   * button says "kill what I am looking at" and means it.
+   *
+   * Deliberately not on the MCP surface. A human pressing this in the Workspace
+   * modal can see the rows it will take; an agent asking for `scope: "all"`
+   * cannot, and would be one argument away from stopping another chat's dev
+   * server. Agents close their own shells one at a time, through DELETE below.
+   *
+   * The query's scope invariants carry over unchanged: `scope=chat` with no
+   * `chatId` kills NOTHING rather than widening to the whole machine — the one
+   * mistake a bulk kill really must not make.
+   */
+  app.post("/api/terminals/kill-all", async (req, reply) => {
+    try {
+      const query = parseRegistryQuery((req.body ?? {}) as Record<string, unknown>);
+      return terminals.killMatching(query);
+    } catch (err) {
+      if (err instanceof RegistryQueryError) {
+        return reply.code(400).send({ error: err.message });
+      }
+      throw err;
+    }
   });
 
   // Closing a shell keeps its transcript (retention will take it eventually);

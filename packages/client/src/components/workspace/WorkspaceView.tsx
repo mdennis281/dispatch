@@ -19,8 +19,10 @@
  * and the MCP tools take, so what a human sees here and what an agent gets back
  * from `worktree({ action: "list" })` are the same question.
  */
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  ArrowDownWideNarrow,
+  Check,
   FolderGit2,
   GitPullRequest,
   MessageSquare,
@@ -28,11 +30,19 @@ import {
   Search,
   SquareTerminal,
   Trash2,
+  X,
+  Zap,
 } from "lucide-react";
-import type { RegistryScope, TerminalInfo, WorktreeInfo } from "@dispatch/shared";
+import type {
+  RegistryScope,
+  RegistrySort,
+  TerminalInfo,
+  WorktreeInfo,
+} from "@dispatch/shared";
 import { Modal, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { Chip, type Tone } from "../ui/Chip.js";
+import { Select } from "../ui/Select.js";
 import { Spinner } from "../ui/Spinner.js";
 import { Tabs } from "../ui/Tabs.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
@@ -43,7 +53,11 @@ import { useOverlay } from "../../stores/view.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
 import { selectChat } from "../../stores/navigation.js";
-import { useWorkspace, type WorkspaceKind } from "../../stores/workspace.js";
+import {
+  useWorkspace,
+  type WorkspaceFilters,
+  type WorkspaceKind,
+} from "../../stores/workspace.js";
 
 /* --------------------------------------------------------------- utilities */
 
@@ -58,6 +72,42 @@ const ORIGIN_TONE: Record<string, Tone> = {
   agent: "accent",
   harness: "warn",
   external: "warn",
+};
+
+/**
+ * The sort keys are `RegistryQuery`'s three, but the FIELD each one reads is
+ * per-catalog — so the labels are too. "Recent" is a worktree's last sighting
+ * and a shell's last output, and calling both "Recent" in the menu would hide
+ * that the two tabs are answering with different clocks.
+ */
+const SORT_LABELS: Record<WorkspaceKind, Record<RegistrySort, string>> = {
+  worktrees: { recent: "Last seen", created: "Created", name: "Branch" },
+  terminals: { recent: "Last activity", created: "Created", name: "Name" },
+  prs: { recent: "Recent", created: "Created", name: "Title" },
+};
+
+/** Which toggles belong to which tab, and what each one says it does. */
+const FACETS: Record<"worktrees" | "terminals", Array<{
+  key: keyof WorkspaceFilters;
+  label: string;
+  tip: string;
+}>> = {
+  worktrees: [
+    {
+      key: "unmerged",
+      label: "Unmerged",
+      tip: "Branches whose work isn't on the trunk yet — plus any the app couldn't determine",
+    },
+    {
+      key: "unattributed",
+      label: "Unattributed",
+      tip: "Worktrees no chat owns — the state this catalog exists to surface",
+    },
+  ],
+  terminals: [
+    { key: "active", label: "Active", tip: "Running a command, or holding a background one" },
+    { key: "hideArchived", label: "Hide archived", tip: "Hide shells whose process is gone" },
+  ],
 };
 
 /* ------------------------------------------------------------------- rows */
@@ -155,6 +205,11 @@ function WorktreeRow({ wt, showProject }: { wt: WorktreeInfo; showProject: boole
               )}
             </>
           )}
+          {/* Only the LANDED state is chipped. "Unmerged" is the resting state
+              of nearly every tree here, so a chip for it would sit on every row
+              and say nothing; "merged" is the one that means you can delete
+              this. Its absence is what the Unmerged filter selects on. */}
+          {wt.merged === true && <Chip tone="muted">merged</Chip>}
           {wt.label && <Chip tone="neutral">{wt.label}</Chip>}
         </>
       }
@@ -221,12 +276,95 @@ function TerminalRow({
   );
 }
 
+/**
+ * Kill every live shell the current question selects.
+ *
+ * Two clicks, like `StashesTab`'s stash drop: this stops real processes — a dev
+ * server mid-build, a watcher — and at "Everything" scope it reaches into other
+ * people's chats, so it must not be one stray click away. The label names the
+ * count so the second click is a decision about a number rather than a leap.
+ *
+ * It does NOT delete transcripts. Killing a shell archives its row and keeps its
+ * output readable, which is the difference between reclaiming a port and losing
+ * the log that says why it was held.
+ */
+function KillAllButton({
+  count,
+  scopeLabel,
+  busy,
+  onKill,
+}: {
+  count: number;
+  scopeLabel: string;
+  busy: boolean;
+  onKill: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  // A refetch that drops the count to zero (or a tab switch) must not leave a
+  // primed confirm behind for the next thing that lands in this spot.
+  useEffect(() => {
+    if (count === 0) setConfirming(false);
+  }, [count]);
+
+  if (count === 0) return null;
+  if (!confirming) {
+    return (
+      <Button
+        variant="ghost"
+        size="sm"
+        className="hover:!text-danger"
+        title={`Stop ${count} running shell${count === 1 ? "" : "s"} ${scopeLabel}. Transcripts are kept.`}
+        onClick={() => setConfirming(true)}
+      >
+        <Zap size={13} /> Kill {count} running
+      </Button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1">
+      <span className="text-xs text-muted">Kill {count} {scopeLabel}?</span>
+      <Button
+        variant="danger"
+        size="sm"
+        disabled={busy}
+        title="Confirm — the processes stop; their transcripts stay readable"
+        onClick={() => {
+          setConfirming(false);
+          onKill();
+        }}
+      >
+        <Check size={13} /> Kill
+      </Button>
+      <Button variant="ghost" size="sm" title="Cancel" onClick={() => setConfirming(false)}>
+        <X size={13} />
+      </Button>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------- view */
 
 export function WorkspaceView() {
   const { open, close } = useOverlay("workspace");
-  const { kind, scope, q, worktrees, terminals, loading, error, setKind, setScope, setQ, load } =
-    useWorkspace();
+  const {
+    kind,
+    scope,
+    sort,
+    filters,
+    q,
+    worktrees,
+    terminals,
+    loading,
+    killing,
+    error,
+    setKind,
+    setScope,
+    setSort,
+    toggleFilter,
+    setQ,
+    load,
+    killAll,
+  } = useWorkspace();
   const projectId = useProjects((s) => s.activeProjectId) ?? undefined;
   const chatId = useChats((s) => s.activeChatId) ?? undefined;
 
@@ -234,11 +372,13 @@ export function WorkspaceView() {
     void load({ projectId, chatId });
   }, [load, projectId, chatId]);
 
-  // Fetch on open and whenever the question changes. Not on `q`: that filter is
-  // applied to the rows we already have, so typing costs nothing.
+  // Fetch on open and whenever the QUESTION changes — the sort and the facets
+  // included, because the server is what answers them (`unmerged` needs git and
+  // the PR records; nothing in the browser can compute it). Not on `q`: that
+  // filter is applied to the rows we already have, so typing costs nothing.
   useEffect(() => {
     if (open) refresh();
-  }, [open, kind, scope, refresh]);
+  }, [open, kind, scope, sort, filters, refresh]);
 
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -252,6 +392,11 @@ export function WorkspaceView() {
 
   const list = kind === "worktrees" ? rows.worktrees : kind === "terminals" ? rows.terminals : [];
   const showProject = scope === "all";
+  // What "Kill all" would actually stop: a shell with a process behind it. The
+  // count comes off the VISIBLE rows so the button and the list can't disagree.
+  const runningCount = rows.terminals.filter((t) => t.status === "live" && !t.archived).length;
+  const scopeLabel =
+    scope === "chat" ? "in this chat" : scope === "project" ? "in this project" : "everywhere";
 
   const onPurge = useCallback(
     async (id: string) => {
@@ -312,6 +457,56 @@ export function WorkspaceView() {
           />
         </div>
 
+        {kind !== "prs" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Select<RegistrySort>
+              label="Sort"
+              leftIcon={<ArrowDownWideNarrow size={13} />}
+              value={sort}
+              onChange={setSort}
+              width={190}
+              options={[
+                {
+                  value: "recent",
+                  label: SORT_LABELS[kind].recent,
+                  hint: "Newest first",
+                },
+                {
+                  value: "created",
+                  label: SORT_LABELS[kind].created,
+                  hint: "Newest first",
+                },
+                { value: "name", label: SORT_LABELS[kind].name, hint: "A→Z" },
+              ]}
+            />
+            {FACETS[kind].map((f) => (
+              <Button
+                key={f.key}
+                variant="toggle"
+                size="sm"
+                // `aria-pressed` drives the pressed LOOK as well as the
+                // accessible state (see the `toggle` variant), so the two can
+                // never drift apart.
+                aria-pressed={filters[f.key]}
+                title={f.tip}
+                onClick={() => toggleFilter(f.key)}
+              >
+                {f.label}
+              </Button>
+            ))}
+            {kind === "terminals" && (
+              <div className="ml-auto">
+                <KillAllButton
+                  count={runningCount}
+                  scopeLabel={scopeLabel}
+                  busy={killing}
+                  onKill={() => void killAll({ projectId, chatId })}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
         <label className="flex items-center gap-2 rounded-md border border-line bg-inset px-2 py-1.5">
           <Search size={13} className="shrink-0 text-muted" />
           <input
@@ -340,9 +535,14 @@ export function WorkspaceView() {
             <EmptyState>
               {q
                 ? `Nothing matches “${q}”.`
-                : scope === "chat"
-                  ? `This chat has no ${kind}. Try a wider scope.`
-                  : `No ${kind} here yet.`}
+                : FACETS[kind].some((f) => filters[f.key])
+                  ? // Named separately from the scope hint because the fix is
+                    // different: an empty filtered list means turn a toggle off,
+                    // not widen the scope.
+                    `No ${kind} match these filters.`
+                  : scope === "chat"
+                    ? `This chat has no ${kind}. Try a wider scope.`
+                    : `No ${kind} here yet.`}
             </EmptyState>
           ) : kind === "worktrees" ? (
             rows.worktrees.map((w) => (

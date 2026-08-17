@@ -181,10 +181,24 @@ export interface RemoveWorktreeOptions {
 
 /* ----------------------------------------------------------------- service */
 
+/**
+ * How long a "which branches have landed?" answer is reused.
+ *
+ * Short enough that pressing Refresh after a merge tells the truth, long enough
+ * that the modal's own refetch-on-every-control-change doesn't re-shell-out per
+ * click. The answer is advisory — it decides a chip and a filter, never an
+ * action — so a few seconds of staleness costs nothing.
+ */
+const MERGED_TTL_MS = 10_000;
+
 export class WorktreeService {
   private readonly bus?: EventBus;
   private readonly store?: Store;
   private readonly exec: ExecFn;
+
+  /** Per-project merged-branch answers, and the app-wide PR half. See {@link mergedBranches}. */
+  private readonly mergedByProject = new Map<string, { at: number; branches: Set<string> }>();
+  private mergedByPr?: { at: number; branches: Set<string> };
 
   /**
    * Optional hook fired after a worktree is removed THROUGH this service (a
@@ -319,7 +333,10 @@ export class WorktreeService {
     // The primary checkout is a worktree to git but not a disposable one to us:
     // it is never attributed to a chat and must never be catalogued as removable.
     const disposable = live.filter((w) => !samePath(w.path, project.repoPath));
-    const records = await this.sync(project, disposable);
+    const [records, merged] = await Promise.all([
+      this.sync(project, disposable),
+      this.mergedBranches(project),
+    ]);
     return live.map((w) => {
       const rec = findRecord(records, w.path);
       const isPrimary = samePath(w.path, project.repoPath);
@@ -333,8 +350,103 @@ export class WorktreeService {
         createdAt: rec?.createdAt,
         lastSeenAt: rec?.lastSeenAt,
         isPrimary: isPrimary || undefined,
+        // The trunk is not "merged into itself", and a detached HEAD (branch
+        // `(detached)`) is not a branch — both are left UNKNOWN rather than
+        // answered `false`, which would read as "has unlanded work".
+        merged:
+          isPrimary || !merged || w.branch.startsWith("(")
+            ? undefined
+            : merged.has(w.branch),
       });
     });
+  }
+
+  /**
+   * The branches whose work is already on the trunk — or `null` when nothing
+   * could tell us. ONE git call per project, never one per worktree: at ~70
+   * trees a per-tree `rev-list` would put ~3s of process spawns in front of
+   * every list, and this is a chip, not a gate.
+   *
+   * Two sources, unioned, because each misses what the other catches:
+   *
+   *   1. `for-each-ref --merged <trunk>` — git's own ancestry. Exact for a
+   *      merge- or rebase-merged branch, and free.
+   *   2. The merged PRs Dispatch already recorded on chats (`Chat.prs`). This
+   *      is the load-bearing half HERE: this repo squash-merges, and a squash
+   *      rewrites the commits, so a landed branch is not an ancestor of the
+   *      trunk and source 1 calls it unmerged forever. Without this, "unmerged
+   *      only" on a squash-merging repo selects nearly everything.
+   *
+   * The gap left over is a branch squash-merged outside Dispatch, with no PR
+   * record: it reads as unmerged. That is the safe direction — the filter shows
+   * a tree you may not need, rather than hiding one that still holds work.
+   */
+  private async mergedBranches(project: Project): Promise<Set<string> | null> {
+    const now = Date.now();
+    const cached = this.mergedByProject.get(project.id);
+    if (cached && now - cached.at < MERGED_TTL_MS) return cached.branches;
+    const [ancestors, landed] = await Promise.all([
+      this.branchesMergedIntoTrunk(project),
+      this.branchesWithMergedPr(),
+    ]);
+    // Neither source could answer → `undefined`, not "nothing is merged".
+    if (!ancestors && !landed) return null;
+    const branches = new Set([...(ancestors ?? []), ...(landed ?? [])]);
+    this.mergedByProject.set(project.id, { at: now, branches });
+    return branches;
+  }
+
+  /** Source 1: local branches that are ancestors of the trunk. `null` = couldn't ask. */
+  private async branchesMergedIntoTrunk(project: Project): Promise<Set<string> | null> {
+    const def = project.defaultBranch ?? "main";
+    // `origin/<default>` is the truth about what has LANDED; local `<default>`
+    // is the fallback for a clone with no remote (the same order `diffVsMain`
+    // resolves its base in).
+    let trunk: string | undefined;
+    for (const ref of [`origin/${def}`, def]) {
+      if (await this.refExists(project.repoPath, ref)) {
+        trunk = ref;
+        break;
+      }
+    }
+    if (!trunk) return null;
+    const r = await this.exec(
+      "git",
+      // `--merged=<ref>` rather than a separate argument, and `--end-of-options`
+      // before the pattern: neither the ref nor `refs/heads` can then be read as
+      // a flag, the same rule every other git call in this file follows.
+      ["for-each-ref", "--format=%(refname:short)", `--merged=${trunk}`, "--end-of-options", "refs/heads"],
+      { cwd: project.repoPath },
+    );
+    if (r.exitCode !== 0) return null;
+    return new Set(
+      r.stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
+  }
+
+  /** Source 2: branches whose recorded PR reached `merged`. `null` = no store. */
+  private async branchesWithMergedPr(): Promise<Set<string> | null> {
+    if (!this.store) return null;
+    const now = Date.now();
+    if (this.mergedByPr && now - this.mergedByPr.at < MERGED_TTL_MS) {
+      return this.mergedByPr.branches;
+    }
+    try {
+      const branches = new Set<string>();
+      for (const chat of await this.store.listChats()) {
+        for (const pr of chat.prs ?? []) {
+          if (pr.state === "merged" && pr.branch) branches.add(pr.branch);
+        }
+      }
+      this.mergedByPr = { at: now, branches };
+      return branches;
+    } catch {
+      /* an unreadable chat must not make every worktree look unmerged */
+      return null;
+    }
   }
 
   /**
@@ -352,6 +464,18 @@ export class WorktreeService {
     return applyRegistryQuery(all, query, {
       text: (w) => [w.path, w.branch, w.label, w.origin],
       touchedAt: (w) => w.lastSeenAt ?? w.createdAt,
+      createdAt: (w) => w.createdAt,
+      name: (w) => w.branch,
+      origin: (w) => w.origin,
+      facets: {
+        // UNKNOWN counts as unmerged. A tree whose state nobody could determine
+        // is exactly the one worth looking at; hiding it would be the filter
+        // quietly deciding the work has landed.
+        unmerged: (w) => !w.isPrimary && w.merged !== true,
+        // The primary checkout has no owning chat BY DESIGN, so it is never the
+        // answer to "what did the registry fail to attribute?".
+        unattributed: (w) => !w.isPrimary && !w.chatId,
+      },
     });
   }
 

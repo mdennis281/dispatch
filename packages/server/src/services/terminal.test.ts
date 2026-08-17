@@ -768,4 +768,117 @@ describe("TerminalService — durable roster and transcripts", () => {
     const grepped = await svc.tail("c1", "build", 50, { q: "compil" });
     expect(grepped.output).toBe("compiled");
   });
+
+  it("orders by the query, newest-first by default", async () => {
+    let clock = 1_000;
+    const { svc } = makeService({ now: () => clock });
+    await svc.run({ chatId: "c1", name: "zebra", command: "printout a", cwd: "C:\\repo" });
+    clock = 2_000;
+    await svc.run({ chatId: "c1", name: "alpha", command: "printout b", cwd: "C:\\repo" });
+
+    expect(svc.catalog({ scope: "all" }).map((t) => t.name)).toEqual(["alpha", "zebra"]);
+    expect(svc.catalog({ scope: "all", sort: "name" }).map((t) => t.name)).toEqual([
+      "alpha",
+      "zebra",
+    ]);
+    expect(
+      svc.catalog({ scope: "all", sort: "recent", order: "asc" }).map((t) => t.name),
+    ).toEqual(["zebra", "alpha"]);
+  });
+
+  it("`active` is narrower than live — an idle shell is not doing anything", async () => {
+    const { svc } = makeService();
+    // Finished: live, but idle. This is the row that made the old live-count
+    // badge useless, and the reason the facet exists.
+    await svc.run({ chatId: "c1", name: "build", command: "printout done", cwd: "C:\\repo" });
+    await svc.run({
+      chatId: "c1",
+      name: "server",
+      command: "serve forever",
+      cwd: "C:\\repo",
+      background: true,
+    });
+
+    expect(svc.catalog({ scope: "all" })).toHaveLength(2);
+    expect(svc.catalog({ scope: "all", active: true }).map((t) => t.name)).toEqual(["server"]);
+    expect(svc.catalog({ scope: "all", active: false }).map((t) => t.name)).toEqual(["build"]);
+  });
+
+  it("filters archived rows and origin", async () => {
+    const { svc } = makeService({ store });
+    await svc.run({ chatId: "c1", name: "build", command: "printout x", cwd: "C:\\repo" });
+    await svc.run({
+      chatId: "c1",
+      name: "typed",
+      command: "printout y",
+      cwd: "C:\\repo",
+      origin: "ui",
+    });
+    svc.kill("c1::build");
+    // `flush()` is the barrier: the kill's archive write is fire-and-forget.
+    await svc.flush();
+
+    expect(svc.catalog({ scope: "all", archived: true }).map((t) => t.name)).toEqual(["build"]);
+    expect(svc.catalog({ scope: "all", archived: false }).map((t) => t.name)).toEqual(["typed"]);
+    expect(svc.catalog({ scope: "all", origin: "ui" }).map((t) => t.name)).toEqual(["typed"]);
+    expect(svc.catalog({ scope: "all", origin: "agent" }).map((t) => t.name)).toEqual(["build"]);
+  });
+
+  it("returns nothing for a facet terminals can't answer, rather than everything", () => {
+    const { svc } = makeService();
+    svc.create("c1", "shell", "C:\\repo");
+    expect(svc.catalog({ scope: "all" })).toHaveLength(1);
+    expect(svc.catalog({ scope: "all", unmerged: true })).toEqual([]);
+  });
+
+  it("kills the live shells the query selects, and keeps their transcripts", async () => {
+    const { svc, shells } = makeService({ store });
+    await svc.run({
+      chatId: "c1",
+      projectId: "p1",
+      name: "server",
+      command: "printout listening on 4319",
+      cwd: "C:\\repo",
+    });
+    await svc.run({
+      chatId: "c2",
+      projectId: "p2",
+      name: "other",
+      command: "printout untouched",
+      cwd: "C:\\other",
+    });
+
+    await svc.flush();
+    const { killed, ids } = svc.killMatching({ scope: "chat", chatId: "c1" });
+    expect(killed).toBe(1);
+    expect(ids).toEqual(["c1::server"]);
+    expect(shells[0]!.killed).toBe(true);
+    // The other chat's shell is untouched: a scoped kill that reached past its
+    // scope would be the whole hazard of having this verb at all.
+    expect(svc.catalog({ scope: "chat", chatId: "c2" }).map((t) => t.status)).toEqual(["live"]);
+
+    // Reaping is about the PROCESS. The row survives as archived and its output
+    // is still readable — "close the shell" and "forget what it said" stay
+    // different asks.
+    await svc.flush();
+    const row = svc.catalog({ scope: "chat", chatId: "c1" })[0]!;
+    expect(row).toMatchObject({ archived: true, status: "exited" });
+    const lines = await svc.scrollback("c1::server");
+    expect(lines.map((l) => l.chunk)).toContain("listening on 4319");
+  });
+
+  it("a narrow scope with no id kills NOTHING — never widens to the machine", async () => {
+    const { svc } = makeService();
+    await svc.run({ chatId: "c1", name: "server", command: "printout up", cwd: "C:\\repo" });
+    expect(svc.killMatching({ scope: "chat" })).toEqual({ killed: 0, ids: [] });
+    expect(svc.catalog({ scope: "all" }).map((t) => t.status)).toEqual(["live"]);
+  });
+
+  it("skips rows with no process behind them", async () => {
+    const { svc } = makeService({ store });
+    await svc.run({ chatId: "c1", name: "build", command: "printout done", cwd: "C:\\repo" });
+    svc.kill("c1::build");
+    await svc.flush();
+    expect(svc.killMatching({ scope: "all" })).toEqual({ killed: 0, ids: [] });
+  });
 });
