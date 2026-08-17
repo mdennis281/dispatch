@@ -30,8 +30,13 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
 /**
  * Raw `<button>` elements outside `components/ui/` at the time the ratchet was
  * introduced. Lower this as call sites migrate; never raise it.
+ *
+ * 85 → 84: the settings modals became pages. Two hand-rolled controls went with
+ * them — the project-config section rail and a private on/off switch, now
+ * `ui/Switch` — against one bare element added back, the settings rail row,
+ * which is a whole row that happens to be clickable.
  */
-const BASELINE = 85;
+const BASELINE = 84;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

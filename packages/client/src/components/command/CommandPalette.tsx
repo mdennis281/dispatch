@@ -38,7 +38,14 @@ import { actions } from "../../lib/actions.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
 import { selectChat, selectProject } from "../../stores/navigation.js";
-import { useView, openOverlay } from "../../stores/view.js";
+import {
+  useView,
+  openOverlay,
+  openAppSettings,
+  openProjectSettings,
+} from "../../stores/view.js";
+import { APP_SECTIONS } from "../settings/appSections.js";
+import { SECTIONS } from "../config/sections.js";
 import { requestFocusPanel, type FocusPanelTab } from "../panels/panelBus.js";
 import { Kbd } from "../ui/Kbd.js";
 import { cn } from "../../lib/cn.js";
@@ -187,8 +194,23 @@ export function CommandPalette({
         group: "Navigate",
         icon: <FileCog />,
         keywords: "config Dispatch manifest instructions subapps mcp agents modes memory export import cm scaffold reload",
-        run: () => openOverlay("config"),
+        run: () => openProjectSettings(),
       });
+      // One entry per subpage. This is what the modal couldn't do: its section
+      // was local state, so "Skills" was somewhere you had to arrive at rather
+      // than somewhere you could go. Each section's own `blurb` is the subtitle,
+      // so the palette explains what it is on the way there.
+      for (const s of SECTIONS) {
+        list.push({
+          id: `project-config-${s.id}`,
+          title: `Project config › ${s.label}`,
+          subtitle: s.blurb,
+          group: "Navigate",
+          icon: <s.icon />,
+          keywords: `config Dispatch ${s.noun} ${s.blurb}`,
+          run: () => openProjectSettings(s.id),
+        });
+      }
     }
 
     if (activeChatId) {
@@ -248,20 +270,33 @@ export function CommandPalette({
       group: "Navigate",
       icon: <SlidersHorizontal />,
       keywords: "preferences theme webhook config gear notifications",
-      run: () => openOverlay("settings"),
+      run: () => openAppSettings(),
     });
+    for (const s of APP_SECTIONS) {
+      list.push({
+        id: `settings-${s.id}`,
+        title: `Settings › ${s.label}`,
+        subtitle: s.blurb,
+        group: "Navigate",
+        icon: <s.icon />,
+        keywords: `settings preferences ${s.blurb}`,
+        run: () => openAppSettings(s.id),
+      });
+    }
 
     // "How do I quit this thing" is a top-level question, so it gets a top-level
     // answer — but it lands on the confirm rather than firing the stop, because
-    // one keystroke away from killing every running agent is too close.
+    // one keystroke away from killing every running agent is too close. It now
+    // lands on the SECTION that holds it rather than on a modal you then had to
+    // scroll to the bottom of.
     list.push({
       id: "stop-dispatch",
       title: "Stop Dispatch",
-      subtitle: "opens Settings → Stop",
+      subtitle: "opens Settings › System",
       group: "Actions",
       icon: <Power />,
       keywords: "quit exit shutdown kill halt close server stop app",
-      run: () => openOverlay("settings"),
+      run: () => openAppSettings("system"),
     });
 
     // Not gated on an active project — this is how the FIRST one gets made, and
