@@ -86,7 +86,7 @@ async function withRelease(manifest: unknown, latestTag: string | null): Promise
 }
 
 /**
- * Wait out the deferred launch a successful install schedules.
+ * Wait out the deferred launch(es) a successful install schedules.
  *
  * The route spawns 150ms AFTER the reply is flushed, so a test that ends at the
  * 200 leaves a timer armed — and it fires during whichever test runs next. The
@@ -96,8 +96,20 @@ async function withRelease(manifest: unknown, latestTag: string | null): Promise
  * That is a load-dependent failure (it only shows up when the whole suite runs
  * together), so every test that legitimately launches consumes its own launch
  * here rather than leaving it for a neighbour.
+ *
+ * Which is why the wait is on a call COUNT and the tag, not on a bare
+ * `toHaveBeenCalled()`. A bare one is satisfied by any call, including a
+ * neighbour's orphaned timer landing mid-test — it returned on a launch the test
+ * had not caused, the test's own timer stayed armed, and it fired two tests
+ * later inside `expect(launchUpdate).not.toHaveBeenCalled()`. That is exactly
+ * how "refuses a named tag when no head has been resolved at all" came to fail
+ * on `v2026.08.14.79778`, a tag it never asks for.
  */
-const settleLaunch = () => vi.waitFor(() => expect(launchUpdate).toHaveBeenCalled());
+const settleLaunch = (tag: string, times = 1) =>
+  vi.waitFor(() => {
+    expect(launchUpdate).toHaveBeenCalledTimes(times);
+    expect(launchUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ tag }));
+  });
 
 beforeEach(async () => {
   // A full reset, not `mockClear`: the install route spawns 150ms AFTER its
@@ -169,7 +181,7 @@ describe("POST /api/update/install", () => {
     // contract; a caller that gets a dropped socket cannot tell start from fail.
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.85068" });
-    await settleLaunch();
+    await settleLaunch("v2026.08.14.85068");
   });
 
   it("un-latches when the installer never actually launches", async () => {
@@ -185,6 +197,9 @@ describe("POST /api/update/install", () => {
     await vi.waitFor(() => expect(release.status().installing).toBeUndefined());
     const retry = await app.inject({ method: "POST", url: "/api/update/install" });
     expect(retry.statusCode).toBe(200);
+    // The retry arms a launch of its own, and that one is this file's actual
+    // escapee: nothing above waits for it, so it fired during a later test.
+    await settleLaunch("v2026.08.14.85068", 2);
   });
 
   it("refuses a second install once one is already running", async () => {
@@ -208,7 +223,7 @@ describe("POST /api/update/install", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.79778" });
-    await settleLaunch();
+    await settleLaunch("v2026.08.14.79778");
   });
 
   it("refuses any tag that is not the channel head", async () => {
