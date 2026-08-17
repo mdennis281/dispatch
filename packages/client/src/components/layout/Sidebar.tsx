@@ -13,6 +13,7 @@ import {
   Trash2,
   Pencil,
   Brain,
+  FolderOpen,
   GitBranch,
   type LucideIcon,
 } from "lucide-react";
@@ -585,6 +586,18 @@ export function Sidebar() {
             active={view === "git"}
             onClick={() => {
               setView(view === "git" ? "chat" : "git");
+              dismissLeftDrawer();
+            }}
+          />
+          {/* Below Source Control because it's the wider lens on the same
+              thing: git shows what CHANGED in the checkout, this shows what's
+              on the disk — including the drives and mounts no repo covers. */}
+          <NavButton
+            icon={FolderOpen}
+            label="Files"
+            active={view === "files"}
+            onClick={() => {
+              setView(view === "files" ? "chat" : "files");
               dismissLeftDrawer();
             }}
           />

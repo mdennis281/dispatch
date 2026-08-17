@@ -3,7 +3,20 @@
  * click or ⌘/Ctrl-K, fuzzy-filters a live command list (switch chat/project, new
  * chat, open settings, jump to a right-panel tab, regenerate title…), and runs
  * the selected command. Fully keyboard-driven: ↑/↓ move, Enter runs, Esc closes.
- * Zero deps — the fuzzy matcher + portal overlay are local.
+ *
+ * It also searches the active project's FILES, because "where is that file" is
+ * the same shape of question as "where is that setting" and answering it
+ * somewhere else means remembering which search box knows about which. Those
+ * results come from the server (a browser cannot see a filesystem) through the
+ * git-backed index, so they honour `.gitignore` and cost one `git ls-files` per
+ * ten seconds rather than a walk per keystroke.
+ *
+ * File hits are appended AFTER the commands rather than merged into the fuzzy
+ * ranking: they're already ranked by the server, and interleaving two scores
+ * computed by different scorers produces an order that looks arbitrary from
+ * either side. Commands are a closed set you're recalling; files are an open
+ * set you're searching — keeping them in that order means typing a command name
+ * never gets outbid by a file that happens to share letters.
  */
 import {
   useCallback,
@@ -33,8 +46,12 @@ import {
   ArrowUp,
   ArrowDown,
   Power,
+  FolderOpen,
+  FileText,
 } from "lucide-react";
 import { actions } from "../../lib/actions.js";
+import { api } from "../../lib/api.js";
+import { openCodeViewer } from "../monaco/store.js";
 import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
 import { selectChat, selectProject } from "../../stores/navigation.js";
@@ -86,6 +103,73 @@ function fuzzyScore(query: string, text: string): number | null {
     }
   }
   return qi === q.length ? score : null;
+}
+
+/** Below this, a query is too broad to be worth a round trip per keystroke. */
+const FILE_SEARCH_MIN_CHARS = 2;
+/** How many file hits the palette shows before the list stops being scannable. */
+const FILE_SEARCH_LIMIT = 8;
+/** One request per typing pause, not per character. */
+const FILE_SEARCH_DEBOUNCE_MS = 140;
+
+/**
+ * The active project's files matching `query`, as palette commands.
+ *
+ * Returns `[]` for a short query or no project rather than an error state: an
+ * empty file section is indistinguishable from "still typing", and a palette
+ * that flashes a diagnostic while you type is worse than one that shows the
+ * commands it already has.
+ */
+function useProjectFileCommands(
+  query: string,
+  projectId: string | undefined,
+  repoPath: string | undefined,
+  open: boolean,
+): Command[] {
+  const [files, setFiles] = useState<{ rel: string; abs: string }[]>([]);
+
+  useEffect(() => {
+    const q = query.trim();
+    if (!open || !projectId || q.length < FILE_SEARCH_MIN_CHARS) {
+      setFiles([]);
+      return;
+    }
+    // `live` rather than an AbortController: the responses are small and the
+    // cost worth avoiding is a STALE one overwriting a fresh one, which this
+    // covers without the request bookkeeping.
+    let live = true;
+    const timer = setTimeout(() => {
+      api.files
+        .searchProject(projectId, q, FILE_SEARCH_LIMIT)
+        .then((res) => live && setFiles(res.files))
+        .catch(() => live && setFiles([]));
+    }, FILE_SEARCH_DEBOUNCE_MS);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [query, projectId, open]);
+
+  return useMemo(
+    () =>
+      files.map((file) => ({
+        id: `file-${file.abs}`,
+        title: file.rel.split("/").pop() ?? file.rel,
+        // The directory is most of what you wanted to know — two files with the
+        // same basename are otherwise indistinguishable rows.
+        subtitle: file.rel,
+        group: "Files",
+        icon: <FileText />,
+        run: () =>
+          openCodeViewer({
+            worktreePath: repoPath ?? "",
+            relPath: file.rel,
+            mode: "file",
+            base: "main",
+          }),
+      })),
+    [files, repoPath],
+  );
 }
 
 /** Fire-and-focus a new chat (mirrors the sidebar's create+auto-select). */
@@ -155,6 +239,7 @@ export function CommandPalette({
     const list: Command[] = [];
     const project = projects.find((p) => p.id === activeProjectId) ?? null;
 
+
     if (project) {
       list.push({
         id: "new-chat",
@@ -178,6 +263,18 @@ export function CommandPalette({
         keywords:
           "workspace worktree worktrees terminal terminals shell shells catalog registry all everything scope orphan unattributed",
         run: () => openOverlay("workspace"),
+      });
+      // The file manager: this machine's disks, not just the checkout. Distinct
+      // from the file HITS below, which only ever cover the project.
+      list.push({
+        id: "browse-files",
+        title: "Browse files",
+        subtitle: "this machine's drives, mounts, projects and worktrees",
+        group: "Navigate",
+        icon: <FolderOpen />,
+        keywords:
+          "files file explorer browse folder directory disk drive volume mount path finder manager",
+        run: () => useView.getState().setView("files"),
       });
       // Project-wide open-PR board (distinct from the per-chat "Go to PRs" panel).
       list.push({
@@ -356,6 +453,14 @@ export function CommandPalette({
     return list;
   }, [projects, activeProjectId, chatsById, chatOrder, activeChatId]);
 
+  const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
+  const fileCommands = useProjectFileCommands(
+    query,
+    activeProject?.id,
+    activeProject?.repoPath,
+    open,
+  );
+
   const results = useMemo(() => {
     const scored: { cmd: Command; score: number; i: number }[] = [];
     commands.forEach((cmd, i) => {
@@ -365,8 +470,11 @@ export function CommandPalette({
     });
     // stable: by score desc, then original order.
     scored.sort((a, b) => b.score - a.score || a.i - b.i);
-    return scored.map((s) => s.cmd);
-  }, [commands, query]);
+    // Files last — see the header note. They arrive already ranked, so folding
+    // them into the sort above would re-rank them by a scorer that never saw
+    // the repo.
+    return [...scored.map((s) => s.cmd), ...fileCommands];
+  }, [commands, query, fileCommands]);
 
   // keep the active index in range as the result set changes.
   useEffect(() => {
@@ -443,7 +551,7 @@ export function CommandPalette({
               setQuery(e.target.value);
               setActive(0);
             }}
-            placeholder="Search or run a command…"
+            placeholder="Search files or run a command…"
             className="min-w-0 flex-1 bg-transparent text-lg text-primary placeholder:text-faint outline-none"
             spellCheck={false}
             autoComplete="off"
@@ -454,7 +562,13 @@ export function CommandPalette({
         <div ref={listRef} className="cm-scroll max-h-[52vh] overflow-y-auto p-1.5">
           {results.length === 0 ? (
             <div className="px-3 py-10 text-center text-base text-muted">
-              No commands match “{query}”.
+              Nothing matches “{query}”.
+              {/* Naming the limit turns "this app can't find my file" into "this
+                  search doesn't cover that", which is actionable. */}
+              <span className="mt-1 block text-xs text-faint">
+                File search covers the project's tracked and untracked files.
+                Ignored files and other drives are in Browse files.
+              </span>
             </div>
           ) : (
             results.map((cmd, idx) => (

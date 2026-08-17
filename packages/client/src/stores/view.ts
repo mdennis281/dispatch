@@ -4,6 +4,7 @@ import type { ConfigSection } from "@dispatch/shared";
 /** The app's primary surface. "chat" = the transcript workspace; "memory" = the
  *  top-level, chat-independent memory browser (list+search + viewer); "git" =
  *  the project's Source Control cockpit (changes, history, branches, stashes);
+ *  "files" = the filesystem browser (this machine's disks, not just the repo);
  *  "new-project" = the full-bleed project setup page;
  *  "project-settings" / "app-settings" = the two settings pages.
  *
@@ -15,6 +16,7 @@ export type AppView =
   | "chat"
   | "memory"
   | "git"
+  | "files"
   | "new-project"
   | "project-settings"
   | "app-settings";
