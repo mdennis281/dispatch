@@ -10,6 +10,7 @@ import { isPrSettledIdle } from "@dispatch/shared";
 import {
   SessionBroker,
   EFFORT_THINKING_TOKENS,
+  makePrCreateBinding,
   statusForTool,
   type QueryFn,
 } from "./session-broker.js";
@@ -2513,5 +2514,96 @@ describe("SessionBroker — settled PRs", () => {
     const stored = await store.getChat("c1");
     expect(stored?.lastUserMessageAt).toBeGreaterThan(500);
     expect(isPrSettledIdle(stored!)).toBe(false);
+  });
+});
+
+/**
+ * `resolveRepo` shells out to `gh repo view`, so it fails for reasons that say
+ * nothing about this checkout — a GitHub outage, a dropped network, an expired
+ * token. The binding memoises the answer, and it used to memoise those too.
+ *
+ * That is what happened on 2026-08-17: GitHub's GraphQL API returned 503 while a
+ * chat was open, the binding cached `null`, and every `create_pr` for the rest of
+ * that session refused with "could not resolve this chat's repo or branch" —
+ * hours after GitHub had recovered. It could not discover it was wrong, because
+ * a cached answer never asks again.
+ */
+describe("makePrCreateBinding — repo resolution caching", () => {
+  function fakeGitHub(resolveRepo: () => Promise<string>) {
+    return {
+      resolveRepo,
+      sameRepository: async () => true,
+      prCreatePreflight: async () => ({
+        branch: "feat/x",
+        trunk: "main",
+        base: "main",
+        aheadOfBase: 1,
+        dirty: false,
+        existing: null,
+      }),
+    } as unknown as Parameters<typeof makePrCreateBinding>[0];
+  }
+
+  const opts = { trunk: "main", reviewers: [] as string[], draft: false };
+
+  it("retries after a failure instead of refusing for the rest of the session", async () => {
+    let calls = 0;
+    const binding = makePrCreateBinding(
+      fakeGitHub(async () => {
+        calls += 1;
+        // The outage, then the recovery.
+        if (calls === 1) throw new Error("HTTP 503: No server is currently available");
+        return "mdennis281/dispatch";
+      }),
+      "/repo",
+      "c1",
+      opts,
+    );
+
+    expect(await binding.preflight()).toBeNull();
+    // The whole point: the second call goes back to `gh` rather than replaying
+    // the 503, so the PR opens the moment GitHub is back.
+    expect(await binding.preflight()).toMatchObject({ branch: "feat/x" });
+    expect(calls).toBe(2);
+  });
+
+  it("still resolves only once when it succeeds", async () => {
+    let calls = 0;
+    const binding = makePrCreateBinding(
+      fakeGitHub(async () => {
+        calls += 1;
+        return "mdennis281/dispatch";
+      }),
+      "/repo",
+      "c1",
+      opts,
+    );
+
+    await binding.preflight();
+    await binding.preflight();
+    await binding.preflight();
+    expect(calls).toBe(1);
+  });
+
+  it("shares one in-flight resolve between concurrent callers", async () => {
+    let calls = 0;
+    let release: (v: string) => void = () => {};
+    const binding = makePrCreateBinding(
+      fakeGitHub(() => {
+        calls += 1;
+        return new Promise<string>((ok) => (release = ok));
+      }),
+      "/repo",
+      "c1",
+      opts,
+    );
+
+    const both = Promise.all([binding.preflight(), binding.preflight()]);
+    release("mdennis281/dispatch");
+    const [a, b] = await both;
+    expect(a).toMatchObject({ branch: "feat/x" });
+    expect(b).toMatchObject({ branch: "feat/x" });
+    // One `gh` for two callers — the memo still has to do its actual job.
+    expect(calls).toBe(1);
   });
 });

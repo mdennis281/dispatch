@@ -376,7 +376,7 @@ function makeGithubBinding(
  * re-create exactly the failure it exists to fix: each step individually
  * skippable, and nothing noticing when one was.
  */
-function makePrCreateBinding(
+export function makePrCreateBinding(
   github: GitHubService,
   cwd: string | undefined,
   chatId: string,
@@ -389,9 +389,32 @@ function makePrCreateBinding(
   },
 ): ManagerMcpPrCreate {
   let repoP: Promise<string | null> | undefined;
+  /**
+   * The repo this session opens PRs against, resolved once — but only once it
+   * has actually been resolved.
+   *
+   * `resolveRepo` shells out to `gh repo view`, so it fails for reasons that have
+   * nothing to do with this checkout: a GitHub outage, a dropped network, an
+   * expired token. Caching those was caching a fact about one bad minute for the
+   * life of the session. During a GitHub incident this binding answered `null`
+   * to a 503, memoised it, and then went on refusing every `create_pr` with
+   * "could not resolve this chat's repo or branch" for hours after GitHub had
+   * recovered — the one failure mode where the tool is both wrong and unable to
+   * discover that it is wrong, because it never asks again.
+   *
+   * So the promise is still shared while it is in flight (concurrent callers must
+   * not each spawn a `gh`), and dropped the moment it settles as a failure, which
+   * makes the next call a retry.
+   */
   const repoFor = async (): Promise<string | null> => {
     if (!cwd) return null;
-    return (repoP ??= github.resolveRepo(cwd).catch(() => null));
+    const inflight = (repoP ??= github.resolveRepo(cwd).catch(() => null));
+    const repo = await inflight;
+    // Compare against the promise we awaited, not `repoP` as it stands now: a
+    // concurrent caller may already have installed a fresh attempt, and clearing
+    // that one would throw away a resolve that is about to succeed.
+    if (repo === null && repoP === inflight) repoP = undefined;
+    return repo;
   };
 
   /**
