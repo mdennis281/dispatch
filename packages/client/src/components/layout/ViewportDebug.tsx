@@ -145,7 +145,13 @@ function ViewportReadout() {
   // so the bar's bottom is cut rather than merely low. This must be 0.
   const over = (m.shellBottom || m.shell) - m.clientHeight;
   const rows: Array<[string, string, boolean]> = [
-    ["shell", `${m.dvh} (dvh)`, false],
+    // `m.shell`, not `m.dvh`: the store already resolves the fallback
+    // (`dvh || innerHeight`), and that is the same number `over` is computed
+    // from. Reading the raw probe here would report `shell 0` on any frame the
+    // probe hasn't measured yet, against an `over` derived from the fallback —
+    // a readout disagreeing with itself, which is the failure mode this whole
+    // overlay exists to end.
+    ["shell", `${m.shell} (dvh)`, false],
     ["dead", `${dead}`, false],
     // Non-zero means the shell is asking for more room than the layout viewport
     // has. That is the bottom nav being CLIPPED, not sitting short.
