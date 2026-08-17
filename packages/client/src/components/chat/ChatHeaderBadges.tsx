@@ -6,6 +6,13 @@ import { Button } from "../ui/Button.js";
 import { openOverlay } from "../../stores/view.js";
 import { cn } from "../../lib/cn.js";
 
+/** Names only what the cluster actually shows — a chat can have either alone. */
+function triggerLabel(branchCount: number, hasPr: boolean): string {
+  const branchPart = branchCount > 1 ? "Worktrees" : branchCount === 1 ? "Worktree" : null;
+  if (branchPart && hasPr) return `${branchPart} and pull request`;
+  return branchPart ?? "Pull request";
+}
+
 export interface ChatHeaderBadgesProps {
   /** Phone width: collapse to icons, put the words behind a tap. */
   compact: boolean;
@@ -80,7 +87,8 @@ export function ChatHeaderBadges({
         <Button
           size="md"
           onClick={toggle}
-          aria-label="Worktree and pull request"
+          aria-label={triggerLabel(branches.length, pr !== undefined)}
+          aria-expanded={open}
           className={cn("gap-1.5 px-2", open && "bg-elevated border-line-strong")}
         >
           {primaryBranch &&
@@ -105,7 +113,10 @@ export function ChatHeaderBadges({
               </p>
               {branches.map((branch, i) => (
                 <p
-                  key={branch}
+                  // Index-keyed: two worktrees can sit on the same branch, so
+                  // the name alone isn't unique. The list is render-only and
+                  // never reorders in place, so position is a fine identity.
+                  key={`${i}-${branch}`}
                   className={cn(
                     "cm-mono break-all text-2xs leading-4",
                     i === 0 && primaryMerged ? "text-success" : i === 0 ? "text-info-hi" : "text-muted",
