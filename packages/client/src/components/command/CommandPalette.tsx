@@ -158,6 +158,20 @@ export function CommandPalette({
         keywords: "create start task conversation",
         run: () => newChatAndFocus(project.id),
       });
+      // The cross-cutting catalog: worktrees + shells at chat / project / app
+      // scope. Distinct from the per-chat right-panel tabs, which only ever
+      // show the chat you're in — which is how a stray worktree or a shell in a
+      // closed chat stayed invisible.
+      list.push({
+        id: "workspace",
+        title: "Workspace",
+        subtitle: "worktrees, terminals and PRs across every scope",
+        group: "Navigate",
+        icon: <FolderGit2 />,
+        keywords:
+          "workspace worktree worktrees terminal terminals shell shells catalog registry all everything scope orphan unattributed",
+        run: () => openOverlay("workspace"),
+      });
       // Project-wide open-PR board (distinct from the per-chat "Go to PRs" panel).
       list.push({
         id: "project-prs",

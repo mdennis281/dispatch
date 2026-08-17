@@ -28,6 +28,7 @@ export type AppView = "chat" | "memory" | "git" | "new-project";
  * each other with no way to tell which Esc would dismiss.
  */
 export type AppOverlay =
+  | "workspace"
   | "prs"
   | "mcp"
   | "config"

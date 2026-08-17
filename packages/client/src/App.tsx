@@ -9,6 +9,7 @@ import { ChatView } from "./components/chat/ChatView.js";
 import { CodeViewerHost } from "./components/monaco/index.js";
 import { AgentRunHost } from "./components/agents/AgentRunHost.js";
 import { ProjectPRsView } from "./components/prs/ProjectPRsView.js";
+import { WorkspaceView } from "./components/workspace/WorkspaceView.js";
 import { ProcessesOverlay } from "./components/panels/ProcessesOverlay.js";
 import { McpCatalogView } from "./components/mcp/McpCatalogView.js";
 import { ProjectConfigView } from "./components/config/ProjectConfigView.js";
@@ -197,6 +198,7 @@ export default function App() {
           window-event buses and two stray useStates this used to take. */}
       <CodeViewerHost />
       <AgentRunHost />
+      <WorkspaceView />
       <ProjectPRsView />
       <ProcessesOverlay />
       <McpCatalogView />

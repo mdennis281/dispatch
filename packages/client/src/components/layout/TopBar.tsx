@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, Settings, GitPullRequest, Blocks, FileCog } from "lucide-react";
+import { Search, Settings, GitPullRequest, Blocks, FileCog, FolderGit2 } from "lucide-react";
 import { AttentionPopover } from "../attention/AttentionPopover.js";
 import { UsageMeter } from "./UsageMeter.js";
 import { CommandPalette } from "../command/CommandPalette.js";
@@ -119,6 +119,12 @@ export function TopBar() {
         {!compact && (
           <>
             <AttentionPopover />
+            <IconButton
+              tip="Workspace — worktrees, terminals, PRs"
+              onClick={() => openOverlay("workspace")}
+            >
+              <FolderGit2 />
+            </IconButton>
             <IconButton tip="Project config" onClick={() => openOverlay("config")}>
               <FileCog />
             </IconButton>

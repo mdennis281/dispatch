@@ -573,8 +573,15 @@ export const api = {
 
   /* worktrees */
   worktrees: {
-    list: (projectId: string) =>
-      get<WorktreeInfo[]>(`/api/worktrees${qs({ projectId })}`),
+    /**
+     * The catalog. A bare `projectId` keeps its original meaning (that project's
+     * trees); a full query widens to the chat or the whole app, through the same
+     * predicate the server applies to the `worktree` MCP tool's `list`.
+     */
+    list: (query: string | Partial<RegistryQuery>) =>
+      get<WorktreeInfo[]>(
+        `/api/worktrees${qs(typeof query === "string" ? { projectId: query } : { ...query })}`,
+      ),
     /** Local branches (recency-sorted) for the launch picker. */
     branches: (projectId: string) =>
       get<BranchInfo[]>(`/api/branches${qs({ projectId })}`),
