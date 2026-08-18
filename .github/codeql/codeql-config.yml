@@ -1,0 +1,39 @@
+# CodeQL analysis config — the query exclusions that survive a refactor.
+#
+# WHY THIS FILE EXISTS. Code scanning ran as GitHub's *default setup*, which
+# takes no configuration. The only lever it offers is dismissing alerts one at a
+# time, and a dismissal is bound to a fingerprint that includes a hash of its own
+# line's contents — so editing the line resurrects the alert under a NEW number,
+# undismissed. For a finding that is wrong about the whole PROJECT rather than
+# about one line, that means re-triaging the same false positive forever.
+#
+# There is a way to keep default setup and still supply this file: set the
+# `github-codeql-config-file` repository property (GA 2026-08-04). It does not
+# apply here — custom properties are organization-scoped and mdennis281/dispatch
+# is owned by a USER account, so `/properties/values` 404s. Advanced setup is the
+# only route to a query filter on this repo. See .github/workflows/codeql.yml.
+
+query-filters:
+  # js/missing-rate-limiting — 6 alerts, all false positives, and the rule will
+  # keep generating one for every future route that touches a file.
+  #
+  # It fires on any route handler that does filesystem I/O or authorization
+  # without a rate-limiter the query recognizes, which in practice means
+  # `@fastify/rate-limit`. Two independent reasons that is wrong here:
+  #
+  #   * Authorization IS throttled. `AuthService.limit()` in
+  #     services/auth.ts is a sliding-window limiter applied at seven call
+  #     sites — login at 8/min per IP plus a separate per-username bucket,
+  #     bootstrap 5 per 5min, refresh 30/min, setup redeem, passkey options and
+  #     verify. It is hand-rolled, so the query cannot see it.
+  #
+  #   * The filesystem routes are a single-user local file browser that
+  #     deliberately hands out the same authority as the terminal sitting next
+  #     to it (see the header of services/fs-explorer.ts). Rate-limiting a
+  #     browser tab against the disk of the person who opened it protects
+  #     nobody.
+  #
+  # The rule also mislocates: one of its six hits was start.ts's `onClose`
+  # shutdown hook, which is not a route handler at all.
+  - exclude:
+      id: js/missing-rate-limiting
