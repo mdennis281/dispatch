@@ -98,6 +98,36 @@
   --p-accent-2-line: rgba(109, 40, 217, 0.28);
   --p-accent-2-fg: #f7f3ff;
 
+  /* ── chart series ────────────────────────────────────────────────────────
+   * The same eight hues as dark, re-STEPPED for a white surface — not the dark
+   * values reused, and not an algorithmic lightening of them. Same fixed order,
+   * same no-ninth-hue rule (see dark.css for why the order is load-bearing).
+   *
+   * Validated as a set against this theme's `--p-panel` (#ffffff):
+   *   lightness band  PASS (all inside OKLCH L 0.43–0.77)
+   *   chroma floor    PASS
+   *   CVD separation  PASS — worst adjacent pair ΔE 9.1 (protan)
+   *   normal vision   PASS — worst adjacent pair ΔE 19.6
+   *   contrast        WARN — aqua (2.82), yellow (2.17) and magenta (2.69) sit
+   *                   below 3:1 on white.
+   *
+   * That WARN is not dismissable, and it is the reason the Metrics view always
+   * renders a legend AND a breakdown table beside every chart: the relief rule
+   * says a sub-3:1 series must have its identity and its value reachable without
+   * relying on the mark's colour. Remove the table and this palette stops being
+   * compliant on light.
+   */
+  --p-chart-1: #2a78d6; /* blue */
+  --p-chart-2: #eb6834; /* orange */
+  --p-chart-3: #1baf7a; /* aqua */
+  --p-chart-4: #eda100; /* yellow */
+  --p-chart-5: #e87ba4; /* magenta */
+  --p-chart-6: #008300; /* green */
+  --p-chart-7: #4a3aa7; /* violet */
+  --p-chart-8: #e34948; /* red */
+  --p-chart-other: #929cab;
+  --p-chart-grid: rgba(15, 23, 42, 0.1);
+
   /* ── semantics ───────────────────────────────────────────────────────────
    * The dark theme's semantics are all too light to read on white, so each is
    * re-picked at roughly 5:1 rather than shifted. Warn keeps its burnt-orange

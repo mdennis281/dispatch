@@ -99,6 +99,42 @@
   --p-accent-2-line: rgba(167, 139, 250, 0.34);
   --p-accent-2-fg: #14091f;
 
+  /* ── chart series ────────────────────────────────────────────────────────
+   * The categorical palette for the Metrics view. Eight slots, assigned in this
+   * FIXED ORDER and never cycled — a ninth series folds into "Other" rather than
+   * inventing a hue, because a generated ninth is indistinguishable from one of
+   * these under colour-blind simulation.
+   *
+   * The ORDER is the accessibility mechanism, not a preference. These eight were
+   * validated as a set against this theme's `--p-panel` (#111418), which is the
+   * surface the charts actually render on:
+   *   lightness band  PASS (all inside OKLCH L 0.48–0.67)
+   *   chroma floor    PASS
+   *   CVD separation  PASS — worst adjacent pair ΔE 8.4 (protan)
+   *   normal vision   PASS — worst adjacent pair ΔE 19.3
+   *   contrast        PASS — all eight ≥ 3:1 on #111418
+   * Re-order or re-value one and the guarantee is void: re-run the validator on
+   * the whole set against the panel colour, not just the changed slot.
+   *
+   * Deliberately NOT drawn from the accent tokens. `--p-accent` is the brand
+   * amber and means "this is selected / this is Dispatch"; a series wearing it
+   * would read as the highlighted one when it is just the fourth thing in a list.
+   */
+  --p-chart-1: #3987e5; /* blue */
+  --p-chart-2: #d95926; /* orange */
+  --p-chart-3: #199e70; /* aqua */
+  --p-chart-4: #c98500; /* yellow */
+  --p-chart-5: #d55181; /* magenta */
+  --p-chart-6: #008300; /* green */
+  --p-chart-7: #9085e9; /* violet */
+  --p-chart-8: #e66767; /* red */
+  /* The "Other" fold and de-emphasised marks. Grey on purpose: a residue is not
+   * a series, and giving it a hue makes it compete with the ones that are. */
+  --p-chart-other: #6b7280;
+  /* Gridlines: one step off the surface, never a mid-grey that competes with
+   * the marks. */
+  --p-chart-grid: rgba(255, 255, 255, 0.07);
+
   /* ── semantics ───────────────────────────────────────────────────────────
    * Muted on purpose — a transcript full of tool results would strobe with
    * saturated status colors. Each carries base / -hi / -ghost / -line so a

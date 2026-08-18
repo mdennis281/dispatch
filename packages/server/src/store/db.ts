@@ -123,6 +123,53 @@ const MIGRATIONS: ReadonlyArray<string> = [
   );
   CREATE INDEX checkpoint_chat ON checkpoint(chat_id, seq);
   `,
+  // 2 — the usage ledger behind the Metrics view. One row per thing an agent
+  // reached for: a tool call, a manager MCP endpoint, a skill, a memory that
+  // was surfaced or recalled, a block of project instructions that rode along.
+  //
+  // The one table here with no JSON `body` column. Every other table stores a
+  // validated entity and reads it back whole; nothing ever reads a metric row
+  // whole. Every read is an aggregate over its columns ("count by tool, by day,
+  // for one agent"), so the columns ARE the record — a body would be dead weight
+  // on the highest-row-count table in the file.
+  `
+  CREATE TABLE metric (
+    seq        INTEGER PRIMARY KEY,
+    ts         INTEGER NOT NULL,
+    category   TEXT    NOT NULL,
+    identifier TEXT    NOT NULL,
+    detail     TEXT,
+    project_id TEXT,
+    chat_id    TEXT,
+    agent      TEXT,
+    subagent   TEXT,
+    model      TEXT,
+    harness    TEXT,
+    turn       INTEGER,
+    ok         INTEGER,
+    source     TEXT    NOT NULL DEFAULT 'live',
+    -- The idempotency key. Every insert is OR IGNORE against this UNIQUE index,
+    -- which is what lets the transcript import (services/metrics-backfill.ts)
+    -- re-run without doubling history, and lets it race live recording of the
+    -- same call without either side having to know about the other.
+    event_key  TEXT    NOT NULL UNIQUE
+  );
+  -- Every chart is "a time window, optionally narrowed, grouped by one column",
+  -- so ts leads and the narrowing column follows.
+  CREATE INDEX metric_ts         ON metric(ts);
+  CREATE INDEX metric_category   ON metric(category, ts);
+  CREATE INDEX metric_project    ON metric(project_id, ts);
+  CREATE INDEX metric_chat       ON metric(chat_id, ts);
+  CREATE INDEX metric_agent      ON metric(agent, ts);
+  CREATE INDEX metric_identifier ON metric(identifier, ts);
+
+  -- Bookkeeping for the ledger itself — currently just the transcript import's
+  -- watermark, so a one-time import stays one-time across restarts.
+  CREATE TABLE metric_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

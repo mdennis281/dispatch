@@ -48,6 +48,8 @@ import { TrunkSyncService } from "./trunk-sync.js";
 import { PrReviewWatcher } from "./pr-review-watcher.js";
 import { PrRegistry } from "./pr-registry.js";
 import { FileIndexService } from "./file-index.js";
+import { MetricsService } from "./metrics.js";
+import { MetricsBackfill } from "./metrics-backfill.js";
 import { FsExplorerService } from "./fs-explorer.js";
 import { HarnessRegistry } from "../harness/index.js";
 import { ManagerMcpBridge } from "./mcp/manager-http.js";
@@ -87,6 +89,8 @@ export interface ServiceOverrides {
   release?: ReleaseService;
   resume?: ResumeScheduler;
   fileIndex?: FileIndexService;
+  metrics?: MetricsService;
+  metricsBackfill?: MetricsBackfill;
   fsExplorer?: FsExplorerService;
   trunkSync?: TrunkSyncService;
   prReviewWatcher?: PrReviewWatcher;
@@ -131,6 +135,10 @@ export interface Services extends ServiceBase {
   /** Schedules a chat to continue itself once a usage limit lifts. */
   resume: ResumeScheduler;
   fileIndex: FileIndexService;
+  /** The SQLite usage ledger behind the Metrics view. */
+  metrics: MetricsService;
+  /** The one-time transcript import that gives that view history on day one. */
+  metricsBackfill: MetricsBackfill;
   /** Directory listings, stats, drives/mounts and writes for the file explorer. */
   fsExplorer: FsExplorerService;
   /** Fast-forwards a project's primary checkout after its PRs land. */
@@ -194,6 +202,13 @@ export function createServices(
   // `.dispatch/` fall back to the `.data` store untouched (back-compat).
   // Constructed before `memory` so it can relocate a config-dir project's memory
   // to the repo's committable `.dispatch/memory/` source of truth.
+  // The usage ledger. Constructed before the broker because the broker RECORDS
+  // into it; per-instance (it lives in `.data`, never the shared `config/`) for
+  // the same reason `runners.json` is — two processes writing one SQLite file
+  // over a shared/network path is a corruption story nobody needs.
+  const metrics = overrides.metrics ?? new MetricsService({ db: store.stateDb });
+  const metricsBackfill =
+    overrides.metricsBackfill ?? new MetricsBackfill({ store, metrics });
   const projectConfig =
     overrides.projectConfig ?? new ProjectConfigService({ store, bus });
   // Per-project durable agent memory: injected at session start + exposed to the
@@ -280,6 +295,7 @@ export function createServices(
       harnesses,
       managerMcp,
       inspect,
+      metrics,
       deps: brokerDeps,
     });
   const title =
@@ -543,6 +559,8 @@ export function createServices(
     resume,
     fileIndex,
     fsExplorer,
+    metrics,
+    metricsBackfill,
     trunkSync,
     prReviewWatcher,
     prRegistry,
@@ -579,6 +597,24 @@ export function createServices(
           console.error(`[Dispatch] ${label}.start() failed (continuing):`, err);
         }
       };
+      // The usage ledger's flush timer. Rows buffer whether or not it is armed,
+      // so nothing is lost before this — it only decides how promptly the buffer
+      // reaches the disk.
+      safeStart("metrics", () => metrics.start());
+      // Reconstruct history from the transcripts, ONCE (see MetricsBackfill
+      // for the three guards). Deliberately not awaited: on a long-lived install
+      // this walks every chat that ever existed, and boot must not wait for it.
+      void metricsBackfill.run().then(
+        (r) => {
+          if (r.ran) {
+            console.log(
+              `[Dispatch] metrics: imported ${r.rows} row(s) from ${r.chats} chat(s).`,
+            );
+          }
+        },
+        (err: unknown) => console.error("[Dispatch] metrics backfill failed:", err),
+      );
+
       safeStart("attention", () => attention.start());
       safeStart("memoryCommitter", () => memoryCommitter.start());
       safeStart("notifier", () => notifier.start());
@@ -706,6 +742,11 @@ export function createServices(
       await runner.stopAll().catch(() => {});
       await broker.dispose().catch(() => {});
       await harnesses.dispose().catch(() => {});
+      // AFTER the broker: it is the thing still recording, and disarming the
+      // flush earlier would strand the last turn's rows in the buffer. This only
+      // flushes + disarms — the database handle belongs to `Store`, which closes
+      // it in its own teardown.
+      metrics.dispose();
       if (terminalSweep) clearInterval(terminalSweep);
       terminalSweep = undefined;
       // Kill any lingering persistent shells after the broker unwinds — flushing

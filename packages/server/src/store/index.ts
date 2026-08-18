@@ -283,6 +283,24 @@ export class Store {
   }
 
   /**
+   * The state database handle.
+   *
+   * Every OTHER table in this file is reached through a typed method on this
+   * class, and that stays the rule for anything storing an entity. The exception
+   * this exists for is the metrics ledger (services/metrics.ts): it stores no
+   * entity, and its entire read surface is aggregation SQL — bucketed series,
+   * faceted totals, dynamic group-by. Three hundred lines of that on `Store`
+   * would say nothing about the store and would bury the entity methods that do.
+   *
+   * It is exposed rather than duplicated because the alternative is a SECOND
+   * database file, which means a second connection, a second migration list, and
+   * a second thing to close before Windows will let you delete the data dir.
+   */
+  get stateDb(): StateDb {
+    return this.db;
+  }
+
+  /**
    * `all()` typed as the loose row shape `node:sqlite` actually returns. Every
    * caller here immediately narrows a known column, so a shared cast beats
    * repeating it at three dozen call sites.

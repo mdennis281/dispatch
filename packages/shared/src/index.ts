@@ -26,4 +26,5 @@ export * from "./notify.js";
 export * from "./titles.js";
 export * from "./version.js";
 export * from "./wire.js";
+export * from "./metrics.js";
 export * from "./pr-tools.js";

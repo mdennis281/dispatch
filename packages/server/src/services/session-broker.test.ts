@@ -17,6 +17,8 @@ import {
   type QueryFn,
 } from "./session-broker.js";
 import { MemoryService } from "./memory.js";
+import { MetricsService } from "./metrics.js";
+import { MetricsBackfill } from "./metrics-backfill.js";
 import { ProjectConfigService } from "./project-config.js";
 
 /* ------------------------------------------------------------------ fixtures */
@@ -66,7 +68,11 @@ function chatFor(id: string, projectId = "p1"): Chat {
   };
 }
 
-function makeBroker(fn: QueryFn, cap = 6): SessionBroker {
+function makeBroker(
+  fn: QueryFn,
+  cap = 6,
+  extra: Partial<ConstructorParameters<typeof SessionBroker>[0]> = {},
+): SessionBroker {
   let idc = 0;
   let clock = 1000;
   const broker = new SessionBroker({
@@ -74,6 +80,7 @@ function makeBroker(fn: QueryFn, cap = 6): SessionBroker {
     bus,
     maxActiveSessions: cap,
     deps: { query: fn, genId: () => `id-${++idc}`, now: () => ++clock },
+    ...extra,
   });
   brokers.push(broker);
   return broker;
@@ -2755,5 +2762,147 @@ describe("makePrCreateBinding — repo resolution", () => {
 
     expect(await binding.preflight()).toBeNull();
     expect(await binding.preflight()).toMatchObject({ branch: "feat/x" });
+  });
+});
+
+/* --------------------------------------------------------------- metrics */
+
+describe("SessionBroker — the usage ledger", () => {
+  /** A broker recording into a real ledger over the test store's database. */
+  function meteredBroker(fn: QueryFn) {
+    // flushMs 0: no timer, so every assertion reads what the code under test
+    // actually wrote rather than racing a background flush.
+    const metrics = new MetricsService({ db: store.stateDb, flushMs: 0 });
+    return { metrics, broker: makeBroker(fn, 6, { metrics }) };
+  }
+
+  async function runTurn(broker: SessionBroker, chat: Chat, text = "go") {
+    await store.saveChat(chat);
+    broker.create(chat);
+    const idle = broker.waitFor(chat.id, "idle");
+    await broker.sendMessage(chat.id, text);
+    await idle;
+  }
+
+  it("records each tool call with the chat, agent, model and runtime behind it", async () => {
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      toolUseMsg("Bash", { command: "ls" }, "tu-1"),
+      toolResultMsg("tu-1", "ok"),
+      resultMsg(),
+    ]);
+    const { metrics, broker } = meteredBroker(fn);
+    await runTurn(broker, { ...chatFor("c1"), agentId: "reviewer" });
+
+    const rows = metrics.recent();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      category: "tool",
+      identifier: "Bash",
+      chatId: "c1",
+      projectId: "p1",
+      agent: "reviewer",
+      // From the `init` handshake, not the chat record — it is what the runtime
+      // actually reported for this session.
+      model: "claude-test",
+      harness: "claude",
+      source: "live",
+    });
+  });
+
+  it("classifies a manager endpoint, a skill and a subagent as themselves", async () => {
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      toolUseMsg("mcp__manager__create_pr", {}, "tu-1"),
+      toolUseMsg("Skill", { skill: "code-review" }, "tu-2"),
+      toolUseMsg("Agent", { subagent_type: "Explore" }, "tu-3"),
+      resultMsg(),
+    ]);
+    const { metrics, broker } = meteredBroker(fn);
+    await runTurn(broker, chatFor("c1"));
+
+    const byCategory = Object.fromEntries(
+      metrics.recent().map((r) => [r.category, r.identifier]),
+    );
+    expect(byCategory).toEqual({
+      manager: "create_pr",
+      skill: "code-review",
+      subagent: "Explore",
+    });
+  });
+
+  it("attributes a subagent's own tool call to that subagent", async () => {
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      {
+        type: "assistant",
+        parent_tool_use_id: "tu-task",
+        uuid: "t-uuid",
+        session_id: "sess-1",
+        // The SDK's own field name for "which agent type emitted this".
+        subagent_type: "Explore",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "tu-9", name: "Grep", input: {} }],
+        },
+      },
+      resultMsg(),
+    ]);
+    const { metrics, broker } = meteredBroker(fn);
+    await runTurn(broker, chatFor("c1"));
+
+    const row = metrics.recent().find((r) => r.identifier === "Grep");
+    expect(row).toBeDefined();
+    // The main loop leaves this null; only a spawned thread fills it, which is
+    // what makes "which agent called what" answerable at all.
+    expect(row?.subagent).toBe("Explore");
+  });
+
+  it("keys a call with no id the same way the transcript does, so an import can't double it", async () => {
+    // A tool_use block with no `id` of its own. The transcript row gets a
+    // generated one; the ledger has to get the SAME one, or a later backfill
+    // re-reads that row, computes a different event_key, and counts the call
+    // twice.
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      {
+        type: "assistant",
+        parent_tool_use_id: null,
+        uuid: "t-uuid",
+        session_id: "sess-1",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }],
+        },
+      },
+      resultMsg(),
+    ]);
+    const { metrics, broker } = meteredBroker(fn);
+    await runTurn(broker, chatFor("c1"));
+    // `stats()` reports stored vs buffered separately (it backs a health
+    // readout), so flush before counting stored rows.
+    metrics.flush();
+    expect(metrics.stats().rows).toBe(1);
+
+    // The real invariant, asserted against the real importer rather than by
+    // re-deriving the key here.
+    const backfill = new MetricsBackfill({ store, metrics });
+    const res = await backfill.run();
+    expect(res.scanned).toBe(1); // the transcript row was found…
+    expect(res.rows).toBe(0); // …and recognised as already counted
+    expect(metrics.stats().rows).toBe(1);
+  });
+
+  it("runs the turn normally when there is no ledger to record into", async () => {
+    // Every recording path is fire-and-forget: a broker with no metrics service
+    // must behave identically, just uncounted.
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      toolUseMsg("Bash", { command: "ls" }, "tu-1"),
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await runTurn(broker, chatFor("c1"));
+    expect(broker.getStatus("c1")).toBe("idle");
   });
 });

@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
+  BarChart3,
   Menu,
   MessageSquare,
   Ship,
@@ -342,6 +343,11 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
             icon={<FolderOpen />}
             label="Files"
             onClick={() => goView(view === "files" ? "chat" : "files")}
+          />
+          <SheetRow
+            icon={<BarChart3 />}
+            label="Metrics"
+            onClick={() => goView(view === "metrics" ? "chat" : "metrics")}
           />
           <div className="my-1 h-px bg-line-soft" />
           <SheetRow

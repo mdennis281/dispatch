@@ -16,6 +16,7 @@ import { NewProjectView } from "./components/project/NewProjectView.js";
 import { MemoryView } from "./components/memory/MemoryView.js";
 import { GitView } from "./components/git/GitView.js";
 import { FilesView } from "./components/files/FilesView.js";
+import { MetricsView } from "./components/metrics/MetricsView.js";
 import { FilePickerHost } from "./components/files/FilePickerModal.js";
 import { AppSettingsView } from "./components/settings/AppSettingsView.js";
 import { ManageConfigDialog } from "./components/sidebar/ManageConfigDialog.js";
@@ -165,6 +166,8 @@ export default function App() {
             <GitView />
           ) : view === "files" ? (
             <FilesView />
+          ) : view === "metrics" ? (
+            <MetricsView />
           ) : view === "project-settings" ? (
             <ProjectSettingsView />
           ) : view === "app-settings" ? (

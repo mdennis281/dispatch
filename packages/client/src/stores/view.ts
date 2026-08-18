@@ -5,6 +5,7 @@ import type { ConfigSection } from "@dispatch/shared";
  *  top-level, chat-independent memory browser (list+search + viewer); "git" =
  *  the project's Source Control cockpit (changes, history, branches, stashes);
  *  "files" = the filesystem browser (this machine's disks, not just the repo);
+ *  "metrics" = the usage ledger (which agent reached for which tool, and when);
  *  "new-project" = the full-bleed project setup page;
  *  "project-settings" / "app-settings" = the two settings pages.
  *
@@ -17,6 +18,7 @@ export type AppView =
   | "memory"
   | "git"
   | "files"
+  | "metrics"
   | "new-project"
   | "project-settings"
   | "app-settings";
