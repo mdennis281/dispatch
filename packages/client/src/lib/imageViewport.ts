@@ -1,17 +1,32 @@
 /**
  * Zoom and pan, as pure arithmetic.
  *
- * The viewport maps image space (see doc.ts) onto the visible box, and is the
- * ONLY place the two spaces meet. Keeping it here rather than inside the
- * component means the fiddly parts — anchoring a zoom under the cursor, keeping
- * a pinch centred between two fingers, refusing to let the image be flung off
- * screen — are testable without a canvas or a DOM.
+ * The viewport maps image space onto the visible box, and is the ONLY place the
+ * two spaces meet. Keeping it here rather than inside the component means the
+ * fiddly parts — anchoring a zoom under the cursor, keeping a pinch centred
+ * between two fingers, refusing to let the image be flung off screen — are
+ * testable without a canvas or a DOM.
+ *
+ * Lives in `lib/` because it has two consumers: the annotator it was written
+ * for, and the chat's media viewer. Zoom-under-cursor is exactly the kind of
+ * arithmetic that is wrong in subtly different ways in each of two copies.
  *
  * The old editor had no zoom at all: it sized the image with `objectFit:
  * contain` into a fixed 64vh box, so a 3000px-wide screenshot was viewed at
  * roughly a third of scale and you annotated details you could not see.
  */
-import type { Rect } from "./doc.js";
+/**
+ * The rectangle `zoomToRect` frames. Declared structurally rather than imported
+ * from the annotator's `doc.ts`: this module moved OUT of the annotator so the
+ * chat's media viewer could share its arithmetic, and importing a shape back
+ * from the feature it was extracted from would re-couple the two.
+ */
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
 
 export interface Viewport {
   /** Image pixels per screen pixel. */

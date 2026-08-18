@@ -12,6 +12,7 @@ import type {
   AgentConfigInput,
   ModeConfig,
   AttentionItem,
+  NotificationPrefs,
   PermissionRequest,
   RunnerInstance,
   RegistryQuery,
@@ -260,6 +261,20 @@ export function assetUrl(chatId: string, image: { path: string }): string {
   if (/^(https?:|data:|blob:)/i.test(p)) return p;
   const name = p.split(/[\\/]/).pop() ?? p;
   return `${BASE}/api/chats/${chatId}/assets/${encodeURIComponent(name)}`;
+}
+
+/**
+ * The endpoint that serves a file from the PROJECT filesystem — what an agent's
+ * `![chart](out/chart.png)` resolves to.
+ *
+ * Separate from `assetUrl` because the two answer different questions.
+ * `assets/<name>` is content-addressed and immutable; a working-tree path is
+ * live, relative to the chat's worktree, and confined server-side. Conflating
+ * them would mean either caching a live file forever or re-fetching an
+ * immutable one on every scroll.
+ */
+export function fsAssetUrl(chatId: string, path: string): string {
+  return `${BASE}/api/chats/${chatId}/fs-asset?path=${encodeURIComponent(path)}`;
 }
 
 export class ApiError extends Error {
@@ -517,6 +532,31 @@ export const api = {
     /** Open permission/question requests to re-materialize inline cards on (re)connect. */
     pendingPermissions: () =>
       get<PermissionRequest[]>("/api/attention/permissions"),
+  },
+
+  /* web push — server-sent notifications (the only path an iOS app has) */
+  push: {
+    /** The VAPID public key `pushManager.subscribe` needs. */
+    key: () => get<{ publicKey: string }>("/api/push/key"),
+    devices: () =>
+      get<Array<{ id: string; label?: string; createdAt: number; updatedAt: number }>>(
+        "/api/push/devices",
+      ),
+    subscribe: (body: { subscription: unknown; prefs?: NotificationPrefs; label?: string }) =>
+      post<{ id: string; prefs: NotificationPrefs }>("/api/push/subscribe", body),
+    /**
+     * Retune one device's filters. Server-side because iOS revokes a
+     * subscription whose push handler declines to show anything — a muted event
+     * has to be one that is never sent. See lib/webPush.ts.
+     */
+    setPrefs: (endpoint: string, prefs: NotificationPrefs) =>
+      put<{ ok: true }>("/api/push/prefs", { endpoint, prefs }),
+    /** "The app is in front of me" — suppresses pushes to a screen already showing it. */
+    presence: (endpoint: string, inFront: boolean) =>
+      post<{ ok: true }>("/api/push/presence", { endpoint, inFront }),
+    test: (endpoint: string) => post<{ ok: true }>("/api/push/test", { endpoint }),
+    unsubscribe: (endpoint: string) =>
+      post<{ removed: boolean }>("/api/push/unsubscribe", { endpoint }),
   },
 
   /* runners */

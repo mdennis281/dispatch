@@ -9,6 +9,7 @@ import {
   resolveWholeRef,
   type CodeRefResolver,
 } from "./codeRefs.js";
+import { MarkdownImage, MediaRefContext, linkifyMediaChildren } from "./mediaRefs.js";
 import { cn } from "../../lib/cn.js";
 
 /**
@@ -25,13 +26,23 @@ function fenceFilename(meta: string | undefined): string | undefined {
 }
 
 /**
- * Linkify string leaves of a prose element's children into clickable code
- * pointers (no-op when no resolver is in scope, e.g. live streaming rows).
+ * Linkify string leaves of a prose element's children — first into clickable
+ * code pointers, then into media chips for any `out/chart.png` left over.
+ *
+ * Order matters and the passes are disjoint: a code pointer must carry a line
+ * number and a source extension, a media path carries neither, so nothing is
+ * eligible for both. Media runs second so it only ever sees the string leaves
+ * the code pass declined to claim.
+ *
+ * Both are no-ops without their context in scope (a live streaming row has no
+ * resolver; a preview pane has no chat), which is why each is guarded
+ * separately rather than behind one flag.
  */
 function Linkify({ children }: { children?: ReactNode }) {
   const resolve = useContext(CodeRefContext);
-  if (!resolve) return <>{children}</>;
-  return <>{linkifyChildren(children, resolve)}</>;
+  const chatId = useContext(MediaRefContext);
+  const withCode = resolve ? linkifyChildren(children, resolve) : children;
+  return <>{chatId ? linkifyMediaChildren(withCode, chatId) : withCode}</>;
 }
 
 /** Assistant markdown → tokenised HTML with our code blocks + quiet typography. */
@@ -98,24 +109,39 @@ const components: Components = {
     );
   },
   pre: ({ children }) => <>{children}</>,
+  // Without this, `![chart](out/chart.png)` rendered a bare <img> pointed at the
+  // SPA's own origin — a guaranteed 404 and the broken-image glyph. See
+  // mediaRefs.tsx for how a working-tree path is actually served.
+  img: ({ src, alt }) => (
+    <MarkdownImage src={typeof src === "string" ? src : undefined} alt={alt} />
+  ),
 };
 
 export function Markdown({
   children,
   className,
   resolve,
+  chatId,
 }: {
   children: string;
   className?: string;
   /** When set, code pointers (path:line) in prose/inline-code become clickable. */
   resolve?: CodeRefResolver;
+  /**
+   * When set, image paths resolve against this chat's worktree — both explicit
+   * `![…](…)` embeds and bare media paths mentioned in prose. Omitted for
+   * previews that have no chat to resolve against, where a path is just text.
+   */
+  chatId?: string;
 }) {
   return (
     <div className={cn("text-base text-primary/95", className)}>
       <CodeRefContext.Provider value={resolve ?? null}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-          {children}
-        </ReactMarkdown>
+        <MediaRefContext.Provider value={chatId ?? null}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+            {children}
+          </ReactMarkdown>
+        </MediaRefContext.Provider>
       </CodeRefContext.Provider>
     </div>
   );

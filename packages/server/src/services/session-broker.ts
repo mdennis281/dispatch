@@ -44,6 +44,7 @@ import {
   mediaKind,
   formatBytes,
 } from "./media-types.js";
+import { identifyMedia } from "./media-sniff.js";
 import type {
   Options,
   Query,
@@ -81,6 +82,7 @@ import type {
   WorkflowViolation,
   PRRef,
   HarnessKind,
+  PrSnapshot,
 } from "@dispatch/shared";
 import {
   DEFAULT_HARNESS,
@@ -88,6 +90,7 @@ import {
   classifyWorkflowViolation,
   describeExemptionScope,
   isPrSettledIdle,
+  parseInlineMedia,
   resolveWorkflow,
   type MetricEvent,
 } from "@dispatch/shared";
@@ -117,6 +120,7 @@ import {
   type ManagerAskQuestion,
   type ManagerAskResult,
   type ManagerMcpGitHub,
+  type ManagerMcpPrRegistry,
   type ManagerMcpPrApproval,
   type ManagerMcpPrCreate,
   type PrLandingPolicy,
@@ -554,6 +558,49 @@ export function makePrCreateBinding(
         watching: Boolean(opts.arm),
       };
     },
+  };
+}
+
+/**
+ * The catalog as a SESSION sees it — PR numbers, no repo argument required.
+ *
+ * The broker holds the repo-agnostic version (it is one registry for the whole
+ * app); this binds each session's own `owner/name` in, so a tool that was given
+ * only `{ number: 96 }` still lands on the right row. An explicit `repo`
+ * override always wins, exactly as it does for the watch itself.
+ */
+export interface SessionPrRegistry {
+  snapshot(repo: string, prNumber: number): Promise<PrSnapshot | null>;
+  refresh(repo: string, prNumber: number): Promise<PrSnapshot | null>;
+  noteWatched(repo: string, prNumber: number): Promise<void>;
+  refreshByThread(threadId: string): Promise<PrSnapshot | null>;
+  snapshotByThread(threadId: string): Promise<PrSnapshot | null>;
+}
+
+function makePrRegistryBinding(
+  registry: SessionPrRegistry,
+  github: GitHubService,
+  cwd: string | undefined,
+): ManagerMcpPrRegistry {
+  const repoFor = makeRepoResolver(github, cwd);
+  // Every method degrades to null rather than throwing: a card is a nicety, and
+  // no tool should fail because the catalog could not name a repository.
+  return {
+    snapshot: async (n, repo) => {
+      const r = await repoFor(repo);
+      return r ? registry.snapshot(r, n) : null;
+    },
+    refresh: async (n, repo) => {
+      const r = await repoFor(repo);
+      return r ? registry.refresh(r, n) : null;
+    },
+    noteWatched: async (n, repo) => {
+      const r = await repoFor(repo);
+      if (r) await registry.noteWatched(r, n);
+    },
+    // Thread ids are globally unique node ids, so these need no repo at all.
+    refreshByThread: (threadId) => registry.refreshByThread(threadId),
+    snapshotByThread: (threadId) => registry.snapshotByThread(threadId),
   };
 }
 
@@ -1324,6 +1371,13 @@ export class SessionBroker {
    * away, and the app went on believing whatever the last sweep had seen.
    */
   onPrSnapshot?: (chatId: string, snapshot: PrPollSnapshot) => void;
+  /**
+   * The tracked-PR catalog, for the PR tools' cards. Settable after
+   * construction for the same reason as `armPrWatch`: the registry is built
+   * after the broker. Absent → the tools answer in prose and the transcript
+   * renders them the way it always did.
+   */
+  prRegistry?: SessionPrRegistry;
   /**
    * Create + start a chat on the agent's behalf, once the human has approved it
    * (see `mcp__manager__spawn_chat`). Settable after construction for the same
@@ -3122,19 +3176,41 @@ export class SessionBroker {
   }
 
   /**
-   * Scan a tool_result's `content` for image blocks the agent received, persist
-   * any inline base64 image to the chat's assets dir, and return the resulting
-   * ImageRefs plus a sanitized copy of the content. Claude supplies image bytes
-   * under `source`; Codex MCP results use top-level `data` + `mimeType`, and can
-   * occasionally serialize the whole CallToolResult into a text block. Handle
-   * all three so provider boundaries never turn a screenshot into a megabyte of
-   * base64 in the transcript.
+   * Scan a tool result's `content` for media the agent produced, persist it to
+   * the chat's assets dir, and return the resulting ImageRefs plus a sanitized
+   * copy of the content.
+   *
+   * The RECOGNITION is not here: `parseInlineMedia` (in shared) knows every
+   * spelling — Anthropic's nested `source`, MCP's flat `data`, MCP's
+   * `EmbeddedResource` blob and its SVG-bearing `text` sibling, OpenAI's
+   * `image_url`, a bare data URL — and the client re-uses that identical
+   * function to repair transcripts written before a case was understood. This
+   * method only does the parts that need a disk: cap, decode, sniff, write.
+   *
+   * Handles a non-array `content` too. A harness that hands back a single block
+   * or a JSON string used to return here untouched, which silently dropped
+   * every image that arrived that way.
    */
   private async persistContentImages(
     session: LiveSession,
     content: unknown,
+    depth = 0,
   ): Promise<{ images: ImageRef[]; content: unknown }> {
-    if (!Array.isArray(content)) return { images: [], content };
+    // Bound the recursion. Nesting is legitimate (a serialized CallToolResult
+    // inside a text block, which may itself contain one), but a cyclic or
+    // pathological payload must not be able to spin the event loop.
+    if (depth > 4) return { images: [], content };
+    if (!Array.isArray(content)) {
+      // A lone block, or a JSON string holding one. Wrap, walk, unwrap — so the
+      // single-block shape gets exactly the same treatment as the list shape.
+      if (content && (typeof content === "object" || typeof content === "string")) {
+        const walked = await this.persistContentImages(session, [content], depth + 1);
+        if (walked.images.length) {
+          return { images: walked.images, content: (walked.content as unknown[])[0] };
+        }
+      }
+      return { images: [], content };
+    }
     const images: ImageRef[] = [];
     const out: unknown[] = [];
     for (const raw of content) {
@@ -3144,6 +3220,18 @@ export class SessionBroker {
       // block with one short line naming what the human can now watch.
       const ref = parseAssetReference(raw);
       if (ref) {
+        if (ref.url) {
+          // A remote http(s) reference. Nothing to copy: hand the client the URL
+          // and let the browser fetch it, exactly as it would any other image.
+          images.push({
+            id: this.genId(),
+            path: ref.url,
+            mimeType: ref.mimeType,
+            alt: ref.alt,
+          });
+          out.push(raw);
+          continue;
+        }
         const ingested = await this.ingestAssetReference(session, ref);
         if (ingested) {
           images.push(ingested.image);
@@ -3155,84 +3243,132 @@ export class SessionBroker {
         out.push(raw);
         continue;
       }
-      if (!block || typeof block !== "object" || block.type !== "image") {
-        if (
-          block?.type === "text" &&
-          typeof block.text === "string" &&
-          block.text.trimStart().startsWith("{")
-        ) {
-          try {
-            const parsed = JSON.parse(block.text) as Record<string, unknown>;
-            if (parsed && Array.isArray(parsed.content)) {
-              const nested = await this.persistContentImages(session, parsed.content);
-              if (nested.images.length) {
-                images.push(...nested.images);
-                out.push({ ...block, text: JSON.stringify({ ...parsed, content: nested.content }) });
-                continue;
-              }
-            }
-          } catch {
-            // Ordinary text (including non-result JSON) stays byte-for-byte intact.
-          }
+
+      const media = parseInlineMedia(raw);
+      if (!media) {
+        // Not media itself, but it may WRAP media: several servers serialize the
+        // whole CallToolResult into a text block.
+        const nested = await this.persistNestedResult(session, block, depth);
+        if (nested) {
+          images.push(...nested.images);
+          out.push(nested.block);
+          continue;
         }
         out.push(raw);
         continue;
       }
-      const source = block.source as Record<string, unknown> | undefined;
-      const srcType = source ? String(source.type ?? "") : "";
-      const directData = typeof block.data === "string" ? block.data : undefined;
-      const base64 = srcType === "base64" ? source?.data : directData;
-      if (typeof base64 === "string") {
-        const mime =
-          typeof source?.media_type === "string"
-            ? source.media_type
-            : typeof block.mimeType === "string"
-              ? block.mimeType
-              : typeof block.mime_type === "string"
-                ? block.mime_type
-                : "image/png";
-        try {
-          // Sized from the STRING, before decoding: `Buffer.from` would already
-          // have made the allocation this cap exists to prevent, so a server
-          // returning a gigabyte of base64 could exhaust memory on a payload
-          // that was always going to be refused.
-          const approx = approxBase64Bytes(base64);
-          if (approx > MAX_INLINE_ASSET_BYTES) {
-            // Refuse rather than store it: something this big came through the
-            // model's context to get here, and silently accepting teaches the
-            // server that inlining video works. Point it at the cheap route.
-            out.push({
-              type: "text",
-              text:
-                `[dispatch: refused a ${formatBytes(approx)} inline ${mime} attachment ` +
-                `(limit ${formatBytes(MAX_INLINE_ASSET_BYTES)}). Return a resource_link or ` +
-                `{"dispatch":"asset","path":"…"} instead — the file is then shown to the ` +
-                `user without its bytes entering the context window.]`,
-            });
-          } else {
-            const buf = Buffer.from(base64, "base64");
-            const name = `${this.genId()}${extFromMediaType(mime)}`;
-            const relPath = await this.store.writeChatAsset(session.chatId, name, buf);
-            images.push({ id: this.genId(), path: relPath, mimeType: mime });
-            out.push({ type: "image", media_type: mime, asset: relPath });
-          }
-        } catch {
-          // Persist failed (bad base64 / disk) → keep the raw block, no ref.
-          out.push(raw);
-        }
-      } else if (srcType === "url" && typeof source?.url === "string") {
+
+      if (media.url) {
+        // Remote. Recorded as a ref so it renders, left in place so the model's
+        // own view of the result is unchanged.
         images.push({
           id: this.genId(),
-          path: source.url,
-          mimeType:
-            typeof source.media_type === "string" ? source.media_type : undefined,
+          path: media.url,
+          mimeType: media.mimeType,
+          alt: media.alt,
         });
         out.push(raw);
-      } else {
+        continue;
+      }
+      if (!media.base64) {
+        out.push(raw);
+        continue;
+      }
+
+      // Sized from the STRING, before decoding: `Buffer.from` would already have
+      // made the allocation this cap exists to prevent, so a server returning a
+      // gigabyte of base64 could exhaust memory on a payload that was always
+      // going to be refused.
+      const approx = approxBase64Bytes(media.base64);
+      if (approx > MAX_INLINE_ASSET_BYTES) {
+        // Refuse rather than store it: something this big came through the
+        // model's context to get here, and silently accepting teaches the
+        // server that inlining video works. Point it at the cheap route.
+        out.push({
+          type: "text",
+          text:
+            `[dispatch: refused a ${formatBytes(approx)} inline ` +
+            `${media.mimeType ?? "binary"} attachment (limit ` +
+            `${formatBytes(MAX_INLINE_ASSET_BYTES)}). Return a resource_link or ` +
+            `{"dispatch":"asset","path":"…"} instead — the file is then shown to the ` +
+            `user without its bytes entering the context window.]`,
+        });
+        continue;
+      }
+
+      try {
+        const buf = Buffer.from(media.base64, "base64");
+        if (buf.length === 0) {
+          out.push(raw);
+          continue;
+        }
+        // Trust the BYTES over the declaration. A tool that labels a PNG
+        // `application/octet-stream` (or says nothing at all) used to have it
+        // stored as `.bin` and served with a content-type the browser refuses
+        // to paint — the single largest source of "the image is broken".
+        const { mimeType, width, height } = identifyMedia(buf, media.mimeType);
+        const name = `${this.genId()}${extFromMediaType(mimeType, ".bin")}`;
+        const relPath = await this.store.writeChatAsset(session.chatId, name, buf);
+        images.push({
+          id: this.genId(),
+          path: relPath,
+          mimeType,
+          alt: media.alt,
+          width,
+          height,
+        });
+        // Replace the payload with a reference. The bytes have already cost the
+        // context window once on the way in; they must not cost it again on
+        // every subsequent turn that replays this transcript.
+        out.push({ type: "image", media_type: mimeType, asset: relPath });
+      } catch {
+        // Persist failed (bad base64 / disk) → keep the raw block, no ref.
         out.push(raw);
       }
     }
     return { images, content: out };
+  }
+
+  /**
+   * A text block that is really a serialized tool result — `{"content":[…]}` —
+   * walked for media and re-serialized. Returns null when the block isn't one.
+   *
+   * MCP servers reached through a bridge routinely arrive this way: the whole
+   * CallToolResult JSON-encoded into a single text block, images and all. Left
+   * unwalked, every image inside is invisible AND still costs its full base64
+   * in the context window.
+   */
+  private async persistNestedResult(
+    session: LiveSession,
+    block: Record<string, unknown> | null,
+    depth: number,
+  ): Promise<{ images: ImageRef[]; block: unknown } | null> {
+    if (block?.type !== "text" || typeof block.text !== "string") return null;
+    if (!block.text.trimStart().startsWith("{")) return null;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(block.text) as Record<string, unknown>;
+    } catch {
+      // Ordinary text that merely opens with a brace. Stays byte-for-byte.
+      return null;
+    }
+    if (!parsed || typeof parsed !== "object") return null;
+
+    // `content` is the standard field; `structuredContent` is where the 2025
+    // MCP revision puts a typed result, and servers put images in both.
+    const images: ImageRef[] = [];
+    const next = { ...parsed };
+    for (const key of ["content", "structuredContent"]) {
+      const value = parsed[key];
+      if (value === undefined) continue;
+      const walked = await this.persistContentImages(session, value, depth + 1);
+      if (walked.images.length) {
+        images.push(...walked.images);
+        next[key] = walked.content;
+      }
+    }
+    if (!images.length) return null;
+    return { images, block: { ...block, text: JSON.stringify(next) } };
   }
 
   /**
@@ -4525,6 +4661,11 @@ export class SessionBroker {
         // The agent may still pass an explicit repo override on any call. The
         // project's reviewer list rides along so `request_review` has a default —
         // the same list `create_pr` asks on the first round.
+        // The PR catalog, so every PR tool can freeze a card into its result.
+        prRegistry:
+          github && this.prRegistry
+            ? makePrRegistryBinding(this.prRegistry, github, cwd)
+            : undefined,
         github: github
           ? makeGithubBinding(
               github,

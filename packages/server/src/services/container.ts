@@ -17,7 +17,7 @@ import type { ServerConfig } from "../config.js";
 // Value import (not `import type`): the InspectService needs to CONSTRUCT a
 // second Store over the installed instance's roots for `instance: "stable"`.
 import { Store } from "../store/index.js";
-import type { PRRef } from "@dispatch/shared";
+import { PrSnapshotSchema, prRecordKey, type PRRef, type PrRecord, type PrSnapshot } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
 import { SessionBroker } from "./session-broker.js";
@@ -39,6 +39,7 @@ import { RunnerService } from "./runner.js";
 import { ProcessService } from "./processes.js";
 import { GitHubService } from "./github.js";
 import { Notifier } from "./notifier.js";
+import { PushService } from "./push.js";
 import { AttentionQueue } from "./attention.js";
 import { UsageService } from "./usage.js";
 import { ReleaseService } from "./release.js";
@@ -82,6 +83,7 @@ export interface ServiceOverrides {
   processes?: ProcessService;
   github?: GitHubService;
   notifier?: Notifier;
+  push?: PushService;
   attention?: AttentionQueue;
   usage?: UsageService;
   release?: ReleaseService;
@@ -124,6 +126,8 @@ export interface Services extends ServiceBase {
   processes: ProcessService;
   github: GitHubService;
   notifier: Notifier;
+  /** Server-sent Web Push — the only delivery path an iOS home-screen app has. */
+  push: PushService;
   attention: AttentionQueue;
   usage: UsageService;
   /** Knows whether a newer Dispatch release exists, and can launch the installer. */
@@ -324,6 +328,18 @@ export function createServices(
   // `prewarm_mcp` tool can never disagree about which port a checkout got.
   worktrees.mcpPrewarm = broker.mcpPrewarm;
   const notifier = overrides.notifier ?? new Notifier({ bus, store });
+  // Web Push. The keypair goes in the CONFIG root (shared, and regenerating it
+  // would silently invalidate every phone's subscription); the registry goes in
+  // the per-instance DATA root, so a dev server never pushes to devices that
+  // registered against the installed app. See services/push.ts.
+  const push =
+    overrides.push ??
+    new PushService({
+      bus,
+      configDir: config.configDir ?? config.dataDir,
+      dataDir: config.dataDir,
+      onError: (err) => console.error("[Dispatch] web push failed:", err),
+    });
   const attention = overrides.attention ?? new AttentionQueue({ bus });
   // Subscription usage (5h + weekly) for the header meter. Polls the account
   // OAuth usage endpoint once (server-side) and fans snapshots to every client.
@@ -400,6 +416,23 @@ export function createServices(
   // that answer was read once and discarded.
   broker.onPrSnapshot = (chatId, snapshot) => {
     void prRegistry.record(snapshot, { chatId }).catch(() => {});
+  };
+  // Every PR tool reads the catalog to freeze a card into its result, and
+  // `watch_pr` writes back through it to keep the sweep on its fast cadence
+  // while an agent is blocked. Repo-agnostic here; the broker binds each
+  // session's own owner/name in.
+  broker.prRegistry = {
+    snapshot: (repo, number) => prRegistry.snapshot(repo, number),
+    refresh: (repo, number) => prRegistry.refresh(prRecordKey(repo, number)).then(toPrSnapshot),
+    noteWatched: async (repo, number) => {
+      await prRegistry.noteWatched(repo, number);
+    },
+    refreshByThread: async (threadId) => {
+      const row = await prRegistry.findByThread(threadId);
+      if (!row) return null;
+      return toPrSnapshot(await prRegistry.refresh(row.key));
+    },
+    snapshotByThread: async (threadId) => toPrSnapshot(await prRegistry.findByThread(threadId)),
   };
   const prReviewWatcher =
     overrides.prReviewWatcher ??
@@ -519,6 +552,7 @@ export function createServices(
     processes,
     github,
     notifier,
+    push,
     attention,
     usage,
     release,
@@ -584,6 +618,7 @@ export function createServices(
       safeStart("attention", () => attention.start());
       safeStart("memoryCommitter", () => memoryCommitter.start());
       safeStart("notifier", () => notifier.start());
+      safeStart("push", () => push.start());
       // Subscription usage polling (a missing token / offline just yields an
       // "unavailable" snapshot the header meter hides on).
       safeStart("usage", () => usage.start());
@@ -692,6 +727,7 @@ export function createServices(
       memoryCommitter.stop();
       await memoryCommitter.drain().catch(() => {});
       notifier.stop();
+      push.stop();
       attention.stop();
       // Unsubscribe first, then let an in-flight sweep land rather than yanking
       // the store out from under it.
@@ -728,4 +764,14 @@ export function createServices(
   };
 
   return services;
+}
+
+/**
+ * A catalog row reduced to the display half a PR tool freezes into its result.
+ *
+ * Null-tolerant because every caller here is best-effort: a PR the catalog has
+ * never seen yields no card, never an error on a tool that otherwise worked.
+ */
+function toPrSnapshot(row: PrRecord | null): PrSnapshot | null {
+  return row ? PrSnapshotSchema.parse(row) : null;
 }

@@ -24,6 +24,7 @@ function rec(over: Partial<PrRecord> & Pick<PrRecord, "key">): PrRecord {
     lastChangedAt: 1,
     nextPollAt: 0,
     quietPolls: 0,
+    watchedUntil: 0,
     ...over,
   };
 }

@@ -29,6 +29,15 @@
  * the constructor gets an `onclick` here, the SW posts a message that main.tsx
  * routes to {@link focusAttentionTarget}.
  *
+ * ── Why NONE of this reaches a phone ───────────────────────────────────────
+ * Every path here runs in the OPEN PAGE. iOS suspends a backgrounded home-screen
+ * web app outright — socket dropped, timers stopped — so on a phone this module
+ * can only fire while you are already looking at the app, which is exactly when
+ * `appIsInFront()` suppresses it. Server-sent Web Push (lib/webPush.ts +
+ * services/push.ts) is the only delivery an iPhone ever sees; this module stays
+ * for desktop, where the window survives in the background and a push round-trip
+ * through Apple/Google would be a worse way to say the same thing.
+ *
  * ── Why this can be unavailable ────────────────────────────────────────────
  * The Notification API needs a SECURE CONTEXT. `http://localhost` counts and
  * HTTPS counts; `http://192.168.x.x` does NOT. So on the machine running
@@ -38,7 +47,9 @@
  * silently does nothing.
  */
 import { create } from "zustand";
+import { shouldNotify } from "@dispatch/shared";
 import type { AttentionItem } from "@dispatch/shared";
+import { useWebPush } from "./webPush.js";
 
 /** Message the service worker posts back when a notification is clicked. */
 export interface AttentionFocusMessage {
@@ -211,6 +222,10 @@ export async function notifyAttention(item: AttentionItem, chatTitle?: string): 
   const { enabled, permission } = useBrowserNotify.getState();
   if (!enabled || permission !== "granted") return;
   if (appIsInFront()) return;
+  // The same per-kind filters and quiet hours the server applies to pushes.
+  // Both sides run the ONE predicate in shared/notify.ts, so a kind muted in
+  // Settings cannot leak through whichever path happens to deliver first.
+  if (!shouldNotify(useWebPush.getState().prefs, item, Date.now())) return;
 
   const meta = KIND_META[item.kind];
   if (!meta) return; // defensive: a kind added server-side that we don't know

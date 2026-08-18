@@ -3,18 +3,30 @@ import { ImageIcon } from "lucide-react";
 import type { ImageRef } from "@dispatch/shared";
 import { cn } from "../../../lib/cn.js";
 import { useAssetSrc } from "../../../lib/assetSrc.js";
-import { ImageLightbox } from "./ImageLightbox.js";
+import { MediaViewer, assetName } from "./MediaViewer.js";
 
 /**
  * One image thumbnail — a real preview via the chat's asset endpoint with a
  * labelled card fallback if the bytes can't load. Shared by the user turn
- * (pasted/dropped attachments) and the tool card (images a tool returned, e.g.
- * a Claude-in-Chrome screenshot).
+ * (pasted/dropped attachments), the tool card (images a tool returned), and the
+ * assistant's own markdown.
+ *
+ * `onOpen` hands the click to {@link MediaGroup}, so the viewer it opens can
+ * step across the whole row. Standalone (no `onOpen`) it still opens a viewer
+ * of its own, because plenty of call sites have exactly one image.
  */
-export function ImageThumb({ chatId, img }: { chatId: string; img: ImageRef }) {
+export function ImageThumb({
+  chatId,
+  img,
+  onOpen,
+}: {
+  chatId: string;
+  img: ImageRef;
+  onOpen?: () => void;
+}) {
   const [decodeFailed, setDecodeFailed] = useState(false);
   const [zoomed, setZoomed] = useState(false);
-  const name = img.path.split(/[\\/]/).pop() ?? img.path;
+  const name = assetName(img);
   const dims = img.width && img.height ? `${img.width}×${img.height}` : undefined;
   const { src, failed } = useAssetSrc(chatId, img);
   const broken = failed || decodeFailed;
@@ -44,7 +56,7 @@ export function ImageThumb({ chatId, img }: { chatId: string; img: ImageRef }) {
         <button
           type="button"
           disabled={!src}
-          onClick={() => setZoomed(true)}
+          onClick={() => (onOpen ? onOpen() : setZoomed(true))}
           className={cn(
             "block w-full outline-none focus-visible:ring-1 focus-visible:ring-accent-line",
             src ? "cursor-zoom-in" : "cursor-default",
@@ -56,7 +68,10 @@ export function ImageThumb({ chatId, img }: { chatId: string; img: ImageRef }) {
               src={src}
               alt={img.alt ?? name}
               onError={() => setDecodeFailed(true)}
-              className="block max-h-52 max-w-[240px] object-contain"
+              // A checkerboard behind the image, so a transparent PNG reads as
+              // transparent instead of as a picture with a hole in it — the
+              // thing that most often looks like "the image is broken".
+              className="block max-h-52 max-w-[240px] bg-[repeating-conic-gradient(#191d23_0deg_90deg,#14181d_90deg_180deg)] bg-[length:12px_12px] object-contain"
             />
           ) : (
             // The bytes are still being fetched. Hold the row's height so a
@@ -69,8 +84,8 @@ export function ImageThumb({ chatId, img }: { chatId: string; img: ImageRef }) {
           {dims && <span className="cm-mono !text-2xs text-faint">{dims}</span>}
         </figcaption>
       </figure>
-      {zoomed && src && (
-        <ImageLightbox src={src} name={name} dims={dims} onClose={() => setZoomed(false)} />
+      {zoomed && (
+        <MediaViewer chatId={chatId} assets={[img]} onClose={() => setZoomed(false)} />
       )}
     </>
   );

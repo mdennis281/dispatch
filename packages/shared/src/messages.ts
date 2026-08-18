@@ -361,6 +361,16 @@ export const AttentionItemSchema = z.object({
   prNumber: z.number().int().optional(),
   /** For kind==="review", a link straight to the PR. */
   url: z.string().optional(),
+  /**
+   * For kind==="review", WHICH activity fired — a red check, a new comment, a
+   * submitted review, or the PR settling (merged/closed). One poll can find
+   * several at once, hence an array.
+   *
+   * It exists so notification filtering can be finer than the kind: "wake me for
+   * a failed check but not for a nit" is the distinction people actually want,
+   * and `kind` alone cannot express it. See `shouldNotify` in shared/notify.ts.
+   */
+  reviewKinds: z.array(z.enum(["check", "comment", "review", "settled"])).optional(),
   createdAt: z.number().int(),
 });
 export type AttentionItem = z.infer<typeof AttentionItemSchema>;

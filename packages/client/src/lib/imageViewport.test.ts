@@ -10,7 +10,7 @@ import {
   wheelFactor,
   zoomAt,
   zoomToRect,
-} from "./viewport.js";
+} from "./imageViewport.js";
 
 const image = { width: 1000, height: 500 };
 const box = { width: 500, height: 500 };

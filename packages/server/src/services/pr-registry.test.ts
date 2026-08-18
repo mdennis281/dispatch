@@ -10,6 +10,8 @@ import {
   PR_POLL_HOT_MS,
   PR_POLL_BACKOFF_MS,
   PR_ACTIVE_WINDOW_MS,
+  PR_POLL_WATCHED_MS,
+  PR_WATCH_TTL_MS,
 } from "./pr-registry.js";
 import type { PrPollSnapshot } from "./github.js";
 
@@ -228,6 +230,55 @@ describe("PrRegistry — adaptive cadence", () => {
     );
     expect(woken.quietPolls).toBe(0);
     expect(woken.nextPollAt - now).toBe(PR_POLL_HOT_MS);
+  });
+
+  it("drops to the WATCHED cadence while an agent is blocked on the PR", async () => {
+    const reg = makeRegistry();
+    // A parked PR that has backed off as far as the ladder goes.
+    const parked = snapshot();
+    await reg.record(parked);
+    now += PR_ACTIVE_WINDOW_MS;
+    const cold = await reg.record(parked);
+    // One quiet poll past the active window — the first rung of the ladder.
+    expect(cold.nextPollAt - now).toBe(PR_POLL_BACKOFF_MS[1]!);
+
+    // An agent starts watching. Waiting ten minutes to notice a merge while a
+    // chat sits idle is the most visible slowness this app has.
+    const watched = await reg.noteWatched(REPO, 42);
+    expect(watched!.nextPollAt - now).toBeLessThanOrEqual(PR_POLL_WATCHED_MS);
+    const next = await reg.record(parked);
+    expect(next.nextPollAt - now).toBe(PR_POLL_WATCHED_MS);
+  });
+
+  it("lets the watch window lapse on its own", async () => {
+    // Nothing has to remember to clear it: an agent that stops watching simply
+    // stops renewing, so a killed session cannot pin a PR to 30s forever.
+    const reg = makeRegistry();
+    await reg.record(snapshot());
+    await reg.noteWatched(REPO, 42);
+    now += PR_WATCH_TTL_MS + PR_ACTIVE_WINDOW_MS;
+    const after = await reg.record(snapshot());
+    expect(after.nextPollAt - now).toBeGreaterThan(PR_POLL_WATCHED_MS);
+  });
+
+  it("does not invent a row for a PR it has never heard of", async () => {
+    // `watch_pr` can be pointed at any number; a hollow row from a watch would
+    // put PRs in the roster that nothing is actually tracking.
+    const reg = makeRegistry();
+    expect(await reg.noteWatched(REPO, 999)).toBeNull();
+    expect(await reg.list()).toEqual([]);
+  });
+
+  it("finds the PR that owns a review thread", async () => {
+    // `resolve_thread` is handed a thread id and nothing else — this is what
+    // turns it into a card about a pull request.
+    const reg = makeRegistry();
+    await reg.record(
+      snapshot({ threads: [{ id: "PRRT_1", isResolved: false, path: "a.ts" }] }),
+    );
+    expect((await reg.findByThread("PRRT_1"))?.number).toBe(42);
+    expect(await reg.findByThread("PRRT_nope")).toBeNull();
+    expect(await reg.findByThread("")).toBeNull();
   });
 
   it("never returns a settled PR as due — it is over", async () => {

@@ -32,7 +32,7 @@
  * this pass" (never a false badge, never an abort), and a resume failure leaves
  * the badge standing so the human can still act on it.
  */
-import type { AttentionItem, Chat, PRRef } from "@dispatch/shared";
+import type { AttentionItem, Chat, PRRef, ReviewKind } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 import type { PrPollSnapshot } from "./github.js";
@@ -413,6 +413,10 @@ export class PrReviewWatcher {
     const reviews = { reported: snap.reported };
 
     const reasons: string[] = [];
+    // Which CLASS of activity fired, so notification filters can be finer than
+    // "review": a red check is worth a 2am push, a nit is not. A single poll can
+    // find several, so this is a set and the item carries all of them.
+    const reviewKinds = new Set<ReviewKind>();
 
     for (const c of checks ?? []) {
       const conclusion = c.conclusion ?? undefined;
@@ -420,6 +424,7 @@ export class PrReviewWatcher {
       const failing = conclusion !== undefined && FAILING_CONCLUSIONS.has(conclusion);
       if (failing && st.checks.get(c.name) !== fingerprint) {
         reasons.push(`check "${c.name}" ${conclusion}`);
+        reviewKinds.add("check");
       }
       st.checks.set(c.name, fingerprint);
     }
@@ -429,6 +434,7 @@ export class PrReviewWatcher {
       if (st.threads.has(t.id)) continue;
       st.threads.add(t.id);
       reasons.push(`review comment from ${t.author ?? "a reviewer"}${t.path ? ` on ${t.path}` : ""}`);
+      reviewKinds.add("comment");
     }
 
     for (const r of reviews?.reported ?? []) {
@@ -438,6 +444,7 @@ export class PrReviewWatcher {
       if (st.reviews.has(key)) continue;
       st.reviews.add(key);
       reasons.push(`${r.author} ${r.state.toLowerCase().replace(/_/g, " ")}`);
+      reviewKinds.add("review");
     }
 
     if (!reasons.length) return null;
@@ -454,6 +461,7 @@ export class PrReviewWatcher {
       projectId: chat.projectId || undefined,
       prNumber: ref.number,
       url: ref.url,
+      reviewKinds: [...reviewKinds],
       createdAt: this.now(),
     };
     this.bus.publish({ type: "attention-add", item });
@@ -508,6 +516,25 @@ export class PrReviewWatcher {
       );
       const saved = await this.store.saveChat({ ...chat, prs, updatedAt: this.now() });
       this.bus.publish({ type: "chat-update", chat: saved });
+      // "It landed" is the one PR event that closes a loop rather than opening
+      // one, and until now it was the only state change the human had to go
+      // looking for. It rides the `review` kind (so it inherits the queue's
+      // triage weight) but carries the `settled` sub-kind, which is what lets
+      // someone keep failed-check pushes and mute merge confetti.
+      this.bus.publish({
+        type: "attention-add",
+        item: {
+          id: `att-review-${chatId}-${ref.number}-settled`,
+          chatId,
+          kind: "review",
+          summary: `PR #${ref.number} ${state}`,
+          projectId: chat.projectId || undefined,
+          prNumber: ref.number,
+          url: ref.url,
+          reviewKinds: ["settled"],
+          createdAt: this.now(),
+        },
+      });
     } catch {
       /* best-effort: a failed write just means we re-poll it next sweep */
     }
