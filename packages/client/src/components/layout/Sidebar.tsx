@@ -12,6 +12,7 @@ import {
   Circle,
   Trash2,
   Pencil,
+  BarChart3,
   Brain,
   FolderOpen,
   GitBranch,
@@ -598,6 +599,18 @@ export function Sidebar() {
             active={view === "files"}
             onClick={() => {
               setView(view === "files" ? "chat" : "files");
+              dismissLeftDrawer();
+            }}
+          />
+          {/* Last in the group: it is the only one that is not about the CURRENT
+              state of the project — it is the record of what has already
+              happened, across every project. */}
+          <NavButton
+            icon={BarChart3}
+            label="Metrics"
+            active={view === "metrics"}
+            onClick={() => {
+              setView(view === "metrics" ? "chat" : "metrics");
               dismissLeftDrawer();
             }}
           />

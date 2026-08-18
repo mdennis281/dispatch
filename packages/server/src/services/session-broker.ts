@@ -89,11 +89,14 @@ import {
   describeExemptionScope,
   isPrSettledIdle,
   resolveWorkflow,
+  type MetricEvent,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import type { TerminalService } from "./terminal.js";
 import type { MemoryService } from "./memory.js";
+import type { MetricsService } from "./metrics.js";
+import { classifyTool } from "./metrics-classify.js";
 import type { MemoryHistoryService } from "./memory-history.js";
 import type {
   FindChatsQuery,
@@ -649,6 +652,9 @@ export interface BrokerProjectConfig {
   /** The bounded, delimited system-prompt append for a project's authored
    *  instructions, or null when it has none (inject nothing). */
   buildInstructionsInjection(projectId: string): string | null;
+  /** Stable ids for the individual authored instruction entries, for the usage
+   *  ledger. Optional so older fakes stay valid — absent just means uncounted. */
+  listInstructions?(projectId: string): string[];
   /** A project's config-sourced external MCP servers (name → config), or `{}`.
    *  Merged into the session's `Options.mcpServers` alongside `manager`. */
   getMcpServers(projectId: string): Record<string, McpServerConfig>;
@@ -699,6 +705,12 @@ export interface SessionBrokerOptions {
   managerMcp?: ManagerMcpBridge;
   /** Read-only cross-chat inspection behind `chat_find`/`chat_read`/`project_info`. */
   inspect?: BrokerInspect;
+  /**
+   * The usage ledger. Optional, and every call into it is fire-and-forget: a
+   * broker without one behaves identically, just uncounted. Telemetry must never
+   * be able to fail a turn.
+   */
+  metrics?: MetricsService;
   /**
    * Called when a turn ends in ERROR, with the SDK's message. The broker doesn't
    * interpret it — the ResumeScheduler decides whether it was a usage limit and
@@ -1293,6 +1305,7 @@ export class SessionBroker {
   private readonly harnesses?: HarnessRegistry;
   private readonly managerMcp?: ManagerMcpBridge;
   private readonly inspect?: BrokerInspect;
+  private readonly metrics?: MetricsService;
   /** Settable after construction — the scheduler is built after the broker. */
   onTurnError?: (chatId: string, reason: string | undefined) => void;
   /**
@@ -1355,6 +1368,7 @@ export class SessionBroker {
     this.harnesses = opts.harnesses;
     this.managerMcp = opts.managerMcp;
     this.inspect = opts.inspect;
+    this.metrics = opts.metrics;
     this.onTurnError = opts.onTurnError;
     this.query = opts.deps?.query ?? (sdkQuery as unknown as QueryFn);
     this.genId = opts.deps?.genId ?? (() => nanoid());
@@ -1503,6 +1517,45 @@ export class SessionBroker {
   }
 
   /**
+   * Stamp one ledger row with WHO and WHERE, from the live session.
+   *
+   * The session is the only place that knows all of it — the chat's agent, the
+   * model the runtime actually reported at `init`, the runtime itself and the
+   * turn index — which is why recording happens HERE rather than off the bus.
+   * A bus subscriber would have to re-read the chat record per event and would
+   * still get the CURRENT agent rather than the one that made the call.
+   *
+   * Never throws and never awaits: `record()` buffers. Telemetry is not allowed
+   * to be a reason a turn fails or slows down.
+   */
+  private recordUse(
+    session: LiveSession,
+    row: {
+      category: MetricEvent["category"];
+      identifier: string;
+      detail?: string;
+      subagent?: string;
+      toolUseId?: string;
+      ok?: boolean;
+    },
+  ): void {
+    if (!this.metrics) return;
+    try {
+      this.metrics.record({
+        ...row,
+        projectId: session.projectId,
+        chatId: session.chatId,
+        agent: session.agentId,
+        model: session.model,
+        harness: session.harnessKind,
+        turn: session.turn,
+      });
+    } catch {
+      /* a broken ledger must never break a turn */
+    }
+  }
+
+  /**
    * Rank this project's durable memories against a turn's text and return an
    * invisible `<system-reminder>` block for the SDK message when relevant,
    * not-yet-surfaced ones clear the bar. Records only the memories given IN FULL
@@ -1522,6 +1575,15 @@ export class SessionBroker {
         exclude: session.surfacedMemories,
       });
       if (!surfaced) return undefined;
+      // Two tiers, recorded distinctly: `surfaced` got its full body into the
+      // turn, `pointed` got only its name. Collapsing them would make a memory
+      // that is merely ADJACENT to the work look as used as one that was read.
+      for (const name of surfaced.names) {
+        this.recordUse(session, { category: "memory", identifier: name, detail: "surfaced" });
+      }
+      for (const name of surfaced.pointed) {
+        this.recordUse(session, { category: "memory", identifier: name, detail: "pointed" });
+      }
       for (const name of surfaced.names) session.surfacedMemories.add(name);
       return surfaced;
     } catch {
@@ -2582,6 +2644,15 @@ export class SessionBroker {
         });
         return;
       case "tool-use": {
+        // The ledger row for this call. Classified the same way the transcript
+        // import classifies a historical one (see metrics-classify), so a call
+        // counts identically whether it was seen live or reconstructed later.
+        const use = classifyTool(event.name, event.input);
+        this.recordUse(session, {
+          ...use,
+          subagent: event.subagentType,
+          toolUseId: event.toolUseId,
+        });
         const toolStatus = statusForTool(event.name, event.input);
         this.setStatus(session, toolStatus, {
           state: "tool",
@@ -2848,6 +2919,21 @@ export class SessionBroker {
         for (const tb of toolBlocks) {
           const name = String(tb.name ?? "");
           const input = (tb.input ?? {}) as Record<string, unknown>;
+          // The ledger row. Recorded HERE as well as in `handleHarnessEvent`
+          // because these are two independent tool_use paths — this one is the
+          // legacy in-broker Claude loop that the default runtime still takes,
+          // and instrumenting only the harness adapter left the app's most-used
+          // runtime silently uncounted.
+          //
+          // Counted BEFORE the AskUserQuestion skip below: that skip exists so
+          // the TRANSCRIPT shows one canonical question surface, which is a
+          // rendering decision. The agent did call the tool, and the ledger's
+          // job is to say what was reached for.
+          this.recordUse(session, {
+            ...classifyTool(name, input),
+            subagent: subagentType,
+            toolUseId: tb.id === undefined ? undefined : String(tb.id),
+          });
           // AskUserQuestion is surfaced as an interactive QuestionCard via the
           // `canUseTool` → permission-request path; suppress the redundant
           // generic tool_use row so the transcript shows one canonical question
@@ -4241,7 +4327,17 @@ export class SessionBroker {
     // and it never clobbers the existing appends.
     if (this.projectConfig && session.projectId) {
       const instructions = this.projectConfig.buildInstructionsInjection(session.projectId);
-      if (instructions) appends.push(instructions);
+      if (instructions) {
+        appends.push(instructions);
+        // One row per authored FILE, not one per injection: "the instructions
+        // were injected" is true on every turn of every session and says
+        // nothing, while "this house-rules file rode along on 400 turns" is the
+        // question. `listInstructions` is optional on the interface, so an older
+        // fake just contributes nothing here.
+        for (const id of this.projectConfig.listInstructions?.(session.projectId) ?? []) {
+          this.recordUse(session, { category: "instruction", identifier: id });
+        }
+      }
     }
 
     // Read-at-start: inject the project's durable memory (index + one-line
@@ -4390,7 +4486,21 @@ export class SessionBroker {
           memory && projectId
             ? {
                 remember: (input) => memory.write(projectId, input),
-                recall: (query, opts) => memory.recall(projectId, query, opts),
+                // Wrapped rather than passed straight through: the tool call
+                // itself is already counted as a `manager` row, but that only
+                // says "someone searched". What the page is asked is WHICH facts
+                // keep coming back, which is only knowable from the result.
+                recall: async (query, opts) => {
+                  const result = await memory.recall(projectId, query, opts);
+                  for (const m of result.matches) {
+                    this.recordUse(session, {
+                      category: "memory",
+                      identifier: m.name,
+                      detail: "recalled",
+                    });
+                  }
+                  return result;
+                },
                 forget: (name) => memory.delete(projectId, name),
                 findSimilar: (candidate, opts) =>
                   memory.findSimilar(projectId, candidate, opts),

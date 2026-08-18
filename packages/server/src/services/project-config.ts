@@ -423,6 +423,23 @@ export class ProjectConfigService {
   }
 
   /**
+   * Stable ids for a project's authored instruction entries, for the usage
+   * ledger — "which house-rules file is actually riding along on turns".
+   *
+   * A file entry is named by its RESOLVED path (`rel`), because that is the
+   * thing on disk you would go and edit; the authored `file` is ambiguous (the
+   * loader accepts it relative to two directories). Inline `text` entries have
+   * no name at all, so they're numbered by position — stable as long as the
+   * manifest's order is, which is the best identity an anonymous block has.
+   */
+  listInstructions(projectId: string): string[] {
+    const instructions = this.getConfig(projectId)?.instructions ?? [];
+    return instructions.map(
+      (entry, i) => entry.rel ?? entry.file ?? `(inline instruction ${i + 1})`,
+    );
+  }
+
+  /**
    * A project's config-sourced external MCP servers (name → config), or `{}` when
    * it has no `.dispatch/`. The broker merges these into every session's
    * `Options.mcpServers` (config wins over the `.data` record; the in-process

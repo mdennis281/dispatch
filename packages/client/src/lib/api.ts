@@ -36,6 +36,13 @@ import type {
   GitStash,
   ProjectConfigResult,
   UsageSnapshot,
+  MetricDimension,
+  MetricEvent,
+  MetricFacetsResponse,
+  MetricFilter,
+  MetricQueryInput,
+  MetricSeriesResponse,
+  MetricTotalsResponse,
   UpdateStatus,
   UpdateChannel,
   ContextUsage,
@@ -860,6 +867,24 @@ export const api = {
     /** Force a fresh fetch now (the "refresh" button). */
     refresh: (harness: HarnessKind = "claude") =>
       post<UsageSnapshot>(`/api/usage/refresh?harness=${encodeURIComponent(harness)}`),
+  },
+
+  /* the usage ledger behind the Metrics view.
+   *
+   * POST for reads, matching the server: the query carries a filter map
+   * (dimension → allowed values), which has no honest query-string form and
+   * would hit the URL length limit the first time someone selects thirty tools.
+   */
+  metrics: {
+    series: (query: MetricQueryInput) => post<MetricSeriesResponse>("/api/metrics/series", query),
+    totals: (query: MetricQueryInput & { groupBy: MetricDimension }) =>
+      post<MetricTotalsResponse>("/api/metrics/totals", query),
+    facets: (scope: { from?: number; to?: number; filter?: MetricFilter }) =>
+      post<MetricFacetsResponse>("/api/metrics/facets", scope),
+    recent: (scope: { from?: number; to?: number; filter?: MetricFilter; limit?: number }) =>
+      post<MetricEvent[]>("/api/metrics/recent", scope),
+    stats: () => get<{ rows: number; buffered: number; dropped: number }>("/api/metrics/stats"),
+    prune: (before: number) => post<{ deleted: number }>("/api/metrics/prune", { before }),
   },
 };
 

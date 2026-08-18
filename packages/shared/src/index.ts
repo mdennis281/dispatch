@@ -23,3 +23,4 @@ export * from "./messages.js";
 export * from "./titles.js";
 export * from "./version.js";
 export * from "./wire.js";
+export * from "./metrics.js";

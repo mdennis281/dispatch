@@ -25,6 +25,7 @@ import { registerPrRoutes } from "./prs.js";
 import { registerAttentionRoutes } from "./attention.js";
 import { registerSettingsRoutes } from "./settings.js";
 import { registerUsageRoutes } from "./usage.js";
+import { registerMetricsRoutes } from "./metrics.js";
 import { registerFileRoutes } from "./files.js";
 import { registerFsRoutes } from "./fs.js";
 import { registerShutdownRoutes } from "./shutdown.js";
@@ -54,6 +55,7 @@ export function registerRoutes(app: FastifyInstance): void {
   registerAttentionRoutes(app);
   registerSettingsRoutes(app);
   registerUsageRoutes(app);
+  registerMetricsRoutes(app);
   registerFileRoutes(app);
   registerFsRoutes(app);
   registerShutdownRoutes(app);
