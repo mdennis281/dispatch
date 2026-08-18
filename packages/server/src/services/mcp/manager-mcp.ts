@@ -1315,6 +1315,13 @@ function textResult(text: string, isError = false): CallToolResult {
  * the result — it is not looked up again when the card renders. That is what
  * keeps a transcript a record of what happened rather than a live dashboard
  * that quietly restates last week's `create_pr` as today's CI.
+ *
+ * `outcome.ok` and `isError` are DIFFERENT questions and must not be conflated.
+ * `ok` describes what happened to the pull request; `isError` describes the
+ * tool CALL. "Not landing this yet, here is why" is a successful call reporting
+ * a negative outcome, and flagging it as a tool error would tell the agent its
+ * own request failed. The default is the common case; every refusal that is a
+ * normal answer passes `isError: false` and says so.
  */
 function prToolResult(
   tool: PrToolKind,
@@ -2823,7 +2830,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             details: blockers.map((b) => b.detail),
           },
           (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null,
-          { text:
+          // Being told "not yet" is a normal, expected answer — see prToolResult.
+          { isError: false, text:
           `${isDone ? "Nothing to do" : `Not landing PR #${number} yet`}:\n` +
             blockers.map((b) => `  · ${b.detail}`).join("\n") +
             (isDone ? "" : "\n\nFix these, then call approve_pr again.") +
@@ -2864,7 +2872,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
               details: suppressed.map((b) => b.detail),
             },
             (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null,
-            { text:
+            // The human said no. That is an answer, not a tool failure.
+            { isError: false, text:
             `Not landing PR #${number} — the human did not approve the override:\n` +
               suppressed.map((b) => `  · ${b.detail}`).join("\n") +
               (verdict.message ? `\n\nThey said: ${verdict.message}` : "") +

@@ -67,16 +67,37 @@ describe("PR tool payloads", () => {
 
   it("degrades to prose for a payload this client cannot read", () => {
     // Forwards compatibility: a NEWER server may send a shape we do not know.
-    // Rendering nothing is right; throwing inside a transcript row is not.
+    // Rendering nothing is right; throwing inside a transcript row is not —
+    // and neither is showing the human the envelope.
     const text = `prose\n${PR_TOOL_PAYLOAD_MARKER}{"v":99,"tool":"teleport_pr"}`;
-    expect(decodePrToolPayload(text).payload).toBeNull();
+    const decoded = decodePrToolPayload(text);
+    expect(decoded.payload).toBeNull();
+    expect(decoded.text).toBe("prose");
+    expect(decoded.text).not.toContain(PR_TOOL_PAYLOAD_MARKER);
   });
 
-  it("survives a truncated payload line", () => {
+  it("strips the envelope even when the payload is truncated", () => {
     const text = `prose\n${PR_TOOL_PAYLOAD_MARKER}{"v":1,"tool":"watch_pr"`;
     const decoded = decodePrToolPayload(text);
     expect(decoded.payload).toBeNull();
-    expect(decoded.text).toContain("prose");
+    expect(decoded.text).toBe("prose");
+    expect(decoded.text).not.toContain(PR_TOOL_PAYLOAD_MARKER);
+  });
+
+  it("only treats a LINE-START marker as an envelope", () => {
+    // Prose can quote anything, including this string. A mid-line match is a
+    // coincidence, and eating the line it sits on would delete real content.
+    const quoted = `The agent writes ${PR_TOOL_PAYLOAD_MARKER} inline sometimes.`;
+    const decoded = decodePrToolPayload(quoted);
+    expect(decoded.payload).toBeNull();
+    expect(decoded.text).toBe(quoted);
+  });
+
+  it("keeps the prose either side of the envelope line", () => {
+    const text = `before\n${PR_TOOL_PAYLOAD_MARKER}{"nope"}\nafter`;
+    const decoded = decodePrToolPayload(text);
+    expect(decoded.payload).toBeNull();
+    expect(decoded.text).toBe("before\nafter");
   });
 
   it("keeps a payload with no PR — a tool that could not read one", () => {

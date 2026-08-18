@@ -79,28 +79,51 @@ export function encodePrToolPayload(payload: PrToolPayload): string {
 /**
  * Pull the payload out of a tool result, and give back the prose without it.
  *
- * Never throws: a result from an older build has no marker, and one from a
- * NEWER build may carry a shape this client cannot read. Both degrade to "no
- * payload, all prose", which is the pre-existing rendering — a transcript must
- * stay readable across versions in both directions.
+ * Never throws, and — just as importantly — never LEAKS. The envelope line is
+ * stripped whenever it is found, whether or not it parses: a result from a
+ * NEWER build may carry a shape this client cannot read, and the failure mode
+ * that must not happen is `<<dispatch:pr>>{…}` rendered to a human as if it
+ * were something the agent said. Both directions degrade to "no payload, all
+ * prose", which is the pre-existing rendering.
+ *
+ * The marker is matched only at the START of a line, so prose or a JSON blob
+ * that happens to contain the string cannot be mistaken for machinery.
  */
 export function decodePrToolPayload(text: string): {
   payload: PrToolPayload | null;
   text: string;
 } {
-  const at = text.lastIndexOf(PR_TOOL_PAYLOAD_MARKER);
+  const at = lastLineStartMarker(text);
   if (at < 0) return { payload: null, text };
-  const line = text.slice(at + PR_TOOL_PAYLOAD_MARKER.length);
-  // The marker always begins the LAST line, so anything after it is the payload
-  // up to the first newline — trailing prose would be a bug, not a shape to
-  // tolerate, but slicing to the newline keeps it harmless if one appears.
-  const end = line.indexOf("\n");
-  const json = end < 0 ? line : line.slice(0, end);
-  const rest = (text.slice(0, at) + (end < 0 ? "" : line.slice(end + 1))).trim();
+  const after = at + PR_TOOL_PAYLOAD_MARKER.length;
+  const end = text.indexOf("\n", after);
+  const json = end < 0 ? text.slice(after) : text.slice(after, end);
+  // Drop the whole line, including the newline that preceded it.
+  const head = at > 0 ? text.slice(0, at - 1) : "";
+  const tail = end < 0 ? "" : text.slice(end + 1);
+  const prose = (head + (head && tail ? "\n" : "") + tail).trim();
   try {
     const parsed = PrToolPayloadSchema.safeParse(JSON.parse(json));
-    return parsed.success ? { payload: parsed.data, text: rest } : { payload: null, text };
+    return { payload: parsed.success ? parsed.data : null, text: prose };
   } catch {
-    return { payload: null, text };
+    return { payload: null, text: prose };
+  }
+}
+
+/**
+ * Index of the last marker that begins a line, or -1.
+ *
+ * Line-anchored on purpose: these results end in a JSON blob written for the
+ * model, and prose can quote anything. A marker found mid-line is a
+ * coincidence, not an envelope.
+ */
+function lastLineStartMarker(text: string): number {
+  let from = text.length;
+  for (;;) {
+    const at = text.lastIndexOf(PR_TOOL_PAYLOAD_MARKER, from);
+    if (at < 0) return -1;
+    if (at === 0 || text[at - 1] === "\n") return at;
+    from = at - 1;
+    if (from < 0) return -1;
   }
 }
