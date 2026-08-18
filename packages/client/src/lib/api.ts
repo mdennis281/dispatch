@@ -256,6 +256,20 @@ export function assetUrl(chatId: string, image: { path: string }): string {
   return `${BASE}/api/chats/${chatId}/assets/${encodeURIComponent(name)}`;
 }
 
+/**
+ * The endpoint that serves a file from the PROJECT filesystem — what an agent's
+ * `![chart](out/chart.png)` resolves to.
+ *
+ * Separate from `assetUrl` because the two answer different questions.
+ * `assets/<name>` is content-addressed and immutable; a working-tree path is
+ * live, relative to the chat's worktree, and confined server-side. Conflating
+ * them would mean either caching a live file forever or re-fetching an
+ * immutable one on every scroll.
+ */
+export function fsAssetUrl(chatId: string, path: string): string {
+  return `${BASE}/api/chats/${chatId}/fs-asset?path=${encodeURIComponent(path)}`;
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,

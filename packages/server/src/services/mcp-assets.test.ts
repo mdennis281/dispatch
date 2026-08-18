@@ -35,12 +35,30 @@ describe("parseAssetReference", () => {
     ).toEqual({ path: "/tmp/run.mp4", alt: "run", mimeType: "video/mp4" });
   });
 
-  it("accepts a bare path in a resource_link, but not a remote url", () => {
+  it("accepts a bare path in a resource_link", () => {
     expect(parseAssetReference({ type: "resource_link", uri: "out/run.mp4" })?.path).toBe(
       "out/run.mp4",
     );
-    // A remote URL is not ours to copy off the filesystem.
-    expect(parseAssetReference({ type: "resource_link", uri: "https://x/y.mp4" })).toBeNull();
+  });
+
+  it("reports a remote url as a url ref, not a path", () => {
+    // Nothing is copied for these — the browser fetches them. Returning null
+    // (as this used to) meant a perfectly ordinary remote image never showed.
+    const ref = parseAssetReference({ type: "resource_link", uri: "https://x/y.mp4" });
+    expect(ref).toEqual({ path: "", url: "https://x/y.mp4", alt: undefined, mimeType: undefined });
+  });
+
+  it("accepts file/uri aliases and a url in the dispatch envelope", () => {
+    expect(
+      parseAssetReference({ type: "text", text: JSON.stringify({ dispatch: "asset", file: "a.png" }) })
+        ?.path,
+    ).toBe("a.png");
+    expect(
+      parseAssetReference({
+        type: "text",
+        text: JSON.stringify({ dispatch: "asset", url: "https://x/y.png" }),
+      })?.url,
+    ).toBe("https://x/y.png");
   });
 
   it("reads a resource block that only points at a file", () => {

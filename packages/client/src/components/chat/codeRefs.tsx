@@ -33,6 +33,7 @@ import {
   resolveRepoFile,
   type CodeViewerRequest,
 } from "../monaco/index.js";
+import { InlineChip } from "../ui/InlineChip.js";
 
 /* --------------------------------------------------------------- parsing */
 
@@ -166,15 +167,13 @@ export function CodeRefChip({
       ? `${request.selection.startLine}-${request.selection.endLine}`
       : request.selection?.startLine;
   return (
-    <button
-      type="button"
+    <InlineChip
       onClick={() => openCodeViewer(request)}
       title={`Open ${request.relPath}${range ? `:${range}` : ""}`}
-      className="inline-flex items-center gap-1 rounded-[4px] border border-accent-line/70 bg-accent-ghost px-1 py-px align-baseline cm-mono !text-xs text-accent-hi transition-colors hover:border-accent hover:bg-accent-ghost/80 hover:text-accent-hi [&_svg]:size-3 [&_svg]:-mb-px [&_svg]:opacity-80"
+      icon={<FileCode2 />}
     >
-      <FileCode2 />
       {label}
-    </button>
+    </InlineChip>
   );
 }
 

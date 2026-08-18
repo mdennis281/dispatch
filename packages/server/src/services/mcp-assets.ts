@@ -23,12 +23,26 @@
 
 /** A file an MCP result pointed at, before Dispatch has read it. */
 export interface AssetReference {
-  /** Filesystem path, absolute or relative to the server's cwd. */
+  /** Filesystem path, absolute or relative to the server's cwd. Empty for a `url` ref. */
   path: string;
+  /**
+   * An http(s) location instead of a local file. Nothing is copied for these —
+   * the browser fetches them directly. A remote MCP naming a remote image is a
+   * perfectly ordinary thing to do, and rejecting it (as this module used to)
+   * meant the picture simply never appeared.
+   */
+  url?: string;
   /** Optional caption; falls back to the file's own name. */
   alt?: string;
   /** Declared media type, when the block bothered to say. */
   mimeType?: string;
+}
+
+/** An http(s) URL, trimmed, or undefined. */
+function remoteUrl(value: unknown): string | undefined {
+  return typeof value === "string" && /^https?:\/\//i.test(value.trim())
+    ? value.trim()
+    : undefined;
 }
 
 /** Strip a `file://` uri down to a filesystem path, or null if it isn't one. */
@@ -57,14 +71,12 @@ export function parseAssetReference(block: unknown): AssetReference | null {
 
   // MCP's standard resource_link.
   if (b.type === "resource_link" && typeof b.uri === "string") {
+    const alt = typeof b.name === "string" ? b.name : undefined;
+    const mimeType = typeof b.mimeType === "string" ? b.mimeType : undefined;
+    const url = remoteUrl(b.uri);
+    if (url) return { path: "", url, alt, mimeType };
     const path = pathFromFileUri(b.uri) ?? (isPlainPath(b.uri) ? b.uri : null);
-    if (path) {
-      return {
-        path,
-        alt: typeof b.name === "string" ? b.name : undefined,
-        mimeType: typeof b.mimeType === "string" ? b.mimeType : undefined,
-      };
-    }
+    if (path) return { path, alt, mimeType };
   }
 
   // An embedded `resource` whose contents were NOT inlined — it only has a uri.
@@ -72,14 +84,12 @@ export function parseAssetReference(block: unknown): AssetReference | null {
     const r = b.resource as Record<string, unknown>;
     // `text`/`blob` mean the payload IS inline; that isn't a reference.
     if (r.text === undefined && r.blob === undefined && typeof r.uri === "string") {
+      const alt = typeof r.name === "string" ? r.name : undefined;
+      const mimeType = typeof r.mimeType === "string" ? r.mimeType : undefined;
+      const url = remoteUrl(r.uri);
+      if (url) return { path: "", url, alt, mimeType };
       const path = pathFromFileUri(r.uri);
-      if (path) {
-        return {
-          path,
-          alt: typeof r.name === "string" ? r.name : undefined,
-          mimeType: typeof r.mimeType === "string" ? r.mimeType : undefined,
-        };
-      }
+      if (path) return { path, alt, mimeType };
     }
   }
 
@@ -89,12 +99,18 @@ export function parseAssetReference(block: unknown): AssetReference | null {
     if (!t.startsWith("{") || !t.includes('"dispatch"')) return null;
     try {
       const parsed = JSON.parse(t) as Record<string, unknown>;
-      if (parsed.dispatch === "asset" && typeof parsed.path === "string" && parsed.path) {
-        return {
-          path: parsed.path,
-          alt: typeof parsed.alt === "string" ? parsed.alt : undefined,
-          mimeType: typeof parsed.mimeType === "string" ? parsed.mimeType : undefined,
-        };
+      if (parsed.dispatch === "asset") {
+        const alt = typeof parsed.alt === "string" ? parsed.alt : undefined;
+        const mimeType = typeof parsed.mimeType === "string" ? parsed.mimeType : undefined;
+        const url = remoteUrl(parsed.url) ?? remoteUrl(parsed.path);
+        if (url) return { path: "", url, alt, mimeType };
+        // `file` and `uri` are accepted as aliases: an agent writing this
+        // envelope by hand reaches for whichever word it thinks of first, and
+        // failing on the synonym is a silently-missing image.
+        const raw = [parsed.path, parsed.file, parsed.uri].find(
+          (v): v is string => typeof v === "string" && v.length > 0,
+        );
+        if (raw) return { path: pathFromFileUri(raw) ?? raw, alt, mimeType };
       }
     } catch {
       // Not our envelope. Leave the text exactly as it was.

@@ -73,7 +73,7 @@ import { SelectionOverlay } from "./annotator/SelectionOverlay.js";
 import { ShapeNode } from "./annotator/ShapeNode.js";
 import { type ToolId, Toolbar } from "./annotator/Toolbar.js";
 import { useDoc } from "./annotator/useDoc.js";
-import * as vpm from "./annotator/viewport.js";
+import * as vpm from "../../lib/imageViewport.js";
 
 export interface ImageAnnotatorProps {
   chatId: string;
