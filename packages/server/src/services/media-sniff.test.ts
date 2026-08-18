@@ -87,6 +87,14 @@ describe("sniffMediaType", () => {
       }
     });
 
+    it("stops at an UNTERMINATED prologue node", () => {
+      // `indexOf(…) + 2` turned a -1 into an offset of 1, which cleared the
+      // `> 0` guard and walked a byte into content the parser had no business
+      // reading. A node with no terminator now ends the walk.
+      expect(sniffMediaType(Buffer.from("<?xml version=\"1.0\" <svg/>"))).toBeUndefined();
+      expect(sniffMediaType(Buffer.from("<!-- unclosed <svg/>"))).toBeUndefined();
+    });
+
     it("does not claim an HTML page that merely contains an svg", () => {
       // Labelling this `image/svg+xml` would make the browser refuse to render
       // a document it would otherwise have shown.

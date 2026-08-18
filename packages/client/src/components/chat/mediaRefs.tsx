@@ -144,10 +144,16 @@ export function linkifyMediaRefs(text: string, chatId: string): ReactNode[] {
 }
 
 /**
- * Walk a rendered children tree and linkify media paths in its string leaves.
+ * Linkify media paths in the STRING leaves of a rendered children tree.
  *
- * Element children are recursed into but never re-created wholesale, so a chip
- * inserted by the code-ref pass upstream survives this one untouched.
+ * Deliberately does not descend into element children, matching
+ * `linkifyChildren` next door: every prose element that can contain nested
+ * elements (`p`, `li`, `strong`, `em`, `h1..3`, `blockquote`, `td`, `th`)
+ * renders its own `<Linkify>`, so a path inside a `<strong>` is already reached
+ * when that `<strong>` renders. Recursing here would visit it a second time.
+ *
+ * Leaving elements untouched is also what lets a chip the code-ref pass just
+ * inserted survive this one.
  */
 export function linkifyMediaChildren(children: ReactNode, chatId: string): ReactNode {
   return Children.map(children, (child, i) => {

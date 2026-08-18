@@ -123,15 +123,21 @@ function looksLikeSvg(buf: Buffer): boolean {
   for (let guard = 0; guard < 8; guard += 1) {
     rest = rest.trimStart();
     if (rest.startsWith("<svg")) return true;
-    const end = rest.startsWith("<?")
-      ? rest.indexOf("?>") + 2
+    // Each prologue node is (opener, terminator). An UNTERMINATED node ends the
+    // walk: `indexOf` returning -1 must not be turned into an offset, which is
+    // what `indexOf(…) + 2` did — it yielded 1, cleared a `> 0` guard, and
+    // walked one byte into content it had no business reading.
+    const node = rest.startsWith("<?")
+      ? ({ open: "<?", close: "?>" } as const)
       : rest.startsWith("<!--")
-        ? rest.indexOf("-->") + 3
+        ? ({ open: "<!--", close: "-->" } as const)
         : /^<!DOCTYPE/i.test(rest)
-          ? rest.indexOf(">") + 1
-          : 0;
-    if (end <= 0) return false;
-    rest = rest.slice(end);
+          ? ({ open: "<!DOCTYPE", close: ">" } as const)
+          : null;
+    if (!node) return false;
+    const at = rest.indexOf(node.close, node.open.length);
+    if (at < 0) return false;
+    rest = rest.slice(at + node.close.length);
   }
   return false;
 }

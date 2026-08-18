@@ -82,6 +82,30 @@ describe("recoverResultMedia", () => {
   });
 });
 
+describe("depth bounding", () => {
+  it("survives a deeply nested payload instead of blowing the stack", () => {
+    // The walk runs inside a render. Unbounded recursion here does not fail to
+    // find an image, it takes the whole transcript down.
+    let deep: unknown = { type: "image", data: PNG, mimeType: "image/png" };
+    for (let i = 0; i < 5000; i += 1) deep = [deep];
+    expect(() => recoverResultMedia(deep)).not.toThrow();
+  });
+
+  it("still reaches media at a realistic nesting depth", () => {
+    const { images } = recoverResultMedia({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            content: [{ type: "image", data: PNG, mimeType: "image/png" }],
+          }),
+        },
+      ],
+    });
+    expect(images).toHaveLength(1);
+  });
+});
+
 describe("mergeImages", () => {
   it("drops a recovered duplicate of a server-supplied ref", () => {
     // Both are live at once: a current message has a real ImageRef AND a

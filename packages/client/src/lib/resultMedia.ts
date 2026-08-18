@@ -25,11 +25,20 @@ export interface RecoveredMedia {
   content: unknown;
 }
 
-/** Bound the recursion; a nested result may itself hold a nested result. */
-const MAX_DEPTH = 4;
-
-/** Keys that hold a nested tool result, in the order servers actually use. */
-const NESTED_KEYS = ["content", "structuredContent", "result", "output"];
+/**
+ * Bound the recursion.
+ *
+ * Counts EVERY structural step — an array element, an object value, a parsed
+ * nested result — not just the interesting ones. Incrementing only on the
+ * nested-result hop left arrays and plain objects recursing without limit, so a
+ * deeply nested payload could blow the stack in the middle of a render, which
+ * takes the transcript down rather than just failing to find an image.
+ *
+ * Generous, because it is now measuring ordinary nesting too: a serialized
+ * result inside a serialized result is roughly six levels, and legitimate tool
+ * output is nested well past four.
+ */
+const MAX_DEPTH = 24;
 
 /**
  * Pull every renderable image out of a stored tool-result `content`.
@@ -59,7 +68,7 @@ function walk(
   if (depth > MAX_DEPTH) return node;
 
   if (Array.isArray(node)) {
-    return node.map((child) => walk(child, images, depth, chatId, seq));
+    return node.map((child) => walk(child, images, depth + 1, chatId, seq));
   }
 
   // A JSON string holding a serialized CallToolResult — the shape a bridged MCP
@@ -115,11 +124,13 @@ function walk(
     }
   }
 
+  // Every value, not a whitelist of `content`/`structuredContent`/`result`.
+  // The whitelist saved nothing — the other keys were walked anyway, just at
+  // the same depth — and it meant a server that named its payload something
+  // else got a shallower search for no reason.
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(block)) {
-    out[key] = NESTED_KEYS.includes(key)
-      ? walk(value, images, depth + 1, chatId, seq)
-      : walk(value, images, depth, chatId, seq);
+    out[key] = walk(value, images, depth + 1, chatId, seq);
   }
   return out;
 }
