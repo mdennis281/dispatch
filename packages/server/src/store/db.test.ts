@@ -11,6 +11,7 @@ import {
   assertStateMigrated,
   findLegacyState,
 } from "./db.js";
+import { markMigration } from "./db.testkit.js";
 
 let dir: string;
 let db: StateDb;
@@ -130,9 +131,23 @@ describe("the un-migrated-store guard", () => {
     expect(() => assertStateMigrated(dir)).toThrow(/app:migrate-store/);
   });
 
-  it("stays quiet once the database exists — the JSON tree IS the rollback path", async () => {
+  it("refuses a HALF-migrated store — `state.db` existing proves nothing", async () => {
+    // The script creates the database before it copies the first row, so a run
+    // killed part-way leaves a real, openable, incomplete store. Booting off it
+    // beside the untouched JSON would silently hide every record the run never
+    // reached — an empty checkpoint list next to a file full of them, no error.
     await writeFile(join(dir, "checkpoints.json"), "{}");
     db.open();
+    markMigration(dir, { complete: false });
+    expect(() => assertStateMigrated(dir)).toThrow(/never finished/);
+    // …and it must say the re-run resumes, not that they should start over.
+    expect(() => assertStateMigrated(dir)).toThrow(/RESUMES/i);
+  });
+
+  it("stays quiet once a migration FINISHED — the JSON tree IS the rollback path", async () => {
+    await writeFile(join(dir, "checkpoints.json"), "{}");
+    db.open();
+    markMigration(dir, { complete: true });
     // Complaining here would make the documented rollback (delete state.db, boot
     // off the JSON again) impossible to walk back INTO.
     expect(() => assertStateMigrated(dir)).not.toThrow();

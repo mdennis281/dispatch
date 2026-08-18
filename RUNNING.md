@@ -448,20 +448,24 @@ Re-running it refuses a non-empty destination unless `--force`.
 
 `app:migrate-store` moves the state root's JSON maps (`checkpoints.json`, `prs.json`,
 `worktrees.json`, `runners.json`, `terminals.json`, `mcp-ports.json`, `terminals/`) into
-`state.db`. Same posture: it **copies**, verifies every record by reading it back out and
-comparing bytes, and leaves the JSON exactly where it was as the rollback path — delete
-`state.db` and the server boots off the old tree again, unchanged. Removing it is a
-separate, opt-in `--prune` that only runs after a verified pass. It is resumable, so an
-interrupted run picks up where it stopped.
+`state.db`. Same posture: it **copies**, verifies every record by reading it back out of
+the database and comparing it against the source, and leaves the JSON exactly where it was
+as the rollback path — delete `state.db` and the server boots off the old tree again,
+unchanged. Removing it is a separate, opt-in `--prune` that only runs after a verified
+pass. It is resumable, so an interrupted run picks up where it stopped.
 
 Two things to know:
 
 - **Stop the instance first** (`pnpm app:stop`). It refuses to migrate a running store in
   place, because the app would keep appending to the JSON that the snapshot has already
   read past. Rehearsing with `--target <scratch dir>` reads only, so that's allowed live.
-- **A state root with legacy JSON and no `state.db` refuses to boot**, naming this script.
-  Nothing auto-migrates: this is a minute of work on data you have no second copy of, and
-  a silent pause at startup is the worst possible way to find out it happened.
+- **A state root with legacy JSON and no FINISHED migration refuses to boot**, naming this
+  script. Nothing auto-migrates: this is a minute of work on data you have no second copy
+  of, and a silent pause at startup is the worst possible way to find out it happened.
+  "Finished" means a marker the script writes *after* its verify passes — not the mere
+  existence of `state.db`, which it creates before copying the first row. Booting off a
+  half-copied database while the JSON sat there untouched would hide records with no
+  error at all. If you see that message, just re-run the script: it resumes.
 
 ```
 pnpm app:migrate-store -- --source "%LOCALAPPDATA%\claude-manager\data" --dry-run

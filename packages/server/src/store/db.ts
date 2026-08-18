@@ -334,22 +334,94 @@ export function findLegacyState(dataDir: string): string[] {
 }
 
 /**
- * Refuse to start on a state root that still holds un-migrated JSON.
+ * `_migration` — `tools/app/migrate-store.mjs`'s bookkeeping: one row per unit
+ * it has copied, plus {@link MIGRATION_COMPLETE_UNIT} once the whole run
+ * verified.
  *
- * Only when the database is ABSENT. Once `state.db` exists the migration has run
- * (or there was nothing to run), and the JSONL tree deliberately stays on disk
- * as the rollback path — see the `--prune` flag on the script. Complaining about
- * it then would make the documented rollback path unbootable.
+ * Defined HERE, in the module that reads it, even though only the script writes
+ * it. The guard below is the one thing standing between a user and a silently
+ * half-migrated store; a second copy of this DDL in a standalone `.mjs` is
+ * exactly the kind of duplicate that drifts and is only discovered by the
+ * failure it was supposed to prevent.
+ */
+export const MIGRATION_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS _migration (
+    unit    TEXT PRIMARY KEY,
+    rows    INTEGER NOT NULL,
+    sha256  TEXT NOT NULL,
+    done_at INTEGER NOT NULL
+  )
+`;
+
+/**
+ * `_migration.unit` value the script writes AFTER its verify passes — and clears
+ * again the moment a later run starts writing.
+ */
+export const MIGRATION_COMPLETE_UNIT = "@complete";
+
+/**
+ * Did a migration of this database actually FINISH?
+ *
+ * The existence of `state.db` proves nothing: the script creates it before it
+ * copies the first row, so a run killed halfway leaves a real, openable, PARTLY
+ * POPULATED database. Booting off that with the legacy JSON still on disk would
+ * silently hide every rollback point the interrupted unit hadn't reached yet —
+ * no error, just an empty checkpoint list next to a 2.4 MB file full of them.
+ *
+ * Read-only, so asking the question can't create the thing being asked about.
+ * Any failure to answer counts as NOT complete: the only caller already knows
+ * there is un-migrated JSON on disk, and in that state "couldn't tell" must
+ * never read as "fine".
+ */
+function migrationFinished(dbFile: string): boolean {
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(dbFile, { readOnly: true });
+    const table = db
+      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '_migration'")
+      .get();
+    if (!table) return false;
+    return (
+      db.prepare("SELECT 1 AS ok FROM _migration WHERE unit = ?").get(MIGRATION_COMPLETE_UNIT) !==
+      undefined
+    );
+  } catch {
+    return false;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // Nothing useful to do with a close failure on a read-only probe.
+    }
+  }
+}
+
+/**
+ * Refuse to start on a state root whose JSON hasn't been fully migrated.
+ *
+ * Only fires when legacy files are actually present. Once they're gone
+ * (`--prune`) there is nothing to be inconsistent with — and while they're still
+ * there beside a FINISHED migration, that's the documented rollback path, not a
+ * problem: delete `state.db` and the old tree boots again unchanged.
  */
 export function assertStateMigrated(dataDir: string): void {
-  if (existsSync(stateDbPath(dataDir))) return;
   const legacy = findLegacyState(dataDir);
   if (legacy.length === 0) return; // fresh install, or already pruned
+  const dbFile = stateDbPath(dataDir);
+  const started = existsSync(dbFile);
+  if (started && migrationFinished(dbFile)) return;
   throw new Error(
-    `This state root predates the SQLite store and has not been migrated:\n` +
-      `  ${dataDir}\n` +
-      `  found: ${legacy.join(", ")}\n\n` +
-      `Migrate it (the source is COPIED, never modified):\n` +
+    (started
+      ? `This state root has a migration that never finished:\n` +
+        `  ${dataDir}\n` +
+        `  ${STATE_DB_FILENAME} exists but carries no completed-and-verified marker, so it\n` +
+        `  may be missing rows the JSON below still holds. Booting off it would hide them.\n` +
+        `  still on disk: ${legacy.join(", ")}\n\n` +
+        `Finish it — the run RESUMES from where it stopped:\n`
+      : `This state root predates the SQLite store and has not been migrated:\n` +
+        `  ${dataDir}\n` +
+        `  found: ${legacy.join(", ")}\n\n` +
+        `Migrate it (the source is COPIED, never modified):\n`) +
       `  pnpm app:migrate-store -- --source "${dataDir}" --dry-run\n` +
       `  pnpm app:migrate-store -- --source "${dataDir}"\n`,
   );

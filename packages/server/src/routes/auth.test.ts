@@ -6,6 +6,7 @@ import { buildApp } from "../app.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { StateDb } from "../store/db.js";
+import { markMigration } from "../store/db.testkit.js";
 import { normalizeUserAgent, verifyTotp } from "../services/auth.js";
 
 const dirs: string[] = [];
@@ -120,13 +121,16 @@ describe("optional authentication", () => {
   it("treats a MIGRATED legacy root as an existing install", async () => {
     const dir = await mkdtemp(join(tmpdir(), "dispatch-auth-legacy-upgrade-"));
     dirs.push(dir);
-    // What a migrated store looks like: the database exists, and the JSONL tree
-    // is still there because it is the documented rollback path (`--prune` is
-    // opt-in and separate).
+    // What a migrated store looks like: the database exists AND carries the
+    // completed-and-verified marker, while the JSONL tree is still there because
+    // it is the documented rollback path (`--prune` is opt-in and separate).
+    // The marker is not decoration — without it the guard treats the database as
+    // a half-finished migration, which is exactly what it should do.
     await writeFile(join(dir, "runners.json"), "[]");
     const db = new StateDb(dir);
     db.open();
     db.close();
+    markMigration(dir, { complete: true });
 
     const store = new Store(dir);
     const instance = await buildApp({ store, bus: new EventBus(), config: {

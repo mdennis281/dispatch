@@ -19,6 +19,11 @@
  *     unless `--force` — so pointing it at a live store can't quietly double up.
  *   - RESUMES. Each unit is one transaction plus a `_migration` row, so an
  *     interrupted run picks up where it stopped instead of starting over.
+ *   - MARKS COMPLETION, and only after the verify. The server's boot guard keys
+ *     on that marker rather than on `state.db` existing, because the database is
+ *     created before the first row is copied — so a half-finished run leaves a
+ *     real, openable, INCOMPLETE store, and booting off it beside the untouched
+ *     JSON would silently hide every record the run never reached.
  *   - Entries it doesn't recognise are REPORTED, never silently skipped.
  *
  * WHAT IT DOES NOT TOUCH. `chats/` stays exactly where it is — transcripts are
@@ -304,21 +309,25 @@ async function openStateDb(dataDir) {
         `  Build it first:  pnpm build`,
     );
   }
-  const { StateDb } = await import(pathToFileURL(dist).href);
-  const db = new StateDb(dataDir);
+  const schema = await import(pathToFileURL(dist).href);
+  const db = new schema.StateDb(dataDir);
   db.open(); // pragmas + schema + version check, identical to a server boot
-  return db;
+  return { db, schema };
 }
 
-function ensureBookkeeping(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS _migration (
-      unit    TEXT PRIMARY KEY,
-      rows    INTEGER NOT NULL,
-      sha256  TEXT NOT NULL,
-      done_at INTEGER NOT NULL
-    )
-  `);
+/**
+ * The bookkeeping table's DDL and its completion marker come from the SERVER
+ * module, not from a copy here.
+ *
+ * That marker is what the server's boot guard keys on — not the existence of
+ * `state.db`, because the database is created before the first row is copied, so
+ * a run killed halfway leaves a real, openable, partly populated store. Booting
+ * off that beside the untouched JSON would silently hide every record the
+ * interrupted unit never reached. A second definition of the table these two
+ * agree through would be discovered drifting by exactly that failure.
+ */
+function ensureBookkeeping(db, schema) {
+  db.exec(schema.MIGRATION_TABLE_DDL);
 }
 
 /* ------------------------------------------------------------------- main */
@@ -404,13 +413,17 @@ async function main() {
   }
 
   await mkdir(target, { recursive: true });
-  const db = await openStateDb(target);
+  const { db, schema } = await openStateDb(target);
+  const COMPLETE_UNIT = schema.MIGRATION_COMPLETE_UNIT;
   try {
-    ensureBookkeeping(db);
+    ensureBookkeeping(db, schema);
 
     // ---- refuse a destination that already holds somebody else's rows.
     const done = new Map(
-      db.prepare("SELECT unit, rows, sha256 FROM _migration").all().map((r) => [r.unit, r]),
+      db
+        .prepare("SELECT unit, rows, sha256 FROM _migration WHERE unit <> ?")
+        .all(COMPLETE_UNIT)
+        .map((r) => [r.unit, r]),
     );
     const occupied = [];
     for (const p of plan) {
@@ -434,7 +447,9 @@ async function main() {
       const prev = done.get(unit.name);
       if (prev && !args.force) {
         console.log(`  ${unit.name.padEnd(14)} already migrated (${prev.rows} rows) — skipping`);
-        results.push({ unit, rows, skipped: true });
+        // Digest recomputed even when skipped: the completion marker below sums
+        // these, and a resumed run would otherwise stamp it from empty strings.
+        results.push({ unit, rows, skipped: true, sha: digest(rows.map((r) => r.body)) });
         continue;
       }
       const started = Date.now();
@@ -445,6 +460,10 @@ async function main() {
       // rather than resuming into a half-copied table.
       try {
         db.tx(() => {
+          // Cleared here rather than up front: a run that aborts on one of the
+          // checks above must not leave a previously-complete store looking
+          // unfinished, which would make it refuse to boot.
+          db.prepare("DELETE FROM _migration WHERE unit = ?").run(COMPLETE_UNIT);
           if (args.force) db.exec(`DELETE FROM ${unit.table}`);
           const ins = db.prepare(unit.insert);
           for (const r of rows) ins.run(...r.params);
@@ -491,6 +510,13 @@ async function main() {
       process.exitCode = 1;
       return;
     }
+    // The marker the server's boot guard looks for. AFTER the verify, so it can
+    // only ever mean "every unit landed and was read back intact".
+    db.prepare(
+      "INSERT INTO _migration (unit, rows, sha256, done_at) VALUES (?, ?, ?, ?)" +
+        " ON CONFLICT(unit) DO UPDATE SET rows = excluded.rows," +
+        " sha256 = excluded.sha256, done_at = excluded.done_at",
+    ).run(COMPLETE_UNIT, totalRows, digest(results.map((r) => r.sha)), Date.now());
     console.log(`OK — ${totalRows} rows read back identical to the source.`);
 
     // ---- prune: opt-in, and only ever after the verify above passed.

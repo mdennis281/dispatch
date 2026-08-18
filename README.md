@@ -43,7 +43,7 @@ configuration live outside the app payload and survive updates.
 **Updating from a build older than the SQLite store:** per-instance state
 (checkpoints, PRs, worktrees, runners, terminals) moved out of JSON files into
 `data/state.db`, and the server refuses to start on a store that still has the old
-files and no database rather than migrating it silently behind your back. Stop it,
+files and no *finished* migration rather than migrating it silently behind your back. Stop it,
 run `pnpm app:migrate-store -- --source "<your data dir>"`, and start it again. The
 old files are copied, never modified, and stay put as the rollback path. See
 [RUNNING.md](./RUNNING.md#install) for the full walkthrough.
