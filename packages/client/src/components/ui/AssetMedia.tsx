@@ -1,6 +1,7 @@
 import { Download, FileIcon, Music } from "lucide-react";
 import { type ImageRef, formatBytes, mediaKind } from "@dispatch/shared";
 import { useAssetSrc } from "../../lib/assetSrc.js";
+import { cn } from "../../lib/cn.js";
 
 /**
  * A chat attachment that ISN'T an image — a video an MCP recorded, an audio
@@ -22,10 +23,13 @@ export function AssetMedia({
   chatId,
   asset,
   className,
+  onOpen,
 }: {
   chatId: string;
   asset: ImageRef;
   className?: string;
+  /** Open this in the full-screen viewer. Supplied by `MediaGroup` for video. */
+  onOpen?: () => void;
 }) {
   const { src, failed } = useAssetSrc(chatId, asset);
   const name = asset.alt ?? asset.path.split(/[\\/]/).pop() ?? asset.path;
@@ -61,7 +65,7 @@ export function AssetMedia({
           preload="metadata"
           className="block max-h-72 max-w-full bg-black"
         />
-        <MediaCaption name={name} src={src} />
+        <MediaCaption name={name} src={src} onOpen={onOpen} />
       </figure>
     );
   }
@@ -94,14 +98,35 @@ export function AssetMedia({
   );
 }
 
-function MediaCaption({ name, src }: { name: string; src: string }) {
+function MediaCaption({
+  name,
+  src,
+  onOpen,
+}: {
+  name: string;
+  src: string;
+  onOpen?: () => void;
+}) {
   return (
     <figcaption className="flex items-center gap-1.5 border-t border-line-soft px-2 py-1">
       <span className="truncate text-2xs text-secondary">{name}</span>
+      {onOpen && (
+        <button
+          type="button"
+          onClick={onOpen}
+          className="ml-auto shrink-0 text-2xs text-faint outline-none hover:text-secondary focus-visible:ring-1 focus-visible:ring-accent-line"
+        >
+          Expand
+        </button>
+      )}
       <a
         href={src}
         download={name}
-        className="ml-auto shrink-0 text-2xs text-faint outline-none hover:text-secondary focus-visible:ring-1 focus-visible:ring-accent-line"
+        className={cn(
+          "shrink-0 text-2xs text-faint outline-none hover:text-secondary focus-visible:ring-1 focus-visible:ring-accent-line",
+          // The Expand button takes the spacer when it is present.
+          onOpen ? "" : "ml-auto",
+        )}
       >
         Download
       </a>

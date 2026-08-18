@@ -39,8 +39,14 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * 84 → 83: `chat/FilePathPicker` was deleted. The composer's "Insert file path"
  * now opens the file explorer's picker modal, whose result rows are `role=option`
  * inside a listbox rather than a stack of buttons.
+ *
+ * 83 → 82: the media work added two in-prose chips and a viewer nav control, and
+ * paid for all three. `codeRefs`' pointer chip and the new media chip are now one
+ * `ui/InlineChip` — a chip that sits in a line of prose genuinely can't be
+ * `Button`, which starts at h-6 and would open the line box. The viewer's
+ * prev/next is `Button circle`.
  */
-const BASELINE = 83;
+const BASELINE = 82;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

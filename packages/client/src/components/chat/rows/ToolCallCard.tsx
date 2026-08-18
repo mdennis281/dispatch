@@ -3,8 +3,7 @@ import { ChevronRight, Check, X, FileDiff, FileCode2, Square, Moon } from "lucid
 import type { ToolUseRow, ToolResultRow, TaskStatusRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { toolIcon } from "../toolIcon.js";
-import { Attachment } from "./Attachment.js";
-import { ImageLightbox } from "./ImageLightbox.js";
+import { MediaGroup } from "./MediaGroup.js";
 import { PlanBody, parsePlan } from "./PlanCard.js";
 import { ackTaskId } from "../../../lib/subagentRuns.js";
 import { Chip } from "../../ui/Chip.js";
@@ -16,51 +15,24 @@ import { hydrateFullRows } from "../../../stores/index.js";
 import { useChats } from "../../../stores/chats.js";
 import { usePanels } from "../../../stores/panels.js";
 import { toolFileTarget, openCodeViewer } from "../../monaco/index.js";
-import { parseInlineResultImages } from "../../../lib/resultImages.js";
+import { mergeImages, recoverResultMedia } from "../../../lib/resultMedia.js";
 
-/** Render a tool result payload (string as mono block, object as JSON). */
+/**
+ * The raw tool-result payload (string as mono block, object as JSON).
+ *
+ * Media is deliberately NOT rendered here — the card shows it above, expanded
+ * or not, so a screenshot isn't something you have to go looking for. What this
+ * uses the recovery pass for is the OTHER half of its job: replacing an inline
+ * payload with a short placeholder, so a result carrying 4 MB of base64 doesn't
+ * get poured into a `<pre>` and lock up the tab.
+ */
 function ResultBody({ content }: { content: unknown }) {
-  const parsed = useMemo(() => parseInlineResultImages(content), [content]);
-  const [zoomed, setZoomed] = useState<number | null>(null);
+  const sanitized = useMemo(() => recoverResultMedia(content).content, [content]);
   if (content === undefined || content === null) {
     return <span className="text-faint">— no output —</span>;
   }
-  const text = typeof parsed.content === "string" ? parsed.content : safeJson(parsed.content);
-  return (
-    <>
-      {parsed.images.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-2">
-          {parsed.images.map((image, index) => {
-            const src = `data:${image.mimeType};base64,${image.data}`;
-            return (
-              <Button
-                key={index}
-                type="button"
-                variant="ghost"
-                onClick={() => setZoomed(index)}
-                className="!h-auto !p-0 overflow-hidden rounded-md border border-line bg-inset outline-none focus-visible:ring-1 focus-visible:ring-accent-line"
-                title="Click to enlarge"
-              >
-                <img
-                  src={src}
-                  alt={`Tool result image ${index + 1}`}
-                  className="block max-h-52 max-w-[240px] object-contain"
-                />
-              </Button>
-            );
-          })}
-        </div>
-      )}
-      <pre className="whitespace-pre-wrap break-words cm-mono text-secondary">{text}</pre>
-      {zoomed !== null && parsed.images[zoomed] && (
-        <ImageLightbox
-          src={`data:${parsed.images[zoomed].mimeType};base64,${parsed.images[zoomed].data}`}
-          name={`Tool result image ${zoomed + 1}`}
-          onClose={() => setZoomed(null)}
-        />
-      )}
-    </>
-  );
+  const text = typeof sanitized === "string" ? sanitized : safeJson(sanitized);
+  return <pre className="whitespace-pre-wrap break-words cm-mono text-secondary">{text}</pre>;
 }
 
 /** Trailing "…still loading the rest" hint under a clipped payload. */
@@ -142,6 +114,14 @@ export const ToolCallCard = memo(function ToolCallCard({
     <Chip tone="success" icon={<Check />}>ok</Chip>
   );
 
+  // Media to show on the CARD ITSELF, without expanding it. The server's own
+  // refs plus anything recovered from a stored result it didn't recognize at
+  // the time — merged so a current screenshot doesn't render twice.
+  const headlineImages = useMemo(
+    () => mergeImages(result?.images, recoverResultMedia(result?.content).images),
+    [result?.images, result?.content],
+  );
+
   const command = typeof use.input.command === "string" ? use.input.command : undefined;
   // ExitPlanMode's argument IS a markdown document — render it as one.
   // (skipped while the input is still clipped — a half-plan would render as
@@ -202,12 +182,12 @@ export const ToolCallCard = memo(function ToolCallCard({
           )}
         </div>
 
-        {result?.images && result.images.length > 0 && (
-          <div className="flex flex-wrap gap-2 border-t border-line-soft px-3 py-2.5">
-            {result.images.map((img) => (
-              <Attachment key={img.id} chatId={use.chatId} asset={img} />
-            ))}
-          </div>
+        {headlineImages.length > 0 && (
+          <MediaGroup
+            chatId={use.chatId}
+            assets={headlineImages}
+            className="border-t border-line-soft px-3 py-2.5"
+          />
         )}
 
         {open && (

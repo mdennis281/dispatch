@@ -60,7 +60,9 @@ export function StreamingRow({ chatId, text, thinking }: { chatId: string; text:
     >
       {text ? (
         <div className="min-w-0">
-          <Markdown>{shown}</Markdown>
+          {/* chatId so an image the agent embeds resolves while it is still
+              streaming, rather than only once the turn finalizes. */}
+          <Markdown chatId={chatId}>{shown}</Markdown>
           <span className="mt-0.5 inline-flex align-middle">
             <TypingPulse />
           </span>

@@ -8,9 +8,17 @@
  */
 import type { FastifyInstance } from "fastify";
 import { extname } from "node:path";
+import { tmpdir } from "node:os";
 import { nanoid } from "nanoid";
-import { ImageRefSchema } from "@dispatch/shared";
+import { ImageRefSchema, chatRoot } from "@dispatch/shared";
 import { extFromMediaType, mediaTypeFromName } from "../services/media-types.js";
+import { identifyMedia } from "../services/media-sniff.js";
+import {
+  isDenied,
+  openFsAsset,
+  resolveFsAsset,
+  type FsAssetDenial,
+} from "../services/fs-assets.js";
 
 /** Cap a single upload so a runaway paste can't fill the disk / RAM. */
 const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
@@ -106,16 +114,24 @@ export function registerAssetRoutes(app: FastifyInstance): void {
       const safeExt = /^\.[a-z0-9]+$/.test(ext) ? ext : ".png";
       mime = mime ?? mediaTypeFromName(safeExt);
 
-      const name = `${nanoid()}${safeExt}`;
+      // The bytes get the final say on type and size. A composer paste carries
+      // whatever the OS clipboard claimed, and a drop carries whatever the
+      // filename implied — both are routinely wrong, and a wrong content-type
+      // is a picture the browser refuses to paint.
+      const sniffed = identifyMedia(buf, mime);
+      const realExt = extFromMediaType(sniffed.mimeType, safeExt);
+      const name = `${nanoid()}${/^\.[a-z0-9]+$/.test(realExt) ? realExt : safeExt}`;
       const relPath = await store.writeChatAsset(req.params.id, name, buf);
 
       const parsed = ImageRefSchema.safeParse({
         id: nanoid(),
         path: relPath,
-        mimeType: mime,
+        mimeType: sniffed.mimeType,
         alt: typeof body.alt === "string" ? body.alt : undefined,
-        width: posInt(body.width),
-        height: posInt(body.height),
+        // A caller-supplied dimension wins: the composer measures the decoded
+        // image, which is authoritative for formats this can't parse.
+        width: posInt(body.width) ?? sniffed.width,
+        height: posInt(body.height) ?? sniffed.height,
       });
       if (!parsed.success) {
         return reply.code(400).send({ error: parsed.error.message });
@@ -160,4 +176,84 @@ export function registerAssetRoutes(app: FastifyInstance): void {
       return reply.send(stream);
     },
   );
+
+  /**
+   * A file the AGENT wrote, served as a renderable asset.
+   *
+   *   GET /api/chats/:id/fs-asset?path=out/chart.png
+   *
+   * The commonest way an image reaches a human is that a script wrote it and
+   * the agent named the path — no MCP block, no bytes on the wire, nothing for
+   * the asset pipeline to catch. Without this the markdown `![](out/chart.png)`
+   * resolves against the SPA origin and 404s into the broken-image glyph.
+   *
+   * Relative paths resolve against the chat's worktree, because that is where
+   * the agent that wrote them was standing. Confinement, type-sniffing and the
+   * size cap all live in `resolveFsAsset` — see there for why each is load-
+   * bearing.
+   */
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
+    "/api/chats/:id/fs-asset",
+    async (req, reply) => {
+      const wanted = (req.query.path ?? "").trim();
+      if (!wanted) return reply.code(400).send({ error: "path required" });
+
+      const chat = await store.getChat(req.params.id);
+      if (!chat) return reply.code(404).send({ error: "chat not found" });
+      const project = await store.getProject(chat.projectId);
+      if (!project) return reply.code(404).send({ error: "project not found" });
+
+      // Order matters: the chat's own worktree is roots[0] and therefore the
+      // base a relative path resolves against. The project checkout is included
+      // because plenty of output lands there, and tmp because that is where
+      // capture tools stage a file before naming it.
+      const roots = [chatRoot(chat, project), project.repoPath, tmpdir()].filter(Boolean);
+      const found = await resolveFsAsset(wanted, roots);
+      if (isDenied(found)) {
+        return reply.code(DENIAL_STATUS[found.denied]).send({ error: found.denied });
+      }
+
+      reply.header("content-type", found.mimeType);
+      // `nosniff` so a browser can never re-interpret these bytes as something
+      // more privileged than the type we sniffed them to be.
+      reply.header("x-content-type-options", "nosniff");
+      // An SVG rendered through `<img>` cannot run script, but a human who opens
+      // this URL in a tab renders it as a DOCUMENT, where it can. The sandbox
+      // CSP closes that without blocking the picture.
+      if (found.mimeType === "image/svg+xml") {
+        reply.header("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'");
+      }
+      // Deliberately NOT `immutable` like the chat-asset route: that one serves
+      // content-addressed names that can never change, while this serves a live
+      // working-tree path whose bytes are rewritten every time the agent re-runs
+      // its script. Caching it hard would pin the FIRST chart forever.
+      reply.header("cache-control", "private, no-cache");
+      reply.header("accept-ranges", "bytes");
+
+      const range = parseByteRange(req.headers.range, found.size);
+      if (range === "unsatisfiable") {
+        reply.header("content-range", `bytes */${found.size}`);
+        return reply.code(416).send();
+      }
+      if (range) {
+        reply.header("content-range", `bytes ${range.start}-${range.end}/${found.size}`);
+        reply.header("content-length", String(range.end - range.start + 1));
+        return reply.code(206).send(openFsAsset(found.path, range));
+      }
+      reply.header("content-length", String(found.size));
+      return reply.send(openFsAsset(found.path));
+    },
+  );
 }
+
+/**
+ * Denials map to distinct statuses so the client can tell "typo" from "not
+ * allowed" from "that isn't a picture" — a single 404 for all three makes a
+ * confinement rejection indistinguishable from a missing file when debugging.
+ */
+const DENIAL_STATUS: Record<FsAssetDenial, number> = {
+  "not-found": 404,
+  forbidden: 403,
+  "too-large": 413,
+  "not-media": 415,
+};

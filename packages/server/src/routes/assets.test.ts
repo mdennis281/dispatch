@@ -84,7 +84,7 @@ describe("chat assets", () => {
     expect((up.json() as { path: string }).path).toMatch(/^assets\/.+\.png$/);
   });
 
-  it("accepts a data: URL and drops a bad width", async () => {
+  it("accepts a data: URL, drops a bad width, and sniffs the real one", async () => {
     const chatId = await makeChat();
     const up = await app.inject({
       method: "POST",
@@ -94,7 +94,26 @@ describe("chat assets", () => {
     expect(up.statusCode).toBe(201);
     const ref = up.json() as { path: string; mimeType: string; width?: number };
     expect(ref.mimeType).toBe("image/png");
-    expect(ref.width).toBeUndefined();
+    // 1.5 is refused as before — but the dimension is no longer simply lost.
+    // The PNG header is read at upload, so the caption has a size to show even
+    // when the client sent a junk one (or none at all).
+    expect(ref.width).toBe(1);
+  });
+
+  it("corrects a mislabelled upload from the bytes", async () => {
+    // A clipboard paste routinely carries the wrong type. Storing it under the
+    // declared one meant a .jpg extension on PNG bytes, served with a
+    // content-type the browser refuses to paint.
+    const chatId = await makeChat();
+    const up = await app.inject({
+      method: "POST",
+      url: `/api/chats/${chatId}/assets`,
+      payload: { data: PNG_B64, mimeType: "image/jpeg", filename: "shot.jpg" },
+    });
+    expect(up.statusCode).toBe(201);
+    const ref = up.json() as { path: string; mimeType: string };
+    expect(ref.mimeType).toBe("image/png");
+    expect(ref.path.endsWith(".png")).toBe(true);
   });
 
   it("rejects an empty body and a missing chat", async () => {

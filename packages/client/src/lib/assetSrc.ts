@@ -20,11 +20,34 @@
  * every scroll.
  */
 import { useEffect, useState } from "react";
-import { assetUrl } from "./api.js";
+import type { ImageRef } from "@dispatch/shared";
+import { assetUrl, fsAssetUrl } from "./api.js";
 import { sessionFetch } from "../stores/auth.js";
 
 /** Already renderable as-is — nothing to fetch, nothing to revoke. */
 const DIRECT = /^(https?:|data:|blob:)/i;
+
+/**
+ * Marks a path that lives in the PROJECT working tree rather than in the chat's
+ * assets dir — an image the agent wrote and then merely mentioned.
+ *
+ * An explicit prefix rather than a heuristic on the path shape, because there
+ * isn't a reliable one: `assetUrl` reduces a chat asset to its basename, so
+ * `out/chart.png` and `assets/chart.png` would both be requested as
+ * `chart.png` and the working-tree file would 404. The two are genuinely
+ * different resources and the ref has to say which it is.
+ */
+const FS_PREFIX = "fs:";
+
+/** An `ImageRef` for a file in the chat's working tree. */
+export function fsImageRef(path: string, extra?: Partial<ImageRef>): ImageRef {
+  return { id: `fs-${path}`, ...extra, path: `${FS_PREFIX}${path}` };
+}
+
+/** The working-tree path a ref points at, or null if it isn't one. */
+export function fsRefPath(path: string): string | null {
+  return path.startsWith(FS_PREFIX) ? path.slice(FS_PREFIX.length) : null;
+}
 
 /**
  * Bound the object URLs held alive. Each entry pins its blob in memory, and an
@@ -68,7 +91,10 @@ export function directSrc(path: string): string | null {
 
 /** The endpoint that serves `image` for `chatId` — only for non-direct paths. */
 export function assetSrcTarget(chatId: string, path: string): string {
-  return directSrc(path) ?? assetUrl(chatId, { path });
+  const direct = directSrc(path);
+  if (direct) return direct;
+  const fsPath = fsRefPath(path);
+  return fsPath === null ? assetUrl(chatId, { path }) : fsAssetUrl(chatId, fsPath);
 }
 
 function entryFor(url: string): Entry {

@@ -80,7 +80,7 @@ export const AssistantRow = memo(function AssistantRow({
           )}
         </div>
       )}
-      <Markdown resolve={resolveRef}>{row.text}</Markdown>
+      <Markdown resolve={resolveRef} chatId={chatId}>{row.text}</Markdown>
     </RowShell>
   );
 });
