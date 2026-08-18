@@ -122,7 +122,7 @@ export function PathBar({
       <div
         className="h-6 min-w-[3rem] flex-1 cursor-text"
         onClick={() => onEditingChange(true)}
-        title="Edit path (Ctrl+L)"
+        title="Edit path (⌘/Ctrl+L)"
       />
     </div>
   );

@@ -18,7 +18,6 @@ import {
   ArrowRight,
   ArrowUp,
   ArrowUpDown,
-  ChevronRight,
   Copy,
   Eye,
   EyeOff,
