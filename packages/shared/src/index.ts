@@ -20,6 +20,7 @@ export * from "./mcp.js";
 export * from "./file-tools.js";
 export * from "./fs-entry.js";
 export * from "./messages.js";
+export * from "./notify.js";
 export * from "./titles.js";
 export * from "./version.js";
 export * from "./wire.js";

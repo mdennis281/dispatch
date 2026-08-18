@@ -9,6 +9,7 @@ import {
 import { ws } from "./lib/ws.js";
 import { RunnerLogWindow } from "./components/panels/RunnerLogWindow.js";
 import { capturePwaInstall } from "./lib/pwaInstall.js";
+import { useWebPush, startPresenceReporting } from "./lib/webPush.js";
 import { focusAttentionTarget } from "./components/attention/focus.js";
 import { watchSystemTheme, syncThemeColor } from "./stores/theme.js";
 import "./index.css";
@@ -100,6 +101,21 @@ if (!isLogWindow) {
     // After hydrate, or setActiveChat targets a chat the store hasn't seen.
     window.setTimeout(() => focusAttentionTarget(chatId, hash.get("attn") ?? undefined), 400);
   }
+}
+
+// Reconcile this device's push subscription with the server on every load, and
+// start reporting whether the app is in front. Both are cheap and both heal a
+// failure that is otherwise silent: a subscription the server forgot, and pushes
+// arriving on a screen you're already looking at. Deferred to `load` so it never
+// competes with first paint, and skipped for the log popup, which is a child of
+// an already-registered client.
+if (!isLogWindow) {
+  window.addEventListener("load", () => {
+    void useWebPush
+      .getState()
+      .hydrate()
+      .then(() => startPresenceReporting());
+  });
 }
 
 const el = document.getElementById("root");
