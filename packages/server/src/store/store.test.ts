@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./index.js";
 import { STATE_DB_FILENAME } from "./db.js";
+import { DatabaseSync } from "node:sqlite";
 import { renameWithRetry, writeJsonAtomic, readJson } from "./fsq.js";
-import type { Project, Chat, ChatMessage, RunnerInstance, Checkpoint } from "@dispatch/shared";
+import type { Project, Chat, ChatMessage, RunnerInstance, Checkpoint, PrRecord } from "@dispatch/shared";
+import { PrRecordSchema } from "@dispatch/shared";
 
 let dir: string;
 let store: Store;
@@ -30,6 +32,20 @@ function project(id: string): Project {
     subApps: [],
     createdAt: Date.now(),
   };
+}
+
+/** A complete PrRecord minus its key — every default filled in, as a real caller has. */
+function pr(number: number, title: string): Omit<PrRecord, "key"> {
+  const { key: _key, ...rest } = PrRecordSchema.parse({
+    key: `owner/repo#${number}`,
+    repo: "owner/repo",
+    number,
+    title,
+    url: `https://example.test/${number}`,
+    firstSeenAt: 1,
+    lastChangedAt: 1,
+  });
+  return rest;
 }
 
 function chat(id: string, projectId: string): Chat {
@@ -256,6 +272,26 @@ describe("Store runners + checkpoints + settings", () => {
     expect(await store.getCheckpoints("c1")).toHaveLength(0);
     // Deleting a chat must not cost another chat its rollback points.
     expect(await store.getCheckpoints("c2")).toHaveLength(1);
+  });
+
+  it("drops a row it cannot even parse, instead of losing the whole roster", async () => {
+    // The tolerant readers (PRs, MCP port leases) used to face one JSON document
+    // per file: a malformed row could not exist, because the whole file either
+    // parsed or it didn't. Row by row it can — and letting `JSON.parse` throw
+    // ahead of the schema check would cost the entire catalog for one bad record,
+    // which is the exact opposite of what those readers are for.
+    await store.upsertPrRecord("owner/repo#1", pr(1, "good"));
+    // Reach past the API to plant the corruption a torn disk write would leave.
+    const db = new DatabaseSync(join(dir, STATE_DB_FILENAME));
+    db.prepare("INSERT INTO pr (key, body) VALUES (?, ?)").run("owner/repo#2", "{not json");
+    db.close();
+
+    expect((await store.listPrRecords()).map((p) => p.key)).toEqual(["owner/repo#1"]);
+    expect(await store.getPrRecord("owner/repo#2")).toBeNull();
+    // …and the next poll simply replaces it, rather than being wedged out.
+    const healed = await store.upsertPrRecord("owner/repo#2", pr(2, "rewritten"));
+    expect(healed.title).toBe("rewritten");
+    expect(await store.listPrRecords()).toHaveLength(2);
   });
 
   it("round-trips settings with defaults", async () => {

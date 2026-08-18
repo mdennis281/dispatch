@@ -224,6 +224,27 @@ function parseMessageLines(lines: string[]): ChatMessage[] {
   return out;
 }
 
+/**
+ * Decode a row body LENIENTLY: `null` when it doesn't parse as JSON, and `null`
+ * when it doesn't satisfy the schema.
+ *
+ * The two failures have to be treated alike. As one JSON document per file, a
+ * malformed row could not exist — the whole file parsed or it didn't. Row by
+ * row, a body this build can't even `JSON.parse` is exactly the case the
+ * tolerant readers below exist for, and letting it throw would cost the entire
+ * PR roster (or every session's port lease) for one corrupt record.
+ */
+function decodeRow<T>(schema: z.ZodType<T>, body: unknown): T | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(String(body));
+  } catch {
+    return null;
+  }
+  const parsed = schema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
 /** Rebuild a TerminalLineRecord from its three columns (see the schema). */
 function toTerminalLine(row: Record<string, unknown>): TerminalLineRecord {
   return TerminalLineSchema.parse({ ts: row.ts, stream: row.stream, chunk: row.chunk });
@@ -725,8 +746,8 @@ export class Store {
     // Tolerate a partially-corrupt store: a bad row costs one lease (re-leased on
     // next use), where a throw would cost every session in every project.
     return this.rows("SELECT body FROM mcp_port_lease ORDER BY seq").flatMap((r) => {
-      const p = McpPortLeaseSchema.safeParse(JSON.parse(r.body as string));
-      return p.success ? [p.data] : [];
+      const lease = decodeRow(McpPortLeaseSchema, r.body);
+      return lease ? [lease] : [];
     });
   }
 
@@ -1063,15 +1084,13 @@ export class Store {
    */
   async listPrRecords(): Promise<PrRecord[]> {
     return this.rows("SELECT body FROM pr ORDER BY seq").flatMap((r) => {
-      const p = PrRecordSchema.safeParse(JSON.parse(r.body as string));
-      return p.success ? [p.data] : [];
+      const pr = decodeRow(PrRecordSchema, r.body);
+      return pr ? [pr] : [];
     });
   }
   async getPrRecord(key: string): Promise<PrRecord | null> {
     const row = this.db.prepare("SELECT body FROM pr WHERE key = ?").get(key);
-    if (!row) return null;
-    const p = PrRecordSchema.safeParse(JSON.parse(row.body as string));
-    return p.success ? p.data : null;
+    return row ? decodeRow(PrRecordSchema, row.body) : null;
   }
 
   /**
@@ -1092,11 +1111,10 @@ export class Store {
   ): Promise<PrRecord> {
     return this.db.tx(() => {
       const row = this.db.prepare("SELECT body FROM pr WHERE key = ?").get(key);
-      // safeParse, matching listPrRecords: a row this build can no longer read is
+      // Lenient, matching listPrRecords: a row this build can no longer read is
       // replaced by the poll that's writing right now, rather than throwing and
       // wedging that PR out of the roster for good.
-      const parsed = row ? PrRecordSchema.safeParse(JSON.parse(row.body as string)) : undefined;
-      const prev = parsed?.success ? parsed.data : undefined;
+      const prev = row ? decodeRow(PrRecordSchema, row.body) : null;
       const result = PrRecordSchema.parse({ ...(prev ?? create), ...update, key });
       this.db
         .prepare(

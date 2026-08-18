@@ -9,7 +9,12 @@
  *     it once you delete `state.db`. Removing the old tree is a SEPARATE,
  *     opt-in `--prune` that only runs after a verified pass.
  *   - VERIFIES every migrated record by reading it back OUT of the database and
- *     comparing bytes, then hashes both sides. Exits non-zero on any mismatch.
+ *     comparing it, in order, against the source — then digests both sides.
+ *     Exits non-zero on any mismatch. The comparison is on CANONICAL JSON
+ *     (`JSON.parse` → `JSON.stringify`), not the source file's on-disk bytes:
+ *     `checkpoints.json` is pretty-printed and the row isn't, so a byte compare
+ *     against the file would be comparing indentation. Key order and every value
+ *     survive that round-trip, which is what the check is actually about.
  *   - REFUSES a database that already holds rows this run didn't put there,
  *     unless `--force` — so pointing it at a live store can't quietly double up.
  *   - RESUMES. Each unit is one transaction plus a `_migration` row, so an
@@ -20,11 +25,12 @@
  * still JSONL and assets are still files on purpose (see the Store docblock).
  * `auth-sessions.json` belongs to AuthService and is still a file.
  *
- * WHY NO ZOD HERE. Records are copied VERBATIM: the bytes read out of the JSON
- * go into the row unchanged, which is what makes the byte-for-byte verify below
- * meaningful. Validation stays where it has always been — on the Store's read
- * path — so a legacy record that no longer parses surfaces there, loudly, with
- * the original file still on disk to fix it from.
+ * WHY NO ZOD HERE. A record is re-serialized but never RESHAPED: no schema is
+ * applied, no default is filled in, no unrecognised field is dropped. That is
+ * what makes the verify below meaningful — both sides are the same canonical
+ * form of the same object. Validation stays where it has always been, on the
+ * Store's read path, so a legacy record that no longer parses surfaces there,
+ * loudly, with the original file still on disk to fix it from.
  *
  * Usage:
  *   node tools/app/migrate-store.mjs [--source <stateRoot>] [--target <stateRoot>]
@@ -40,7 +46,7 @@ import { existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { LEGACY_STATE_ENTRIES } from "./paths.mjs";
+import { LEGACY_STATE_ENTRIES, STATE_ENTRIES } from "./paths.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../..");
@@ -146,9 +152,10 @@ function digest(parts) {
  *
  * `rows(dir)` yields `{ params, body }` — `params` are the INSERT's bind values
  * and `body` is the comparison string for that record. For a `body TEXT` table
- * they are the same VERBATIM JSON, which is what makes the verify byte-exact.
- * A table stored as typed columns (terminal_line) supplies a `project()` that
- * rebuilds the same string from the row, so both sides compare identically.
+ * they are the same canonical JSON, so the verify compares the stored column
+ * against the string that produced it. A table stored as typed columns
+ * (terminal_line) supplies a `project()` that rebuilds the same string from the
+ * row, so both sides still compare as one value.
  */
 const UNITS = [
   {
@@ -267,18 +274,12 @@ const UNITS = [
 ];
 
 /**
- * State-root entries this script knows about. Anything else is reported so a
- * file nobody remembered can't be quietly left behind by a `--prune`.
+ * State-root entries this script knows about — the same list `app:migrate`
+ * classifies against, so the two tools agree on what a state root contains.
+ * Anything else is reported, so a file nobody remembered can't be quietly left
+ * behind by a `--prune`.
  */
-const KNOWN_ENTRIES = new Set([
-  ...LEGACY_STATE_ENTRIES,
-  "chats",
-  "state.db",
-  "state.db-wal",
-  "state.db-shm",
-  "auth-sessions.json",
-  "auth-recovery.lock",
-]);
+const KNOWN_ENTRIES = new Set(STATE_ENTRIES);
 
 /* ------------------------------------------------------------------- db */
 
@@ -472,6 +473,7 @@ async function main() {
         problems.push(`${unit.name}: ${want.length} source rows vs ${got.length} in the database`);
         continue;
       }
+      // Compared as canonical JSON rather than raw file bytes — see the header.
       for (let i = 0; i < want.length; i++) {
         if (got[i] !== want[i]) {
           problems.push(`${unit.name}: row ${i} differs\n    source: ${want[i].slice(0, 160)}\n    stored: ${got[i].slice(0, 160)}`);
@@ -489,7 +491,7 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    console.log(`OK — ${totalRows} rows verified byte-identical.`);
+    console.log(`OK — ${totalRows} rows read back identical to the source.`);
 
     // ---- prune: opt-in, and only ever after the verify above passed.
     if (args.prune) {
