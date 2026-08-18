@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { buildApp } from "../app.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
+import { StateDb } from "../store/db.js";
+import { markMigration } from "../store/db.testkit.js";
 import { normalizeUserAgent, verifyTotp } from "../services/auth.js";
 
 const dirs: string[] = [];
@@ -98,10 +100,38 @@ describe("optional authentication", () => {
     await instance.close();
   });
 
-  it("treats a legacy root containing only runners.json as an existing install", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "dispatch-auth-legacy-upgrade-"));
+  // A root holding only `runners.json` used to be the canonical "this is an
+  // upgrade, not a fresh install" case. It is now ALSO the canonical un-migrated
+  // store, so it has to answer both questions — hence the pair below.
+  it("refuses to boot a legacy root that was never migrated to SQLite", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dispatch-auth-legacy-unmigrated-"));
     dirs.push(dir);
     await writeFile(join(dir, "runners.json"), "[]");
+    const store = new Store(dir);
+    // Refusing beats auto-migrating: this is a minute of work on data the user
+    // has no second copy of, and a silent pause at boot is the worst way to
+    // learn it happened. The message has to name the script that does it.
+    await expect(
+      buildApp({ store, bus: new EventBus(), config: {
+        port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1,
+      }}),
+    ).rejects.toThrow(/app:migrate-store/);
+  });
+
+  it("treats a MIGRATED legacy root as an existing install", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dispatch-auth-legacy-upgrade-"));
+    dirs.push(dir);
+    // What a migrated store looks like: the database exists AND carries the
+    // completed-and-verified marker, while the JSONL tree is still there because
+    // it is the documented rollback path (`--prune` is opt-in and separate).
+    // The marker is not decoration — without it the guard treats the database as
+    // a half-finished migration, which is exactly what it should do.
+    await writeFile(join(dir, "runners.json"), "[]");
+    const db = new StateDb(dir);
+    db.open();
+    db.close();
+    markMigration(dir, { complete: true });
+
     const store = new Store(dir);
     const instance = await buildApp({ store, bus: new EventBus(), config: {
       port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1,

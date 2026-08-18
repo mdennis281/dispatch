@@ -26,6 +26,7 @@ beforeEach(async () => {
   memory = new MemoryService({ store, bus, now: () => ++clock });
 });
 afterEach(async () => {
+  store.close();
   await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 

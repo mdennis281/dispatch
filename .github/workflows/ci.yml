@@ -93,10 +93,12 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
-          # package.json engines says >=20. Pinning the LTS keeps `engines`
-          # honest — the author develops on a newer Node, so this is the leg
-          # that would notice if the floor quietly rose.
-          node-version: 22
+          # package.json engines says >=24, and that floor is LOAD-BEARING:
+          # Node 22 ships `node:sqlite` WITHOUT FTS5, so the store's tables all
+          # create fine and only the transcript search index throws
+          # `no such module: fts5`. A gate on 22 would go green on a build with
+          # no search. Pinned exactly so this leg notices if the floor moves.
+          node-version: 24
           # NO `cache: pnpm` HERE, DELIBERATELY. That option uploads and
           # downloads the pnpm store through GitHub's cache service on every
           # run. This runner is persistent: its pnpm store already survives
@@ -220,7 +222,9 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # See the note on the self-hosted leg: 24 is the floor `node:sqlite`
+          # needs for FTS5, not a preference.
+          node-version: 24
           # Kept here, unlike the self-hosted leg: this runner IS ephemeral, so
           # without the cache every run pays a cold pnpm install at 2× billing.
           cache: pnpm

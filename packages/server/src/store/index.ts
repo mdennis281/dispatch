@@ -1,37 +1,59 @@
 /**
- * Filesystem Store — the no-DB persistence layer. Everything lives under a
- * dataDir as JSON (config/entities) + JSONL (chat transcripts). All writes are
- * atomic and serialized per-file via a KeyedMutex, and every value is
- * zod-validated on the way in AND out so corrupt/legacy data surfaces loudly.
+ * Store — the persistence layer. Two roots, two very different storage models,
+ * split along how often each is written.
  *
- * The tree is split across TWO roots so a stable and a dev instance can share
- * what's safe to share and keep apart what isn't (see {@link Store} ctor):
- *
- * CONFIG root (`configDir`) — low-write, safe to share between instances:
+ * CONFIG root (`configDir`) — low-write, shared between instances, JSON FILES:
  *   config.json                  — global app settings
  *   projects/<id>.json           — Project
  *   projects/<id>/memory/        — project agent-memory (+ memory-stats.json)
  *   agents/<id>.json             — AgentConfig
  *   modes/<id>.json              — ModeConfig
  *
- * STATE root (`dataDir`) — high-write, MUST stay per-instance:
+ * These stay files deliberately. They are ~41 KB in total and rewritten by hand
+ * about as often as they are by the app; project memory is git-committed
+ * markdown whose diffability is the point. A database would buy nothing and cost
+ * the ability to fix one with an editor.
+ *
+ * STATE root (`dataDir`) — high-write, per-instance, SQLITE (`state.db`):
+ *   runner, mcp_port_lease, worktree, terminal, terminal_line, pr, checkpoint
+ *
+ * …plus what is still on the filesystem there, on purpose:
  *   chats/<id>/chat.json         — Chat
  *   chats/<id>/messages.jsonl    — ChatMessage rows
- *   chats/<id>/assets/           — pasted/received images
- *   runners.json                 — RunnerInstance[]
- *   checkpoints.json             — { [chatId]: { [messageId]: Checkpoint } }
- *   worktrees.json               — WorktreeRecord[] (attribution, keyed by path)
- *   terminals.json               — TerminalRecord[] (shell roster)
- *   terminals/<logId>.jsonl      — that shell's retained output
- *   prs.json                     — PrRecord[] (PR roster, keyed `repo#number`)
+ *   chats/<id>/assets/           — pasted/received images, video, audio, files
+ *   auth-sessions.json           — refresh families (owned by AuthService)
  *
- * `runners.json`, `checkpoints.json`, `worktrees.json`, `terminals.json` and
- * `prs.json` are whole-file read-modify-write maps
- * guarded only by this process's {@link KeyedMutex}, so two processes sharing
- * them would silently lose each other's entries — that's the reason for the
- * split, and the reason chats stay per-instance even though sharing them would
- * be convenient. `configDir` defaults to `dataDir`, so a single-root deployment
- * (and every test) behaves exactly as before.
+ * Assets are FILES and stay files. `ImageRefSchema.path` is already "path under
+ * the chat's assets/ dir", the media is 582 MB of PNG/JPG/video against a 214 MB
+ * transcript corpus, and only 158 of 2730 are duplicates — so there is no dedup
+ * win to chase, and putting hundreds of megabytes of opaque blobs into the same
+ * file as the rows would make every backup, every VACUUM and every range request
+ * worse. `writeChatAsset` / `readChatAsset` / `openChatAsset` (and the traversal
+ * guard in `safeAssetPath`) are unchanged.
+ *
+ * WHY THE STATE ROOT MOVED. Every one of those tables used to be a whole-file
+ * read-modify-write JSON map guarded by an in-process {@link KeyedMutex}:
+ * `saveCheckpoint` rewrote all 2.4 MB of `checkpoints.json` to add one entry,
+ * once per turn, and it only ever grew. The mutex also meant two PROCESSES
+ * sharing a state root would silently drop each other's writes, which is the
+ * reason the dev and stable instances were given separate `data/` dirs.
+ *
+ * SQLite + WAL retires that hazard: concurrent writers serialize properly and a
+ * reader gets a consistent snapshot rather than whatever a half-finished rewrite
+ * left behind. Keeping the two state roots apart is now a POLICY choice (a dev
+ * crash shouldn't cost the stable instance its rollback points), not a
+ * correctness requirement — and the one place that always crossed the line,
+ * InspectService opening the installed instance's store from dev (see
+ * `makeStore` in services/container.ts), now reads a snapshot instead of JSON
+ * files caught mid-rename.
+ *
+ * Everything is still zod-validated on the way in AND out, so corrupt or legacy
+ * data surfaces loudly rather than propagating. The exception is deliberate and
+ * documented where it lives: `services/inspect.ts` duck-types transcript rows
+ * because it reads months of older schema versions.
+ *
+ * The database is opened LAZILY and must be {@link Store.close}d — on Windows an
+ * open SQLite handle blocks `rm -r` of the directory containing it.
  */
 import { join, resolve, relative, isAbsolute, basename } from "node:path";
 import {
@@ -79,10 +101,9 @@ import {
   readJson,
   writeJsonAtomic,
   appendJsonl,
-  appendJsonlBatch,
-  readJsonl,
   readJsonlLines,
 } from "./fsq.js";
+import { StateDb, assertStateMigrated } from "./db.js";
 
 /** Global app settings (config.json). Kept permissive by design. */
 export const AppSettingsSchema = z.object({
@@ -165,8 +186,6 @@ export type AppSettings = z.infer<typeof AppSettingsSchema>;
 
 const DEFAULT_SETTINGS: AppSettings = { theme: "dark" };
 
-type CheckpointMap = Record<string, Record<string, Checkpoint>>;
-
 /**
  * Row id off a raw JSONL line WITHOUT parsing it. `id` is the first key of every
  * persisted row (MessageBase is spread first in every message schema, and
@@ -205,13 +224,40 @@ function parseMessageLines(lines: string[]): ChatMessage[] {
   return out;
 }
 
+/**
+ * Decode a row body LENIENTLY: `null` when it doesn't parse as JSON, and `null`
+ * when it doesn't satisfy the schema.
+ *
+ * The two failures have to be treated alike. As one JSON document per file, a
+ * malformed row could not exist — the whole file parsed or it didn't. Row by
+ * row, a body this build can't even `JSON.parse` is exactly the case the
+ * tolerant readers below exist for, and letting it throw would cost the entire
+ * PR roster (or every session's port lease) for one corrupt record.
+ */
+function decodeRow<T>(schema: z.ZodType<T>, body: unknown): T | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(String(body));
+  } catch {
+    return null;
+  }
+  const parsed = schema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Rebuild a TerminalLineRecord from its three columns (see the schema). */
+function toTerminalLine(row: Record<string, unknown>): TerminalLineRecord {
+  return TerminalLineSchema.parse({ ts: row.ts, stream: row.stream, chunk: row.chunk });
+}
+
 export class Store {
   private readonly mutex = new KeyedMutex();
   private readonly configDir: string;
+  private readonly db: StateDb;
   private freshInstall = true;
 
   /**
-   * @param dataDir   STATE root (chats, checkpoints, runners) — per-instance.
+   * @param dataDir   STATE root (`state.db` + chats) — per-instance.
    * @param configDir CONFIG root (settings, projects, agents, modes) — shareable
    *                  between instances. Defaults to `dataDir` for a single-root
    *                  layout, which is what every existing caller and test uses.
@@ -221,6 +267,28 @@ export class Store {
     configDir?: string,
   ) {
     this.configDir = configDir ?? dataDir;
+    this.db = new StateDb(dataDir);
+  }
+
+  /**
+   * Release the state database. Idempotent, and safe to call on a store that
+   * never opened one.
+   *
+   * NOT optional on Windows: SQLite opens its files without FILE_SHARE_DELETE,
+   * so `rm -r` of the directory holding an open database fails EPERM. That is
+   * every test's `afterEach` teardown, and the server's own `dispose()`.
+   */
+  close(): void {
+    this.db.close();
+  }
+
+  /**
+   * `all()` typed as the loose row shape `node:sqlite` actually returns. Every
+   * caller here immediately narrows a known column, so a shared cast beats
+   * repeating it at three dozen call sites.
+   */
+  private rows(sql: string, ...params: Array<string | number>): Array<Record<string, unknown>> {
+    return this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
   }
 
   /* ------------------------------------------------------------ paths */
@@ -278,46 +346,6 @@ export class Store {
   chatAssetsDir(chatId: string) {
     return join(this.chatDir(chatId), "assets");
   }
-  private runnersFile() {
-    return join(this.dataDir, "runners.json");
-  }
-  /**
-   * Per-INSTANCE, like runners.json and for the same reason: it's a whole-file
-   * read-modify-write map guarded by an in-process mutex, so two processes
-   * sharing it would silently drop each other's leases and hand two checkouts
-   * one port — the exact collision the leases exist to prevent.
-   */
-  private mcpPortsFile() {
-    return join(this.dataDir, "mcp-ports.json");
-  }
-  private checkpointsFile() {
-    return join(this.dataDir, "checkpoints.json");
-  }
-  private worktreesFile() {
-    return join(this.dataDir, "worktrees.json");
-  }
-  private terminalsFile() {
-    return join(this.dataDir, "terminals.json");
-  }
-  /**
-   * The PR roster. STATE root for the same reason as worktrees.json: a whole-file
-   * read-modify-write map guarded only by this process's mutex, so a stable and a
-   * dev instance sharing it would silently drop each other's rows.
-   */
-  private prsFile() {
-    return join(this.dataDir, "prs.json");
-  }
-  private terminalLogsDir() {
-    return join(this.dataDir, "terminals");
-  }
-  /**
-   * A terminal's transcript. Keyed by `logId` rather than by the terminal's own
-   * id, which is `${chatId}::${agentChosenName}` — neither `::` nor an arbitrary
-   * agent-supplied string is a safe filename.
-   */
-  private terminalLogFile(logId: string) {
-    return join(this.terminalLogsDir(), `${logId}.jsonl`);
-  }
   private settingsFile() {
     return join(this.configDir, "config.json");
   }
@@ -334,8 +362,19 @@ export class Store {
     return join(this.dataDir, "auth-recovery.lock");
   }
 
-  /** Create both roots' trees. Idempotent; call once at boot. */
+  /**
+   * Create both roots' trees and open the state database. Idempotent; call once
+   * at boot.
+   *
+   * Opening here rather than on first use is deliberate: a state root written by
+   * a newer schema, or a Node without FTS5, should stop the server at boot with
+   * a message — not surface as one failing request an hour in.
+   */
   async init(): Promise<void> {
+    // BEFORE the database is opened. Opening it creates `state.db`, and an empty
+    // one sitting next to un-migrated JSON is indistinguishable from a migrated
+    // store — the check would never fire again.
+    assertStateMigrated(this.dataDir);
     // Capture this before seedDefaultsIfEmpty creates the standard project and
     // modes. Auth uses it to show first-run setup only to genuinely new data,
     // never as a surprise blocker after upgrading an existing installation.
@@ -357,6 +396,7 @@ export class Store {
       mkdir(this.modesDir(), { recursive: true }),
       mkdir(this.chatsDir(), { recursive: true }),
     ]);
+    this.db.open();
   }
 
   /** Snapshot taken before boot-time seeding; stable for this process lifetime. */
@@ -676,61 +716,68 @@ export class Store {
   /* ----------------------------------------------------------- runners */
 
   async listRunners(): Promise<RunnerInstance[]> {
-    const raw = (await readJson<unknown[]>(this.runnersFile())) ?? [];
-    return z.array(RunnerInstanceSchema).parse(raw);
+    return this.rows("SELECT body FROM runner ORDER BY seq").map((r) =>
+      RunnerInstanceSchema.parse(JSON.parse(r.body as string)),
+    );
   }
   async getRunner(id: string): Promise<RunnerInstance | null> {
-    const all = await this.listRunners();
-    return all.find((r) => r.id === id) ?? null;
+    const row = this.db.prepare("SELECT body FROM runner WHERE id = ?").get(id);
+    return row ? RunnerInstanceSchema.parse(JSON.parse(row.body as string)) : null;
   }
   async saveRunner(runner: RunnerInstance): Promise<RunnerInstance> {
     const validated = RunnerInstanceSchema.parse(runner);
-    await this.mutex.run("runners", async () => {
-      const all = (await readJson<unknown[]>(this.runnersFile())) ?? [];
-      const list = z.array(RunnerInstanceSchema).parse(all);
-      const idx = list.findIndex((r) => r.id === validated.id);
-      if (idx >= 0) list[idx] = validated;
-      else list.push(validated);
-      await writeJsonAtomic(this.runnersFile(), list);
-    });
+    // ON CONFLICT leaves `seq` alone, so re-saving a runner doesn't move it to
+    // the end of the roster the way a rewritten JSON array would.
+    this.db
+      .prepare(
+        "INSERT INTO runner (id, body) VALUES (?, ?)" +
+          " ON CONFLICT(id) DO UPDATE SET body = excluded.body",
+      )
+      .run(validated.id, JSON.stringify(validated));
     return validated;
   }
   async deleteRunner(id: string): Promise<void> {
-    await this.mutex.run("runners", async () => {
-      const all = (await readJson<unknown[]>(this.runnersFile())) ?? [];
-      const list = z.array(RunnerInstanceSchema).parse(all).filter((r) => r.id !== id);
-      await writeJsonAtomic(this.runnersFile(), list);
-    });
+    this.db.prepare("DELETE FROM runner WHERE id = ?").run(id);
   }
 
   /* ---------------------------------------------------- MCP port leases */
 
   async listMcpPortLeases(): Promise<McpPortLease[]> {
-    const raw = (await readJson<unknown[]>(this.mcpPortsFile())) ?? [];
-    // Tolerate a partially-corrupt file: a bad row costs one lease (re-leased on
+    // Tolerate a partially-corrupt store: a bad row costs one lease (re-leased on
     // next use), where a throw would cost every session in every project.
-    return raw.flatMap((r) => {
-      const p = McpPortLeaseSchema.safeParse(r);
-      return p.success ? [p.data] : [];
+    return this.rows("SELECT body FROM mcp_port_lease ORDER BY seq").flatMap((r) => {
+      const lease = decodeRow(McpPortLeaseSchema, r.body);
+      return lease ? [lease] : [];
     });
   }
 
   /**
-   * Read-modify-write the whole lease list under one lock. Allocation must see a
+   * Replace the whole lease list under one lock. Allocation must see a
    * consistent view — two concurrent sessions each picking "the lowest free
    * port" from a stale read would pick the SAME one.
+   *
+   * Still a whole-list replace rather than a row diff, because that is genuinely
+   * the shape of the operation: `fn` is handed every lease and returns the set
+   * that should exist afterwards. The rows are tiny and there are a handful of
+   * them; inventing a per-row key the allocator doesn't have would buy nothing.
+   *
+   * The MUTEX survives here where every other map dropped it, because `fn` is
+   * allowed to be async (the allocator probes sockets) and a synchronous
+   * transaction cannot be held across an await. So the transaction covers only
+   * the replace, and the mutex covers the read/compute/write triple.
    */
   async updateMcpPortLeases<T>(
     fn: (leases: McpPortLease[]) => { leases: McpPortLease[]; result: T } | Promise<{ leases: McpPortLease[]; result: T }>,
   ): Promise<T> {
     return this.mutex.run("mcp-ports", async () => {
-      const raw = (await readJson<unknown[]>(this.mcpPortsFile())) ?? [];
-      const current = raw.flatMap((r) => {
-        const p = McpPortLeaseSchema.safeParse(r);
-        return p.success ? [p.data] : [];
-      });
+      const current = await this.listMcpPortLeases();
       const { leases, result } = await fn(current);
-      await writeJsonAtomic(this.mcpPortsFile(), leases);
+      const validated = leases.map((l) => McpPortLeaseSchema.parse(l));
+      this.db.tx(() => {
+        this.db.prepare("DELETE FROM mcp_port_lease").run();
+        const ins = this.db.prepare("INSERT INTO mcp_port_lease (body) VALUES (?)");
+        for (const lease of validated) ins.run(JSON.stringify(lease));
+      });
       return result;
     });
   }
@@ -740,6 +787,22 @@ export class Store {
   /** How stale a worktree's `lastSeenAt` may get before a sighting rewrites it. */
   private static readonly LAST_SEEN_REFRESH_MS = 5 * 60_000;
 
+  /** Upsert by path, preserving `seq` (and therefore roster order). */
+  private putWorktreeRow(rec: WorktreeRecord): void {
+    this.db
+      .prepare(
+        "INSERT INTO worktree (path, project_id, body) VALUES (?, ?, ?)" +
+          " ON CONFLICT(path) DO UPDATE SET project_id = excluded.project_id, body = excluded.body",
+      )
+      .run(rec.path, rec.projectId, JSON.stringify(rec));
+  }
+
+  private worktreeRows(): WorktreeRecord[] {
+    return this.rows("SELECT body FROM worktree ORDER BY seq").map((r) =>
+      WorktreeRecordSchema.parse(JSON.parse(r.body as string)),
+    );
+  }
+
   /**
    * Worktree ATTRIBUTION records, keyed by canonical path.
    *
@@ -747,48 +810,32 @@ export class Store {
    * answer, re-read on every list. What lives here is what git can't tell us:
    * which chat cut the tree, how (ui/tool/harness/external), and when. Callers
    * canonicalize the path before it gets here; the store treats it as opaque.
-   *
-   * STATE root, same as runners.json: whole-file read-modify-write under this
-   * process's mutex, so two instances sharing it would lose each other's rows.
    */
   async listWorktreeRecords(): Promise<WorktreeRecord[]> {
-    const raw = (await readJson<unknown[]>(this.worktreesFile())) ?? [];
-    return z.array(WorktreeRecordSchema).parse(raw);
+    return this.worktreeRows();
   }
   async getWorktreeRecord(path: string): Promise<WorktreeRecord | null> {
-    const all = await this.listWorktreeRecords();
-    return all.find((w) => w.path === path) ?? null;
+    const row = this.db.prepare("SELECT body FROM worktree WHERE path = ?").get(path);
+    return row ? WorktreeRecordSchema.parse(JSON.parse(row.body as string)) : null;
   }
   async saveWorktreeRecord(rec: WorktreeRecord): Promise<WorktreeRecord> {
     const validated = WorktreeRecordSchema.parse(rec);
-    await this.mutex.run("worktrees", async () => {
-      const all = (await readJson<unknown[]>(this.worktreesFile())) ?? [];
-      const list = z.array(WorktreeRecordSchema).parse(all);
-      const idx = list.findIndex((w) => w.path === validated.path);
-      if (idx >= 0) list[idx] = validated;
-      else list.push(validated);
-      await writeJsonAtomic(this.worktreesFile(), list);
-    });
+    this.putWorktreeRow(validated);
     return validated;
   }
   async deleteWorktreeRecord(path: string): Promise<void> {
-    await this.mutex.run("worktrees", async () => {
-      const all = (await readJson<unknown[]>(this.worktreesFile())) ?? [];
-      const list = z
-        .array(WorktreeRecordSchema)
-        .parse(all)
-        .filter((w) => w.path !== path);
-      await writeJsonAtomic(this.worktreesFile(), list);
-    });
+    this.db.prepare("DELETE FROM worktree WHERE path = ?").run(path);
   }
 
   /**
    * Reconcile one project's rows against what git currently reports.
    *
-   * A single read-modify-write for the whole project, and a NO-OP when nothing
-   * changed — `list()` runs on every panel refresh, branch lookup and subApp
-   * launch, so a per-path write here would rewrite the file dozens of times a
-   * minute to change nothing.
+   * The plan is computed from a READ and only then applied, so a sync that
+   * changes nothing takes no write lock at all — `list()` runs on every panel
+   * refresh, branch lookup and subApp launch, and grabbing the database's write
+   * lock dozens of times a minute to change nothing would contend with the other
+   * instance for no reason. Nothing awaits between the read and the apply, so no
+   * other in-process caller can interleave with it.
    *
    * A path git has never reported before is back-filled as `external`
    * (unattributed, but VISIBLE — the whole point). A row for this project that
@@ -804,54 +851,50 @@ export class Store {
   ): Promise<WorktreeRecord[]> {
     const now = opts.now ?? Date.now();
     const key = opts.key ?? ((p: string) => p);
-    let result: WorktreeRecord[] = [];
-    await this.mutex.run("worktrees", async () => {
-      const raw = (await readJson<unknown[]>(this.worktreesFile())) ?? [];
-      const list = z.array(WorktreeRecordSchema).parse(raw);
-      const byKey = new Map(list.map((r) => [key(r.path), r] as const));
-      const liveKeys = new Set(live.map((w) => key(w.path)));
-      let dirty = false;
+    // Every project's rows, not just this one's: the match below is by
+    // NORMALIZED path across the whole roster, so a tree already attributed to
+    // another project is found and updated in place rather than duplicated.
+    const existing = this.worktreeRows();
+    const byKey = new Map(existing.map((r) => [key(r.path), r] as const));
+    const liveKeys = new Set(live.map((w) => key(w.path)));
 
-      for (const w of live) {
-        const prev = byKey.get(key(w.path));
-        if (!prev) {
-          const rec = WorktreeRecordSchema.parse({
-            path: w.path,
-            projectId,
-            branch: w.branch,
-            origin: "external",
-            createdAt: now,
-            lastSeenAt: now,
-          });
-          list.push(rec);
-          byKey.set(key(w.path), rec);
-          dirty = true;
-          continue;
-        }
-        // Bumping `lastSeenAt` on every sighting would make every list() a write.
-        // Refresh it only when the row is stale or has changed branch (a worktree
-        // can be re-pointed with `git switch`).
-        const stale = now - prev.lastSeenAt > Store.LAST_SEEN_REFRESH_MS;
-        if (prev.branch !== w.branch || stale) {
-          const idx = list.findIndex((r) => r.path === prev.path);
-          list[idx] = WorktreeRecordSchema.parse({
-            ...prev,
-            branch: w.branch,
-            lastSeenAt: now,
-          });
-          dirty = true;
-        }
+    const upserts: WorktreeRecord[] = [];
+    for (const w of live) {
+      const prev = byKey.get(key(w.path));
+      if (!prev) {
+        const rec = WorktreeRecordSchema.parse({
+          path: w.path,
+          projectId,
+          branch: w.branch,
+          origin: "external",
+          createdAt: now,
+          lastSeenAt: now,
+        });
+        upserts.push(rec);
+        byKey.set(key(w.path), rec);
+        continue;
       }
+      // Bumping `lastSeenAt` on every sighting would make every list() a write.
+      // Refresh it only when the row is stale or has changed branch (a worktree
+      // can be re-pointed with `git switch`).
+      const stale = now - prev.lastSeenAt > Store.LAST_SEEN_REFRESH_MS;
+      if (prev.branch !== w.branch || stale) {
+        const next = WorktreeRecordSchema.parse({ ...prev, branch: w.branch, lastSeenAt: now });
+        upserts.push(next);
+        byKey.set(key(w.path), next);
+      }
+    }
+    const gone = existing
+      .filter((r) => r.projectId === projectId && !liveKeys.has(key(r.path)))
+      .map((r) => r.path);
 
-      const kept = list.filter(
-        (r) => r.projectId !== projectId || liveKeys.has(key(r.path)),
-      );
-      if (kept.length !== list.length) dirty = true;
-
-      if (dirty) await writeJsonAtomic(this.worktreesFile(), kept);
-      result = kept;
+    if (upserts.length === 0 && gone.length === 0) return existing;
+    this.db.tx(() => {
+      for (const rec of upserts) this.putWorktreeRow(rec);
+      const del = this.db.prepare("DELETE FROM worktree WHERE path = ?");
+      for (const path of gone) del.run(path);
     });
-    return result;
+    return this.worktreeRows();
   }
 
   /**
@@ -863,85 +906,87 @@ export class Store {
    * known chat, and a later reconcile pass that merely re-saw it in
    * `git worktree list` must not restate it as `external` and orphan it.
    *
-   * One mutex hold covers the read AND the write; the read-then-save shape a
-   * caller would otherwise hand-roll interleaves with that same sweep and loses
-   * whichever attribution lost the race.
+   * The read and the write are ONE synchronous transaction; the read-then-save
+   * shape a caller would otherwise hand-roll interleaves with that same sweep
+   * and loses whichever attribution lost the race.
    */
   async upsertWorktreeRecord(
     path: string,
     create: Omit<WorktreeRecord, "path" | "createdAt" | "lastSeenAt">,
     update: Partial<Omit<WorktreeRecord, "path">> = {},
   ): Promise<WorktreeRecord> {
-    let result!: WorktreeRecord;
-    await this.mutex.run("worktrees", async () => {
-      const all = (await readJson<unknown[]>(this.worktreesFile())) ?? [];
-      const list = z.array(WorktreeRecordSchema).parse(all);
-      const idx = list.findIndex((w) => w.path === path);
+    return this.db.tx(() => {
+      const row = this.db.prepare("SELECT body FROM worktree WHERE path = ?").get(path);
+      const prev = row ? WorktreeRecordSchema.parse(JSON.parse(row.body as string)) : undefined;
       const now = Date.now();
-      const prev = idx >= 0 ? list[idx] : undefined;
-      result = WorktreeRecordSchema.parse({
+      const result = WorktreeRecordSchema.parse({
         ...(prev ?? { ...create, createdAt: now }),
         lastSeenAt: now,
         ...update,
         path,
       });
-      if (idx >= 0) list[idx] = result;
-      else list.push(result);
-      await writeJsonAtomic(this.worktreesFile(), list);
+      this.putWorktreeRow(result);
+      return result;
     });
-    return result;
   }
 
   /* --------------------------------------------------------- terminals */
 
   /**
-   * Terminal ROWS. The transcripts live beside them as JSONL (see
-   * {@link appendTerminalLines}) because output is high-volume and a whole-file
-   * rewrite per line would be absurd; the row is small and changes rarely.
+   * Terminal ROWS. The output lines live in their own table (see
+   * {@link appendTerminalLines}) rather than inside the row, because output is
+   * high-volume and the row is small and changes rarely.
    */
   async listTerminalRecords(): Promise<TerminalRecord[]> {
-    const raw = (await readJson<unknown[]>(this.terminalsFile())) ?? [];
-    return z.array(TerminalRecordSchema).parse(raw);
+    return this.rows("SELECT body FROM terminal ORDER BY seq").map((r) =>
+      TerminalRecordSchema.parse(JSON.parse(r.body as string)),
+    );
   }
   async saveTerminalRecord(rec: TerminalRecord): Promise<TerminalRecord> {
     const validated = TerminalRecordSchema.parse(rec);
-    await this.mutex.run("terminals", async () => {
-      const raw = (await readJson<unknown[]>(this.terminalsFile())) ?? [];
-      const list = z.array(TerminalRecordSchema).parse(raw);
-      const idx = list.findIndex((t) => t.id === validated.id);
-      if (idx >= 0) list[idx] = validated;
-      else list.push(validated);
-      await writeJsonAtomic(this.terminalsFile(), list);
-    });
+    this.db
+      .prepare(
+        "INSERT INTO terminal (id, log_id, body) VALUES (?, ?, ?)" +
+          " ON CONFLICT(id) DO UPDATE SET log_id = excluded.log_id, body = excluded.body",
+      )
+      .run(validated.id, validated.logId, JSON.stringify(validated));
     return validated;
   }
-  /** Drop a row AND its transcript. Returns the row that was removed, if any. */
+  /**
+   * Drop a row AND its transcript. Returns the row that was removed, if any.
+   *
+   * Both in ONE transaction. As two file operations this was a whole-file
+   * rewrite and an unlink with a crash window between them, and a crash there
+   * left a `terminals/<logId>.jsonl` no roster row referenced — an orphan
+   * nothing would ever read, list or clean up.
+   */
   async deleteTerminalRecord(id: string): Promise<TerminalRecord | null> {
-    let removed: TerminalRecord | null = null;
-    await this.mutex.run("terminals", async () => {
-      const raw = (await readJson<unknown[]>(this.terminalsFile())) ?? [];
-      const list = z.array(TerminalRecordSchema).parse(raw);
-      removed = list.find((t) => t.id === id) ?? null;
-      if (!removed) return;
-      await writeJsonAtomic(
-        this.terminalsFile(),
-        list.filter((t) => t.id !== id),
-      );
+    return this.db.tx(() => {
+      const row = this.db.prepare("SELECT body FROM terminal WHERE id = ?").get(id);
+      if (!row) return null;
+      const removed = TerminalRecordSchema.parse(JSON.parse(row.body as string));
+      this.db.prepare("DELETE FROM terminal WHERE id = ?").run(id);
+      this.db.prepare("DELETE FROM terminal_line WHERE log_id = ?").run(removed.logId);
+      return removed;
     });
-    if (removed) await this.deleteTerminalLog((removed as TerminalRecord).logId);
-    return removed;
   }
 
   /** Append output lines to a terminal's transcript. */
   async appendTerminalLines(logId: string, lines: TerminalLineRecord[]): Promise<void> {
     if (lines.length === 0) return;
-    await mkdir(this.terminalLogsDir(), { recursive: true });
-    // ONE write for the whole batch. A write-behind flush of a dev server's
-    // output is routinely hundreds of lines, and a syscall each would make the
-    // batching pointless.
-    await this.mutex.run(`terminal-log:${logId}`, () =>
-      appendJsonlBatch(this.terminalLogFile(logId), lines),
-    );
+    // ONE transaction for the whole batch. A write-behind flush of a dev
+    // server's output is routinely hundreds of lines, and a commit each would
+    // make the batching pointless — the same reason this used to be one
+    // appendFile rather than a loop of them.
+    this.db.tx(() => {
+      const ins = this.db.prepare(
+        "INSERT INTO terminal_line (log_id, ts, stream, chunk) VALUES (?, ?, ?, ?)",
+      );
+      for (const line of lines) {
+        const v = TerminalLineSchema.parse(line);
+        ins.run(logId, v.ts, v.stream, v.chunk);
+      }
+    });
   }
 
   /**
@@ -951,6 +996,13 @@ export class Store {
    * programmatic read — `terminal_output({ grep, since })` and the Workspace
    * view's search both land on it, and a `tail` that windows AFTER filtering is
    * the only one that means "the last 50 lines that matched".
+   *
+   * `since` and `stream` go into the WHERE clause, but `q` does NOT: SQLite's
+   * `lower()` folds ASCII only, and pushing the substring test down would
+   * quietly stop matching the non-ASCII output `String.toLowerCase()` handles
+   * today. A `q` scan has to read the candidate rows anyway. Without `q` the
+   * tail becomes `ORDER BY seq DESC LIMIT n` — which is the whole point, since
+   * "the last 50 lines" no longer means reading a 40 MB log to get to them.
    */
   async readTerminalLines(
     logId: string,
@@ -961,54 +1013,57 @@ export class Store {
       stream?: TerminalLineRecord["stream"];
     } = {},
   ): Promise<TerminalLineRecord[]> {
-    const raw = await readJsonl(this.terminalLogFile(logId));
-    let lines: TerminalLineRecord[] = [];
-    for (const row of raw) {
-      const parsed = TerminalLineSchema.safeParse(row);
-      if (parsed.success) lines.push(parsed.data);
+    const where = ["log_id = ?"];
+    const params: Array<string | number> = [logId];
+    if (opts.since !== undefined) {
+      where.push("ts >= ?");
+      params.push(opts.since);
     }
-    if (opts.since !== undefined) lines = lines.filter((l) => l.ts >= opts.since!);
-    if (opts.stream) lines = lines.filter((l) => l.stream === opts.stream);
+    if (opts.stream) {
+      where.push("stream = ?");
+      params.push(opts.stream);
+    }
+    const select = `SELECT ts, stream, chunk FROM terminal_line WHERE ${where.join(" AND ")}`;
+    const tail = opts.tail && opts.tail > 0 ? opts.tail : undefined;
+
+    if (!opts.q && tail !== undefined) {
+      const rows = this.rows(`${select} ORDER BY seq DESC LIMIT ?`, ...params, tail);
+      return rows.reverse().map((r) => toTerminalLine(r));
+    }
+    let lines = this.rows(`${select} ORDER BY seq`, ...params).map((r) => toTerminalLine(r));
     if (opts.q) {
       const needle = opts.q.toLowerCase();
       lines = lines.filter((l) => l.chunk.toLowerCase().includes(needle));
     }
-    return opts.tail && opts.tail > 0 ? lines.slice(-opts.tail) : lines;
+    return tail !== undefined ? lines.slice(-tail) : lines;
   }
 
   /**
    * Drop transcript lines older than `cutoff`, returning what's left.
    *
-   * A rewrite, not an append — which is why it belongs on the retention sweep
-   * and nowhere near the write path.
+   * `bytes` is SQLite's `length()`, which counts CHARACTERS where the old
+   * `chunk.length` counted UTF-16 units — they differ only on astral-plane
+   * codepoints, and this number exists to drive a retention sweep, not to
+   * reconcile against anything.
    */
   async pruneTerminalLog(
     logId: string,
     cutoff: number,
   ): Promise<{ lines: number; bytes: number }> {
-    let kept: TerminalLineRecord[] = [];
-    await this.mutex.run(`terminal-log:${logId}`, async () => {
-      const file = this.terminalLogFile(logId);
-      if (!existsSync(file)) return;
-      const raw = await readJsonl(file);
-      for (const row of raw) {
-        const parsed = TerminalLineSchema.safeParse(row);
-        if (parsed.success && parsed.data.ts >= cutoff) kept.push(parsed.data);
-      }
-      if (kept.length === raw.length) return;
-      const body = kept.map((l) => `${JSON.stringify(l)}\n`).join("");
-      await fsWriteFile(file, body, "utf8");
+    return this.db.tx(() => {
+      this.db.prepare("DELETE FROM terminal_line WHERE log_id = ? AND ts < ?").run(logId, cutoff);
+      const row = this.db
+        .prepare(
+          "SELECT COUNT(*) AS lines, COALESCE(SUM(LENGTH(chunk)), 0) AS bytes" +
+            " FROM terminal_line WHERE log_id = ?",
+        )
+        .get(logId)!;
+      return { lines: Number(row.lines), bytes: Number(row.bytes) };
     });
-    return {
-      lines: kept.length,
-      bytes: kept.reduce((n, l) => n + l.chunk.length, 0),
-    };
   }
 
   async deleteTerminalLog(logId: string): Promise<void> {
-    await this.mutex.run(`terminal-log:${logId}`, () =>
-      rm(this.terminalLogFile(logId), { force: true }),
-    );
+    this.db.prepare("DELETE FROM terminal_line WHERE log_id = ?").run(logId);
   }
 
   /* --------------------------------------------------------------- PRs */
@@ -1028,15 +1083,14 @@ export class Store {
    * a throw would cost the entire catalog.
    */
   async listPrRecords(): Promise<PrRecord[]> {
-    const raw = (await readJson<unknown[]>(this.prsFile())) ?? [];
-    return raw.flatMap((r) => {
-      const p = PrRecordSchema.safeParse(r);
-      return p.success ? [p.data] : [];
+    return this.rows("SELECT body FROM pr ORDER BY seq").flatMap((r) => {
+      const pr = decodeRow(PrRecordSchema, r.body);
+      return pr ? [pr] : [];
     });
   }
   async getPrRecord(key: string): Promise<PrRecord | null> {
-    const all = await this.listPrRecords();
-    return all.find((p) => p.key === key) ?? null;
+    const row = this.db.prepare("SELECT body FROM pr WHERE key = ?").get(key);
+    return row ? decodeRow(PrRecordSchema, row.body) : null;
   }
 
   /**
@@ -1046,77 +1100,67 @@ export class Store {
    * ones a chat opened; without the split it would restate an attributed row
    * with no `chatId` and orphan it from the chat that owns it.
    *
-   * One mutex hold covers the read AND the write: the discovery sweep and a
-   * `create_pr` land on this concurrently, and a hand-rolled get-then-save pair
-   * loses whichever attribution loses the race.
+   * The read and the write are one synchronous transaction: the discovery sweep
+   * and a `create_pr` land on this concurrently, and a hand-rolled
+   * get-then-save pair loses whichever attribution loses the race.
    */
   async upsertPrRecord(
     key: string,
     create: Omit<PrRecord, "key">,
     update: Partial<Omit<PrRecord, "key">> = {},
   ): Promise<PrRecord> {
-    let result!: PrRecord;
-    await this.mutex.run("prs", async () => {
-      const raw = (await readJson<unknown[]>(this.prsFile())) ?? [];
-      const list = raw.flatMap((r) => {
-        const p = PrRecordSchema.safeParse(r);
-        return p.success ? [p.data] : [];
-      });
-      const idx = list.findIndex((p) => p.key === key);
-      const prev = idx >= 0 ? list[idx] : undefined;
-      result = PrRecordSchema.parse({ ...(prev ?? create), ...update, key });
-      if (idx >= 0) list[idx] = result;
-      else list.push(result);
-      await writeJsonAtomic(this.prsFile(), list);
+    return this.db.tx(() => {
+      const row = this.db.prepare("SELECT body FROM pr WHERE key = ?").get(key);
+      // Lenient, matching listPrRecords: a row this build can no longer read is
+      // replaced by the poll that's writing right now, rather than throwing and
+      // wedging that PR out of the roster for good.
+      const prev = row ? decodeRow(PrRecordSchema, row.body) : null;
+      const result = PrRecordSchema.parse({ ...(prev ?? create), ...update, key });
+      this.db
+        .prepare(
+          "INSERT INTO pr (key, body) VALUES (?, ?)" +
+            " ON CONFLICT(key) DO UPDATE SET body = excluded.body",
+        )
+        .run(key, JSON.stringify(result));
+      return result;
     });
-    return result;
   }
 
   async deletePrRecord(key: string): Promise<void> {
-    await this.mutex.run("prs", async () => {
-      const raw = (await readJson<unknown[]>(this.prsFile())) ?? [];
-      const list = raw
-        .flatMap((r) => {
-          const p = PrRecordSchema.safeParse(r);
-          return p.success ? [p.data] : [];
-        })
-        .filter((p) => p.key !== key);
-      await writeJsonAtomic(this.prsFile(), list);
-    });
+    this.db.prepare("DELETE FROM pr WHERE key = ?").run(key);
   }
 
   /* ------------------------------------------------------- checkpoints */
 
-  private async readCheckpointMap(): Promise<CheckpointMap> {
-    const raw = (await readJson<unknown>(this.checkpointsFile())) ?? {};
-    return z.record(z.string(), z.record(z.string(), CheckpointSchema)).parse(raw);
-  }
-
   async getCheckpoints(chatId: string): Promise<Checkpoint[]> {
-    const map = await this.readCheckpointMap();
-    return Object.values(map[chatId] ?? {});
+    return this.rows(
+      "SELECT body FROM checkpoint WHERE chat_id = ? ORDER BY seq",
+      chatId,
+    ).map((r) => CheckpointSchema.parse(JSON.parse(r.body as string)));
   }
   async getCheckpoint(chatId: string, messageId: string): Promise<Checkpoint | null> {
-    const map = await this.readCheckpointMap();
-    return map[chatId]?.[messageId] ?? null;
+    const row = this.db
+      .prepare("SELECT body FROM checkpoint WHERE chat_id = ? AND message_id = ?")
+      .get(chatId, messageId);
+    return row ? CheckpointSchema.parse(JSON.parse(row.body as string)) : null;
   }
+  /**
+   * One row, one INSERT. This is the write that motivated the whole move: it
+   * used to read all 2.4 MB of `checkpoints.json`, splice one entry in and write
+   * every byte back — once per turn, against a map that only ever grew.
+   */
   async saveCheckpoint(cp: Checkpoint): Promise<Checkpoint> {
     const validated = CheckpointSchema.parse(cp);
-    await this.mutex.run("checkpoints", async () => {
-      const map = await this.readCheckpointMap();
-      (map[validated.chatId] ??= {})[validated.messageId] = validated;
-      await writeJsonAtomic(this.checkpointsFile(), map);
-    });
+    this.db
+      .prepare(
+        "INSERT INTO checkpoint (chat_id, message_id, body) VALUES (?, ?, ?)" +
+          " ON CONFLICT(chat_id, message_id) DO UPDATE SET body = excluded.body",
+      )
+      .run(validated.chatId, validated.messageId, JSON.stringify(validated));
     return validated;
   }
   async deleteCheckpoints(chatId: string): Promise<void> {
-    await this.mutex.run("checkpoints", async () => {
-      const map = await this.readCheckpointMap();
-      if (map[chatId]) {
-        delete map[chatId];
-        await writeJsonAtomic(this.checkpointsFile(), map);
-      }
-    });
+    this.db.prepare("DELETE FROM checkpoint WHERE chat_id = ?").run(chatId);
   }
 
   /* ---------------------------------------------------------- settings */

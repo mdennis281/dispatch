@@ -114,6 +114,7 @@ describe("SessionBroker neutral harness path", () => {
 
   afterEach(async () => {
     await broker.dispose();
+    store.close();
     await rm(dir, { recursive: true, force: true });
   });
 

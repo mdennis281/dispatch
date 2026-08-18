@@ -5,7 +5,7 @@
   "version": "0.0.0",
   "description": "A local control plane for Claude Code and Codex: multi-chat, worktrees, sub-apps, and GitHub workflows.",
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "scripts": {
     "build": "pnpm -r build",
@@ -23,6 +23,7 @@
     "app:upgrade": "node tools/app/upgrade.mjs",
     "app:shortcut": "node tools/app/create-shortcut.mjs",
     "app:migrate": "node tools/app/migrate-data.mjs",
+    "app:migrate-store": "node tools/app/migrate-store.mjs",
     "app:backsync": "node tools/app/backsync.mjs"
   },
   "devDependencies": {

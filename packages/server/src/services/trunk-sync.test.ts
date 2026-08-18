@@ -63,6 +63,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   bus.clear();
+  store.close();
   await rm(root, { recursive: true, force: true }).catch(() => {});
 });
 

@@ -239,9 +239,13 @@ describe("WorktreeService on a real temp repo", () => {
   let bus: EventBus;
   let events: WsServerEvent[];
   let svc: WorktreeService;
+  // Two cases below build their own Store. Windows won't remove `root` while
+  // any SQLite handle under it is open, so they get closed with the temp dir.
+  let stores: Store[];
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "cm-wt-"));
+    stores = [];
     repo = join(root, "repo");
     wtRoot = join(root, "worktrees");
     await mkdir(repo, { recursive: true });
@@ -259,6 +263,7 @@ describe("WorktreeService on a real temp repo", () => {
     svc = new WorktreeService({ bus, exec: undefined });
   });
   afterEach(async () => {
+    for (const s of stores) s.close();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -371,6 +376,7 @@ describe("WorktreeService on a real temp repo", () => {
 
   it("links the worktree onto its owning chat when a Store is provided", async () => {
     const store = new Store(join(root, "data"));
+    stores.push(store);
     await store.init();
     const chat: Chat = {
       id: "chatA",
@@ -401,6 +407,7 @@ describe("WorktreeService on a real temp repo", () => {
 
   it("detachFromChat unlinks a worktree path WITHOUT touching disk (idempotent)", async () => {
     const store = new Store(join(root, "data-detach"));
+    stores.push(store);
     await store.init();
     const chat: Chat = {
       id: "chatB",
@@ -465,6 +472,7 @@ describe("WorktreeService — the attribution registry (real git)", () => {
     svc = new WorktreeService({ store, bus: new EventBus() });
   });
   afterEach(async () => {
+    store.close();
     await rm(root, { recursive: true, force: true });
   });
 

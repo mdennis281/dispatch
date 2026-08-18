@@ -6,7 +6,7 @@ in this repository. Development state lives in `./.data` (JSON/JSONL, git-ignore
 release installs keep state under the platform user-data directory.
 
 ## Prerequisites
-- Node ≥ 20, pnpm, git, `gh` (authenticated), Docker (only for subApps that need it).
+- Node ≥ 24, pnpm, git, `gh` (authenticated), Docker (only for subApps that need it).
 - Logged in to Claude Code (`claude`) and/or Codex (`codex`).
 
 ## Use it (single port — simplest)
@@ -427,9 +427,10 @@ and the **hot-reload dev server** you break things in. They run side by side.
 
 ### Install
 ```
-pnpm app:migrate -- --dry-run   # preview the data move; then drop --dry-run
-pnpm app:publish                # build + install the payload
-pnpm app:shortcut               # Start-menu entry (add -- --desktop for a Desktop one)
+pnpm app:migrate -- --dry-run        # preview the data move; then drop --dry-run
+pnpm app:migrate-store -- --source "%LOCALAPPDATA%\claude-manager\data" --dry-run   # then drop it
+pnpm app:publish                     # build + install the payload
+pnpm app:shortcut                    # Start-menu entry (add -- --desktop for a Desktop one)
 ```
 Then click the shortcut once. Dispatch notices it's running in a browser tab and offers
 **Install Dispatch** in the bottom-right corner — click the card and the browser's real
@@ -445,6 +446,35 @@ assuming `%USERPROFILE%\Desktop`, which OneDrive redirects. The migration **copi
 it verifies every file by SHA-256 and never deletes or modifies the source `.data`.
 Re-running it refuses a non-empty destination unless `--force`.
 
+`app:migrate-store` moves the state root's JSON maps (`checkpoints.json`, `prs.json`,
+`worktrees.json`, `runners.json`, `terminals.json`, `mcp-ports.json`, `terminals/`) into
+`state.db`. Same posture: it **copies**, verifies every record by reading it back out of
+the database and comparing it against the source, and leaves the JSON exactly where it was
+as the rollback path — delete `state.db` and the server boots off the old tree again,
+unchanged. Removing it is a separate, opt-in `--prune` that only runs after a verified
+pass. It is resumable, so an interrupted run picks up where it stopped.
+
+Two things to know:
+
+- **Stop the instance first** (`pnpm app:stop`). It refuses to migrate a running store in
+  place, because the app would keep appending to the JSON that the snapshot has already
+  read past. Rehearsing with `--target <scratch dir>` reads only, so that's allowed live.
+- **A state root with legacy JSON and no FINISHED migration refuses to boot**, naming this
+  script. Nothing auto-migrates: this is a minute of work on data you have no second copy
+  of, and a silent pause at startup is the worst possible way to find out it happened.
+  "Finished" means a marker the script writes *after* its verify passes — not the mere
+  existence of `state.db`, which it creates before copying the first row. Booting off a
+  half-copied database while the JSON sat there untouched would hide records with no
+  error at all. If you see that message, just re-run the script: it resumes.
+
+```
+pnpm app:migrate-store -- --source "%LOCALAPPDATA%\claude-manager\data" --dry-run
+pnpm app:migrate-store -- --source "%LOCALAPPDATA%\claude-manager\data"
+```
+`--source` defaults to this checkout's `.data`, so a dev-only migration needs no flags.
+`--target` writes the database somewhere else, leaving the source untouched — that is how
+to rehearse against real data at real scale before committing to it.
+
 **Requirements:** Python 3.10+ with `pip install pwa-launcher`, and any Chromium-based
 browser (Chrome, Edge, Brave, Vivaldi…).
 
@@ -452,7 +482,9 @@ browser (Chrome, Edge, Brave, Vivaldi…).
 ```
 %LOCALAPPDATA%\claude-manager\    ← still the pre-rename name; see note below
   app\               the payload — a git clone of this repo, built in place
-  data\              DISPATCH_DATA_DIR   chats, checkpoints, runners   (per-instance)
+  data\              DISPATCH_DATA_DIR   chats + state.db              (per-instance)
+    state.db         checkpoints, PRs, worktrees, runners, terminals, MCP port leases
+    chats\           one dir per chat: chat.json, messages.jsonl, assets/
   config\            DISPATCH_CONFIG_DIR settings, projects, agents, modes (SHARED)
   browser-profile\   the PWA's own Chromium profile (window state, mic permission)
   staging\           app:upgrade's build area — the live app never hears about it
@@ -470,13 +502,20 @@ nobody opens — so the rebrand left it alone. Move it deliberately when you wan
 set `DISPATCH_HOME`, or run `pnpm app:migrate`. `DISPATCH_HOME` is read first but
 `CM_HOME` still works, so a shortcut created before the rename keeps launching.
 
-**`config/` is shared, `data/` is not** — and that split is deliberate. Projects, agents
-and modes are written rarely and are miserable to maintain twice, so both instances read
-one copy. Chats are the opposite: `checkpoints.json` and `runners.json` are whole-file
-read-modify-write maps guarded by an *in-process* mutex, so two processes sharing them
-would silently drop each other's entries. Losing rollback points on the instance you
-trust with long work isn't a tradeoff worth making, so each instance keeps its own chats.
-Want to see stable's chats while working in dev? Open both tabs.
+**`config/` is shared, `data/` is not.** Projects, agents and modes are written rarely and
+are miserable to maintain twice, so both instances read one copy.
+
+The `data/` split used to be a *correctness* requirement: `checkpoints.json` and
+`runners.json` were whole-file read-modify-write maps guarded by an *in-process* mutex, so
+two processes sharing them would silently drop each other's entries. **SQLite + WAL
+retired that** — concurrent writers serialize properly and a reader gets a consistent
+snapshot instead of half a rewrite. Keeping the roots apart is now a *policy* choice: a
+dev crash still shouldn't cost the instance you trust with long work its rollback points.
+
+One place always crossed the line and is simply better for it — `chat_find` / `chat_read`
+from a dev session read the *installed* instance's store directly, which used to mean
+reading JSON files caught mid-rename. Want to see stable's chats in the dev UI? Open both
+tabs, or `pnpm app:backsync`.
 
 ### Why a PWA and not an Electron shell
 The old shell did two unrelated jobs, and only one of them needed 270 MB.

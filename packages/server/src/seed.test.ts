@@ -18,6 +18,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  store.close();
   await rm(dir, { recursive: true, force: true });
 });
 

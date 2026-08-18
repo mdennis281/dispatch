@@ -59,4 +59,46 @@ export function desktopPaths(env = process.env) {
  * losing an unrecognised file is strictly worse than misfiling it.
  */
 export const CONFIG_ENTRIES = ["config.json", "projects", "agents", "modes"];
-export const STATE_ENTRIES = ["chats", "checkpoints.json", "runners.json"];
+
+/**
+ * The JSON/JSONL state that `state.db` replaced, in the order the migration
+ * reports them. Still part of STATE_ENTRIES below because `app:migrate` must
+ * keep moving them: the tree stays on disk as the rollback path until
+ * `app:migrate-store --prune` removes it.
+ *
+ * MIRROR: `LEGACY_STATE_ENTRIES` in packages/server/src/store/db.ts, which the
+ * server's startup guard reads. Same reason this file already mirrors
+ * `launch.py` — one is a `.mjs` tool, the other is bundled TypeScript.
+ */
+export const LEGACY_STATE_ENTRIES = [
+  "runners.json",
+  "mcp-ports.json",
+  "worktrees.json",
+  "terminals.json",
+  "terminals",
+  "prs.json",
+  "checkpoints.json",
+];
+
+/**
+ * Every top-level name a state root is expected to hold. This list is the ONLY
+ * thing that keeps `migrate-data.mjs` from reporting a real, known file as an
+ * "unrecognised entry" — it still copies an unlisted one to `data/` (misfiled
+ * beats lost), but a migration that narrates five false alarms teaches you to
+ * skim the one that matters. Add the name when you add the file.
+ */
+export const STATE_ENTRIES = [
+  "chats",
+  // The SQLite state database and its WAL sidecars. All three, because moving
+  // `state.db` without `-wal` silently drops every commit still in the log.
+  "state.db",
+  "state.db-wal",
+  "state.db-shm",
+  ...LEGACY_STATE_ENTRIES,
+  // Owned by AuthService, not the Store's tables — still per-instance state.
+  "auth-sessions.json",
+  "auth-recovery.lock",
+  // `<dataDir>/crash.log`, plus the one rotated generation — see crash-log.ts.
+  "crash.log",
+  "crash.log.1",
+];

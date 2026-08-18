@@ -4,8 +4,11 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./index.js";
+import { STATE_DB_FILENAME } from "./db.js";
+import { DatabaseSync } from "node:sqlite";
 import { renameWithRetry, writeJsonAtomic, readJson } from "./fsq.js";
-import type { Project, Chat, ChatMessage, RunnerInstance, Checkpoint } from "@dispatch/shared";
+import type { Project, Chat, ChatMessage, RunnerInstance, Checkpoint, PrRecord } from "@dispatch/shared";
+import { PrRecordSchema } from "@dispatch/shared";
 
 let dir: string;
 let store: Store;
@@ -16,6 +19,7 @@ beforeEach(async () => {
   await store.init();
 });
 afterEach(async () => {
+  store.close();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -28,6 +32,20 @@ function project(id: string): Project {
     subApps: [],
     createdAt: Date.now(),
   };
+}
+
+/** A complete PrRecord minus its key — every default filled in, as a real caller has. */
+function pr(number: number, title: string): Omit<PrRecord, "key"> {
+  const { key: _key, ...rest } = PrRecordSchema.parse({
+    key: `owner/repo#${number}`,
+    repo: "owner/repo",
+    number,
+    title,
+    url: `https://example.test/${number}`,
+    firstSeenAt: 1,
+    lastChangedAt: 1,
+  });
+  return rest;
 }
 
 function chat(id: string, projectId: string): Chat {
@@ -222,6 +240,60 @@ describe("Store runners + checkpoints + settings", () => {
     expect(await store.getCheckpoints("c1")).toHaveLength(0);
   });
 
+  it("keeps roster order across an update, rather than moving the row to the end", async () => {
+    // The JSON array these replaced was read in insertion order, and several
+    // panels render it that way. An upsert must not resort the roster just
+    // because a runner reported a new status.
+    const mk = (id: string): RunnerInstance => ({
+      id,
+      worktreePath: "C:/wt",
+      subAppId: "game",
+      kind: "process",
+      status: "running",
+    });
+    for (const id of ["a", "b", "c"]) await store.saveRunner(mk(id));
+    await store.saveRunner({ ...mk("a"), status: "stopped" });
+    expect((await store.listRunners()).map((r) => r.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("upserts a checkpoint in place and scopes deletes to one chat", async () => {
+    const at = Date.now();
+    await store.saveCheckpoint({ messageId: "m1", chatId: "c1", ref: "refs/cm/one", createdAt: at });
+    await store.saveCheckpoint({ messageId: "m2", chatId: "c1", ref: "refs/cm/two", createdAt: at });
+    await store.saveCheckpoint({ messageId: "m1", chatId: "c2", ref: "refs/cm/other", createdAt: at });
+    // Same chat + message: one row, rewritten — not a second rollback point.
+    await store.saveCheckpoint({ messageId: "m1", chatId: "c1", ref: "refs/cm/redone", createdAt: at });
+
+    expect((await store.getCheckpoints("c1")).map((c) => c.ref)).toEqual([
+      "refs/cm/redone",
+      "refs/cm/two",
+    ]);
+    await store.deleteCheckpoints("c1");
+    expect(await store.getCheckpoints("c1")).toHaveLength(0);
+    // Deleting a chat must not cost another chat its rollback points.
+    expect(await store.getCheckpoints("c2")).toHaveLength(1);
+  });
+
+  it("drops a row it cannot even parse, instead of losing the whole roster", async () => {
+    // The tolerant readers (PRs, MCP port leases) used to face one JSON document
+    // per file: a malformed row could not exist, because the whole file either
+    // parsed or it didn't. Row by row it can — and letting `JSON.parse` throw
+    // ahead of the schema check would cost the entire catalog for one bad record,
+    // which is the exact opposite of what those readers are for.
+    await store.upsertPrRecord("owner/repo#1", pr(1, "good"));
+    // Reach past the API to plant the corruption a torn disk write would leave.
+    const db = new DatabaseSync(join(dir, STATE_DB_FILENAME));
+    db.prepare("INSERT INTO pr (key, body) VALUES (?, ?)").run("owner/repo#2", "{not json");
+    db.close();
+
+    expect((await store.listPrRecords()).map((p) => p.key)).toEqual(["owner/repo#1"]);
+    expect(await store.getPrRecord("owner/repo#2")).toBeNull();
+    // …and the next poll simply replaces it, rather than being wedged out.
+    const healed = await store.upsertPrRecord("owner/repo#2", pr(2, "rewritten"));
+    expect(healed.title).toBe("rewritten");
+    expect(await store.listPrRecords()).toHaveLength(2);
+  });
+
   it("round-trips settings with defaults", async () => {
     expect(await store.getSettings()).toMatchObject({ theme: "dark" });
     await store.saveSettings({ theme: "light", defaultModeId: "plan" });
@@ -250,6 +322,7 @@ describe("Store config/state split", () => {
     await split.init();
   });
   afterEach(async () => {
+    split.close();
     await rm(stateDir, { recursive: true, force: true });
     await rm(configDir, { recursive: true, force: true });
   });
@@ -269,11 +342,13 @@ describe("Store config/state split", () => {
     expect(existsSync(join(configDir, "config.json"))).toBe(true);
     // ...and NONE of the per-instance state.
     expect(existsSync(join(configDir, "chats"))).toBe(false);
-    expect(existsSync(join(configDir, "checkpoints.json"))).toBe(false);
+    expect(existsSync(join(configDir, STATE_DB_FILENAME))).toBe(false);
 
-    // State root holds only the per-instance state.
+    // State root holds only the per-instance state: transcripts as files, and
+    // everything that used to be a whole-file JSON map inside the database.
     expect(existsSync(join(stateDir, "chats", "c1", "chat.json"))).toBe(true);
-    expect(existsSync(join(stateDir, "checkpoints.json"))).toBe(true);
+    expect(existsSync(join(stateDir, STATE_DB_FILENAME))).toBe(true);
+    expect(await split.getCheckpoints("c1")).toHaveLength(1);
     expect(existsSync(join(stateDir, "projects", "p1.json"))).toBe(false);
   });
 
@@ -289,6 +364,7 @@ describe("Store config/state split", () => {
       expect(await other.listProjects()).toHaveLength(1);
       // ...but not the first instance's chats.
       expect(await other.listChats()).toHaveLength(0);
+      other.close();
     } finally {
       await rm(otherState, { recursive: true, force: true });
     }
@@ -303,6 +379,8 @@ describe("Store config/state split", () => {
       await s.saveChat(chat("c", "p"));
       expect(existsSync(join(only, "projects", "p.json"))).toBe(true);
       expect(existsSync(join(only, "chats", "c", "chat.json"))).toBe(true);
+      expect(existsSync(join(only, STATE_DB_FILENAME))).toBe(true);
+      s.close();
     } finally {
       await rm(only, { recursive: true, force: true });
     }
@@ -516,6 +594,59 @@ describe("worktree records", () => {
     // Retention rewrites the file, keeping only what's inside the window.
     expect(await store.pruneTerminalLog("log2", 1_150)).toMatchObject({ lines: 1 });
     expect((await store.readTerminalLines("log2")).map((l) => l.chunk)).toEqual(["deprecated"]);
+  });
+
+  it("drops a terminal's transcript with its row, in one step", async () => {
+    // These were two file operations — a whole-file rewrite of terminals.json
+    // and an unlink of terminals/<logId>.jsonl — with a crash window between
+    // them that stranded a transcript no roster row referenced.
+    await store.saveTerminalRecord({
+      id: "c1::build",
+      logId: "log-build",
+      chatId: "c1",
+      name: "build",
+      cwd: "C:/wt",
+      origin: "agent",
+      createdAt: 1,
+      updatedAt: 1,
+      lastActivityAt: 1,
+      lines: 0,
+      bytes: 0,
+    });
+    await store.appendTerminalLines("log-build", [
+      { stream: "stdout", chunk: "hello", ts: 1_000 },
+    ]);
+    const removed = await store.deleteTerminalRecord("c1::build");
+    expect(removed).toMatchObject({ logId: "log-build" });
+    expect(await store.listTerminalRecords()).toHaveLength(0);
+    expect(await store.readTerminalLines("log-build")).toHaveLength(0);
+    // Deleting again is a no-op, not a throw — the reaper runs on stale rosters.
+    expect(await store.deleteTerminalRecord("c1::build")).toBeNull();
+  });
+
+  it("windows `tail` AFTER `q`, so it means the last N that MATCHED", async () => {
+    // The two are separate code paths now (a bare tail is `ORDER BY seq DESC
+    // LIMIT n` in SQL; a `q` scan filters in JS because SQLite's lower() folds
+    // ASCII only). They have to agree on what tail means.
+    await store.appendTerminalLines(
+      "log3",
+      Array.from({ length: 10 }, (_, i) => ({
+        stream: "stdout" as const,
+        chunk: i % 2 === 0 ? `hit ${i}` : `miss ${i}`,
+        ts: 1_000 + i,
+      })),
+    );
+    expect((await store.readTerminalLines("log3", { q: "hit", tail: 2 })).map((l) => l.chunk)).toEqual([
+      "hit 6",
+      "hit 8",
+    ]);
+    // …and a non-ASCII haystack still folds the way String.toLowerCase does.
+    await store.appendTerminalLines("log3", [
+      { stream: "stdout", chunk: "\u00c9CHEC de la build", ts: 2_000 },
+    ]);
+    expect((await store.readTerminalLines("log3", { q: "\u00e9chec" })).map((l) => l.chunk)).toEqual([
+      "\u00c9CHEC de la build",
+    ]);
   });
 
   it("deletes a record by path", async () => {

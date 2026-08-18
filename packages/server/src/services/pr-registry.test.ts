@@ -78,6 +78,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  store.close();
   await rm(root, { recursive: true, force: true });
 });
 

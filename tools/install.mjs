@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_REPO = "mdennis281/dispatch";
 const PNPM_VERSION = "11.5.0";
-const MIN_NODE_MAJOR = 20;
+const MIN_NODE_MAJOR = 24;
 const REQUIRED_PAYLOAD = [
   "package.json",
   "pnpm-lock.yaml",
