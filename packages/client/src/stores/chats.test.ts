@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { Chat } from "@dispatch/shared";
-import { useChats, chatsForProject } from "./chats.js";
+import { useChats, chatsForProject, countProjectAgents } from "./chats.js";
 
 function chat(id: string, projectId: string, updatedAt = 1): Chat {
   return {
@@ -174,5 +174,43 @@ describe("hydrate — the reconnect path", () => {
 
     expect(useChats.getState().order).toEqual(["b", "a"]);
     expect(useChats.getState().activeChatId).toBe("a");
+  });
+});
+
+describe("countProjectAgents", () => {
+  const byId = (cs: Chat[]) => Object.fromEntries(cs.map((c) => [c.id, c]));
+  const withStatus = (c: Chat, status: Chat["status"], archived?: boolean): Chat => ({
+    ...c,
+    status,
+    archived,
+  });
+
+  it("splits working from awaiting-input, per project", () => {
+    const counts = countProjectAgents(
+      byId([
+        withStatus(chat("a", "p1"), "running"),
+        withStatus(chat("b", "p1"), "queued"),
+        withStatus(chat("c", "p1"), "awaiting-input"),
+        withStatus(chat("d", "p2"), "waiting"),
+      ]),
+    );
+
+    expect(counts).toEqual({
+      p1: { working: 2, attention: 1 },
+      p2: { working: 1, attention: 0 },
+    });
+  });
+
+  it("omits projects whose chats are all quiet, archived, or statusless", () => {
+    const counts = countProjectAgents(
+      byId([
+        withStatus(chat("a", "p1"), "idle"),
+        withStatus(chat("b", "p1"), "done"),
+        withStatus(chat("c", "p1"), "running", true),
+        chat("d", "p1"),
+      ]),
+    );
+
+    expect(counts).toEqual({});
   });
 });
