@@ -23,6 +23,7 @@
  * recording racing the one-time backfill, can only ever produce one row.
  */
 import {
+  METRIC_MAX_BUCKETS,
   METRIC_OTHER_KEY,
   resolveBucket,
   type MetricDimension,
@@ -47,8 +48,6 @@ const FLUSH_AT_ROWS = 250;
 const MAX_BUFFERED_ROWS = 20_000;
 /** Widest window a `facets` call will offer values for, per dimension. */
 const FACET_LIMIT = 200;
-/** Ceiling on gap-filled buckets, so a silly window can't allocate forever. */
-const MAX_BUCKETS = 1_000;
 
 /**
  * Wire dimension → ledger column. One map, so a dimension can't be filterable
@@ -529,7 +528,16 @@ function bucketSql(bucket: "hour" | "day" | "week" | "month"): string {
   }
 }
 
-/** Every bucket start from `first` to `last` inclusive, so gaps render as zeros. */
+/**
+ * Every bucket start from `first` to `last` inclusive, so gaps render as zeros.
+ *
+ * The `METRIC_MAX_BUCKETS` guard is a BACKSTOP against a runaway allocation,
+ * not a policy: `resolveBucket` has already coarsened the width so the window
+ * fits, and `first`/`last` come from the DATA (whose span can only be narrower
+ * than the requested window), so it should never bind. It must not be relied on
+ * to trim, because a row whose bucket got trimmed away is a row silently
+ * dropped from both its series and the response total.
+ */
 function fillBuckets(
   first: number,
   last: number,
@@ -541,7 +549,7 @@ function fillBuckets(
     // Months aren't a fixed width, so step the calendar rather than the clock.
     const start = new Date(first);
     let cur = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1);
-    while (cur <= last && out.length < MAX_BUCKETS) {
+    while (cur <= last && out.length < METRIC_MAX_BUCKETS) {
       out.push(cur);
       const c = new Date(cur);
       cur = Date.UTC(c.getUTCFullYear(), c.getUTCMonth() + 1, 1);
@@ -549,7 +557,7 @@ function fillBuckets(
     return out;
   }
   const step = bucket === "hour" ? 3_600_000 : bucket === "day" ? 86_400_000 : 604_800_000;
-  for (let t = first; t <= last && out.length < MAX_BUCKETS; t += step) out.push(t);
+  for (let t = first; t <= last && out.length < METRIC_MAX_BUCKETS; t += step) out.push(t);
   return out;
 }
 

@@ -262,18 +262,62 @@ export const METRIC_BUCKET_MS: Record<"hour" | "day" | "week", number> = {
 };
 
 /**
- * Pick a bucket width that keeps a window under ~180 points — past that a line
- * chart is a texture, not a reading.
+ * The most buckets a series response may contain.
+ *
+ * This is a CORRECTNESS bound, not just a rendering one. The server gap-fills
+ * the bucket list and indexes each row into it; a row whose bucket start isn't
+ * in the list has nowhere to land, so a truncated list doesn't render fewer
+ * points — it silently drops counts out of both the series and the total.
+ * {@link resolveBucket} therefore guarantees the width it returns FITS, rather
+ * than leaving anything to be trimmed afterwards.
+ */
+export const METRIC_MAX_BUCKETS = 1000;
+
+/** Bucket widths, coarsest last — the order `resolveBucket` steps through. */
+const BUCKET_ORDER = ["hour", "day", "week", "month"] as const;
+
+/**
+ * Roughly how many buckets of this width a span covers. Approximate on purpose:
+ * a month is counted as 30 days, which is close enough to answer the only
+ * question asked of it — "does this fit under the cap".
+ */
+function bucketsIn(width: (typeof BUCKET_ORDER)[number], span: number): number {
+  const ms = width === "month" ? 30 * METRIC_BUCKET_MS.day : METRIC_BUCKET_MS[width];
+  return Math.ceil(span / ms) + 1;
+}
+
+/**
+ * The bucket width to actually use for a window.
+ *
+ * Two jobs, in order. `auto` picks by READABILITY — past ~180 points a line
+ * chart is a texture, not a reading. Then ANY width, explicitly requested or
+ * not, is coarsened until it fits under {@link METRIC_MAX_BUCKETS}.
+ *
+ * That second step is why an explicit pick isn't returned unchanged: "hourly"
+ * over two years is ~17,500 buckets, and the alternative to coarsening is
+ * either refusing a combination the UI legitimately offers, or truncating the
+ * list and under-reporting the totals without saying so. The response carries
+ * the width actually used, so the axis and the caller stay honest about it.
  */
 export function resolveBucket(
   bucket: MetricBucket,
   from: number,
   to: number,
 ): "hour" | "day" | "week" | "month" {
-  if (bucket !== "auto") return bucket;
   const span = Math.max(0, to - from);
-  if (span <= 3 * METRIC_BUCKET_MS.day) return "hour";
-  if (span <= 120 * METRIC_BUCKET_MS.day) return "day";
-  if (span <= 730 * METRIC_BUCKET_MS.day) return "week";
+  const preferred =
+    bucket !== "auto"
+      ? bucket
+      : span <= 3 * METRIC_BUCKET_MS.day
+        ? "hour"
+        : span <= 120 * METRIC_BUCKET_MS.day
+          ? "day"
+          : span <= 730 * METRIC_BUCKET_MS.day
+            ? "week"
+            : "month";
+  for (let i = BUCKET_ORDER.indexOf(preferred); i < BUCKET_ORDER.length; i++) {
+    const width = BUCKET_ORDER[i]!;
+    if (bucketsIn(width, span) <= METRIC_MAX_BUCKETS) return width;
+  }
   return "month";
 }

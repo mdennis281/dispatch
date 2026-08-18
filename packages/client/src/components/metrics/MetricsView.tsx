@@ -58,6 +58,14 @@ const GROUPABLE: MetricDimension[] = [
   "source",
 ];
 
+/** Bucket widths as the note below the picker says them. */
+const BUCKET_LABELS: Record<string, string> = {
+  hour: "hourly",
+  day: "daily",
+  week: "weekly",
+  month: "monthly",
+};
+
 const CHART_KINDS: ChartKind[] = [
   "line",
   "area",
@@ -243,6 +251,9 @@ export function MetricsView() {
   }, []);
 
   const timeForm = isTimeChart(chart);
+  // The server coarsens a bucket the window can't accommodate (hourly over two
+  // years is ~17,500 points), so the width it USED can differ from the pick.
+  const coarsened = !!series && bucket !== "auto" && series.bucket !== bucket;
   const legend = timeForm
     ? (series?.series ?? []).map((s) => ({ key: s.key, label: s.label, total: s.total }))
     : (totals?.totals ?? []).map((t) => ({ key: t.key, label: t.label, total: t.count }));
@@ -346,9 +357,20 @@ export function MetricsView() {
                     label="Series"
                     width={140}
                   />
-                  {series && series.truncated > 0 && timeForm && (
+                  {timeForm && (series?.truncated || coarsened) && (
                     <span className="ml-auto text-2xs text-faint">
-                      {series.truncated} more folded into Other
+                      {/* Never let the page bound what it shows without saying
+                          so. Both of these are the chart quietly showing less
+                          than was asked for, and an unexplained one reads as
+                          "that's all there was". */}
+                      {[
+                        series?.truncated
+                          ? `${series.truncated} more folded into Other`
+                          : null,
+                        coarsened ? `bucketed ${BUCKET_LABELS[series!.bucket]} to fit` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
                     </span>
                   )}
                 </div>

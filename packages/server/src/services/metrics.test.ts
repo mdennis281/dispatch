@@ -216,6 +216,34 @@ describe("MetricsService — series", () => {
     );
   });
 
+  it("coarsens an over-wide bucket rather than dropping rows off the end", () => {
+    // Hourly over two years is ~17,500 buckets. Truncating that list to a cap
+    // doesn't render fewer points — rows whose bucket start fell off the end
+    // have nowhere to land, so they vanish from their series AND from the
+    // reported total, with nothing saying so.
+    const res = metrics.series({
+      from: NOW - 730 * DAY,
+      to: NOW + 1,
+      bucket: "hour",
+      groupBy: "identifier",
+      limit: 8,
+    });
+    expect(res.bucket).not.toBe("hour"); // coarsened to something that fits
+    expect(res.buckets.length).toBeLessThanOrEqual(1000);
+    // The whole point: every row is still counted.
+    expect(res.total).toBe(7);
+    expect(res.series.reduce((n, s) => n + s.values.reduce((a, b) => a + b, 0), 0)).toBe(7);
+  });
+
+  it("still honours an explicit bucket the window can accommodate", () => {
+    // Coarsening is a fit guarantee, not a takeover — a request that fits is
+    // returned as asked.
+    expect(metrics.series({ from: NOW - 2 * DAY, to: NOW + 1, bucket: "hour", limit: 8 }).bucket)
+      .toBe("hour");
+    expect(metrics.series({ from: NOW - 400 * DAY, to: NOW + 1, bucket: "month", limit: 8 }).bucket)
+      .toBe("month");
+  });
+
   it("is empty — not broken — for a window with no rows", () => {
     const res = metrics.series({ from: NOW + DAY, to: NOW + 2 * DAY, bucket: "day", limit: 8 });
     expect(res).toMatchObject({ buckets: [], series: [], total: 0, truncated: 0 });
