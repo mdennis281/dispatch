@@ -28,7 +28,9 @@ import {
   applyRegistryQuery,
   prRecordKey,
   isHeldByLabel,
+  PrSnapshotSchema,
   type PrRecord,
+  type PrSnapshot,
   type PRRef,
   type RegistryQuery,
 } from "@dispatch/shared";
@@ -42,6 +44,29 @@ import type { PrPollSnapshot } from "./github.js";
  * often than the sweep runs, so a shorter value here would be a lie.
  */
 export const PR_POLL_HOT_MS = 90_000;
+
+/**
+ * The cadence while an AGENT is blocked on `watch_pr`.
+ *
+ * Faster than hot, and justified by exactly the thing that makes it expensive:
+ * somebody is waiting. Every other cadence trades staleness against GitHub
+ * quota; this one trades quota against a chat sitting idle for up to a minute
+ * after its PR went green, which is the most visible kind of slowness this app
+ * has. It applies only while a watch is live (see `PrRecord.watchedUntil`), so
+ * the load is bounded by how many agents are actually watching.
+ */
+export const PR_POLL_WATCHED_MS = 30_000;
+
+/**
+ * How long one `watch_pr` poll keeps a PR on the fast cadence.
+ *
+ * Comfortably longer than the tool's own poll interval, so a watch that is
+ * merely between polls still counts as live; short enough that a watch killed
+ * mid-flight (an interrupted turn, a crashed session) stops costing anything
+ * within a couple of minutes. Nothing has to remember to clear it — an agent
+ * that stops watching simply stops renewing.
+ */
+export const PR_WATCH_TTL_MS = 2 * 60_000;
 
 /**
  * Backoff for a PARKED PR — one with nobody queued to review, no CI in flight
@@ -145,6 +170,7 @@ export class PrRegistry {
           lastChangedAt,
           nextPollAt: 0,
           quietPolls,
+          watchedUntil: 0,
         },
         {
           ...next,
@@ -155,7 +181,8 @@ export class PrRegistry {
           lastPolledAt: now,
           lastChangedAt,
           quietPolls,
-          nextPollAt: now + this.cadenceFor(next, lastChangedAt, quietPolls, now),
+          nextPollAt:
+            now + this.cadenceFor(next, lastChangedAt, quietPolls, now, prev?.watchedUntil ?? 0),
           pollError: undefined,
         },
       ),
@@ -215,6 +242,7 @@ export class PrRegistry {
           lastChangedAt: ref.settledAt ?? now,
           nextPollAt: 0,
           quietPolls: 0,
+          watchedUntil: 0,
         },
         {
           // An existing row already holds richer state than the ref does; only
@@ -224,6 +252,64 @@ export class PrRegistry {
         },
       ),
     );
+  }
+
+  /**
+   * Mark this PR as being actively watched by an agent, and return the row.
+   *
+   * Called by `watch_pr` on every poll. It only ever EXTENDS the window, and it
+   * pulls `nextPollAt` in to match — otherwise a row that had just backed off to
+   * ten minutes would keep that appointment for ten minutes after an agent
+   * started waiting on it, which is precisely the case this exists to fix.
+   *
+   * A no-op for a PR the catalog has never heard of: `watch_pr` can be pointed
+   * at any number, and creating a hollow row from a watch would put PRs in the
+   * roster that nothing is tracking.
+   */
+  async noteWatched(repo: string, number: number): Promise<PrRecord | null> {
+    const key = prRecordKey(repo, number);
+    const prev = await this.store.getPrRecord(key);
+    if (!prev) return null;
+    const now = this.now();
+    const watchedUntil = Math.max(prev.watchedUntil, now + PR_WATCH_TTL_MS);
+    if (prev.watchedUntil === watchedUntil && prev.nextPollAt <= now + PR_POLL_WATCHED_MS) {
+      return prev;
+    }
+    // No `publish`: a watch window is server bookkeeping, not something the
+    // catalog renders, and announcing it would wake every client every 30s.
+    return this.store.upsertPrRecord(key, { ...prev }, {
+      watchedUntil,
+      nextPollAt: Math.min(prev.nextPollAt, now + PR_POLL_WATCHED_MS),
+    });
+  }
+
+  /**
+   * Which tracked PR owns this review thread?
+   *
+   * `resolve_thread` is handed a thread id and nothing else — the tool has never
+   * needed to know which PR it belongs to, and the agent is not asked to say.
+   * The catalog already holds every PR's threads, so it can answer, and that is
+   * what lets a resolve show up as a card about a pull request rather than an
+   * opaque node id.
+   *
+   * Linear over the roster, which is fine: the roster is bounded by open PRs and
+   * this runs once per human-initiated resolve, not on any sweep.
+   */
+  async findByThread(threadId: string): Promise<PrRecord | null> {
+    if (!threadId) return null;
+    const all = await this.store.listPrRecords();
+    return all.find((p) => p.threads.some((t) => t.id === threadId)) ?? null;
+  }
+
+  /**
+   * The display half of a row — what a PR tool freezes into its result.
+   *
+   * Strips the tracking bookkeeping deliberately: a snapshot in a transcript is
+   * a record of what a PR looked like, and `nextPollAt` is not part of that.
+   */
+  async snapshot(repo: string, number: number): Promise<PrSnapshot | null> {
+    const row = await this.store.getPrRecord(prRecordKey(repo, number));
+    return row ? toSnapshot(row) : null;
   }
 
   /**
@@ -286,7 +372,13 @@ export class PrRegistry {
   /** The PR fields a snapshot supplies, separated from tracking bookkeeping. */
   private fieldsFrom(s: PrPollSnapshot): Omit<
     PrRecord,
-    "key" | "firstSeenAt" | "lastPolledAt" | "lastChangedAt" | "nextPollAt" | "quietPolls"
+    | "key"
+    | "firstSeenAt"
+    | "lastPolledAt"
+    | "lastChangedAt"
+    | "nextPollAt"
+    | "quietPolls"
+    | "watchedUntil"
   > {
     return {
       repo: s.repo,
@@ -308,6 +400,9 @@ export class PrRegistry {
       checks: s.checks,
       commentCount: s.commentCount,
       headRefOid: s.headRefOid,
+      additions: s.additions,
+      deletions: s.deletions,
+      changedFiles: s.changedFiles,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
       mergedAt: s.mergedAt,
@@ -327,8 +422,11 @@ export class PrRegistry {
     lastChangedAt: number,
     quietPolls: number,
     now: number,
+    watchedUntil = 0,
   ): number {
     if (fields.state !== "open") return PR_POLL_BACKOFF_MS[PR_POLL_BACKOFF_MS.length - 1]!;
+    // An agent is blocked on this PR right now. Nothing else outranks that.
+    if (now < watchedUntil) return PR_POLL_WATCHED_MS;
     const awaited = fields.reviewers.some(
       (r) => r.state === "requested" || r.state === "in_progress",
     );
@@ -391,4 +489,16 @@ function fingerprint(p: {
     p.threads.map((t) => `${t.id}:${t.isResolved ? 1 : 0}:${t.isOutdated ? 1 : 0}`).sort(),
     p.checks.map((c) => `${c.name}:${c.status}:${c.conclusion ?? ""}`).sort(),
   ]);
+}
+
+/**
+ * A row reduced to its display half.
+ *
+ * Parsed through the snapshot schema rather than hand-picked, so adding a field
+ * to what the catalog shows automatically adds it to what a tool freezes —
+ * hand-picking is how the two drift until a card is missing something the
+ * roster has shown for months.
+ */
+function toSnapshot(row: PrRecord): PrSnapshot {
+  return PrSnapshotSchema.parse(row);
 }

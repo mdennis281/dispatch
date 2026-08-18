@@ -76,12 +76,16 @@ import {
   MemoryTypeSchema,
   ManifestMcpTransportSchema,
   MERGE_HOLD_LABEL,
+  encodePrToolPayload,
   WorkflowExemptionScopeSchema,
   WorkflowMergeMethodSchema,
   describeExemptionScope,
   type ChatStatus,
   type CheckRun,
   type ContextUsage,
+  type PrSnapshot,
+  type PrToolKind,
+  type PrToolOutcome,
   type Effort,
   type ManifestMcpServer,
   type ProjectMemory,
@@ -640,6 +644,42 @@ export interface PrLandingPolicy {
  * opted in has no way to merge anything (a raw `gh pr merge` is separately denied
  * by the trunk guard).
  */
+/**
+ * The PR catalog, as the manager tools need it.
+ *
+ * Deliberately narrow and deliberately best-effort: a tool's job is to open,
+ * watch or land a pull request, and it must not fail because the catalog could
+ * not be read. Every method may answer null, and every caller treats that as
+ * "no card, just prose".
+ */
+export interface ManagerMcpPrRegistry {
+  /** The PR as the catalog currently has it. */
+  snapshot(prNumber: number, repo?: string): Promise<PrSnapshot | null>;
+  /** Poll GitHub NOW, record it, and return the fresh snapshot. */
+  refresh(prNumber: number, repo?: string): Promise<PrSnapshot | null>;
+  /**
+   * Report that an agent is blocked on this PR, which puts the background sweep
+   * on its fast cadence. Called on every `watch_pr` poll — the window lapses on
+   * its own, so a watch that dies with its session costs nothing.
+   */
+  noteWatched(prNumber: number, repo?: string): Promise<void>;
+  /**
+   * Poll and record the PR that owns this review THREAD.
+   *
+   * `resolve_thread` knows a thread id and nothing else — nobody asks the agent
+   * which PR it belongs to. The catalog already holds every tracked PR's
+   * threads, so it can answer, and that is what turns a resolve from an opaque
+   * node id into a card about a pull request.
+   */
+  refreshByThread(threadId: string): Promise<PrSnapshot | null>;
+  /**
+   * The same lookup WITHOUT polling GitHub — for the paths that failed, or that
+   * deliberately changed nothing. A card is still worth showing there; a GitHub
+   * call to draw it is not.
+   */
+  snapshotByThread(threadId: string): Promise<PrSnapshot | null>;
+}
+
 export interface ManagerMcpPrApproval {
   /** Fresh readiness snapshot; null = the PR/repo couldn't be resolved. */
   readiness(prNumber: number, repo?: string): Promise<PrReadiness | null>;
@@ -1219,6 +1259,15 @@ export interface ManagerMcpContext {
    * somewhere to point.
    */
   prCreate?: ManagerMcpPrCreate;
+  /**
+   * The tracked-PR catalog for this session.
+   *
+   * Every PR tool reads it to FREEZE a snapshot into its result, which is what
+   * lets the transcript render a real card — title, diff size, per-job CI, who
+   * is reviewing — instead of the model's prose about it. Optional: without it
+   * the tools work exactly as before and their cards fall back to prose.
+   */
+  prRegistry?: ManagerMcpPrRegistry;
   /** SubApp launcher for this session (omitted → no `run_subapp` tool). */
   runner?: ManagerMcpRunner;
   /** MCP prewarm for this session's checkout (omitted → no `prewarm_mcp` tool). */
@@ -1256,6 +1305,26 @@ function extraSignal(extra: unknown): AbortSignal | undefined {
 
 function textResult(text: string, isError = false): CallToolResult {
   return { content: [{ type: "text", text }], isError };
+}
+
+/**
+ * A PR tool's result: prose for the model, plus one machine-readable line the
+ * transcript renders as a card (see `@dispatch/shared/pr-tools`).
+ *
+ * The snapshot is taken HERE, at the moment the tool answers, and travels with
+ * the result — it is not looked up again when the card renders. That is what
+ * keeps a transcript a record of what happened rather than a live dashboard
+ * that quietly restates last week's `create_pr` as today's CI.
+ */
+function prToolResult(
+  tool: PrToolKind,
+  outcome: PrToolOutcome,
+  pr: PrSnapshot | null,
+  opts: { isError?: boolean; text?: string } = {},
+): CallToolResult {
+  const prose = opts.text ?? [outcome.summary, ...outcome.details].filter(Boolean).join("\n");
+  const payload = encodePrToolPayload({ v: 1, tool, outcome, pr: pr ?? undefined });
+  return textResult(`${prose}\n${payload}`, opts.isError ?? !outcome.ok);
 }
 
 /**
@@ -1526,6 +1595,13 @@ async function watchForPrActivity(
     timeoutMs: number;
     signals: (AbortSignal | undefined)[];
     now: () => number;
+    /**
+     * Fired once per poll, before the read. This is how the catalog learns an
+     * agent is BLOCKED on this PR — a single note at the start of the watch
+     * would lapse long before a 15-minute watch returned, and the whole point
+     * of the fast cadence is that it holds for as long as somebody is waiting.
+     */
+    onPoll?: () => void;
   },
 ): Promise<WatchPrOutcome> {
   const started = opts.now();
@@ -1534,6 +1610,7 @@ async function watchForPrActivity(
 
   for (;;) {
     if (aborted()) return { kind: "aborted" };
+    opts.onPoll?.();
 
     let merge: PrWatchSnapshot | null;
     try {
@@ -1960,16 +2037,35 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         timeoutMs: timeoutSeconds * 1000,
         signals: [ctx.signal, extraSignal(extra)],
         now: ctx.now ?? (() => Date.now()),
+        onPoll: () => void ctx.prRegistry?.noteWatched(number, repo).catch(() => {}),
       });
 
+      /** The PR as it stands at the moment we answer — watch_pr's whole subject. */
+      const snap = async (): Promise<PrSnapshot | null> =>
+        (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null;
+
       if (outcome.kind === "aborted") {
-        return textResult(`Watch on PR #${number} was cancelled after being interrupted.`);
+        return prToolResult(
+          "watch_pr",
+          {
+            summary: `Watch on PR #${number} was cancelled after being interrupted.`,
+            ok: true,
+            details: [],
+          },
+          await snap(),
+        );
       }
       if (outcome.kind === "error") {
-        return textResult(
-          `Could not watch PR #${number}: ${outcome.error}. Check the number and, ` +
-            "if the repo can't be auto-detected here, pass `repo` as 'owner/name'.",
-          true,
+        return prToolResult(
+          "watch_pr",
+          { summary: `Could not watch PR #${number}`, ok: false, details: [outcome.error] },
+          await snap(),
+          {
+            isError: true,
+            text:
+              `Could not watch PR #${number}: ${outcome.error}. Check the number and, ` +
+              "if the repo can't be auto-detected here, pass `repo` as 'owner/name'.",
+          },
         );
       }
       if (outcome.kind === "terminal") {
@@ -1983,7 +2079,18 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         // A merge (usually the auto-merge job's, not ours) means the trunk moved;
         // tell the manager so the primary checkout can fast-forward to it.
         if (s.merged) ctx.github.notePrMerged?.();
-        return textResult(
+        return prToolResult(
+          "watch_pr",
+          {
+            summary: `PR #${s.number} ${s.merged ? "merged" : "closed"}`,
+            ok: true,
+            details: s.mergedAt ? [`Merged at ${s.mergedAt}`] : [],
+          },
+          // Refresh rather than read: the PR just reached a terminal state, and a
+          // card still saying "open" on the very row announcing the merge is the
+          // one bit of staleness nobody would forgive.
+          (await ctx.prRegistry?.refresh(number, repo).catch(() => null)) ?? (await snap()),
+          { text:
           `PR #${s.number} reached terminal state "${s.state}"${s.merged ? " (merged)" : ""}. ` +
             `Watch complete — no need to call watch_pr again.\n` +
             JSON.stringify({
@@ -1992,15 +2099,23 @@ export function createManagerTools(ctx: ManagerMcpContext) {
               merged: s.merged,
               done: true,
               ...(s.mergedAt ? { mergedAt: s.mergedAt } : {}),
-            }),
+            }) },
         );
       }
       if (outcome.kind === "timeout") {
         const s = outcome.state;
-        return textResult(
+        return prToolResult(
+          "watch_pr",
+          {
+            summary: `No new activity on PR #${number} for ${timeoutSeconds}s`,
+            ok: true,
+            details: [`Still ${s.state}.`],
+          },
+          await snap(),
+          { text:
           `No new activity on PR #${number} in the last ${timeoutSeconds}s (still ` +
             `${s.state}). Call watch_pr again to keep watching until it merges.\n` +
-            JSON.stringify({ number, state: s.state, done: false, timedOut: true, events: [] }),
+            JSON.stringify({ number, state: s.state, done: false, timedOut: true, events: [] }) },
         );
       }
 
@@ -2076,7 +2191,17 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         );
       }
       const advice = adviceParts.join(" ");
-      return textResult(
+      return prToolResult(
+        "watch_pr",
+        {
+          summary: `PR #${number} ${needsWork ? "needs attention" : "update"}: ${parts.join(" and ")}`,
+          ok: true,
+          // The event lines verbatim, minus the thread ids the model needs and a
+          // human reading a card does not — those are in the drilldown.
+          details: lines.map((line) => line.split("\n")[0]!.trim()),
+        },
+        await snap(),
+        { text:
         `PR #${number} ${needsWork ? "needs attention" : "update"}: ${parts.join(" and ")}.\n` +
           `${lines.join("\n")}\n\n${advice}\n` +
           JSON.stringify({
@@ -2086,7 +2211,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             checksPassing: !!passed,
             reviewStalled: !!stalled,
             events,
-          }),
+          }) },
       );
     },
   );
@@ -2156,23 +2281,56 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         }
       }
       if (!shouldResolve) {
-        return textResult(
-          `Replied in thread ${threadId} and left it OPEN, as asked. It still counts as an ` +
-            "outstanding thread and will block the merge until someone resolves it.",
+        return prToolResult(
+          "resolve_thread",
+          {
+            summary: "Replied and left the thread OPEN, as asked",
+            ok: true,
+            details: ["It still counts as outstanding and will block the merge."],
+          },
+          (await ctx.prRegistry?.snapshotByThread(threadId).catch(() => null)) ?? null,
+          {
+            text:
+              `Replied in thread ${threadId} and left it OPEN, as asked. It still counts as an ` +
+              "outstanding thread and will block the merge until someone resolves it.",
+          },
         );
       }
       try {
         await gh.resolveThread(threadId);
       } catch (err) {
-        return textResult(
-          `${reply ? "Replied, but could not resolve" : "Could not resolve"} thread ` +
-            `${threadId}: ${err instanceof Error ? err.message : String(err)}.`,
-          true,
+        return prToolResult(
+          "resolve_thread",
+          {
+            summary: reply ? "Replied, but could not resolve the thread" : "Could not resolve the thread",
+            ok: false,
+            details: [err instanceof Error ? err.message : String(err)],
+          },
+          (await ctx.prRegistry?.snapshotByThread(threadId).catch(() => null)) ?? null,
+          {
+            isError: true,
+            text:
+              `${reply ? "Replied, but could not resolve" : "Could not resolve"} thread ` +
+              `${threadId}: ${err instanceof Error ? err.message : String(err)}.`,
+          },
         );
       }
-      return textResult(
-        `Resolved thread ${threadId}${reply ? " (reply posted)" : ""}. ` +
-          "Resolve every thread you fixed, then call watch_pr again.",
+      return prToolResult(
+        "resolve_thread",
+        {
+          summary: `Resolved a review thread${reply ? " (reply posted)" : ""}`,
+          ok: true,
+          details: reply ? [reply] : [],
+        },
+        // Re-poll, not re-read: the resolve just happened, and a card that still
+        // shows the thread outstanding is reporting the opposite of what the
+        // tool just did.
+        (await ctx.prRegistry?.refreshByThread(threadId).catch(() => null)) ?? null,
+        {
+          text:
+            `Resolved thread ${threadId}${reply ? " (reply posted)" : ""}. ` +
+            "Resolve every thread you fixed, then call watch_pr again.",
+        },
       );
     },
   );
@@ -2236,11 +2394,20 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       try {
         res = await gh.requestReviewers(number, asked, repo);
       } catch (err) {
-        return textResult(
-          `Could not request review on PR #${number}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-          true,
+        return prToolResult(
+          "request_review",
+          {
+            summary: `Could not request review on PR #${number}`,
+            ok: false,
+            details: [err instanceof Error ? err.message : String(err)],
+          },
+          (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null,
+          {
+            isError: true,
+            text: `Could not request review on PR #${number}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          },
         );
       }
       const lines: string[] = [];
@@ -2277,16 +2444,30 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             "land the PR on the review you already have if there's nothing outstanding."
           : "Fix the reviewer names or the project's `workflow.pr.reviewers`; retrying the " +
             "same list will fail the same way.";
-      return textResult(
-        `${ok ? `Review requested on PR #${number}.` : `Nobody is queued on PR #${number}.`}\n` +
-          `${lines.join("\n")}\n\n${advice}\n` +
-          JSON.stringify({
-            number,
-            requested: onHook ?? res.requested,
-            failed: res.failed,
-            verified: onHook !== null,
-          }),
-        !ok,
+      return prToolResult(
+        "request_review",
+        {
+          summary: ok
+            ? `Review requested on PR #${number}`
+            : `Nobody is queued on PR #${number}`,
+          ok,
+          details: lines.map((line) => line.replace(/^\s*·\s*/, "").trim()),
+        },
+        // Re-poll: the reviewer queue is the thing that just changed, and it is
+        // the first thing the card shows.
+        (await ctx.prRegistry?.refresh(number, repo).catch(() => null)) ?? null,
+        {
+          isError: !ok,
+          text:
+            `${ok ? `Review requested on PR #${number}.` : `Nobody is queued on PR #${number}.`}\n` +
+            `${lines.join("\n")}\n\n${advice}\n` +
+            JSON.stringify({
+              number,
+              requested: onHook ?? res.requested,
+              failed: res.failed,
+              verified: onHook !== null,
+            }),
+        },
       );
     },
   );
@@ -2461,9 +2642,18 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           cwd: st.cwd,
         });
       } catch (e) {
-        return textResult(
-          `Could not open the PR: ${e instanceof Error ? e.message : String(e)}`,
-          true,
+        return prToolResult(
+          "create_pr",
+          {
+            summary: "Could not open the PR",
+            ok: false,
+            details: [e instanceof Error ? e.message : String(e)],
+          },
+          null,
+          {
+            isError: true,
+            text: `Could not open the PR: ${e instanceof Error ? e.message : String(e)}`,
+          },
         );
       }
 
@@ -2493,17 +2683,30 @@ export function createManagerTools(ctx: ManagerMcpContext) {
               "come back to this chat on its own"
           : "  · ⚠ the review watcher is not running; call `mcp__manager__watch_pr` yourself",
       );
-      return textResult(
-        `${lines.join("\n")}\n\nNow call \`mcp__manager__watch_pr\` in a loop to work the ` +
-          `review round.\n` +
-          JSON.stringify({
-            number: res.number,
-            url: res.url,
-            created: true,
-            draft: res.draft,
-            reviewersRequested: res.reviewersRequested,
-            watching: res.watching,
-          }),
+      return prToolResult(
+        "create_pr",
+        {
+          summary: `Opened PR #${res.number}`,
+          ok: true,
+          details: lines.slice(1).map((line) => line.replace(/^\s*·\s*/, "").trim()),
+        },
+        // The very first poll of a PR that did not exist a second ago. `create`
+        // already recorded the ref; this is what fills the card with a title,
+        // a diff size and whoever was just asked to review.
+        (await ctx.prRegistry?.refresh(res.number).catch(() => null)) ?? null,
+        {
+          text:
+            `${lines.join("\n")}\n\nNow call \`mcp__manager__watch_pr\` in a loop to work the ` +
+            `review round.\n` +
+            JSON.stringify({
+              number: res.number,
+              url: res.url,
+              created: true,
+              draft: res.draft,
+              reviewersRequested: res.reviewersRequested,
+              watching: res.watching,
+            }),
+        },
       );
     },
   );
@@ -2576,9 +2779,18 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       try {
         pr = await approval.readiness(number, repo);
       } catch (e) {
-        return textResult(
-          `Could not read PR #${number}: ${e instanceof Error ? e.message : String(e)}`,
-          true,
+        return prToolResult(
+          "approve_pr",
+          {
+            summary: `Could not read PR #${number}`,
+            ok: false,
+            details: [e instanceof Error ? e.message : String(e)],
+          },
+          (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null,
+          {
+            isError: true,
+            text: `Could not read PR #${number}: ${e instanceof Error ? e.message : String(e)}`,
+          },
         );
       }
       if (!pr) {
@@ -2603,7 +2815,15 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       if (blockers.length) {
         // Not an error — being told "not yet" is a normal, expected answer.
         const isDone = blockers.some((b) => b.code === "not-open");
-        return textResult(
+        return prToolResult(
+          "approve_pr",
+          {
+            summary: isDone ? "Nothing to do" : `Not landing PR #${number} yet`,
+            ok: false,
+            details: blockers.map((b) => b.detail),
+          },
+          (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null,
+          { text:
           `${isDone ? "Nothing to do" : `Not landing PR #${number} yet`}:\n` +
             blockers.map((b) => `  · ${b.detail}`).join("\n") +
             (isDone ? "" : "\n\nFix these, then call approve_pr again.") +
@@ -2612,7 +2832,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
               number,
               merged: false,
               blockers: blockers.map((b) => b.code),
-            }),
+            }) },
         );
       }
 
@@ -2636,7 +2856,15 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           verdict = { approved: false, message: e instanceof Error ? e.message : String(e) };
         }
         if (!verdict.approved) {
-          return textResult(
+          return prToolResult(
+            "approve_pr",
+            {
+              summary: `Not landing PR #${number} — the human declined the override`,
+              ok: false,
+              details: suppressed.map((b) => b.detail),
+            },
+            (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null,
+            { text:
             `Not landing PR #${number} — the human did not approve the override:\n` +
               suppressed.map((b) => `  · ${b.detail}`).join("\n") +
               (verdict.message ? `\n\nThey said: ${verdict.message}` : "") +
@@ -2647,7 +2875,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
                 merged: false,
                 blockers: suppressed.map((b) => b.code),
                 overrideDeclined: true,
-              }),
+              }) },
           );
         }
         ctx.bus.publish({
@@ -2692,11 +2920,21 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       // green, and the manager fast-forwards the primary checkout to the trunk.
       ctx.broker.markPrWatched(ctx.chatId, { number, state: "merged" });
       const noChecks = pr.checks.length === 0 ? " (this PR had no CI checks reporting)" : "";
-      return textResult(
+      return prToolResult(
+        "approve_pr",
+        {
+          summary: `Merged PR #${number} (${method}${approved.approved ? ", approved" : ""})`,
+          ok: true,
+          details: noChecks ? ["This PR had no CI checks reporting."] : [],
+        },
+        // The merge just landed; re-poll so the card says merged rather than
+        // showing the open PR it was a moment ago.
+        (await ctx.prRegistry?.refresh(number, repo).catch(() => null)) ?? null,
+        { text:
         `Merged PR #${number} (${method}${approved.approved ? ", approved" : ""})${noChecks}. ` +
           "The branch is deleted and the trunk will fast-forward — the task is done, so " +
           "don't watch it or open anything else.\n" +
-          JSON.stringify({ number, merged: true, method, approved: approved.approved }),
+          JSON.stringify({ number, merged: true, method, approved: approved.approved }) },
       );
     },
   );

@@ -15,18 +15,23 @@ export const SHELL_FILTER_OPTIONS: ReadonlyArray<{
 }> = [
   { id: "shell", label: "Shell commands", description: "Bash, PowerShell, and managed terminals" },
   { id: "memory", label: "Memory", description: "Recall, remember, forget, and memory search" },
-  { id: "pr", label: "Pull requests", description: "Review, watch, resolve, approve, and merge" },
   { id: "wait", label: "Waits", description: "Sleep countdowns and chat waits" },
   { id: "preview", label: "App previews", description: "Starting and inspecting project apps" },
   { id: "chat", label: "Chat context", description: "Context usage, compaction, and chat operations" },
   { id: "dispatch", label: "Other Dispatch tools", description: "Worktrees and newly added manager tools" },
 ];
 
+/**
+ * Which filter category a terminal-frame row belongs to.
+ *
+ * PR tools are absent on purpose: they left the terminal frame for cards of
+ * their own, so `shellGroupPresentation` never returns one and there is nothing
+ * here to classify. The `pr` category was retired with them.
+ */
 export function presentationFilterCategory(presentation: ShellGroupPresentation): ShellTranscriptCategory {
   if (presentation.kind === "shell") return "shell";
   switch (presentation.category) {
     case "memory": return "memory";
-    case "pr": return "pr";
     case "wait": return "wait";
     case "preview": return "preview";
     case "chat": return "chat";

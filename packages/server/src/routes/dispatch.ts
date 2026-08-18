@@ -14,6 +14,7 @@
 import { nanoid } from "nanoid";
 import { resolve as resolvePath } from "node:path";
 import {
+  prRecordKey,
   composeMessageText,
   type WsClientAction,
   type Chat,
@@ -200,6 +201,21 @@ export async function runGhAction(
     return action.prNumber;
   };
 
+  /**
+   * Re-poll the catalog after a mutation.
+   *
+   * Every branch below CHANGES the PR — merges it, labels it, re-runs its CI,
+   * resolves a thread on it. Without this the roster keeps showing the state
+   * from before the click until the next sweep comes round, which for a parked
+   * PR is ten minutes; the human who just pressed Hold watches nothing happen
+   * and presses it again. Best-effort: the action itself already succeeded.
+   */
+  const recatalog = async (prNumber: number): Promise<void> => {
+    await services.prRegistry
+      .refresh(prRecordKey(repo, prNumber))
+      .catch(() => null);
+  };
+
   switch (action.op) {
     case "ship": {
       const chat = action.chatId ? await store.getChat(action.chatId) : null;
@@ -207,40 +223,73 @@ export async function runGhAction(
       if (!branch) {
         throw new Error("ship requires a chat with a worktree branch");
       }
-      await github.ship(project, branch, { cwd, chatId: action.chatId });
+      const shipped = await github.ship(project, branch, { cwd, chatId: action.chatId });
+      // `ship` runs the project's own command, which may open a PR Dispatch has
+      // never heard of. Put it in the catalog the same way `create_pr` does, so
+      // the UI path and the agent path produce the same tracked PR rather than
+      // one that is watched and one that is not.
+      if (shipped) {
+        await services.prRegistry
+          .track(
+            {
+              number: shipped.number,
+              url: shipped.url,
+              branch: shipped.branch,
+              repo,
+              title: shipped.title,
+              state: shipped.state,
+            },
+            { chatId: action.chatId, projectId: project.id },
+          )
+          .catch(() => null);
+        await recatalog(shipped.number);
+      }
       return;
     }
     case "refresh":
       await github.refreshPr(repo, needPr(), ctx);
+      await recatalog(needPr());
       return;
     case "merge":
       await github.merge(repo, needPr(), "squash", ctx);
+      await recatalog(needPr());
       return;
     case "hold":
       await github.hold(repo, needPr(), true, ctx);
+      await recatalog(needPr());
       return;
     case "unhold":
       await github.hold(repo, needPr(), false, ctx);
+      await recatalog(needPr());
       return;
     case "label":
       if (!action.label) throw new Error("label op requires a label");
       await github.setLabel(repo, needPr(), action.label, true, ctx);
+      await recatalog(needPr());
       return;
     case "unlabel":
       if (!action.label) throw new Error("unlabel op requires a label");
       await github.setLabel(repo, needPr(), action.label, false, ctx);
+      await recatalog(needPr());
       return;
     case "rerun":
       await github.rerunFailedChecks(repo, needPr(), ctx);
+      await recatalog(needPr());
       return;
     case "resolve-thread":
       if (!action.threadId) {
         throw new Error("resolve-thread op requires a threadId");
       }
       await github.resolveThread(action.threadId, ctx);
+      // Thread-keyed: this op is the one that never carries a PR number.
+      await services.prRegistry
+        .findByThread(action.threadId)
+        .then((row) => (row ? services.prRegistry.refresh(row.key) : null))
+        .catch(() => null);
       return;
     case "review":
       await github.requestReview(repo, needPr(), COPILOT_LOGIN, ctx);
+      await recatalog(needPr());
       return;
     case "dispatch": {
       if (!action.workflow) throw new Error("dispatch op requires a workflow");

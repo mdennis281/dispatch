@@ -10,6 +10,7 @@ import type {
 } from "@dispatch/shared";
 import { EventBus } from "../../bus.js";
 import { memorySimilarity } from "../memory.js";
+import { decodePrToolPayload } from "@dispatch/shared";
 import {
   createManagerTools,
   createManagerMcpServer,
@@ -2382,7 +2383,10 @@ describe("manager-mcp — approve_pr", () => {
     expect(calls.merge).toEqual([]);
     // Nor may it approve — a review it then didn't land is noise on the PR.
     expect(calls.approve).toEqual([]);
-    const text = resultText(res);
+    // Split the card payload off first: PR tools now answer with prose for the
+    // model AND one machine-readable line for the transcript, so "the last {"
+    // is the payload's, not the model-facing JSON's.
+    const { payload, text } = decodePrToolPayload(resultText(res));
     expect(text).toMatch(/did not approve the override/i);
     expect(text).toMatch(/wait for copilot/);
     expect(text).toMatch(/don't re-ask/i);
@@ -2390,6 +2394,11 @@ describe("manager-mcp — approve_pr", () => {
       merged: false,
       overrideDeclined: true,
       blockers: ["no-review"],
+    });
+    // …and the card says the same thing, without the human having to read prose.
+    expect(payload).toMatchObject({
+      tool: "approve_pr",
+      outcome: { ok: false, summary: expect.stringMatching(/declined the override/i) },
     });
   });
 

@@ -5,11 +5,17 @@
  */
 import * as z from "zod";
 
-/** Tool families that can be shown inside Dispatch's compact transcript shell. */
+/**
+ * Tool families that can be shown inside Dispatch's compact transcript shell.
+ *
+ * `pr` was here and is deliberately gone: pull-request tools left the terminal
+ * frame for cards of their own, so a toggle that hid them among shell commands
+ * no longer describes anything. Retiring a category is exactly why the filter
+ * parses leniently below.
+ */
 export const SHELL_TRANSCRIPT_CATEGORIES = [
   "shell",
   "memory",
-  "pr",
   "wait",
   "preview",
   "chat",
@@ -17,9 +23,30 @@ export const SHELL_TRANSCRIPT_CATEGORIES = [
 ] as const;
 export const ShellTranscriptCategorySchema = z.enum(SHELL_TRANSCRIPT_CATEGORIES);
 export type ShellTranscriptCategory = z.infer<typeof ShellTranscriptCategorySchema>;
+/**
+ * Unknown categories are DROPPED rather than rejected.
+ *
+ * This is the one schema in the app where strictness would be self-inflicted
+ * damage: the stored value is a list of product concepts, and retiring one (as
+ * `pr` was) would otherwise make every chat, project and settings record that
+ * mentions it fail to parse — turning a UI change into an unreadable install.
+ * A filter naming a category that no longer exists means "that thing is gone",
+ * not "this file is corrupt".
+ */
 export const ShellTranscriptFilterSchema = z
-  .array(ShellTranscriptCategorySchema)
-  .max(SHELL_TRANSCRIPT_CATEGORIES.length)
+  .preprocess(
+    (value) =>
+      Array.isArray(value)
+        ? value.filter((item) =>
+            (SHELL_TRANSCRIPT_CATEGORIES as readonly unknown[]).includes(item),
+          )
+        : value,
+    z.array(ShellTranscriptCategorySchema),
+  )
+  .refine(
+    (items) => items.length <= SHELL_TRANSCRIPT_CATEGORIES.length,
+    "too many shell filter categories",
+  )
   .refine((items) => new Set(items).size === items.length, "duplicate shell filter category");
 export type ShellTranscriptFilter = z.infer<typeof ShellTranscriptFilterSchema>;
 

@@ -160,9 +160,18 @@ export const PRRefSchema = z.object({
 });
 export type PRRef = z.infer<typeof PRRefSchema>;
 
-/** A single CI check / status on a PR. */
+/** A single CI check / status on a PR — one JOB, not one workflow. */
 export const CheckRunSchema = z.object({
   name: z.string(),
+  /**
+   * The workflow this job belongs to, when GitHub reports one. Present so a CI
+   * breakdown can GROUP jobs the way the Actions tab does — "3 jobs of `ci.yml`"
+   * is a sentence a human can act on; three unrelated-looking names is not.
+   */
+  workflowName: z.string().optional(),
+  /** ISO timestamps, when known — a job's duration is what tells you it hung. */
+  startedAt: z.string().optional(),
+  completedAt: z.string().optional(),
   status: z.enum(["queued", "in_progress", "completed"]),
   conclusion: z
     .enum([
@@ -293,7 +302,7 @@ export type PrReviewer = z.infer<typeof PrReviewerSchema>;
  * nothing. `Chat.prs` remains the ownership pointer — `chatId` here is copied
  * FROM it — so the settled-PR green dot keeps reading the record it always has.
  */
-export const PrRecordSchema = z.object({
+export const PrSnapshotSchema = z.object({
   /** `owner/repo#number` — the primary key. */
   key: z.string(),
   repo: z.string(),
@@ -323,11 +332,28 @@ export const PrRecordSchema = z.object({
   commentCount: z.number().int().optional(),
   /** Head sha, so a reviewer's verdict can be dated against the current code. */
   headRefOid: z.string().optional(),
+  /** Diff size. What "how big is this change" means without opening GitHub. */
+  additions: z.number().int().optional(),
+  deletions: z.number().int().optional(),
+  changedFiles: z.number().int().optional(),
   createdAt: z.string().optional(),
   updatedAt: z.string().optional(),
   mergedAt: z.string().optional(),
   closedAt: z.string().optional(),
 
+});
+export type PrSnapshot = z.infer<typeof PrSnapshotSchema>;
+
+/**
+ * A tracked PR's registry row: everything {@link PrSnapshotSchema} shows, plus
+ * the bookkeeping that keeps it current.
+ *
+ * The split exists because the snapshot travels somewhere the row does not — a
+ * PR tool FREEZES one into its result so the transcript stays a record of what
+ * happened, rather than silently re-reading as today's state when you scroll
+ * back to it a week later. Cadence counters have no business in that copy.
+ */
+export const PrRecordSchema = PrSnapshotSchema.extend({
   /* --- registry scope (RegistryScoped) --- */
   projectId: z.string().optional(),
   /**
@@ -348,6 +374,15 @@ export const PrRecordSchema = z.object({
   nextPollAt: z.number().int().default(0),
   /** Consecutive polls that changed nothing — drives the backoff ladder. */
   quietPolls: z.number().int().default(0),
+  /**
+   * An agent is ACTIVELY watching this PR until this epoch-ms instant.
+   *
+   * `watch_pr` bumps it on every poll. While it holds, the sweep drops to its
+   * fastest cadence: an agent blocked on a PR is the one moment where a minute
+   * of staleness is a minute of a human's chat sitting idle, and it is also the
+   * moment the poll is cheapest to justify — somebody is waiting on the answer.
+   */
+  watchedUntil: z.number().int().default(0),
   /**
    * Why the last poll failed. Kept ON the row rather than dropping it: a stale
    * row that says why it's stale is honest; one that silently keeps showing
