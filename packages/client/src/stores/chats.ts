@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import type { Chat, ChatStatus, AgentActivity, WorkflowExemption } from "@dispatch/shared";
@@ -201,4 +202,50 @@ export function chatsForProject(
 /** Selector: chats for a project, ordered by most-recent activity first. */
 export function useProjectChats(projectId: string | null): Chat[] {
   return useChats(useShallow((s) => chatsForProject(s, projectId)));
+}
+
+/**
+ * Statuses that mean an agent is mid-turn on this chat. `queued` counts: the
+ * turn is already submitted and will run on its own, so the project has work in
+ * flight even though nothing is streaming yet.
+ */
+const WORKING_STATUS: ReadonlySet<ChatStatus> = new Set(["running", "waiting", "queued"]);
+
+export interface ProjectAgentCounts {
+  /** Chats with an agent mid-turn. */
+  working: number;
+  /** Chats stopped on a question — nothing moves until a human answers. */
+  attention: number;
+}
+
+/**
+ * projectId → live agent counts. Pure so the picker's badge and its test share
+ * one definition of "an agent is live in this project".
+ */
+export function countProjectAgents(byId: Record<string, Chat>): Record<string, ProjectAgentCounts> {
+  const out: Record<string, ProjectAgentCounts> = {};
+  for (const id in byId) {
+    const chat = byId[id]!;
+    const status = chat.status;
+    if (chat.archived || !status) continue;
+    if (status !== "awaiting-input" && !WORKING_STATUS.has(status)) continue;
+    const counts = (out[chat.projectId] ??= { working: 0, attention: 0 });
+    if (status === "awaiting-input") counts.attention++;
+    else counts.working++;
+  }
+  return out;
+}
+
+/**
+ * Selector: live agent counts per project, for the project picker's right-hand
+ * hint.
+ *
+ * Subscribes to `byId` (a flat record, so `useShallow` genuinely compares it)
+ * and derives OUTSIDE the selector. Building the nested result inside the
+ * selector would hand zustand a new object on every read, which is the render
+ * loop that white-screened the app once already — see the PR selector.
+ */
+export function useProjectAgentCounts(): Record<string, ProjectAgentCounts> {
+  const byId = useChats(useShallow((s) => s.byId));
+  return useMemo(() => countProjectAgents(byId), [byId]);
 }

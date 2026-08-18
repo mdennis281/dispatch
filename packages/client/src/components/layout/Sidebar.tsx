@@ -29,7 +29,12 @@ import { Chip } from "../ui/Chip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { useProjects, useActiveProject } from "../../stores/projects.js";
-import { useChats, useProjectChats } from "../../stores/chats.js";
+import {
+  useChats,
+  useProjectChats,
+  useProjectAgentCounts,
+  type ProjectAgentCounts,
+} from "../../stores/chats.js";
 import { useView, openOverlay } from "../../stores/view.js";
 import { useLayout, dismissLeftDrawer } from "../../stores/layout.js";
 import { selectChat, selectProject } from "../../stores/navigation.js";
@@ -78,6 +83,49 @@ function isActive(status: RunnerInstance["status"] | undefined): boolean {
 
 /* ------------------------------------------------------------ project head */
 
+/**
+ * The right-hand half of a project row: how many agents are live in it.
+ *
+ * Two tones, never summed into one number — "3 working" and "1 waiting on you"
+ * are different calls to action, and a project you have to go answer must not
+ * hide inside a busy-looking count. Nothing renders for a quiet project: a row
+ * of zeroes would make the menu read as a dashboard rather than a picker.
+ */
+function ProjectAgentBadge({ counts }: { counts: ProjectAgentCounts | undefined }) {
+  const working = counts?.working ?? 0;
+  const attention = counts?.attention ?? 0;
+  if (!working && !attention) return null;
+
+  // "working" rather than "running": the count also covers `waiting` and
+  // `queued`, which are agents with a turn in flight but nothing streaming.
+  const label = [
+    attention ? `${attention} awaiting input` : null,
+    working ? `${working} working` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <span className="flex items-center gap-1.5 tabular-nums" title={label}>
+      {/* The dots carry the meaning by colour alone, so the readable form goes
+          to assistive tech directly — a `title` is not reliably announced. */}
+      <span className="sr-only">{label}</span>
+      {attention > 0 && (
+        <span aria-hidden className={cn("flex items-center gap-1", toneText("warn"))}>
+          <StatusDot tone="warn" pulse size={5} />
+          {attention}
+        </span>
+      )}
+      {working > 0 && (
+        <span aria-hidden className={cn("flex items-center gap-1", toneText("working"))}>
+          <StatusDot tone="working" pulse size={5} />
+          {working}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function ProjectSelector({
   onAddProject,
   onManageConfig,
@@ -87,6 +135,7 @@ function ProjectSelector({
 }) {
   const projects = useProjects((s) => s.projects);
   const active = useActiveProject();
+  const agentCounts = useProjectAgentCounts();
 
   return (
     <Popover
@@ -127,6 +176,7 @@ function ProjectSelector({
               key={p.id}
               icon={<FolderGit2 />}
               active={p.id === active?.id}
+              hint={<ProjectAgentBadge counts={agentCounts[p.id]} />}
               onClick={() => {
                 selectProject(p.id);
                 close();

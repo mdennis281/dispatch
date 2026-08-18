@@ -1,0 +1,4 @@
+refactor(chats): iterate the chat record without materializing values
+
+No measurable difference at this size, but the loop reads the same either
+way, so there is no reason to keep the extra array.
