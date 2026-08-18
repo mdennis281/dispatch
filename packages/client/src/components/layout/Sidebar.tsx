@@ -96,23 +96,28 @@ function ProjectAgentBadge({ counts }: { counts: ProjectAgentCounts | undefined 
   const attention = counts?.attention ?? 0;
   if (!working && !attention) return null;
 
+  // "working" rather than "running": the count also covers `waiting` and
+  // `queued`, which are agents with a turn in flight but nothing streaming.
   const label = [
     attention ? `${attention} awaiting input` : null,
-    working ? `${working} running` : null,
+    working ? `${working} working` : null,
   ]
     .filter(Boolean)
     .join(" · ");
 
   return (
     <span className="flex items-center gap-1.5 tabular-nums" title={label}>
+      {/* The dots carry the meaning by colour alone, so the readable form goes
+          to assistive tech directly — a `title` is not reliably announced. */}
+      <span className="sr-only">{label}</span>
       {attention > 0 && (
-        <span className={cn("flex items-center gap-1", toneText("warn"))}>
+        <span aria-hidden className={cn("flex items-center gap-1", toneText("warn"))}>
           <StatusDot tone="warn" pulse size={5} />
           {attention}
         </span>
       )}
       {working > 0 && (
-        <span className={cn("flex items-center gap-1", toneText("working"))}>
+        <span aria-hidden className={cn("flex items-center gap-1", toneText("working"))}>
           <StatusDot tone="working" pulse size={5} />
           {working}
         </span>

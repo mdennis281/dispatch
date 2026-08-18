@@ -1,0 +1,8 @@
+fix(sidebar): say "working", and give the agent badge a readable label
+
+The count covers `waiting` and `queued` as well as `running`, so a tooltip
+reading "2 running" was wrong for a queued chat. Call it what it counts.
+
+The dots carry their meaning in colour, and a `title` is not reliably
+announced, so the readable form now goes to assistive tech as an sr-only
+label with the visual groups hidden from it.
