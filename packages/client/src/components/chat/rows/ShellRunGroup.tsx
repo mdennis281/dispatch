@@ -16,7 +16,11 @@ import { ackTaskId } from "../../../lib/subagentRuns.js";
 import { toolCallState } from "../../../lib/toolState.js";
 import { hydrateFullRows } from "../../../stores/index.js";
 import { displayResultText, shellGroupPresentation } from "../../../lib/toolPresentations.js";
-import { presentationFilterCategory, useShellFilter } from "../../../lib/shellFilter.js";
+import {
+  SHELL_FILTER_OPTIONS,
+  presentationFilterCategory,
+  useShellFilter,
+} from "../../../lib/shellFilter.js";
 import { ShellFilterModal } from "../ShellFilterModal.js";
 
 export interface ShellRunEntry {
@@ -200,8 +204,11 @@ export const ShellRunGroup = memo(function ShellRunGroup({
           {terminals.length === 1 && <Chip tone="muted" mono>{terminals[0]}</Chip>}
           <span className="ml-auto">
             <IconButton
-              tip={`Shell visibility · ${filter.enabled.length} of 7 shown`}
-              active={filter.enabled.length < 7}
+              // Counted, never hardcoded: the list has already lost a category
+              // (`pr`, now its own card) and a stale "of 7" is a lie the UI
+              // tells with total confidence.
+              tip={`Shell visibility · ${filter.enabled.length} of ${SHELL_FILTER_OPTIONS.length} shown`}
+              active={filter.enabled.length < SHELL_FILTER_OPTIONS.length}
               onClick={() => setFilterOpen(true)}
             >
               <SlidersHorizontal />

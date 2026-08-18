@@ -17,7 +17,7 @@ import type { ServerConfig } from "../config.js";
 // Value import (not `import type`): the InspectService needs to CONSTRUCT a
 // second Store over the installed instance's roots for `instance: "stable"`.
 import { Store } from "../store/index.js";
-import type { PRRef } from "@dispatch/shared";
+import { PrSnapshotSchema, prRecordKey, type PRRef, type PrRecord, type PrSnapshot } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
 import { SessionBroker } from "./session-broker.js";
@@ -385,6 +385,23 @@ export function createServices(
   broker.onPrSnapshot = (chatId, snapshot) => {
     void prRegistry.record(snapshot, { chatId }).catch(() => {});
   };
+  // Every PR tool reads the catalog to freeze a card into its result, and
+  // `watch_pr` writes back through it to keep the sweep on its fast cadence
+  // while an agent is blocked. Repo-agnostic here; the broker binds each
+  // session's own owner/name in.
+  broker.prRegistry = {
+    snapshot: (repo, number) => prRegistry.snapshot(repo, number),
+    refresh: (repo, number) => prRegistry.refresh(prRecordKey(repo, number)).then(toPrSnapshot),
+    noteWatched: async (repo, number) => {
+      await prRegistry.noteWatched(repo, number);
+    },
+    refreshByThread: async (threadId) => {
+      const row = await prRegistry.findByThread(threadId);
+      if (!row) return null;
+      return toPrSnapshot(await prRegistry.refresh(row.key));
+    },
+    snapshotByThread: async (threadId) => toPrSnapshot(await prRegistry.findByThread(threadId)),
+  };
   const prReviewWatcher =
     overrides.prReviewWatcher ??
     new PrReviewWatcher({
@@ -687,4 +704,14 @@ export function createServices(
   };
 
   return services;
+}
+
+/**
+ * A catalog row reduced to the display half a PR tool freezes into its result.
+ *
+ * Null-tolerant because every caller here is best-effort: a PR the catalog has
+ * never seen yields no card, never an error on a tool that otherwise worked.
+ */
+function toPrSnapshot(row: PrRecord | null): PrSnapshot | null {
+  return row ? PrSnapshotSchema.parse(row) : null;
 }

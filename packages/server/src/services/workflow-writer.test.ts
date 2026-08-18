@@ -171,8 +171,8 @@ describe("workflow-writer", () => {
 
   it("stores a shell filter on projects without a manifest and can reset it", async () => {
     await seedProject();
-    await saveProjectShellFilter(deps(), "p1", ["shell", "pr"]);
-    expect((await store.getProject("p1"))?.shellFilter).toEqual(["shell", "pr"]);
+    await saveProjectShellFilter(deps(), "p1", ["shell", "memory"]);
+    expect((await store.getProject("p1"))?.shellFilter).toEqual(["shell", "memory"]);
 
     await saveProjectShellFilter(deps(), "p1", undefined);
     expect((await store.getProject("p1"))?.shellFilter).toBeUndefined();

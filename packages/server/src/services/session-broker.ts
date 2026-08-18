@@ -81,6 +81,7 @@ import type {
   WorkflowViolation,
   PRRef,
   HarnessKind,
+  PrSnapshot,
 } from "@dispatch/shared";
 import {
   DEFAULT_HARNESS,
@@ -114,6 +115,7 @@ import {
   type ManagerAskQuestion,
   type ManagerAskResult,
   type ManagerMcpGitHub,
+  type ManagerMcpPrRegistry,
   type ManagerMcpPrApproval,
   type ManagerMcpPrCreate,
   type PrLandingPolicy,
@@ -551,6 +553,49 @@ export function makePrCreateBinding(
         watching: Boolean(opts.arm),
       };
     },
+  };
+}
+
+/**
+ * The catalog as a SESSION sees it — PR numbers, no repo argument required.
+ *
+ * The broker holds the repo-agnostic version (it is one registry for the whole
+ * app); this binds each session's own `owner/name` in, so a tool that was given
+ * only `{ number: 96 }` still lands on the right row. An explicit `repo`
+ * override always wins, exactly as it does for the watch itself.
+ */
+export interface SessionPrRegistry {
+  snapshot(repo: string, prNumber: number): Promise<PrSnapshot | null>;
+  refresh(repo: string, prNumber: number): Promise<PrSnapshot | null>;
+  noteWatched(repo: string, prNumber: number): Promise<void>;
+  refreshByThread(threadId: string): Promise<PrSnapshot | null>;
+  snapshotByThread(threadId: string): Promise<PrSnapshot | null>;
+}
+
+function makePrRegistryBinding(
+  registry: SessionPrRegistry,
+  github: GitHubService,
+  cwd: string | undefined,
+): ManagerMcpPrRegistry {
+  const repoFor = makeRepoResolver(github, cwd);
+  // Every method degrades to null rather than throwing: a card is a nicety, and
+  // no tool should fail because the catalog could not name a repository.
+  return {
+    snapshot: async (n, repo) => {
+      const r = await repoFor(repo);
+      return r ? registry.snapshot(r, n) : null;
+    },
+    refresh: async (n, repo) => {
+      const r = await repoFor(repo);
+      return r ? registry.refresh(r, n) : null;
+    },
+    noteWatched: async (n, repo) => {
+      const r = await repoFor(repo);
+      if (r) await registry.noteWatched(r, n);
+    },
+    // Thread ids are globally unique node ids, so these need no repo at all.
+    refreshByThread: (threadId) => registry.refreshByThread(threadId),
+    snapshotByThread: (threadId) => registry.snapshotByThread(threadId),
   };
 }
 
@@ -1311,6 +1356,13 @@ export class SessionBroker {
    * away, and the app went on believing whatever the last sweep had seen.
    */
   onPrSnapshot?: (chatId: string, snapshot: PrPollSnapshot) => void;
+  /**
+   * The tracked-PR catalog, for the PR tools' cards. Settable after
+   * construction for the same reason as `armPrWatch`: the registry is built
+   * after the broker. Absent → the tools answer in prose and the transcript
+   * renders them the way it always did.
+   */
+  prRegistry?: SessionPrRegistry;
   /**
    * Create + start a chat on the agent's behalf, once the human has approved it
    * (see `mcp__manager__spawn_chat`). Settable after construction for the same
@@ -4410,6 +4462,11 @@ export class SessionBroker {
         // The agent may still pass an explicit repo override on any call. The
         // project's reviewer list rides along so `request_review` has a default —
         // the same list `create_pr` asks on the first round.
+        // The PR catalog, so every PR tool can freeze a card into its result.
+        prRegistry:
+          github && this.prRegistry
+            ? makePrRegistryBinding(this.prRegistry, github, cwd)
+            : undefined,
         github: github
           ? makeGithubBinding(
               github,

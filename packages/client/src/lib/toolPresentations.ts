@@ -232,10 +232,16 @@ export function toolPresentation(use: ToolUseRow): ToolPresentation | null {
   return null;
 }
 
-/** The presentation for a row inside a terminal frame (never a file row). */
+/** The presentation for a row inside a terminal frame (never a file or PR row). */
 export function shellGroupPresentation(use: ToolUseRow): ShellGroupPresentation | null {
   const presentation = toolPresentation(use);
-  return presentation && presentation.kind !== "file" ? presentation : null;
+  if (!presentation || presentation.kind === "file") return null;
+  return presentation.kind === "dispatch" && presentation.category === "pr" ? null : presentation;
+}
+
+/** True for a call that belongs in a PR card rather than the terminal frame. */
+export function isPrPresentation(presentation: ToolPresentation | null): boolean {
+  return presentation?.kind === "dispatch" && presentation.category === "pr";
 }
 
 export interface TranscriptRowItem {
@@ -253,20 +259,37 @@ export interface TranscriptFilesItem {
   rows: ToolUseRow[];
 }
 
-export type TranscriptItem = TranscriptRowItem | TranscriptShellItem | TranscriptFilesItem;
+/**
+ * Adjacent pull-request calls, as their own run.
+ *
+ * They used to sit inside the terminal frame with a `pr >` prompt, which said
+ * the wrong thing about them: nothing here is a command, the useful content is
+ * the PR's state rather than an output stream, and the terminal's two-line
+ * receipt had nowhere to put a title, a diff size or a list of jobs.
+ */
+export interface TranscriptPrItem {
+  kind: "pr";
+  rows: ToolUseRow[];
+}
+
+export type TranscriptItem =
+  | TranscriptRowItem
+  | TranscriptShellItem
+  | TranscriptFilesItem
+  | TranscriptPrItem;
 
 /**
  * Group adjacent terminal-style calls and adjacent file calls into their own
  * runs, leaving every unhandled row untouched.
  *
- * The two kinds do NOT merge: a shell run is a terminal session and a file run
- * is a changelog, and interleaving them would make both unreadable. A file call
- * between two commands therefore closes the terminal frame, which is honest —
- * that is what happened.
+ * The kinds do NOT merge: a shell run is a terminal session, a file run is a
+ * changelog, and a PR run is a pull request's story. Interleaving them would
+ * make all three unreadable. A file call between two commands therefore closes
+ * the terminal frame, which is honest — that is what happened.
  */
 export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
-  let run: { kind: "shell" | "files"; rows: ToolUseRow[] } | null = null;
+  let run: { kind: "shell" | "files" | "pr"; rows: ToolUseRow[] } | null = null;
 
   const flush = () => {
     if (run?.rows.length) items.push({ kind: run.kind, rows: run.rows });
@@ -280,7 +303,11 @@ export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
     if (row.kind === "tool_use") {
       const presentation = toolPresentation(row);
       if (presentation) {
-        const kind = presentation.kind === "file" ? "files" : "shell";
+        const kind = isPrPresentation(presentation)
+          ? "pr"
+          : presentation.kind === "file"
+            ? "files"
+            : "shell";
         if (!run || run.kind !== kind) {
           flush();
           run = { kind, rows: [row] };

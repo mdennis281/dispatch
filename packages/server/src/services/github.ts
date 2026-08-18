@@ -213,6 +213,10 @@ export interface PrPollSnapshot {
   mergeStateStatus?: string;
   reviewDecision: ReviewDecision | null;
   headRefOid?: string;
+  /** Diff size — "how big is this change" without opening GitHub. */
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
   reviewers: PrReviewer[];
   threads: ReviewThread[];
   checks: CheckRun[];
@@ -274,6 +278,10 @@ interface RawRollupEntry {
   conclusion?: string | null;
   detailsUrl?: string;
   workflowName?: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  /** GraphQL nests the workflow name this deep; REST-ish reads flatten it. */
+  checkSuite?: { workflowRun?: { workflow?: { name?: string } | null } | null } | null;
   // StatusContext shape
   context?: string;
   state?: string;
@@ -365,6 +373,9 @@ interface RawGraphqlPoll {
         mergeable?: string;
         mergeStateStatus?: string;
         reviewDecision?: string | null;
+        additions?: number;
+        deletions?: number;
+        changedFiles?: number;
         author?: { login?: string } | null;
         labels?: { nodes?: Array<{ name?: string }> };
         reviewRequests?: { nodes?: Array<{ requestedReviewer?: RawRequestedReviewer | null } | null> };
@@ -517,9 +528,15 @@ function mapRollupEntry(e: RawRollupEntry): CheckRun {
   }
   return CheckRunSchema.parse({
     name: e.name || e.workflowName || "check",
+    // The workflow is the GROUPING a human already has in their head from the
+    // Actions tab; without it, three jobs of one workflow read as three
+    // unrelated failures.
+    workflowName: e.checkSuite?.workflowRun?.workflow?.name || e.workflowName || undefined,
     status: mapCheckStatus(e.status),
     conclusion: mapConclusionString(e.conclusion),
     url: e.detailsUrl || undefined,
+    startedAt: e.startedAt || undefined,
+    completedAt: e.completedAt || undefined,
   });
 }
 
@@ -963,6 +980,7 @@ export class GitHubService {
       "{repository(owner:$owner,name:$repo){pullRequest(number:$number){" +
       "number title url state isDraft merged mergedAt closedAt createdAt updatedAt " +
       "headRefOid headRefName baseRefName mergeable mergeStateStatus reviewDecision " +
+      "additions deletions changedFiles " +
       "author{login} labels(first:50){nodes{name}} " +
       "reviewRequests(first:50){nodes{requestedReviewer{__typename " +
       "... on User{login} ... on Bot{login} ... on Mannequin{login} ... on Team{slug}}}} " +
@@ -972,7 +990,8 @@ export class GitHubService {
       "comments(first:1){nodes{author{login} body url createdAt}}}} " +
       "comments(first:1){totalCount} " +
       "commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{__typename " +
-      "... on CheckRun{name status conclusion detailsUrl} " +
+      "... on CheckRun{name status conclusion detailsUrl startedAt completedAt " +
+      "checkSuite{workflowRun{workflow{name}}}} " +
       "... on StatusContext{context state targetUrl}}}}}}}" +
       "}}}";
     const raw = await this.ghJson<RawGraphqlPoll>(
@@ -1042,6 +1061,9 @@ export class GitHubService {
       mergeStateStatus: pr.mergeStateStatus ?? undefined,
       reviewDecision: mapReviewDecision(pr.reviewDecision),
       headRefOid: pr.headRefOid || undefined,
+      additions: pr.additions,
+      deletions: pr.deletions,
+      changedFiles: pr.changedFiles,
       reviewers,
       threads: (pr.reviewThreads?.nodes ?? []).map((t) => {
         const first = t.comments?.nodes?.[0];
