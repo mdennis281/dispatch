@@ -10,7 +10,7 @@
  * Both sit on `useFsBrowser`, so navigation, selection and the request-ordering
  * race are solved in one place rather than twice.
  */
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ArrowLeft,
@@ -27,6 +27,7 @@ import {
 import type { FsEntry } from "@dispatch/shared";
 import { useFilePicker } from "./filePicker.js";
 import { useFsBrowser } from "./useFsBrowser.js";
+import { PathBar, isEditPathShortcut } from "./PathBar.js";
 import { entryIcon, formatBytes, formatStamp, describeFilter, rootIcon, UNREADABLE_ICON } from "./fsMeta.js";
 import { useFsRoots } from "../../stores/fsRoots.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -51,6 +52,7 @@ function FilePickerModal() {
   const roots = useFsRoots((s) => s.roots);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [editingPath, setEditingPath] = useState(false);
 
   const settle = request?.settle;
   const cancel = useCallback(() => settle?.(null), [settle]);
@@ -106,6 +108,15 @@ function FilePickerModal() {
   const commit = () => (canPickCwd ? settle?.([browser.cwd]) : browser.commit());
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // Bound to the DIALOG, not to the window: a modal that grabbed Ctrl+L
+    // globally would also fire for the Files page underneath it. Focus is
+    // always inside here (the search box takes it on open), so a React handler
+    // on the container sees every keystroke that matters.
+    if (isEditPathShortcut(e)) {
+      e.preventDefault();
+      setEditingPath(true);
+      return;
+    }
     if (e.key === "Escape") {
       e.preventDefault();
       // Stop it here so one Escape closes the picker and not also whatever
@@ -160,10 +171,12 @@ function FilePickerModal() {
             and the nav row — the chips lost half their height and the footer
             crept up. Only the list may give ground. */}
         <header className="flex shrink-0 items-center gap-2.5 px-4 py-3 cm-hairline-b">
-          <div className="min-w-0 flex-1">
-            <h2 className="truncate text-base font-semibold text-primary">{heading}</h2>
-            <p className="mt-px truncate text-xs text-muted cm-mono">{browser.cwd || "…"}</p>
-          </div>
+          {/* The path used to live here as dead text. It's a `PathBar` below
+              now — same control as the full page, so it can be clicked through
+              and typed into rather than only read. */}
+          <h2 className="min-w-0 flex-1 truncate text-base font-semibold text-primary">
+            {heading}
+          </h2>
           <IconButton tip="Close" onClick={cancel}>
             <X />
           </IconButton>
@@ -230,6 +243,24 @@ function FilePickerModal() {
             <RefreshCw />
           </IconButton>
         </div>
+
+        {/* Directly above the list, exactly where the full page puts it, so the
+            same gesture works on both surfaces without relearning. */}
+        <PathBar
+          className="shrink-0"
+          crumbs={browser.crumbs}
+          cwd={browser.cwd}
+          editing={editingPath}
+          onEditingChange={(next) => {
+            setEditingPath(next);
+            // Hand focus back when the field closes. It is removed from the DOM
+            // on the way out, so focus would fall to `<body>` and take the
+            // dialog's container-scoped keyboard handling with it — Ctrl+L
+            // would work exactly once.
+            if (!next) requestAnimationFrame(() => inputRef.current?.focus());
+          }}
+          onNavigate={browser.navigate}
+        />
 
         <div ref={listRef} className="cm-scroll min-h-[200px] flex-1 overflow-y-auto p-1.5">
           <EntryList browser={browser} />
@@ -332,6 +363,16 @@ function Row({
       role="option"
       aria-selected={selected}
       data-path={entry.path}
+      // KEEP FOCUS IN THE SEARCH BOX. A `role="option"` div isn't focusable, so
+      // mousing down on one hands focus to `<body>` — and this dialog's entire
+      // keyboard model is a React `onKeyDown` on its container, which only sees
+      // events raised INSIDE itself. So one click on a row used to silently kill
+      // ↑/↓, Enter, Escape and Backspace for the rest of the session.
+      //
+      // Suppressing the default is the standard listbox answer: focus never
+      // leaves the input, and `aria-selected` is what conveys the choice.
+      // Double-click is unaffected — it doesn't depend on focus moving.
+      onMouseDown={(e) => e.preventDefault()}
       onClick={(e) =>
         browser.select(entry, e.shiftKey ? "range" : e.ctrlKey || e.metaKey ? "toggle" : "replace")
       }
