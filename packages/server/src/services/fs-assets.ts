@@ -113,6 +113,7 @@ export async function resolveFsAsset(
   // symlink: a link sitting inside the worktree and pointing at ~/.ssh spells
   // as an in-root path and only gives itself away once resolved.
   if (!isPathWithinRoots(real, allowed)) return { denied: "forbidden" };
+  if (!withinRootsExact(real, allowed)) return { denied: "forbidden" };
   if (info.size > MAX_FS_ASSET_BYTES) return { denied: "too-large" };
 
   const mimeType = await sniffFile(real);
@@ -122,6 +123,40 @@ export async function resolveFsAsset(
   if (!mimeType || mediaKind(mimeType) === "file") return { denied: "not-media" };
 
   return { path: real, size: info.size, mimeType };
+}
+
+/**
+ * A CASE-SENSITIVE containment check, applied on top of `isPathWithinRoots`.
+ *
+ * `isPathWithinRoots` case-folds on darwin, because the Mac default volume is
+ * case-insensitive and `/Users/x/Repo` really is `/Users/x/repo` there. But
+ * APFS can be formatted case-SENSITIVE, and on such a volume `/WT/secrets` is a
+ * genuinely different directory from an allowed root of `/wt` — which the fold
+ * would wave through. That is a hole in the confinement, so this endpoint (which
+ * serves file bytes to a browser) closes it rather than inheriting it.
+ *
+ * Why an exact compare is safe on BOTH Mac configurations: this runs on the
+ * REALPATH'd path, against REALPATH'd roots, and `realpath` returns the casing
+ * as it exists on disk. On a case-insensitive volume a request for `/WT/x`
+ * comes back canonicalized to `/wt/x`, so the exact compare passes — no false
+ * negative. On a case-sensitive volume `/WT/x` comes back as itself and
+ * correctly fails.
+ *
+ * Windows is excluded: NTFS is case-insensitive in practice, and applying this
+ * there would refuse legitimate files over a drive-letter or path-case
+ * difference. Linux is unaffected — the fold is already the identity there, so
+ * this is a second look at a check that had the same answer.
+ */
+function withinRootsExact(resolved: string, roots: string[]): boolean {
+  if (process.platform === "win32") return true;
+  const norm = (p: string): string => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const target = norm(resolved);
+  return roots.some((root) => {
+    const r = norm(root);
+    // The trailing "/" matters: without it `/repo-secrets` passes as a child of
+    // `/repo`.
+    return !!r && (target === r || target.startsWith(`${r}/`));
+  });
 }
 
 /** Sniff a file's type from a bounded prefix, without reading the whole thing. */
