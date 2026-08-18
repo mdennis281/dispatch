@@ -119,6 +119,7 @@ afterEach(async () => {
   detector?.stop();
   // Windows holds handles on freshly-created worktrees briefly; a failed cleanup
   // of a temp dir must not fail the test that just passed.
+  store.close();
   await rm(root, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
 });
 

@@ -680,6 +680,7 @@ describe("TerminalService — durable roster and transcripts", () => {
       svc.dispose();
     }
     liveServices = [];
+    store.close();
     await rm(dir, { recursive: true, force: true });
   });
 

@@ -27,6 +27,7 @@ beforeEach(async () => {
   projectConfig = new ProjectConfigService({ store, bus });
 });
 afterEach(async () => {
+  store.close();
   await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   await rm(repoDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });

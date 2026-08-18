@@ -46,6 +46,7 @@ afterEach(async () => {
   // fix, a process-killing unhandled rejection. dispose() closes the inputs and
   // awaits each run loop; the retrying rm absorbs any last straggler on Windows.
   await Promise.all(brokers.map((b) => b.dispose().catch(() => {})));
+  store.close();
   await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   for (const d of tempDirs) {
     await rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });

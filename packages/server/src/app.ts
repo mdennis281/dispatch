@@ -168,9 +168,14 @@ export async function buildApp(
   // auto-checkpoint). Best-effort; a failure here must not stop the app booting.
   await services.start().catch(() => {});
 
-  // Tear the service container down with the server.
+  // Tear the service container down with the server, then release the state
+  // database — services dispose FIRST because their teardown still writes (the
+  // broker persists live session state, the terminal service flushes its
+  // write-behind buffer), and a store closed underneath them would silently
+  // reopen mid-shutdown.
   app.addHook("onClose", async () => {
     await services.dispose().catch(() => {});
+    store.close();
   });
 
   return app;

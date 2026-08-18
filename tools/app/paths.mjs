@@ -59,4 +59,33 @@ export function desktopPaths(env = process.env) {
  * losing an unrecognised file is strictly worse than misfiling it.
  */
 export const CONFIG_ENTRIES = ["config.json", "projects", "agents", "modes"];
-export const STATE_ENTRIES = ["chats", "checkpoints.json", "runners.json"];
+export const STATE_ENTRIES = [
+  "chats",
+  // The SQLite state database and its WAL sidecars. All three, because moving
+  // `state.db` without `-wal` silently drops every commit still in the log.
+  "state.db",
+  "state.db-wal",
+  "state.db-shm",
+  "checkpoints.json",
+  "runners.json",
+];
+
+/**
+ * The JSON/JSONL state that `state.db` replaced, in the order the migration
+ * reports them. Still listed in STATE_ENTRIES above because `app:migrate` must
+ * keep moving them: the tree stays on disk as the rollback path until
+ * `app:migrate-store --prune` removes it.
+ *
+ * MIRROR: `LEGACY_STATE_ENTRIES` in packages/server/src/store/db.ts, which the
+ * server's startup guard reads. Same reason this file already mirrors
+ * `launch.py` — one is a `.mjs` tool, the other is bundled TypeScript.
+ */
+export const LEGACY_STATE_ENTRIES = [
+  "runners.json",
+  "mcp-ports.json",
+  "worktrees.json",
+  "terminals.json",
+  "terminals",
+  "prs.json",
+  "checkpoints.json",
+];

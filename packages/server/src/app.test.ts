@@ -89,6 +89,7 @@ describe("buildApp", () => {
       expect(report.spa).toBe(true);
       expect(report.ok).toBe(true);
     } finally {
+      store.close();
       await rm(dir, { recursive: true, force: true });
     }
   });

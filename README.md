@@ -18,7 +18,7 @@ An all-in-one agent CLI harness that replaces how you work with your LLMs. I bui
 
 ## Install the latest release
 
-Prerequisites: Node.js 20+, Python 3.10+, and at least one authenticated agent CLI
+Prerequisites: Node.js 24+, Python 3.10+, and at least one authenticated agent CLI
 (`claude` or `codex`). Git and GitHub CLI are needed for Git/PR features, but a
 Git clone of Dispatch is not.
 
@@ -39,6 +39,14 @@ installs runtime dependencies, and starts Dispatch at
 `http://127.0.0.1:4318` (also reachable at `http://<lan-ip>:4318`). Run the same
 command again to update. Existing chats and
 configuration live outside the app payload and survive updates.
+
+**Updating from a build older than the SQLite store:** per-instance state
+(checkpoints, PRs, worktrees, runners, terminals) moved out of JSON files into
+`data/state.db`, and the server refuses to start on a store that still has the old
+files and no database rather than migrating it silently behind your back. Stop it,
+run `pnpm app:migrate-store -- --source "<your data dir>"`, and start it again. The
+old files are copied, never modified, and stay put as the rollback path. See
+[RUNNING.md](./RUNNING.md#install) for the full walkthrough.
 
 An installed Dispatch checks for newer releases itself and offers to install one
 from a dismissable card; the same offer, plus the running build and a manual

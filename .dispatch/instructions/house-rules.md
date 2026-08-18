@@ -21,13 +21,20 @@ it spawned, so a hard kill orphans every one of them onto the port it holds.
 Stop it one of these ways only: `pnpm app:stop`, Ctrl-C in a `pnpm dev` window,
 or Settings → Stop in the app.
 
-## `.data` is per-instance. Do not point two processes at one.
+## `.data` is per-instance — by policy now, not by necessity.
 
-`runners.json` and `checkpoints.json` are whole-file read-modify-write maps
-guarded by an **in-process** mutex. Two processes sharing them silently drop each
-other's writes — you lose rollback points with no error. That is the entire
-reason `data/` is split while `config/` is shared, and why
-`tools/app/backsync.mjs` copies chats rather than pointing dev at prod's dir.
+It used to be by necessity: `runners.json` and `checkpoints.json` were whole-file
+read-modify-write maps guarded by an **in-process** mutex, so two processes
+sharing them silently dropped each other's writes and you lost rollback points
+with no error.
+
+Those maps are rows in `data/state.db` now, and SQLite + WAL makes concurrent
+access correct — writers serialize, readers get a snapshot. The split stays
+because a dev crash still shouldn't cost the instance you trust with long work
+its rollback points, and because `tools/app/backsync.mjs` exists to move chats
+across deliberately. Don't re-argue the split from the mutex; that reason is gone.
+
+Transcripts (`chats/<id>/messages.jsonl`) and assets are still files on purpose.
 
 ## Publishing vs upgrading.
 

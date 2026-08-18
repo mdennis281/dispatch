@@ -165,6 +165,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   detector.stop();
+  store.close();
   await rm(root, { recursive: true, force: true });
 });
 

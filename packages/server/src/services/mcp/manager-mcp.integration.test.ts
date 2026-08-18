@@ -169,6 +169,7 @@ describe("manager-mcp integration — wait_for_chat over a real SessionBroker", 
   });
   afterEach(async () => {
     await broker?.dispose().catch(() => {});
+    store.close();
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
@@ -551,6 +552,7 @@ describe("manager-mcp integration — memory tools over a real MemoryService", (
   });
   afterEach(async () => {
     await broker?.dispose().catch(() => {});
+    store.close();
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 

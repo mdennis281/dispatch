@@ -43,6 +43,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   if (service) await service.stopAll().catch(() => {});
+  store.close();
   await rm(dir, { recursive: true, force: true });
 });
 

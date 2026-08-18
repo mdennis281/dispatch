@@ -85,6 +85,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  store.close();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -416,6 +417,7 @@ describe("instance: stable", () => {
     expect(result.chats.map((c) => c.id)).toEqual(["prod-chat"]);
     // …and the caller's own store is untouched by that.
     expect((await svc.findChats({ query: "production only" })).chats).toEqual([]);
+    otherStore.close();
     await rm(other, { recursive: true, force: true });
   });
 });

@@ -53,6 +53,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  store.close();
   await rm(repo, { recursive: true, force: true });
   await rm(dataDir, { recursive: true, force: true });
 });

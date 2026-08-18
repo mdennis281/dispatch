@@ -2,7 +2,7 @@
 set -eu
 
 if ! command -v node >/dev/null 2>&1; then
-  echo "Dispatch requires Node.js 20 or newer. Install Node, then run this command again." >&2
+  echo "Dispatch requires Node.js 24 or newer. Install Node, then run this command again." >&2
   exit 1
 fi
 

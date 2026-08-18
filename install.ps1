@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  throw "Dispatch requires Node.js 20 or newer. Install Node, then run this command again."
+  throw "Dispatch requires Node.js 24 or newer. Install Node, then run this command again."
 }
 
 $installerUrl = if ($env:DISPATCH_INSTALLER_URL) {

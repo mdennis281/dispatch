@@ -49,6 +49,7 @@ describe("healthReport", () => {
       // Best effort: a payload without git is unusual, not unhealthy.
       if (r.sha !== undefined) expect(r.sha).toMatch(/^[0-9a-f]{40}$/);
     } finally {
+      store.close();
       await rm(dir, { recursive: true, force: true });
       await rm(clientDist, { recursive: true, force: true });
     }
@@ -71,6 +72,7 @@ describe("healthReport", () => {
       expect(r.store).toBe(true);
       expect(r.problems.join(" ")).toMatch(/SPA shell missing/);
     } finally {
+      store.close();
       await rm(dir, { recursive: true, force: true });
     }
   });
@@ -117,6 +119,7 @@ describe("healthReport", () => {
       expect(r.configDir).toBe(missingConfig);
       expect(r.problems.join(" ")).toMatch(/config dir unreadable/);
     } finally {
+      store.close();
       await rm(dir, { recursive: true, force: true });
       await rm(clientDist, { recursive: true, force: true });
     }
@@ -135,6 +138,7 @@ describe("healthReport", () => {
       expect(r.store).toBe(false);
       expect(r.problems.join(" ")).toMatch(/store unreadable/);
     } finally {
+      store.close();
       await rm(dir, { recursive: true, force: true });
       await rm(clientDist, { recursive: true, force: true });
     }
@@ -153,6 +157,7 @@ describe("healthReport", () => {
       expect(r.ok).toBe(true);
       expect(r.problems).toEqual([]);
     } finally {
+      store.close();
       await rm(dir, { recursive: true, force: true });
     }
   });
@@ -160,7 +165,7 @@ describe("healthReport", () => {
   it("resolves rather than throwing when the store blows up", async () => {
     // A probe that 500s tells the upgrade gate nothing: it reads as "degraded,
     // no reason given" and burns the whole health timeout before rolling back.
-    const { dir } = await tempStore();
+    const { dir, store } = await tempStore();
     const clientDist = await spaDist();
     const exploding = {
       getSettings: () => Promise.reject(new Error("boom")),
@@ -173,6 +178,7 @@ describe("healthReport", () => {
       // Still reports identity — the caller needs it even on the sad path.
       expect(r.pid).toBe(process.pid);
     } finally {
+      store.close();
       await rm(dir, { recursive: true, force: true });
       await rm(clientDist, { recursive: true, force: true });
     }
@@ -192,6 +198,7 @@ describe("healthReport", () => {
       expect(a.sha).not.toBe("");
       expect(b.startedAt).toBe(a.startedAt);
     } finally {
+      store.close();
       await rm(dir, { recursive: true, force: true });
       await rm(clientDist, { recursive: true, force: true });
     }
