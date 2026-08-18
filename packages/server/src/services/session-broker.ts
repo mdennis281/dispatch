@@ -2919,6 +2919,12 @@ export class SessionBroker {
         for (const tb of toolBlocks) {
           const name = String(tb.name ?? "");
           const input = (tb.input ?? {}) as Record<string, unknown>;
+          // Resolved ONCE, above both consumers. The ledger keys its dedup on
+          // this id and the transcript is what a later backfill re-reads, so if
+          // they disagreed — which they did while the ledger read `tb.id` and
+          // the row below fell back to a generated one — an import would insert
+          // a second row for a call already counted.
+          const toolUseId = String(tb.id ?? this.genId());
           // The ledger row. Recorded HERE as well as in `handleHarnessEvent`
           // because these are two independent tool_use paths — this one is the
           // legacy in-broker Claude loop that the default runtime still takes,
@@ -2932,7 +2938,7 @@ export class SessionBroker {
           this.recordUse(session, {
             ...classifyTool(name, input),
             subagent: subagentType,
-            toolUseId: tb.id === undefined ? undefined : String(tb.id),
+            toolUseId,
           });
           // AskUserQuestion is surfaced as an interactive QuestionCard via the
           // `canUseTool` → permission-request path; suppress the redundant
@@ -2946,7 +2952,6 @@ export class SessionBroker {
             toolName: name,
             target: deriveTarget(input),
           });
-          const toolUseId = String(tb.id ?? this.genId());
           // Stamped BEFORE the row goes out: the PreToolUse hook for this call is
           // what reports the thread's effort, and it can only name the call.
           this.noteToolThread(session, toolUseId, parentToolUseId);

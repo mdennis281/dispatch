@@ -18,6 +18,7 @@ import {
 } from "./session-broker.js";
 import { MemoryService } from "./memory.js";
 import { MetricsService } from "./metrics.js";
+import { MetricsBackfill } from "./metrics-backfill.js";
 import { ProjectConfigService } from "./project-config.js";
 
 /* ------------------------------------------------------------------ fixtures */
@@ -2855,6 +2856,41 @@ describe("SessionBroker — the usage ledger", () => {
     // The main loop leaves this null; only a spawned thread fills it, which is
     // what makes "which agent called what" answerable at all.
     expect(row?.subagent).toBe("Explore");
+  });
+
+  it("keys a call with no id the same way the transcript does, so an import can't double it", async () => {
+    // A tool_use block with no `id` of its own. The transcript row gets a
+    // generated one; the ledger has to get the SAME one, or a later backfill
+    // re-reads that row, computes a different event_key, and counts the call
+    // twice.
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      {
+        type: "assistant",
+        parent_tool_use_id: null,
+        uuid: "t-uuid",
+        session_id: "sess-1",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }],
+        },
+      },
+      resultMsg(),
+    ]);
+    const { metrics, broker } = meteredBroker(fn);
+    await runTurn(broker, chatFor("c1"));
+    // `stats()` reports stored vs buffered separately (it backs a health
+    // readout), so flush before counting stored rows.
+    metrics.flush();
+    expect(metrics.stats().rows).toBe(1);
+
+    // The real invariant, asserted against the real importer rather than by
+    // re-deriving the key here.
+    const backfill = new MetricsBackfill({ store, metrics });
+    const res = await backfill.run();
+    expect(res.scanned).toBe(1); // the transcript row was found…
+    expect(res.rows).toBe(0); // …and recognised as already counted
+    expect(metrics.stats().rows).toBe(1);
   });
 
   it("runs the turn normally when there is no ledger to record into", async () => {
