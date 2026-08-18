@@ -320,6 +320,17 @@ describe("MetricsService — facets", () => {
     expect(narrowed.facets.projectId?.map((f) => f.value)).toEqual(["p1"]);
   });
 
+  it("orders equal-count values deterministically", () => {
+    // "reviewer" and a third agent both sit at 1. Without a tie-break SQLite may
+    // return them in any order, so the pick-list reshuffles between loads — and
+    // at the LIMIT boundary the tie would decide which values appear at all.
+    metrics.record(tool("Read", { agent: "aardvark", toolUseId: "z1" }));
+    metrics.flush();
+    const order = () => metrics.facets().facets.agent?.map((f) => f.value);
+    expect(order()).toEqual(["builder", "aardvark", "reviewer"]);
+    expect(order()).toEqual(order());
+  });
+
   it("omits the unbounded dimensions the UI filters by typing", () => {
     const { facets } = metrics.facets();
     expect(facets.identifier).toBeUndefined();

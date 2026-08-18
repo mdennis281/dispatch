@@ -447,8 +447,13 @@ export class MetricsService {
       const w = this.where(from, to, filter);
       const rows = this.db
         .prepare(
+          // `v ASC` is a tie-break, not a nicety. Without it SQLite may return
+          // equal-count values in any order, so a pick-list would reshuffle
+          // between loads — and worse, at the LIMIT boundary the tie decides
+          // which values are in the list at all. Matches `totals()`, which
+          // already breaks its ties the same way.
           `SELECT COALESCE(${COLUMN[dim]}, '') AS v, COUNT(*) AS c FROM metric
-           WHERE ${w.sql} GROUP BY v ORDER BY c DESC LIMIT ${FACET_LIMIT}`,
+           WHERE ${w.sql} GROUP BY v ORDER BY c DESC, v ASC LIMIT ${FACET_LIMIT}`,
         )
         .all(...w.params) as { v: string; c: number }[];
       facets[dim] = rows.map((r) => ({ value: r.v, count: Number(r.c) }));
