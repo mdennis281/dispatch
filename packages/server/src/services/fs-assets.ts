@@ -75,12 +75,33 @@ export async function resolveFsAsset(
   // would pass a check made on the whole string and then open something else.
   if (wanted.includes("\0")) return { denied: "forbidden" };
 
+  // `resolve` normalizes `..` away, so this is already traversal-free — but it
+  // has NOT yet been checked against the roots, so nothing may touch the
+  // filesystem with it until the lexical gate below has passed.
   const abs = isAbsolute(wanted) ? wanted : resolvePath(roots[0], wanted);
+  const real0 = await realpath(roots[0]).catch(() => roots[0]);
+  const allowed = await Promise.all(roots.map((r) => realpath(r).catch(() => r)));
+
+  // GATE ONE, before any syscall on the caller's path. Two reasons it comes
+  // first rather than after the stat:
+  //
+  //   • It keeps an unvalidated path out of `realpath`/`stat` entirely, which
+  //     is what CodeQL's path-injection query is asking for and is simply the
+  //     right order to do this in.
+  //   • It closes an existence oracle. Checking after the stat meant a path
+  //     outside the roots answered 404 when it did not exist and 403 when it
+  //     did — enough to enumerate the filesystem one guess at a time.
+  //
+  // Compared against the roots BOTH as given and as resolved: a root that is
+  // itself behind a symlink (a /tmp that is really /private/tmp) would
+  // otherwise fail its own lexical check and refuse every legitimate file
+  // under it.
+  const lexicalRoots = [...new Set([...roots, ...allowed, real0])];
+  if (!isPathWithinRoots(abs, lexicalRoots)) return { denied: "forbidden" };
+
   let real: string;
   let info: Awaited<ReturnType<typeof stat>>;
   try {
-    // Follow symlinks BEFORE deciding: a link inside the worktree pointing out
-    // of it would otherwise pass a check made on the pre-resolution path.
     real = await realpath(abs);
     info = await stat(real);
   } catch {
@@ -88,7 +109,9 @@ export async function resolveFsAsset(
   }
   if (!info.isFile()) return { denied: "not-found" };
 
-  const allowed = await Promise.all(roots.map((r) => realpath(r).catch(() => r)));
+  // GATE TWO, on the RESOLVED path. The lexical gate cannot see through a
+  // symlink: a link sitting inside the worktree and pointing at ~/.ssh spells
+  // as an in-root path and only gives itself away once resolved.
   if (!isPathWithinRoots(real, allowed)) return { denied: "forbidden" };
   if (info.size > MAX_FS_ASSET_BYTES) return { denied: "too-large" };
 
