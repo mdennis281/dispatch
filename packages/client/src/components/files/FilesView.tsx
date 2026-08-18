@@ -18,7 +18,6 @@ import {
   ArrowRight,
   ArrowUp,
   ArrowUpDown,
-  ChevronRight,
   Copy,
   Eye,
   EyeOff,
@@ -37,6 +36,7 @@ import { FS_FILTER_ANY, fsBasename } from "@dispatch/shared";
 import { api } from "../../lib/api.js";
 import { useFsRoots, usePathPlatform } from "../../stores/fsRoots.js";
 import { useFsBrowser, useFsJoin } from "./useFsBrowser.js";
+import { useFilePicker } from "./filePicker.js";
 import {
   entryIcon,
   rootIcon,
@@ -45,6 +45,7 @@ import {
   formatCapacity,
   UNREADABLE_ICON,
 } from "./fsMeta.js";
+import { PathBar, isEditPathShortcut } from "./PathBar.js";
 import { openCodeViewer } from "../monaco/store.js";
 import { Modal, Field, TextInput, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
@@ -71,6 +72,11 @@ export function FilesView() {
   const [showDetails, setShowDetails] = useState(true);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
+  const [editingPath, setEditingPath] = useState(false);
+  // A picker modal can be opened OVER this page. It is a dialog, so it owns the
+  // keyboard while it's up — without this, one Ctrl+L opens two path fields and
+  // one arrow key moves two lists, the second of them behind a scrim.
+  const pickerOpen = useFilePicker((s) => s.request !== null);
 
   const browser = useFsBrowser({
     // The page browses; it never answers a question, so nothing is ever
@@ -118,8 +124,15 @@ export function FilesView() {
       // and Backspace in the search box means "delete a letter", not "go up".
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       // A dialog is open — its own buttons own the keyboard.
-      if (prompt) return;
+      if (prompt || pickerOpen) return;
 
+      // Before the navigation keys: Ctrl+L is the one shortcut that is about
+      // getting somewhere rather than moving within what's already listed.
+      if (isEditPathShortcut(e)) {
+        e.preventDefault();
+        setEditingPath(true);
+        return;
+      }
       if (e.key === "ArrowDown") {
         e.preventDefault();
         browser.moveCursor(1);
@@ -151,7 +164,7 @@ export function FilesView() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [browser, openFile, prompt]);
+  }, [browser, openFile, prompt, pickerOpen]);
 
   return (
     <div className="flex h-full min-w-0 flex-1 bg-app">
@@ -233,7 +246,13 @@ export function FilesView() {
           onPrompt={setPrompt}
         />
 
-        <Breadcrumbs browser={browser} />
+        <PathBar
+          crumbs={browser.crumbs}
+          cwd={browser.cwd}
+          editing={editingPath}
+          onEditingChange={setEditingPath}
+          onNavigate={browser.navigate}
+        />
 
         {banner && (
           <div className="flex items-start gap-2 border-b border-danger/30 bg-danger-ghost px-3 py-2 text-xs text-danger">
@@ -401,90 +420,6 @@ function Toolbar({
       <IconButton tip="Details" active={showDetails} onClick={onToggleDetails}>
         <Info />
       </IconButton>
-    </div>
-  );
-}
-
-/**
- * Breadcrumbs, or — on ⌘/Ctrl-L, or a click on the empty space beside them — an
- * editable path.
- *
- * Crumbs only walk UP. Getting to a path you already know (one you copied from a
- * terminal, or an error message) means clicking down through six folders, and
- * every file manager solves that with the same shortcut. This is also the answer
- * for a location with no crumb at all: a UNC share, or a drive that isn't in the
- * Places list.
- */
-function Breadcrumbs({ browser }: { browser: ReturnType<typeof useFsBrowser> }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
-
-  const begin = useCallback(() => {
-    setDraft(browser.cwd);
-    setEditing(true);
-  }, [browser.cwd]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && (e.key === "l" || e.key === "L")) {
-        e.preventDefault();
-        begin();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [begin]);
-
-  if (editing) {
-    return (
-      <div className="px-3 py-1.5 cm-hairline-b">
-        <TextInput
-          mono
-          autoFocus
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => setEditing(false)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              browser.navigate(draft);
-              setEditing(false);
-            } else if (e.key === "Escape") {
-              // Stop it before a parent dialog sees it — Escape here means
-              // "never mind the path", not "close the app's overlay".
-              e.stopPropagation();
-              setEditing(false);
-            }
-          }}
-          placeholder="Type or paste a path, then Enter"
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div className="cm-scroll flex items-center gap-0.5 overflow-x-auto px-3 py-1.5 cm-hairline-b">
-      {browser.crumbs.map((crumb, i) => (
-        <span key={crumb.path} className="flex shrink-0 items-center gap-0.5">
-          {i > 0 && <ChevronRight className="size-3 text-faint" />}
-          <Button
-            variant="ghost"
-            onClick={() => browser.navigate(crumb.path)}
-            className={cn(
-              "!px-1.5",
-              i === browser.crumbs.length - 1 && "font-medium text-primary",
-            )}
-          >
-            {crumb.label}
-          </Button>
-        </span>
-      ))}
-      {/* The dead space after the last crumb is the click target every file
-          manager uses to get an editable path. */}
-      <div
-        className="h-6 min-w-[3rem] flex-1 cursor-text"
-        onClick={begin}
-        title="Edit path (Ctrl+L)"
-      />
     </div>
   );
 }
