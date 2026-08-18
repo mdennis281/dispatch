@@ -63,6 +63,9 @@ describe("createServices().start() resilience", () => {
       runner: stub(),
       github: stub(),
       notifier: stub(),
+      // Stubbed like the rest: the real PushService resolves its two file paths
+      // from `config`, and this test's config is a bare `{ maxActiveSessions }`.
+      push: stub(),
       attention: stub(),
       usage: stub({
         start: () => {

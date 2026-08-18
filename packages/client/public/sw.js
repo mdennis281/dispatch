@@ -24,7 +24,7 @@
  */
 
 /** Bump to evict every previous shell. Old caches are dropped on activate. */
-const CACHE = "dispatch-shell-v2";
+const CACHE = "dispatch-shell-v3";
 let accessToken = null;
 let refreshInFlight = null;
 
@@ -86,6 +86,21 @@ async function authenticatedFetch(request) {
     response = await withToken(request);
   }
   return response;
+}
+
+/**
+ * An API call ORIGINATING IN THIS WORKER (push re-subscription), which the
+ * `fetch` handler below never sees — that only intercepts requests made by a
+ * page. Auth is optional in Dispatch, so a missing token is not an error; but if
+ * a session exists we must attach it, and a cold worker woken by a push has no
+ * token in memory yet and has to refresh one first.
+ */
+async function apiFetch(path, init = {}) {
+  if (!accessToken) await refreshSession().catch(() => false);
+  const headers = new Headers(init.headers || {});
+  headers.set("content-type", "application/json");
+  if (accessToken) headers.set("authorization", `Bearer ${accessToken}`);
+  return fetch(path, { ...init, headers, credentials: "same-origin", mode: "same-origin" });
 }
 
 /** The minimum needed to render something recognisable with no network. */
@@ -188,6 +203,94 @@ self.addEventListener("fetch", (event) => {
  * fully closed, in which case the target rides in on the URL hash because there
  * is no client to postMessage to yet.
  */
+/**
+ * Server-sent Web Push — the ONLY notification path that reaches a phone.
+ *
+ * Everything else in this app raises notifications from the page (see
+ * lib/browserNotify.ts), which requires the page to still be running. iOS
+ * suspends a backgrounded home-screen web app outright: the socket drops, the
+ * timers stop, and nothing of ours runs again until the icon is tapped. A push
+ * is what wakes this worker when the app is closed.
+ *
+ * ── The rule that makes this handler look paranoid ─────────────────────────
+ * WebKit REQUIRES a visible notification for every push. A handler that returns
+ * without calling `showNotification` is treated as a silent push, and after a
+ * handful of them iOS revokes the subscription outright — the failure mode being
+ * that notifications work for a day and then stop with no error anywhere. So:
+ *
+ *   - `event.waitUntil` always wraps a `showNotification` — never a bare async
+ *     function that might resolve without displaying anything;
+ *   - an unparseable or empty payload still shows a generic notification rather
+ *     than bailing;
+ *   - FILTERING IS NOT DONE HERE. Which events a device wants is decided
+ *     server-side (services/push.ts) precisely because dropping a push locally
+ *     is the thing that costs you the subscription.
+ */
+self.addEventListener("push", (event) => {
+  let data = null;
+  try {
+    data = event.data ? event.data.json() : null;
+  } catch {
+    /* fall through to the generic notification below */
+  }
+
+  const title = data?.title || "Dispatch";
+  const options = {
+    body: data?.body || "An agent needs you.",
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
+    // One toast per attention item: a re-sent event replaces rather than stacks.
+    tag: data?.id || "dispatch",
+    requireInteraction: !!data?.sticky,
+    data: data
+      ? {
+          type: "attention-focus",
+          chatId: data.chatId,
+          permissionRequestId: data.permissionRequestId,
+          url: data.url,
+        }
+      : null,
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+/**
+ * The push service rotated this device's endpoint (it does this on its own
+ * schedule, and iOS does it after a reinstall). Re-subscribe with the same
+ * application server key and tell the server, or the device goes quiet with
+ * nothing on either end reporting a problem.
+ */
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    (async () => {
+      try {
+        const key =
+          event.oldSubscription?.options?.applicationServerKey ??
+          (await apiFetch("/api/push/key")
+            .then((r) => r.json())
+            .then((j) => j.publicKey));
+        const fresh = await self.registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: key,
+        });
+        await apiFetch("/api/push/subscribe", {
+          method: "POST",
+          body: JSON.stringify({ subscription: fresh.toJSON() }),
+        });
+        if (event.oldSubscription) {
+          await apiFetch("/api/push/unsubscribe", {
+            method: "POST",
+            body: JSON.stringify({ endpoint: event.oldSubscription.endpoint }),
+          }).catch(() => undefined);
+        }
+      } catch {
+        // Nothing more to try from here — the next app launch re-subscribes.
+      }
+    })(),
+  );
+});
+
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const data = event.notification.data;
@@ -204,7 +307,14 @@ self.addEventListener("notificationclick", (event) => {
       const app = clientList.find((c) => !new URL(c.url).searchParams.has("logs"));
       if (app) {
         await app.focus();
-        app.postMessage(data);
+        // A test push carries no chat. Focusing the window is the whole of the
+        // right behaviour there; posting a focus request for chat "" would send
+        // the UI looking for a chat that doesn't exist.
+        if (data.chatId) app.postMessage(data);
+        return;
+      }
+      if (!data.chatId) {
+        await self.clients.openWindow("/");
         return;
       }
       const params = new URLSearchParams({ chat: data.chatId });

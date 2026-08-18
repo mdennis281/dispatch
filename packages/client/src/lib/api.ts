@@ -12,6 +12,7 @@ import type {
   AgentConfigInput,
   ModeConfig,
   AttentionItem,
+  NotificationPrefs,
   PermissionRequest,
   RunnerInstance,
   RegistryQuery,
@@ -510,6 +511,31 @@ export const api = {
     /** Open permission/question requests to re-materialize inline cards on (re)connect. */
     pendingPermissions: () =>
       get<PermissionRequest[]>("/api/attention/permissions"),
+  },
+
+  /* web push — server-sent notifications (the only path an iOS app has) */
+  push: {
+    /** The VAPID public key `pushManager.subscribe` needs. */
+    key: () => get<{ publicKey: string }>("/api/push/key"),
+    devices: () =>
+      get<Array<{ id: string; label?: string; createdAt: number; updatedAt: number }>>(
+        "/api/push/devices",
+      ),
+    subscribe: (body: { subscription: unknown; prefs?: NotificationPrefs; label?: string }) =>
+      post<{ id: string; prefs: NotificationPrefs }>("/api/push/subscribe", body),
+    /**
+     * Retune one device's filters. Server-side because iOS revokes a
+     * subscription whose push handler declines to show anything — a muted event
+     * has to be one that is never sent. See lib/webPush.ts.
+     */
+    setPrefs: (endpoint: string, prefs: NotificationPrefs) =>
+      put<{ ok: true }>("/api/push/prefs", { endpoint, prefs }),
+    /** "The app is in front of me" — suppresses pushes to a screen already showing it. */
+    presence: (endpoint: string, inFront: boolean) =>
+      post<{ ok: true }>("/api/push/presence", { endpoint, inFront }),
+    test: (endpoint: string) => post<{ ok: true }>("/api/push/test", { endpoint }),
+    unsubscribe: (endpoint: string) =>
+      post<{ removed: boolean }>("/api/push/unsubscribe", { endpoint }),
   },
 
   /* runners */
