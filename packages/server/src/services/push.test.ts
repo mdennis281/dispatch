@@ -154,6 +154,24 @@ describe("PushService", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("does not rewrite the registry for a presence report", async () => {
+    // Presence is reported on every visibility change AND a 60s heartbeat; the
+    // registry is a whole-file rewrite. Persisting it would mean a disk write a
+    // minute per open tab to record something stale within 90 seconds.
+    const { svc } = make();
+    await svc.subscribe(sub(1));
+    const before = await readFile(join(dir, "push-subscriptions.json"), "utf8");
+    await svc.setPresence(sub(1).endpoint, true);
+    expect(await readFile(join(dir, "push-subscriptions.json"), "utf8")).toBe(before);
+  });
+
+  it("reports whether the endpoint reporting presence is one we know", async () => {
+    const { svc } = make();
+    await svc.subscribe(sub(1));
+    expect(await svc.setPresence(sub(1).endpoint, true)).toBe(true);
+    expect(await svc.setPresence("https://push.example/9", true)).toBe(false);
+  });
+
   it("stops skipping as soon as the device says it went away", async () => {
     const { svc, sent } = make();
     await svc.subscribe(sub(1));

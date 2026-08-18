@@ -261,15 +261,32 @@ self.addEventListener("push", (event) => {
  * application server key and tell the server, or the device goes quiet with
  * nothing on either end reporting a problem.
  */
+/**
+ * VAPID keys travel as base64url; `pushManager.subscribe` wants raw bytes.
+ * Passing the string straight through throws, which would make the whole
+ * re-subscription below fail silently — the device simply stops receiving.
+ */
+function applicationServerKey(base64) {
+  const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
+  const raw = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
 self.addEventListener("pushsubscriptionchange", (event) => {
   event.waitUntil(
     (async () => {
       try {
+        // The old subscription's key is already a BufferSource; a freshly
+        // fetched one is base64url and has to be decoded first.
         const key =
           event.oldSubscription?.options?.applicationServerKey ??
-          (await apiFetch("/api/push/key")
-            .then((r) => r.json())
-            .then((j) => j.publicKey));
+          applicationServerKey(
+            await apiFetch("/api/push/key")
+              .then((r) => r.json())
+              .then((j) => j.publicKey),
+          );
         const fresh = await self.registration.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: key,

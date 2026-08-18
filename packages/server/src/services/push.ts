@@ -64,13 +64,6 @@ const StoredSubscriptionSchema = z.object({
   label: z.string().optional(),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
-  /**
-   * When this device last reported the app visible and focused in front of the
-   * human. A push to a screen someone is already looking at is pure noise — the
-   * in-app badge and the inline card are already saying it — so a recent value
-   * suppresses the push. See PRESENCE_TTL_MS.
-   */
-  inFrontAt: z.number().int().optional(),
 });
 export type StoredSubscription = z.infer<typeof StoredSubscriptionSchema>;
 
@@ -92,6 +85,12 @@ export type VapidKeys = z.infer<typeof VapidSchema>;
 
 /**
  * How long a "the app is in front of me" report stays trusted.
+ *
+ * Held in memory and never persisted: it is reported on every visibility change
+ * AND on a 60s heartbeat, and the registry is a whole-file rewrite — persisting
+ * it would mean rewriting `push-subscriptions.json` once a minute per open tab
+ * to record something that is stale within 90 seconds. A restart simply forgets
+ * who was looking, and the next heartbeat says so again.
  *
  * Generous on purpose. The client re-reports on every visibility change and on a
  * 60s heartbeat while visible, so the only way to hit this ceiling is a device
@@ -158,6 +157,8 @@ export class PushService {
 
   private vapid: VapidKeys | null = null;
   private subs: StoredSubscription[] = [];
+  /** endpoint → when it last reported the app in front. In memory only. */
+  private readonly inFront = new Map<string, number>();
   private loaded = false;
   /** Serializes the read-modify-write of the registry file. */
   private writeChain: Promise<unknown> = Promise.resolve();
@@ -288,20 +289,25 @@ export class PushService {
     });
   }
 
-  /** Note that this device currently has the app in front of the human. */
+  /**
+   * Note that this device currently has the app in front of the human.
+   *
+   * Deliberately does NOT touch the registry file — see PRESENCE_TTL_MS. Returns
+   * whether the endpoint is one we know, so a client whose registration the
+   * server lost still learns to re-subscribe.
+   */
   async setPresence(endpoint: string, inFront: boolean): Promise<boolean> {
-    return this.mutate(() => {
-      const entry = this.subs.find((s) => s.subscription.endpoint === endpoint);
-      if (!entry) return false;
-      entry.inFrontAt = inFront ? this.now() : undefined;
-      return true;
-    });
+    if (inFront) this.inFront.set(endpoint, this.now());
+    else this.inFront.delete(endpoint);
+    await this.load();
+    return this.subs.some((s) => s.subscription.endpoint === endpoint);
   }
 
   async unsubscribe(endpoint: string): Promise<boolean> {
     return this.mutate(() => {
       const before = this.subs.length;
       this.subs = this.subs.filter((s) => s.subscription.endpoint !== endpoint);
+      this.inFront.delete(endpoint);
       return this.subs.length !== before;
     });
   }
@@ -338,11 +344,11 @@ export class PushService {
     await this.load();
     if (!this.subs.length) return;
     const now = this.now();
-    const targets = this.subs.filter(
-      (s) =>
-        shouldNotify(s.prefs, item, now) &&
-        !(s.inFrontAt !== undefined && now - s.inFrontAt < PRESENCE_TTL_MS),
-    );
+    const targets = this.subs.filter((s) => {
+      if (!shouldNotify(s.prefs, item, now)) return false;
+      const seen = this.inFront.get(s.subscription.endpoint);
+      return seen === undefined || now - seen >= PRESENCE_TTL_MS;
+    });
     if (!targets.length) return;
     const payload = JSON.stringify(PushService.payloadFor(item));
     await Promise.all(targets.map((t) => this.send(t, payload)));
