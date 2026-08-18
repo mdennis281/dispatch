@@ -1,0 +1,97 @@
+# CodeQL — replacing GitHub's default setup, to gain a config file.
+#
+# ⚠️ THIS FILE DOES NOTHING UNTIL DEFAULT SETUP IS TURNED OFF.
+# Default setup and advanced setup are mutually exclusive: while default setup
+# is enabled it disables advanced workflows and REJECTS their analysis uploads.
+# Switch it off at Settings → Code security → Code scanning (or
+# `PATCH /repos/mdennis281/dispatch/code-scanning/default-setup {"state":"not-configured"}`)
+# or this workflow runs and throws its results away.
+#
+# WHY GIVE UP DEFAULT SETUP. Default setup takes no configuration, so the only
+# way to retire a false positive is to dismiss each alert by hand — and
+# dismissals are keyed on a fingerprint that includes a hash of the alert's own
+# line, so any edit to that line brings the alert back under a new number. A
+# query that is wrong about this project rather than about one line therefore
+# costs re-triage forever. `.github/codeql/codeql-config.yml` carries that
+# reasoning as reviewable code instead. The lower-maintenance alternative —
+# keeping default setup and pointing the `github-codeql-config-file` repository
+# property at the same file — needs an ORGANIZATION, and this repo is owned by a
+# user account.
+#
+# WHY ubuntu-latest, AND NOT THE SELF-HOSTED RUNNER. ci.yml puts its heavy job on
+# the self-hosted Linux box to avoid billing, and guards it with an `if:` so a
+# pull request from a FORK never runs there — because this repo is public and
+# that runner is a box on the home LAN. The same reasoning applies here with
+# nothing to trade off against it: a public repo gets GitHub-hosted minutes for
+# free, so there is no saving to justify pointing a fork-triggerable analysis at
+# the LAN. Do not "optimize" this onto `[self-hosted, …]`.
+#
+# LANGUAGES. The same set default setup had resolved: `actions`,
+# `javascript-typescript` (its `javascript` and `typescript` entries are aliases
+# of this one analysis, not extra ones) and `python`, which covers the launcher
+# and shortcut scripts under tools/.
+name: CodeQL
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  # Default setup scanned on a schedule as well as on change. Keeping that means
+  # a newly published query still finds an old vulnerability in code nobody has
+  # touched — the case a per-PR-only scan structurally cannot catch.
+  schedule:
+    - cron: "27 4 * * 1"
+
+# `security-events: write` is what lets the analyze step upload results; the
+# default token cannot. Everything else stays read-only.
+#
+# `actions: read` is NOT required today and the `actions` leg passes without it
+# — GitHub's own CodeQL template marks it "only required for workflows in
+# private repositories", and this repo is public. It is here because this repo
+# has ALREADY been private once (see the billing note at the top of ci.yml), and
+# the failure it would cause on the way back is a silently degraded `actions`
+# analysis rather than a red check. A read-only scope is cheap insurance
+# against a repo-visibility change nobody would think to re-audit this file for.
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+# Same reasoning as ci.yml: agents push several times a minute, and a superseded
+# analysis is worth cancelling rather than queueing.
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      # One language failing should still leave the others' results uploaded —
+      # a partial scan reported is worth more than three scans discarded.
+      fail-fast: false
+      matrix:
+        language: [actions, javascript-typescript, python]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # No `build-mode:` and no build step: all three of these are analyzed
+      # from source, so the pnpm install/build dance ci.yml needs is dead weight
+      # here.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          # Distinguishes the three matrix legs' uploads. Without it each leg
+          # overwrites the last and only one language's alerts survive.
+          category: "/language:${{ matrix.language }}"
