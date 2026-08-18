@@ -224,7 +224,8 @@ export interface ProjectAgentCounts {
  */
 export function countProjectAgents(byId: Record<string, Chat>): Record<string, ProjectAgentCounts> {
   const out: Record<string, ProjectAgentCounts> = {};
-  for (const chat of Object.values(byId)) {
+  for (const id in byId) {
+    const chat = byId[id]!;
     const status = chat.status;
     if (chat.archived || !status) continue;
     if (status !== "awaiting-input" && !WORKING_STATUS.has(status)) continue;
