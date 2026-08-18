@@ -1,7 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   BarChart3,
-  Menu,
   MessageSquare,
   Ship,
   Play,
@@ -21,7 +20,7 @@ import { Button } from "../ui/Button.js";
 import { Badge } from "../ui/Chip.js";
 import { AttentionPopover } from "../attention/AttentionPopover.js";
 import { usePanelCounts } from "../panels/usePanelCounts.js";
-import { useLayout, type Pane } from "../../stores/layout.js";
+import { useLayout, dismissLeftDrawer, type Pane } from "../../stores/layout.js";
 import { useView, openOverlay, type AppView } from "../../stores/view.js";
 import { openWorkspace } from "../../stores/workspace.js";
 import { useAttention } from "../../stores/attention.js";
@@ -29,6 +28,7 @@ import { useProjectMemories } from "../../stores/memory.js";
 import { useProjects } from "../../stores/projects.js";
 import { useGitChangeCount } from "../../stores/git.js";
 import { useViewport } from "../../stores/viewport.js";
+import { currentSlot, chatsAction } from "./navState.js";
 import { LAYER } from "../../lib/layers.js";
 import { cn } from "../../lib/cn.js";
 
@@ -37,10 +37,21 @@ import { cn } from "../../lib/cn.js";
  *
  * The obvious mobile layout is a pane switcher plus a separate drawer handle,
  * and it's wrong: two bars competing to answer "where am I" answer it twice and
- * agree never. So the ☰ slot lives in the same strip as the panes even though it
- * isn't one — it opens modal chrome LAYERED OVER whichever pane is active, and
- * it never lights up as selected. The three pane slots are the only ones that
- * can be current.
+ * agree never.
+ *
+ * The same argument applies inside the strip, which is why there is no longer a
+ * ☰ slot beside a Chat slot. Two adjacent controls both labelled for the chat
+ * surface is the two-bar mistake at slot scale: one went to the transcript, the
+ * other opened the list of transcripts, and neither was named in a way that told
+ * you which. They are one **Chats** slot now, whose press means "get me back to
+ * my chat" from anywhere else and "show me the list" once you're already there —
+ * see `chatsAction` in navState.
+ *
+ * Which slot reads as selected is likewise not decided here: `currentSlot` owns
+ * it, so the answer is one function of the whole shell rather than four ternaries
+ * that could each be right on their own and wrong together. Every slot can be
+ * current, including More — a menu you can't tell is open is a menu you press
+ * twice.
  *
  * The Ship / Run slots are `RightPanel`'s own two `PanelGroup`s with their
  * rolled-up badges (see panels/usePanelCounts), not a new taxonomy. The five
@@ -54,14 +65,26 @@ function NavSlot({
   label,
   count,
   current,
+  expanded,
   disabled,
   onClick,
 }: {
   icon: ReactNode;
   label: string;
   count?: number;
-  /** Selected — only ever true for a PANE slot. ☰ and ⋯ open things, they aren't places. */
+  /** Selected. See `currentSlot` — at most one slot in the strip is ever true. */
   current?: boolean;
+  /**
+   * For the slot that owns a sheet: whether that sheet is open right now.
+   *
+   * Split from `current` because they look the same and mean different things to
+   * a screen reader. Both light the slot, but "the More sheet is open" is
+   * `aria-expanded`, not `aria-current="page"` — the sheet is a menu, not a
+   * destination — while "you are on Memory, which More took you to" is exactly
+   * `aria-current`. Announcing an open menu as the current page is how a sighted
+   * fix becomes an unsighted regression.
+   */
+  expanded?: boolean;
   disabled?: boolean;
   onClick: () => void;
 }) {
@@ -70,12 +93,30 @@ function NavSlot({
       variant="ghost"
       onClick={onClick}
       disabled={disabled}
-      aria-current={current ? "page" : undefined}
+      // Present only while selected, and its VALUE says which kind of selected:
+      // "page" for a destination you're on, plain "true" for the More slot while
+      // its sheet is up — a menu is a current item in this set, not a page.
+      aria-current={current ? (expanded ? "true" : "page") : undefined}
+      aria-expanded={expanded}
+      aria-haspopup={expanded !== undefined ? "dialog" : undefined}
       className={cn(
         // `h-full` + `flex-1` rather than a Button size: the kit's two heights
         // are 24 and 32px and both are under the 44px minimum for a thumb.
         "h-full min-w-0 flex-1 flex-col gap-0.5 rounded-none px-1 text-2xs font-medium",
-        current ? "text-accent-hi" : "text-muted",
+        // The selected look reads off `aria-current` rather than off a ternary,
+        // for the reason the `toggle` variant gives: state you can see and state
+        // you can hear then cannot drift apart. It is ALSO the only form that
+        // works here. `cn` is plain clsx with no conflict resolution, so the
+        // `text-accent-hi` this used to pass sat beside `ghost`'s own
+        // `text-secondary` as two same-specificity utilities and lost on emit
+        // order — every slot in this bar has rendered #9aa1a9 whatever was
+        // selected, which is why nothing appeared to highlight. An attribute
+        // variant compiles to `.…[aria-current]` and outranks it.
+        "aria-[current]:text-accent-hi",
+        // …and outranks `ghost`'s `hover:text-primary` too, which is otherwise
+        // the same specificity as the line above and would pull a selected slot
+        // back to grey under a mouse.
+        "aria-[current]:hover:text-accent-hi",
       )}
     >
       <span className="relative [&_svg]:size-[18px]">
@@ -180,16 +221,29 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
   const project = useProjects((s) => s.activeProjectId);
   const memCount = useProjectMemories(project).length;
   const changeCount = useGitChangeCount();
-  // The same "needs you" tally the sidebar rows carry, rolled up onto ☰ — the
-  // whole point of the badge is to be readable while the sidebar is off-canvas.
+  // The same "needs you" tally the sidebar rows carry, rolled up onto Chats —
+  // the whole point of the badge is to be readable while the sidebar is
+  // off-canvas.
   const attention = useAttention(
     (s) => s.items.filter((i) => i.kind === "permission" || i.kind === "question").length,
   );
 
-  // Project setup takes the whole window and isn't scoped to a project, so the
-  // sidebar is hidden there (App's `fullBleed`). A ☰ that opens an empty drawer
-  // over it would be a control that does nothing.
-  const canOpenLeft = view !== "new-project";
+  /** Where the whole shell is, in the four bits the two rules below read. */
+  const place = { mode, view, pane, leftOpen, moreOpen };
+  const slot = currentSlot(place);
+
+  /**
+   * Both sheets stand down whenever the nav commits to a destination.
+   *
+   * They are transient chrome layered OVER the main area, not places, so leaving
+   * one up across a navigation strands it over a surface it has nothing to do
+   * with — pick Memory from the More sheet with the chat picker also open and
+   * you land on Memory with a list of chats parked on top of it.
+   */
+  const dismissSheets = () => {
+    setMoreOpen(false);
+    dismissLeftDrawer();
+  };
 
   /** Everything below the pane switcher goes back to the transcript first. */
   const goView = (next: AppView) => {
@@ -199,7 +253,7 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
     // it here rather than letting it emerge: choosing a view IS choosing the
     // main area, so the pane resets with it.
     setPane("chat");
-    setMoreOpen(false);
+    dismissSheets();
   };
 
   const goPane = (next: Pane) => {
@@ -207,11 +261,35 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
     // screen underneath them would show the panel for a chat you can't see.
     if (view !== "chat") setView("chat");
     setPane(next);
+    dismissSheets();
+  };
+
+  /**
+   * One slot, three meanings — `chatsAction` decides which, this applies it.
+   *
+   * The picker is only ever REACHED from step two, so it can't be opened over a
+   * screen it doesn't belong to: by the time this opens it, the branch has
+   * already established you're looking at the transcript.
+   */
+  const goChats = () => {
+    switch (chatsAction(place)) {
+      case "open-picker":
+        setLeftOpen(true);
+        break;
+      case "close-picker":
+        setLeftOpen(false);
+        break;
+      case "go-chat":
+        if (view !== "chat") setView("chat");
+        setPane("chat");
+        dismissSheets();
+        break;
+    }
   };
 
   const goOverlay = (id: Parameters<typeof openOverlay>[0]) => {
     openOverlay(id);
-    setMoreOpen(false);
+    dismissSheets();
   };
 
   // `lg` has no bottom nav at all — every surface it switches between is already
@@ -274,19 +352,19 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
             typing ? "hidden" : "flex h-[var(--cm-bottom-nav-strip)]",
           )}
         >
-          {mode === "sm" && canOpenLeft && (
-            <NavSlot
-              icon={<Menu />}
-              label="Chats"
-              count={attention}
-              onClick={() => setLeftOpen(!leftOpen)}
-            />
-          )}
+          {/* The transcript AND the list of transcripts, in that order. Always
+              rendered, at every mode and on every view — the ☰ it absorbed was
+              conditional on both, and a slot that comes and goes is a slot you
+              can't reach for without looking. */}
           <NavSlot
             icon={<MessageSquare />}
-            label="Chat"
-            current={pane === "chat"}
-            onClick={() => goPane("chat")}
+            label="Chats"
+            // Only where the rail is off-canvas. At `md` the sidebar is an
+            // inline column carrying these same counts on the rows themselves,
+            // so a roll-up beside it is the number twice.
+            count={mode === "sm" ? attention : undefined}
+            current={slot === "chats"}
+            onClick={goChats}
           />
           {/* Both panels are chat-scoped and only render inside the chat branch
               of `App`, so with no chat open these slots would light up over an
@@ -296,7 +374,7 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
             icon={<Ship />}
             label="Ship"
             count={counts.ship}
-            current={pane === "ship"}
+            current={slot === "ship"}
             disabled={!chat}
             onClick={() => goPane("ship")}
           />
@@ -304,11 +382,22 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
             icon={<Play />}
             label="Run"
             count={counts.run}
-            current={pane === "run"}
+            current={slot === "run"}
             disabled={!chat}
             onClick={() => goPane("run")}
           />
-          <NavSlot icon={<MoreHorizontal />} label="More" onClick={() => setMoreOpen(true)} />
+          {/* A toggle, not an opener. The sheet's only other dismissals are
+              picking a row (which navigates you away, so it can't be how you
+              back OUT) and the scrim above it — which on a tall sheet is a
+              sliver of screen you have to aim at. Pressing the control you
+              opened it with is the gesture everyone tries first. */}
+          <NavSlot
+            icon={<MoreHorizontal />}
+            label="More"
+            current={slot === "more"}
+            expanded={moreOpen}
+            onClick={() => setMoreOpen((open) => !open)}
+          />
         </div>
       </nav>
 

@@ -21,8 +21,9 @@
  *     popover: `LAYER.popover` is 400 and sits above the whole dialog band, so
  *     an off-canvas sidebar borrowing that constant would cover the delete-chat
  *     dialog opened from a row inside itself. `bottomNav` is one step above
- *     `drawer` on purpose — its ☰ and Chat slots are how you DISMISS a drawer,
- *     so being underneath the thing it closes would strand you.
+ *     `drawer` on purpose — its Chats and More slots are the toggles that DISMISS
+ *     the chat picker and the More sheet, so being underneath the things it
+ *     closes would strand you in both.
  *   - `toast` sits under dialogs: a notice must never cover a decision.
  *   - `palette` (command palette, file picker) sits above every dialog: it's
  *     summoned from anywhere and can't be underneath what summoned it.
