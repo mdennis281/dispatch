@@ -45,7 +45,16 @@ on:
 
 # `security-events: write` is what lets the analyze step upload results; the
 # default token cannot. Everything else stays read-only.
+#
+# `actions: read` is NOT required today and the `actions` leg passes without it
+# — GitHub's own CodeQL template marks it "only required for workflows in
+# private repositories", and this repo is public. It is here because this repo
+# has ALREADY been private once (see the billing note at the top of ci.yml), and
+# the failure it would cause on the way back is a silently degraded `actions`
+# analysis rather than a red check. A read-only scope is cheap insurance
+# against a repo-visibility change nobody would think to re-audit this file for.
 permissions:
+  actions: read
   contents: read
   security-events: write
 
