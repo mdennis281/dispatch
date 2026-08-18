@@ -116,6 +116,67 @@ describe("chat assets", () => {
     expect(ref.path.endsWith(".png")).toBe(true);
   });
 
+  describe("fs-asset — a file the agent wrote and only mentioned", () => {
+    it("serves a media file from the chat's root", async () => {
+      const chatId = await makeChat();
+      await mkdir(join(dir, "out"), { recursive: true });
+      await writeFile(join(dir, "out", "chart.png"), Buffer.from(PNG_B64, "base64"));
+
+      const got = await app.inject({
+        method: "GET",
+        url: `/api/chats/${chatId}/fs-asset?path=out/chart.png`,
+      });
+      expect(got.statusCode).toBe(200);
+      expect(got.headers["content-type"]).toBe("image/png");
+      // Never `immutable`: this is a live working-tree path whose bytes are
+      // rewritten every time the agent re-runs its script.
+      expect(got.headers["cache-control"]).toBe("private, no-cache");
+      expect(got.rawPayload.length).toBe(Buffer.from(PNG_B64, "base64").length);
+    });
+
+    it("refuses a traversal, a non-media file and a missing path", async () => {
+      const chatId = await makeChat();
+      await writeFile(join(dir, "secret.txt"), "SECRET");
+      const at = (path: string) =>
+        app.inject({ method: "GET", url: `/api/chats/${chatId}/fs-asset?path=${encodeURIComponent(path)}` });
+
+      // `process.execPath` is guaranteed to exist and to sit outside both the
+      // chat root and tmp — a literal "/etc/passwd" would 404 on Windows for
+      // the wrong reason and prove nothing about the confinement.
+      expect((await at(process.execPath)).statusCode).toBe(403);
+      // The endpoint exists to show pictures; it must not be a file read.
+      expect((await at("secret.txt")).statusCode).toBe(415);
+      expect((await at("nope.png")).statusCode).toBe(404);
+      expect((await at("")).statusCode).toBe(400);
+    });
+
+    it("sets a sandbox CSP on SVG, which renders as a document in a tab", async () => {
+      const chatId = await makeChat();
+      await writeFile(join(dir, "d.svg"), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+      const got = await app.inject({
+        method: "GET",
+        url: `/api/chats/${chatId}/fs-asset?path=d.svg`,
+      });
+      expect(got.statusCode).toBe(200);
+      expect(got.headers["content-type"]).toBe("image/svg+xml");
+      expect(got.headers["content-security-policy"]).toContain("default-src 'none'");
+    });
+
+    it("honours a byte range, so a video can seek", async () => {
+      const chatId = await makeChat();
+      const bytes = Buffer.from(PNG_B64, "base64");
+      await writeFile(join(dir, "a.png"), bytes);
+      const got = await app.inject({
+        method: "GET",
+        url: `/api/chats/${chatId}/fs-asset?path=a.png`,
+        headers: { range: "bytes=0-9" },
+      });
+      expect(got.statusCode).toBe(206);
+      expect(got.headers["content-range"]).toBe(`bytes 0-9/${bytes.length}`);
+      expect(got.rawPayload.length).toBe(10);
+    });
+  });
+
   it("rejects an empty body and a missing chat", async () => {
     const chatId = await makeChat();
     const bad = await app.inject({
