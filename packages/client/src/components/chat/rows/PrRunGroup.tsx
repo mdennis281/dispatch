@@ -32,6 +32,7 @@ import {
   type ToolUseRow,
 } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
+import { ResultMediaStrip } from "./ResultMediaStrip.js";
 import { PrStatePanel, PrStateStrip } from "./PrStateView.js";
 import { Modal } from "../../sidebar/Modal.js";
 import { CodeBlock } from "../CodeBlock.js";
@@ -221,6 +222,10 @@ export const PrRunGroup = memo(function PrRunGroup({ entries }: { entries: PrRun
             <PrToolCard key={entry.use.id} entry={entry} />
           ))}
         </div>
+        <ResultMediaStrip
+          chatId={entries[0]?.use.chatId ?? ""}
+          results={entries.map((e) => e.result)}
+        />
       </div>
     </RowShell>
   );

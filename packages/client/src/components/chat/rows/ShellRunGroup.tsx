@@ -2,6 +2,7 @@ import { memo, useMemo, useState } from "react";
 import { Check, Circle, SlidersHorizontal, SquareTerminal, X } from "lucide-react";
 import type { TaskStatusRow, ToolResultRow, ToolUseRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
+import { ResultMediaStrip } from "./ResultMediaStrip.js";
 import { InlineCode } from "../CodeBlock.js";
 import { ToolDetailModal, type ToolDetailState } from "../ToolDetailModal.js";
 import { DispatchToolCard } from "./DispatchToolCard.js";
@@ -251,6 +252,9 @@ export const ShellRunGroup = memo(function ShellRunGroup({
             </div>
           )}
         </div>
+        {/* A command that produced an image — a screenshot tool driven from the
+            shell, a chart script that prints a data URL. */}
+        <ResultMediaStrip chatId={chatId} results={entries.map((e) => e.result)} />
       </div>
           </RowShell>
         </div>
