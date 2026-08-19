@@ -26,8 +26,39 @@ import { describe, expect, it } from "vitest";
 /** `packages/client/src`. */
 const SRC = fileURLToPath(new URL("../../..", import.meta.url));
 
-/** Anything that renders media, directly or through the shared strip. */
-const RENDERS_MEDIA = /ResultMediaStrip|MediaGroup|Attachment|ImageThumb|AssetMedia/;
+/**
+ * Anything that renders media, directly or through the shared strip.
+ *
+ * Matches JSX USE (`<ResultMediaStrip`), not a bare mention. Every file in
+ * `RENDERERS` names the strip in a comment explaining why it is there, so a
+ * plain substring match would keep passing after someone deleted the element
+ * and left the prose behind — the precise regression this file exists to
+ * catch, waved through by the thing meant to catch it.
+ */
+const RENDERS_MEDIA = /<\s*(ResultMediaStrip|MediaGroup|Attachment|ImageThumb|AssetMedia)[\s/>]/;
+
+/**
+ * Blank out comments and string literals before matching, so neither a doc
+ * comment nor a quoted example can satisfy the check.
+ *
+ * Crude — it does not parse JSX, regex literals or template interpolation. It
+ * only has to be sound in the ONE direction that matters: it can never turn a
+ * real `<ResultMediaStrip …>` into a miss, because a mounted element is not
+ * inside a comment or a quoted string. Being over-eager elsewhere costs
+ * nothing, since the result is only ever fed to `RENDERS_MEDIA`.
+ */
+function stripCommentsAndStrings(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ")
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''");
+}
+
+/** Does this source actually MOUNT a media component, rather than mention one? */
+function mountsMedia(source: string): boolean {
+  return RENDERS_MEDIA.test(stripCommentsAndStrings(source));
+}
 
 /**
  * Files that take a `ToolResultRow` but legitimately never draw one.
@@ -60,7 +91,7 @@ describe("media coverage", () => {
   it("every tool-result renderer can show images", () => {
     const missing = RENDERERS.filter((rel) => {
       if (rel in EXEMPT) return false;
-      return !RENDERS_MEDIA.test(readFileSync(join(SRC, rel), "utf8"));
+      return !mountsMedia(readFileSync(join(SRC, rel), "utf8"));
     });
 
     expect(
@@ -69,6 +100,31 @@ describe("media coverage", () => {
         "\n  ",
       )}\nMount <ResultMediaStrip chatId={…} results={…} />, or add an EXEMPT entry saying why the tool can never return media.`,
     ).toEqual([]);
+  });
+
+  it("cannot be satisfied by a mention — only by mounting the thing", () => {
+    // The guard, guarding itself. Without this the check above would go green
+    // for a file that merely TALKS about the strip, which is the state every
+    // one of these files is one deletion away from.
+    const notMounted = [
+      "// renders ResultMediaStrip below\nreturn <div />;",
+      "/** See MediaGroup for why. */ return <div />;",
+      'const doc = "<ResultMediaStrip />"; return <div />;',
+      "import { ResultMediaStrip } from './x.js';",
+    ];
+    for (const source of notMounted) {
+      expect(mountsMedia(source), source).toBe(false);
+    }
+
+    // …and is still satisfied by the real thing, in the spellings that occur.
+    const mounted = [
+      "return <ResultMediaStrip chatId={id} results={r} />;",
+      "return <MediaGroup\n  chatId={id}\n  assets={a}\n/>;",
+      "return <Attachment {...p} />;",
+    ];
+    for (const source of mounted) {
+      expect(mountsMedia(source), source).toBe(true);
+    }
   });
 
   it("the renderer list still matches what actually takes a ToolResultRow", () => {

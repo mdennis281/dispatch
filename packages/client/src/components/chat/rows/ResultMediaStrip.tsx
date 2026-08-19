@@ -44,7 +44,13 @@ export function ResultMediaStrip({
     // A group can repeat one file — an agent re-reading the same screenshot
     // after an edit is the normal case, and showing it four times is noise.
     const seen = new Set<string>();
-    return out.filter((img) => !seen.has(img.path) && seen.add(img.path));
+    const deduped: typeof out = [];
+    for (const img of out) {
+      if (seen.has(img.path)) continue;
+      seen.add(img.path);
+      deduped.push(img);
+    }
+    return deduped;
   }, [results]);
 
   if (!assets.length) return null;
