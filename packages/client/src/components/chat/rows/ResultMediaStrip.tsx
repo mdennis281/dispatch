@@ -1,7 +1,8 @@
 import { useMemo } from "react";
-import type { ToolResultRow } from "@dispatch/shared";
+import type { ToolResultRow, ToolUseRow } from "@dispatch/shared";
 import { MediaGroup } from "./MediaGroup.js";
 import { mergeImages, recoverResultMedia } from "../../../lib/resultMedia.js";
+import { labelForAsset } from "../../../lib/chatMedia.js";
 import { cn } from "../../../lib/cn.js";
 
 /**
@@ -25,20 +26,32 @@ import { cn } from "../../../lib/cn.js";
 export function ResultMediaStrip({
   chatId,
   results,
+  uses,
   className,
 }: {
   chatId: string;
   /** The results of one group. `undefined` entries (still running) are fine. */
   results: (ToolResultRow | undefined)[];
+  /**
+   * The tool calls that produced them, positionally matched to `results`.
+   *
+   * Only used for the CAPTION: a stored asset is content-addressed
+   * (`kEE0Q1yjaoffNb8tVDGmR.png`), which is right on disk and unreadable in a
+   * caption. The call still knows the path the agent asked for.
+   */
+  uses?: (ToolUseRow | undefined)[];
   className?: string;
 }) {
   const assets = useMemo(() => {
-    const out = results.flatMap((result) =>
+    const out = results.flatMap((result, i) =>
       result
         ? // Server refs first, then anything recovered from a stored payload the
           // ingest path didn't recognize when it was written. `mergeImages`
           // drops the duplicate a current message produces via both routes.
-          mergeImages(result.images, recoverResultMedia(result.content).images)
+          mergeImages(result.images, recoverResultMedia(result.content).images).map((asset) => {
+            const alt = labelForAsset(asset, uses?.[i]);
+            return alt ? { ...asset, alt } : asset;
+          })
         : [],
     );
     // A group can repeat one file — an agent re-reading the same screenshot
@@ -51,7 +64,7 @@ export function ResultMediaStrip({
       deduped.push(img);
     }
     return deduped;
-  }, [results]);
+  }, [results, uses]);
 
   if (!assets.length) return null;
   return (

@@ -254,7 +254,11 @@ export const ShellRunGroup = memo(function ShellRunGroup({
         </div>
         {/* A command that produced an image — a screenshot tool driven from the
             shell, a chart script that prints a data URL. */}
-        <ResultMediaStrip chatId={chatId} results={entries.map((e) => e.result)} />
+        <ResultMediaStrip
+          chatId={chatId}
+          results={entries.map((e) => e.result)}
+          uses={entries.map((e) => e.use)}
+        />
       </div>
           </RowShell>
         </div>
