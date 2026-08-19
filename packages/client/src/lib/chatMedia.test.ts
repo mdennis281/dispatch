@@ -92,6 +92,24 @@ describe("collectChatMedia", () => {
     ).toEqual([]);
   });
 
+  it("includes the user's own attachments", () => {
+    // A pasted screenshot is an image in the chat by any reading. Leaving these
+    // out meant clicking your own attachment opened the viewer on an unrelated
+    // tool result, because the gallery had never heard of it.
+    const items = collectChatMedia([
+      {
+        ...base,
+        id: "u1",
+        kind: "user",
+        text: "look at this",
+        images: [{ id: "p1", path: "assets/pasted.png", mimeType: "image/png" }],
+      } as ChatMessage,
+      use("t1", "a/one.png"),
+      result("t1", ["assets/1.png"]),
+    ]);
+    expect(items.map((i) => i.asset.path)).toEqual(["assets/pasted.png", "assets/1.png"]);
+  });
+
   it("records the row each image came from", () => {
     const items = collectChatMedia([use("t1", "a/one.png"), result("t1", ["assets/1.png"])]);
     expect(items[0]?.rowId).toBe("r-t1");
@@ -105,10 +123,10 @@ describe("indexOfAsset", () => {
     expect(indexOfAsset(items, "b")).toBe(1);
   });
 
-  it("falls back to the first rather than -1", () => {
-    // A markdown embed or a prose chip is not a tool result, so it is not in
-    // the gallery — the viewer must still open on something.
-    expect(indexOfAsset(items, "not-here")).toBe(0);
-    expect(indexOfAsset([], "anything")).toBe(0);
+  it("reports a miss as -1 rather than pretending it is the first", () => {
+    // Coercing a miss to 0 opened the viewer on a completely different picture.
+    // The caller (MediaGroup) needs to know so it can fall back to its own row.
+    expect(indexOfAsset(items, "not-here")).toBe(-1);
+    expect(indexOfAsset([], "anything")).toBe(-1);
   });
 });

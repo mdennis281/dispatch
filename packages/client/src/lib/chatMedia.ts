@@ -45,8 +45,16 @@ export function labelForAsset(asset: ImageRef, use?: ToolUseRow): string | undef
   return name || undefined;
 }
 
-/** Pull every renderable image out of one row, if it carries any. */
+/**
+ * Pull every renderable image out of one row, if it carries any.
+ *
+ * USER rows count. A pasted or dropped screenshot is an image in the chat by
+ * any reading, and leaving it out meant clicking your own attachment opened the
+ * viewer on some unrelated tool result — `indexOfAsset` could only answer 0 for
+ * something it had never been told about.
+ */
 function imagesOn(row: ChatMessage): ImageRef[] {
+  if (row.kind === "user") return row.images ?? [];
   if (row.kind !== "tool_result") return [];
   return mergeImages(row.images, recoverResultMedia(row.content).images);
 }
@@ -84,13 +92,14 @@ export function useChatMedia(chatId: string): ChatMediaItem[] {
 }
 
 /**
- * Where `path` sits in the gallery, or 0 when it isn't there.
+ * Where `path` sits in the gallery, or **-1** when it isn't there.
  *
- * Not -1: a viewer opened on an image the gallery hasn't got (a markdown embed,
- * a prose chip — neither is a tool result) must still open on something rather
- * than render an empty frame.
+ * Reporting absence honestly is the point. Coercing a miss to 0 opened the
+ * viewer on a completely different picture — the first one in the chat —
+ * whenever the clicked image wasn't a gallery member (a markdown embed and a
+ * prose chip are neither tool results nor attachments). The caller decides what
+ * to do about it; see `MediaGroup`, which falls back to its own row.
  */
 export function indexOfAsset(items: ChatMediaItem[], path: string): number {
-  const at = items.findIndex((item) => item.asset.path === path);
-  return at >= 0 ? at : 0;
+  return items.findIndex((item) => item.asset.path === path);
 }

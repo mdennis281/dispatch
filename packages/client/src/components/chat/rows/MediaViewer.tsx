@@ -378,7 +378,17 @@ export function MediaViewer({
         </IconButton>
       </header>
 
-      <div className="flex min-h-0 flex-1 items-center">
+      {/* The whole media row swallows clicks. A DISABLED nav button has
+          `pointer-events: none` (Button applies it), so a click at either end
+          of the gallery passes straight through it — and without this it would
+          reach the scrim, whose handler closes. That is the original "pressing
+          next just closes the image", reappearing precisely at the boundary
+          where the button is dead. Stopping here covers the button, the gaps
+          around it, and anything added to this row later. */}
+      <div
+        className="flex min-h-0 flex-1 items-center"
+        onClick={(e) => e.stopPropagation()}
+      >
         {items.length > 1 && (
           <NavButton side="left" disabled={index === 0} onClick={() => step(-1)}>
             <ChevronLeft />

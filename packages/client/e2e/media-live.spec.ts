@@ -147,6 +147,17 @@ async function seed(dir: string): Promise<{ chatId: string }> {
   });
   const chatId = String(chat.id);
 
+  // Leave OURS as the only project. The server seeds a demo one on a fresh data
+  // dir, and with two the sidebar shows whichever is active — which meant the
+  // test had to drive the project switcher to find its own chat, and that was
+  // the one intermittently-failing step in the whole spec. One project is one
+  // less thing for the UI to be mid-transition about.
+  const projects = (await (await fetch(`${BASE}/api/projects`)).json()) as { id: string }[];
+  for (const other of projects) {
+    if (other.id === project.id) continue;
+    await fetch(`${BASE}/api/projects/${other.id}`, { method: "DELETE" });
+  }
+
   const chatDir = join(dir, "chats", chatId);
   const assetsDir = join(chatDir, "assets");
   mkdirSync(assetsDir, { recursive: true });
@@ -229,6 +240,9 @@ test.beforeAll(async () => {
     // stdin PIPED, not ignored: the server treats a closed stdin as "my parent
     // is gone, shut down", and "ignore" hands it a already-ended stream.
     stdio: ["pipe", "pipe", "pipe"],
+    // Its own process group off Windows, so `killTree` can take the whole tree
+    // down rather than orphaning the node under the pnpm shim.
+    detached: process.platform !== "win32",
   });
   server.stdout?.on("data", (d) => process.stdout.write(`[server] ${d}`));
   server.stderr?.on("data", (d) => process.stderr.write(`[server] ${d}`));
@@ -240,10 +254,35 @@ test.beforeAll(async () => {
   await seed(dataDir);
 });
 
-test.afterAll(async () => {
-  if (server?.pid) {
-    spawnSync("taskkill", ["/pid", String(server.pid), "/T", "/F"], { stdio: "ignore" });
+/**
+ * Kill the spawned server AND its children, on whichever OS this is.
+ *
+ * `pnpm → tsx → node` is a tree, so killing the pid we hold leaves the actual
+ * server holding the port. Windows needs `taskkill /T`; elsewhere the shell is
+ * a process-group leader, so a negative pid signals the whole group. Both are
+ * best-effort — a failure here must not fail the suite.
+ */
+function killTree(child: ChildProcess): void {
+  const pid = child.pid;
+  if (!pid) return;
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+    return;
   }
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    // No process group (or already gone) — fall back to the child itself.
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      /* already dead */
+    }
+  }
+}
+
+test.afterAll(async () => {
+  if (server) killTree(server);
   if (dataDir) {
     try {
       rmSync(dataDir, { recursive: true, force: true });
@@ -265,9 +304,8 @@ async function openChat(page: import("@playwright/test").Page): Promise<void> {
   await expect(page.getByText("Connected")).toBeVisible();
 
   // A fresh config dir means a first run, which greets you with the "Protect
-  // Dispatch" dialog over everything. Dismiss it or every later click hits the
-  // scrim instead of the app.
-  // WAIT for it rather than probe once: the dialog mounts a beat after the WS
+  // Dispatch" dialog over everything — dismiss it or every later click hits its
+  // scrim. WAIT for it rather than probe once: the dialog mounts a beat after the WS
   // connects, so an immediate isVisible() says "no" and every later click then
   // lands on its scrim. A bounded click that swallows the timeout is a no-op
   // when the dialog never appears.
@@ -276,32 +314,43 @@ async function openChat(page: import("@playwright/test").Page): Promise<void> {
     .click({ timeout: 10_000 })
     .catch(() => {});
 
-  // The newest chat opens by itself; click it only if something else is showing.
-  // The server seeds a demo project on a fresh data dir, so ours is not
-  // necessarily the active one — and the sidebar lists the ACTIVE project's
-  // chats. Switch to it first when the chat isn't already on screen.
+  // Ours is the only project (see `seed`), so its chats are always the listed
+  // ones — no switcher to drive, nothing to be mid-transition about.
   const chat = page.getByText(CHAT_TITLE).first();
-  if (!(await chat.isVisible().catch(() => false))) {
-    await page.getByRole("button").filter({ hasText: PROJECT_NAME }).first().click();
-    await page.getByText(PROJECT_NAME, { exact: true }).last().click();
-  }
-  await expect(chat, "seeded chat is not listed in the sidebar").toBeVisible();
-  await chat.click();
+  await expect(chat, "seeded chat is not listed in the sidebar").toBeVisible({
+    timeout: 15_000,
+  });
+  await chat.click({ timeout: 10_000 });
 
   // Wait on an IMAGE, not on prose. Transcript rows use `content-visibility`,
   // so text that has scrolled out of view is genuinely not in the DOM — a
   // getByText on the oldest message is a race against where the view landed.
-  await expect(page.locator("figure img").first()).toBeVisible();
+  await expect(page.locator("figure img").first()).toBeVisible({ timeout: 20_000 });
 }
 
-/** Scroll the transcript to the top so every row is materialized. */
+/**
+ * Scroll the transcript to the top so every row is materialized.
+ *
+ * Driven from the DOM rather than by `mouse.wheel`, which depends on what the
+ * cursor happens to be over and made this intermittently miss rows. Repeated
+ * because `content-visibility` materializes rows as they approach the viewport,
+ * which grows `scrollHeight` — one pass to the top is not necessarily the top.
+ */
 async function revealAll(page: import("@playwright/test").Page): Promise<void> {
   for (let i = 0; i < 8; i += 1) {
-    await page.mouse.move(600, 400);
-    await page.mouse.wheel(0, -3000);
-    await page.waitForTimeout(150);
+    const atTop = await page.evaluate(() => {
+      const scroller = Array.from(document.querySelectorAll<HTMLElement>("*"))
+        .filter((el) => el.scrollHeight > el.clientHeight + 50)
+        .sort((a, b) => b.scrollHeight - a.scrollHeight)[0];
+      if (!scroller) return true;
+      const was = scroller.scrollTop;
+      scroller.scrollTop = 0;
+      return was === 0;
+    });
+    await page.waitForTimeout(200);
+    if (atTop && i > 0) break;
   }
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(300);
 }
 
 test("a Read of an image shows a thumbnail in the transcript", async ({ page }) => {
@@ -352,6 +401,9 @@ test("arrows walk every image in the chat, and stop at both ends", async ({ page
   // which is what pressing it used to do.
   await expect(position).toHaveText("1/5");
   await expect(prev).toBeDisabled();
+  await prev.click({ force: true });
+  await expect(viewer).toBeVisible();
+  await expect(position).toHaveText("1/5");
 
   for (let i = 2; i <= SHOTS.length; i += 1) {
     await next.click();
@@ -359,9 +411,14 @@ test("arrows walk every image in the chat, and stop at both ends", async ({ page
     await expect(viewer).toBeVisible();
   }
 
-  // At the newest, Next is dead.
+  // At the newest, Next is dead — and pressing it must do NOTHING. A disabled
+  // Button has `pointer-events: none`, so the click passes through it; if the
+  // row underneath doesn't swallow it, it reaches the scrim and closes the
+  // viewer. That is the original bug, reappearing exactly at the boundary.
   await expect(next).toBeDisabled();
+  await next.click({ force: true });
   await expect(viewer).toBeVisible();
+  await expect(position).toHaveText(`${SHOTS.length}/${SHOTS.length}`);
 
   // Keyboard agrees with the buttons.
   await page.keyboard.press("ArrowLeft");

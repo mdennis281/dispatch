@@ -35,11 +35,19 @@ export function MediaGroup({
   const gallery = useChatMedia(chatId);
   if (!assets.length) return null;
 
-  // The chat-wide gallery is the sequence to walk. It can legitimately be empty
-  // of THIS asset — a markdown embed or a prose chip is not a tool result — so
-  // fall back to the group, which is always right even if it is short.
-  const galleryAssets = gallery.length ? gallery.map((item) => item.asset) : assets;
   const tiled = assets.length > 1;
+
+  // The chat-wide gallery is the sequence to walk — but ONLY when it actually
+  // contains the image that was clicked. A markdown embed or a prose chip is
+  // neither a tool result nor an attachment, so it is not a member; opening the
+  // chat gallery anyway would land on whatever happened to be first and show
+  // the wrong picture. Falling back to this row is always right, just shorter.
+  const at = openPath === null ? -1 : indexOfAsset(gallery, openPath);
+  const inGallery = at >= 0;
+  const viewerAssets = inGallery ? gallery.map((item) => item.asset) : assets;
+  const viewerIndex = inGallery
+    ? at
+    : Math.max(assets.findIndex((asset) => asset.path === openPath), 0);
 
   return (
     <>
@@ -65,11 +73,8 @@ export function MediaGroup({
       {openPath !== null && (
         <MediaViewer
           chatId={chatId}
-          assets={galleryAssets}
-          index={indexOfAsset(
-            gallery.length ? gallery : assets.map((asset) => ({ asset, rowId: "" })),
-            openPath,
-          )}
+          assets={viewerAssets}
+          index={viewerIndex}
           onClose={() => setOpenPath(null)}
         />
       )}
