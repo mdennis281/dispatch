@@ -10,6 +10,7 @@ import {
   type ToolUseRow,
 } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
+import { ResultMediaStrip } from "./ResultMediaStrip.js";
 import { ToolDetailModal } from "../ToolDetailModal.js";
 import { Button } from "../../ui/Button.js";
 import { Spinner } from "../../ui/Spinner.js";
@@ -426,6 +427,10 @@ export const FileRunGroup = memo(function FileRunGroup({ entries }: { entries: F
             );
           })}
         </div>
+        {/* A `Read` of a PNG is how an agent looks at a picture, and this group
+            is where that row lands. It used to show the filename and nothing
+            else, which is exactly the "it clearly saw it but I can't" case. */}
+        <ResultMediaStrip chatId={chatId} results={entries.map((e) => e.result)} />
       </div>
     </RowShell>
   );

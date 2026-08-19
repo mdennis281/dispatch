@@ -11,6 +11,7 @@ import { ChevronRight, CornerDownRight } from "lucide-react";
 import type { RunStep, SubagentRun } from "../../lib/subagentRuns.js";
 import { runDuration, toolDetail } from "../../lib/subagentRuns.js";
 import { toolIcon } from "../chat/toolIcon.js";
+import { ResultMediaStrip } from "../chat/rows/ResultMediaStrip.js";
 import { Markdown } from "../chat/Markdown.js";
 import { AgentGlyph } from "./runVisuals.js";
 import { Chip } from "../ui/Chip.js";
@@ -23,8 +24,10 @@ import { useState } from "react";
 /** A collapsed tool call; expands to args + result in place. */
 const ToolBlock = memo(function ToolBlock({
   step,
+  chatId,
 }: {
   step: Extract<RunStep, { kind: "tool" }>;
+  chatId: string;
 }) {
   const [open, setOpen] = useState(false);
   const failed = step.result?.isError || step.result?.ok === false;
@@ -75,6 +78,10 @@ const ToolBlock = memo(function ToolBlock({
           )}
         </span>
       </button>
+      {/* Outside the `open` gate on purpose: a picture a subagent looked at is
+          the thing you opened the inspector to see, not a detail behind a
+          disclosure. */}
+      <ResultMediaStrip chatId={chatId} results={[step.result]} className="px-2.5" />
       {open && (
         <div className="cm-anim-rise space-y-2 border-t border-line-soft px-3 py-2.5">
           <div>
@@ -216,7 +223,7 @@ export function RunStream({
             ) : step.kind === "subagent" ? (
               <NestedRunBlock step={step} onOpen={() => onOpenNested(step.runId)} />
             ) : (
-              <ToolBlock step={step} />
+              <ToolBlock step={step} chatId={run.chatId} />
             )}
           </div>
         ))}
