@@ -1,5 +1,5 @@
 import { type ImageRef, mediaKind } from "@dispatch/shared";
-import { ImageThumb } from "./ImageThumb.js";
+import { ImageThumb, type ThumbVariant } from "./ImageThumb.js";
 import { AssetMedia } from "../../ui/AssetMedia.js";
 
 /**
@@ -18,16 +18,19 @@ export function Attachment({
   chatId,
   asset,
   onOpen,
+  variant,
 }: {
   chatId: string;
   asset: ImageRef;
   onOpen?: () => void;
+  /** How much room an IMAGE gets; non-images ignore it. */
+  variant?: ThumbVariant;
 }) {
   const kind = mediaKind(asset.mimeType);
   // Video goes through the viewer too — full-screen with the same download and
   // open-in-tab controls, rather than a 240px inline player and nothing else.
   return kind === "image" ? (
-    <ImageThumb chatId={chatId} img={asset} onOpen={onOpen} />
+    <ImageThumb chatId={chatId} img={asset} onOpen={onOpen} variant={variant} />
   ) : (
     <AssetMedia chatId={chatId} asset={asset} onOpen={kind === "video" ? onOpen : undefined} />
   );

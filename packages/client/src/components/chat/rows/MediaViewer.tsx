@@ -38,10 +38,16 @@ export function assetName(asset: ImageRef): string {
  * {@link module:lib/imageViewport}, shared with the annotator rather than
  * written twice.
  *
- * `assets` is the whole group the click came from, so ← / → step between the
- * images of one message without closing and reopening. Only the CURRENT one is
- * resolved to bytes — a message with thirty screenshots must not fetch thirty
- * blobs because one was clicked.
+ * `assets` is the gallery, and by default that is EVERY image in the chat —
+ * see `useChatMedia`. Opening a screenshot and pressing → should reach the next
+ * screenshot, not stop dead because that tool call happened to return one
+ * image. Only the CURRENT one is resolved to bytes, so a chat with thirty
+ * screenshots does not fetch thirty blobs because one was clicked.
+ *
+ * The ends STOP rather than wrap. Wrapping made "next" silently jump back to
+ * the oldest picture, which reads as the viewer having lost your place; a
+ * disabled button says "that was the last one" without you having to work it
+ * out.
  */
 export function MediaViewer({
   chatId,
@@ -224,10 +230,10 @@ export function MediaViewer({
 
   const step = useCallback(
     (delta: number) => {
-      if (items.length < 2) return;
-      // Wrap: at the last image, → returns to the first. A dead key at the end
-      // reads as a broken control rather than as a boundary.
-      setIndex((i) => (i + delta + items.length) % items.length);
+      // CLAMPED, not wrapped. See the component doc: at the last image, → does
+      // nothing and its button is disabled, rather than teleporting you back to
+      // the first and looking like a lost position.
+      setIndex((i) => Math.min(Math.max(i + delta, 0), Math.max(items.length - 1, 0)));
     },
     [items.length],
   );
@@ -298,6 +304,9 @@ export function MediaViewer({
   // the status bar and the home indicator.
   return createPortal(
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Media viewer"
       style={{ zIndex: z }}
       className="fixed inset-0 flex flex-col bg-scrim-strong backdrop-blur-[2px] cm-safe-pad"
       onClick={onClose}
@@ -308,7 +317,7 @@ export function MediaViewer({
       >
         <span className="min-w-0 flex-1 truncate text-sm text-secondary">{item.name}</span>
         {items.length > 1 && (
-          <span className="cm-mono shrink-0 !text-2xs text-faint">
+          <span data-testid="viewer-position" className="cm-mono shrink-0 !text-2xs text-faint">
             {index + 1}/{items.length}
           </span>
         )}
@@ -369,9 +378,19 @@ export function MediaViewer({
         </IconButton>
       </header>
 
-      <div className="relative flex min-h-0 flex-1">
+      {/* The whole media row swallows clicks. A DISABLED nav button has
+          `pointer-events: none` (Button applies it), so a click at either end
+          of the gallery passes straight through it — and without this it would
+          reach the scrim, whose handler closes. That is the original "pressing
+          next just closes the image", reappearing precisely at the boundary
+          where the button is dead. Stopping here covers the button, the gaps
+          around it, and anything added to this row later. */}
+      <div
+        className="flex min-h-0 flex-1 items-center"
+        onClick={(e) => e.stopPropagation()}
+      >
         {items.length > 1 && (
-          <NavButton side="left" onClick={() => step(-1)}>
+          <NavButton side="left" disabled={index === 0} onClick={() => step(-1)}>
             <ChevronLeft />
           </NavButton>
         )}
@@ -379,7 +398,7 @@ export function MediaViewer({
         <div
           ref={boxRef}
           className={cn(
-            "relative min-h-0 flex-1 overflow-hidden",
+            "relative h-full min-h-0 min-w-0 flex-1 overflow-hidden",
             zoomable && (dragging ? "cursor-grabbing" : "cursor-grab"),
           )}
           onClick={(e) => e.stopPropagation()}
@@ -442,7 +461,11 @@ export function MediaViewer({
         </div>
 
         {items.length > 1 && (
-          <NavButton side="right" onClick={() => step(1)}>
+          <NavButton
+            side="right"
+            disabled={index >= items.length - 1}
+            onClick={() => step(1)}
+          >
             <ChevronRight />
           </NavButton>
         )}
@@ -452,14 +475,26 @@ export function MediaViewer({
   );
 }
 
-/** Prev/next affordance, floated over the media rather than stealing width. */
+/**
+ * Prev/next affordance.
+ *
+ * A FLEX SIBLING of the image surface, not an overlay on top of it. Floating
+ * them over the picture meant their hit area overlapped the pan surface, and a
+ * click that missed by a pixel — or landed mid-re-render, when the image is
+ * being swapped — fell through to the scrim, whose job is to CLOSE. "Pressing
+ * next just closes the image" was exactly that. Sibling layout makes the
+ * overlap impossible rather than merely unlikely, and has the side benefit that
+ * the controls never sit on top of the thing you are trying to look at.
+ */
 function NavButton({
   side,
   onClick,
+  disabled,
   children,
 }: {
   side: "left" | "right";
   onClick: () => void;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -467,15 +502,19 @@ function NavButton({
       circle
       size="md"
       aria-label={side === "left" ? "Previous" : "Next"}
+      disabled={disabled}
       onClick={(e) => {
+        // Always stop the bubble, even when disabled has already swallowed the
+        // click: this button sits on the scrim, whose click handler CLOSES the
+        // viewer. That is what made "press next at the end" look like "next
+        // closes the image".
         e.stopPropagation();
         onClick();
       }}
       className={cn(
         // Floated over the media rather than taking a column of width, and
         // translucent so it never hides the part of the image it sits on.
-        "absolute top-1/2 z-10 -translate-y-1/2 bg-panel/80 backdrop-blur [&_svg]:size-5",
-        side === "left" ? "left-3" : "right-3",
+        "mx-2 shrink-0 bg-panel/80 backdrop-blur [&_svg]:size-5",
       )}
     >
       {children}

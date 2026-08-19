@@ -430,7 +430,11 @@ export const FileRunGroup = memo(function FileRunGroup({ entries }: { entries: F
         {/* A `Read` of a PNG is how an agent looks at a picture, and this group
             is where that row lands. It used to show the filename and nothing
             else, which is exactly the "it clearly saw it but I can't" case. */}
-        <ResultMediaStrip chatId={chatId} results={entries.map((e) => e.result)} />
+        <ResultMediaStrip
+          chatId={chatId}
+          results={entries.map((e) => e.result)}
+          uses={entries.map((e) => e.use)}
+        />
       </div>
     </RowShell>
   );
