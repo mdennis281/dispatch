@@ -62,7 +62,7 @@ export function Modal({
         // larger of the two. The `sm` offset gets the same treatment for the
         // short viewport where 9vh is the smaller number.
         "fixed inset-0 flex items-start justify-center overflow-y-auto " +
-        "cm-safe-pad [--cm-gutter:1.5rem] sm:pt-[max(9vh,var(--cm-safe-top))]"
+        "cm-safe-pad [--cm-gutter:1.5rem] sm:pt-[max(9vh,var(--cm-safe-top),var(--cm-titlebar-h))]"
       }
     >
       <div

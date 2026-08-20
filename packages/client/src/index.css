@@ -567,13 +567,26 @@
  * site) and that side's inset, so nothing moves anywhere the insets are 0 —
  * which is everywhere but a notched display.
  *
+ * The TOP has a second claimant on the desktop, for exactly the same reason.
+ * With the window controls overlay up (see `--cm-titlebar-*`) the installed
+ * window has no title bar, so `inset: 0` reaches the very top of the window and
+ * the minimise/maximise/close buttons are painted over whatever is there. The
+ * media viewer put its whole toolbar — zoom, copy, download, CLOSE — in that
+ * band, so on Windows the close button sat under the system's close button and
+ * could not be pressed at all. `--cm-titlebar-h` is that band's height, 0px
+ * wherever the overlay isn't up, so it joins the same `max()` rather than
+ * needing a rule of its own. It is not in the left/right sides because the
+ * buttons are always at one END of the strip (right on Windows, left on macOS)
+ * and clearing the strip's HEIGHT clears them on both, without spending a
+ * ~138px dead gutter down the full height of a dialog.
+ *
  * A `@utility` rather than a plain class in `@layer components`: it has to sit
  * in the utilities layer to outrank the `p-*` it replaces (a layered class
  * loses to a utility no matter the source order), and only a real utility can
  * take the `sm:` / `max-sm:` variants the full-bleed dialogs need.
  */
 @utility cm-safe-pad {
-  padding-top: max(var(--cm-gutter, 0px), var(--cm-safe-top));
+  padding-top: max(var(--cm-gutter, 0px), var(--cm-safe-top), var(--cm-titlebar-h));
   padding-right: max(var(--cm-gutter, 0px), var(--cm-safe-right));
   padding-bottom: max(var(--cm-gutter, 0px), var(--cm-safe-bottom));
   padding-left: max(var(--cm-gutter, 0px), var(--cm-safe-left));

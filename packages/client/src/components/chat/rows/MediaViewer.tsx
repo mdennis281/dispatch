@@ -314,7 +314,12 @@ export function MediaViewer({
 
   // `cm-safe-pad`: the scrim is this element, so the insets go on as padding —
   // the dim still covers the whole screen and only the chrome moves clear of
-  // the status bar and the home indicator.
+  // the status bar, the home indicator, and (on the installed desktop window)
+  // the system's own minimise/maximise/close buttons. This header is the reason
+  // that last one is in there: it is the only surface in the app that puts
+  // interactive controls at y=0 across the full width, so with the window
+  // controls overlay up its right-hand end — including Close — was underneath
+  // the OS buttons and unclickable.
   return createPortal(
     <div
       role="dialog"
