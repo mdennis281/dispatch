@@ -14,27 +14,32 @@
  * projects/agents stores. A list that offered a project with no rows would be a
  * dead end, and one that dropped a DELETED project would hide history that
  * still exists.
+ *
+ * ---
+ *
+ * GENERIC OVER THE DIMENSION SET, because there are two ledgers. The usage half
+ * filters by `category`; the runtime half filters by `state` and `class`, and
+ * neither dimension exists in the other's table — a `state` chip sent to
+ * `/api/metrics/facets` is a 400, not a narrower result. So the two pages
+ * cannot share ONE filter row's state, and this file makes them share its
+ * behaviour instead: {@link FacetRow} takes the dimension list, the labels, the
+ * facets and the toggle, and each page supplies its own.
+ *
+ * A dimension can be FILTERABLE without appearing here. `runId` is the case:
+ * its values are raw `Task` tool_use ids, so a pick-list of them is a wall of
+ * `toolu_01LDfmxt…` that nobody can choose from — `subagent` answers the same
+ * question in words. It is still a real filter, reached by splitting the chart
+ * by run and clicking the row you want in the breakdown table, which is the one
+ * place those ids appear next to something that identifies them.
  */
 import { Check, Filter, X } from "lucide-react";
-import type { MetricDimension, MetricFacetValue } from "@dispatch/shared";
-import { METRIC_DIMENSION_LABELS } from "@dispatch/shared";
+import type { MetricFacetValue } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { MenuItem, Popover } from "../ui/Popover.js";
 import { Select } from "../ui/Select.js";
-import { activeFilterCount, RANGE_PRESETS, useMetrics } from "../../stores/metrics.js";
-import { useMetricLabel } from "./labels.js";
+import { RANGE_PRESETS } from "../../stores/metrics.js";
+import type { DimLabeller } from "./labels.js";
 import { cn } from "../../lib/cn.js";
-
-/** Dimensions offered as pick-lists, in the order they read. */
-const FILTERABLE: MetricDimension[] = [
-  "projectId",
-  "agent",
-  "subagent",
-  "category",
-  "model",
-  "harness",
-  "source",
-];
 
 const num = new Intl.NumberFormat();
 
@@ -44,26 +49,38 @@ const num = new Intl.NumberFormat();
  * The facets endpoint reports these as `""` because that is what the column
  * holds; the server spells them out in its own labels, but a facet value is a
  * bare string, so the list has to say it here or offer a blank row.
+ *
+ * `subagent` and `runId` are the same fact seen two ways — a span with no run
+ * id came from the chat's main loop — and both say so, because "(none)" on the
+ * BIGGEST group of every window is the page's most misreadable label. `runId`
+ * has no picker of its own (see the header), but it reaches this through the
+ * breakdown table's filter buttons.
  */
-function emptyLabel(dim: MetricDimension): string {
+export function emptyLabel(dim: string): string {
   if (dim === "agent") return "(default agent)";
-  if (dim === "subagent") return "(main loop)";
+  if (dim === "subagent" || dim === "runId") return "(main loop)";
   if (dim === "model") return "(default model)";
   return "(none)";
 }
 
 /** One dimension's pick-list, as a popover of checkable rows. */
-function FacetPicker({
+function FacetPicker<D extends string>({
   dim,
+  title,
   values,
+  selected,
+  toggle,
+  clear,
+  label,
 }: {
-  dim: MetricDimension;
+  dim: D;
+  title: string;
   values: MetricFacetValue[];
+  selected: string[] | undefined;
+  toggle: (dim: D, value: string) => void;
+  clear: (dim: D) => void;
+  label: DimLabeller<D>;
 }) {
-  const selected = useMetrics((s) => s.filter[dim]);
-  const toggle = useMetrics((s) => s.toggleFilter);
-  const clear = useMetrics((s) => s.clearFilter);
-  const label = useMetricLabel(dim);
   const count = selected?.length ?? 0;
 
   // A dimension with nothing (or only one thing) to choose between is not a
@@ -85,7 +102,7 @@ function FacetPicker({
           aria-pressed={count > 0}
           className={cn(open && "text-secondary")}
         >
-          {METRIC_DIMENSION_LABELS[dim]}
+          {title}
           {count > 0 && <span className="cm-mono !text-2xs">{count}</span>}
         </Button>
       )}
@@ -100,7 +117,7 @@ function FacetPicker({
                 close();
               }}
             >
-              Clear {METRIC_DIMENSION_LABELS[dim].toLowerCase()}
+              Clear {title.toLowerCase()}
             </MenuItem>
           )}
           {values.map((v) => {
@@ -122,7 +139,7 @@ function FacetPicker({
                 hint={num.format(v.count)}
                 onClick={() => toggle(dim, v.value)}
               >
-                {v.value === "" ? emptyLabel(dim) : label(v.value)}
+                {v.value === "" ? emptyLabel(dim) : label(dim, v.value)}
               </MenuItem>
             );
           })}
@@ -132,13 +149,38 @@ function FacetPicker({
   );
 }
 
-export function MetricsFilters() {
-  const rangeId = useMetrics((s) => s.rangeId);
-  const setRange = useMetrics((s) => s.setRange);
-  const facets = useMetrics((s) => s.facets);
-  const filter = useMetrics((s) => s.filter);
-  const clear = useMetrics((s) => s.clearFilter);
-  const active = activeFilterCount(filter);
+/**
+ * The whole row: range preset, then one pick-list per filterable dimension.
+ *
+ * `filter` is `Partial<Record<D, string[]>>` rather than the ledger's own filter
+ * type so the same component serves both halves; each store's filter satisfies
+ * it structurally.
+ */
+export function FacetRow<D extends string>({
+  rangeId,
+  setRange,
+  dims,
+  dimLabels,
+  facets,
+  filter,
+  toggle,
+  clear,
+  label,
+}: {
+  rangeId: string;
+  setRange: (id: string) => void;
+  dims: readonly D[];
+  dimLabels: Record<D, string>;
+  facets: Partial<Record<D, MetricFacetValue[]>> | undefined;
+  filter: Partial<Record<D, string[]>>;
+  toggle: (dim: D, value: string) => void;
+  clear: (dim?: D) => void;
+  label: DimLabeller<D>;
+}) {
+  const active = Object.values(filter).reduce<number>(
+    (n, values) => n + ((values as string[] | undefined)?.length ?? 0),
+    0,
+  );
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
@@ -151,8 +193,17 @@ export function MetricsFilters() {
       />
       <span className="mx-0.5 h-4 w-px bg-line-soft" aria-hidden />
       <Filter className="size-3.5 shrink-0 text-faint" aria-hidden />
-      {FILTERABLE.map((dim) => (
-        <FacetPicker key={dim} dim={dim} values={facets?.facets[dim] ?? []} />
+      {dims.map((dim) => (
+        <FacetPicker
+          key={dim}
+          dim={dim}
+          title={dimLabels[dim]}
+          values={facets?.[dim] ?? []}
+          selected={filter[dim]}
+          toggle={toggle}
+          clear={clear}
+          label={label}
+        />
       ))}
       {active > 0 && (
         <Button variant="link" leftIcon={<X />} onClick={() => clear()}>

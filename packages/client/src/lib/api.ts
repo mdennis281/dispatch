@@ -44,6 +44,14 @@ import type {
   MetricFilter,
   MetricQueryInput,
   MetricSeriesResponse,
+  MetricSpan,
+  MetricSpanDimension,
+  MetricSpanFacetsResponse,
+  MetricSpanFilter,
+  MetricSpanQueryInput,
+  MetricSpanSeriesResponse,
+  MetricSpanSummary,
+  MetricSpanTotalsResponse,
   MetricTotalsResponse,
   UpdateStatus,
   UpdateChannel,
@@ -940,6 +948,30 @@ export const api = {
       post<MetricEvent[]>("/api/metrics/recent", scope),
     stats: () => get<{ rows: number; buffered: number; dropped: number }>("/api/metrics/stats"),
     prune: (before: number) => post<{ deleted: number }>("/api/metrics/prune", { before }),
+
+    /* The RUNTIME half — the same window, answered in milliseconds.
+     *
+     * Its own paths rather than a `measure` flag on the five above: a span has
+     * a `state` where an event has a `category`, so one endpoint would have to
+     * accept a filter it might reject and return a union the caller narrows
+     * anyway. `summary` has no counterpart at all — it is the hero row, and
+     * there is no honest single-number equivalent for a count ledger. */
+    spans: {
+      series: (query: MetricSpanQueryInput) =>
+        post<MetricSpanSeriesResponse>("/api/metrics/spans/series", query),
+      totals: (query: MetricSpanQueryInput & { groupBy: MetricSpanDimension }) =>
+        post<MetricSpanTotalsResponse>("/api/metrics/spans/totals", query),
+      summary: (scope: { from?: number; to?: number; filter?: MetricSpanFilter }) =>
+        post<MetricSpanSummary>("/api/metrics/spans/summary", scope),
+      facets: (scope: { from?: number; to?: number; filter?: MetricSpanFilter }) =>
+        post<MetricSpanFacetsResponse>("/api/metrics/spans/facets", scope),
+      recent: (scope: {
+        from?: number;
+        to?: number;
+        filter?: MetricSpanFilter;
+        limit?: number;
+      }) => post<MetricSpan[]>("/api/metrics/spans/recent", scope),
+    },
   },
 };
 
