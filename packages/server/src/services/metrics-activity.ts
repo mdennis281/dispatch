@@ -24,6 +24,7 @@
  * `runId` alone.
  */
 import type { ChatStatus, MetricState } from "@dispatch/shared";
+import { spawnedSubagent } from "./metrics-classify.js";
 
 /** The main loop's run id. Empty string, matching the NULL-is-"" convention. */
 export const MAIN_ACTOR = "";
@@ -275,12 +276,17 @@ export class ActivityTracker {
   ): void {
     const actor = this.ensure(runId);
     // A subagent has no turn-start event of its own; its first tool call IS the
-    // evidence that it is running.
+    // evidence that it is running — unless its spawn was seen, in which case
+    // {@link spawnChild} has already started it at the earlier, truer instant.
     if (runId !== MAIN_ACTOR) {
       actor.live = true;
       actor.subagent = subagent ?? actor.subagent;
     }
     this.occupy(runId, toolUseId, classifyActivity(name, input), name, at, toolUseId);
+    // The child's run id IS this call's tool_use id, so a spawn is the one
+    // moment we can start the child's timeline where it really starts.
+    const spawned = spawnedSubagent(name, input);
+    if (spawned !== undefined) this.spawnChild(toolUseId, spawned, at);
   }
 
   /** A tool call finished. */
@@ -413,6 +419,34 @@ export class ActivityTracker {
     if (actor.generating === undefined) return;
     this.sink.close(actor.generating, at);
     actor.generating = undefined;
+  }
+
+  /**
+   * A spawn opened the parent's wait — start the child at that same instant.
+   *
+   * Waiting for the child's first tool call loses its OPENING REASONING, which
+   * is the one state this ledger exists to isolate. Measured on a production
+   * run: the parent was blocked on an `Agent` for 336.7s, the child's timeline
+   * began 3.3s later, and those 3.3s belonged to no actor at all — the tail was
+   * exact, so the whole error is at the start. On a subagent that thinks for
+   * twenty seconds and then makes two quick calls, that is most of the run.
+   *
+   * Same `at` as the parent's `waiting_agent` span, so the two timelines start
+   * together rather than a millisecond apart.
+   *
+   * Only for a REAL spawn — see {@link spawnedSubagent}. Several other tools
+   * classify as `waiting_agent` while blocking on a peer chat, and pre-opening
+   * for one of those would invent an actor that never existed — a phantom
+   * timeline in every chart grouped by run, and an extra body in the `actors`
+   * count on every summary.
+   */
+  private spawnChild(runId: string, subagent: string, at: number): void {
+    const actor = this.ensure(runId);
+    actor.live = true;
+    actor.subagent = subagent;
+    // `settle` is what keeps this from double-opening: if the child somehow
+    // already has a span (a re-delivered spawn event), it does nothing.
+    this.settle(runId, actor, at);
   }
 
   /** A run stopped producing, but may yet revive (the async-spawn case). */
