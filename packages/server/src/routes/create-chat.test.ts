@@ -22,16 +22,22 @@ let root: string;
 let bus: EventBus;
 let store: Store;
 
-/** createChat only reaches for the store, the bus and the harness registry. */
+/**
+ * createChat only reaches for the store, the bus and the harness registry — the
+ * last of which is absent here (a unit test installs no runtime, and the lookup
+ * is already guarded). `satisfies` keeps the two fields it DOES provide
+ * type-checked, so renaming either breaks the build rather than the run.
+ */
 function services(): Services {
-  return { store, bus, harnesses: undefined } as unknown as Services;
+  const partial = { store, bus } satisfies Pick<Services, "store" | "bus">;
+  return { ...partial, harnesses: undefined } as unknown as Services;
 }
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "cm-newchat-"));
   bus = new EventBus();
   store = new Store(join(root, "data"));
-  await store.init?.();
+  await store.init();
   await store.saveProject({
     id: "p1",
     name: "P",
