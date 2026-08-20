@@ -533,36 +533,42 @@ export class WorktreeDetector {
   private async ensureHistoryLoaded(project: Project, chatId: string): Promise<void> {
     if (this.historyLoaded.has(chatId)) return;
     this.historyLoaded.add(chatId);
-    let messages: ChatMessage[];
-    try {
-      messages = await this.store.readMessages(chatId);
-    } catch {
-      return;
-    }
     // `EnterWorktree` calls we've seen but whose result row hasn't come up yet.
     // Scoped to this scan (messages are in order) — the live map is for the bus.
     const openEnters = new Set<string>();
-    for (const m of messages) {
-      if (m.kind === "tool_use" && m.name === "EnterWorktree") {
-        openEnters.add(m.toolUseId);
-        this.recordEnterWorktree(chatId, m.input, m.ts ?? this.now());
-        continue;
-      }
-      if (m.kind === "tool_result") {
-        if (!openEnters.delete(m.toolUseId)) continue;
-        const hit = parseEnterWorktreeResult(m.content);
-        if (hit) this.recordWorktreePath(chatId, hit.path, m.ts ?? this.now());
-        continue;
-      }
-      if (m.kind !== "tool_use") continue;
-      const command = (m.input as { command?: unknown } | undefined)?.command;
-      if (typeof command !== "string" || !command) continue;
-      if (!looksLikeWorktreeCreate(command)) continue;
-      this.recordChatBranches(
-        chatId,
-        parseWorktreeBranches(command),
-        m.ts ?? this.now(),
-      );
+    try {
+      // `scanMessages`, NOT `readMessages`: this reads four fields off each row
+      // and already treats every one of them as untrusted, so zod-validating the
+      // whole discriminated union bought nothing and cost 77% of the scan. On a
+      // real store that was a 3.3s freeze across one project's 157 chats, on the
+      // first poll tick after a restart — see Store.scanMessages.
+      await this.store.scanMessages(chatId, (m) => {
+        const kind = m.kind;
+        const ts = typeof m.ts === "number" ? m.ts : this.now();
+        const toolUseId = typeof m.toolUseId === "string" ? m.toolUseId : "";
+        const input =
+          m.input && typeof m.input === "object"
+            ? (m.input as Record<string, unknown>)
+            : undefined;
+        if (kind === "tool_result") {
+          if (!toolUseId || !openEnters.delete(toolUseId)) return;
+          const hit = parseEnterWorktreeResult(m.content);
+          if (hit) this.recordWorktreePath(chatId, hit.path, ts);
+          return;
+        }
+        if (kind !== "tool_use") return;
+        if (m.name === "EnterWorktree") {
+          if (toolUseId) openEnters.add(toolUseId);
+          this.recordEnterWorktree(chatId, input, ts);
+          return;
+        }
+        const command = input?.command;
+        if (typeof command !== "string" || !command) return;
+        if (!looksLikeWorktreeCreate(command)) return;
+        this.recordChatBranches(chatId, parseWorktreeBranches(command), ts);
+      });
+    } catch {
+      return;
     }
   }
 
