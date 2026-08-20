@@ -1,8 +1,12 @@
 import { useMemo } from "react";
-import type { ToolResultRow, ToolUseRow } from "@dispatch/shared";
+import {
+  labelForAsset,
+  mergeImages,
+  recoverResultMedia,
+  type ToolResultRow,
+  type ToolUseRow,
+} from "@dispatch/shared";
 import { MediaGroup } from "./MediaGroup.js";
-import { mergeImages, recoverResultMedia } from "../../../lib/resultMedia.js";
-import { labelForAsset } from "../../../lib/chatMedia.js";
 import { cn } from "../../../lib/cn.js";
 
 /**

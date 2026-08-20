@@ -52,17 +52,29 @@ export function assetName(asset: ImageRef): string {
 export function MediaViewer({
   chatId,
   assets,
-  index: initialIndex,
+  path,
   onClose,
 }: {
   chatId: string;
   assets: ImageRef[];
-  index?: number;
+  /** Which image to show. Identifies it by PATH, not by position — see below. */
+  path?: string;
   onClose: () => void;
 }) {
   const z = useDialogLayer();
-  const [index, setIndex] = useState(() =>
-    Math.min(Math.max(initialIndex ?? 0, 0), Math.max(assets.length - 1, 0)),
+  // The current image is tracked by PATH, and the index is derived from it.
+  //
+  // Position alone cannot survive the gallery being REPLACED. It opens on the
+  // row's own images and is swapped for the chat-wide list a moment later, at
+  // which point a stored index points at a different picture: clicking the
+  // third of five showed "1/5", because index 0 was seeded before the real
+  // gallery arrived and nothing re-seated it. A path re-locates itself.
+  const [activePath, setActivePath] = useState<string | undefined>(
+    () => path ?? assets[0]?.path,
+  );
+  const index = Math.max(
+    assets.findIndex((a) => a.path === activePath),
+    0,
   );
   const asset = assets[index];
   const { src, failed: loadFailed } = useAssetSrc(chatId, asset);
@@ -233,9 +245,10 @@ export function MediaViewer({
       // CLAMPED, not wrapped. See the component doc: at the last image, → does
       // nothing and its button is disabled, rather than teleporting you back to
       // the first and looking like a lost position.
-      setIndex((i) => Math.min(Math.max(i + delta, 0), Math.max(items.length - 1, 0)));
+      const next = Math.min(Math.max(index + delta, 0), Math.max(items.length - 1, 0));
+      setActivePath(items[next]?.path);
     },
-    [items.length],
+    [index, items],
   );
 
   const copy = useCallback(async () => {

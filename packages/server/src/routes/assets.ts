@@ -10,7 +10,13 @@ import type { FastifyInstance } from "fastify";
 import { extname } from "node:path";
 import { tmpdir } from "node:os";
 import { nanoid } from "nanoid";
-import { ImageRefSchema, chatRoot } from "@dispatch/shared";
+import {
+  ImageRefSchema,
+  MEDIA_ROW_KINDS,
+  chatRoot,
+  collectChatMedia,
+  type MediaScanRow,
+} from "@dispatch/shared";
 import { extFromMediaType, mediaTypeFromName } from "../services/media-types.js";
 import { identifyMedia } from "../services/media-sniff.js";
 import {
@@ -176,6 +182,42 @@ export function registerAssetRoutes(app: FastifyInstance): void {
       return reply.send(stream);
     },
   );
+
+  /**
+   * Every image in the chat, in transcript order — the viewer's gallery.
+   *
+   *   GET /api/chats/:id/media → { items: [{ asset, rowId }] }
+   *
+   * WHY THE SERVER ANSWERS THIS: the client's transcript is a 150-row WINDOW,
+   * and a real session runs to hundreds of rows. Building the gallery from the
+   * rows that happen to be loaded meant a chat with eleven screenshots offered
+   * five, reported "1/5", and let the arrows reach only the recent tail — a
+   * total that was really a measure of how far the human had scrolled.
+   *
+   * Only the whole transcript can answer it, and only the server has that
+   * without paging the client through every row it has no other reason to hold.
+   */
+  app.get<{ Params: { id: string } }>("/api/chats/:id/media", async (req, reply) => {
+    const chat = await store.getChat(req.params.id);
+    if (!chat) return reply.code(404).send({ error: "chat not found" });
+
+    // `scanMessages`, NOT `readMessages`: the gallery is the WHOLE transcript,
+    // and zod is 77% of the cost of reading one (343ms of validation on an
+    // 8,235-row chat, on the main thread). This reads six fields per row and
+    // `collectChatMedia` narrows every one of them itself, so validating the
+    // discriminated union first would buy nothing and stall the event loop —
+    // the same trade the WorktreeDetector already made.
+    //
+    // Filtering by kind first means the heavy rows a transcript is mostly made
+    // of (assistant prose, system payloads) are skipped without being touched.
+    const rows: MediaScanRow[] = [];
+    await store.scanMessages(req.params.id, (row) => {
+      if (MEDIA_ROW_KINDS.has(String(row.kind))) rows.push(row);
+    });
+    // The same function the client runs over its window, so the two cannot
+    // disagree about what counts as an image.
+    return { items: collectChatMedia(rows) };
+  });
 
   /**
    * A file the AGENT wrote, served as a renderable asset.

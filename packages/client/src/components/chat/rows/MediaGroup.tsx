@@ -32,7 +32,9 @@ export function MediaGroup({
   className?: string;
 }) {
   const [openPath, setOpenPath] = useState<string | null>(null);
-  const gallery = useChatMedia(chatId);
+  // Only asked for once something opens: the gallery is a whole-transcript
+  // read, and no row needs it merely to draw its thumbnails.
+  const gallery = useChatMedia(chatId, openPath !== null);
   if (!assets.length) return null;
 
   const tiled = assets.length > 1;
@@ -42,12 +44,12 @@ export function MediaGroup({
   // neither a tool result nor an attachment, so it is not a member; opening the
   // chat gallery anyway would land on whatever happened to be first and show
   // the wrong picture. Falling back to this row is always right, just shorter.
-  const at = openPath === null ? -1 : indexOfAsset(gallery, openPath);
-  const inGallery = at >= 0;
+  //
+  // This list CHANGES under the viewer: it opens on the row and is replaced by
+  // the chat-wide gallery once that request lands, which is exactly why the
+  // viewer identifies its image by path rather than by position.
+  const inGallery = openPath !== null && indexOfAsset(gallery, openPath) >= 0;
   const viewerAssets = inGallery ? gallery.map((item) => item.asset) : assets;
-  const viewerIndex = inGallery
-    ? at
-    : Math.max(assets.findIndex((asset) => asset.path === openPath), 0);
 
   return (
     <>
@@ -74,7 +76,7 @@ export function MediaGroup({
         <MediaViewer
           chatId={chatId}
           assets={viewerAssets}
-          index={viewerIndex}
+          path={openPath}
           onClose={() => setOpenPath(null)}
         />
       )}

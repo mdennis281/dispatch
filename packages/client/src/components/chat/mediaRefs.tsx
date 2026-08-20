@@ -63,7 +63,7 @@ export function MediaRefChip({ chatId, path }: { chatId: string; path: string })
         {name}
       </InlineChip>
       {open && (
-        <MediaViewer chatId={chatId} assets={[asset]} onClose={() => setOpen(false)} />
+        <MediaViewer chatId={chatId} assets={[asset]} path={asset.path} onClose={() => setOpen(false)} />
       )}
     </>
   );
