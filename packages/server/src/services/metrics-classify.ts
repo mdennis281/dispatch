@@ -99,9 +99,13 @@ export function classifyTool(name: string, input?: Record<string, unknown>): Cla
  * The runtime span tracker has to tell a spawn from the other things that block
  * on an agent — `mcp__manager__wait_for_chat` blocks on a PEER chat, whose
  * tool_use id is nobody's run id — and the answer has to be the one this file
- * already gives the ledger. Hence a predicate over {@link SUBAGENT_TOOLS}
- * rather than a second list somewhere else to drift from it.
+ * already gives the ledger.
+ *
+ * So it READS {@link classifyTool} rather than re-testing {@link SUBAGENT_TOOLS}
+ * itself: one decision about what a spawn is, in one place, and the identifier
+ * comes back already carrying the un-typed-spawn default.
  */
 export function spawnedSubagent(name: string, input?: Record<string, unknown>): string | undefined {
-  return SUBAGENT_TOOLS.has(name) ? classifyTool(name, input).identifier : undefined;
+  const use = classifyTool(name, input);
+  return use.category === "subagent" ? use.identifier : undefined;
 }
