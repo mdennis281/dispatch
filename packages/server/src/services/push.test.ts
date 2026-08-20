@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AttentionItem, NotificationPrefs } from "@dispatch/shared";
 import { DEFAULT_NOTIFICATION_PREFS } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
-import { PushService, type WebPushLike, type PushSubscriptionJson } from "./push.js";
+import { PushService, isValidVapidSubject, type WebPushLike, type PushSubscriptionJson } from "./push.js";
 
 function sub(n = 1): PushSubscriptionJson {
   return {
@@ -33,6 +33,26 @@ function webPushMock(fail?: (endpoint: string) => number | undefined) {
   return { mock, sent };
 }
 
+describe("isValidVapidSubject", () => {
+  // Apple validates the `sub` claim and answers 403 BadJwtToken when it points
+  // nowhere; FCM ignores it entirely. Everything here is about that asymmetry.
+  it.each([
+    ["https://dispatch.example.com", true],
+    ["https://github.com/mdennis281/dispatch", true],
+    ["mailto:someone@example.com", true],
+    ["mailto:dispatch@localhost", false],
+    ["https://localhost:4318", false],
+    ["https://127.0.0.1", false],
+    ["https://dispatch.local", false],
+    ["mailto:me@nas.lan", false],
+    ["http://dispatch.example.com", false],
+    ["dispatch@example.com", false],
+    ["", false],
+  ])("%s → %s", (subject, expected) => {
+    expect(isValidVapidSubject(subject)).toBe(expected);
+  });
+});
+
 describe("PushService", () => {
   let dir: string;
   let bus: EventBus;
@@ -40,8 +60,12 @@ describe("PushService", () => {
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "dispatch-push-"));
     bus = new EventBus();
+    // A real DISPATCH_VAPID_SUBJECT in the environment would override what these
+    // tests set up, so neutralise it rather than depend on the machine.
+    vi.stubEnv("DISPATCH_VAPID_SUBJECT", "");
   });
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -68,6 +92,68 @@ describe("PushService", () => {
     const raw = JSON.parse(await readFile(join(dir, "vapid.json"), "utf8"));
     expect(raw.privateKey).toBe("PRIV");
     expect(raw.subject).toBeTruthy();
+  });
+
+  it("writes a VAPID subject a push service will actually accept", async () => {
+    // `mailto:dispatch@localhost` is what this used to default to, and Apple
+    // answers every push signed with it `403 {"reason":"BadJwtToken"}` — while
+    // FCM ignores the field, so desktop worked and no iPhone ever made a sound.
+    const { mock } = webPushMock();
+    const svc = new PushService({ bus, configDir: dir, dataDir: dir, webPush: mock });
+    const keys = await svc.vapidKeys();
+    expect(isValidVapidSubject(keys.subject)).toBe(true);
+  });
+
+  it("heals an existing @localhost subject without regenerating the keypair", async () => {
+    // Regenerating the keys would invalidate every registered device, so the
+    // repair has to be to the subject alone — an install that predates the fix
+    // starts working on restart with no phone re-registering anything.
+    await writeFile(
+      join(dir, "vapid.json"),
+      JSON.stringify({ publicKey: "PUB", privateKey: "PRIV", subject: "mailto:dispatch@localhost" }),
+    );
+    const { mock } = webPushMock();
+    const svc = new PushService({ bus, configDir: dir, dataDir: dir, webPush: mock });
+    const keys = await svc.vapidKeys();
+    expect(keys.publicKey).toBe("PUB");
+    expect(keys.privateKey).toBe("PRIV");
+    expect(isValidVapidSubject(keys.subject)).toBe(true);
+    // Persisted, not just patched in memory.
+    expect(JSON.parse(await readFile(join(dir, "vapid.json"), "utf8")).subject).toBe(keys.subject);
+  });
+
+  it("keeps a valid subject already on disk, and honours a valid override", async () => {
+    await writeFile(
+      join(dir, "vapid.json"),
+      JSON.stringify({ publicKey: "PUB", privateKey: "PRIV", subject: "mailto:me@example.com" }),
+    );
+    const { mock } = webPushMock();
+    const kept = new PushService({ bus, configDir: dir, dataDir: dir, webPush: mock });
+    expect((await kept.vapidKeys()).subject).toBe("mailto:me@example.com");
+
+    const overridden = new PushService({
+      bus,
+      configDir: dir,
+      dataDir: dir,
+      webPush: mock,
+      subject: "https://dispatch.example.com",
+    });
+    expect((await overridden.vapidKeys()).subject).toBe("https://dispatch.example.com");
+  });
+
+  it("refuses an invalid override rather than signing with it", async () => {
+    const errors: unknown[] = [];
+    const { mock } = webPushMock();
+    const svc = new PushService({
+      bus,
+      configDir: dir,
+      dataDir: dir,
+      webPush: mock,
+      subject: "mailto:dispatch@localhost",
+      onError: (e) => errors.push(e),
+    });
+    expect(isValidVapidSubject((await svc.vapidKeys()).subject)).toBe(true);
+    expect(errors).toHaveLength(1);
   });
 
   it("dedups a re-registration by endpoint rather than stacking copies", async () => {
@@ -230,10 +316,25 @@ describe("PushService", () => {
   it("sendTest reaches one device and reports an unknown endpoint", async () => {
     const { svc, sent } = make();
     await svc.subscribe(sub(1));
-    expect(await svc.sendTest("https://push.example/9")).toBe(false);
-    expect(await svc.sendTest(sub(1).endpoint)).toBe(true);
+    expect(await svc.sendTest("https://push.example/9")).toBeNull();
+    expect(await svc.sendTest(sub(1).endpoint)).toEqual({ ok: true });
     // The test push carries no chat — the SW must not try to focus chat "".
     expect(JSON.parse(sent[0]!.payload).chatId).toBe("");
+  });
+
+  it("sendTest reports the push service's refusal instead of claiming success", async () => {
+    // The bug this covers: a 403 from Apple came back as `true`, so a device
+    // that could never receive anything was indistinguishable from one that had
+    // just been reached — the only visible symptom of a total iOS outage.
+    const { mock } = webPushMock(() => 403);
+    const svc = new PushService({ bus, configDir: dir, dataDir: dir, webPush: mock });
+    await svc.subscribe(sub(1));
+    const result = await svc.sendTest(sub(1).endpoint);
+    expect(result?.ok).toBe(false);
+    expect(result?.statusCode).toBe(403);
+    expect(result?.error).toMatch(/VAPID subject/);
+    // A 403 is about our credentials, not about this device — it keeps its slot.
+    expect(await svc.list()).toHaveLength(1);
   });
 
   it("unsubscribe removes exactly one device", async () => {
