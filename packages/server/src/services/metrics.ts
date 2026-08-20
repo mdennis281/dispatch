@@ -802,11 +802,20 @@ export class MetricsService {
       // Still in the buffer — close it in place, and the row is written once,
       // complete. The common case by far: most tool calls finish inside a flush
       // interval, so most spans never cost an UPDATE at all.
+      //
+      // A span that already has an end is LEFT ALONE, matching what
+      // `AND end_ts IS NULL` does on the disk path. Without this the same
+      // duplicate close would extend a span or not depending purely on whether
+      // a flush happened to land between the two calls.
+      if (pending.endTs !== null) return;
       pending.endTs = Math.max(endTs, pending.startTs);
       if (extra?.ok !== undefined) pending.ok = extra.ok;
       if (extra?.reportedMs !== undefined) pending.reportedMs = extra.reportedMs;
       return;
     }
+    // Likewise first-close-wins for a row already on disk: a second close
+    // queued behind the first would overwrite it before either is applied.
+    if (this.spanCloses.has(key)) return;
     this.spanCloses.set(key, { endTs, ok: extra?.ok, reportedMs: extra?.reportedMs });
     this.maybeFlushSpans();
   }
@@ -913,8 +922,13 @@ export class MetricsService {
     groupExpr: string,
   ): Where {
     const w = this.spanWhere(from, to, live, filter);
+    // COALESCE, because "" IS the NULL group everywhere else in the feature —
+    // `spanLabelFor` renders it, and a filter chip sends it back to select the
+    // NULL rows. Without it the commonest group of all leaks out as a literal
+    // null: `run_id` is NULL for every main-loop span, so grouping by run would
+    // key the whole main loop on nothing.
     const sql = `WITH raw AS (
-      SELECT ${groupExpr} AS g, state, chat_id, run_id,
+      SELECT COALESCE(${groupExpr}, '') AS g, state, chat_id, run_id,
              CASE WHEN end_ts IS NULL THEN 1 ELSE 0 END AS still_open,
              MAX(start_ts, ?) AS s0, MIN(COALESCE(end_ts, ?), ?) AS e0
       FROM metric_span WHERE ${w.sql}
@@ -1198,11 +1212,15 @@ export class MetricsService {
         .all(...w.params) as { v: string; c: number }[];
       facets[dim] = rows.map((r) => ({ value: r.v, count: Number(r.c) }));
     }
+    // An open span's effective end is NOW, exactly as every read treats it —
+    // falling back to its START would leave the range short of the present for
+    // as long as anything is running, which is when someone is most likely to
+    // be looking.
     const range = this.db
       .prepare(
-        "SELECT MIN(start_ts) AS lo, MAX(COALESCE(end_ts, start_ts)) AS hi, COUNT(*) AS n FROM metric_span",
+        "SELECT MIN(start_ts) AS lo, MAX(COALESCE(end_ts, ?)) AS hi, COUNT(*) AS n FROM metric_span",
       )
-      .get() as { lo: number | null; hi: number | null; n: number } | undefined;
+      .get(live) as { lo: number | null; hi: number | null; n: number } | undefined;
     return {
       facets,
       range: { from: range?.lo ?? null, to: range?.hi ?? null },

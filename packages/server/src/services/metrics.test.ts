@@ -472,6 +472,26 @@ describe("MetricsService — recording spans", () => {
     next.dispose();
   });
 
+  it("ignores a second close, whichever side of a flush it lands on", () => {
+    // The disk path enforces this with `AND end_ts IS NULL`. If the buffer
+    // didn't, the same duplicate close would extend a span or not depending on
+    // whether a flush happened to land between the two calls.
+    const buffered = metrics.openSpan(span({ startTs: NOW - HOUR, toolUseId: "a" }));
+    metrics.closeSpan(buffered, NOW - HOUR + 1_000);
+    metrics.closeSpan(buffered, NOW - HOUR + 9_000, { ok: false });
+
+    const flushed = metrics.openSpan(span({ startTs: NOW - HOUR, toolUseId: "b" }));
+    metrics.flush();
+    metrics.closeSpan(flushed, NOW - HOUR + 1_000);
+    metrics.closeSpan(flushed, NOW - HOUR + 9_000, { ok: false });
+    metrics.flush();
+
+    for (const row of metrics.recentSpans()) {
+      expect(row.endTs).toBe(NOW - HOUR + 1_000);
+      expect(row.ok).toBeUndefined();
+    }
+  });
+
   it("keeps the runtime's own duration beside the observed one, never instead", () => {
     const key = metrics.openSpan(span({ state: "shell", startTs: NOW - HOUR }));
     metrics.closeSpan(key, NOW - HOUR + 10_000, { ok: false, reportedMs: 9_500 });
@@ -540,6 +560,25 @@ describe("MetricsService — span series", () => {
     expect(by.get("working")).toBe(30 * MIN);
     expect(by.get("blocked")).toBe(20 * MIN);
     expect(res.series.find((s) => s.key === "thinking")?.label).toBe("Thinking");
+  });
+
+  it("keys a NULL group as \"\", not as null", () => {
+    // `run_id` is NULL for every main-loop span, so this is the commonest group
+    // in the table rather than an edge case — a raw NULL here would key the
+    // whole main loop on nothing and skip the label the UI shows for it.
+    metrics.recordSpans([
+      span({ startTs: NOW - 10 * MIN, endTs: NOW - 5 * MIN, toolUseId: "main" }),
+      span({ runId: "task-1", startTs: NOW - 9 * MIN, endTs: NOW - 6 * MIN, toolUseId: "child" }),
+    ]);
+    const res = metrics.spanSeries({ groupBy: "runId", bucket: "day" });
+    const main = res.series.find((s) => s.key === "");
+    expect(main?.label).toBe("(main loop)");
+    expect(main?.total).toBe(5 * MIN);
+    expect(res.series.find((s) => s.key === "task-1")?.total).toBe(3 * MIN);
+    expect(metrics.spanTotals({ groupBy: "runId" }).totals.map((t) => t.key).sort()).toEqual([
+      "",
+      "task-1",
+    ]);
   });
 
   it("returns an empty response for a window with no spans", () => {
@@ -629,6 +668,14 @@ describe("MetricsService — span facets and retention", () => {
     expect(res.facets.identifier).toBeUndefined();
     expect(res.facets.runId).toBeUndefined();
     expect(res.rows).toBe(2);
+  });
+
+  it("stretches the range to now for a span that is still open", () => {
+    // The window controls read this range. An open span's effective end is now
+    // on every other read, and stopping at its START would leave the range
+    // short of the present exactly while something is running.
+    metrics.openSpan(span({ startTs: NOW - HOUR }));
+    expect(metrics.spanFacets().range).toEqual({ from: NOW - HOUR, to: NOW });
   });
 
   it("prunes spans that ENDED before the cut-off, and keeps the ones still running", () => {
