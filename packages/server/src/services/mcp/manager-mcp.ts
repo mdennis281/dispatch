@@ -1270,6 +1270,17 @@ export interface ManagerMcpContext {
   prRegistry?: ManagerMcpPrRegistry;
   /** SubApp launcher for this session (omitted → no `run_subapp` tool). */
   runner?: ManagerMcpRunner;
+  /**
+   * Names of the bundled browser MCP servers this session actually got, so
+   * `run_subapp` can tell the agent HOW to look at what it just started.
+   *
+   * The tool has always claimed the agent could "actually SEE your change
+   * running" and then returned a bare URL, which an agent has no way to open.
+   * Naming the tool that opens it is the difference between a capability being
+   * present and it being used. Empty/omitted → say nothing rather than point at
+   * tools this session does not have.
+   */
+  browserServers?: string[];
   /** MCP prewarm for this session's checkout (omitted → no `prewarm_mcp` tool). */
   prewarm?: ManagerMcpPrewarm;
   /** Chat spawner for this session (omitted → no `spawn_chat` tool). */
@@ -3950,9 +3961,18 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         }
         const r = await ctx.runner.launch({ chatId: ctx.chatId, subAppId: subApp, branch });
         const where = r.branch ? ` on ${r.branch}` : "";
+        // Point at the eyes, not just the address. See `browserServers`.
+        const look = r.url && ctx.browserServers?.length
+          ? ctx.browserServers.includes("playwright")
+            ? ` Look at it before calling this done: mcp__playwright__browser_navigate to that URL, ` +
+              `then mcp__playwright__browser_snapshot (cheap, tells you what is on the page) or ` +
+              `mcp__playwright__browser_take_screenshot (when the question is visual).`
+            : ` Look at it before calling this done: mcp__chrome-devtools__navigate_page to that URL, ` +
+              `then mcp__chrome-devtools__take_screenshot.`
+          : "";
         return textResult(
           r.url
-            ? `Started ${r.subAppId}${where} — ${r.status}. Open it at ${r.url}`
+            ? `Started ${r.subAppId}${where} — ${r.status}. Open it at ${r.url}.${look}`
             : `Started ${r.subAppId}${where} — ${r.status} (no URL yet; give it a moment and list again).`,
         );
       } catch (err) {

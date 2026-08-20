@@ -146,6 +146,88 @@ export const ManifestMcpServerSchema = z.object({
 });
 export type ManifestMcpServer = z.infer<typeof ManifestMcpServerSchema>;
 
+
+/* ------------------------------------------------------------ browser MCP */
+
+/** The browser MCP servers Dispatch ships with, by config name. */
+export const BROWSER_MCP_SERVERS = ["playwright", "chrome-devtools"] as const;
+export type BrowserMcpServer = (typeof BROWSER_MCP_SERVERS)[number];
+
+/**
+ * Which bundled browser servers a project gets, and how they drive the browser.
+ *
+ * These are not ordinary `mcpServers` entries. They ship INSIDE Dispatch — real
+ * dependencies of the server package, spawned with `node` — so a project opts in
+ * with a word instead of pasting an `npx` command that would download a package
+ * mid-task and, on Windows, fail to spawn at all (a `.cmd` shim needs a shell;
+ * see `needsShell` in tools/app/build-payload.mjs for the same bug in publish).
+ * Assembled in `services/mcp/browser-mcp.ts`.
+ *
+ * Accepted spellings in `.dispatch/project.yaml`:
+ *
+ *   browser: off                       # never inject one
+ *   browser: [playwright]              # exactly these, gate ignored
+ *   browser:                           # long form, for viewport / headed
+ *     servers: [playwright, chrome-devtools]
+ *     headless: false
+ */
+export const BrowserMcpConfigSchema = z.object({
+  /**
+   * `auto` — inject BOTH, but only for a project declaring a sub-app with a
+   * `url`, i.e. one that actually has something to look at. A backend-only repo
+   * pays no context for tools it can't use. An explicit list skips that gate.
+   */
+  servers: z
+    .union([z.literal("auto"), z.literal("off"), z.array(z.enum(BROWSER_MCP_SERVERS))])
+    .default("auto"),
+  /**
+   * Headless by default, which is NEITHER package's own default — both launch
+   * headed. On a box running several agents in parallel that means windows
+   * stealing focus every time one looks at something, and on a headless server
+   * it means the tool just fails.
+   */
+  headless: z.boolean().default(true),
+  /**
+   * Which browser playwright drives. Defaults to the SYSTEM Chrome, not the
+   * bundled Chromium that is playwright's own default, because the bundled one
+   * is version-pinned to the `@playwright/mcp` release and is simply absent
+   * until someone runs `playwright install` — the first tool call then fails
+   * with "Browser chrome-for-testing is not installed". Verified: a machine with
+   * five cached Chromium builds still lacked the pinned one.
+   *
+   * System Chrome needs no download, and chrome-devtools-mcp requires it
+   * anyway, so this makes the whole feature work out of the box on one browser.
+   * The other values all require `playwright install <engine>` first.
+   */
+  engine: z.enum(["chrome", "chromium", "firefox", "webkit", "msedge"]).default("chrome"),
+  /** `WIDTHxHEIGHT`, applied to both so their screenshots are comparable. */
+  viewport: z
+    .string()
+    .regex(/^\d+x\d+$/, 'viewport must look like "1280x800"')
+    .default("1280x800"),
+});
+export type BrowserMcpConfig = z.infer<typeof BrowserMcpConfigSchema>;
+
+/**
+ * Manifest spelling: both shorthands normalize into the object above so
+ * everything downstream reads one shape.
+ *
+ * `browser: off` needs the boolean arm because YAML 1.1 — which js-yaml still
+ * implements — resolves a bare `off`/`no` to boolean FALSE before any schema
+ * sees it. Without that arm the most natural way to write "don't" would fail
+ * validation with a type error about a boolean the author never typed.
+ */
+export const ManifestBrowserSchema = z.preprocess(
+  (v: unknown) =>
+    v === false || v === "off"
+      ? { servers: "off" }
+      : v === true
+        ? { servers: "auto" }
+        : Array.isArray(v)
+          ? { servers: v }
+          : v,
+  BrowserMcpConfigSchema,
+);
 /** Default session posture for chats started under this project. */
 export const ManifestDefaultsSchema = z.object({
   mode: z.string().optional(),
@@ -201,6 +283,8 @@ export const ProjectManifestSchema = z.object({
   instructions: z.array(ManifestInstructionSchema).optional(),
   subApps: z.array(ManifestSubAppSchema).optional(),
   mcpServers: z.array(ManifestMcpServerSchema).optional(),
+  /** Bundled browser MCP servers (see {@link ManifestBrowserSchema}). */
+  browser: ManifestBrowserSchema.optional(),
   /** Dir override for memories (default `memory/`). */
   memory: z.string().optional(),
   /** Dir override for agents (default `agents/`). */
@@ -321,6 +405,8 @@ export const ProjectConfigSchema = z.object({
   subApps: z.array(SubAppSchema).default([]),
   /** MCP servers keyed by name (as the store + SDK consume them). */
   mcpServers: z.record(z.string(), McpServerConfigSchema).default({}),
+  /** Normalized browser-MCP block; absent → the `auto` default applies. */
+  browser: BrowserMcpConfigSchema.optional(),
   /** Agents loaded from `agents/*.md` (mapped onto the store AgentConfig). */
   agents: z.array(AgentConfigSchema).default([]),
   /** Modes loaded from `modes/*.yaml`. */
