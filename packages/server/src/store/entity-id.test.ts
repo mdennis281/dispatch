@@ -160,6 +160,24 @@ describe("Store refuses an id that would leave its root", () => {
     expect(mutex.size).toBeGreaterThan(before);
   });
 
+  it("the basename barrier is a no-op for every id the allowlist admits", async () => {
+    // `assertEntityId` runs its result through `basename` (a CodeQL-recognised
+    // path-injection barrier). That must not quietly rewrite a legal id — if it
+    // ever did, `getChat` would look in the wrong place and a chat would vanish.
+    for (const id of ["V1StGXR8_Z5jdHi6B-myT", "auto", "hivebreak", "a", "A-_9"]) {
+      const saved = await store.saveChat(chat(id));
+      expect(saved.id).toBe(id);
+      expect((await store.getChat(id))?.id).toBe(id);
+      // Exact, not `toContain`: a short id like "a" occurs all over an absolute
+      // temp path, so a substring check would pass even if the segment HAD been
+      // rewritten — which is the only thing this test exists to catch.
+      expect(store.chatTranscriptPath(id)).toBe(join(dir, "chats", id, "messages.jsonl"));
+    }
+    expect((await store.listChats()).map((c) => c.id).sort()).toEqual(
+      ["A-_9", "V1StGXR8_Z5jdHi6B-myT", "a", "auto", "hivebreak"].sort(),
+    );
+  });
+
   it("project memory paths are guarded too", () => {
     expect(() => store.projectMemoryDir("../../evil")).toThrow(InvalidEntityIdError);
     expect(() => store.projectMemoryStatsFile("../../evil")).toThrow(InvalidEntityIdError);

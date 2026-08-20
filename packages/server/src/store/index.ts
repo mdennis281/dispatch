@@ -269,7 +269,21 @@ export class InvalidEntityIdError extends Error {
  */
 function assertEntityId(kind: string, id: string): string {
   if (!isEntityId(id)) throw new InvalidEntityIdError(kind);
-  return id;
+  // A NO-OP for anything the allowlist admits — there are no separators left to
+  // strip. It is here for two reasons anyway.
+  //
+  // Structurally, it means the containment guarantee survives someone later
+  // widening ENTITY_ID: whatever the regex comes to accept, what reaches the
+  // path has no directory component.
+  //
+  // And practically, CodeQL's `js/path-injection` recognises `path.basename` as
+  // a barrier but does NOT recognise a regex test as one. It tracked the taint
+  // straight through `return id` and kept alert #27 open on `main` after the
+  // real fix landed, with the flow running through this very function. A
+  // standing false positive on a high-severity rule is not free: it red-gates
+  // every future PR that touches these lines (which is how the original bug was
+  // found), and it trains people to wave alerts through.
+  return basename(id);
 }
 
 /** Parse + validate a window of raw JSONL lines, tolerating a torn last line. */
