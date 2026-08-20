@@ -7,6 +7,7 @@
 import type {
   Project,
   Chat,
+  ChatMediaItem,
   ChatMessage,
   AgentConfig,
   AgentConfigInput,
@@ -273,6 +274,11 @@ export function assetUrl(chatId: string, image: { path: string }): string {
  * them would mean either caching a live file forever or re-fetching an
  * immutable one on every scroll.
  */
+/** Every image in a chat, in transcript order — independent of the window. */
+export function chatMediaUrl(chatId: string): string {
+  return `${BASE}/api/chats/${chatId}/media`;
+}
+
 export function fsAssetUrl(chatId: string, path: string): string {
   return `${BASE}/api/chats/${chatId}/fs-asset?path=${encodeURIComponent(path)}`;
 }
@@ -370,6 +376,15 @@ export const api = {
     ) =>
       put<Chat>(`/api/chats/${id}`, body),
     remove: (id: string) => del<void>(`/api/chats/${id}`),
+    /**
+     * Every image in the chat, in transcript order.
+     *
+     * Deliberately NOT derived from `messages` above: that is a 150-row window,
+     * so a gallery built from it silently reports a total that measures how far
+     * the human scrolled rather than how many pictures the chat holds.
+     */
+    media: async (id: string) =>
+      (await get<{ items: ChatMediaItem[] }>(`/api/chats/${id}/media`)).items,
     /**
      * A WINDOW of a chat's transcript, newest-first-biased and LEAN: bulky tool
      * payloads the collapsed cards don't render arrive clipped + flagged (see

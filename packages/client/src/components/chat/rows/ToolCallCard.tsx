@@ -15,7 +15,7 @@ import { hydrateFullRows } from "../../../stores/index.js";
 import { useChats } from "../../../stores/chats.js";
 import { usePanels } from "../../../stores/panels.js";
 import { toolFileTarget, openCodeViewer } from "../../monaco/index.js";
-import { mergeImages, recoverResultMedia } from "../../../lib/resultMedia.js";
+import { mergeImages, recoverResultMedia } from "@dispatch/shared";
 
 /**
  * The raw tool-result payload (string as mono block, object as JSON).

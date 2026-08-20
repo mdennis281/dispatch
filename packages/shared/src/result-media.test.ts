@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mergeImages, recoverResultMedia } from "./resultMedia.js";
+import { mergeImages, recoverResultMedia } from "./result-media.js";
 
 const PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";

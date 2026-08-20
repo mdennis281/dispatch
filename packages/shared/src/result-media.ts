@@ -1,4 +1,5 @@
-import { parseInlineMedia, type ImageRef } from "@dispatch/shared";
+import { parseInlineMedia } from "./media-blocks.js";
+import type { ImageRef } from "./common.js";
 
 /**
  * Recovering media from a tool result AT RENDER TIME.

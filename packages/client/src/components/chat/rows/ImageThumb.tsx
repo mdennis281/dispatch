@@ -111,7 +111,7 @@ export function ImageThumb({
         )}
       </figure>
       {zoomed && (
-        <MediaViewer chatId={chatId} assets={[img]} onClose={() => setZoomed(false)} />
+        <MediaViewer chatId={chatId} assets={[img]} path={img.path} onClose={() => setZoomed(false)} />
       )}
     </>
   );

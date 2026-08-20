@@ -112,6 +112,12 @@ const SHOTS = [
   { name: "bsmt-halfdone.png", rgb: [190, 80, 220] as const },
 ];
 
+/** Enough prose to push the early images past `TRANSCRIPT_PAGE_SIZE` (150). */
+const FILLER_ROWS = 200;
+
+/** Images that land inside the window a chat opens with. */
+const IN_WINDOW = 3;
+
 let server: ChildProcess | undefined;
 let dataDir: string | undefined;
 
@@ -179,7 +185,13 @@ async function seed(dir: string): Promise<{ chatId: string }> {
     writeFileSync(join(assetsDir, asset), png(...shot.rgb));
 
     if (i < 2) push({ kind: "assistant", text: `Here is ${shot.name}:` });
-    else if (i === 2) push({ kind: "assistant", text: "Now the rooms:" });
+    else if (i === 2) {
+      // Push the first two images clear of the 150-row transcript WINDOW. A
+      // gallery derived from the loaded rows reported a total that measured how
+      // far the human had scrolled; this is what makes that visible to a test.
+      for (let f = 0; f < FILLER_ROWS; f += 1) push({ kind: "assistant", text: `filler ${f}` });
+      push({ kind: "assistant", text: "Now the rooms:" });
+    }
     push({
       kind: "tool_use",
       toolUseId: `tu${i}`,
@@ -372,6 +384,25 @@ test("a Read of an image shows a thumbnail in the transcript", async ({ page }) 
   await expect(group).toBeVisible();
   await page.waitForTimeout(500);
   await page.screenshot({ path: join(artifacts, "media-group.png"), fullPage: false });
+});
+
+test("the gallery is the whole chat, not the loaded window", async ({ page }) => {
+  await openChat(page);
+
+  // NO scrolling back: only the tail of the transcript is loaded, so only the
+  // last three images exist as rows at all.
+  await expect(page.locator("figure img")).toHaveCount(IN_WINDOW);
+
+  await page.locator("figure img").first().click();
+  const viewer = page.getByRole("dialog", { name: "Media viewer" });
+  await expect(viewer).toBeVisible();
+
+  // …and yet the viewer knows about all five, and places this one correctly.
+  // Before the server answered this, it said "1/3".
+  await expect(viewer.getByTestId("viewer-position")).toHaveText(
+    `${SHOTS.length - IN_WINDOW + 1}/${SHOTS.length}`,
+  );
+  await expect(viewer.getByRole("button", { name: "Previous" })).toBeEnabled();
 });
 
 test("clicking a thumbnail opens the viewer on THAT image", async ({ page }) => {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import type { ChatMessage } from "@dispatch/shared";
-import { collectChatMedia, indexOfAsset, labelForAsset } from "./chatMedia.js";
+import type { ChatMessage } from "./messages.js";
+import { collectChatMedia, indexOfAsset, labelForAsset } from "./media-index.js";
 
 const base = { chatId: "c", ts: 0, turn: 1 } as const;
 

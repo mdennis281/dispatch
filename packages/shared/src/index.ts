@@ -21,6 +21,8 @@ export * from "./mcp.js";
 export * from "./file-tools.js";
 export * from "./fs-entry.js";
 export * from "./media-blocks.js";
+export * from "./result-media.js";
+export * from "./media-index.js";
 export * from "./media-types.js";
 export * from "./messages.js";
 export * from "./notify.js";

@@ -10,7 +10,7 @@ import type { FastifyInstance } from "fastify";
 import { extname } from "node:path";
 import { tmpdir } from "node:os";
 import { nanoid } from "nanoid";
-import { ImageRefSchema, chatRoot } from "@dispatch/shared";
+import { ImageRefSchema, chatRoot, collectChatMedia } from "@dispatch/shared";
 import { extFromMediaType, mediaTypeFromName } from "../services/media-types.js";
 import { identifyMedia } from "../services/media-sniff.js";
 import {
@@ -176,6 +176,30 @@ export function registerAssetRoutes(app: FastifyInstance): void {
       return reply.send(stream);
     },
   );
+
+  /**
+   * Every image in the chat, in transcript order — the viewer's gallery.
+   *
+   *   GET /api/chats/:id/media → { items: [{ asset, rowId }] }
+   *
+   * WHY THE SERVER ANSWERS THIS: the client's transcript is a 150-row WINDOW,
+   * and a real session runs to hundreds of rows. Building the gallery from the
+   * rows that happen to be loaded meant a chat with eleven screenshots offered
+   * five, reported "1/5", and let the arrows reach only the recent tail — a
+   * total that was really a measure of how far the human had scrolled.
+   *
+   * Only the whole transcript can answer it, and only the server has that
+   * without paging the client through every row it has no other reason to hold.
+   */
+  app.get<{ Params: { id: string } }>("/api/chats/:id/media", async (req, reply) => {
+    const chat = await store.getChat(req.params.id);
+    if (!chat) return reply.code(404).send({ error: "chat not found" });
+    // No limit: the gallery IS the whole chat, which is the entire point.
+    // `collectChatMedia` is the same function the client used to run over its
+    // window, so the two can't disagree about what counts as an image.
+    const rows = await store.readMessages(req.params.id);
+    return { items: collectChatMedia(rows) };
+  });
 
   /**
    * A file the AGENT wrote, served as a renderable asset.

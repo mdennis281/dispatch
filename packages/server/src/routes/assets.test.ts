@@ -19,10 +19,11 @@ const PNG_B64 =
 
 let dir: string;
 let app: FastifyInstance;
+let store: Store;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "cm-assets-"));
-  const store = new Store(dir);
+  store = new Store(dir);
   await store.init();
   const config = { ...loadConfig(), dataDir: dir };
   app = await buildApp({ config, store, bus: new EventBus() });
@@ -114,6 +115,56 @@ describe("chat assets", () => {
     const ref = up.json() as { path: string; mimeType: string };
     expect(ref.mimeType).toBe("image/png");
     expect(ref.path.endsWith(".png")).toBe(true);
+  });
+
+  describe("chat media index", () => {
+    it("returns every image in the chat, past the transcript window", async () => {
+      const chatId = await makeChat();
+      const bytes = Buffer.from(PNG_B64, "base64");
+      await store.writeChatAsset(chatId, "old.png", bytes);
+      await store.writeChatAsset(chatId, "new.png", bytes);
+
+      // 400 rows, with images near the START — outside the 150-row window a
+      // client opens with. Deriving the gallery from that window is what made a
+      // chat with eleven screenshots report five.
+      const rows: unknown[] = [];
+      const push = (row: Record<string, unknown>) =>
+        rows.push({ id: `r${rows.length}`, chatId, ts: rows.length, turn: 1, ...row });
+      push({ kind: "tool_use", toolUseId: "t0", name: "Read", input: { file_path: "a/old.png" } });
+      push({
+        kind: "tool_result",
+        toolUseId: "t0",
+        ok: true,
+        content: [],
+        images: [{ id: "i0", path: "assets/old.png", mimeType: "image/png" }],
+      });
+      for (let i = 0; i < 400; i += 1) push({ kind: "assistant", text: `filler ${i}` });
+      push({ kind: "tool_use", toolUseId: "t1", name: "Read", input: { file_path: "b/new.png" } });
+      push({
+        kind: "tool_result",
+        toolUseId: "t1",
+        ok: true,
+        content: [],
+        images: [{ id: "i1", path: "assets/new.png", mimeType: "image/png" }],
+      });
+      await writeFile(
+        join(dir, "chats", chatId, "messages.jsonl"),
+        rows.map((r) => JSON.stringify(r)).join(String.fromCharCode(10)) +
+          String.fromCharCode(10),
+      );
+
+      const got = await app.inject({ method: "GET", url: `/api/chats/${chatId}/media` });
+      expect(got.statusCode).toBe(200);
+      const { items } = got.json() as { items: { asset: { path: string; alt?: string } }[] };
+      expect(items.map((i) => i.asset.path)).toEqual(["assets/old.png", "assets/new.png"]);
+      // Captioned from the tool call, not the content-addressed asset name.
+      expect(items.map((i) => i.asset.alt)).toEqual(["old.png", "new.png"]);
+    });
+
+    it("404s for a chat that does not exist", async () => {
+      const got = await app.inject({ method: "GET", url: "/api/chats/nope/media" });
+      expect(got.statusCode).toBe(404);
+    });
   });
 
   describe("fs-asset — a file the agent wrote and only mentioned", () => {
