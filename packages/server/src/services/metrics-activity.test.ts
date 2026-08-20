@@ -300,3 +300,118 @@ describe("ActivityTracker — subagents are their own actors", () => {
     expect(sink.of("task-1")).toMatchObject([{ state: "shell", startTs: 10, endTs: 999 }]);
   });
 });
+
+describe("ActivityTracker — one human wait per actor", () => {
+  it("counts a self-gated tool's wait once, under the tool's own name", () => {
+    // `spawn_chat` is itself classified waiting_human AND raises the consent
+    // card it is waiting for, so the card's permission wait opened nested
+    // inside the tool call: production billed one human wait twice. The tool
+    // span is the one that survives — it carries the fuller identifier.
+    sink.at(0);
+    track.turnStart();
+    sink.at(10);
+    track.toolStart(MAIN_ACTOR, "tu-1", "mcp__manager__spawn_chat");
+    sink.at(20);
+    track.blocked(MAIN_ACTOR, "perm-1", "waiting_human", "spawn_chat");
+    sink.at(900);
+    track.unblocked("perm-1");
+    sink.at(1000);
+    track.toolEnd("tu-1");
+    sink.at(1000);
+    track.turnEnd();
+
+    expect(sink.of()).toMatchObject([
+      { state: "generating", startTs: 0, endTs: 10 },
+      { state: "waiting_human", identifier: "mcp__manager__spawn_chat", startTs: 10, endTs: 1000 },
+      { state: "generating", startTs: 1000, endTs: 1000 },
+    ]);
+    expect(sink.msByState()).toEqual({ generating: 10, waiting_human: 990 });
+    expect(sink.running).toEqual([]);
+  });
+
+  it("counts it once in the legacy order too, where the prompt lands first", () => {
+    // The `canUseTool` gate registers the permission before the tool_use block
+    // arrives, so the same pair nests the other way round. The wait the human
+    // actually served is one wait either way, and the answer ends it.
+    sink.at(0);
+    track.turnStart();
+    sink.at(10);
+    track.blocked(MAIN_ACTOR, "perm-1", "waiting_human", "spawn_chat");
+    sink.at(20);
+    track.toolStart(MAIN_ACTOR, "tu-1", "mcp__manager__spawn_chat");
+    sink.at(900);
+    track.unblocked("perm-1");
+    sink.at(1000);
+    track.toolEnd("tu-1"); // the suppressed span registered no id: a no-op
+    sink.at(1000);
+    track.turnEnd();
+
+    expect(sink.of()).toMatchObject([
+      { state: "generating", startTs: 0, endTs: 10 },
+      { state: "waiting_human", identifier: "spawn_chat", startTs: 10, endTs: 900 },
+      { state: "generating", startTs: 900, endTs: 1000 },
+    ]);
+    expect(sink.msByState()).toEqual({ generating: 110, waiting_human: 890 });
+    expect(sink.running).toEqual([]);
+  });
+
+  it("leaves an ordinary prompt-then-tool sequence alone", () => {
+    // What is suppressed is an OVERLAP, not the pairing: Bash's permission is
+    // answered before Bash starts, so both spans are real and both stay.
+    sink.at(0);
+    track.turnStart();
+    sink.at(10);
+    track.blocked(MAIN_ACTOR, "perm-1", "waiting_human", "Bash");
+    sink.at(100);
+    track.unblocked("perm-1");
+    sink.at(100);
+    track.toolStart(MAIN_ACTOR, "tu-1", "Bash");
+    sink.at(300);
+    track.toolEnd("tu-1");
+    sink.at(300);
+    track.turnEnd();
+
+    expect(sink.of().map((s) => [s.state, s.identifier])).toEqual([
+      ["generating", "turn"],
+      ["waiting_human", "Bash"],
+      ["generating", "turn"],
+      ["shell", "Bash"],
+      ["generating", "turn"],
+    ]);
+    expect(sink.msByState()).toEqual({ generating: 10, waiting_human: 90, shell: 200 });
+  });
+
+  it("lets two actors wait on their own human at once", () => {
+    // Suppression is per actor. A subagent's question and the main loop's are
+    // two people being waited on, not one wait seen twice, and folding them
+    // together would lose whichever arrived second entirely.
+    sink.at(0);
+    track.turnStart();
+    sink.at(10);
+    track.toolStart("task-1", "c1", "mcp__manager__ask_user", undefined, "worker");
+    sink.at(20);
+    track.blocked(MAIN_ACTOR, "perm-1", "waiting_human", "AskUserQuestion");
+    expect(sink.running.map((s) => [s.runId, s.state])).toEqual([
+      ["task-1", "waiting_human"],
+      [MAIN_ACTOR, "waiting_human"],
+    ]);
+
+    sink.at(120);
+    track.unblocked("perm-1");
+    sink.at(200);
+    track.toolEnd("c1");
+    sink.at(250);
+    track.turnEnd();
+
+    expect(sink.of("task-1")).toMatchObject([
+      { state: "waiting_human", identifier: "mcp__manager__ask_user", startTs: 10, endTs: 200 },
+      { state: "generating", startTs: 200, endTs: 250 },
+    ]);
+    expect(sink.of(MAIN_ACTOR)).toMatchObject([
+      { state: "generating", startTs: 0, endTs: 20 },
+      { state: "waiting_human", identifier: "AskUserQuestion", startTs: 20, endTs: 120 },
+      { state: "generating", startTs: 120, endTs: 250 },
+    ]);
+    expect(sink.msByState().waiting_human).toBe(290);
+  });
+});
