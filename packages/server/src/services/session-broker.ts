@@ -28,6 +28,7 @@ import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { basename, extname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { realpath, stat } from "node:fs/promises";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
+import { buildBrowserMcpServers } from "./mcp/browser-mcp.js";
 import { McpPrewarmService } from "./mcp-prewarm.js";
 import { tmpdir } from "node:os";
 import {
@@ -74,6 +75,8 @@ import type {
   ModeConfig,
   McpServerConfig,
   SkillConfig,
+  SubApp,
+  BrowserMcpConfig,
   ContextUsage,
   ResolvedWorkflow,
   WorkflowExemption,
@@ -708,6 +711,14 @@ export interface BrokerProjectConfig {
   /** A project's config-sourced skills (from `.dispatch/skills/`), or `[]`.
    *  Materialized into the session cwd's `.claude/skills/` so the SDK finds them. */
   getSkills(projectId: string): SkillConfig[];
+  /** A project's bundled-browser block, or undefined when the manifest says
+   *  nothing — which means the `auto` default, NOT off. Optional so older fakes
+   *  stay valid. */
+  getBrowserConfig?(projectId: string): BrowserMcpConfig | undefined;
+  /** A project's config-sourced sub-apps. Read from config rather than the
+   *  store copy so a live manifest edit gates the browser servers on the next
+   *  session. Optional so older fakes stay valid. */
+  getSubApps?(projectId: string): SubApp[];
   /** A project's authored spawn-chat consent override, or null when it has none
    *  (then the app setting decides). Optional so older fakes stay valid. */
   getSpawnAutoApprove?(projectId: string): boolean | null;
@@ -4543,10 +4554,27 @@ export class SessionBroker {
     // friends. Without this every worktree's server runs in the primary
     // checkout on one shared port — and a server that adopts a healthy dev
     // server on that port then reports on the WRONG tree's code.
+    // The bundled browser servers (playwright / chrome-devtools) go UNDERNEATH
+    // everything: they are Dispatch's defaults, so a project that declares a
+    // server of the same name under `mcpServers` overrides them outright. Read
+    // subApps from config first for the same reason `configMcp` is — so a live
+    // manifest edit takes effect on the next session rather than the next sync.
+    const browserMcp = buildBrowserMcpServers({
+      config: projectId ? this.projectConfig?.getBrowserConfig?.(projectId) : undefined,
+      subApps: (projectId ? this.projectConfig?.getSubApps?.(projectId) : undefined) ??
+        project?.subApps ??
+        [],
+      chatId: session.chatId,
+      onUnavailable: (name, pkg) =>
+        console.warn(
+          `[Dispatch] browser MCP "${name}" is configured but ${pkg} could not be ` +
+            `resolved — its tools will be missing from this session.`,
+        ),
+    });
     const externalMcp =
       projectId && cwd
         ? await resolveMcpServers(
-            { ...(project?.mcpServers ?? {}), ...configMcp },
+            { ...browserMcp, ...(project?.mcpServers ?? {}), ...configMcp },
             {
               projectId,
               cwd,
@@ -4556,13 +4584,15 @@ export class SessionBroker {
             },
             this.mcpPorts,
           )
-        : { ...(project?.mcpServers ?? {}), ...configMcp };
+        : { ...browserMcp, ...(project?.mcpServers ?? {}), ...configMcp };
     options.mcpServers = {
       ...(externalMcp as unknown as Record<string, SdkMcpServerConfig>),
       manager: createManagerMcpServer({
         chatId: session.chatId,
         bus: this.bus,
         broker: this,
+        // So `run_subapp` can name the tool that opens the URL it returns.
+        browserServers: Object.keys(browserMcp),
         // Bind the terminal runner to this session's chat + default cwd (its
         // worktree, else the repo root), so the agent just picks a name.
         terminals: terminals

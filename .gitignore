@@ -58,3 +58,8 @@ __pycache__/
 
 # One-off local captures. Curated product images belong under docs/assets/.
 .artifacts/
+
+# Playwright MCP's default dump dir, for a server run WITHOUT the --output-dir
+# Dispatch passes it (a hand-rolled config, or npx by hand). It writes
+# page-*.png/.yml straight into the cwd — i.e. whatever checkout you are in.
+.playwright-mcp/

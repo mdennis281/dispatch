@@ -88,6 +88,26 @@ get one. See `needsShell` in `tools/app/build-payload.mjs`.
 playwright suites (`pnpm --filter @dispatch/client test` / `e2e`) that the root
 script deliberately does not run — don't assume green means the SPA is tested.
 
+## Verify UI changes by LOOKING at them.
+
+`pnpm test` doesn't run the client suites (above), and nothing in this repo
+asserts what a component looks like. A UI change that builds and type-checks has
+been verified by nobody.
+
+Both bundled browser MCPs are injected into every chat here — the `dev-server`
+sub-app declares a `url`, which is what the `auto` gate reads. So there is no
+excuse left:
+
+1. `run_subapp` the dev server, and note the port it ACTUALLY got. It is not
+   4319 when another agent already holds that one.
+2. `mcp__playwright__browser_navigate` there, then `browser_snapshot` for "is it
+   present, does it say the right thing" — an a11y tree, far cheaper than a
+   picture — and `browser_take_screenshot` when the question is genuinely visual.
+3. `mcp__chrome-devtools__list_console_messages` when it renders but misbehaves.
+
+Screenshots render inline in the transcript, so a capture of the thing working
+is worth more than a paragraph asserting that it does.
+
 ## Comments here explain WHY.
 
 The existing code comments cite the specific failure that motivated the code —

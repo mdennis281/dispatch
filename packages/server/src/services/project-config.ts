@@ -60,6 +60,7 @@ import {
   type AgentConfig,
   type SkillConfig,
   type SubApp,
+  type BrowserMcpConfig,
   type McpServerConfig,
   type WorkflowConfig,
 } from "@dispatch/shared";
@@ -453,6 +454,15 @@ export class ProjectConfigService {
   }
 
   /**
+   * This project's bundled-browser block. `undefined` means the manifest said
+   * nothing, which is NOT the same as `off` — the `auto` default still applies
+   * and is resolved in `browser-mcp.ts`.
+   */
+  getBrowserConfig(projectId: string): BrowserMcpConfig | undefined {
+    return this.getConfig(projectId)?.browser;
+  }
+
+  /**
    * A project's config-sourced sub-apps (mapped onto the store {@link SubApp}
    * shape), or `[]` when it has no `.dispatch/`. These are merged over the
    * `.data` record (config wins on id; `.data`-only sub-apps survive) into the
@@ -613,6 +623,7 @@ export class ProjectConfigService {
       shipCmd: manifest.ship,
       workflow: manifest.workflow,
       spawnChat: manifest.spawnChat,
+      browser: manifest.browser,
       defaults: manifest.defaults,
       instructions,
       instructionsText: instructionsText || undefined,

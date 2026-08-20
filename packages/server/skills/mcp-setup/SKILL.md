@@ -25,6 +25,7 @@ rest is split out — read the one you need, not all four.
 | If you're… | Read |
 |---|---|
 | Running several chats/worktrees and they fight over a port | [references/per-worktree.md](references/per-worktree.md) |
+| Driving a browser / looking at the UI you just built | [references/browser.md](references/browser.md) |
 | Returning a screenshot, video, or file from a tool | [references/outputs.md](references/outputs.md) |
 | Staring at a server that won't connect or shows no tools | [references/troubleshooting.md](references/troubleshooting.md) |
 | Writing a new MCP server | [references/authoring.md](references/authoring.md) |
