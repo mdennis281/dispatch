@@ -170,6 +170,65 @@ const MIGRATIONS: ReadonlyArray<string> = [
     value TEXT NOT NULL
   );
   `,
+  // 3 — the runtime half of the ledger. Migration 2 records WHAT an agent
+  // reached for; this records WHERE THE TIME WENT. One row per stretch of wall
+  // clock an actor spent in one state.
+  //
+  // A separate table rather than a `duration_ms` column on `metric`, because
+  // the two aggregate differently and irreconcilably: an event has a timestamp
+  // and lands in exactly one bucket, while a span has a WIDTH and a four-hour
+  // one starting at 23:00 belongs to two days. Bolting a width onto the event
+  // table would mean every existing COUNT(*) query silently answering a
+  // different question depending on which rows had one.
+  //
+  // No JSON body here either, for the same reason as `metric`: nothing reads a
+  // span row whole except the activity tail.
+  `
+  CREATE TABLE metric_span (
+    seq         INTEGER PRIMARY KEY,
+    start_ts    INTEGER NOT NULL,
+    -- NULL means STILL OPEN. Reads clip an open span to now, and the boot sweep
+    -- closes any left behind by a crash at the last heartbeat (see
+    -- MetricsService.recoverOpenSpans) rather than letting one read as a
+    -- three-day tool call.
+    end_ts      INTEGER,
+    state       TEXT    NOT NULL,
+    identifier  TEXT    NOT NULL,
+    detail      TEXT,
+    project_id  TEXT,
+    chat_id     TEXT,
+    -- The subagent run's id, or NULL for the chat's main loop. (chat_id, run_id)
+    -- is the ACTOR: the unit whose spans form one timeline and whose intervals
+    -- are unioned for a wall-clock figure.
+    run_id      TEXT,
+    agent       TEXT,
+    subagent    TEXT,
+    model       TEXT,
+    harness     TEXT,
+    turn        INTEGER,
+    ok          INTEGER,
+    -- The runtime's own duration, when it reports one. Stored beside the
+    -- observed wall clock and never summed with it — one clock per install is
+    -- what makes a Claude hour and a Codex hour comparable.
+    reported_ms INTEGER,
+    truncated   INTEGER,
+    source      TEXT    NOT NULL DEFAULT 'live',
+    -- Same idempotency discipline as metric.event_key, and double-duty: this
+    -- is also the handle a caller closes an open span by, so the recorder never
+    -- has to hold a rowid it hasn't been assigned yet.
+    span_key    TEXT    NOT NULL UNIQUE
+  );
+  -- Every window read is a range over start_ts, optionally narrowed.
+  CREATE INDEX metric_span_start   ON metric_span(start_ts);
+  CREATE INDEX metric_span_state   ON metric_span(state, start_ts);
+  CREATE INDEX metric_span_project ON metric_span(project_id, start_ts);
+  -- The union pass walks spans actor by actor in time order. With this index
+  -- that is an ordered scan instead of a sort of the whole window.
+  CREATE INDEX metric_span_actor   ON metric_span(chat_id, run_id, start_ts);
+  -- Partial: the boot sweep asks only for the handful a crash left open, and
+  -- this keeps that from scanning a table of millions of closed ones.
+  CREATE INDEX metric_span_open    ON metric_span(start_ts) WHERE end_ts IS NULL;
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

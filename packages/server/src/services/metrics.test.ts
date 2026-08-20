@@ -3,7 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateDb } from "../store/db.js";
-import { MetricsService, eventKey, type MetricInput } from "./metrics.js";
+import {
+  MetricsService,
+  eventKey,
+  type MetricInput,
+  type MetricSpanInput,
+} from "./metrics.js";
 
 let dir: string;
 let db: StateDb;
@@ -381,5 +386,306 @@ describe("MetricsService — retention", () => {
     metrics.flush();
     expect(metrics.prune(NOW - 5 * DAY)).toBe(1);
     expect(metrics.stats().rows).toBe(1);
+  });
+});
+
+/* ========================================================================== */
+/*                              RUNTIME SPANS                                 */
+/* ========================================================================== */
+
+/** Midnight UTC on NOW's day — the boundary the straddle tests cross. */
+const MIDNIGHT = Date.UTC(2026, 7, 18);
+const MIN = 60_000;
+
+/** Shorthand for a closed tool span. */
+function span(over: Partial<MetricSpanInput> = {}): MetricSpanInput {
+  return {
+    state: "tool",
+    identifier: "Read",
+    chatId: "c1",
+    projectId: "p1",
+    startTs: NOW - HOUR,
+    ...over,
+  };
+}
+
+describe("MetricsService — recording spans", () => {
+  it("writes one complete row when a span opens and closes before the flush", () => {
+    const key = metrics.openSpan(span({ startTs: NOW - HOUR }));
+    metrics.closeSpan(key, NOW - HOUR + 5_000);
+    expect(metrics.stats().spansBuffered).toBe(1);
+    expect(metrics.flush()).toBe(1);
+    expect(metrics.recentSpans()[0]).toMatchObject({
+      startTs: NOW - HOUR,
+      endTs: NOW - HOUR + 5_000,
+      state: "tool",
+    });
+  });
+
+  it("applies a close to a span already on disk", () => {
+    const key = metrics.openSpan(span());
+    metrics.flush();
+    expect(metrics.recentSpans()[0]?.endTs).toBeNull();
+    metrics.closeSpan(key, NOW - HOUR + 1_000);
+    expect(metrics.recentSpans()[0]?.endTs).toBe(NOW - HOUR + 1_000);
+  });
+
+  it("shows a span that is STILL RUNNING, clipped to now", () => {
+    // The whole point of writing the row at open time: a four-hour sleep should
+    // be on the chart while it happens, not only once it ends.
+    metrics.openSpan(span({ state: "sleeping", identifier: "wait", startTs: NOW - HOUR }));
+    const summary = metrics.spanSummary();
+    expect(summary.byState.sleeping).toBe(HOUR);
+    expect(summary.open).toBe(1);
+    expect(metrics.stats().openSpans).toBe(1);
+  });
+
+  it("refuses a negative duration when a close precedes its open", () => {
+    // Applied on the DISK path (the close lands after the insert flushed), which
+    // is where the guard is SQL rather than JS.
+    const key = metrics.openSpan(span({ startTs: NOW - HOUR }));
+    metrics.flush();
+    metrics.closeSpan(key, NOW - 2 * HOUR);
+    expect(metrics.recentSpans()[0]?.endTs).toBe(NOW - HOUR);
+  });
+
+  it("dedupes two recordings of the same tool call's span", () => {
+    metrics.openSpan(span({ toolUseId: "tu-1", endTs: NOW - HOUR + 1_000 }));
+    expect(metrics.flush()).toBe(1);
+    metrics.openSpan(span({ toolUseId: "tu-1", endTs: NOW - HOUR + 1_000, source: "backfill" }));
+    expect(metrics.flush()).toBe(0);
+    expect(metrics.stats().spans).toBe(1);
+  });
+
+  it("closes spans left open by a previous process at its last heartbeat", () => {
+    metrics.openSpan(span({ state: "shell", identifier: "Bash", startTs: NOW - HOUR }));
+    metrics.flush(); // stamps the heartbeat at NOW
+
+    // A new process, an hour later, finding the row still open. Without
+    // recovery every read would clip it to ITS now, and the span would grow
+    // for as long as nobody noticed.
+    const next = new MetricsService({ db, now: () => NOW + HOUR, flushMs: 0 });
+    expect(next.recoverOpenSpans()).toBe(1);
+    const row = next.recentSpans({ from: NOW - 2 * HOUR, to: NOW + 2 * HOUR })[0];
+    expect(row?.endTs).toBe(NOW);
+    expect(row?.truncated).toBe(true);
+    next.dispose();
+  });
+
+  it("ignores a second close, whichever side of a flush it lands on", () => {
+    // The disk path enforces this with `AND end_ts IS NULL`. If the buffer
+    // didn't, the same duplicate close would extend a span or not depending on
+    // whether a flush happened to land between the two calls.
+    const buffered = metrics.openSpan(span({ startTs: NOW - HOUR, toolUseId: "a" }));
+    metrics.closeSpan(buffered, NOW - HOUR + 1_000);
+    metrics.closeSpan(buffered, NOW - HOUR + 9_000, { ok: false });
+
+    const flushed = metrics.openSpan(span({ startTs: NOW - HOUR, toolUseId: "b" }));
+    metrics.flush();
+    metrics.closeSpan(flushed, NOW - HOUR + 1_000);
+    metrics.closeSpan(flushed, NOW - HOUR + 9_000, { ok: false });
+    metrics.flush();
+
+    for (const row of metrics.recentSpans()) {
+      expect(row.endTs).toBe(NOW - HOUR + 1_000);
+      expect(row.ok).toBeUndefined();
+    }
+  });
+
+  it("keeps the runtime's own duration beside the observed one, never instead", () => {
+    const key = metrics.openSpan(span({ state: "shell", startTs: NOW - HOUR }));
+    metrics.closeSpan(key, NOW - HOUR + 10_000, { ok: false, reportedMs: 9_500 });
+    const row = metrics.recentSpans()[0];
+    expect(row?.endTs).toBe(NOW - HOUR + 10_000);
+    expect(row?.reportedMs).toBe(9_500);
+    expect(row?.ok).toBe(false);
+  });
+});
+
+describe("MetricsService — span series", () => {
+  it("splits a span across every bucket it covers", () => {
+    // 23:00 to 03:00: one hour of the 17th, three of the 18th. Banked whole it
+    // would read as a four-hour burst on one day or the other.
+    metrics.openSpan(
+      span({
+        state: "sleeping",
+        identifier: "wait",
+        startTs: MIDNIGHT - HOUR,
+        endTs: MIDNIGHT + 3 * HOUR,
+      }),
+    );
+    const res = metrics.spanSeries({ from: NOW - 3 * DAY, to: NOW + 1, bucket: "day" });
+    const values = res.series[0]!.values;
+    expect(values[res.buckets.indexOf(Date.UTC(2026, 7, 17))]).toBe(HOUR);
+    expect(values[res.buckets.indexOf(Date.UTC(2026, 7, 18))]).toBe(3 * HOUR);
+    expect(res.total).toBe(4 * HOUR);
+    expect(res.spans).toBe(1);
+  });
+
+  it("sums spans that sit inside one bucket", () => {
+    metrics.recordSpans([
+      span({ startTs: MIDNIGHT + HOUR, endTs: MIDNIGHT + 2 * HOUR, toolUseId: "a" }),
+      span({ startTs: MIDNIGHT + 3 * HOUR, endTs: MIDNIGHT + 4 * HOUR, toolUseId: "b" }),
+    ]);
+    const res = metrics.spanSeries({ from: NOW - 2 * DAY, to: NOW + 1, bucket: "day" });
+    expect(res.series[0]!.values[res.buckets.indexOf(Date.UTC(2026, 7, 18))]).toBe(2 * HOUR);
+    expect(res.series[0]!.count).toBe(2);
+  });
+
+  it("gap-fills the quiet days between two spans", () => {
+    metrics.recordSpans([
+      span({ startTs: NOW - 3 * DAY, endTs: NOW - 3 * DAY + HOUR, toolUseId: "a" }),
+      span({ startTs: NOW - MIN, endTs: NOW, toolUseId: "b" }),
+    ]);
+    const res = metrics.spanSeries({ from: NOW - 4 * DAY, to: NOW + 1, bucket: "day" });
+    expect(res.buckets.length).toBe(4);
+    expect(res.series[0]!.values.filter((v) => v === 0).length).toBe(2);
+  });
+
+  it("clips a span that began before the window to the part inside it", () => {
+    metrics.openSpan(span({ startTs: NOW - 5 * DAY, endTs: NOW - DAY }));
+    const res = metrics.spanSummary({ from: NOW - 2 * DAY, to: NOW + 1 });
+    expect(res.attributedMs).toBe(DAY);
+  });
+
+  it("groups by the derived activity class", () => {
+    metrics.recordSpans([
+      span({ state: "generating", identifier: "turn", startTs: NOW - HOUR, endTs: NOW - 50 * MIN, toolUseId: "g" }),
+      span({ state: "shell", identifier: "Bash", startTs: NOW - 50 * MIN, endTs: NOW - 20 * MIN, toolUseId: "s" }),
+      span({ state: "sleeping", identifier: "wait", startTs: NOW - 20 * MIN, endTs: NOW, toolUseId: "w" }),
+    ]);
+    const res = metrics.spanSeries({ groupBy: "class", bucket: "day" });
+    const by = new Map(res.series.map((s) => [s.key, s.total]));
+    expect(by.get("thinking")).toBe(10 * MIN);
+    expect(by.get("working")).toBe(30 * MIN);
+    expect(by.get("blocked")).toBe(20 * MIN);
+    expect(res.series.find((s) => s.key === "thinking")?.label).toBe("Thinking");
+  });
+
+  it("keys a NULL group as \"\", not as null", () => {
+    // `run_id` is NULL for every main-loop span, so this is the commonest group
+    // in the table rather than an edge case — a raw NULL here would key the
+    // whole main loop on nothing and skip the label the UI shows for it.
+    metrics.recordSpans([
+      span({ startTs: NOW - 10 * MIN, endTs: NOW - 5 * MIN, toolUseId: "main" }),
+      span({ runId: "task-1", startTs: NOW - 9 * MIN, endTs: NOW - 6 * MIN, toolUseId: "child" }),
+    ]);
+    const res = metrics.spanSeries({ groupBy: "runId", bucket: "day" });
+    const main = res.series.find((s) => s.key === "");
+    expect(main?.label).toBe("(main loop)");
+    expect(main?.total).toBe(5 * MIN);
+    expect(res.series.find((s) => s.key === "task-1")?.total).toBe(3 * MIN);
+    expect(metrics.spanTotals({ groupBy: "runId" }).totals.map((t) => t.key).sort()).toEqual([
+      "",
+      "task-1",
+    ]);
+  });
+
+  it("returns an empty response for a window with no spans", () => {
+    metrics.openSpan(span({ startTs: NOW - 40 * DAY, endTs: NOW - 39 * DAY }));
+    const res = metrics.spanSeries({ from: NOW - DAY, to: NOW + 1 });
+    expect(res).toMatchObject({ buckets: [], series: [], total: 0, spans: 0 });
+  });
+});
+
+describe("MetricsService — attributed time vs wall clock", () => {
+  it("counts parallel tool calls once for wall clock and twice for attribution", () => {
+    // Two Bash calls open at once. The agent was busy for ten minutes, and it
+    // spent nineteen agent-minutes doing it — both true, and the gap between
+    // them is the parallelism the chart should be able to show.
+    metrics.recordSpans([
+      span({ state: "shell", startTs: NOW - 10 * MIN, endTs: NOW, toolUseId: "t1" }),
+      span({ state: "shell", startTs: NOW - 9 * MIN, endTs: NOW, toolUseId: "t2" }),
+    ]);
+    const res = metrics.spanTotals({ groupBy: "chatId" });
+    expect(res.totals[0]).toMatchObject({ key: "c1", ms: 19 * MIN, busyMs: 10 * MIN });
+  });
+
+  it("treats a subagent run as an actor of its own", () => {
+    // The parent blocks on the child for the whole run. That is two actors busy,
+    // not one — else a fleet of subagents would cost nothing at all.
+    metrics.recordSpans([
+      span({
+        state: "waiting_agent",
+        identifier: "Explore",
+        startTs: NOW - 10 * MIN,
+        endTs: NOW,
+        toolUseId: "task-1",
+      }),
+      span({
+        state: "generating",
+        identifier: "turn",
+        runId: "task-1",
+        subagent: "Explore",
+        startTs: NOW - 9 * MIN,
+        endTs: NOW - MIN,
+        toolUseId: "child-1",
+      }),
+    ]);
+    const summary = metrics.spanSummary();
+    expect(summary.actors).toBe(2);
+    expect(summary.chats).toBe(1);
+    expect(summary.busyMs).toBe(10 * MIN + 8 * MIN);
+    expect(summary.byClass).toEqual({ blocked: 10 * MIN, thinking: 8 * MIN });
+  });
+
+  it("does not merge two chats running at the same time", () => {
+    metrics.recordSpans([
+      span({ chatId: "c1", startTs: NOW - 10 * MIN, endTs: NOW, toolUseId: "a" }),
+      span({ chatId: "c2", startTs: NOW - 10 * MIN, endTs: NOW, toolUseId: "b" }),
+    ]);
+    const summary = metrics.spanSummary();
+    expect(summary.busyMs).toBe(20 * MIN);
+    expect(summary.attributedMs).toBe(20 * MIN);
+  });
+
+  it("re-unions the folded groups rather than summing their wall clocks", () => {
+    // One chat, three overlapping states. Group by state with room for one, and
+    // the two that fold share the same actor — summing them would report more
+    // wall clock than the window contains.
+    metrics.recordSpans([
+      span({ state: "shell", startTs: NOW - 10 * MIN, endTs: NOW, toolUseId: "a" }),
+      span({ state: "tool", startTs: NOW - 10 * MIN, endTs: NOW, toolUseId: "b" }),
+      span({ state: "generating", startTs: NOW - 10 * MIN, endTs: NOW, toolUseId: "c" }),
+    ]);
+    const res = metrics.spanTotals({ groupBy: "state", limit: 1 });
+    const other = res.totals.find((t) => t.key === "__other__");
+    expect(other?.ms).toBe(20 * MIN);
+    expect(other?.busyMs).toBe(10 * MIN);
+    expect(res.busyMs).toBe(10 * MIN);
+  });
+});
+
+describe("MetricsService — span facets and retention", () => {
+  it("offers the states and classes that actually occur", () => {
+    metrics.recordSpans([
+      span({ state: "shell", startTs: NOW - HOUR, endTs: NOW - 30 * MIN, toolUseId: "a" }),
+      span({ state: "sleeping", startTs: NOW - 30 * MIN, endTs: NOW, toolUseId: "b" }),
+    ]);
+    const res = metrics.spanFacets();
+    expect(res.facets.state?.map((f) => f.value).sort()).toEqual(["shell", "sleeping"]);
+    // Unbounded dimensions are typed, not picked from a list.
+    expect(res.facets.identifier).toBeUndefined();
+    expect(res.facets.runId).toBeUndefined();
+    expect(res.rows).toBe(2);
+  });
+
+  it("stretches the range to now for a span that is still open", () => {
+    // The window controls read this range. An open span's effective end is now
+    // on every other read, and stopping at its START would leave the range
+    // short of the present exactly while something is running.
+    metrics.openSpan(span({ startTs: NOW - HOUR }));
+    expect(metrics.spanFacets().range).toEqual({ from: NOW - HOUR, to: NOW });
+  });
+
+  it("prunes spans that ENDED before the cut-off, and keeps the ones still running", () => {
+    metrics.recordSpans([
+      span({ startTs: NOW - 10 * DAY, endTs: NOW - 9 * DAY, toolUseId: "old" }),
+      span({ startTs: NOW - DAY, endTs: NOW, toolUseId: "new" }),
+    ]);
+    // Started before the cut-off but has not finished — not history yet.
+    metrics.openSpan(span({ startTs: NOW - 10 * DAY, toolUseId: "running" }));
+    expect(metrics.prune(NOW - 5 * DAY)).toBe(1);
+    expect(metrics.stats().spans).toBe(2);
   });
 });
