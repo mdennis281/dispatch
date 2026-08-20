@@ -217,6 +217,61 @@ function lineHasId(line: string, id: string): boolean {
   return rowIdOf(line) === id;
 }
 
+/**
+ * Every id that is allowed to become a path segment.
+ *
+ * Deliberately an ALLOWLIST, not a traversal check. `resolve`-then-`relative`
+ * containment (what {@link Store.safeAssetPath} does for asset names) stops the
+ * escapes — `../`, an absolute path, a UNC root, a drive-relative `a:b` — but
+ * it happily admits `a/b` (a nested path where a flat id was meant, invisible
+ * to the `listDir` that enumerates the namespace), `chat.json:evil` (a Windows
+ * alternate data stream), and names with trailing dots or spaces that Windows
+ * silently rewrites. An id is a nanoid or a hand-written slug, so nothing
+ * legitimate needs any of those: all 368 ids in a real store — chats, projects,
+ * agents and modes — match this, the longest of them 21 characters.
+ *
+ * 64 is not arbitrary: `slugifyConfigName` (services/project-config.ts) already
+ * mints config-sourced agent and mode ids as `[a-z0-9-]` capped at 64, so the
+ * other id-minting path in this codebase independently landed on a strict
+ * subset of this. Comfortably above anything we generate, comfortably below
+ * anything that could push a path near MAX_PATH.
+ */
+const ENTITY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Whether `id` can be used as a path segment. Cheap; no filesystem access. */
+export function isEntityId(id: unknown): id is string {
+  return typeof id === "string" && ENTITY_ID.test(id);
+}
+
+/**
+ * Raised when an id that is about to become a path is not one. Carries no path,
+ * so echoing it back to a client cannot confirm what does or doesn't exist on
+ * disk.
+ */
+export class InvalidEntityIdError extends Error {
+  readonly statusCode = 400;
+  constructor(readonly kind: string) {
+    super(`invalid ${kind} id`);
+    this.name = "InvalidEntityIdError";
+  }
+}
+
+/**
+ * Return `id` if it may become a path segment, else throw.
+ *
+ * THIS IS THE CHOKEPOINT. Ids reach the filesystem from two directions, and
+ * both were unguarded: `:id` route params, where a single-segment percent-
+ * encoded traversal survives Fastify's router (`GET /api/chats/..%2f..%2fx`
+ * arrives as `id === "../../x"`), and REQUEST BODIES — `POST /api/projects`,
+ * `/api/agents` and `/api/modes` all took `body.id` verbatim, which made the
+ * WRITE side attacker-controlled too. Guarding here rather than at each route
+ * means a new route, service or MCP tool cannot reintroduce it by forgetting.
+ */
+function assertEntityId(kind: string, id: string): string {
+  if (!isEntityId(id)) throw new InvalidEntityIdError(kind);
+  return id;
+}
+
 /** Parse + validate a window of raw JSONL lines, tolerating a torn last line. */
 function parseMessageLines(lines: string[]): ChatMessage[] {
   const out: ChatMessage[] = [];
@@ -336,7 +391,7 @@ export class Store {
    * creates it on demand.
    */
   projectMemoryDir(projectId: string) {
-    return join(this.projectsDir(), projectId, "memory");
+    return join(this.projectsDir(), assertEntityId("project", projectId), "memory");
   }
   /**
    * Sidecar ACCESS-telemetry file for a project's memories (how often each is
@@ -345,7 +400,11 @@ export class Store {
    * churn the repo. Owned by {@link MemoryStatsStore}; created on demand.
    */
   projectMemoryStatsFile(projectId: string) {
-    return join(this.projectsDir(), projectId, "memory-stats.json");
+    return join(
+      this.projectsDir(),
+      assertEntityId("project", projectId),
+      "memory-stats.json",
+    );
   }
   private agentsDir() {
     return join(this.configDir, "agents");
@@ -356,8 +415,12 @@ export class Store {
   private chatsDir() {
     return join(this.dataDir, "chats");
   }
+  /**
+   * Guarding HERE covers the whole chat namespace: `chatFile`, `messagesFile`,
+   * `chatTranscriptPath` and `chatAssetsDir` are all built from this one.
+   */
   private chatDir(chatId: string) {
-    return join(this.chatsDir(), chatId);
+    return join(this.chatsDir(), assertEntityId("chat", chatId));
   }
   private chatFile(chatId: string) {
     return join(this.chatDir(chatId), "chat.json");
@@ -443,7 +506,20 @@ export class Store {
     const entries = await readdir(dir, { withFileTypes: true });
     return entries
       .filter((e) => e.isFile() && e.name.endsWith(".json"))
-      .map((e) => e.name.slice(0, -".json".length));
+      .map((e) => e.name.slice(0, -".json".length))
+      // A file on disk whose name isn't a legal id can't be one of our entities,
+      // and must not be handed back: `getX` would throw on it and take the whole
+      // listing down with it.
+      .filter(isEntityId);
+  }
+
+  /**
+   * `<dir>/<id>.json` for one of the flat entity namespaces, id checked.
+   * The kind in the error comes off the directory, de-pluralised so it reads the
+   * same as the chat one: `projects` → "invalid project id".
+   */
+  private entityFile(dir: string, id: string): string {
+    return join(dir, `${assertEntityId(basename(dir).replace(/s$/, ""), id)}.json`);
   }
 
   private async readEntity<T>(
@@ -466,6 +542,15 @@ export class Store {
     return validated;
   }
 
+  /*
+   * WHY EVERY ID-TAKING ACCESSOR BELOW IS `async`, even the ones whose body is a
+   * single `return <promise>`: `assertEntityId` THROWS, and a Promise-returning
+   * method that throws synchronously breaks every `store.getX(id).catch(…)`
+   * caller — the catch never runs and the throw escapes into the caller's frame
+   * instead. `session-broker.ts` resolving an agent id is exactly that shape.
+   * `async` turns the throw into the rejection those callers already handle.
+   */
+
   /* ---------------------------------------------------------- projects */
 
   async listProjects(): Promise<Project[]> {
@@ -473,21 +558,23 @@ export class Store {
     const all = await Promise.all(ids.map((id) => this.getProject(id)));
     return all.filter((p): p is Project => p !== null);
   }
-  getProject(id: string): Promise<Project | null> {
-    return this.readEntity(join(this.projectsDir(), `${id}.json`), ProjectSchema);
+  async getProject(id: string): Promise<Project | null> {
+    return this.readEntity(this.entityFile(this.projectsDir(), id), ProjectSchema);
   }
-  saveProject(project: Project): Promise<Project> {
+  async saveProject(project: Project): Promise<Project> {
     return this.writeEntity(
       `project:${project.id}`,
-      join(this.projectsDir(), `${project.id}.json`),
+      this.entityFile(this.projectsDir(), project.id),
       ProjectSchema,
       project,
     );
   }
   async deleteProject(id: string): Promise<void> {
-    await this.mutex.run(`project:${id}`, () =>
-      rm(join(this.projectsDir(), `${id}.json`), { force: true }),
-    );
+    // Resolve (and so VALIDATE) before taking the lock: `mutex.run` interns its
+    // key forever, so validating inside the task would let a caller mint an
+    // unbounded number of dead map entries with ids that were never legal.
+    const path = this.entityFile(this.projectsDir(), id);
+    await this.mutex.run(`project:${id}`, () => rm(path, { force: true }));
   }
 
   /* ------------------------------------------------------------ agents */
@@ -497,21 +584,23 @@ export class Store {
     const all = await Promise.all(ids.map((id) => this.getAgent(id)));
     return all.filter((a): a is AgentConfig => a !== null);
   }
-  getAgent(id: string): Promise<AgentConfig | null> {
-    return this.readEntity(join(this.agentsDir(), `${id}.json`), AgentConfigSchema);
+  async getAgent(id: string): Promise<AgentConfig | null> {
+    return this.readEntity(this.entityFile(this.agentsDir(), id), AgentConfigSchema);
   }
-  saveAgent(agent: AgentConfig): Promise<AgentConfig> {
+  async saveAgent(agent: AgentConfig): Promise<AgentConfig> {
     return this.writeEntity(
       `agent:${agent.id}`,
-      join(this.agentsDir(), `${agent.id}.json`),
+      this.entityFile(this.agentsDir(), agent.id),
       AgentConfigSchema,
       agent,
     );
   }
   async deleteAgent(id: string): Promise<void> {
-    await this.mutex.run(`agent:${id}`, () =>
-      rm(join(this.agentsDir(), `${id}.json`), { force: true }),
-    );
+    // Resolve (and so VALIDATE) before taking the lock: `mutex.run` interns its
+    // key forever, so validating inside the task would let a caller mint an
+    // unbounded number of dead map entries with ids that were never legal.
+    const path = this.entityFile(this.agentsDir(), id);
+    await this.mutex.run(`agent:${id}`, () => rm(path, { force: true }));
   }
 
   /* ------------------------------------------------------------- modes */
@@ -521,21 +610,23 @@ export class Store {
     const all = await Promise.all(ids.map((id) => this.getMode(id)));
     return all.filter((m): m is ModeConfig => m !== null);
   }
-  getMode(id: string): Promise<ModeConfig | null> {
-    return this.readEntity(join(this.modesDir(), `${id}.json`), ModeConfigSchema);
+  async getMode(id: string): Promise<ModeConfig | null> {
+    return this.readEntity(this.entityFile(this.modesDir(), id), ModeConfigSchema);
   }
-  saveMode(mode: ModeConfig): Promise<ModeConfig> {
+  async saveMode(mode: ModeConfig): Promise<ModeConfig> {
     return this.writeEntity(
       `mode:${mode.id}`,
-      join(this.modesDir(), `${mode.id}.json`),
+      this.entityFile(this.modesDir(), mode.id),
       ModeConfigSchema,
       mode,
     );
   }
   async deleteMode(id: string): Promise<void> {
-    await this.mutex.run(`mode:${id}`, () =>
-      rm(join(this.modesDir(), `${id}.json`), { force: true }),
-    );
+    // Resolve (and so VALIDATE) before taking the lock: `mutex.run` interns its
+    // key forever, so validating inside the task would let a caller mint an
+    // unbounded number of dead map entries with ids that were never legal.
+    const path = this.entityFile(this.modesDir(), id);
+    await this.mutex.run(`mode:${id}`, () => rm(path, { force: true }));
   }
 
   /* ------------------------------------------------------------- chats */
@@ -571,7 +662,12 @@ export class Store {
       if (!isMissing(err)) throw err;
       return [];
     }
-    const ids = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    // `isEntityId` filters, rather than `getChat` throwing: a directory whose
+    // name can't be an id is not a chat, and one stray entry (an editor's temp
+    // dir, a half-finished restore) must not take the whole listing down.
+    const ids = entries
+      .filter((e) => e.isDirectory() && isEntityId(e.name))
+      .map((e) => e.name);
     // Evict records whose directory is gone. Unconditional rather than gated on
     // a size comparison: one chat removed and another added between two calls
     // leaves the count unchanged, and the stale record would then survive to be
@@ -674,6 +770,7 @@ export class Store {
    * outside this lock can let either whole-file rewrite erase the other.
    */
   async patchChat(id: string, patch: Partial<Chat>): Promise<Chat | null> {
+    assertEntityId("chat", id); // before the lock — see deleteProject
     return this.mutex.run(`chat:${id}`, async () => {
       const current = await this.readChatRecord(id);
       if (!current) return null;
@@ -684,8 +781,9 @@ export class Store {
     });
   }
   async deleteChat(id: string): Promise<void> {
+    const dir = this.chatDir(id); // validates before the lock — see deleteProject
     await this.mutex.run(`chat:${id}`, () =>
-      rm(this.chatDir(id), { recursive: true, force: true }),
+      rm(dir, { recursive: true, force: true }),
     );
     this.chatCache.delete(id);
     await this.deleteCheckpoints(id);

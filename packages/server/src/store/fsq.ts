@@ -13,6 +13,16 @@ import { randomBytes } from "node:crypto";
 export class KeyedMutex {
   private readonly chains = new Map<string, Promise<unknown>>();
 
+  /**
+   * How many distinct keys have been seen. Nothing evicts, so this only grows —
+   * which is fine for the bounded key space it is meant for (one per entity)
+   * and is exactly why callers must VALIDATE an id before locking on it. Exposed
+   * so that rule can be tested rather than merely asserted in a comment.
+   */
+  get size(): number {
+    return this.chains.size;
+  }
+
   run<T>(key: string, task: () => Promise<T>): Promise<T> {
     const prev = this.chains.get(key) ?? Promise.resolve();
     // Run `task` after prev settles (success OR failure) so one failure can't
