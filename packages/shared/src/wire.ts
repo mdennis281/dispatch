@@ -40,7 +40,35 @@ import { WorkflowExemptionSchema } from "./workflow.js";
 export const HelloEventSchema = z.object({
   type: z.literal("hello"),
   serverTime: z.number().int(),
+  /**
+   * The build stamp of the payload answering this socket, when it has one (a
+   * release install; a source checkout has no manifest and sends nothing).
+   *
+   * This is what turns the nastiest failure in the whole protocol into a
+   * sentence. The service worker caches hashed assets aggressively and a
+   * long-lived installed window can sit on a bundle for days, so a tab can be
+   * talking to a server it wasn't built against. When that happens the schemas
+   * disagree, frames fail validation, and the client drops them — silently, with
+   * the status dot still green and the UI simply frozen. Comparing this against
+   * the client's own `__BUILD_VERSION__` lets that be reported as "this tab is
+   * stale, reload" instead of being invisible.
+   */
   version: z.string().optional(),
+});
+
+/**
+ * Answer to a client `ping`, echoing its nonce.
+ *
+ * The transport-level ping the server already sends (see routes/ws.ts) cannot do
+ * this job: the browser WebSocket API exposes no ping/pong event to JavaScript
+ * at all, so a client has no way to observe one. Without an APPLICATION-level
+ * round trip there is no way to distinguish an idle socket from a dead one — and
+ * a socket reaped by a proxy or an OS suspend keeps `readyState === OPEN`, so the
+ * client sits on a green dot forever waiting for a `close` that never comes.
+ */
+export const PongEventSchema = z.object({
+  type: z.literal("pong"),
+  nonce: z.string(),
 });
 
 /** A newly-appended transcript row for a chat. */
@@ -444,6 +472,7 @@ export const ServerShutdownEventSchema = z.object({
 
 export const WsServerEventSchema = z.discriminatedUnion("type", [
   HelloEventSchema,
+  PongEventSchema,
   ChatMessageEventSchema,
   MessageChunkEventSchema,
   ChatStatusEventSchema,
@@ -723,7 +752,14 @@ export const GhActionSchema = z.object({
   inputs: z.record(z.string(), z.string()).optional(),
 });
 
+/** Liveness probe. The server answers with `pong` carrying the same nonce. */
+export const PingActionSchema = z.object({
+  type: z.literal("ping"),
+  nonce: z.string(),
+});
+
 export const WsClientActionSchema = z.discriminatedUnion("type", [
+  PingActionSchema,
   CreateChatActionSchema,
   SubscribeActionSchema,
   UnsubscribeActionSchema,

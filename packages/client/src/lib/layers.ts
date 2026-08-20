@@ -30,7 +30,9 @@
  *   - `popover` and `tooltip` sit above everything a dialog can reach, because
  *     they're spawned BY controls inside these surfaces — a select menu inside
  *     the fourth-deep dialog still has to render over it.
- *   - `shutdown` is last because the server is gone and nothing else matters.
+ *   - `connecting` then `shutdown` are last because the server is gone and
+ *     nothing else matters. They are mutually exclusive by their own guards;
+ *     the ordering is belt-and-braces.
  *
  * The dialog band is capped below `palette`, so a pathological stack of dialogs
  * can never climb over the transient layers.
@@ -51,6 +53,13 @@ export const LAYER = {
   palette: 300,
   popover: 400,
   tooltip: 500,
+  /**
+   * The connection diagnosis. Above everything the app itself can raise, because
+   * once the socket is down every control under it silently fails — but BELOW
+   * `shutdown`, because a deliberate stop is a more specific answer than "can't
+   * connect" and the two must never argue about which is on top.
+   */
+  connecting: 580,
   shutdown: 600,
 } as const;
 

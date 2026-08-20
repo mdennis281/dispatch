@@ -23,6 +23,7 @@ import { ManageConfigDialog } from "./components/sidebar/ManageConfigDialog.js";
 import { Toasts } from "./components/Toasts.js";
 import { ShutdownScreen } from "./components/ShutdownScreen.js";
 import { UpdatingScreen } from "./components/update/UpdatingScreen.js";
+import { ConnectingScreen } from "./components/connection/ConnectingScreen.js";
 import { useChats } from "./stores/chats.js";
 import { useProjects, useActiveProject } from "./stores/projects.js";
 import { visibleChat } from "./stores/navigation.js";
@@ -89,6 +90,13 @@ export default function App() {
           process it exists to narrate. It renders over everything either way,
           and watching your own update finish is not a privileged operation. */}
       <UpdatingScreen />
+      {/* Outside the gate for the same reason, and a stronger one: a server this
+          tab cannot reach is a server it cannot authenticate against either, so
+          inside the gate the diagnosis would be replaced by a login form for the
+          very host it is trying to tell you is unreachable. It stands down on
+          its own whenever the shutdown or updating screens have a more specific
+          answer — see its guards. */}
+      <ConnectingScreen />
       <AuthGate>
       {/* `100dvh`, not `100vh`. On mobile Safari `vh` is pinned to the LARGEST
           viewport (URL bar retracted), so a `h-screen` app column is taller than
