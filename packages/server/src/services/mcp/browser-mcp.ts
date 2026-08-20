@@ -141,7 +141,13 @@ export function selectBrowserServers(
 export interface BrowserMcpBuildOptions {
   config?: BrowserMcpConfig;
   subApps?: readonly SubApp[];
-  /** Namespaces the output dir so two chats never share one. */
+  /**
+   * Namespaces the output dir. The broker always passes the session's chat id,
+   * so in practice every chat writes somewhere of its own; it is optional only
+   * because tests build configs without a session. Omitted → one shared
+   * fallback dir, which is fine for a caller that never launches a browser and
+   * wrong for anything that does.
+   */
   chatId?: string;
   /** Called when a selected server isn't installed, so it can be surfaced. */
   onUnavailable?: (server: BrowserMcpServer, pkg: string) => void;
@@ -170,7 +176,10 @@ export function buildBrowserMcpServers(
       opts.onUnavailable?.(name, spec.pkg);
       continue;
     }
-    const outDir = join(tmpdir(), "dispatch-browser-mcp", opts.chatId ?? "shared");
+    // "no-chat" rather than "shared": it names what actually happened, so a
+    // stray dir on disk says which caller omitted the id instead of implying
+    // some deliberate sharing arrangement.
+    const outDir = join(tmpdir(), "dispatch-browser-mcp", opts.chatId ?? "no-chat");
     out[name] = {
       type: "stdio",
       command: process.execPath,

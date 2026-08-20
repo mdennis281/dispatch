@@ -3964,15 +3964,21 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         // Point at the eyes, not just the address. See `browserServers`.
         const look = r.url && ctx.browserServers?.length
           ? ctx.browserServers.includes("playwright")
-            ? ` Look at it before calling this done: mcp__playwright__browser_navigate to that URL, ` +
+            ? `Look at it before calling this done: mcp__playwright__browser_navigate to that URL, ` +
               `then mcp__playwright__browser_snapshot (cheap, tells you what is on the page) or ` +
               `mcp__playwright__browser_take_screenshot (when the question is visual).`
-            : ` Look at it before calling this done: mcp__chrome-devtools__navigate_page to that URL, ` +
+            : `Look at it before calling this done: mcp__chrome-devtools__navigate_page to that URL, ` +
               `then mcp__chrome-devtools__take_screenshot.`
           : "";
+        // The URL ends its line with NO trailing punctuation: a period directly
+        // after it gets swallowed into the link by most auto-linkers, so the
+        // thing the agent is being told to open is the thing it can copy.
         return textResult(
           r.url
-            ? `Started ${r.subAppId}${where} — ${r.status}. Open it at ${r.url}.${look}`
+            ? `Started ${r.subAppId}${where} — ${r.status}. Open it at ${r.url}` +
+              (look ? `
+
+${look}` : "")
             : `Started ${r.subAppId}${where} — ${r.status} (no URL yet; give it a moment and list again).`,
         );
       } catch (err) {
