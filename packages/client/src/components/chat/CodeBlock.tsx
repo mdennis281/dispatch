@@ -127,7 +127,7 @@ export function CodeBlock({ code, language = "ts", filename, className }: CodeBl
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <div className="cm-scroll overflow-x-auto px-3.5 py-2.5">
+      <div className="cm-scroll cm-scroll-x overflow-x-auto px-3.5 py-2.5">
         <SyntaxHighlighter
           language={lang}
           style={codeTheme}
