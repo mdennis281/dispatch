@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { ChatMessage } from "@dispatch/shared";
 import {
+  ackTaskId,
   deriveSubagentRuns,
   runDuration,
   sortRunsForRoster,
@@ -436,5 +437,38 @@ describe("roster + formatting helpers", () => {
     expect(mk({ file_path: "src/a.ts" })).toBe("src/a.ts");
     expect(mk({ pattern: "TODO" })).toBe("TODO");
     expect(mk({ nothing: 1 })).toBeUndefined();
+  });
+});
+
+
+/**
+ * A tool result is only a launch ack if it is SHAPED like one. Matching the id
+ * pattern anywhere in a command's output wedged that call on "running" forever.
+ */
+describe("ackTaskId", () => {
+  const res = (text: string) =>
+    toolResult("t1", { ts: 1, content: [{ type: "text", text }] }) as never as Parameters<typeof ackTaskId>[0];
+
+  it("reads the id out of a one-line launch ack", () => {
+    expect(ackTaskId(res("Async agent launched successfully. agentId: a730258b58"))).toBe("a730258b58");
+  });
+
+  it("reads a backgrounded Bash ack", () => {
+    expect(ackTaskId(res("Command running in background with ID: bash_120394"))).toBe("bash_120394");
+  });
+
+  it("ignores a command's own output that merely mentions an id", () => {
+    const dump = ["export const actions = {", "  createChat(input: {", "    agentId: string;"]
+      .concat(Array.from({ length: 40 }, (_, i) => `    line${i}: string;`))
+      .join("\n");
+    expect(ackTaskId(res(dump))).toBeUndefined();
+  });
+
+  it("ignores a long single-line payload", () => {
+    expect(ackTaskId(res(`agentId: abcdefgh ${"x".repeat(500)}`))).toBeUndefined();
+  });
+
+  it("has nothing to read when there is no result", () => {
+    expect(ackTaskId(undefined)).toBeUndefined();
   });
 });
