@@ -232,10 +232,27 @@ function resultText(content: unknown): string {
  */
 export function ackTaskId(result: ToolResultRow | undefined): string | undefined {
   if (!result) return undefined;
-  const m = /\b(?:agentId|agent_id|taskId|task_id|ID)\s*[:=]\s*([A-Za-z0-9_-]{6,})/.exec(
-    resultText(result.content),
-  );
+  const text = resultText(result.content).trim();
+  if (!isAckShaped(text)) return undefined;
+  const m = /\b(?:agentId|agent_id|taskId|task_id|ID)\s*[:=]\s*([A-Za-z0-9_-]{6,})/.exec(text);
   return m?.[1];
+}
+
+/** An ack is a receipt — a line or three. A command's own output is not. */
+const ACK_MAX_CHARS = 400;
+const ACK_MAX_LINES = 3;
+
+/**
+ * Requiring the ack SHAPE is what stops an ordinary command's output from being
+ * read as a launch ack. A `sed` dump of a source file containing `agentId: x`
+ * matched the pattern, so the finished call was treated as backgrounded and
+ * wedged on "running" forever: the chat read "waiting on Bash", and the shell
+ * receipt — which skipped its 2-line clamp while running — printed the whole
+ * payload into the transcript.
+ */
+function isAckShaped(text: string): boolean {
+  if (text.length > ACK_MAX_CHARS) return false;
+  return text.split("\n").filter((line) => line.trim()).length <= ACK_MAX_LINES;
 }
 
 /** First line of a string, clipped — for one-line summaries. */

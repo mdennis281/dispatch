@@ -98,21 +98,18 @@ function ShellCommandPair({ entry }: { entry: ShellRunEntry }) {
         onClick={inspect}
         className="group/receipt !grid !h-auto min-h-0 w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 !whitespace-normal !rounded-none !border-0 px-2.5 py-0.5 text-left !font-normal text-muted hover:!bg-transparent hover:text-secondary active:translate-y-0"
       >
-        {state === "running" ? (
-          <span className="flex items-center gap-1.5 whitespace-pre-wrap cm-mono !text-2xs italic leading-[1.35] text-faint">
-            {output}
-            <Spinner size={9} className="shrink-0" />
-          </span>
-        ) : (
+        <span className="flex min-w-0 items-start gap-1.5">
           <OverflowTooltip
             text={output}
             lines={2}
             className={cn(
-              "whitespace-pre-wrap cm-mono !text-2xs leading-[1.35] opacity-75 transition-[color,opacity] duration-150 group-hover/receipt:text-primary group-hover/receipt:opacity-100 group-focus/receipt:text-primary group-focus/receipt:opacity-100",
+              "min-w-0 flex-1 whitespace-pre-wrap cm-mono !text-2xs leading-[1.35] opacity-75 transition-[color,opacity] duration-150 group-hover/receipt:text-primary group-hover/receipt:opacity-100 group-focus/receipt:text-primary group-focus/receipt:opacity-100",
+              state === "running" && "italic text-faint",
               state === "failed" && "text-danger",
             )}
           />
-        )}
+          {state === "running" && <Spinner size={9} className="mt-0.5 shrink-0" />}
+        </span>
         {state !== "running" && (
           <span className="flex min-w-12 items-center justify-end gap-1.5 pt-px cm-mono !text-2xs text-faint [&_svg]:size-3">
             {elapsed !== undefined && <span>{dur(elapsed)}</span>}
