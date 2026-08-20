@@ -186,13 +186,18 @@ interface PushStore {
   endpoint: string | null;
   busy: boolean;
   error: string | null;
+  /** A transient "that worked" line. Cleared by the next action. */
+  notice: string | null;
   /** Read what's already registered and reconcile the server's copy. Safe to call twice. */
   hydrate: () => Promise<void>;
   /** Ask for permission (if needed) and register. Must be called from a click. */
   enable: () => Promise<PushState>;
   disable: () => Promise<void>;
   setPrefs: (next: NotificationPrefs) => void;
-  /** Send a sample push to this device, so "is it working" has an answer. */
+  /**
+   * Send a sample push to this device, so "is it working" has an answer — and
+   * so does "it isn't". Sets `notice` or `error`; never fails silently.
+   */
   test: () => Promise<boolean>;
 }
 
@@ -202,6 +207,7 @@ export const useWebPush = create<PushStore>((set, get) => ({
   endpoint: null,
   busy: false,
   error: null,
+  notice: null,
 
   hydrate: async () => {
     if (!pushSupported()) {
@@ -229,7 +235,7 @@ export const useWebPush = create<PushStore>((set, get) => ({
       set({ error: reason, state: isIos() && !isStandalone() ? "needs-install" : "unsupported" });
       return get().state;
     }
-    set({ busy: true, error: null });
+    set({ busy: true, error: null, notice: null });
     try {
       const permission = await Notification.requestPermission();
       if (permission !== "granted") {
@@ -264,7 +270,7 @@ export const useWebPush = create<PushStore>((set, get) => ({
 
   disable: async () => {
     const sub = await existingSubscription();
-    set({ state: "unsubscribed", endpoint: null });
+    set({ state: "unsubscribed", endpoint: null, error: null, notice: null });
     if (!sub) return;
     await api.push.unsubscribe(sub.endpoint).catch(() => undefined);
     await sub.unsubscribe().catch(() => undefined);
@@ -282,12 +288,24 @@ export const useWebPush = create<PushStore>((set, get) => ({
 
   test: async () => {
     const endpoint = get().endpoint;
-    if (!endpoint) return false;
-    try {
-      await api.push.test(endpoint);
-      return true;
-    } catch {
+    if (!endpoint) {
+      set({ error: "This device isn't registered yet.", notice: null });
       return false;
+    }
+    set({ busy: true, error: null, notice: null });
+    try {
+      // The server sends synchronously and answers 502 with the push service's
+      // own reason when it is refused, so this await is a real verdict. It used
+      // to be swallowed, which made a total iOS outage look like a button that
+      // does nothing at all.
+      await api.push.test(endpoint);
+      set({ notice: "Test push sent — it should arrive in a moment." });
+      return true;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : "The test push could not be sent." });
+      return false;
+    } finally {
+      set({ busy: false });
     }
   },
 }));

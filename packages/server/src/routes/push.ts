@@ -7,6 +7,7 @@
  *   PUT    /api/push/prefs       → { endpoint, prefs } — retune one device's filters
  *   POST   /api/push/presence    → { endpoint, inFront } — "I'm looking at the app"
  *   POST   /api/push/test        → { endpoint } — send a sample push to one device
+ *                                    (502 + the push service's own reason if it refused)
  *   POST   /api/push/unsubscribe → { endpoint }
  *
  * Filters live on the SERVER copy rather than being applied on the device: iOS
@@ -77,8 +78,13 @@ export function registerPushRoutes(app: FastifyInstance): void {
   app.post("/api/push/test", async (req, reply) => {
     const parsed = EndpointBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid endpoint" });
-    const ok = await push.sendTest(parsed.data.endpoint);
-    if (!ok) return reply.code(404).send({ error: "unknown subscription" });
+    const result = await push.sendTest(parsed.data.endpoint);
+    if (!result) return reply.code(404).send({ error: "unknown subscription" });
+    // The one push whose outcome somebody is standing there waiting for. A 403
+    // from Apple used to come back as `{ ok: true }`, so a device that could
+    // never receive anything looked identical to one that just had. 502: the
+    // failure is the upstream push service's, not the caller's.
+    if (!result.ok) return reply.code(502).send({ error: result.error, statusCode: result.statusCode });
     return { ok: true };
   });
 

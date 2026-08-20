@@ -40,6 +40,7 @@ function PushNotifications() {
   const state = useWebPush((s) => s.state);
   const busy = useWebPush((s) => s.busy);
   const error = useWebPush((s) => s.error);
+  const notice = useWebPush((s) => s.notice);
   const enable = useWebPush((s) => s.enable);
   const disable = useWebPush((s) => s.disable);
   const test = useWebPush((s) => s.test);
@@ -56,8 +57,8 @@ function PushNotifications() {
         <span className="text-sm font-medium text-secondary">Push notifications</span>
         {unavailable ? null : state === "subscribed" ? (
           <div className="flex items-center gap-1.5">
-            <Button size="sm" variant="ghost" onClick={() => void test()}>
-              Send test
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => void test()}>
+              {busy ? "Sending…" : "Send test"}
             </Button>
             <Button size="sm" variant="ghost" onClick={() => void disable()}>
               Turn off
@@ -76,6 +77,9 @@ function PushNotifications() {
             : "Sent by the server, so they arrive with the app closed. On iPhone and iPad this is the only kind that works: iOS suspends a backgrounded web app, and a suspended app can't raise a toast.")}
       </p>
       {error ? <p className="mt-1 text-xs leading-snug text-warn">{error}</p> : null}
+      {notice && !error ? (
+        <p className="mt-1 text-xs leading-snug text-faint">{notice}</p>
+      ) : null}
     </div>
   );
 }
