@@ -173,10 +173,15 @@ function useProjectFileCommands(
   );
 }
 
-/** Fire-and-focus a new chat (mirrors the sidebar's create+auto-select). */
+/**
+ * Fire-and-focus a new chat (mirrors the sidebar's create+auto-select).
+ *
+ * No effort is sent — see `createChatAndFocus` in Sidebar.tsx: pinning one here
+ * overrides the app's default-effort setting instead of falling through to it.
+ */
 function newChatAndFocus(projectId: string): void {
   const before = new Set(useChats.getState().order);
-  actions.createChat({ projectId, modeId: "auto", effort: "medium" });
+  actions.createChat({ projectId, modeId: "auto" });
   let done = false;
   const unsub = useChats.subscribe((s) => {
     const fresh = s.order.find((id) => !before.has(id));

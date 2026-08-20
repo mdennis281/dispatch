@@ -475,13 +475,17 @@ function NavButton({
  * project, default mode/effort, no custom agent) and select the chat the moment
  * its id streams back into the store — no dialog. create-chat is fire-and-forget,
  * so we watch the chats store for the newly-appeared id (with an 8s safety net).
+ *
+ * Effort is deliberately NOT sent: the server resolves it from the app's
+ * per-provider default (Settings → Chat), and an explicit value here WINS over
+ * that chain — which is exactly how every new chat used to land on medium no
+ * matter what the setting said.
  */
 function createChatAndFocus(input: { projectId: string; modeId?: string }): void {
   const before = new Set(useChats.getState().order);
   actions.createChat({
     projectId: input.projectId,
     modeId: input.modeId,
-    effort: "medium",
   });
 
   let done = false;
