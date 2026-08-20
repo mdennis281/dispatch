@@ -3051,6 +3051,81 @@ describe("SessionBroker — the runtime ledger", () => {
     expect(metrics.recentSpans({ ...ALL(), limit: 500 }).every((s) => s.endTs !== null)).toBe(true);
   });
 
+  it("times the human's own thinking, on the legacy canUseTool gate too", async () => {
+    // The THIRD registration path: `handlePermission`, which the default
+    // runtime takes. Instrumenting only the two harness events left every
+    // permission wait on it filed as the model generating.
+    let permResult: unknown;
+    const { fn } = makeFakeQuery(async (_text, ctl) => {
+      permResult = await ctl.canUseTool!("Write", { file_path: "a.txt" }, { title: "Write" });
+      return [assistantText("done"), resultMsg()];
+    });
+    const { metrics, broker } = meteredBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    const reqP = nextPermissionId();
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "write");
+    const reqId = await reqP;
+    broker.resolvePermission(reqId, { decision: "allow" });
+    await idleP;
+    expect(permResult).toMatchObject({ behavior: "allow" });
+
+    const wait = timeline(metrics).find((s) => s.state === "waiting_human");
+    expect(wait).toMatchObject({ identifier: "Write", chatId: "c1" });
+    expect(wait?.endTs).not.toBeNull();
+    expect(metrics.stats().openSpans).toBe(0);
+  });
+
+  it("counts a wait for the context budget as queued, not as thinking", async () => {
+    // The SECOND way a turn queues. Unlike the concurrency cap this one is
+    // decided INSIDE `startQuery`, after the turn's `generating` span is
+    // already open — so the wait has to end that span as well as begin itself.
+    await store.saveSettings({
+      theme: "dark",
+      harness: {
+        defaultHarness: "claude",
+        defaults: {},
+        // 1 token: any other active chat's estimate exceeds it, so the second
+        // chat queues on the budget rather than on the concurrency cap.
+        contextLimits: { overallTokens: 1 },
+      },
+    });
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const { fn } = makeFakeQuery(async (text) => {
+      if (text === "hold") await held;
+      return [initMsg("sess-1"), resultMsg()];
+    });
+    const { metrics, broker } = meteredBroker(fn);
+
+    // One chat occupying the budget…
+    await store.saveChat(chatFor("cA"));
+    broker.create(chatFor("cA"));
+    await broker.sendMessage("cA", "hold");
+    await vi.waitFor(() => expect(broker.getStatus("cA")).toBe("running"));
+
+    // …and a second that can't start until it lets go.
+    await store.saveChat(chatFor("cB"));
+    broker.create(chatFor("cB"));
+    await broker.sendMessage("cB", "go");
+    await vi.waitFor(() => expect(broker.getStatus("cB")).toBe("queued"));
+
+    const spans = metrics
+      .recentSpans({ ...ALL(), limit: 500 })
+      .filter((s) => s.chatId === "cB");
+    expect(spans.map((s) => s.state)).toContain("queued");
+    // The `generating` the turn opened before the budget check is CLOSED, or
+    // the chat reads as having thought for the whole wait.
+    expect(spans.filter((s) => s.state === "generating").every((s) => s.endTs !== null)).toBe(
+      true,
+    );
+
+    release();
+    await broker.waitFor("cA", "idle").catch(() => {});
+  });
+
   it("runs the turn normally when there is no ledger to time it with", async () => {
     // The tracker runs either way; with no service behind it every span opens
     // with an empty key and closes into nothing. A turn must not notice.

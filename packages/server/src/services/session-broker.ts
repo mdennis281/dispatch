@@ -2692,6 +2692,11 @@ export class SessionBroker {
     if (active < limit) return true;
     session.started = false;
     if (!this.queueOrder.includes(session.chatId)) this.queueOrder.push(session.chatId);
+    // The SECOND way a turn queues, and it arrives after `startTurn` already
+    // opened the turn's `generating` span — so this both ends that and starts
+    // the wait, rather than leaving the chat looking like it was thinking for
+    // however long the budget took to free up.
+    session.activity.queued(this.now());
     this.setStatus(session, "queued");
     this.bus.publish({
       type: "notice",
@@ -2835,27 +2840,17 @@ export class SessionBroker {
         return;
       }
       case "permission-request":
-        session.activity.blocked(
-          event.parentToolUseId ?? MAIN_ACTOR,
+        this.registerHarnessPermission(
+          session,
           event.requestId,
-          "waiting_human",
           event.toolName,
-          base.ts,
+          event.input,
+          { description: event.reason },
+          undefined,
+          event.parentToolUseId ?? MAIN_ACTOR,
         );
-        this.registerHarnessPermission(session, event.requestId, event.toolName, event.input, {
-          description: event.reason,
-        });
         return;
       case "question-request": {
-        // Resolved through the same `resolvePermission` path as a permission
-        // card, so the same requestId closes this span.
-        session.activity.blocked(
-          event.parentToolUseId ?? MAIN_ACTOR,
-          event.requestId,
-          "waiting_human",
-          "AskUserQuestion",
-          base.ts,
-        );
         const input = {
           questions: event.questions.map((q) => ({
             id: q.id,
@@ -2873,6 +2868,7 @@ export class SessionBroker {
           input,
           {},
           event.questions,
+          event.parentToolUseId ?? MAIN_ACTOR,
         );
         return;
       }
@@ -3567,7 +3563,15 @@ export class SessionBroker {
     input: Record<string, unknown>,
     opts: { title?: string; displayName?: string; description?: string },
     questions?: HarnessQuestion[],
+    /** The actor being blocked — a subagent's prompt is that run's wait. */
+    runId: string = MAIN_ACTOR,
   ): void {
+    // The waiting_human span opens HERE, beside the pending entry it belongs to,
+    // rather than at the two call sites — because there is a third registration
+    // path (`handlePermission`, the legacy `canUseTool` gate the default runtime
+    // still takes) and pairing the span with the registration is the only shape
+    // in which a future fourth one can't quietly go untimed.
+    session.activity.blocked(runId, requestId, "waiting_human", toolName, this.now());
     const request: PermissionRequest = {
       id: requestId,
       chatId: session.chatId,
@@ -3671,6 +3675,12 @@ export class SessionBroker {
         createdAt: this.now(),
       },
     });
+
+    // Attributed to the main loop: `canUseTool` is handed a tool name and its
+    // input and nothing else, so this path has no parent run id to offer. A
+    // subagent's prompt therefore reads as the chat waiting, which is true of
+    // the chat even when it isn't the whole truth about the run.
+    session.activity.blocked(MAIN_ACTOR, requestId, "waiting_human", toolName, this.now());
 
     return new Promise<PermissionResult>((resolve) => {
       const pending: PendingPermission = {
