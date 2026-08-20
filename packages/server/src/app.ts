@@ -174,6 +174,7 @@ export async function buildApp(
   // write-behind buffer), and a store closed underneath them would silently
   // reopen mid-shutdown.
   app.addHook("onClose", async () => {
+    await auth.dispose().catch(() => {});
     await services.dispose().catch(() => {});
     store.close();
   });

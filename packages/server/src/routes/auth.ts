@@ -96,6 +96,14 @@ export function registerAuthRoutes(app: FastifyInstance): void {
   app.put("/api/auth/webauthn", (req, reply) => run(() => auth.updateWebAuthnSettings(
     identity(req), req.body as { canonicalUrl: string; rpId?: string },
   ), reply));
+  app.put("/api/auth/ip-lookup", (req, reply) => run(async () => {
+    // Demand a real boolean rather than coercing: this endpoint's failure
+    // direction matters, and a body that didn't say so must never read as
+    // "send my session IPs nowhere" OR as "send them out" by accident.
+    const enabled = (req.body as { enabled?: unknown } | undefined)?.enabled;
+    if (typeof enabled !== "boolean") throw new AuthFailure(400, "`enabled` must be true or false.");
+    return auth.setIpLookup(identity(req), enabled);
+  }, reply));
   app.post("/api/auth/setup-codes", (req, reply) => run(() => auth.createSetupCode(identity(req)), reply));
   app.post("/api/auth/password", (req, reply) => run(async () => {
     await auth.updatePassword(identity(req), req.body as { currentPassword: string; password: string }); return { ok: true };

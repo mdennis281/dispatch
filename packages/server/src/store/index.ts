@@ -179,6 +179,13 @@ export const AppSettingsSchema = z.object({
       firstRunDismissed: z.boolean().default(false),
       canonicalUrl: z.string().url().optional(),
       rpId: z.string().min(1).optional(),
+      /**
+       * Whether a session's PUBLIC ip may be sent to the geolocation provider
+       * that fills in ISP and city on the Active sessions list. Opt-OUT: unset
+       * reads as on, which keeps every existing config.json meaning what it did.
+       * Private and loopback addresses are never looked up whatever this says.
+       */
+      ipLookup: z.boolean().optional(),
     })
     .optional(),
 });
