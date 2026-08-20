@@ -1,0 +1,302 @@
+import { describe, it, expect, beforeEach } from "vitest";
+import type { MetricState } from "@dispatch/shared";
+import {
+  ActivityTracker,
+  MAIN_ACTOR,
+  chatStatusForActivity,
+  classifyActivity,
+  type SpanOpen,
+  type SpanSink,
+} from "./metrics-activity.js";
+
+/** A span as the fake sink saw it. */
+interface Recorded {
+  key: string;
+  state: MetricState;
+  identifier: string;
+  runId: string;
+  startTs: number;
+  endTs?: number;
+}
+
+/** Records what the tracker asked for, on a clock the test drives by hand. */
+class FakeSink implements SpanSink {
+  clock = 0;
+  readonly spans: Recorded[] = [];
+  private readonly byKey = new Map<string, Recorded>();
+  private n = 0;
+
+  now(): number {
+    return this.clock;
+  }
+  open(span: SpanOpen): string {
+    const key = `k${++this.n}`;
+    const row: Recorded = {
+      key,
+      state: span.state,
+      identifier: span.identifier,
+      runId: span.runId,
+      startTs: span.startTs,
+    };
+    this.spans.push(row);
+    this.byKey.set(key, row);
+    return key;
+  }
+  close(key: string, at: number): void {
+    const row = this.byKey.get(key);
+    if (row && row.endTs === undefined) row.endTs = at;
+  }
+
+  /** Advance the clock. */
+  at(t: number): void {
+    this.clock = t;
+  }
+  /** Closed spans of one actor, in the order they opened. */
+  of(runId = MAIN_ACTOR): Recorded[] {
+    return this.spans.filter((s) => s.runId === runId);
+  }
+  /** Total ms per state across every actor. */
+  msByState(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const s of this.spans) {
+      if (s.endTs === undefined) continue;
+      out[s.state] = (out[s.state] ?? 0) + (s.endTs - s.startTs);
+    }
+    return out;
+  }
+  /** Spans the tracker never closed. Named apart from `open()`, the method. */
+  get running(): Recorded[] {
+    return this.spans.filter((s) => s.endTs === undefined);
+  }
+}
+
+let sink: FakeSink;
+let track: ActivityTracker;
+
+beforeEach(() => {
+  sink = new FakeSink();
+  track = new ActivityTracker(sink);
+});
+
+describe("classifyActivity", () => {
+  const cases: [string, Record<string, unknown> | undefined, MetricState][] = [
+    ["Bash", undefined, "shell"],
+    ["shell_command", undefined, "shell"],
+    ["mcp__manager__terminal", undefined, "shell"],
+    // Reading scrollback that already exists is not running a command.
+    ["mcp__manager__terminal_output", undefined, "tool"],
+    ["mcp__manager__wait", undefined, "sleeping"],
+    ["functions.wait", undefined, "sleeping"],
+    // Matches both the sleep and the agent spelling; it's a peer, not a nap.
+    ["mcp__manager__wait_for_chat", undefined, "waiting_agent"],
+    ["Task", undefined, "waiting_agent"],
+    ["Agent", undefined, "waiting_agent"],
+    ["collaboration.wait_agent", undefined, "waiting_agent"],
+    ["mcp__manager__ask_user", undefined, "waiting_human"],
+    ["AskUserQuestion", undefined, "waiting_human"],
+    ["mcp__manager__watch_pr", undefined, "waiting_remote"],
+    ["WebFetch", undefined, "waiting_remote"],
+    ["Read", undefined, "tool"],
+    ["mcp__playwright__browser_click", undefined, "tool"],
+    ["functions.exec", { source: "await tools.mcp__manager__terminal({})" }, "shell"],
+  ];
+  for (const [name, input, expected] of cases) {
+    it(`files ${name} as ${expected}`, () => {
+      expect(classifyActivity(name, input)).toBe(expected);
+    });
+  }
+
+  it("survives an input it cannot serialize", () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(() => classifyActivity("functions.exec", circular)).not.toThrow();
+    expect(() => classifyActivity("functions.exec", { value: 1n })).not.toThrow();
+  });
+
+  it("guesses `tool` for a name it has never seen", () => {
+    // The honest default: an unknown tool is doing local work until something
+    // says otherwise. Guessing `blocked` would inflate every new integration.
+    expect(classifyActivity("SomeToolShippedNextMonth")).toBe("tool");
+  });
+
+  it("reads a state back as the chat dot's status", () => {
+    expect(chatStatusForActivity("tool")).toBe("running");
+    expect(chatStatusForActivity("generating")).toBe("running");
+    expect(chatStatusForActivity("shell")).toBe("waiting");
+    expect(chatStatusForActivity("waiting_remote")).toBe("waiting");
+  });
+});
+
+describe("ActivityTracker — one actor's timeline", () => {
+  it("tiles the turn with no gaps and no overlaps", () => {
+    // THE invariant: at every instant the main loop is in exactly one state, so
+    // the spans sum to the elapsed time of the turn. A gap means unaccounted
+    // work; an overlap means double-counted work.
+    sink.at(0);
+    track.turnStart();
+    sink.at(100);
+    track.toolStart(MAIN_ACTOR, "t1", "Bash");
+    sink.at(400);
+    track.toolEnd("t1");
+    sink.at(500);
+    track.turnEnd();
+
+    expect(sink.of()).toMatchObject([
+      { state: "generating", startTs: 0, endTs: 100 },
+      { state: "shell", identifier: "Bash", startTs: 100, endTs: 400 },
+      { state: "generating", startTs: 400, endTs: 500 },
+    ]);
+    expect(sink.msByState()).toEqual({ generating: 200, shell: 300 });
+    expect(sink.running).toEqual([]);
+  });
+
+  it("stays out of `generating` until the LAST parallel tool comes back", () => {
+    sink.at(0);
+    track.turnStart();
+    sink.at(10);
+    track.toolStart(MAIN_ACTOR, "a", "Bash");
+    sink.at(20);
+    track.toolStart(MAIN_ACTOR, "b", "Bash");
+    sink.at(50);
+    track.toolEnd("a");
+    // One tool back, one still running — the model is not generating yet.
+    expect(sink.running.map((s) => s.state)).toEqual(["shell"]);
+    sink.at(80);
+    track.toolEnd("b");
+    expect(sink.running.map((s) => s.state)).toEqual(["generating"]);
+
+    sink.at(100);
+    track.turnEnd();
+    // 40 + 60 attributed against 70 of wall clock: the overlap is real and is
+    // exactly what the union measure exists to reconcile.
+    expect(sink.msByState()).toEqual({ generating: 30, shell: 100 });
+  });
+
+  it("puts a permission prompt between the model and the tool", () => {
+    sink.at(0);
+    track.turnStart();
+    sink.at(10);
+    track.blocked(MAIN_ACTOR, "perm-1", "waiting_human", "Bash");
+    sink.at(1000);
+    track.unblocked("perm-1");
+    sink.at(1001);
+    track.toolStart(MAIN_ACTOR, "t1", "Bash");
+    sink.at(1500);
+    track.toolEnd("t1");
+    sink.at(1500);
+    track.turnEnd();
+    expect(sink.msByState()).toEqual({ generating: 11, waiting_human: 990, shell: 499 });
+  });
+
+  it("counts the queue wait, and ends it when the turn starts", () => {
+    sink.at(0);
+    track.queued();
+    sink.at(0);
+    track.queued(); // a re-publish of the same queued status is not a second wait
+    sink.at(300);
+    track.turnStart();
+    sink.at(400);
+    track.turnEnd();
+    expect(sink.msByState()).toEqual({ queued: 300, generating: 100 });
+  });
+
+  it("keeps a usage-limit pause running ACROSS the turn that caused it", () => {
+    // The pause is what happens because the turn ended, so `turnEnd` must not
+    // close it — it closes when the next turn actually starts.
+    sink.at(0);
+    track.turnStart();
+    sink.at(100);
+    track.turnEnd({ limit: true });
+    expect(sink.running.map((s) => s.state)).toEqual(["paused_limit"]);
+    sink.at(5_000);
+    track.turnStart();
+    expect(sink.msByState()).toMatchObject({ paused_limit: 4_900 });
+  });
+
+  it("closes everything on dispose", () => {
+    sink.at(0);
+    track.turnStart();
+    track.toolStart(MAIN_ACTOR, "t1", "Bash");
+    sink.at(90);
+    track.dispose();
+    expect(sink.running).toEqual([]);
+    expect(track.openCount).toBe(0);
+  });
+});
+
+describe("ActivityTracker — subagents are their own actors", () => {
+  it("runs a child's timeline beside the parent's wait", () => {
+    sink.at(0);
+    track.turnStart();
+    sink.at(10);
+    track.toolStart(MAIN_ACTOR, "task-1", "Task", { subagent_type: "Explore" });
+    // The child's first tool call is the evidence it is running — a subagent
+    // gets no turn-start event of its own.
+    sink.at(20);
+    track.toolStart("task-1", "c1", "Read", undefined, "Explore");
+    sink.at(60);
+    track.toolEnd("c1");
+    sink.at(100);
+    track.toolEnd("task-1");
+    sink.at(100);
+    track.turnEnd();
+
+    const parent = sink.of(MAIN_ACTOR);
+    expect(parent).toMatchObject([
+      { state: "generating", startTs: 0, endTs: 10 },
+      { state: "waiting_agent", identifier: "Task", startTs: 10, endTs: 100 },
+      // The spawner came back and the turn ended in the same instant, so the
+      // model's next stretch is zero long. Recorded rather than suppressed: it
+      // is a real transition, it contributes nothing to any total, and a rule
+      // that dropped it would have to guess which zero-length spans are real
+      // (Codex emits genuine ones for same-tick tool calls).
+      { state: "generating", startTs: 100, endTs: 100 },
+    ]);
+    const child = sink.of("task-1");
+    expect(child).toMatchObject([
+      { state: "tool", identifier: "Read", startTs: 20, endTs: 60 },
+      { state: "generating", startTs: 60, endTs: 100 },
+    ]);
+    // 90 of parent wait CONCURRENT with 80 of child work. Both are real; the
+    // parent's 90 is not the child's time and must not be netted against it.
+    expect(sink.msByState()).toEqual({ generating: 50, waiting_agent: 90, tool: 40 });
+  });
+
+  it("lets an async child revive after its spawner has already answered", () => {
+    // A backgrounded Agent answers in milliseconds with a launch ack and keeps
+    // working. Closing the child at the spawner's result would lose all of it.
+    sink.at(0);
+    track.turnStart();
+    sink.at(10);
+    track.toolStart(MAIN_ACTOR, "task-1", "Agent");
+    sink.at(12);
+    track.toolEnd("task-1"); // the launch ack
+    sink.at(50);
+    track.toolStart("task-1", "c1", "Read", undefined, "worker");
+    sink.at(90);
+    track.toolEnd("c1");
+    sink.at(200);
+    track.runEnd("task-1");
+    sink.at(200);
+    track.turnEnd();
+
+    expect(sink.of("task-1")).toMatchObject([
+      { state: "tool", startTs: 50, endTs: 90 },
+      { state: "generating", startTs: 90, endTs: 200 },
+    ]);
+    // The parent only waited for the ack; it wasn't blocked for the run.
+    expect(sink.msByState().waiting_agent).toBe(2);
+  });
+
+  it("closes a child left running when the turn ends", () => {
+    sink.at(0);
+    track.turnStart();
+    track.toolStart(MAIN_ACTOR, "task-1", "Task");
+    sink.at(10);
+    track.toolStart("task-1", "c1", "Bash");
+    sink.at(999);
+    track.turnEnd();
+    expect(sink.running).toEqual([]);
+    expect(sink.of("task-1")).toMatchObject([{ state: "shell", startTs: 10, endTs: 999 }]);
+  });
+});

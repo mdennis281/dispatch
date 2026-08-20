@@ -323,6 +323,11 @@ export class MetricsService {
   dispose(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    // A clean shutdown KNOWS when its open spans ended: now. Leaving them for
+    // the next boot's recovery sweep would mark perfectly good measurements
+    // `truncated` and clamp them back to the last heartbeat.
+    const at = this.now();
+    for (const key of [...this.openKeys]) this.closeSpan(key, at);
     this.flush();
   }
 

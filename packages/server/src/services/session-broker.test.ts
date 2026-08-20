@@ -2767,23 +2767,23 @@ describe("makePrCreateBinding — repo resolution", () => {
 
 /* --------------------------------------------------------------- metrics */
 
+/** A broker recording into a real ledger over the test store's database. */
+function meteredBroker(fn: QueryFn) {
+  // flushMs 0: no timer, so every assertion reads what the code under test
+  // actually wrote rather than racing a background flush.
+  const metrics = new MetricsService({ db: store.stateDb, flushMs: 0 });
+  return { metrics, broker: makeBroker(fn, 6, { metrics }) };
+}
+
+async function runTurn(broker: SessionBroker, chat: Chat, text = "go") {
+  await store.saveChat(chat);
+  broker.create(chat);
+  const idle = broker.waitFor(chat.id, "idle");
+  await broker.sendMessage(chat.id, text);
+  await idle;
+}
+
 describe("SessionBroker — the usage ledger", () => {
-  /** A broker recording into a real ledger over the test store's database. */
-  function meteredBroker(fn: QueryFn) {
-    // flushMs 0: no timer, so every assertion reads what the code under test
-    // actually wrote rather than racing a background flush.
-    const metrics = new MetricsService({ db: store.stateDb, flushMs: 0 });
-    return { metrics, broker: makeBroker(fn, 6, { metrics }) };
-  }
-
-  async function runTurn(broker: SessionBroker, chat: Chat, text = "go") {
-    await store.saveChat(chat);
-    broker.create(chat);
-    const idle = broker.waitFor(chat.id, "idle");
-    await broker.sendMessage(chat.id, text);
-    await idle;
-  }
-
   it("records each tool call with the chat, agent, model and runtime behind it", async () => {
     const { fn } = makeFakeQuery(() => [
       initMsg("sess-1"),
@@ -2899,6 +2899,165 @@ describe("SessionBroker — the usage ledger", () => {
     const { fn } = makeFakeQuery(() => [
       initMsg("sess-1"),
       toolUseMsg("Bash", { command: "ls" }, "tu-1"),
+      resultMsg(),
+    ]);
+    const broker = makeBroker(fn);
+    await runTurn(broker, chatFor("c1"));
+    expect(broker.getStatus("c1")).toBe("idle");
+  });
+});
+
+describe("SessionBroker — the runtime ledger", () => {
+  /**
+   * Every read here states its window.
+   *
+   * `makeBroker` runs on a counter clock starting at 1000, so a span's start is
+   * a few ms after the epoch — while MetricsService measures "now" with the real
+   * one. The default 30-day window would therefore contain none of them. Real
+   * usage has both on `Date.now`; only the rig disagrees.
+   */
+  const ALL = () => ({ from: 0, to: Date.now() });
+
+  /** Spans oldest-first (`recentSpans` answers newest-first, like the tail). */
+  function timeline(metrics: MetricsService, runId?: string) {
+    return metrics
+      .recentSpans({ ...ALL(), limit: 500 })
+      .filter((s) => (runId === undefined ? true : (s.runId ?? "") === runId))
+      .reverse();
+  }
+
+  it("times the model either side of the tool call it made", async () => {
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      toolUseMsg("Bash", { command: "ls" }, "tu-1"),
+      toolResultMsg("tu-1", "ok"),
+      resultMsg(),
+    ]);
+    const { metrics, broker } = meteredBroker(fn);
+    await runTurn(broker, chatFor("c1"));
+
+    const spans = timeline(metrics);
+    // The turn is TILED: thinking, the shell command, thinking again. A gap
+    // would be time nothing accounted for; an overlap would be time counted
+    // twice.
+    expect(spans.map((s) => s.state)).toEqual(["generating", "shell", "generating"]);
+    expect(spans[1]).toMatchObject({
+      identifier: "Bash",
+      chatId: "c1",
+      projectId: "p1",
+      harness: "claude",
+      state: "shell",
+    });
+    // Every span closed, and each ends where the next begins.
+    expect(spans.every((s) => s.endTs !== null)).toBe(true);
+    expect(spans[0]!.endTs).toBe(spans[1]!.startTs);
+    expect(spans[1]!.endTs).toBe(spans[2]!.startTs);
+    expect(metrics.stats().openSpans).toBe(0);
+  });
+
+  it("separates the token-burning time from the waiting", async () => {
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      toolUseMsg("mcp__manager__wait", { seconds: 30 }, "tu-1"),
+      toolResultMsg("tu-1", "waited"),
+      resultMsg(),
+    ]);
+    const { metrics, broker } = meteredBroker(fn);
+    await runTurn(broker, chatFor("c1"));
+
+    const summary = metrics.spanSummary(ALL());
+    // A sleep is agent time, and it is not thinking time. That distinction is
+    // the whole point of the class rollup.
+    expect(summary.byState.sleeping).toBeGreaterThan(0);
+    expect(summary.byClass.blocked).toBe(summary.byState.sleeping);
+    expect(summary.byClass.thinking).toBeGreaterThan(0);
+    expect(summary.open).toBe(0);
+  });
+
+  it("gives a subagent its own timeline, beside the parent's wait", async () => {
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      toolUseMsg("Task", { subagent_type: "Explore" }, "tu-task"),
+      {
+        type: "assistant",
+        parent_tool_use_id: "tu-task",
+        uuid: "t-uuid",
+        session_id: "sess-1",
+        subagent_type: "Explore",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "tu-9", name: "Grep", input: {} }],
+        },
+      },
+      resultMsg(),
+    ]);
+    const { metrics, broker } = meteredBroker(fn);
+    await runTurn(broker, chatFor("c1"));
+
+    // The parent is BLOCKED on the run…
+    expect(timeline(metrics, "").map((s) => s.state)).toContain("waiting_agent");
+    // …while the run has a timeline of its own, under its own actor.
+    const child = timeline(metrics, "tu-task");
+    expect(child.map((s) => s.identifier)).toContain("Grep");
+    expect(child.every((s) => s.subagent === "Explore")).toBe(true);
+
+    // Two actors, one chat. The parent's wait and the child's work run at the
+    // same time but on DIFFERENT timelines, so wall clock counts both — merging
+    // them would report a fleet of subagents as costing nothing at all.
+    // (Attributed exceeds busy only when ONE actor overlaps itself, which is
+    // parallel tool calls, not nesting.)
+    const summary = metrics.spanSummary(ALL());
+    expect(summary.actors).toBe(2);
+    expect(summary.chats).toBe(1);
+    expect(summary.busyMs).toBe(summary.attributedMs);
+    expect(summary.busyMs).toBeGreaterThan(0);
+  });
+
+  it("groups a window by chat and by run, which is what the page will ask for", async () => {
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      toolUseMsg("Bash", { command: "ls" }, "tu-1"),
+      toolResultMsg("tu-1", "ok"),
+      resultMsg(),
+    ]);
+    const { metrics, broker } = meteredBroker(fn);
+    await runTurn(broker, chatFor("c1"));
+
+    expect(metrics.spanTotals({ ...ALL(), groupBy: "chatId" }).totals[0]).toMatchObject({ key: "c1" });
+    // The main loop groups under "" and renders as "(main loop)" — the case
+    // that is the majority of every chart, not an edge.
+    const byRun = metrics.spanTotals({ ...ALL(), groupBy: "runId" }).totals;
+    expect(byRun.map((t) => t.key)).toEqual([""]);
+    expect(byRun[0]!.label).toBe("(main loop)");
+  });
+
+  it("closes the timeline when the session is stopped mid-tool", async () => {
+    // An interrupted Bash still has an end — the moment we stopped. Leaving it
+    // open would hand it to the next boot's recovery sweep, which can only
+    // truncate it back to the last heartbeat.
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      toolUseMsg("Bash", { command: "sleep 100" }, "tu-1"),
+    ]);
+    const { metrics, broker } = meteredBroker(fn);
+    const chat = chatFor("c1");
+    await store.saveChat(chat);
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "go");
+    await broker.waitFor(chat.id, "waiting").catch(() => {});
+    await broker.stop(chat.id);
+
+    expect(metrics.stats().openSpans).toBe(0);
+    expect(metrics.recentSpans({ ...ALL(), limit: 500 }).every((s) => s.endTs !== null)).toBe(true);
+  });
+
+  it("runs the turn normally when there is no ledger to time it with", async () => {
+    // The tracker runs either way; with no service behind it every span opens
+    // with an empty key and closes into nothing. A turn must not notice.
+    const { fn } = makeFakeQuery(() => [
+      initMsg("sess-1"),
+      toolUseMsg("Bash", { command: "ls" }, "tu-1"),
+      toolResultMsg("tu-1", "ok"),
       resultMsg(),
     ]);
     const broker = makeBroker(fn);
