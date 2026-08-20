@@ -15,6 +15,7 @@ interface Recorded {
   state: MetricState;
   identifier: string;
   runId: string;
+  subagent?: string;
   startTs: number;
   endTs?: number;
 }
@@ -36,6 +37,7 @@ class FakeSink implements SpanSink {
       state: span.state,
       identifier: span.identifier,
       runId: span.runId,
+      subagent: span.subagent,
       startTs: span.startTs,
     };
     this.spans.push(row);
@@ -230,8 +232,7 @@ describe("ActivityTracker — subagents are their own actors", () => {
     track.turnStart();
     sink.at(10);
     track.toolStart(MAIN_ACTOR, "task-1", "Task", { subagent_type: "Explore" });
-    // The child's first tool call is the evidence it is running — a subagent
-    // gets no turn-start event of its own.
+    // The child is thinking from here, not from its first tool call.
     sink.at(20);
     track.toolStart("task-1", "c1", "Read", undefined, "Explore");
     sink.at(60);
@@ -254,12 +255,71 @@ describe("ActivityTracker — subagents are their own actors", () => {
     ]);
     const child = sink.of("task-1");
     expect(child).toMatchObject([
+      // The lead-in: the child's reasoning before it reached for anything,
+      // opening at 10 with the parent's wait rather than at 20. In production
+      // this stretch was 3.3s of a 336.7s run and belonged to no actor at all.
+      { state: "generating", subagent: "Explore", startTs: 10, endTs: 20 },
       { state: "tool", identifier: "Read", startTs: 20, endTs: 60 },
       { state: "generating", startTs: 60, endTs: 100 },
     ]);
-    // 90 of parent wait CONCURRENT with 80 of child work. Both are real; the
+    // 90 of parent wait CONCURRENT with 90 of child work. Both are real; the
     // parent's 90 is not the child's time and must not be netted against it.
-    expect(sink.msByState()).toEqual({ generating: 50, waiting_agent: 90, tool: 40 });
+    expect(sink.msByState()).toEqual({ generating: 60, waiting_agent: 90, tool: 40 });
+  });
+
+  it("starts the child's timeline in the same instant as the parent's wait", () => {
+    // The tail was already exact — the child's last span ended where the
+    // parent's wait ended. This is the other end of the same seam: a gap here
+    // is a systematic under-count of subagent THINKING specifically.
+    sink.at(0);
+    track.turnStart();
+    sink.at(1_000);
+    track.toolStart(MAIN_ACTOR, "task-1", "Agent", { subagent_type: "Explore" });
+
+    const wait = sink.of(MAIN_ACTOR).find((s) => s.state === "waiting_agent");
+    const lead = sink.of("task-1")[0];
+    expect(lead).toMatchObject({ state: "generating", subagent: "Explore" });
+    expect(lead?.startTs).toBe(wait?.startTs);
+  });
+
+  it("invents no child for a wait that isn't a spawn", () => {
+    // `wait_for_chat` classifies as `waiting_agent` too, but it blocks on a
+    // PEER chat — its tool_use id is nobody's run id. A child pre-opened here
+    // would be an actor that never ran, showing up in every chart grouped by
+    // run and in the actor count on every summary.
+    sink.at(0);
+    track.turnStart();
+    sink.at(10);
+    track.toolStart(MAIN_ACTOR, "peer-1", "mcp__manager__wait_for_chat", { chatId: "c9" });
+    sink.at(40);
+    track.toolEnd("peer-1");
+    sink.at(40);
+    track.turnEnd();
+
+    expect(sink.of("peer-1")).toEqual([]);
+    expect(sink.spans.every((s) => s.runId === MAIN_ACTOR)).toBe(true);
+    expect(sink.msByState()).toEqual({ generating: 10, waiting_agent: 30 });
+  });
+
+  it("closes a spawn that produced nothing at all", () => {
+    // A child that returns without reaching for anything now has a timeline
+    // where it used to have none — so it needs an end as well as a start, or
+    // pre-opening trades an under-count for a span left running forever.
+    sink.at(0);
+    track.turnStart();
+    sink.at(10);
+    track.toolStart(MAIN_ACTOR, "task-1", "Task");
+    sink.at(70);
+    track.toolEnd("task-1");
+
+    // The spawner's result IS when a synchronous child finished, so its
+    // lead-in ends there rather than being left open for the turn to sweep.
+    expect(sink.of("task-1")).toMatchObject([
+      { state: "generating", subagent: "general-purpose", startTs: 10, endTs: 70 },
+    ]);
+    sink.at(70);
+    track.turnEnd();
+    expect(sink.running).toEqual([]);
   });
 
   it("lets an async child revive after its spawner has already answered", () => {
@@ -281,6 +341,11 @@ describe("ActivityTracker — subagents are their own actors", () => {
     track.turnEnd();
 
     expect(sink.of("task-1")).toMatchObject([
+      // The lead-in opens at the spawn like any other child's, but the ack is
+      // indistinguishable from a finished run here, so quiescing truncates it
+      // at 12. Two ms of real thinking, and the 12→50 hole is the same one an
+      // async child has always had between its quiesce and its revival.
+      { state: "generating", startTs: 10, endTs: 12 },
       { state: "tool", startTs: 50, endTs: 90 },
       { state: "generating", startTs: 90, endTs: 200 },
     ]);
@@ -297,7 +362,10 @@ describe("ActivityTracker — subagents are their own actors", () => {
     sink.at(999);
     track.turnEnd();
     expect(sink.running).toEqual([]);
-    expect(sink.of("task-1")).toMatchObject([{ state: "shell", startTs: 10, endTs: 999 }]);
+    expect(sink.of("task-1")).toMatchObject([
+      { state: "generating", startTs: 0, endTs: 10 },
+      { state: "shell", startTs: 10, endTs: 999 },
+    ]);
   });
 });
 
