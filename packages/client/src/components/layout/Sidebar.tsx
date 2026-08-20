@@ -471,17 +471,24 @@ function NavButton({
 /* ----------------------------------------------------------------- sidebar */
 
 /**
- * Fire-and-focus chat creation: dispatch create-chat with DEFAULTS (current
- * project, default mode/effort, no custom agent) and select the chat the moment
- * its id streams back into the store — no dialog. create-chat is fire-and-forget,
- * so we watch the chats store for the newly-appeared id (with an 8s safety net).
+ * Fire-and-focus chat creation: dispatch create-chat for the current project
+ * with no custom agent, and select the chat the moment its id streams back into
+ * the store — no dialog. create-chat is fire-and-forget, so we watch the chats
+ * store for the newly-appeared id (with an 8s safety net).
+ *
+ * Effort is deliberately NOT sent: the server resolves it from the app's
+ * per-provider default (Settings → Chat), and an explicit value here WINS over
+ * that chain — which is exactly how every new chat used to land on medium no
+ * matter what the setting said. `modeId` is still whatever the caller pins (the
+ * `+` button pins "auto"), so Settings → Default mode does NOT reach these — a
+ * separate decision, since dropping the pin would change the un-configured
+ * default from acceptEdits to ask.
  */
 function createChatAndFocus(input: { projectId: string; modeId?: string }): void {
   const before = new Set(useChats.getState().order);
   actions.createChat({
     projectId: input.projectId,
     modeId: input.modeId,
-    effort: "medium",
   });
 
   let done = false;
