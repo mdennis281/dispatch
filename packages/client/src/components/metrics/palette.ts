@@ -81,3 +81,52 @@ export function colorFor(palette: ChartPalette, key: string, index: number): str
   if (key === "__other__") return palette.other;
   return palette.series[index % palette.series.length]!;
 }
+
+/**
+ * Fixed slots for the activity classes.
+ *
+ * The three classes are a CLOSED, ORDERED set — thinking / working / blocked —
+ * so they get fixed hues rather than positional ones. The rule is "colour
+ * follows the entity, never its rank": the runtime page paints the same three
+ * classes in a meter, in a chart and in a table, and the server sorts each of
+ * those by time, so a positional assignment would repaint blocked from aqua to
+ * blue the moment a window had more waiting in it than generating.
+ *
+ * Slots 1–3 rather than any three: the palette's adjacent-pair separation is
+ * validated in the order the slots are declared (see `theme/*.css`), and these
+ * three are always drawn touching each other in the meter.
+ *
+ * The STATES are deliberately not in here. There are nine of them and eight
+ * slots, so any fixed map would have to leave one out — and the server already
+ * folds the ninth into "Other". States keep the positional assignment the rest
+ * of the page uses.
+ */
+export const CLASS_SLOT: Record<"thinking" | "working" | "blocked", number> = {
+  thinking: 0,
+  working: 1,
+  blocked: 2,
+};
+
+/** The fixed colour for one activity class. */
+export function classColor(palette: ChartPalette, cls: keyof typeof CLASS_SLOT): string {
+  return palette.series[CLASS_SLOT[cls]]!;
+}
+
+/**
+ * The colour for a group of a SPAN query.
+ *
+ * Same as {@link colorFor}, except that `class` groups take their fixed slot —
+ * so the chart's "Blocked" series and the meter's "Blocked" segment are the
+ * same hue, which they were not when both were assigned by position.
+ */
+export function spanColorFor(
+  palette: ChartPalette,
+  dim: string,
+  key: string,
+  index: number,
+): string {
+  if (dim === "class" && key in CLASS_SLOT) {
+    return classColor(palette, key as keyof typeof CLASS_SLOT);
+  }
+  return colorFor(palette, key, index);
+}

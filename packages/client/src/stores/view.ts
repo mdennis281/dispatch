@@ -5,7 +5,8 @@ import type { ConfigSection } from "@dispatch/shared";
  *  top-level, chat-independent memory browser (list+search + viewer); "git" =
  *  the project's Source Control cockpit (changes, history, branches, stashes);
  *  "files" = the filesystem browser (this machine's disks, not just the repo);
- *  "metrics" = the usage ledger (which agent reached for which tool, and when);
+ *  "metrics" = the ledger, in two subpages — usage (which agent reached for
+ *  which tool, and when) and runtime (where the wall clock went);
  *  "new-project" = the full-bleed project setup page;
  *  "project-settings" / "app-settings" = the two settings pages.
  *
@@ -65,6 +66,16 @@ export type AppSettingsSection =
  * is one list rather than two that answered the same question differently. */
 export type AppOverlay = "workspace" | "mcp" | "agents" | "processes";
 
+/**
+ * The Metrics view's subpages — the two halves of the ledger.
+ *
+ * `usage` counts what agents reached for; `runtime` measures where the wall
+ * clock went. Navigation state rather than a `useState` in the view, for the
+ * same reason `appSection` is: it survives leaving the page, and it is
+ * addressable from outside React.
+ */
+export type MetricsSection = "usage" | "runtime";
+
 interface ViewStore {
   view: AppView;
   setView: (view: AppView) => void;
@@ -74,6 +85,9 @@ interface ViewStore {
   /** Which subpage of the app-settings view is showing. */
   appSection: AppSettingsSection;
   setAppSection: (section: AppSettingsSection) => void;
+  /** Which half of the metrics ledger is showing. */
+  metricsSection: MetricsSection;
+  setMetricsSection: (section: MetricsSection) => void;
   overlay: AppOverlay | null;
   openOverlay: (overlay: AppOverlay) => void;
   closeOverlay: () => void;
@@ -89,6 +103,8 @@ export const useView = create<ViewStore>((set) => ({
   setProjectSection: (projectSection) => set({ projectSection }),
   appSection: "appearance",
   setAppSection: (appSection) => set({ appSection }),
+  metricsSection: "usage",
+  setMetricsSection: (metricsSection) => set({ metricsSection }),
   overlay: null,
   openOverlay: (overlay) => set({ overlay }),
   closeOverlay: () => set({ overlay: null }),
