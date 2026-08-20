@@ -18,12 +18,19 @@
  * ---
  *
  * GENERIC OVER THE DIMENSION SET, because there are two ledgers. The usage half
- * filters by `category`; the runtime half filters by `state` and `class` and by
- * `runId`, and neither dimension exists in the other's table — a `state` chip
- * sent to `/api/metrics/facets` is a 400, not a narrower result. So the two
- * pages cannot share ONE filter row's state, and this file makes them share its
+ * filters by `category`; the runtime half filters by `state` and `class`, and
+ * neither dimension exists in the other's table — a `state` chip sent to
+ * `/api/metrics/facets` is a 400, not a narrower result. So the two pages
+ * cannot share ONE filter row's state, and this file makes them share its
  * behaviour instead: {@link FacetRow} takes the dimension list, the labels, the
  * facets and the toggle, and each page supplies its own.
+ *
+ * A dimension can be FILTERABLE without appearing here. `runId` is the case:
+ * its values are raw `Task` tool_use ids, so a pick-list of them is a wall of
+ * `toolu_01LDfmxt…` that nobody can choose from — `subagent` answers the same
+ * question in words. It is still a real filter, reached by splitting the chart
+ * by run and clicking the row you want in the breakdown table, which is the one
+ * place those ids appear next to something that identifies them.
  */
 import { Check, Filter, X } from "lucide-react";
 import type { MetricFacetValue } from "@dispatch/shared";
@@ -45,7 +52,9 @@ const num = new Intl.NumberFormat();
  *
  * `subagent` and `runId` are the same fact seen two ways — a span with no run
  * id came from the chat's main loop — and both say so, because "(none)" on the
- * BIGGEST group of every window is the page's most misreadable label.
+ * BIGGEST group of every window is the page's most misreadable label. `runId`
+ * has no picker of its own (see the header), but it reaches this through the
+ * breakdown table's filter buttons.
  */
 export function emptyLabel(dim: string): string {
   if (dim === "agent") return "(default agent)";

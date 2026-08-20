@@ -92,9 +92,12 @@ export function colorFor(palette: ChartPalette, key: string, index: number): str
  * those by time, so a positional assignment would repaint blocked from aqua to
  * blue the moment a window had more waiting in it than generating.
  *
- * Slots 1–3 rather than any three: the palette's adjacent-pair separation is
- * validated in the order the slots are declared (see `theme/*.css`), and these
- * three are always drawn touching each other in the meter.
+ * The first three slots rather than any three — `--p-chart-1…3` as the theme
+ * files name them, which is array indices 0–2 here. The palette's adjacent-pair
+ * separation is validated in the order the slots are declared (see
+ * `theme/*.css`), and these three are always drawn touching each other in the
+ * meter, so they need to be a validated-adjacent run rather than three picked
+ * out of the middle.
  *
  * The STATES are deliberately not in here. There are nine of them and eight
  * slots, so any fixed map would have to leave one out — and the server already

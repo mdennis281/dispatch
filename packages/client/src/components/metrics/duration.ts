@@ -13,8 +13,9 @@
  *                           cell, a tooltip row. Up to two units, so "3h 12m"
  *                           keeps the precision that matters and drops the
  *                           precision that doesn't.
- *   {@link axisDuration}    an axis TICK, where six of them sit stacked in 44px
- *                           of gutter. One unit, ever, and no space in it.
+ *   {@link axisDuration}    an axis TICK, where several sit stacked in the
+ *                           52px Y-axis gutter `MetricsChart` reserves. One
+ *                           unit, ever, and no space in it.
  *
  * Both are stepped on the same boundaries, so a tick reading `3.2h` and the
  * tooltip beside it reading `3h 12m` are visibly the same quantity.
