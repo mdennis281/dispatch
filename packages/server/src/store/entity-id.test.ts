@@ -168,7 +168,10 @@ describe("Store refuses an id that would leave its root", () => {
       const saved = await store.saveChat(chat(id));
       expect(saved.id).toBe(id);
       expect((await store.getChat(id))?.id).toBe(id);
-      expect(store.chatTranscriptPath(id)).toContain(id);
+      // Exact, not `toContain`: a short id like "a" occurs all over an absolute
+      // temp path, so a substring check would pass even if the segment HAD been
+      // rewritten — which is the only thing this test exists to catch.
+      expect(store.chatTranscriptPath(id)).toBe(join(dir, "chats", id, "messages.jsonl"));
     }
     expect((await store.listChats()).map((c) => c.id).sort()).toEqual(
       ["A-_9", "V1StGXR8_Z5jdHi6B-myT", "a", "auto", "hivebreak"].sort(),
