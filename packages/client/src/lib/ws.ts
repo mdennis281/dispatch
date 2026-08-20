@@ -476,11 +476,29 @@ export class WsClient {
   close(): void {
     this.closedByUser = true;
     this.clearReconnect();
-    this.clearSocketTimers();
     this.ticketAbort?.abort();
     const socket = this.socket;
-    this.socket = null;
-    socket?.close();
+    if (!socket) {
+      this.clearSocketTimers();
+    } else {
+      try {
+        socket.close();
+      } catch {
+        /* already closing */
+      }
+      // Drive the teardown rather than detaching the field first. `handleClose`
+      // is guarded on `this.socket === socket`, so nulling it here would make
+      // BOTH this call and the socket's own close event no-ops — and the store
+      // would go on reporting `open` for a connection that has deliberately been
+      // taken away. `scheduleReconnect` bails on `closedByUser`, so this records
+      // the close without arming a retry.
+      this.handleClose(socket, { code: 1000, reason: "closed by the app", wasClean: true });
+    }
+    // …and the diagnosis stands down. This is a teardown, not a fault: the app
+    // is no longer trying to hold a connection, which is the same condition as
+    // before `startLiveApp` ever ran. Without this the screen would come up two
+    // seconds after a deliberate shutdown to report a problem nobody has.
+    useConnection.getState().noteLiveStopped();
   }
 }
 

@@ -119,6 +119,7 @@ interface ConnectionStore {
   setOnline: (online: boolean) => void;
   noteMockSeeded: () => void;
   noteLiveStarted: () => void;
+  noteLiveStopped: () => void;
   clearStopped: () => void;
   onHello: (serverTime: number, version?: string) => void;
   onServerShutdown: (reason?: string) => void;
@@ -162,6 +163,7 @@ export const useConnection = create<ConnectionStore>((set) => ({
   setOnline: (online) => set({ online }),
   noteMockSeeded: () => set({ mockSeeded: true }),
   noteLiveStarted: () => set({ liveStarted: true }),
+  noteLiveStopped: () => set({ liveStarted: false }),
   clearStopped: () => set({ stopped: false, stoppedReason: undefined }),
   onHello: (serverTime, version) =>
     set({
