@@ -238,7 +238,7 @@ export function ackTaskId(result: ToolResultRow | undefined): string | undefined
   return m?.[1];
 }
 
-/** An ack is a one-line receipt; a command's own output is not. */
+/** An ack is a receipt — a line or three. A command's own output is not. */
 const ACK_MAX_CHARS = 400;
 const ACK_MAX_LINES = 3;
 
