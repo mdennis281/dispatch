@@ -45,8 +45,14 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * `ui/InlineChip` — a chip that sits in a line of prose genuinely can't be
  * `Button`, which starts at h-6 and would open the line box. The viewer's
  * prev/next is `Button circle`.
+ *
+ * 82 → 83: the session detail work. An Active-sessions row is a two-line
+ * disclosure target — device label above, last-seen and network below, with the
+ * Revoke `Button` beside it — so the clickable thing is the row itself, not a
+ * control inside it. `Button` cannot be that without dropping its own padding,
+ * height floor and single-line layout, which is the whole component.
  */
-const BASELINE = 82;
+const BASELINE = 83;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

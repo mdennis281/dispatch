@@ -5,6 +5,7 @@ import type { AuthSecurityOverview, AuthSessionResponse, AuthSetupCode, AuthTotp
 import { Button } from "../ui/Button.js";
 import { Field, InlineError, TextInput } from "../sidebar/Modal.js";
 import { SectionLabel } from "../ui/Panel.js";
+import { SessionList } from "./SessionList.js";
 import { TotpQr } from "./TotpQr.js";
 import { authDelete, authPost, authPut, sessionFetch, useAuth } from "../../stores/auth.js";
 
@@ -65,9 +66,11 @@ export function AuthSettings() {
   // Every async button routes through this: a handler that throws on its own
   // leaves the click looking like it did nothing at all, which is exactly how a
   // rejected request reads to the user.
-  const guard = (action: () => Promise<void>) => async () => {
+  // Generic in its arguments so a list child can hand back the row it acted on
+  // (revoking session X) without every such callback re-implementing the catch.
+  const guard = <A extends unknown[]>(action: (...args: A) => Promise<void>) => async (...args: A) => {
     setError(null);
-    try { await action(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    try { await action(...args); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
   };
 
   const reload = async () => {
@@ -139,7 +142,11 @@ export function AuthSettings() {
         {security?.user.totpEnabled && <Button className="mt-2" variant="danger" onClick={guard(async () => { await authDelete("/api/auth/totp", { password: currentPassword }); await reload(); })}>Disable using current password</Button>}
       </div>
 
-      <div className="rounded-lg border border-line p-3"><p className="mb-2 text-xs font-medium text-secondary">Active sessions</p><div className="space-y-1">{security?.sessions.map((session) => <div key={session.id} className="flex items-center justify-between rounded bg-inset px-2 py-1.5 text-xs"><span className="min-w-0 truncate text-muted">{session.current ? "This device · " : ""}{session.userAgent || "Unknown browser"}</span><Button variant="danger" disabled={session.current} onClick={guard(async () => { await authDelete(`/api/auth/sessions/${session.id}`); await reload(); })}>Revoke</Button></div>)}</div></div>
+      {security && <SessionList
+        security={security}
+        onRevoke={guard(async (id: string) => { await authDelete(`/api/auth/sessions/${id}`); await reload(); })}
+        onToggleLookup={guard(async (enabled: boolean) => { await authPut("/api/auth/ip-lookup", { enabled }); await reload(); })}
+      />}
 
       {user?.owner && <div className="rounded-lg border border-line p-3">
         <div className="flex items-center justify-between"><div><p className="text-xs font-medium text-secondary">Accounts</p><p className="text-2xs text-faint">Every account sees the same chats and configuration.</p></div><Button leftIcon={<Plus />} onClick={guard(async () => setSetupLink(await authPost("/api/auth/setup-codes")))}>Invite user</Button></div>

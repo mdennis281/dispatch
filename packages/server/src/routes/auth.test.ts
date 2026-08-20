@@ -404,6 +404,58 @@ describe("optional authentication", () => {
     await instance.close();
   });
 
+  it("describes a session's client, network and last-seen on the security overview", async () => {
+    const { instance } = await app();
+    const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+    const session = await bootstrap(instance, ua);
+    const headers = { authorization: `Bearer ${session.body.accessToken}` };
+    const overview = (await instance.inject({ url: "/api/auth/security", headers })).json() as {
+      ipLookup: boolean;
+      sessions: Array<{ current: boolean; client: { browser?: string; os?: string; device: string }; network: { scope: string }; lastSeenAt: number; userAgent: string }>;
+    };
+    const [row] = overview.sessions;
+    expect(row!.current).toBe(true);
+    expect(row!.client).toMatchObject({ browser: "Chrome 141", os: "Windows 10/11", device: "desktop" });
+    // The raw string stays available so a wrong inference stays diagnosable.
+    expect(row!.userAgent).toBe(ua);
+    // fastify's inject reports 127.0.0.1, which must never reach the provider.
+    expect(row!.network.scope).toBe("loopback");
+    expect(overview.ipLookup).toBe(true);
+    await instance.close();
+  });
+
+  // lastUsedAt only moves on refresh, so it reads as ~10 minutes stale even for a
+  // tab that is talking to the server right now. lastSeenAt is the honest one.
+  it("advances lastSeenAt on an ordinary authenticated request, without a refresh", async () => {
+    const { instance } = await app();
+    const session = await bootstrap(instance);
+    const headers = { authorization: `Bearer ${session.body.accessToken}` };
+    const read = async () => ((await instance.inject({ url: "/api/auth/security", headers })).json() as {
+      sessions: Array<{ lastSeenAt: number; lastUsedAt: number }>;
+    }).sessions[0]!;
+    const before = await read();
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await instance.inject({ url: "/api/projects", headers });
+    const after = await read();
+    expect(after.lastSeenAt).toBeGreaterThan(before.lastSeenAt);
+    expect(after.lastUsedAt).toBe(before.lastUsedAt);
+    await instance.close();
+  });
+
+  it("only the owner may switch IP lookup off, and the choice survives on the overview", async () => {
+    const { instance } = await app();
+    const session = await bootstrap(instance);
+    const headers = { authorization: `Bearer ${session.body.accessToken}` };
+    expect((await instance.inject({ method: "PUT", url: "/api/auth/ip-lookup", headers, payload: { enabled: false } })).statusCode).toBe(200);
+    const overview = (await instance.inject({ url: "/api/auth/security", headers })).json() as { ipLookup: boolean };
+    expect(overview.ipLookup).toBe(false);
+    // A full settings PUT must not clear it — auth is preserved wholesale there.
+    const settings = (await instance.inject({ url: "/api/settings", headers })).json() as Record<string, unknown>;
+    expect((await instance.inject({ method: "PUT", url: "/api/settings", headers, payload: { ...settings, theme: "light" } })).statusCode).toBe(200);
+    expect(((await instance.inject({ url: "/api/auth/security", headers })).json() as { ipLookup: boolean }).ipLookup).toBe(false);
+    await instance.close();
+  });
+
   it("turning auth off revokes sessions but preserves the owner for later re-enable", async () => {
     const { instance } = await app();
     const ua = "Mozilla/5.0 Chrome/126.0 Windows NT 10.0";

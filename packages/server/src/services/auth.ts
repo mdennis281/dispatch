@@ -19,7 +19,10 @@ import type {
   AuthTotpSetup,
   AuthStatus,
   AuthUserSummary,
+  SessionNetwork,
 } from "@dispatch/shared";
+import { describeUserAgent } from "@dispatch/shared";
+import { IpGeo } from "./ip-geo.js";
 import type { Store } from "../store/index.js";
 import { readJson, writeJsonAtomic } from "../store/fsq.js";
 
@@ -30,6 +33,13 @@ const CHALLENGE_MS = 5 * 60 * 1000;
 const SETUP_MS = 15 * 60 * 1000;
 const CONCURRENT_REFRESH_GRACE_MS = 2_000;
 const AUTH_LOCK_WAIT_MS = 5_000;
+/**
+ * How long a last-seen stamp may sit in memory before it reaches disk. Every
+ * authenticated request touches it, so writing through would turn a session file
+ * write into a per-request cost; the only thing at risk is up to a minute of
+ * "last seen" precision across an unclean shutdown.
+ */
+const LAST_SEEN_FLUSH_MS = 60_000;
 
 export const REFRESH_COOKIE = "dispatch_refresh";
 
@@ -71,6 +81,12 @@ interface RefreshFamily {
   ip?: string;
   createdAt: number;
   lastUsedAt: number;
+  /**
+   * Last authenticated request. Optional because sessions written before this
+   * field existed have none — they fall back to `lastUsedAt`, which is the same
+   * value they would have had anyway.
+   */
+  lastSeenAt?: number;
   expiresAt: number;
   absoluteExpiresAt: number;
   revokedAt?: number;
@@ -263,16 +279,19 @@ function authEpoch(data: AuthData): number {
   return data.sessionEpoch ?? 0;
 }
 
-function sessionSummary(row: RefreshFamily, currentId?: string): AuthSessionSummary {
+function sessionSummary(row: RefreshFamily, network: SessionNetwork, currentId?: string): AuthSessionSummary {
   return {
     id: row.id,
     current: row.id === currentId,
     createdAt: row.createdAt,
     lastUsedAt: row.lastUsedAt,
+    lastSeenAt: row.lastSeenAt ?? row.lastUsedAt,
     expiresAt: row.expiresAt,
     absoluteExpiresAt: row.absoluteExpiresAt,
     userAgent: row.userAgent,
+    client: describeUserAgent(row.userAgent),
     ip: row.ip,
+    network,
   };
 }
 
@@ -328,8 +347,12 @@ export class AuthService {
   private revocationListeners = new Set<(sessionId: string) => void>();
   private settingsCache: { value: Awaited<ReturnType<Store["getSettings"]>>["auth"]; expiresAt: number } | null = null;
   private settingsLoad: Promise<Awaited<ReturnType<Store["getSettings"]>>["auth"]> | null = null;
+  private readonly geo: IpGeo;
+  private lastSeenFlush: NodeJS.Timeout | null = null;
 
-  constructor(private store: Store) {}
+  constructor(private store: Store, geo?: IpGeo) {
+    this.geo = geo ?? new IpGeo();
+  }
 
   /** Serialize check-then-write credential/session mutations within this process. */
   private async exclusive<T>(task: () => Promise<T>): Promise<T> {
@@ -421,6 +444,32 @@ export class AuthService {
     await this.queuePersist(false, true);
   }
 
+  /**
+   * Record that this session just made an authenticated request. Runs on EVERY
+   * request, so it only mutates memory and arms one debounced write — the
+   * alternative is an atomic rewrite of the session file per API call.
+   */
+  private touch(family: RefreshFamily): void {
+    const now = Date.now();
+    if (family.lastSeenAt && now - family.lastSeenAt < 1_000) return;
+    family.lastSeenAt = now;
+    if (this.lastSeenFlush) return;
+    this.lastSeenFlush = setTimeout(() => {
+      this.lastSeenFlush = null;
+      void this.persistSessions().catch(() => {});
+    }, LAST_SEEN_FLUSH_MS);
+    // Never hold the process open for a timestamp.
+    this.lastSeenFlush.unref?.();
+  }
+
+  /** Land the pending last-seen stamps. Called on server close. */
+  async dispose(): Promise<void> {
+    if (!this.lastSeenFlush) return;
+    clearTimeout(this.lastSeenFlush);
+    this.lastSeenFlush = null;
+    if (this.sessionData) await this.persistSessions().catch(() => {});
+  }
+
   private async queuePersist(auth: boolean, sessions: boolean): Promise<void> {
     const value = this.data;
     const sessionValue = this.sessionData;
@@ -466,6 +515,25 @@ export class AuthService {
     this.settingsCache = { value: auth, expiresAt: Date.now() + 1_000 };
   }
 
+  /**
+   * Whether a public session IP may be sent to the geolocation provider.
+   * Unset reads as ON: this is an opt-OUT, and every config.json predating the
+   * setting belongs to an install that never chose to turn it off.
+   */
+  async ipLookupEnabled(): Promise<boolean> {
+    return (await this.settings())?.ipLookup !== false;
+  }
+
+  async setIpLookup(identity: RequestIdentity, enabled: boolean): Promise<{ ipLookup: boolean }> {
+    return this.sharedMutation(async () => {
+      if (!identity.user.owner) throw new AuthFailure(403, "Owner access required.");
+      const settings = await this.store.getSettings();
+      if (!settings.auth) throw new AuthFailure(409, "Authentication is not configured.");
+      await this.saveAuthSettings({ ...settings.auth, ipLookup: enabled });
+      return { ipLookup: enabled };
+    });
+  }
+
   async enabled(): Promise<boolean> {
     return (await this.settings())?.enabled === true;
   }
@@ -505,6 +573,7 @@ export class AuthService {
     if (!user || !family || family.userId !== user.id || family.securityVersion !== version || payload.ver !== version ||
         family.authEpoch !== epoch || payload.aep !== epoch ||
         family.expiresAt <= Date.now() || family.absoluteExpiresAt <= Date.now()) return null;
+    this.touch(family);
     return { user: userSummary(user), sessionId: family.id, securityVersion: version, authEpoch: epoch };
   }
 
@@ -518,11 +587,11 @@ export class AuthService {
     const now = Date.now();
     const version = user ? securityVersion(user) : -1;
     const epoch = authEpoch(data);
-    return user && family && family.userId === user.id && family.securityVersion === version && payload.ver === version &&
+    if (!(user && family && family.userId === user.id && family.securityVersion === version && payload.ver === version &&
         family.authEpoch === epoch && payload.aep === epoch &&
-        family.expiresAt > now && family.absoluteExpiresAt > now
-      ? { user: userSummary(user), sessionId: family.id, securityVersion: version, authEpoch: epoch }
-      : null;
+        family.expiresAt > now && family.absoluteExpiresAt > now)) return null;
+    this.touch(family);
+    return { user: userSummary(user), sessionId: family.id, securityVersion: version, authEpoch: epoch };
   }
 
   async identityStillValid(identity: RequestIdentity): Promise<boolean> {
@@ -630,7 +699,7 @@ export class AuthService {
     const epoch = authEpoch(data);
     this.sessionData!.sessions.push({ id, userId: user.id, securityVersion: version, authEpoch: epoch, currentHash: digest(raw),
       uaBinding: normalizeUserAgent(meta.ua), userAgent: meta.ua.slice(0, 300), ip: meta.ip,
-      createdAt: now, lastUsedAt: now, expiresAt: now + REFRESH_SLIDING_MS,
+      createdAt: now, lastUsedAt: now, lastSeenAt: now, expiresAt: now + REFRESH_SLIDING_MS,
       absoluteExpiresAt: now + REFRESH_ABSOLUTE_MS });
     await this.persistSessions();
     const nowSec = Math.floor(now / 1000);
@@ -756,8 +825,15 @@ export class AuthService {
   async security(identity: RequestIdentity): Promise<AuthSecurityOverview> {
     const data = await this.load();
     const user = data.users.find((u) => u.id === identity.user.id)!;
+    const rows = this.sessionData!.sessions.filter((s) => s.userId === user.id && !s.revokedAt && s.absoluteExpiresAt > Date.now());
+    // Lookups are cached and coalesced per address, and a failing provider
+    // resolves to a scope-only description rather than rejecting — so awaiting
+    // them here costs one round trip the first time a public IP is seen.
+    const lookup = await this.ipLookupEnabled();
+    const networks = await Promise.all(rows.map((row) => this.geo.describe(row.ip, lookup)));
     return { user: userSummary(user),
-      sessions: this.sessionData!.sessions.filter((s) => s.userId === user.id && !s.revokedAt && s.absoluteExpiresAt > Date.now()).map((s) => sessionSummary(s, identity.sessionId)),
+      ipLookup: lookup,
+      sessions: rows.map((row, index) => sessionSummary(row, networks[index]!, identity.sessionId)),
       passkeys: user.passkeys.map(({ id, name, createdAt, lastUsedAt }) => ({ id, name, createdAt, lastUsedAt })),
     };
   }
