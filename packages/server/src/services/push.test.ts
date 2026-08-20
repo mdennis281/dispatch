@@ -141,6 +141,23 @@ describe("PushService", () => {
     expect((await overridden.vapidKeys()).subject).toBe("https://dispatch.example.com");
   });
 
+  it("trims a stored subject rather than signing with its whitespace", async () => {
+    // `isValidVapidSubject` validates the TRIMMED string, so a padded subject
+    // passes the check; signing with the padding is a different question and
+    // the push service is entitled to reject it.
+    await writeFile(
+      join(dir, "vapid.json"),
+      JSON.stringify({ publicKey: "PUB", privateKey: "PRIV", subject: "  mailto:me@example.com\n" }),
+    );
+    const { mock } = webPushMock();
+    const svc = new PushService({ bus, configDir: dir, dataDir: dir, webPush: mock });
+    expect((await svc.vapidKeys()).subject).toBe("mailto:me@example.com");
+    // Normalised on disk too, or it comes back on the next boot.
+    expect(JSON.parse(await readFile(join(dir, "vapid.json"), "utf8")).subject).toBe(
+      "mailto:me@example.com",
+    );
+  });
+
   it("refuses an invalid override rather than signing with it", async () => {
     const errors: unknown[] = [];
     const { mock } = webPushMock();

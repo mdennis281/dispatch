@@ -260,7 +260,11 @@ export class PushService {
    */
   private subjectFor(stored?: string): string {
     if (this.configuredSubject) return this.configuredSubject;
-    if (stored && isValidVapidSubject(stored)) return stored;
+    // Trimmed, because that is what the validator actually inspected: a stored
+    // subject padded with whitespace would otherwise pass and then be SIGNED
+    // with the padding. Returning the trimmed form also makes the heal below
+    // see a difference and rewrite the file, so it doesn't come back next boot.
+    if (stored && isValidVapidSubject(stored)) return stored.trim();
     return DEFAULT_VAPID_SUBJECT;
   }
 
