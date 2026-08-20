@@ -8,6 +8,20 @@
  *   GET  /api/metrics/stats   → ledger size + write health
  *   POST /api/metrics/prune   → drop rows older than `before`
  *
+ * And the same five reads over the RUNTIME half of the ledger, which answers in
+ * milliseconds rather than counts:
+ *
+ *   POST /api/metrics/spans/series   → MetricSpanSeriesResponse  (time over time)
+ *   POST /api/metrics/spans/totals   → MetricSpanTotalsResponse  (the leaderboard)
+ *   POST /api/metrics/spans/summary  → MetricSpanSummary         (the hero row)
+ *   POST /api/metrics/spans/facets   → MetricSpanFacetsResponse  (filter controls)
+ *   POST /api/metrics/spans/recent   → MetricSpan[]              (activity tail)
+ *
+ * Separate paths rather than a `measure` flag on the existing ones: the two
+ * halves have different dimensions (a span has `state`, an event has `category`)
+ * and different responses, so one endpoint would have to accept a filter it
+ * might reject and return a union the client has to narrow anyway.
+ *
  * POST for reads, deliberately. The query carries a FILTER — a map of dimension
  * to a list of allowed values — and encoding that into a query string means
  * inventing a nesting convention, then parsing it back, then discovering the URL
@@ -25,6 +39,9 @@ import {
   MetricDimensionSchema,
   MetricFilterSchema,
   MetricQuerySchema,
+  MetricSpanDimensionSchema,
+  MetricSpanFilterSchema,
+  MetricSpanQuerySchema,
 } from "@dispatch/shared";
 
 /** The window + filter every read shares. */
@@ -46,6 +63,19 @@ const RecentSchema = ScopeSchema.extend({
  * would delete a different set depending on how long the request sat in a queue.
  */
 const PruneSchema = z.object({ before: z.number().int() });
+
+/** The window + filter every runtime read shares. */
+const SpanScopeSchema = z.object({
+  from: z.number().int().optional(),
+  to: z.number().int().optional(),
+  filter: MetricSpanFilterSchema.optional(),
+});
+
+const SpanTotalsSchema = MetricSpanQuerySchema.extend({ groupBy: MetricSpanDimensionSchema });
+
+const SpanRecentSchema = SpanScopeSchema.extend({
+  limit: z.number().int().min(1).max(500).default(100),
+});
 
 export function registerMetricsRoutes(app: FastifyInstance): void {
   const { metrics } = app.services;
@@ -72,6 +102,36 @@ export function registerMetricsRoutes(app: FastifyInstance): void {
     const parsed = RecentSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
     return metrics.recent(parsed.data);
+  });
+
+  app.post<{ Body: unknown }>("/api/metrics/spans/series", async (req, reply) => {
+    const parsed = MetricSpanQuerySchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    return metrics.spanSeries(parsed.data);
+  });
+
+  app.post<{ Body: unknown }>("/api/metrics/spans/totals", async (req, reply) => {
+    const parsed = SpanTotalsSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    return metrics.spanTotals(parsed.data);
+  });
+
+  app.post<{ Body: unknown }>("/api/metrics/spans/summary", async (req, reply) => {
+    const parsed = SpanScopeSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    return metrics.spanSummary(parsed.data);
+  });
+
+  app.post<{ Body: unknown }>("/api/metrics/spans/facets", async (req, reply) => {
+    const parsed = SpanScopeSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    return metrics.spanFacets(parsed.data);
+  });
+
+  app.post<{ Body: unknown }>("/api/metrics/spans/recent", async (req, reply) => {
+    const parsed = SpanRecentSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    return metrics.recentSpans(parsed.data);
   });
 
   app.get("/api/metrics/stats", async () => metrics.stats());

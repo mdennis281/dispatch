@@ -321,3 +321,334 @@ export function resolveBucket(
   }
   return "month";
 }
+
+/* ==========================================================================
+ *                          RUNTIME SPANS
+ * ========================================================================== */
+
+/**
+ * The second half of the ledger: WHERE THE TIME WENT, not just what was reached
+ * for.
+ *
+ * An event row has no width — it answers "how many times" and can never answer
+ * "for how long". A SPAN is one stretch of wall clock with a start, an end, and
+ * a state, so the same window that counts 400 Bash calls can also say they cost
+ * nine hours and that six of those were spent waiting on a shell rather than
+ * generating tokens.
+ *
+ * THE ACTOR IS `(chatId, runId)`. A chat's main loop and each subagent run it
+ * spawns are separate actors with separate timelines. That is what makes "the
+ * runtime of each chat AND the subagents within it" answerable, and it is what
+ * stops the obvious double count: a parent sitting in `waiting_agent` for ten
+ * minutes while five children each burn eight is not fifty minutes of parent.
+ *
+ * OVERLAP WITHIN AN ACTOR IS ALLOWED, because it is real — a single assistant
+ * turn can open five tool calls at once. Rather than invent a precedence rule
+ * that silently discards four of them, spans are stored as observed and the
+ * query layer offers two measures over them:
+ *
+ *   attributed  plain sum of span durations. What the state breakdown shows.
+ *   busy        union of an actor's intervals. True wall clock, never
+ *               double-counted. What the headline figure shows.
+ *
+ * Their ratio is the parallelism factor — a number worth having, rather than a
+ * discrepancy to hide.
+ */
+
+/**
+ * What an actor was doing for the length of one span.
+ *
+ * Same discipline as {@link MetricCategorySchema}: exactly ONE state per span,
+ * the most specific that applies, so summing one actor's states gives its
+ * attributed time instead of counting the interesting stretches twice.
+ *
+ *   generating     the model is producing text or reasoning — the only state
+ *                  that burns tokens
+ *   tool           a local tool is executing (Read, Edit, Grep, Write)
+ *   shell          a shell command is running (Bash, manager terminal)
+ *   sleeping       an explicit, deliberate wait with no work behind it
+ *   waiting_agent  blocked on a child run or a peer chat
+ *   waiting_human  blocked on a permission prompt or a question
+ *   waiting_remote blocked on the network — a PR watch, a fetch, a remote MCP
+ *   queued         input accepted, the runtime has not started on it yet
+ *   paused_limit   the turn ended on a usage limit; waiting for the window
+ */
+export const MetricStateSchema = z.enum([
+  "generating",
+  "tool",
+  "shell",
+  "sleeping",
+  "waiting_agent",
+  "waiting_human",
+  "waiting_remote",
+  "queued",
+  "paused_limit",
+]);
+export type MetricState = z.infer<typeof MetricStateSchema>;
+
+/** Every state, in the order the UI stacks them. */
+export const METRIC_STATES = MetricStateSchema.options;
+
+/** Display labels for the states. */
+export const METRIC_STATE_LABELS: Record<MetricState, string> = {
+  generating: "Generating",
+  tool: "Tools",
+  shell: "Shell",
+  sleeping: "Sleeping",
+  waiting_agent: "Waiting on agents",
+  waiting_human: "Waiting on human",
+  waiting_remote: "Waiting on remote",
+  queued: "Queued",
+  paused_limit: "Paused (usage limit)",
+};
+
+/**
+ * The coarse rollup — the distinction this whole half of the ledger exists to
+ * draw.
+ *
+ *   thinking  the model is generating: the time that costs tokens
+ *   working   something is executing on the agent's behalf, spending no tokens
+ *   blocked   nothing is happening; the agent waits on someone or something
+ *
+ * `working` and `blocked` are both still agent use and both belong on the chart
+ * — an agent that spent four hours asleep in `wait` was occupied for four hours
+ * — they are just not the same KIND of hour as `thinking`.
+ */
+export const MetricActivityClassSchema = z.enum(["thinking", "working", "blocked"]);
+export type MetricActivityClass = z.infer<typeof MetricActivityClassSchema>;
+
+/** Every class, in reading order. */
+export const METRIC_ACTIVITY_CLASSES = MetricActivityClassSchema.options;
+
+/** Display labels for the classes. */
+export const METRIC_ACTIVITY_CLASS_LABELS: Record<MetricActivityClass, string> = {
+  thinking: "Thinking",
+  working: "Working",
+  blocked: "Blocked",
+};
+
+/**
+ * State to class. The ONE place the rollup is defined; the server builds its SQL
+ * `CASE` from this map rather than storing a `class` column, so re-classifying a
+ * state later re-reads history correctly instead of leaving old rows on the old
+ * answer.
+ */
+export const METRIC_STATE_CLASS: Record<MetricState, MetricActivityClass> = {
+  generating: "thinking",
+  tool: "working",
+  shell: "working",
+  sleeping: "blocked",
+  waiting_agent: "blocked",
+  waiting_human: "blocked",
+  waiting_remote: "blocked",
+  queued: "blocked",
+  paused_limit: "blocked",
+};
+
+/** Roll one state up to its class. */
+export function activityClass(state: MetricState): MetricActivityClass {
+  return METRIC_STATE_CLASS[state];
+}
+
+/** One recorded stretch of an actor's wall clock. */
+export const MetricSpanSchema = z.object({
+  /** Rowid, assigned on insert. Absent on the way in. */
+  id: z.number().int().optional(),
+  /** When the span opened, epoch ms. */
+  startTs: z.number().int(),
+  /** When it closed, epoch ms. NULL means STILL OPEN — clipped to now on read. */
+  endTs: z.number().int().nullable(),
+  state: MetricStateSchema,
+  /**
+   * What was happening, within the state: a tool name for `tool`/`shell`, the
+   * subagent type for `waiting_agent`, `"turn"` for `generating`.
+   */
+  identifier: z.string(),
+  /**
+   * The subagent run this span belongs to — the spawning `Task`/`Agent` call's
+   * tool_use id. Absent means the chat's own main loop. Together with `chatId`
+   * this is the ACTOR, and an actor's spans are its own timeline.
+   */
+  runId: z.string().optional(),
+  detail: z.string().optional(),
+  projectId: z.string().optional(),
+  chatId: z.string().optional(),
+  agent: z.string().optional(),
+  subagent: z.string().optional(),
+  model: z.string().optional(),
+  harness: z.string().optional(),
+  turn: z.number().int().optional(),
+  /** Outcome, for spans that have one (a tool call that failed). */
+  ok: z.boolean().optional(),
+  source: MetricSourceSchema.default("live"),
+  /**
+   * The runtime's OWN duration for this span, when it reported one.
+   *
+   * Kept beside the observed wall clock, never mixed into it. Every harness is
+   * timed on ONE clock — the server's, at event receipt — because that is the
+   * only way a Claude hour and a Codex hour are comparable. This column is the
+   * cross-check that says when the two disagree.
+   */
+  reportedMs: z.number().int().optional(),
+  /**
+   * The span was closed by crash recovery at the last known heartbeat, not by
+   * observing it end. Its duration is a floor, not a measurement.
+   */
+  truncated: z.boolean().optional(),
+  /** Idempotency key, and the handle a caller closes the span by. Derived. */
+  spanKey: z.string().optional(),
+});
+export type MetricSpan = z.infer<typeof MetricSpanSchema>;
+
+/**
+ * The columns a span query may group or filter by.
+ *
+ * {@link MetricDimensionSchema} minus `category` (a span's equivalent axis is
+ * `state`) plus the three only spans have: `state`, `class` and `runId`.
+ */
+export const MetricSpanDimensionSchema = z.enum([
+  "state",
+  "class",
+  "identifier",
+  "projectId",
+  "chatId",
+  "runId",
+  "agent",
+  "subagent",
+  "model",
+  "harness",
+  "detail",
+  "source",
+]);
+export type MetricSpanDimension = z.infer<typeof MetricSpanDimensionSchema>;
+
+/** Display labels for the span dimensions. */
+export const METRIC_SPAN_DIMENSION_LABELS: Record<MetricSpanDimension, string> = {
+  state: "State",
+  class: "Activity",
+  identifier: "Name",
+  projectId: "Project",
+  chatId: "Chat",
+  runId: "Run",
+  agent: "Agent",
+  subagent: "Subagent",
+  model: "Model",
+  harness: "Runtime",
+  detail: "Detail",
+  source: "Source",
+};
+
+/** Dimension to allowed values; OR within a dimension, AND across them. */
+export const MetricSpanFilterSchema = z.partialRecord(
+  MetricSpanDimensionSchema,
+  z.array(z.string()),
+);
+export type MetricSpanFilter = z.infer<typeof MetricSpanFilterSchema>;
+
+/** The query behind every runtime chart. Mirrors {@link MetricQuerySchema}. */
+export const MetricSpanQuerySchema = z.object({
+  /** Window start, epoch ms. A span is in the window if it OVERLAPS it. */
+  from: z.number().int().optional(),
+  /** Window end, epoch ms (exclusive). */
+  to: z.number().int().optional(),
+  filter: MetricSpanFilterSchema.optional(),
+  groupBy: MetricSpanDimensionSchema.optional(),
+  bucket: MetricBucketSchema.default("auto"),
+  limit: z.number().int().min(1).max(50).default(8),
+});
+export type MetricSpanQuery = z.infer<typeof MetricSpanQuerySchema>;
+
+/** The span query as a CALLER writes it — see {@link MetricQueryInput}. */
+export type MetricSpanQueryInput = z.input<typeof MetricSpanQuerySchema>;
+
+/** One group's milliseconds per bucket, aligned to the response's `buckets`. */
+export const MetricSpanSeriesSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  /** Attributed milliseconds across the whole window. */
+  total: z.number().int(),
+  /** Spans in this group — the count the event ledger would have given. */
+  count: z.number().int(),
+  /** Milliseconds per bucket, same order as `buckets`. */
+  values: z.array(z.number().int()),
+});
+export type MetricSpanSeries = z.infer<typeof MetricSpanSeriesSchema>;
+
+/**
+ * A bucketed runtime series.
+ *
+ * Milliseconds, not counts — and a span that straddles a bucket boundary is
+ * SPLIT across the buckets it actually covers rather than banked whole against
+ * the one it started in. A four-hour sleep beginning at 23:00 is one hour of
+ * that day and three of the next, because any other answer makes an overnight
+ * agent look like a burst.
+ */
+export const MetricSpanSeriesResponseSchema = z.object({
+  buckets: z.array(z.number().int()),
+  bucket: z.enum(["hour", "day", "week", "month"]),
+  series: z.array(MetricSpanSeriesSchema),
+  /** Attributed milliseconds across every series. */
+  total: z.number().int(),
+  /** Spans matching the filter. */
+  spans: z.number().int(),
+  /** Groups that folded into "Other". */
+  truncated: z.number().int(),
+});
+export type MetricSpanSeriesResponse = z.infer<typeof MetricSpanSeriesResponseSchema>;
+
+/** One row of the runtime leaderboard. */
+export const MetricSpanTotalSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  /** Attributed milliseconds — the plain sum, which parallel work inflates. */
+  ms: z.number().int(),
+  /**
+   * Wall clock: the union of each actor's intervals in this group, summed over
+   * actors. Never exceeds `ms`, and is the honest answer to "how long was this
+   * chat / this subagent actually running".
+   */
+  busyMs: z.number().int(),
+  count: z.number().int(),
+  chats: z.number().int(),
+  /** Distinct actors — chats plus the subagent runs inside them. */
+  actors: z.number().int(),
+  lastAt: z.number().int(),
+});
+export type MetricSpanTotal = z.infer<typeof MetricSpanTotalSchema>;
+
+/** The runtime leaderboard response. */
+export const MetricSpanTotalsResponseSchema = z.object({
+  totals: z.array(MetricSpanTotalSchema),
+  ms: z.number().int(),
+  busyMs: z.number().int(),
+  groups: z.number().int(),
+  chats: z.number().int(),
+  actors: z.number().int(),
+});
+export type MetricSpanTotalsResponse = z.infer<typeof MetricSpanTotalsResponseSchema>;
+
+/** The headline numbers for a window — everything a hero row needs at once. */
+export const MetricSpanSummarySchema = z.object({
+  from: z.number().int(),
+  to: z.number().int(),
+  /** Wall clock, per-actor union. The figure the page leads with. */
+  busyMs: z.number().int(),
+  /** Plain sum. Exceeds `busyMs` exactly as much as work ran in parallel. */
+  attributedMs: z.number().int(),
+  byState: z.partialRecord(MetricStateSchema, z.number().int()),
+  byClass: z.partialRecord(MetricActivityClassSchema, z.number().int()),
+  spans: z.number().int(),
+  chats: z.number().int(),
+  actors: z.number().int(),
+  /** Spans still open at read time, clipped to the window's end. */
+  open: z.number().int(),
+});
+export type MetricSpanSummary = z.infer<typeof MetricSpanSummarySchema>;
+
+/** Distinct values per span dimension, for the runtime filter controls. */
+export const MetricSpanFacetsResponseSchema = z.object({
+  facets: z.partialRecord(MetricSpanDimensionSchema, z.array(MetricFacetValueSchema)),
+  range: z.object({ from: z.number().int().nullable(), to: z.number().int().nullable() }),
+  rows: z.number().int(),
+});
+export type MetricSpanFacetsResponse = z.infer<typeof MetricSpanFacetsResponseSchema>;
