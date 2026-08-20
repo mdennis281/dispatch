@@ -99,7 +99,7 @@ export function hydrateFromMock(): void {
 export function applyServerEvent(evt: WsServerEvent): void {
   switch (evt.type) {
     case "hello":
-      useConnection.getState().onHello(evt.serverTime);
+      useConnection.getState().onHello(evt.serverTime, evt.version);
       // (Re)hydrate the authoritative REST snapshot on every connect — the very
       // first one primes the app; a reconnect resyncs after a server restart.
       void hydrateFromServer();
@@ -304,6 +304,12 @@ export function applyServerEvent(evt: WsServerEvent): void {
         text: evt.text,
         chatId: evt.chatId,
       });
+      return;
+
+    // Consumed by `WsClient` before it ever reaches this reducer — it is about
+    // one socket's liveness, not about any store. Present so the exhaustive
+    // check below keeps meaning something.
+    case "pong":
       return;
 
     case "error":

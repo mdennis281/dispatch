@@ -763,6 +763,39 @@ describe("routes — WebSocket", () => {
   });
 });
 
+describe("routes — WebSocket liveness", () => {
+  it("answers a ping with a pong carrying the same nonce", async () => {
+    // The client's only way to tell an idle socket from a dead one. The
+    // transport ping the server already sends cannot do it: browsers expose no
+    // ping/pong event to JavaScript, so nothing observes those.
+    await boot(makeFakeQuery(() => [resultMsg()]));
+    const ws = await connect(port);
+    await ws.waitFor((e) => e.type === "hello");
+
+    ws.send({ type: "ping", nonce: "abc123" });
+    const pong = await ws.waitFor((e) => e.type === "pong");
+    expect(pong.type === "pong" && pong.nonce).toBe("abc123");
+    ws.close();
+  });
+
+  it("does not answer a ping with an error the way an unknown action would", async () => {
+    await boot(makeFakeQuery(() => [resultMsg()]));
+    const ws = await connect(port);
+    await ws.waitFor((e) => e.type === "hello");
+
+    ws.send({ type: "ping", nonce: "n1" });
+    await ws.waitFor((e) => e.type === "pong");
+    expect(ws.events.some((e) => e.type === "error")).toBe(false);
+
+    // …whereas something genuinely unknown still is an error, so the heartbeat
+    // isn't accidentally swallowing schema failures.
+    ws.send({ type: "definitely-not-an-action" });
+    const err = await ws.waitFor((e) => e.type === "error");
+    expect(err.type === "error" && err.message).toBe("invalid client action");
+    ws.close();
+  });
+});
+
 describe("routes — gh-action", () => {
   it("POST /api/github/action refresh publishes a pr-update", async () => {
     await boot(makeFakeQuery(() => [resultMsg()]));

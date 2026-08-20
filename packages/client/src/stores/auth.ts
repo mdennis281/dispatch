@@ -4,9 +4,22 @@ import type { AuthSessionResponse, AuthStatus, AuthUserSummary } from "@dispatch
 interface AuthStore {
   ready: boolean;
   status: AuthStatus | null;
+  /**
+   * `initializeAuth` could not reach the server, so `status` below is a
+   * PLACEHOLDER rather than an answer.
+   *
+   * It has to be a placeholder — the shell needs a shape to render against — but
+   * the placeholder says "auth is off", and if auth is in fact on that is a lie
+   * with consequences: the app boots an unauthenticated shell whose every
+   * control fails, and the WS upgrade is refused with a 401 the browser never
+   * surfaces. This flag is how the connecting screen knows to ask again once the
+   * server answers, instead of leaving the tab wrong until someone reloads.
+   */
+  unreachable: boolean;
   accessToken: string | null;
   user: AuthUserSummary | null;
   applyStatus: (status: AuthStatus) => void;
+  markUnreachable: () => void;
   applySession: (session: AuthSessionResponse) => void;
   clear: () => void;
 }
@@ -18,8 +31,9 @@ function tellWorker(token: string | null): void {
 }
 
 export const useAuth = create<AuthStore>((set) => ({
-  ready: false, status: null, accessToken: null, user: null,
-  applyStatus: (status) => set({ ready: true, status, user: status.user }),
+  ready: false, status: null, unreachable: false, accessToken: null, user: null,
+  applyStatus: (status) => set({ ready: true, status, user: status.user, unreachable: false }),
+  markUnreachable: () => set({ unreachable: true }),
   applySession: (session) => {
     tellWorker(session.accessToken);
     set((state) => ({ accessToken: session.accessToken, user: session.user,
@@ -62,8 +76,12 @@ export async function initializeAuth(): Promise<void> {
       }
     }
   } catch {
-    // Keep the normal reconnecting shell when the server is temporarily down.
+    // Keep the normal reconnecting shell when the server is temporarily down —
+    // but FLAG it, because this answer is a guess. `ConnectingScreen` re-runs
+    // this the moment the server starts answering again, so a tab that booted
+    // during an outage ends up with the real auth state rather than this stand-in.
     useAuth.getState().applyStatus({ enabled: false, configured: false, firstRunDismissed: true, user: null });
+    useAuth.getState().markUnreachable();
   }
 }
 

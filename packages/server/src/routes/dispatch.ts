@@ -309,10 +309,16 @@ export async function runGhAction(
 /**
  * Route one inbound client action to the services. Never throws — any failure is
  * caught and published as an `error` event tagged with the action's chatId.
+ *
+ * `ping` is excluded from the parameter type rather than given a dead `case`
+ * here: it is answered at the socket (see routes/ws.ts), which is the only place
+ * that HAS the socket to answer on. Excluding it keeps the exhaustive switch
+ * below meaningful — if the socket layer ever stops intercepting it, this stops
+ * compiling instead of silently swallowing every heartbeat.
  */
 export async function dispatchClientAction(
   services: Services,
-  action: WsClientAction,
+  action: Exclude<WsClientAction, { type: "ping" }>,
 ): Promise<void> {
   const { broker, worktrees, runner, store } = services;
   const chatId = "chatId" in action ? action.chatId : undefined;

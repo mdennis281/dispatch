@@ -51,7 +51,13 @@ if (import.meta.env.DEV && !isLogWindow) {
   setTimeout(() => {
     const connected = useConnection.getState().state === "open";
     const empty = useChats.getState().order.length === 0;
-    if (!connected && empty) hydrateFromMock();
+    if (!connected && empty) {
+      hydrateFromMock();
+      // Tell the connecting screen to stand down: this shell is showing mock
+      // data deliberately, and covering it with "the server isn't running" is
+      // exactly what the seed exists to avoid.
+      useConnection.getState().noteMockSeeded();
+    }
   }, 1200);
 }
 

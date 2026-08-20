@@ -10,10 +10,34 @@
  */
 import type { FastifyInstance } from "fastify";
 import { WsClientActionSchema, type WsServerEvent } from "@dispatch/shared";
+import { readInstalledRelease } from "../services/release.js";
 import { dispatchClientAction } from "./dispatch.js";
 
 /** ws readyState OPEN (avoids importing the `ws` package for a constant). */
 const WS_OPEN = 1;
+
+/**
+ * The build stamp this payload was published as, resolved once.
+ *
+ * Three states, not two — the same reason `health.ts`'s `payloadSha` keeps them
+ * apart: `undefined` is "not looked up yet", `null` is "looked up, and there is
+ * no answer". A source checkout has no `release-manifest.json` and never will,
+ * and collapsing the two would re-stat the payload directory on every socket.
+ *
+ * Absent is the honest answer for a checkout, and the client is written to skip
+ * the staleness comparison rather than guess when it gets nothing.
+ */
+let cachedVersion: string | null | undefined;
+function payloadVersion(): string | undefined {
+  if (cachedVersion === undefined) {
+    try {
+      cachedVersion = readInstalledRelease()?.version ?? null;
+    } catch {
+      cachedVersion = null;
+    }
+  }
+  return cachedVersion ?? undefined;
+}
 
 /** Minimal structural view of the socket we depend on (ws WebSocket satisfies it). */
 interface SocketLike {
@@ -69,7 +93,8 @@ export function registerWsRoutes(app: FastifyInstance): void {
       }
     };
 
-    send({ type: "hello", serverTime: Date.now() });
+    const version = payloadVersion();
+    send({ type: "hello", serverTime: Date.now(), ...(version ? { version } : {}) });
 
     // Fan every bus event out to this socket (multiplexed, client routes by chatId).
     const unsub = bus.subscribe((evt) => send(evt));
@@ -127,6 +152,13 @@ export function registerWsRoutes(app: FastifyInstance): void {
           message: "invalid client action",
           detail: parsed.error.message,
         });
+        return;
+      }
+      // Answered HERE rather than in `dispatchClientAction`, which routes to the
+      // services and has no handle on the socket that asked. A pong is about
+      // this one connection, not about any chat.
+      if (parsed.data.type === "ping") {
+        send({ type: "pong", nonce: parsed.data.nonce });
         return;
       }
       void dispatchClientAction(app.services, parsed.data);
