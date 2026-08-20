@@ -449,6 +449,11 @@ describe("optional authentication", () => {
     expect((await instance.inject({ method: "PUT", url: "/api/auth/ip-lookup", headers, payload: { enabled: false } })).statusCode).toBe(200);
     const overview = (await instance.inject({ url: "/api/auth/security", headers })).json() as { ipLookup: boolean };
     expect(overview.ipLookup).toBe(false);
+    // A body that never said so must not be read as either answer.
+    for (const payload of [{}, { enabled: "false" }, { enabled: 0 }]) {
+      expect((await instance.inject({ method: "PUT", url: "/api/auth/ip-lookup", headers, payload })).statusCode).toBe(400);
+    }
+    expect(((await instance.inject({ url: "/api/auth/security", headers })).json() as { ipLookup: boolean }).ipLookup).toBe(false);
     // A full settings PUT must not clear it — auth is preserved wholesale there.
     const settings = (await instance.inject({ url: "/api/settings", headers })).json() as Record<string, unknown>;
     expect((await instance.inject({ method: "PUT", url: "/api/settings", headers, payload: { ...settings, theme: "light" } })).statusCode).toBe(200);
