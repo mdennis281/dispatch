@@ -103,6 +103,14 @@ import type { TerminalService } from "./terminal.js";
 import type { MemoryService } from "./memory.js";
 import type { MetricsService } from "./metrics.js";
 import { classifyTool } from "./metrics-classify.js";
+import {
+  ActivityTracker,
+  MAIN_ACTOR,
+  chatStatusForActivity,
+  classifyActivity,
+  type SpanOpen,
+  type SpanSink,
+} from "./metrics-activity.js";
 import type { MemoryHistoryService } from "./memory-history.js";
 import type {
   FindChatsQuery,
@@ -870,24 +878,15 @@ const STOP_TIMEOUT_MS = 5_000;
  * Tools whose call blocks the main agent on work happening elsewhere. Keeping
  * this as a real chat status (rather than a client-only color guess) makes the
  * blue waiting state survive reloads and server restarts.
+ *
+ * Now one line over {@link classifyActivity}, which the runtime ledger also
+ * reads — so the dot and the chart cannot disagree about what "waiting" means.
+ * They did while this was its own list of tool names: `watch_pr` and `ask_user`
+ * could block for ten minutes under a "running" dot, because neither was a
+ * terminal or a subagent.
  */
 export function statusForTool(name: string, input?: Record<string, unknown>): ChatStatus {
-  const normalized = name.toLowerCase().replace(/[.:/]/g, "_");
-  const encodedInput = input ? safeHandoffJson(input).toLowerCase() : "";
-  const terminal =
-    normalized === "bash" ||
-    normalized === "shell_command" ||
-    normalized.endsWith("_shell_command") ||
-    normalized.includes("manager__terminal") ||
-    normalized === "functions_wait" ||
-    (normalized === "functions_exec" &&
-      (encodedInput.includes("mcp__manager__terminal") || encodedInput.includes("shell_command")));
-  const subagent =
-    normalized === "task" ||
-    normalized === "agent" ||
-    normalized.endsWith("_wait_agent") ||
-    normalized.includes("collaboration_wait_agent");
-  return terminal || subagent ? "waiting" : "running";
+  return chatStatusForActivity(classifyActivity(name, input));
 }
 
 /* ------------------------------------------------------- internal helpers */
@@ -1337,6 +1336,13 @@ interface LiveSession {
    * only with the session; the agent still has the memory in-context after.
    */
   surfacedMemories: Set<string>;
+  /**
+   * This chat's runtime timeline — which actor was in which state, for how long
+   * (see metrics-activity.ts). Fed from the same neutral events the transcript
+   * is, and a no-op when no MetricsService is wired, so nothing here has to be
+   * conditional on telemetry being on.
+   */
+  activity: ActivityTracker;
 }
 
 /* =============================================================== SessionBroker */
@@ -1482,6 +1488,7 @@ export class SessionBroker {
         stopping: false,
         fork: false,
         surfacedMemories: new Set(),
+        activity: new ActivityTracker(this.activitySink(chat.id)),
       };
       this.sessions.set(chat.id, session);
     }
@@ -1621,6 +1628,57 @@ export class SessionBroker {
   }
 
   /**
+   * Where {@link ActivityTracker}'s spans go.
+   *
+   * Looks the session up by id rather than closing over the object, because the
+   * tracker is built as part of building that object. Every span is stamped with
+   * the session's coordinates HERE, so the tracker itself never has to know what
+   * a project or a harness is.
+   */
+  private activitySink(chatId: string): SpanSink {
+    return {
+      now: () => this.now(),
+      open: (span: SpanOpen) => this.openActivitySpan(chatId, span),
+      close: (key, at, extra) => {
+        if (!key) return;
+        try {
+          this.metrics?.closeSpan(key, at, extra);
+        } catch {
+          /* a broken ledger must never break a turn */
+        }
+      },
+    };
+  }
+
+  /** Stamp a tracker span with its session's coordinates and record it. */
+  private openActivitySpan(chatId: string, span: SpanOpen): string {
+    const session = this.sessions.get(chatId);
+    if (!this.metrics || !session) return "";
+    try {
+      return this.metrics.openSpan({
+        state: span.state,
+        identifier: span.identifier,
+        // "" is the main loop; the column is NULL for it, matching the ledger's
+        // convention that an absent value reads back as "".
+        runId: span.runId || undefined,
+        subagent: span.subagent,
+        detail: span.detail,
+        startTs: span.startTs,
+        toolUseId: span.toolUseId,
+        projectId: session.projectId,
+        chatId: session.chatId,
+        agent: session.agentId,
+        model: session.model,
+        harness: session.harnessKind,
+        turn: session.turn,
+      });
+    } catch {
+      /* a broken ledger must never break a turn */
+      return "";
+    }
+  }
+
+  /**
    * Rank this project's durable memories against a turn's text and return an
    * invisible `<system-reminder>` block for the SDK message when relevant,
    * not-yet-surfaced ones clear the bar. Records only the memories given IN FULL
@@ -1742,6 +1800,7 @@ export class SessionBroker {
       const pending = session.pendingPermissions.get(requestId);
       if (!pending) continue;
       session.pendingPermissions.delete(requestId);
+      session.activity.unblocked(requestId, this.now());
       if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
 
       if (pending.harnessSession) {
@@ -2229,6 +2288,10 @@ export class SessionBroker {
       return;
     }
     this.drainPendingPermissions(session, "Session stopped.");
+    // Close the timeline HERE rather than leaving it to crash recovery: a
+    // stopped session's spans have a known end, and an open row would otherwise
+    // be truncated back to the last heartbeat by the next boot.
+    session.activity.dispose(this.now());
     session.outbox = [];
     this.queueOrder = this.queueOrder.filter((x) => x !== chatId);
 
@@ -2273,6 +2336,7 @@ export class SessionBroker {
     // Abandon any in-flight permission prompt (+ its card / attention item); the
     // forked turn starts fresh, so a stranded "allow?" would never resolve.
     this.drainPendingPermissions(session, "Session forked.");
+    session.activity.dispose(this.now());
     if (session.started && session.harnessSession) {
       session.stopping = true;
       await session.harnessSession.dispose().catch(() => {});
@@ -2309,6 +2373,7 @@ export class SessionBroker {
    * can't leak `LiveSession` objects. Call AFTER `stop()` has settled.
    */
   drop(chatId: string): boolean {
+    this.sessions.get(chatId)?.activity.dispose(this.now());
     this.queueOrder = this.queueOrder.filter((x) => x !== chatId);
     // Tear down the chat's persistent shells alongside its session — a deleted
     // chat must not leak live powershell processes.
@@ -2407,6 +2472,7 @@ export class SessionBroker {
       this.startTurn(session);
     } else {
       if (!this.queueOrder.includes(session.chatId)) this.queueOrder.push(session.chatId);
+      session.activity.queued(this.now());
       this.setStatus(session, "queued");
     }
   }
@@ -2421,6 +2487,7 @@ export class SessionBroker {
       // Alive but idle → begin a fresh turn on the existing subprocess.
       this.flushOutbox(session);
     }
+    session.activity.turnStart(this.now());
     this.setStatus(session, "running", { state: "thinking", label: "thinking…" });
   }
 
@@ -2625,6 +2692,11 @@ export class SessionBroker {
     if (active < limit) return true;
     session.started = false;
     if (!this.queueOrder.includes(session.chatId)) this.queueOrder.push(session.chatId);
+    // The SECOND way a turn queues, and it arrives after `startTurn` already
+    // opened the turn's `generating` span — so this both ends that and starts
+    // the wait, rather than leaving the chat looking like it was thinking for
+    // however long the budget took to free up.
+    session.activity.queued(this.now());
     this.setStatus(session, "queued");
     this.bus.publish({
       type: "notice",
@@ -2718,6 +2790,17 @@ export class SessionBroker {
           subagent: event.subagentType,
           toolUseId: event.toolUseId,
         });
+        // …and the runtime span for the same call. `parentToolUseId` is the
+        // actor: a subagent's tool call belongs to that run's timeline, not to
+        // the main loop's, or a fleet of agents would read as one busy chat.
+        session.activity.toolStart(
+          event.parentToolUseId ?? MAIN_ACTOR,
+          event.toolUseId,
+          event.name,
+          event.input,
+          event.subagentType,
+          base.ts,
+        );
         const toolStatus = statusForTool(event.name, event.input);
         this.setStatus(session, toolStatus, {
           state: "tool",
@@ -2740,6 +2823,7 @@ export class SessionBroker {
         return;
       }
       case "tool-result": {
+        session.activity.toolEnd(event.toolUseId, base.ts, { ok: event.ok });
         const persisted = await this.persistContentImages(session, event.content);
         await this.emit(session, {
           ...base,
@@ -2756,9 +2840,15 @@ export class SessionBroker {
         return;
       }
       case "permission-request":
-        this.registerHarnessPermission(session, event.requestId, event.toolName, event.input, {
-          description: event.reason,
-        });
+        this.registerHarnessPermission(
+          session,
+          event.requestId,
+          event.toolName,
+          event.input,
+          { description: event.reason },
+          undefined,
+          event.parentToolUseId ?? MAIN_ACTOR,
+        );
         return;
       case "question-request": {
         const input = {
@@ -2778,10 +2868,18 @@ export class SessionBroker {
           input,
           {},
           event.questions,
+          event.parentToolUseId ?? MAIN_ACTOR,
         );
         return;
       }
       case "task-notification":
+        // The only per-run completion signal there is. A synchronous subagent is
+        // already quiesced by its spawner's result; this is what closes the
+        // ASYNC ones, whose spawner answered in milliseconds and left the child
+        // running. Without a tool_use to key on there is nothing to close.
+        if (event.toolUseId) {
+          session.activity.runEnd(event.toolUseId, base.ts, event.durationMs);
+        }
         await this.emit(session, {
           ...base,
           kind: "task_status",
@@ -2816,6 +2914,7 @@ export class SessionBroker {
         });
         return;
       case "turn-end":
+        session.activity.turnEnd({ limit: !!event.limit }, base.ts);
         session.lastContextTokens = event.contextTokens ?? session.lastContextTokens;
         session.contextWindow = event.contextWindow ?? session.contextWindow;
         await this.emit(session, {
@@ -3005,6 +3104,17 @@ export class SessionBroker {
             subagent: subagentType,
             toolUseId,
           });
+          // The runtime span for the same call, on the same two paths and for
+          // the same reason: instrumenting only `handleHarnessEvent` left the
+          // app's default runtime silently untimed.
+          session.activity.toolStart(
+            parentToolUseId ?? MAIN_ACTOR,
+            toolUseId,
+            name,
+            input,
+            subagentType,
+            this.now(),
+          );
           // AskUserQuestion is surfaced as an interactive QuestionCard via the
           // `canUseTool` → permission-request path; suppress the redundant
           // generic tool_use row so the transcript shows one canonical question
@@ -3049,6 +3159,7 @@ export class SessionBroker {
         // Surface tool_result blocks; ignore plain echoes of our own input.
         for (const b of this.contentBlocks(m)) {
           if (b.type !== "tool_result") continue;
+          session.activity.toolEnd(String(b.tool_use_id ?? ""), this.now(), { ok: !b.is_error });
           // Persist any image content the tool returned (e.g. a Claude-in-Chrome
           // screenshot) to the chat's assets dir and hand the client small
           // ImageRefs; the enriched `tool_result` row IS the render event (fanned
@@ -3123,6 +3234,10 @@ export class SessionBroker {
         return;
       }
       case "result": {
+        // No `limit` on this path — the legacy loop only learns about a usage
+        // limit by parsing the error text downstream (see onTurnError), so a
+        // pause span is the harness path's to open.
+        session.activity.turnEnd({}, this.now());
         const isError = Boolean((m as { is_error?: unknown }).is_error);
         const resultText =
           typeof (m as { result?: unknown }).result === "string"
@@ -3448,7 +3563,15 @@ export class SessionBroker {
     input: Record<string, unknown>,
     opts: { title?: string; displayName?: string; description?: string },
     questions?: HarnessQuestion[],
+    /** The actor being blocked — a subagent's prompt is that run's wait. */
+    runId: string = MAIN_ACTOR,
   ): void {
+    // The waiting_human span opens HERE, beside the pending entry it belongs to,
+    // rather than at the two call sites — because there is a third registration
+    // path (`handlePermission`, the legacy `canUseTool` gate the default runtime
+    // still takes) and pairing the span with the registration is the only shape
+    // in which a future fourth one can't quietly go untimed.
+    session.activity.blocked(runId, requestId, "waiting_human", toolName, this.now());
     const request: PermissionRequest = {
       id: requestId,
       chatId: session.chatId,
@@ -3552,6 +3675,12 @@ export class SessionBroker {
         createdAt: this.now(),
       },
     });
+
+    // Attributed to the main loop: `canUseTool` is handed a tool name and its
+    // input and nothing else, so this path has no parent run id to offer. A
+    // subagent's prompt therefore reads as the chat waiting, which is true of
+    // the chat even when it isn't the whole truth about the run.
+    session.activity.blocked(MAIN_ACTOR, requestId, "waiting_human", toolName, this.now());
 
     return new Promise<PermissionResult>((resolve) => {
       const pending: PendingPermission = {
@@ -3986,6 +4115,7 @@ export class SessionBroker {
   private drainPendingPermissions(session: LiveSession, message: string): void {
     for (const [requestId, p] of session.pendingPermissions) {
       if (p.timeoutTimer) clearTimeout(p.timeoutTimer);
+      session.activity.unblocked(requestId, this.now());
       if (p.harnessSession) {
         p.harnessSession.resolvePermission(requestId, { decision: "deny", message });
       } else {
