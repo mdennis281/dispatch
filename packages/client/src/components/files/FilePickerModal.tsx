@@ -186,7 +186,7 @@ function FilePickerModal() {
             the picker is 620px wide and a column of drives would cost a third of
             it to show something you click once. */}
         {roots.length > 0 && (
-          <div className="cm-scroll flex shrink-0 gap-1 overflow-x-auto px-3 py-2 cm-hairline-b">
+          <div className="cm-scroll cm-scroll-x flex shrink-0 gap-1 overflow-x-auto px-3 py-2 cm-hairline-b">
             {roots.map((root) => {
               const Icon = rootIcon(root);
               return (

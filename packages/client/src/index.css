@@ -367,6 +367,29 @@
      * the shell (and the bottom nav with it) rather than doing nothing. */
     overscroll-behavior: contain;
   }
+
+  /*
+   * The horizontal-only companion. Put this on anything that wears `.cm-scroll`
+   * purely to style a SIDEWAYS scrollbar — a markdown table, a code block, a
+   * breadcrumb strip.
+   *
+   * Without it those elements silently kill the transcript. CSS will not let
+   * `overflow-x: auto` sit next to `overflow-y: visible`: making one axis
+   * non-visible forces the other to `auto`, so a "horizontal" wrapper is really
+   * a scroll container on BOTH axes and picks up the `contain` above. It has no
+   * vertical overflow, so it paints no scrollbar and has nothing to scroll — but
+   * `contain` still refuses to hand the wheel up to the transcript. Wheeling
+   * over a table did precisely nothing, with no scrollbar on screen to explain
+   * why.
+   *
+   * Only the vertical axis is released. `overscroll-behavior-x` stays `contain`
+   * so a sideways flick that runs off the end of a wide table doesn't get
+   * handed to the browser as a back-navigation gesture.
+   */
+  .cm-scroll-x {
+    overscroll-behavior-y: auto;
+  }
+
   .cm-scroll::-webkit-scrollbar {
     width: 9px;
     height: 9px;

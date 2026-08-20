@@ -100,7 +100,7 @@ export function PathBar({
     <div
       ref={trailRef}
       className={cn(
-        "cm-scroll flex items-center gap-0.5 overflow-x-auto px-3 py-1.5 cm-hairline-b",
+        "cm-scroll cm-scroll-x flex items-center gap-0.5 overflow-x-auto px-3 py-1.5 cm-hairline-b",
         className,
       )}
     >

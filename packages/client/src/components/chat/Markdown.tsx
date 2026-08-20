@@ -75,7 +75,7 @@ const components: Components = {
   ),
   hr: () => <hr className="my-3 border-line" />,
   table: ({ children }) => (
-    <div className="my-2 overflow-x-auto cm-scroll">
+    <div className="my-2 overflow-x-auto cm-scroll cm-scroll-x">
       <table className="w-full border-collapse text-sm">{children}</table>
     </div>
   ),
