@@ -65,7 +65,7 @@ import {
   readFile as fsReadFile,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { existsSync, createReadStream } from "node:fs";
+import { existsSync, createReadStream, type Dirent } from "node:fs";
 import type { Readable } from "node:stream";
 import * as z from "zod";
 import {
@@ -559,7 +559,7 @@ export class Store {
     // `readdir` is the only unconditional disk hit (~0.4ms for 353 entries), and
     // it is what keeps the cache fresh in the direction that matters: a chat
     // dir added or removed underneath us is seen on the very next call.
-    let entries;
+    let entries: Dirent[];
     try {
       entries = await readdir(this.chatsDir(), { withFileTypes: true });
     } catch (err) {
