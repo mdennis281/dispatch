@@ -34,10 +34,56 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-/** Every double-quoted string literal in a source file. */
-function stringLiterals(source: string): string[] {
-  return source.match(/"(?:[^"\\n]|\.)*"/g) ?? [];
+/**
+ * Every double-quoted string literal in a source file.
+ *
+ * Scanned character by character rather than with a regex. The obvious pattern
+ * for this — `"(?:[^"\\]|\\.)*"` — has two alternatives CodeQL reads as
+ * overlapping, and it fails the security gate as exponential backtracking. A
+ * linear scan cannot backtrack at all, and it is far easier to get right: the
+ * regex that shipped in the first draft of this file had a character class that
+ * excluded the LETTER n instead of a newline, and a `\.` that matched a literal
+ * dot instead of any escaped character.
+ */
+export function stringLiterals(source: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] !== '"') continue;
+    const start = i;
+    for (i++; i < source.length; i++) {
+      const ch = source[i];
+      if (ch === "\\") i++; // an escape consumes the character after it
+      else if (ch === '"' || ch === "\n") break;
+    }
+    // An unterminated literal (ran off a newline or the end of file) is dropped.
+    if (source[i] === '"') out.push(source.slice(start, i + 1));
+  }
+  return out;
 }
+
+describe("stringLiterals", () => {
+  it("keeps an escaped quote inside the literal", () => {
+    // Source text:  x = "say \"hi\""
+    expect(stringLiterals('x = "say \\"hi\\""')).toEqual(['"say \\"hi\\""']);
+  });
+
+  it("does not treat the letter n as a terminator", () => {
+    expect(stringLiterals('x = "cm-scroll no wrap"')).toEqual(['"cm-scroll no wrap"']);
+  });
+
+  it("ends the literal after an escaped backslash", () => {
+    // Source text:  x = "back\\" — the escaped backslash must not eat the quote.
+    expect(stringLiterals('x = "back\\\\"')).toEqual(['"back\\\\"']);
+  });
+
+  it("drops a literal left unterminated by a newline", () => {
+    expect(stringLiterals('x = "oops\ny = "ok"')).toEqual(['"ok"']);
+  });
+
+  it("finds several literals on one line", () => {
+    expect(stringLiterals('cn("a", "b")')).toEqual(['"a"', '"b"']);
+  });
+});
 
 describe("scroll chaining", () => {
   const css = readFileSync(join(SRC, "index.css"), "utf8");
