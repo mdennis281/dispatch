@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, isEntityId, InvalidEntityIdError } from "./index.js";
+import type { KeyedMutex } from "./fsq.js";
 import type { Project, Chat } from "@dispatch/shared";
 
 let dir: string;
@@ -135,6 +136,28 @@ describe("Store refuses an id that would leave its root", () => {
     expect(err.message).toBe("invalid chat id");
     expect(err.message).not.toContain("secret-dir");
     expect(err.message).not.toContain(dir);
+  });
+
+  it("refuses BEFORE taking the per-entity lock", async () => {
+    // `KeyedMutex` interns a key forever (nothing evicts — it is sized for one
+    // entry per real entity). Validating inside the locked task would therefore
+    // let a caller mint an unbounded number of dead map entries using ids that
+    // were never legal in the first place, which is a slow leak reachable from
+    // an endpoint that correctly answers 400.
+    const mutex = (store as unknown as { mutex: KeyedMutex }).mutex;
+    const before = mutex.size;
+    for (let i = 0; i < 50; i++) {
+      await store.deleteChat(`../../evil-${i}`).catch(() => {});
+      await store.deleteProject(`../../evil-${i}`).catch(() => {});
+      await store.deleteAgent(`../../evil-${i}`).catch(() => {});
+      await store.deleteMode(`../../evil-${i}`).catch(() => {});
+      await store.patchChat(`../../evil-${i}`, { title: "x" }).catch(() => {});
+    }
+    expect(mutex.size).toBe(before);
+
+    // …and a LEGAL id still takes its lock, so the guard didn't just disable it.
+    await store.deleteChat("legitimateid");
+    expect(mutex.size).toBeGreaterThan(before);
   });
 
   it("project memory paths are guarded too", () => {

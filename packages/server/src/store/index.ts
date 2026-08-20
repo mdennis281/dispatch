@@ -570,9 +570,11 @@ export class Store {
     );
   }
   async deleteProject(id: string): Promise<void> {
-    await this.mutex.run(`project:${id}`, () =>
-      rm(this.entityFile(this.projectsDir(), id), { force: true }),
-    );
+    // Resolve (and so VALIDATE) before taking the lock: `mutex.run` interns its
+    // key forever, so validating inside the task would let a caller mint an
+    // unbounded number of dead map entries with ids that were never legal.
+    const path = this.entityFile(this.projectsDir(), id);
+    await this.mutex.run(`project:${id}`, () => rm(path, { force: true }));
   }
 
   /* ------------------------------------------------------------ agents */
@@ -594,9 +596,11 @@ export class Store {
     );
   }
   async deleteAgent(id: string): Promise<void> {
-    await this.mutex.run(`agent:${id}`, () =>
-      rm(this.entityFile(this.agentsDir(), id), { force: true }),
-    );
+    // Resolve (and so VALIDATE) before taking the lock: `mutex.run` interns its
+    // key forever, so validating inside the task would let a caller mint an
+    // unbounded number of dead map entries with ids that were never legal.
+    const path = this.entityFile(this.agentsDir(), id);
+    await this.mutex.run(`agent:${id}`, () => rm(path, { force: true }));
   }
 
   /* ------------------------------------------------------------- modes */
@@ -618,9 +622,11 @@ export class Store {
     );
   }
   async deleteMode(id: string): Promise<void> {
-    await this.mutex.run(`mode:${id}`, () =>
-      rm(this.entityFile(this.modesDir(), id), { force: true }),
-    );
+    // Resolve (and so VALIDATE) before taking the lock: `mutex.run` interns its
+    // key forever, so validating inside the task would let a caller mint an
+    // unbounded number of dead map entries with ids that were never legal.
+    const path = this.entityFile(this.modesDir(), id);
+    await this.mutex.run(`mode:${id}`, () => rm(path, { force: true }));
   }
 
   /* ------------------------------------------------------------- chats */
@@ -764,6 +770,7 @@ export class Store {
    * outside this lock can let either whole-file rewrite erase the other.
    */
   async patchChat(id: string, patch: Partial<Chat>): Promise<Chat | null> {
+    assertEntityId("chat", id); // before the lock — see deleteProject
     return this.mutex.run(`chat:${id}`, async () => {
       const current = await this.readChatRecord(id);
       if (!current) return null;
@@ -774,8 +781,9 @@ export class Store {
     });
   }
   async deleteChat(id: string): Promise<void> {
+    const dir = this.chatDir(id); // validates before the lock — see deleteProject
     await this.mutex.run(`chat:${id}`, () =>
-      rm(this.chatDir(id), { recursive: true, force: true }),
+      rm(dir, { recursive: true, force: true }),
     );
     this.chatCache.delete(id);
     await this.deleteCheckpoints(id);
