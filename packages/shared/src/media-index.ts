@@ -1,4 +1,3 @@
-import type { ChatMessage, ToolUseRow } from "./messages.js";
 import type { ImageRef } from "./common.js";
 import { mergeImages, recoverResultMedia } from "./result-media.js";
 
@@ -14,6 +13,33 @@ import { mergeImages, recoverResultMedia } from "./result-media.js";
  * Order is the transcript's own order, so "previous" means earlier in the
  * conversation — which is what the arrow keys are expected to mean.
  */
+
+/**
+ * The only fields the gallery reads off a transcript row.
+ *
+ * Declared structurally rather than as `ChatMessage` so the SERVER can feed it
+ * rows straight from `Store.scanMessages` — an unvalidated walk that exists
+ * because zod is 77% of the cost of reading a transcript (343ms of validation
+ * on an 8,235-row one). Validating the whole discriminated union to read six
+ * fields, five of which this narrows itself anyway, is the expense that walk
+ * was added to avoid. A `ChatMessage[]` still satisfies it, so the client
+ * passes its typed rows unchanged.
+ */
+export interface MediaScanRow {
+  id?: unknown;
+  kind?: unknown;
+  toolUseId?: unknown;
+  input?: unknown;
+  images?: unknown;
+  content?: unknown;
+}
+
+/** Row kinds that can carry an image. Everything else is skipped unread. */
+export const MEDIA_ROW_KINDS: ReadonlySet<string> = new Set([
+  "tool_use", // not media itself — it supplies the caption
+  "tool_result",
+  "user",
+]);
 
 /** One image, plus where it came from and what to call it. */
 export interface ChatMediaItem {
@@ -34,7 +60,7 @@ export interface ChatMediaItem {
  * repairs every transcript already written — the alternative only ever helps
  * images captured after the change.
  */
-export function labelForAsset(asset: ImageRef, use?: ToolUseRow): string | undefined {
+export function labelForAsset(asset: ImageRef, use?: MediaScanRow): string | undefined {
   if (asset.alt) return asset.alt;
   const input = (use?.input ?? {}) as Record<string, unknown>;
   const raw = [input.file_path, input.path, input.filename, input.notebook_path].find(
@@ -52,10 +78,11 @@ export function labelForAsset(asset: ImageRef, use?: ToolUseRow): string | undef
  * viewer on some unrelated tool result — `indexOfAsset` could only answer 0 for
  * something it had never been told about.
  */
-function imagesOn(row: ChatMessage): ImageRef[] {
-  if (row.kind === "user") return row.images ?? [];
+function imagesOn(row: MediaScanRow): ImageRef[] {
+  const images = Array.isArray(row.images) ? (row.images as ImageRef[]) : undefined;
+  if (row.kind === "user") return images ?? [];
   if (row.kind !== "tool_result") return [];
-  return mergeImages(row.images, recoverResultMedia(row.content).images);
+  return mergeImages(images, recoverResultMedia(row.content).images);
 }
 
 /**
@@ -64,10 +91,12 @@ function imagesOn(row: ChatMessage): ImageRef[] {
  * Deduped by `path`: the same screenshot re-read after an edit is one picture,
  * and a gallery that shows it four times makes → feel broken.
  */
-export function collectChatMedia(rows: ChatMessage[]): ChatMediaItem[] {
-  const uses = new Map<string, ToolUseRow>();
+export function collectChatMedia(rows: readonly MediaScanRow[]): ChatMediaItem[] {
+  const uses = new Map<string, MediaScanRow>();
   for (const row of rows) {
-    if (row.kind === "tool_use") uses.set(row.toolUseId, row);
+    if (row.kind === "tool_use" && typeof row.toolUseId === "string") {
+      uses.set(row.toolUseId, row);
+    }
   }
 
   const seen = new Set<string>();
@@ -76,9 +105,15 @@ export function collectChatMedia(rows: ChatMessage[]): ChatMediaItem[] {
     for (const asset of imagesOn(row)) {
       if (seen.has(asset.path)) continue;
       seen.add(asset.path);
-      const use = row.kind === "tool_result" ? uses.get(row.toolUseId) : undefined;
+      const use =
+        row.kind === "tool_result" && typeof row.toolUseId === "string"
+          ? uses.get(row.toolUseId)
+          : undefined;
       const alt = labelForAsset(asset, use);
-      out.push({ asset: alt ? { ...asset, alt } : asset, rowId: row.id });
+      out.push({
+        asset: alt ? { ...asset, alt } : asset,
+        rowId: typeof row.id === "string" ? row.id : "",
+      });
     }
   }
   return out;

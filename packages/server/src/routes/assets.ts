@@ -10,7 +10,13 @@ import type { FastifyInstance } from "fastify";
 import { extname } from "node:path";
 import { tmpdir } from "node:os";
 import { nanoid } from "nanoid";
-import { ImageRefSchema, chatRoot, collectChatMedia } from "@dispatch/shared";
+import {
+  ImageRefSchema,
+  MEDIA_ROW_KINDS,
+  chatRoot,
+  collectChatMedia,
+  type MediaScanRow,
+} from "@dispatch/shared";
 import { extFromMediaType, mediaTypeFromName } from "../services/media-types.js";
 import { identifyMedia } from "../services/media-sniff.js";
 import {
@@ -194,10 +200,22 @@ export function registerAssetRoutes(app: FastifyInstance): void {
   app.get<{ Params: { id: string } }>("/api/chats/:id/media", async (req, reply) => {
     const chat = await store.getChat(req.params.id);
     if (!chat) return reply.code(404).send({ error: "chat not found" });
-    // No limit: the gallery IS the whole chat, which is the entire point.
-    // `collectChatMedia` is the same function the client used to run over its
-    // window, so the two can't disagree about what counts as an image.
-    const rows = await store.readMessages(req.params.id);
+
+    // `scanMessages`, NOT `readMessages`: the gallery is the WHOLE transcript,
+    // and zod is 77% of the cost of reading one (343ms of validation on an
+    // 8,235-row chat, on the main thread). This reads six fields per row and
+    // `collectChatMedia` narrows every one of them itself, so validating the
+    // discriminated union first would buy nothing and stall the event loop —
+    // the same trade the WorktreeDetector already made.
+    //
+    // Filtering by kind first means the heavy rows a transcript is mostly made
+    // of (assistant prose, system payloads) are skipped without being touched.
+    const rows: MediaScanRow[] = [];
+    await store.scanMessages(req.params.id, (row) => {
+      if (MEDIA_ROW_KINDS.has(String(row.kind))) rows.push(row);
+    });
+    // The same function the client runs over its window, so the two cannot
+    // disagree about what counts as an image.
     return { items: collectChatMedia(rows) };
   });
 

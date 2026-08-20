@@ -116,6 +116,47 @@ describe("collectChatMedia", () => {
   });
 });
 
+describe("scanned rows (the server's shape)", () => {
+  it("reads rows straight off an unvalidated transcript walk", () => {
+    // `Store.scanMessages` hands back plain parsed JSON, not a validated union
+    // — zod is 77% of the cost of reading a transcript, and this endpoint reads
+    // the WHOLE one. Every field is narrowed here instead.
+    const items = collectChatMedia([
+      { id: "u1", kind: "tool_use", toolUseId: "t1", input: { file_path: "a/shot.png" } },
+      {
+        id: "r1",
+        kind: "tool_result",
+        toolUseId: "t1",
+        images: [{ id: "i1", path: "assets/x.png", mimeType: "image/png" }],
+      },
+    ]);
+    expect(items).toEqual([
+      { asset: expect.objectContaining({ path: "assets/x.png", alt: "shot.png" }), rowId: "r1" },
+    ]);
+  });
+
+  it("survives rows that are missing or malformed", () => {
+    // A torn line, a row with no id, an `images` that isn't an array — none of
+    // which zod is around to reject any more.
+    expect(
+      collectChatMedia([
+        {},
+        { kind: "tool_result" },
+        { kind: "tool_result", images: "not-an-array" },
+        { kind: "user", images: undefined },
+        { kind: "tool_use", toolUseId: 42, input: null },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("gives a row with no id an empty rowId rather than undefined", () => {
+    const items = collectChatMedia([
+      { kind: "user", images: [{ id: "i", path: "assets/p.png" }] },
+    ]);
+    expect(items[0]?.rowId).toBe("");
+  });
+});
+
 describe("indexOfAsset", () => {
   const items = ["a", "b", "c"].map((p) => ({ asset: { id: p, path: p }, rowId: p }));
 
