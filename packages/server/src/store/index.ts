@@ -65,7 +65,7 @@ import {
   readFile as fsReadFile,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { existsSync, createReadStream } from "node:fs";
+import { existsSync, createReadStream, type Dirent } from "node:fs";
 import type { Readable } from "node:stream";
 import * as z from "zod";
 import {
@@ -102,6 +102,8 @@ import {
   writeJsonAtomic,
   appendJsonl,
   readJsonlLines,
+  readJsonlTail,
+  isMissing,
 } from "./fsq.js";
 import { StateDb, assertStateMigrated } from "./db.js";
 
@@ -259,6 +261,11 @@ function toTerminalLine(row: Record<string, unknown>): TerminalLineRecord {
 
 export class Store {
   private readonly mutex = new KeyedMutex();
+  /**
+   * Parsed `chat.json` by chat id. Write-through; see {@link readChatRecord} for
+   * why an in-memory copy is authoritative here and what still isn't cached.
+   */
+  private readonly chatCache = new Map<string, Chat>();
   private readonly configDir: string;
   private readonly db: StateDb;
   private freshInstall = true;
@@ -533,17 +540,94 @@ export class Store {
 
   /* ------------------------------------------------------------- chats */
 
+  /**
+   * Every chat, newest-activity `updatedAt` stamped on, optionally one project's.
+   *
+   * The `projectId` filter is applied AFTER the read on purpose: chats are keyed
+   * by id on disk with no per-project index, so there is nothing to narrow the
+   * scan to. That makes this O(all chats) for every caller, and the callers are
+   * not who you would hope — WorktreeDetector runs one `listChats(project.id)`
+   * per active project on a 4s timer, so a store of 353 chats re-read 353
+   * `chat.json` files two or three times every four seconds, at ~110ms a pass
+   * with most of it holding the event loop.
+   *
+   * The RECORDS are therefore cached in memory (see {@link readChatRecord}) and
+   * the disk read skipped when a cached copy exists. `lastActivityAt` still
+   * stats the transcript every call — see there for why that one stays honest.
+   */
   async listChats(projectId?: string): Promise<Chat[]> {
-    if (!existsSync(this.chatsDir())) return [];
-    const entries = await readdir(this.chatsDir(), { withFileTypes: true });
+    // `readdir` is the only unconditional disk hit (~0.4ms for 353 entries), and
+    // it is what keeps the cache fresh in the direction that matters: a chat
+    // dir added or removed underneath us is seen on the very next call.
+    let entries: Dirent[];
+    try {
+      entries = await readdir(this.chatsDir(), { withFileTypes: true });
+    } catch (err) {
+      // ONLY "the directory isn't there" means "no chats" — that is the state a
+      // fresh install is in. An EACCES or an IO error means we cannot see the
+      // chats, which is not the same claim at all: swallowing it would report an
+      // empty store to the sidebar and, worse, let the WorktreeDetector conclude
+      // no chat owns any worktree.
+      if (!isMissing(err)) throw err;
+      return [];
+    }
     const ids = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    // Evict records whose directory is gone. Unconditional rather than gated on
+    // a size comparison: one chat removed and another added between two calls
+    // leaves the count unchanged, and the stale record would then survive to be
+    // handed out by `getChat` — which reads the cache directly and has no
+    // `readdir` of its own to correct it.
+    const live = new Set(ids);
+    for (const id of this.chatCache.keys()) {
+      if (!live.has(id)) this.chatCache.delete(id);
+    }
     const all = await Promise.all(ids.map((id) => this.getChat(id)));
     const chats = all.filter((c): c is Chat => c !== null);
     return projectId ? chats.filter((c) => c.projectId === projectId) : chats;
   }
+
   async getChat(id: string): Promise<Chat | null> {
-    const chat = await this.readEntity(this.chatFile(id), ChatSchema);
+    const chat = await this.readChatRecord(id);
     return chat && { ...chat, updatedAt: await this.lastActivityAt(chat) };
+  }
+
+  /**
+   * The persisted chat record, served from {@link chatCache} when it's there.
+   *
+   * Safe to cache because this process is the ONLY writer of `dataDir`. That is
+   * the invariant the entire state root rests on — `runners.json` and
+   * `checkpoints.json` are whole-file read-modify-write maps guarded by an
+   * IN-PROCESS mutex, which is precisely why stable and dev share `config/` but
+   * never `data/` (see RUNNING.md). So every mutation of a chat record goes
+   * through `saveChat` / `patchChat` / `deleteChat` below, and each writes
+   * through to this map.
+   *
+   * The one tool that writes `dataDir` from outside is `tools/app/backsync.mjs`,
+   * and it stays correct here: it ADDS chat directories (seen by the `readdir`
+   * in `listChats`) and EXTENDS transcripts (seen by `lastActivityAt`, which is
+   * deliberately not cached). It never rewrites an existing `chat.json`.
+   */
+  private async readChatRecord(id: string): Promise<Chat | null> {
+    const hit = this.chatCache.get(id);
+    if (hit) return hit;
+    const chat = await this.readEntity(this.chatFile(id), ChatSchema);
+    if (chat) this.cacheChat(chat);
+    return chat;
+  }
+
+  /**
+   * Take a private copy into the cache.
+   *
+   * The clone matters because the object a writer hands us is the same one it
+   * goes on to publish on the bus (`saveChat`'s return value IS the
+   * `chat-update` payload). Nothing mutates a Chat in place today, but a cached
+   * record is now process-lifetime state, so an in-place edit anywhere would
+   * stop being a transient bug and start being a wrong answer that outlives the
+   * request. One structuredClone per MUTATION is far too cheap to argue about;
+   * cloning per read would hand the whole saving back.
+   */
+  private cacheChat(chat: Chat): void {
+    this.chatCache.set(chat.id, structuredClone(chat));
   }
 
   /**
@@ -557,6 +641,12 @@ export class Store {
    * history by near-creation timestamps. The transcript's own mtime is the
    * truthful clock, costs one stat, and repairs existing chats with no
    * migration. Live events still advance the client's order between reloads.
+   *
+   * Deliberately NOT covered by {@link chatCache}: the transcript is appended to
+   * constantly, and `backsync.mjs` extends it from outside this process, so a
+   * cached stamp would freeze the sidebar's ordering. One stat per chat is cheap
+   * and — unlike the `existsSync` guards this used to sit behind — asynchronous,
+   * so it does not hold the event loop.
    */
   private async lastActivityAt(chat: Chat): Promise<number> {
     try {
@@ -572,6 +662,9 @@ export class Store {
     await this.mutex.run(`chat:${chat.id}`, () =>
       writeJsonAtomic(this.chatFile(chat.id), validated),
     );
+    // Write through AFTER the write lands, never before: a rejected write must
+    // not leave the cache asserting a state that isn't on disk.
+    this.cacheChat(validated);
     return validated;
   }
 
@@ -582,10 +675,11 @@ export class Store {
    */
   async patchChat(id: string, patch: Partial<Chat>): Promise<Chat | null> {
     return this.mutex.run(`chat:${id}`, async () => {
-      const current = await this.readEntity(this.chatFile(id), ChatSchema);
+      const current = await this.readChatRecord(id);
       if (!current) return null;
       const validated = ChatSchema.parse({ ...current, ...patch, id });
       await writeJsonAtomic(this.chatFile(id), validated);
+      this.cacheChat(validated);
       return validated;
     });
   }
@@ -593,6 +687,7 @@ export class Store {
     await this.mutex.run(`chat:${id}`, () =>
       rm(this.chatDir(id), { recursive: true, force: true }),
     );
+    this.chatCache.delete(id);
     await this.deleteCheckpoints(id);
   }
 
@@ -621,11 +716,29 @@ export class Store {
    *   afterId  — only rows strictly after this id (forward tail read).
    *   beforeId — only rows strictly before this id (backward paging: pass the
    *              oldest row you already hold to get the page above it).
+   *
+   * A CURSORLESS `limit` never touches the older bytes at all: it reads backwards
+   * from EOF (see {@link readJsonlTail}). That is the shape opening a chat asks
+   * for, and the one the session broker and the titler ask for, and slurping the
+   * whole file to serve it cost 38ms of the 40ms it took to answer with the
+   * newest 200 rows of a 17.8MB transcript — all of it on the main thread, with
+   * every other request stalled behind it. Cursor paging still reads whole,
+   * because resolving a cursor means finding a row that could be anywhere.
    */
   async readMessages(
     chatId: string,
     opts: { limit?: number; afterId?: string; beforeId?: string } = {},
   ): Promise<ChatMessage[]> {
+    if (
+      opts.limit !== undefined &&
+      opts.limit >= 0 &&
+      opts.afterId === undefined &&
+      opts.beforeId === undefined
+    ) {
+      return parseMessageLines(
+        await readJsonlTail(this.messagesFile(chatId), opts.limit),
+      );
+    }
     let lines = await readJsonlLines(this.messagesFile(chatId));
     if (opts.afterId) {
       const idx = lines.findIndex((l) => lineHasId(l, opts.afterId!));
@@ -639,6 +752,38 @@ export class Store {
       lines = lines.slice(Math.max(0, lines.length - opts.limit));
     }
     return parseMessageLines(lines);
+  }
+
+  /**
+   * Walk a transcript's rows WITHOUT validating them.
+   *
+   * For scanners that read a couple of fields off each row and defend
+   * themselves anyway — the WorktreeDetector rebuilding which chat cut which
+   * branch is the whole reason this exists. It used `readMessages(chatId)` with
+   * no limit, and zod is 77% of that: on a real 17.8MB / 8,235-row transcript,
+   * `JSON.parse` of every row is 103ms and `ChatMessageSchema.parse` of the
+   * results is another 343ms. Across one project's 157 chats and 105,314 rows
+   * that was a 3.3-SECOND main-thread stall on the detector's first pass after a
+   * restart, to answer questions that never needed a validated union.
+   *
+   * Rows arrive as plain parsed JSON, so callers must narrow what they touch. A
+   * row that doesn't parse is SKIPPED rather than thrown on: this is a
+   * best-effort scan over history, and one torn line must not cost the caller
+   * every row after it.
+   */
+  async scanMessages(
+    chatId: string,
+    visit: (row: Record<string, unknown>) => void,
+  ): Promise<void> {
+    for (const line of await readJsonlLines(this.messagesFile(chatId))) {
+      let row: unknown;
+      try {
+        row = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (row && typeof row === "object") visit(row as Record<string, unknown>);
+    }
   }
 
   /**

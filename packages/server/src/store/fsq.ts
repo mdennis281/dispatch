@@ -5,8 +5,7 @@
  * (libuv MoveFileEx replace-existing on Windows), so a reader never sees a
  * half-written file.
  */
-import { mkdir, readFile, writeFile, rename, appendFile, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { mkdir, readFile, open, writeFile, rename, appendFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -139,10 +138,39 @@ export async function writeJsonAtomic(
   }
 }
 
-/** Read + JSON.parse `path`, or return `undefined` if it doesn't exist. */
+/**
+ * True when an error is "it isn't there", which every reader here treats as
+ * empty. Exported because the Store makes the same distinction over `readdir`:
+ * a missing chats dir is a fresh install, an EACCES is not.
+ */
+export function isMissing(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/**
+ * Read + JSON.parse `path`, or return `undefined` if it doesn't exist.
+ *
+ * The absence check is a CATCH, not an `existsSync` guard, and the difference is
+ * measurable rather than stylistic. `existsSync` is a synchronous stat: it runs
+ * on the main thread and holds the event loop for its whole duration, where
+ * `readFile` hands the work to the libuv pool. Profiled against a real store of
+ * 353 chats, `Store.listChats()` spent 59ms of its 110ms inside 353 of these
+ * guards — five times what the 353 async `readFile`s that followed them cost —
+ * and every one of those milliseconds froze all other HTTP and WebSocket
+ * traffic. The WorktreeDetector calls `listChats` once per active project on a
+ * 4s timer, so that showed up as the server going unresponsive for ~250ms every
+ * 4 seconds, worst with several chats running. `readFile` already reports a
+ * missing file as ENOENT, so the guard bought nothing but a second syscall.
+ */
 export async function readJson<T = unknown>(path: string): Promise<T | undefined> {
-  if (!existsSync(path)) return undefined;
-  const raw = await readFile(path, "utf8");
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (err) {
+    if (isMissing(err)) return undefined;
+    throw err;
+  }
   if (raw.trim() === "") return undefined;
   return JSON.parse(raw) as T;
 }
@@ -195,16 +223,176 @@ export async function readJsonl(path: string): Promise<unknown[]> {
  * multi-megabyte transcript and only then JSON.parse + zod-validate it — parsing
  * every one of thousands of rows to return the last 200 was the dominant cost of
  * opening a long chat. Callers that want whole rows use {@link readJsonl}.
+ *
+ * This still reads and splits the WHOLE file, so it is the right tool only when
+ * the answer genuinely depends on the whole history — resolving a paging cursor,
+ * say. For "the newest N rows" use {@link readJsonlTail}, which is the same
+ * answer for a fraction of the work.
+ *
+ * Absence is caught rather than pre-checked with `existsSync`; see
+ * {@link readJson} for what that guard was costing.
  */
 export async function readJsonlLines(path: string): Promise<string[]> {
-  if (!existsSync(path)) return [];
-  const raw = await readFile(path, "utf8");
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (err) {
+    if (isMissing(err)) return [];
+    throw err;
+  }
+  return splitLines(raw);
+}
+
+/** Non-empty, trimmed lines of a JSONL blob. */
+function splitLines(raw: string): string[] {
   const out: string[] = [];
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (trimmed) out.push(trimmed);
   }
   return out;
+}
+
+/**
+ * First backwards read. Sized so one read covers the newest page of a NORMAL
+ * transcript: real ones run ~2KB a row, so 1MB holds ~500 rows against the 200
+ * a page asks for.
+ */
+const TAIL_CHUNK_BYTES = 1024 * 1024;
+/**
+ * Reads allowed to bisect before giving up and taking the whole remainder.
+ *
+ * Two misses mean the rows are enormous, and then the tail IS most of the file:
+ * the worst real transcript in a live store is 13.5MB across just 1,095 rows,
+ * whose newest 200 are 94% of it. Chunks are disjoint spans, so bisecting never
+ * reads more BYTES than the file — but it does pay a syscall and a decode per
+ * chunk plus a final join, which is how a doubling loop turned a 29ms
+ * whole-file read into 64ms. Three reads is the ceiling.
+ */
+const TAIL_BISECT_READS = 2;
+
+/** The slice of `FileHandle` {@link readFull} needs — a seam the tests can fake. */
+export interface PositionalReader {
+  read(
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number,
+  ): Promise<{ bytesRead: number }>;
+}
+
+/**
+ * Fill `buf` from `position`, looping through SHORT READS. Returns how many
+ * bytes were actually read, which is less than `buf.length` only at EOF.
+ *
+ * `read()` is permitted to return fewer bytes than asked for, and the buffers
+ * here come from `Buffer.allocUnsafe` — uninitialised memory. Trusting one call
+ * to fill the buffer therefore does not merely risk a wrong answer: the unwritten
+ * tail is whatever was previously on the heap, and {@link readJsonlTail} would
+ * newline-count it, UTF-8-decode it and hand it back as transcript content. Loop
+ * until full, and let the caller slice to what was returned.
+ */
+export async function readFull(
+  fh: PositionalReader,
+  buf: Buffer,
+  position: number,
+): Promise<number> {
+  let off = 0;
+  while (off < buf.length) {
+    const { bytesRead } = await fh.read(buf, off, buf.length - off, position + off);
+    if (bytesRead <= 0) break; // EOF — nothing more is coming.
+    off += bytesRead;
+  }
+  return off;
+}
+
+/**
+ * Count 0x0A bytes, without decoding or allocating a split.
+ *
+ * Byte-exact even though the buffer is UTF-8: every byte of a multi-byte
+ * sequence is >= 0x80, so 0x0A can only ever be a real newline.
+ */
+function countNewlineBytes(buf: Buffer): number {
+  let n = 0;
+  for (let i = buf.indexOf(0x0a); i !== -1; i = buf.indexOf(0x0a, i + 1)) n++;
+  return n;
+}
+
+/**
+ * The LAST `n` non-empty lines of a JSONL file, read backwards from EOF.
+ *
+ * WHY. Opening a chat asks for the newest page of its transcript, and
+ * {@link readJsonlLines} answered that by slurping the whole file: on the
+ * largest real transcript in a live store (17.8MB / 8,235 rows) returning the
+ * newest 200 cost 22ms to read and 16ms to split, against 0.9ms to parse the
+ * 200 rows actually wanted. 38 of those 40ms bought nothing, and the split alone
+ * allocated 8,235 strings that were immediately garbage — on the main thread, so
+ * every other request stalled behind it.
+ *
+ * WHAT IS TRUSTWORTHY. A chunk boundary lands mid-row essentially always, so the
+ * FIRST line of what we hold is a fragment until an earlier chunk completes it.
+ * Since we always read through to EOF, `k` newlines mean `k` whole lines after
+ * that fragment — hence the loop stops at MORE than `n` lines, never exactly
+ * `n`, and `slice(-n)` then can't reach back into the fragment. At byte 0 every
+ * line is whole by definition and the check is skipped.
+ *
+ * WHY BUFFERS ARE CONCATENATED, NOT STRINGS. Decoding each chunk as it arrives
+ * and joining the strings corrupts any character that straddles a chunk
+ * boundary: both halves decode to U+FFFD independently and concatenation cannot
+ * put them back. That is not theoretical — a differential run of this function
+ * against `readJsonlLines` over all 353 transcripts in a live store failed on
+ * exactly that, 2 cases out of 4,236, with the right line COUNT and a mangled
+ * character inside one row. Bytes are kept raw and decoded once, over the whole
+ * contiguous region, so the only lossy seam left is at the region's own start -
+ * which is inside the untrusted first line, and discarded.
+ *
+ * WHY THE "\n" COUNT RATHER THAN SPLITTING EACH PASS. The obvious version
+ * re-splits the accumulated tail every round trip, which is quadratic in the
+ * bytes read — and transcripts with a few enormous rows (a tool result carrying
+ * a whole file) read many chunks. Measured, that version took 1254ms on a 12.9MB
+ * transcript where the whole-file read it replaced took 29ms. Counting newlines
+ * is a linear scan of the NEW chunk only; the split happens once, when the count
+ * says it will succeed.
+ */
+export async function readJsonlTail(path: string, n: number): Promise<string[]> {
+  if (n <= 0) return [];
+  let fh: Awaited<ReturnType<typeof open>>;
+  try {
+    fh = await open(path, "r");
+  } catch (err) {
+    if (isMissing(err)) return [];
+    throw err;
+  }
+  try {
+    const { size } = await fh.stat();
+    if (size === 0) return [];
+    const chunks: Buffer[] = [];
+    let newlines = 0;
+    let end = size;
+    for (let read = 0; end > 0; read++) {
+      // Double while bisecting; once out of attempts, take everything left.
+      const want =
+        read < TAIL_BISECT_READS ? TAIL_CHUNK_BYTES * 2 ** read : Number.POSITIVE_INFINITY;
+      const start = Math.max(0, end - want);
+      const raw = Buffer.allocUnsafe(end - start);
+      // Slice to what was actually read: `allocUnsafe` means anything past that
+      // is uninitialised heap, not file content.
+      const buf = raw.subarray(0, await readFull(fh, raw, start));
+      chunks.unshift(buf);
+      newlines += countNewlineBytes(buf);
+      end = start;
+      if (end === 0) break;
+      // Gate on the cheap byte count, then confirm: blank lines are filtered out
+      // by `splitLines`, so a newline count can promise more rows than survive.
+      if (newlines > n) {
+        const lines = splitLines(Buffer.concat(chunks).toString("utf8"));
+        if (lines.length > n) return lines.slice(-n);
+      }
+    }
+    return splitLines(Buffer.concat(chunks).toString("utf8")).slice(-n);
+  } finally {
+    await fh.close().catch(() => {});
+  }
 }
 
 export { mkdir as mkdirp };
