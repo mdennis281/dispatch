@@ -4,13 +4,30 @@
  * pieces that took `listChats` + opening a chat from ~400ms of mostly-blocking
  * work down to ~45ms.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./index.js";
-import { readJsonlLines, readJsonlTail, writeJsonAtomic } from "./fsq.js";
+import { readFull, readJsonlLines, readJsonlTail, writeJsonAtomic } from "./fsq.js";
 import type { Project, Chat } from "@dispatch/shared";
+
+/**
+ * An opt-in seam over `readdir`. `vi.spyOn` cannot reach it — the Store binds the
+ * named ESM import at load — so the module is mocked, but the mock passes
+ * straight through to the real implementation unless a test sets the override.
+ */
+const hoisted = vi.hoisted(() => ({
+  readdirOverride: null as null | (() => Promise<never>),
+}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readdir: (...args: Parameters<typeof actual.readdir>) =>
+      hoisted.readdirOverride ? hoisted.readdirOverride() : actual.readdir(...args),
+  };
+});
 
 let dir: string;
 let store: Store;
@@ -21,6 +38,7 @@ beforeEach(async () => {
   await store.init();
 });
 afterEach(async () => {
+  hoisted.readdirOverride = null;
   store.close();
   await rm(dir, { recursive: true, force: true });
 });
@@ -216,5 +234,74 @@ describe("Store.scanMessages — unvalidated transcript walk", () => {
     const rows: unknown[] = [];
     await store.scanMessages("never-existed", (r) => rows.push(r));
     expect(rows).toEqual([]);
+  });
+});
+
+describe("readFull — short reads", () => {
+  /** A reader that hands back at most `perCall` bytes, like a real short read. */
+  function dribbler(content: Buffer, perCall: number) {
+    return {
+      calls: 0,
+      async read(buf: Buffer, offset: number, length: number, position: number) {
+        this.calls++;
+        const n = Math.min(perCall, length, Math.max(0, content.length - position));
+        content.copy(buf, offset, position, position + n);
+        return { bytesRead: n };
+      },
+    };
+  }
+
+  it("keeps reading until the buffer is full", async () => {
+    const content = Buffer.from("abcdefghij");
+    const fh = dribbler(content, 3);
+    const buf = Buffer.alloc(10);
+    expect(await readFull(fh, buf, 0)).toBe(10);
+    expect(buf.toString()).toBe("abcdefghij");
+    expect(fh.calls).toBeGreaterThan(1); // it really did take several reads
+  });
+
+  it("stops at EOF and reports only what it got, never the uninitialised tail", async () => {
+    // The buffer is 8 long but only 5 bytes exist. Anything past 5 is whatever
+    // was on the heap, so readFull must report 5 and let the caller slice.
+    const fh = dribbler(Buffer.from("abcde"), 3);
+    const buf = Buffer.alloc(8, 0x7a); // 'z' filler stands in for heap garbage
+    expect(await readFull(fh, buf, 0)).toBe(5);
+    expect(buf.subarray(0, 5).toString()).toBe("abcde");
+  });
+
+  it("reads from an offset", async () => {
+    const fh = dribbler(Buffer.from("0123456789"), 2);
+    const buf = Buffer.alloc(4);
+    expect(await readFull(fh, buf, 6)).toBe(4);
+    expect(buf.toString()).toBe("6789");
+  });
+});
+
+describe("Store.listChats — error handling", () => {
+  // `init()` creates `chats/`, so these use an UN-INITIALISED Store: its
+  // constructor touches no disk (StateDb only mkdirs in `open()`), which is what
+  // lets the directory genuinely be absent or be the wrong kind of thing.
+  it("reports no chats when the dir is simply absent (ENOENT)", async () => {
+    const bare = await mkdtemp(join(tmpdir(), "cm-bare-"));
+    expect(await new Store(bare).listChats()).toEqual([]);
+    await rm(bare, { recursive: true, force: true });
+  });
+
+  it("reports no chats when the path is not a directory (ENOTDIR)", async () => {
+    const bare = await mkdtemp(join(tmpdir(), "cm-bare-"));
+    await writeFile(join(bare, "chats"), "not a directory", "utf8");
+    expect(await new Store(bare).listChats()).toEqual([]);
+    await rm(bare, { recursive: true, force: true });
+  });
+
+  it("does NOT swallow a real failure like EACCES", async () => {
+    // Returning [] on an unreadable dir would tell the sidebar the store is
+    // empty and let the WorktreeDetector conclude no chat owns any worktree —
+    // a wrong answer dressed up as a normal one. `readdir` is faked rather than
+    // provoked because there is no portable way to make a real one fail EACCES
+    // across the Linux and Windows CI jobs.
+    hoisted.readdirOverride = () =>
+      Promise.reject(Object.assign(new Error("permission denied"), { code: "EACCES" }));
+    await expect(store.listChats()).rejects.toThrow("permission denied");
   });
 });

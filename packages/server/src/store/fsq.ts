@@ -138,8 +138,12 @@ export async function writeJsonAtomic(
   }
 }
 
-/** True when an error is "the file isn't there", which every reader treats as empty. */
-function isMissing(err: unknown): boolean {
+/**
+ * True when an error is "it isn't there", which every reader here treats as
+ * empty. Exported because the Store makes the same distinction over `readdir`:
+ * a missing chats dir is a fresh install, an EACCES is not.
+ */
+export function isMissing(err: unknown): boolean {
   const code = (err as NodeJS.ErrnoException).code;
   return code === "ENOENT" || code === "ENOTDIR";
 }
@@ -267,6 +271,41 @@ const TAIL_CHUNK_BYTES = 1024 * 1024;
  */
 const TAIL_BISECT_READS = 2;
 
+/** The slice of `FileHandle` {@link readFull} needs — a seam the tests can fake. */
+export interface PositionalReader {
+  read(
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number,
+  ): Promise<{ bytesRead: number }>;
+}
+
+/**
+ * Fill `buf` from `position`, looping through SHORT READS. Returns how many
+ * bytes were actually read, which is less than `buf.length` only at EOF.
+ *
+ * `read()` is permitted to return fewer bytes than asked for, and the buffers
+ * here come from `Buffer.allocUnsafe` — uninitialised memory. Trusting one call
+ * to fill the buffer therefore does not merely risk a wrong answer: the unwritten
+ * tail is whatever was previously on the heap, and {@link readJsonlTail} would
+ * newline-count it, UTF-8-decode it and hand it back as transcript content. Loop
+ * until full, and let the caller slice to what was returned.
+ */
+export async function readFull(
+  fh: PositionalReader,
+  buf: Buffer,
+  position: number,
+): Promise<number> {
+  let off = 0;
+  while (off < buf.length) {
+    const { bytesRead } = await fh.read(buf, off, buf.length - off, position + off);
+    if (bytesRead <= 0) break; // EOF — nothing more is coming.
+    off += bytesRead;
+  }
+  return off;
+}
+
 /**
  * Count 0x0A bytes, without decoding or allocating a split.
  *
@@ -335,8 +374,10 @@ export async function readJsonlTail(path: string, n: number): Promise<string[]> 
       const want =
         read < TAIL_BISECT_READS ? TAIL_CHUNK_BYTES * 2 ** read : Number.POSITIVE_INFINITY;
       const start = Math.max(0, end - want);
-      const buf = Buffer.allocUnsafe(end - start);
-      await fh.read(buf, 0, buf.length, start);
+      const raw = Buffer.allocUnsafe(end - start);
+      // Slice to what was actually read: `allocUnsafe` means anything past that
+      // is uninitialised heap, not file content.
+      const buf = raw.subarray(0, await readFull(fh, raw, start));
       chunks.unshift(buf);
       newlines += countNewlineBytes(buf);
       end = start;

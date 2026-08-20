@@ -103,6 +103,7 @@ import {
   appendJsonl,
   readJsonlLines,
   readJsonlTail,
+  isMissing,
 } from "./fsq.js";
 import { StateDb, assertStateMigrated } from "./db.js";
 
@@ -561,7 +562,13 @@ export class Store {
     let entries;
     try {
       entries = await readdir(this.chatsDir(), { withFileTypes: true });
-    } catch {
+    } catch (err) {
+      // ONLY "the directory isn't there" means "no chats" — that is the state a
+      // fresh install is in. An EACCES or an IO error means we cannot see the
+      // chats, which is not the same claim at all: swallowing it would report an
+      // empty store to the sidebar and, worse, let the WorktreeDetector conclude
+      // no chat owns any worktree.
+      if (!isMissing(err)) throw err;
       return [];
     }
     const ids = entries.filter((e) => e.isDirectory()).map((e) => e.name);
