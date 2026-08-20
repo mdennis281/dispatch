@@ -152,7 +152,7 @@ function FilePickerModal() {
       style={{ zIndex: z }}
       className={
         "fixed inset-0 flex items-start justify-center " +
-        "cm-safe-pad [--cm-gutter:1.5rem] sm:pt-[max(9vh,var(--cm-safe-top))]"
+        "cm-safe-pad [--cm-gutter:1.5rem] sm:pt-[max(9vh,var(--cm-safe-top),var(--cm-titlebar-h))]"
       }
       onKeyDown={onKeyDown}
     >

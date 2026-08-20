@@ -460,3 +460,79 @@ test("arrows walk every image in the chat, and stop at both ends", async ({ page
   await page.keyboard.press("Escape");
   await expect(viewer).toBeHidden();
 });
+
+/**
+ * The system's window buttons are painted OVER the page. Nothing may be there.
+ *
+ * With `display_override: ["window-controls-overlay"]` the installed window has
+ * no title bar: `fixed; inset: 0` reaches the very top of the window, and
+ * Chromium paints minimise/maximise/close on top of whatever the page drew
+ * there. The viewer's toolbar is the app's only full-width row of controls at
+ * y=0, so on Windows its right-hand end — zoom, copy, download and CLOSE — was
+ * underneath those buttons and could not be clicked at all.
+ *
+ * SIMULATED, because Playwright launches a browser tab: there is no installed
+ * window, so `env(titlebar-area-*)` is absent and every `--cm-titlebar-*`
+ * resolves to its 0px fallback. Overriding the three custom properties gives
+ * the same geometry the UA would, and is what the layout actually reads — an
+ * unlayered `<style>` outranks the `@layer base` `:root` that declares them.
+ *
+ * The numbers are a Windows overlay at 100% scale: a ~33px strip, with the
+ * three buttons filling its right ~138px.
+ */
+const WCO_STRIP_H = 33;
+const WCO_BUTTONS_W = 138;
+
+test("the viewer's toolbar clears the window controls overlay", async ({ page }) => {
+  await openChat(page);
+  await page.addStyleTag({
+    content: `:root {
+      --cm-titlebar-h: ${WCO_STRIP_H}px;
+      --cm-titlebar-x: 0px;
+      --cm-titlebar-w: calc(100% - ${WCO_BUTTONS_W}px);
+    }`,
+  });
+
+  await page.locator("figure img").first().click();
+  const viewer = page.getByRole("dialog", { name: "Media viewer" });
+  await expect(viewer).toBeVisible();
+
+  // Every control in the header, against the rect the OS owns. Checked as an
+  // INTERSECTION rather than "is the header below the strip" so this still
+  // means something if the toolbar is ever laid out beside the buttons instead
+  // of below them — the requirement is that they don't overlap, not where the
+  // clearance comes from.
+  const collisions = await page.evaluate(
+    ({ stripH, buttonsW }) => {
+      const header = document.querySelector('[aria-label="Media viewer"] header');
+      if (!header) return ["no header"];
+      const owned = {
+        left: window.innerWidth - buttonsW,
+        right: window.innerWidth,
+        top: 0,
+        bottom: stripH,
+      };
+      return Array.from(header.querySelectorAll("button, a"))
+        .map((el) => ({ el, r: el.getBoundingClientRect() }))
+        .filter(
+          ({ r }) =>
+            r.width > 0 &&
+            r.right > owned.left &&
+            r.left < owned.right &&
+            r.bottom > owned.top &&
+            r.top < owned.bottom,
+        )
+        .map(({ el, r }) => `${el.getAttribute("aria-label") ?? el.tagName} @ ${Math.round(r.top)}`);
+    },
+    { stripH: WCO_STRIP_H, buttonsW: WCO_BUTTONS_W },
+  );
+  expect(collisions).toEqual([]);
+  await page.screenshot({ path: join(artifacts, "media-viewer-wco.png") });
+
+  // And the close button is still reachable — a clearance that worked by
+  // pushing the toolbar off the bottom of the window would pass the test above.
+  // A regex, not "Close": an `IconButton`'s accessible name is its whole
+  // tooltip, shortcut hint and all — "Close  (Esc)".
+  await viewer.getByRole("button", { name: /^Close/ }).click();
+  await expect(viewer).toBeHidden();
+});

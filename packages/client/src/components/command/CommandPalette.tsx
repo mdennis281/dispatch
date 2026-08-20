@@ -534,7 +534,7 @@ export function CommandPalette({
         // Top-anchored: on a phone the 24px gutter alone would put the search
         // field under the status bar. See `cm-safe-pad` in index.css.
         "fixed inset-0 flex items-start justify-center " +
-        "cm-safe-pad [--cm-gutter:1.5rem] sm:pt-[max(12vh,var(--cm-safe-top))]"
+        "cm-safe-pad [--cm-gutter:1.5rem] sm:pt-[max(12vh,var(--cm-safe-top),var(--cm-titlebar-h))]"
       }
     >
       <div className="fixed inset-0 bg-scrim backdrop-blur-[2px]" onClick={close} aria-hidden />
