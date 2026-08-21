@@ -103,3 +103,115 @@ export function reviewerStatus(cred: ReviewerCredential | null | undefined): Rev
     verifiedLogin: cred.verifiedLogin,
   };
 }
+
+/* ------------------------------------------------ what the reviewer is doing */
+
+/**
+ * The reviewer's state on ONE pull request, reduced to the single thing worth
+ * saying about it.
+ *
+ * A rendering concern, but it lives here rather than in a component because the
+ * fields it reads are subtle enough that two surfaces deriving it independently
+ * would drift: `reviewedAt` is claim time and not completion, `rounds` is
+ * meaningless without `maxRounds`, and a `problem` outranks everything because
+ * it means none of the rest is going to happen. The PRs panel and the workspace
+ * roster both show this, and they must agree.
+ *
+ *   - `blocked`  — configured wrong; the reviewer is disabled, not degraded.
+ *   - `queued`   — asked for, waiting on the ~90s sweep to pick it up.
+ *   - `running`  — a round is claimed and nothing has been posted for it yet.
+ *   - `reviewed` — a review landed. `spent` says whether another can follow.
+ *   - `spent`    — every round used and nothing outstanding. A silent stop
+ *                  otherwise: the sweep simply stops spawning, forever.
+ */
+export type PrReviewAgentPhase = "blocked" | "queued" | "running" | "reviewed" | "spent";
+
+export interface PrReviewAgentView {
+  phase: PrReviewAgentPhase;
+  /** Which round this is — `rounds`, which counts claims, so ≥1 once claimed. */
+  round: number;
+  /** The cap, when the row knows it. Absent on rows written before it was recorded. */
+  maxRounds?: number;
+  /** The reviewer chat, so a row can link to the transcript behind the verdict. */
+  chatId?: string;
+  /**
+   * A review actually landed on the PR. False on `spent` when every round was
+   * claimed and none of them filed anything — which is a real outcome (a
+   * reviewer chat that died mid-run still spends its round) and reads very
+   * differently from a cap reached by four reviews that all posted.
+   */
+  posted: boolean;
+  /** Inline findings on the last posted review. */
+  findings?: number;
+  /** The verdict GitHub accepted for the last posted review. */
+  postedEvent?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
+  /** When the phase last moved, for a relative timestamp. */
+  at?: number;
+  /** Set on `blocked` — the operator-facing sentence from `resolveReviewer`. */
+  problem?: string;
+}
+
+/**
+ * Derive {@link PrReviewAgentView} from a PR row's persisted reviewer state.
+ *
+ * `null` = say nothing. That is the resting state of every PR in a project that
+ * never configured a reviewer, and a chip reading "no review" on all of them
+ * would be noise on the rows where it is expected and invisible on the one row
+ * where it is not.
+ */
+export function prReviewAgentView(
+  state:
+    | {
+        requestedAt?: number;
+        reviewedAt?: number;
+        postedAt?: number;
+        chatId?: string;
+        rounds?: number;
+        findings?: number;
+        postedEvent?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
+        maxRounds?: number;
+        problem?: string;
+      }
+    | undefined,
+): PrReviewAgentView | null {
+  if (!state) return null;
+  const round = state.rounds ?? 0;
+  const base = { round, maxRounds: state.maxRounds, chatId: state.chatId, posted: false };
+
+  // First, because it is the answer to "why has nothing happened" and every
+  // other phase below would answer that question wrongly.
+  if (state.problem) {
+    return { ...base, phase: "blocked", problem: state.problem, at: state.requestedAt };
+  }
+
+  // A claim clears the request, so an outstanding one always outranks the last
+  // finished round: the row is waiting on the next sweep, not resting.
+  if (state.requestedAt) return { ...base, phase: "queued", at: state.requestedAt };
+
+  // Claimed and nothing posted for it. NOT derived from `reviewedAt` alone —
+  // that is written at claim time and never cleared, so every reviewed PR would
+  // read as permanently in flight.
+  //
+  // This outranks a spent cap deliberately. A round that has been claimed and
+  // not posted is still running as far as anything persisted knows: a reviewer
+  // chat that died leaves exactly the same row as one three minutes into the
+  // diff, and there is no honest way to tell them apart from here. `running`
+  // links to the chat, which is where the difference is actually visible.
+  if (round > 0 && state.reviewedAt && !state.postedAt) {
+    return { ...base, phase: "running", at: state.reviewedAt };
+  }
+
+  if (state.postedAt) {
+    const done = state.maxRounds != null && round >= state.maxRounds;
+    return {
+      ...base,
+      phase: done ? "spent" : "reviewed",
+      posted: true,
+      findings: state.findings,
+      postedEvent: state.postedEvent,
+      at: state.postedAt,
+    };
+  }
+
+  return null;
+}

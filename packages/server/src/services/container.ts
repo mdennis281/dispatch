@@ -443,6 +443,7 @@ export function createServices(
     },
     snapshotByThread: async (threadId) => toPrSnapshot(await prRegistry.findByThread(threadId)),
     requestReviewAgent: (repo, number, by) => prRegistry.requestReviewAgent(repo, number, by),
+    notePostedReview: (repo, number, by) => prRegistry.notePostedReview(repo, number, by),
   };
   const prReviewWatcher =
     overrides.prReviewWatcher ??
@@ -505,9 +506,15 @@ export function createServices(
           // Through `resolveReviewer` rather than `resolveWorkflow` directly, so
           // a project asking for a dedicated account it has no credential for
           // comes back DISABLED instead of quietly reviewing as the human.
+          //
+          // `problem` is handed BACK rather than published as a notice. The
+          // sweep asks this per PR every 90 seconds, so a notice here was a
+          // toast storm for a standing misconfiguration — and a toast is the
+          // wrong shape for it anyway: miss the one you were shown and the
+          // reviewer is silently not running. The watcher records it on the PR
+          // rows it is costing instead, where it survives a reload.
           const { policy, problem } = await resolveReviewer(store, project);
-          if (problem) bus.publish({ type: "notice", level: "warn", text: problem });
-          return policy;
+          return { policy, problem };
         },
         spawn: async ({ projectId, repo, number, round, policy }) => {
           const out = await launchAgentTask(services, {

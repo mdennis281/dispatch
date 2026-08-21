@@ -100,6 +100,12 @@ export interface PrReviewRegistry {
   ): Promise<{ reviewAgent?: { rounds: number } } | null>;
   /** Attach the reviewer's chat to the row, once it exists. */
   noteReviewChat(repo: string, number: number, chatId: string): Promise<unknown>;
+  /** Mirror the round cap and any blocking misconfiguration onto the row. */
+  notePolicy(
+    repo: string,
+    number: number,
+    policy: { maxRounds?: number; problem?: string },
+  ): Promise<unknown>;
 }
 
 /**
@@ -111,8 +117,17 @@ export interface PrReviewRegistry {
  * the project record, which the store already holds.
  */
 export interface PrReviewAgentHooks {
-  /** This project's reviewer policy; null = no project, or GitHub is unreadable. */
-  policyFor(projectId: string | undefined): Promise<ResolvedReviewAgent | null>;
+  /**
+   * This project's reviewer policy; null = no project, or GitHub is unreadable.
+   *
+   * `problem` travels WITH the policy rather than being reported separately,
+   * because the disabled-for-a-reason case is indistinguishable from
+   * disabled-on-purpose once it is reduced to `enabled: false` — and those want
+   * opposite things from the UI: one is a setting, the other is a fault.
+   */
+  policyFor(
+    projectId: string | undefined,
+  ): Promise<{ policy: ResolvedReviewAgent; problem?: string } | null>;
   /** Launch the reviewer. Returns the chat it created, so the row can link to it. */
   spawn(input: {
     projectId: string;
@@ -444,7 +459,18 @@ export class PrReviewWatcher {
     if (snapshot.isDraft) return;
     const projectId = scope.projectId;
     if (!projectId) return;
-    const policy = await hooks.policyFor(projectId);
+    const resolved = await hooks.policyFor(projectId);
+    // BEFORE the enabled gate, and on every pass: the state most worth showing
+    // is the one where the reviewer is disabled by a missing credential, and
+    // that is exactly the case in which nothing further down ever writes a row.
+    // `notePolicy` no-ops unless something actually changed.
+    await registry
+      .notePolicy(snapshot.repo, snapshot.number, {
+        maxRounds: resolved?.policy.maxRounds,
+        problem: resolved?.problem,
+      })
+      .catch(() => undefined);
+    const policy = resolved?.policy;
     if (!policy?.enabled) return;
 
     // GitHub-sourced request: the configured account is sitting in the queue.
