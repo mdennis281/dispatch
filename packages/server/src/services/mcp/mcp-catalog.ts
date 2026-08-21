@@ -5,9 +5,17 @@
  * (`{ ...projectMcpServers, manager }`):
  *
  *   - the in-process "manager" server, enumerated from {@link managerToolDescriptors}
- *     (the same tool definitions the SDK registers — one source, no drift), and
+ *     (the same tool definitions the SDK registers — one source, no drift),
+ *   - the BUNDLED servers Dispatch injects on the project's behalf (the browser
+ *     pair) — 53 tools that every gated-in session has been getting while this
+ *     view, the one place that claims to list them all, never named them, and
  *   - every external/passthrough server on the project's `mcpServers` config,
  *     probed over a short-timeout MCP `tools/list`.
+ *
+ * A server switched off by an app or project toggle is listed with its tools
+ * empty and `status:"disabled"`, and is NOT probed — spawning a process to
+ * enumerate tools nobody can call is pure cost. It stays visible because this
+ * screen is also where you switch it back on.
  *
  * External probing is defensive: each server is connected in isolation with a
  * hard timeout, and ANY connect/list failure is captured as a `status:"error"`
@@ -21,14 +29,17 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type {
-  McpCatalog,
-  McpServerCatalogEntry,
-  McpServerConfig,
-  McpServerTransport,
-  McpToolInfo,
-  McpToolParam,
-  Project,
+import {
+  resolveMcpEnablement,
+  type McpCatalog,
+  type McpEnablementLayers,
+  type McpServerCatalogEntry,
+  type McpServerConfig,
+  type McpServerKind,
+  type McpServerTransport,
+  type McpToolInfo,
+  type McpToolParam,
+  type Project,
 } from "@dispatch/shared";
 import { managerToolDescriptors, type ManagerToolBindings } from "./manager-mcp.js";
 
@@ -227,17 +238,48 @@ function describeTransport(config: McpServerConfig): McpServerTransport {
   return { type: config.type === "sse" ? "sse" : "http" };
 }
 
-async function buildExternalEntry(
-  name: string,
-  config: McpServerConfig,
+/** One spawnable server to describe: an external declaration or a bundled one. */
+interface SpawnableEntryInput {
+  name: string;
+  kind: Extract<McpServerKind, "bundled" | "external">;
+  config: McpServerConfig;
+  /** Enablement with neither layer pinning it (see {@link BundledCatalogServer}). */
+  byDefault: boolean;
+  defaultReason?: string;
+  unavailable?: string;
+}
+
+async function buildSpawnableEntry(
+  input: SpawnableEntryInput,
+  layers: McpEnablementLayers | undefined,
   probe: McpProbe,
   timeoutMs: number,
   cwd: string | undefined,
 ): Promise<McpServerCatalogEntry> {
+  const { name, kind, config } = input;
   const transport = describeTransport(config);
+  const enablement = resolveMcpEnablement(name, layers, input.byDefault);
+  const base = {
+    name,
+    kind,
+    transport,
+    enablement,
+    ...(input.defaultReason ? { defaultReason: input.defaultReason } : {}),
+  };
+
+  // A server nobody will run is not worth spawning to interrogate. It is still
+  // LISTED — with its toggle — because the catalog is where you go to turn it
+  // back on, and an entry that vanished when switched off would strand it.
+  if (!enablement.effective) return { ...base, status: "disabled", tools: [] };
+
+  // Nothing on disk to spawn — say so rather than probing a command that isn't there.
+  if (input.unavailable) {
+    return { ...base, status: "error", error: input.unavailable, tools: [] };
+  }
+
   // No transport to connect on → unconfigured (don't spawn/probe).
   if (!config.command && !config.url) {
-    return { name, kind: "external", transport, status: "unconfigured", tools: [] };
+    return { ...base, status: "unconfigured", tools: [] };
   }
   const result: McpProbeResult = await probe(name, config, timeoutMs, cwd).catch((err) => ({
     status: "error" as const,
@@ -245,12 +287,10 @@ async function buildExternalEntry(
     tools: [],
   }));
   if (result.status === "error") {
-    return { name, kind: "external", transport, status: "error", error: result.error, tools: [] };
+    return { ...base, status: "error", error: result.error, tools: [] };
   }
   return {
-    name,
-    kind: "external",
-    transport,
+    ...base,
     status: "ok",
     tools: result.tools.map(
       (t): McpToolInfo => ({
@@ -286,6 +326,31 @@ export interface BuildCatalogOptions {
    * paths probes exactly as it will launch.
    */
   cwd?: string;
+  /**
+   * The bundled servers Dispatch injects on this project's behalf — ALL of
+   * them, including any a toggle has switched off, because the catalog has to
+   * be able to offer them back.
+   */
+  bundled?: readonly BundledCatalogServer[];
+  /** App + project `mcpEnabled` pins (see `mcp-enablement.ts`). */
+  enablement?: McpEnablementLayers;
+}
+
+/** One bundled server, with what its own config block says before any toggle. */
+export interface BundledCatalogServer {
+  name: string;
+  config: McpServerConfig;
+  /** Enablement with neither layer pinning it — e.g. the `browser:` auto-gate. */
+  byDefault: boolean;
+  /** One line on why `byDefault` is what it is, shown beside the toggle. */
+  defaultReason?: string;
+  /**
+   * Set when the server is selected but its npm package couldn't be resolved off
+   * disk. Reported as an error entry WITHOUT probing — there is nothing to
+   * spawn — because "its tools are silently missing" was previously visible only
+   * as a line in the server log nobody reads.
+   */
+  unavailable?: string;
 }
 
 /**
@@ -304,6 +369,9 @@ export async function buildProjectMcpCatalog(
     kind: "custom",
     transport: { type: "sdk" },
     status: "ok",
+    // Resolved rather than hard-coded so the UI reads its always-on-ness off the
+    // same rule the broker does, instead of a second copy of the exception.
+    enablement: resolveMcpEnablement("manager", opts.enablement, true),
     tools: managerToolDescriptors(opts.bindings ?? {}).map(
       (d): McpToolInfo => ({
         qualifiedName: `mcp__manager__${d.name}`,
@@ -320,11 +388,35 @@ export async function buildProjectMcpCatalog(
     project.mcpServers ??
     {}) as Record<string, McpServerConfig>;
   const cwd = opts.cwd ?? project.repoPath;
-  const externalEntries = await Promise.all(
-    Object.entries(external).map(([name, config]) =>
-      buildExternalEntry(name, config, probe, timeoutMs, cwd),
+  // A project may declare a server of the same name as a bundled one, in which
+  // case its declaration wins outright in the broker's merge — so listing both
+  // would show a bundled entry no session ever gets. Drop it here for the same
+  // reason and by the same rule.
+  const bundled = (opts.bundled ?? []).filter((b) => !(b.name in external));
+  const inputs: SpawnableEntryInput[] = [
+    ...bundled.map(
+      (b): SpawnableEntryInput => ({
+        name: b.name,
+        kind: "bundled",
+        config: b.config,
+        byDefault: b.byDefault,
+        ...(b.defaultReason ? { defaultReason: b.defaultReason } : {}),
+        ...(b.unavailable ? { unavailable: b.unavailable } : {}),
+      }),
     ),
+    ...Object.entries(external).map(
+      ([name, config]): SpawnableEntryInput => ({
+        name,
+        kind: "external",
+        config,
+        // Declared servers default ON: somebody wrote them down on purpose.
+        byDefault: true,
+      }),
+    ),
+  ];
+  const entries = await Promise.all(
+    inputs.map((input) => buildSpawnableEntry(input, opts.enablement, probe, timeoutMs, cwd)),
   );
 
-  return { servers: [managerEntry, ...externalEntries] };
+  return { servers: [managerEntry, ...entries] };
 }

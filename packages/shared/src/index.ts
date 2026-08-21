@@ -20,6 +20,7 @@ export * from "./user-agent.js";
 export * from "./auth.js";
 export * from "./limits.js";
 export * from "./mcp.js";
+export * from "./mcp-enablement.js";
 export * from "./file-tools.js";
 export * from "./fs-entry.js";
 export * from "./media-blocks.js";

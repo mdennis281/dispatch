@@ -39,8 +39,10 @@ import { tmpdir } from "node:os";
 import {
   BROWSER_MCP_SERVERS,
   BrowserMcpConfigSchema,
+  resolveMcpEnablement,
   type BrowserMcpConfig,
   type BrowserMcpServer,
+  type McpEnablementLayers,
   type McpServerConfig,
   type SubApp,
 } from "@dispatch/shared";
@@ -120,27 +122,69 @@ export function hasWebSubApp(subApps: readonly SubApp[]): boolean {
 }
 
 /**
- * Which servers this project should get.
+ * What the `browser:` block alone says about one server, before any toggle.
  *
  * `auto` is gated on a sub-app with a `url` because these two cost 53 tools of
  * context between them (24 + 29, measured). A repo with nothing to point a
  * browser at should pay nothing for them; an explicit list means the author has
  * decided, so the gate is skipped.
+ *
+ * This is the DEFAULT layer, not the answer: an `mcpEnabled` pin at either scope
+ * overrides it, which is how you get playwright in a repo that declares no
+ * sub-app at all (`browser: auto` would never offer it).
+ */
+export function browserServerDefault(
+  server: BrowserMcpServer,
+  config: BrowserMcpConfig | undefined,
+  subApps: readonly SubApp[],
+): boolean {
+  const cfg = config ?? BrowserMcpConfigSchema.parse({});
+  if (cfg.servers === "off") return false;
+  if (Array.isArray(cfg.servers)) return cfg.servers.includes(server);
+  return hasWebSubApp(subApps);
+}
+
+/** Human-readable reason for {@link browserServerDefault}'s verdict. */
+export function browserServerDefaultReason(
+  config: BrowserMcpConfig | undefined,
+  subApps: readonly SubApp[],
+): string {
+  const cfg = config ?? BrowserMcpConfigSchema.parse({});
+  if (cfg.servers === "off") return "project.yaml sets browser: off";
+  if (Array.isArray(cfg.servers)) return "project.yaml lists browser servers explicitly";
+  return hasWebSubApp(subApps)
+    ? "on automatically — this project has a sub-app with a url"
+    : "off automatically — no sub-app declares a url to point a browser at";
+}
+
+/**
+ * Which servers this project actually gets: the `browser:` default for each,
+ * overridden by an app- or project-scoped `mcpEnabled` pin.
  */
 export function selectBrowserServers(
   config: BrowserMcpConfig | undefined,
   subApps: readonly SubApp[],
+  enablement?: McpEnablementLayers,
 ): BrowserMcpServer[] {
-  const cfg = config ?? BrowserMcpConfigSchema.parse({});
-  if (cfg.servers === "off") return [];
-  if (Array.isArray(cfg.servers)) return [...new Set(cfg.servers)];
-  return hasWebSubApp(subApps) ? [...BROWSER_MCP_SERVERS] : [];
+  return BROWSER_MCP_SERVERS.filter(
+    (name) =>
+      resolveMcpEnablement(name, enablement, browserServerDefault(name, config, subApps))
+        .effective,
+  );
 }
 
 /** Inputs for {@link buildBrowserMcpServers}. */
 export interface BrowserMcpBuildOptions {
   config?: BrowserMcpConfig;
   subApps?: readonly SubApp[];
+  /** App/project `mcpEnabled` pins, applied over the `browser:` default. */
+  enablement?: McpEnablementLayers;
+  /**
+   * Build EXACTLY these, skipping selection entirely. The catalog passes the
+   * full set because it has to describe a disabled server too — you can't offer
+   * to switch on something the builder already filtered away.
+   */
+  servers?: readonly BrowserMcpServer[];
   /**
    * Namespaces the output dir. The broker always passes the session's chat id,
    * so in practice every chat writes somewhere of its own; it is optional only
@@ -163,7 +207,8 @@ export function buildBrowserMcpServers(
   opts: BrowserMcpBuildOptions = {},
 ): Record<string, McpServerConfig> {
   const cfg = opts.config ?? BrowserMcpConfigSchema.parse({});
-  const selected = selectBrowserServers(opts.config, opts.subApps ?? []);
+  const selected =
+    opts.servers ?? selectBrowserServers(opts.config, opts.subApps ?? [], opts.enablement);
   const out: Record<string, McpServerConfig> = {};
 
   for (const name of selected) {

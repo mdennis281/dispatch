@@ -19,7 +19,12 @@ import {
   type SubApp,
 } from "@dispatch/shared";
 import { buildProjectMcpCatalog } from "./mcp-catalog.js";
-import { buildBrowserMcpServers, selectBrowserServers, hasWebSubApp } from "./browser-mcp.js";
+import {
+  buildBrowserMcpServers,
+  browserServerDefault,
+  selectBrowserServers,
+  hasWebSubApp,
+} from "./browser-mcp.js";
 
 const webApp = { id: "dev", name: "Dev", url: "http://localhost:4319" } as SubApp;
 const cliApp = { id: "cli", name: "CLI" } as SubApp;
@@ -54,6 +59,48 @@ describe("selectBrowserServers", () => {
 
   it("treats a missing config as auto, not off", () => {
     expect(selectBrowserServers(undefined, [webApp])).toHaveLength(2);
+  });
+
+  it("an mcpEnabled pin overrides the auto-gate in both directions", () => {
+    // On in a repo the gate would exclude: no sub-app declares a url, but
+    // somebody asked for a browser here anyway.
+    expect(selectBrowserServers(cfg(), [cliApp], { project: { playwright: true } })).toEqual([
+      "playwright",
+    ]);
+    // …and off in a repo the gate would include.
+    expect(selectBrowserServers(cfg(), [webApp], { app: { playwright: false } })).toEqual([
+      "chrome-devtools",
+    ]);
+  });
+
+  it("a project pin beats an app pin", () => {
+    expect(
+      selectBrowserServers(cfg(), [webApp], {
+        app: { "chrome-devtools": false },
+        project: { "chrome-devtools": true },
+      }),
+    ).toEqual(["playwright", "chrome-devtools"]);
+  });
+
+  it("a pin overrides an explicit browser: list too", () => {
+    // `browser:` is the DEFAULT layer, not the answer — otherwise a repo that
+    // listed its servers could never be overridden per install.
+    expect(
+      selectBrowserServers(cfg({ servers: ["playwright"] }), [], {
+        app: { playwright: false, "chrome-devtools": true },
+      }),
+    ).toEqual(["chrome-devtools"]);
+  });
+});
+
+describe("browserServerDefault", () => {
+  it("reports what `browser:` alone says, before any pin", () => {
+    expect(browserServerDefault("playwright", cfg(), [webApp])).toBe(true);
+    expect(browserServerDefault("playwright", cfg(), [cliApp])).toBe(false);
+    expect(browserServerDefault("playwright", cfg({ servers: "off" }), [webApp])).toBe(false);
+    expect(browserServerDefault("chrome-devtools", cfg({ servers: ["playwright"] }), [])).toBe(
+      false,
+    );
   });
 });
 
@@ -130,6 +177,25 @@ describe("buildBrowserMcpServers", () => {
 
   it("returns nothing at all when the project is gated out", () => {
     expect(buildBrowserMcpServers({ subApps: [cliApp] })).toEqual({});
+  });
+
+  it("skips a server an mcpEnabled pin switched off", () => {
+    const servers = buildBrowserMcpServers({
+      subApps: [webApp],
+      enablement: { project: { "chrome-devtools": false } },
+    });
+    expect(Object.keys(servers)).toEqual(["playwright"]);
+  });
+
+  it("an explicit `servers` list bypasses selection entirely", () => {
+    // How the catalog gets a config for a server it must still DESCRIBE (and
+    // offer a switch for) after a toggle turned it off.
+    const servers = buildBrowserMcpServers({
+      subApps: [cliApp],
+      enablement: { app: { playwright: false } },
+      servers: ["playwright"],
+    });
+    expect(Object.keys(servers)).toEqual(["playwright"]);
   });
 });
 

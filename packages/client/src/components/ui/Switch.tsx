@@ -12,11 +12,19 @@ export function Switch({
   checked,
   onChange,
   label,
+  ariaLabel,
   disabled,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
+  /** Visible text beside the track. Empty renders the track alone. */
   label: string;
+  /**
+   * The accessible name when `label` is empty — a switch in a dense list can't
+   * afford the words, but "switch, on" with nothing else is unusable in a
+   * screen reader.
+   */
+  ariaLabel?: string;
   disabled?: boolean;
 }) {
   return (
@@ -24,6 +32,7 @@ export function Switch({
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={ariaLabel}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className="flex items-center gap-2 text-sm font-medium text-secondary disabled:opacity-50"

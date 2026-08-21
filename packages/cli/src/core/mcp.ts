@@ -25,6 +25,7 @@ import {
   formatZodIssues,
   loadManifest,
   manifestJs,
+  mcpEnabledMap,
   mcpServersSeq,
   saveManifest,
   type ProjectPaths,
@@ -133,6 +134,46 @@ export async function removeServer(
   if (seq.items.length === 0) loaded.doc.delete("mcpServers");
   await saveManifest(loaded);
   return { removed: true, paths: loaded.paths };
+}
+
+/* ------------------------------------------------------------ enablement */
+
+/**
+ * Pin a server on or off in this project's `mcpEnabled` map, or clear the pin.
+ *
+ * Separate from add/remove on purpose: switching a server off should not delete
+ * how it was configured, and switching one ON has to work for a BUNDLED server
+ * that has no `mcpServers` entry to edit in the first place. So the name here is
+ * deliberately unvalidated against the declared list — `playwright` is a legal
+ * target in a manifest that never mentions it.
+ *
+ * `enabled: null` removes the pin (back to inheriting the app layer, then the
+ * server's own default), and the `mcpEnabled` key goes with the last pin rather
+ * than lingering as an empty map.
+ */
+export async function setServerEnabled(
+  cwd: string,
+  name: string,
+  enabled: boolean | null,
+): Promise<{ changed: boolean; paths: ProjectPaths }> {
+  assertValidServerName(name);
+  const loaded = await loadManifest(cwd);
+
+  if (enabled === null) {
+    const map = mcpEnabledMap(loaded.doc);
+    if (!map?.has(name)) return { changed: false, paths: loaded.paths };
+    map.delete(name);
+    if (map.items.length === 0) loaded.doc.delete("mcpEnabled");
+    await saveManifest(loaded);
+    return { changed: true, paths: loaded.paths };
+  }
+
+  const map = mcpEnabledMap(loaded.doc, true);
+  if (map.get(name) === enabled) return { changed: false, paths: loaded.paths };
+  map.set(name, enabled);
+  await saveManifest(loaded);
+  if (!loaded.existed) await ensureConfigReadme(loaded.paths.configDir);
+  return { changed: true, paths: loaded.paths };
 }
 
 /** Locate a server entry in a raw YAML sequence by its `name` scalar. */

@@ -91,11 +91,13 @@ import type {
 import {
   DEFAULT_HARNESS,
   EffortSchema,
+  applyMcpEnablement,
   classifyWorkflowViolation,
   describeExemptionScope,
   isPrSettledIdle,
   parseInlineMedia,
   resolveWorkflow,
+  type McpEnablementLayers,
   type MetricEvent,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
@@ -810,6 +812,10 @@ export interface BrokerProjectConfig {
   /** A project's config-sourced skills (from `.dispatch/skills/`), or `[]`.
    *  Materialized into the session cwd's `.claude/skills/` so the SDK finds them. */
   getSkills(projectId: string): SkillConfig[];
+  /** A project's committed per-server MCP on/off pins (manifest `mcpEnabled`),
+   *  or `{}`. The more specific of the two layers — it wins over the app's own
+   *  pins (see `mcp-enablement.ts`). Optional so older fakes stay valid. */
+  getMcpEnabled?(projectId: string): Record<string, boolean>;
   /** A project's bundled-browser block, or undefined when the manifest says
    *  nothing — which means the `auto` default, NOT off. Optional so older fakes
    *  stay valid. */
@@ -4802,11 +4808,27 @@ export class SessionBroker {
     // server of the same name under `mcpServers` overrides them outright. Read
     // subApps from config first for the same reason `configMcp` is — so a live
     // manifest edit takes effect on the next session rather than the next sync.
+    // The two `mcpEnabled` layers — this install's pins under this repo's. A
+    // server switched off at either is never handed to the SDK, so it is not
+    // spawned and its tools cost nothing; `manager` is exempt by rule, which is
+    // why it's applied to the merged record BEFORE `manager` is added below.
+    const mcpEnablement: McpEnablementLayers = {
+      app: appSettings?.mcpEnabled,
+      project: projectId ? this.projectConfig?.getMcpEnabled?.(projectId) : undefined,
+    };
+    // Config-sourced sub-apps decide the browser auto-gate — but fall back on
+    // EMPTY, not on nullish. `getSubApps` answers `[]` for a project whose
+    // config isn't in the cache yet (a restart, a project loaded moments ago),
+    // and `[] ?? project.subApps` keeps the empty array: the session then
+    // silently comes up with no browser tools in a repo that declares three web
+    // sub-apps. The store copy is synced FROM the same config, so it is the
+    // right answer whenever the live one has nothing to say.
+    const configSubApps =
+      (projectId ? this.projectConfig?.getSubApps?.(projectId) : undefined) ?? [];
     const browserMcp = buildBrowserMcpServers({
       config: projectId ? this.projectConfig?.getBrowserConfig?.(projectId) : undefined,
-      subApps: (projectId ? this.projectConfig?.getSubApps?.(projectId) : undefined) ??
-        project?.subApps ??
-        [],
+      subApps: configSubApps.length ? configSubApps : (project?.subApps ?? []),
+      enablement: mcpEnablement,
       chatId: session.chatId,
       onUnavailable: (name, pkg) =>
         console.warn(
@@ -4814,10 +4836,14 @@ export class SessionBroker {
             `resolved — its tools will be missing from this session.`,
         ),
     });
+    const declaredMcp = applyMcpEnablement(
+      { ...browserMcp, ...(project?.mcpServers ?? {}), ...configMcp },
+      mcpEnablement,
+    );
     const externalMcp =
       projectId && cwd
         ? await resolveMcpServers(
-            { ...browserMcp, ...(project?.mcpServers ?? {}), ...configMcp },
+            declaredMcp,
             {
               projectId,
               cwd,
@@ -4827,7 +4853,7 @@ export class SessionBroker {
             },
             this.mcpPorts,
           )
-        : { ...browserMcp, ...(project?.mcpServers ?? {}), ...configMcp };
+        : declaredMcp;
     options.mcpServers = {
       ...(externalMcp as unknown as Record<string, SdkMcpServerConfig>),
       manager: createManagerMcpServer({

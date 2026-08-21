@@ -24,6 +24,7 @@ function config(over: Partial<ProjectConfig> = {}): ProjectConfig {
     instructions: [],
     subApps: [],
     mcpServers: {},
+    mcpEnabled: {},
     agents: [],
     modes: [],
     skills: [],

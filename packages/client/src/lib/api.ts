@@ -33,6 +33,7 @@ import type {
   ProjectMemory,
   MemoryType,
   McpCatalog,
+  McpEnablementScope,
   GitStatus,
   GitBranch,
   GitCommit,
@@ -108,6 +109,13 @@ export interface AppSettings {
   showInjectedContext?: boolean;
   /** App-wide defaults for which tool families appear in transcript shells. */
   shellFilter?: ShellTranscriptFilter;
+  /**
+   * Per-server MCP on/off pins for this install, under a project's own
+   * `mcpEnabled`. Written through `api.mcp.setEnabled`, NOT through a settings
+   * PUT — that endpoint is a full replace and the MCP view holds one toggle,
+   * not a complete settings draft.
+   */
+  mcpEnabled?: Record<string, boolean>;
   /**
    * Whether an agent calling `spawn_chat` may start a chat WITHOUT asking. Off
    * by default: a spawn stops for an approval prompt, and this is the only thing
@@ -562,6 +570,21 @@ export const api = {
   mcp: {
     catalog: (projectId: string, opts?: { fresh?: boolean }) =>
       get<McpCatalog>(`/api/projects/${projectId}/mcp${qs({ fresh: opts?.fresh ? 1 : undefined })}`),
+    /**
+     * Pin one server on/off at a scope, or `null` to clear the pin and inherit.
+     * Returns the rebuilt catalog, so the switch settles on what the server
+     * actually resolved rather than on what the click optimistically assumed.
+     */
+    setEnabled: (
+      projectId: string,
+      name: string,
+      scope: McpEnablementScope,
+      enabled: boolean | null,
+    ) =>
+      put<McpCatalog>(`/api/projects/${projectId}/mcp/${encodeURIComponent(name)}/enabled`, {
+        scope,
+        enabled,
+      }),
   },
 
   /* attention queue snapshot */

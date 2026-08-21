@@ -16,6 +16,7 @@ import {
   listServers,
   mcpJsonEntryToTransport,
   removeServer,
+  setServerEnabled,
 } from "./mcp.js";
 import { CmError, resolveProjectPaths } from "./manifest.js";
 
@@ -260,5 +261,103 @@ describe("importServers", () => {
     const before = await readFile(manifestPath(), "utf8");
     await importServers(dir, { mcpServers: { bad: { nope: 1 } } });
     expect(await readFile(manifestPath(), "utf8")).toBe(before);
+  });
+});
+
+describe("setServerEnabled", () => {
+  it("pins a BUNDLED server the manifest never declares", async () => {
+    // The case add/remove can't serve: `playwright` has no `mcpServers` entry to
+    // edit, and switching it on must still be expressible.
+    await seedManifest("name: Hivebreak\n");
+    const { changed } = await setServerEnabled(dir, "playwright", true);
+
+    expect(changed).toBe(true);
+    const doc = parseDocument(await readFile(manifestPath(), "utf8")).toJS();
+    expect(doc.mcpEnabled).toEqual({ playwright: true });
+    expect(doc.mcpServers).toBeUndefined();
+  });
+
+  it("leaves a declared server's config in place when switching it off", async () => {
+    // Off is not delete: the transport somebody wrote down has to survive, or
+    // the switch is a one-way door with a re-typing tax.
+    await seedManifest(
+      [
+        "name: Hivebreak",
+        "mcpServers:",
+        "  # The issue tracker. Token comes from the environment.",
+        "  - name: linear",
+        "    transport:",
+        "      type: stdio",
+        "      command: npx",
+        "",
+      ].join("\n"),
+    );
+    await setServerEnabled(dir, "linear", false);
+
+    const raw = await readFile(manifestPath(), "utf8");
+    expect(raw).toContain("# The issue tracker. Token comes from the environment.");
+    const doc = parseDocument(raw).toJS();
+    expect(doc.mcpEnabled).toEqual({ linear: false });
+    expect(doc.mcpServers).toHaveLength(1);
+    expect(doc.mcpServers[0].transport.command).toBe("npx");
+  });
+
+  it("clears a pin with null and drops the key with the last one", async () => {
+    await seedManifest("name: Hivebreak\nmcpEnabled:\n  playwright: false\n  linear: true\n");
+
+    await setServerEnabled(dir, "playwright", null);
+    let doc = parseDocument(await readFile(manifestPath(), "utf8")).toJS();
+    expect(doc.mcpEnabled).toEqual({ linear: true });
+
+    await setServerEnabled(dir, "linear", null);
+    doc = parseDocument(await readFile(manifestPath(), "utf8")).toJS();
+    // Not left as an empty `mcpEnabled: {}` nobody wants to read.
+    expect(doc.mcpEnabled).toBeUndefined();
+  });
+
+  it("reports no change for a pin that already says that, and writes nothing", async () => {
+    const path = await seedManifest("name: Hivebreak\nmcpEnabled:\n  playwright: false\n");
+    const before = await readFile(path, "utf8");
+    const { changed } = await setServerEnabled(dir, "playwright", false);
+    expect(changed).toBe(false);
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  it("clearing a pin that isn't there is a no-op, not an error", async () => {
+    await seedManifest("name: Hivebreak\n");
+    expect((await setServerEnabled(dir, "playwright", null)).changed).toBe(false);
+  });
+
+  it("preserves surrounding comments and every other key", async () => {
+    await seedManifest(
+      [
+        "# Dispatch project config — committed on purpose.",
+        "name: Hivebreak",
+        "# How change ships here.",
+        "workflow:",
+        "  profile: review",
+        "",
+      ].join("\n"),
+    );
+    await setServerEnabled(dir, "chrome-devtools", false);
+
+    const raw = await readFile(manifestPath(), "utf8");
+    expect(raw).toContain("# Dispatch project config — committed on purpose.");
+    expect(raw).toContain("# How change ships here.");
+    expect(parseDocument(raw).toJS()).toMatchObject({
+      name: "Hivebreak",
+      workflow: { profile: "review" },
+      mcpEnabled: { "chrome-devtools": false },
+    });
+  });
+
+  it("refuses a name the mcp__server__tool addressing can't express", async () => {
+    await seedManifest("name: Hivebreak\n");
+    await expect(setServerEnabled(dir, "bad name!", false)).rejects.toThrow(CmError);
+  });
+
+  it("refuses to clobber an mcpEnabled key that isn't a map", async () => {
+    await seedManifest("name: Hivebreak\nmcpEnabled: nope\n").catch(() => {});
+    await expect(setServerEnabled(dir, "playwright", false)).rejects.toThrow();
   });
 });

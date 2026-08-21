@@ -147,6 +147,28 @@ export const ManifestMcpServerSchema = z.object({
 export type ManifestMcpServer = z.infer<typeof ManifestMcpServerSchema>;
 
 
+/* --------------------------------------------------------- mcp enablement */
+
+/**
+ * `mcpEnabled` — per-server on/off pins, by server name.
+ *
+ * Spelled identically in `.dispatch/project.yaml` and in the app's own settings
+ * (`AppSettings.mcpEnabled`), which is what lets one resolver read both (see
+ * `mcp-enablement.ts`). Deliberately SEPARATE from `mcpServers`: that key says
+ * which servers this repo declares, while this one says which servers actually
+ * run — a set that also covers the bundled browser pair, which has no entry
+ * under `mcpServers` to hang a flag off.
+ *
+ *   mcpEnabled:
+ *     playwright: false     # not in this repo, however the auto-gate votes
+ *     chrome-devtools: true # yes here, even though nothing declares a url
+ *
+ * An ABSENT name is not `false`: it means "inherit", which is the whole reason
+ * this is a map and not a list of disabled names.
+ */
+export const McpEnabledMapSchema = z.record(z.string(), z.boolean());
+export type McpEnabledMap = z.infer<typeof McpEnabledMapSchema>;
+
 /* ------------------------------------------------------------ browser MCP */
 
 /** The browser MCP servers Dispatch ships with, by config name. */
@@ -180,6 +202,10 @@ export const BrowserMcpConfigSchema = z.object({
   servers: z
     .union([z.literal("auto"), z.literal("off"), z.array(z.enum(BROWSER_MCP_SERVERS))])
     .default("auto"),
+  /* NOTE: whatever this key says is the DEFAULT, not the last word. An
+     `mcpEnabled` pin (see {@link McpEnabledMapSchema}) overrides it at either
+     scope — that is how a repo with no web sub-app gets a browser at all, since
+     `auto` would never offer it one. */
   /**
    * Headless by default, which is NEITHER package's own default — both launch
    * headed. On a box running several agents in parallel that means windows
@@ -283,6 +309,8 @@ export const ProjectManifestSchema = z.object({
   instructions: z.array(ManifestInstructionSchema).optional(),
   subApps: z.array(ManifestSubAppSchema).optional(),
   mcpServers: z.array(ManifestMcpServerSchema).optional(),
+  /** Per-server on/off overrides (see {@link McpEnabledMapSchema}). */
+  mcpEnabled: McpEnabledMapSchema.optional(),
   /** Bundled browser MCP servers (see {@link ManifestBrowserSchema}). */
   browser: ManifestBrowserSchema.optional(),
   /** Dir override for memories (default `memory/`). */
@@ -405,6 +433,12 @@ export const ProjectConfigSchema = z.object({
   subApps: z.array(SubAppSchema).default([]),
   /** MCP servers keyed by name (as the store + SDK consume them). */
   mcpServers: z.record(z.string(), McpServerConfigSchema).default({}),
+  /**
+   * From manifest `mcpEnabled` — this repo's per-server on/off pins, covering
+   * bundled servers as well as declared ones. Empty ⇒ nothing pinned, so every
+   * server falls through to the app layer and then to its own default.
+   */
+  mcpEnabled: McpEnabledMapSchema.default({}),
   /** Normalized browser-MCP block; absent → the `auto` default applies. */
   browser: BrowserMcpConfigSchema.optional(),
   /** Agents loaded from `agents/*.md` (mapped onto the store AgentConfig). */

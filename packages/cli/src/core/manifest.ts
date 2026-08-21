@@ -18,7 +18,7 @@
 import { readFile, writeFile, rename, mkdir, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, dirname, basename, resolve, parse as parsePath } from "node:path";
-import { Document, isSeq, parseDocument, type YAMLSeq } from "yaml";
+import { Document, isMap, isSeq, parseDocument, type YAMLMap, type YAMLSeq } from "yaml";
 import {
   CONFIG_DIR_NAME,
   CONFIG_DIR_NAMES,
@@ -186,6 +186,30 @@ export function mcpServersSeq(doc: Document, create = false): YAMLSeq | null {
   if (!isSeq(node)) {
     throw new CmError(
       "`mcpServers` in project.yaml is not a list — fix it by hand before using `dispatch mcp`.",
+    );
+  }
+  return node;
+}
+
+/**
+ * Get the document's `mcpEnabled` map node, creating an empty one when the key
+ * is absent (`create`) or returning null when it isn't there. Same contract as
+ * {@link mcpServersSeq}, including refusing to clobber a key that holds
+ * something else — a hand-written manifest is nobody's scratch space.
+ */
+export function mcpEnabledMap(doc: Document, create: true): YAMLMap;
+export function mcpEnabledMap(doc: Document, create?: false): YAMLMap | null;
+export function mcpEnabledMap(doc: Document, create = false): YAMLMap | null {
+  const node = doc.get("mcpEnabled", true);
+  if (node === undefined || node === null) {
+    if (!create) return null;
+    const map = doc.createNode({}) as YAMLMap;
+    doc.set("mcpEnabled", map);
+    return map;
+  }
+  if (!isMap(node)) {
+    throw new CmError(
+      "`mcpEnabled` in project.yaml is not a map of name → true/false — fix it by hand.",
     );
   }
   return node;
