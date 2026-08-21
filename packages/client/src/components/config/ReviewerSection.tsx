@@ -26,16 +26,20 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   AlertTriangle,
+  Bot,
   Check,
   Gauge,
   Loader2,
+  Plus,
   ScanEye,
   Trash2,
   TriangleAlert,
   UserRound,
+  Users,
   X,
 } from "lucide-react";
 import {
+  COPILOT_LOGIN,
   resolveWorkflow,
   type Effort,
   type ReviewerCheck,
@@ -108,14 +112,19 @@ export function ReviewerSection({
   fromManifest?: boolean;
   disabled?: boolean;
 }) {
-  const resolved = resolveWorkflow({ workflow: value }).pr.reviewAgent;
+  // Resolved as though the profile were already `review`, because it is what the
+  // draft AUTHORS that this pane edits. `resolveWorkflow` clamps `pr` INERT off
+  // the review rung, so resolving the draft as-is would render every control
+  // here dead on a `none`/`commit` project — a toggle you can click that springs
+  // straight back, under a banner promising these settings are kept either way.
+  const pr = resolveWorkflow({ workflow: { ...value, profile: "review" } }).pr;
+  const resolved = pr.reviewAgent;
   const isReviewProfile = value.profile === "review";
 
+  const patchPr = (p: Partial<NonNullable<WorkflowConfig["pr"]>>) =>
+    onChange({ ...value, pr: { ...value.pr, ...p } });
   const patch = (p: Partial<NonNullable<NonNullable<WorkflowConfig["pr"]>["reviewAgent"]>>) =>
-    onChange({
-      ...value,
-      pr: { ...value.pr, reviewAgent: { ...value.pr?.reviewAgent, ...p } },
-    });
+    patchPr({ reviewAgent: { ...value.pr?.reviewAgent, ...p } });
 
   return (
     <div className="space-y-4">
@@ -134,6 +143,16 @@ export function ReviewerSection({
         </div>
       )}
 
+      {/* GitHub's queue first, Dispatch's reviewer second: the list is who gets
+          ASKED when a PR opens, and the agent below is a separate answer to the
+          same question. They are not alternatives — a project can have both. */}
+      <ReviewerList
+        value={pr.reviewers}
+        onChange={(reviewers) => patchPr({ reviewers })}
+        requireReview={pr.requireReview}
+        disabled={disabled}
+      />
+
       <div className="rounded-md border border-line bg-panel-2/40">
         <ToggleRow
           checked={resolved.enabled}
@@ -145,8 +164,9 @@ export function ReviewerSection({
           description={
             <>
               When a review is requested on a PR here, Dispatch spawns a chat that reads the
-              diff and posts a real GitHub review — inline comments and all. Off means PRs wait
-              for whoever <span className="cm-mono">workflow.pr.reviewers</span> names.
+              diff and posts a real GitHub review — inline comments and all. This is on top of
+              the list above, not instead of it: off means PRs wait only for the reviewers
+              GitHub was asked for.
             </>
           }
         >
@@ -235,11 +255,147 @@ export function ReviewerSection({
 
       {fromManifest && (
         <p className="text-2xs leading-snug text-faint">
-          Saving writes <span className="cm-mono">workflow.pr.reviewAgent</span> into this
-          repo&rsquo;s <span className="cm-mono">.dispatch/project.yaml</span>. The account and
-          its token are never written there — that file is committed.
+          Saving writes <span className="cm-mono">workflow.pr</span> into this repo&rsquo;s{" "}
+          <span className="cm-mono">.dispatch/project.yaml</span>. The account and its token are
+          never written there — that file is committed.
         </p>
       )}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------- the GitHub queue */
+
+/**
+ * `workflow.pr.reviewers` — the logins `create_pr` and `request_review` ask.
+ *
+ * Editable here because this is the page you are already on when you ask "who
+ * reviews my PRs", and until now the answer was only editable by hand in the
+ * YAML. Entries are GitHub logins or `org/team` slugs; a `/` is what routes one
+ * to `team_reviewers[]` (see `GitHubService.requestReviewers`), so the slash is
+ * load-bearing rather than cosmetic and the row says which one it made.
+ *
+ * An EMPTY list is a decision, not an unset field — `resolveWorkflow` reads it
+ * with `?? base` precisely so `reviewers: []` means "ask nobody" instead of
+ * falling back to the profile's Copilot default. So the empty state says what
+ * that choice costs rather than looking like a form you forgot to fill in.
+ */
+function ReviewerList({
+  value,
+  onChange,
+  requireReview,
+  disabled,
+}: {
+  value: string[];
+  onChange: (next: string[]) => void;
+  /** Drives the empty-state warning: with this off, an empty list blocks nothing. */
+  requireReview: boolean;
+  disabled?: boolean;
+}) {
+  const [entry, setEntry] = useState("");
+
+  const add = () => {
+    // A pasted `@octocat` is the same reviewer as `octocat`, and GitHub would
+    // reject the `@`. Same for a case-different duplicate: logins are
+    // case-insensitive, so two rows would ask one person twice.
+    const login = entry.trim().replace(/^@/, "");
+    if (!login) return;
+    if (!value.some((v) => v.toLowerCase() === login.toLowerCase())) onChange([...value, login]);
+    setEntry("");
+  };
+
+  return (
+    <div className="rounded-md border border-line bg-panel-2/40">
+      <div className="flex items-center gap-2 px-3 py-2 [&_svg]:size-3.5">
+        <Users className="shrink-0 text-muted" />
+        <span className="text-sm font-semibold text-primary">Request review from</span>
+        <span className="ml-auto truncate text-2xs text-faint">
+          asked on every <span className="cm-mono">create_pr</span> and{" "}
+          <span className="cm-mono">request_review</span>
+        </span>
+      </div>
+
+      {value.length > 0 ? (
+        <ul className="border-t border-line-soft">
+          {value.map((login) => {
+            const team = login.includes("/");
+            const Icon = team ? Users : login.endsWith("]") ? Bot : UserRound;
+            return (
+              <li
+                key={login}
+                className="flex items-center gap-2 border-b border-line-soft px-3 py-1.5 last:border-b-0"
+              >
+                <Icon className="size-3.5 shrink-0 text-muted" />
+                <span className="cm-mono truncate text-xs text-secondary">{login}</span>
+                <span className="ml-auto shrink-0 text-2xs text-faint">
+                  {team ? "team" : "user"}
+                </span>
+                <IconButton
+                  size="sm"
+                  tip={`Stop asking ${login}`}
+                  disabled={disabled}
+                  onClick={() => onChange(value.filter((v) => v !== login))}
+                >
+                  <X />
+                </IconButton>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <div className="flex items-start gap-2 border-t border-line-soft px-3 py-2">
+          <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-warn" />
+          <p className="text-2xs leading-snug text-secondary">
+            Nobody. GitHub is asked for no review when a PR opens here
+            {requireReview ? (
+              <>
+                {" "}
+                — and because this project requires a review,{" "}
+                <span className="cm-mono">approve_pr</span> will refuse to land one for{" "}
+                <span className="cm-mono">no-review</span> with nobody it can suggest asking.
+              </>
+            ) : (
+              "."
+            )}{" "}
+            That is a valid choice, and it is the one this project has made.
+          </p>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2 border-t border-line-soft px-3 py-2">
+        <input
+          value={entry}
+          onChange={(e) => setEntry(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              add();
+            }
+          }}
+          autoComplete="off"
+          spellCheck={false}
+          disabled={disabled}
+          placeholder="octocat, or my-org/reviewers for a team"
+          className={cn(
+            "min-w-0 flex-1 rounded-md border border-line bg-inset px-2.5 py-1.5",
+            "cm-mono text-xs text-secondary placeholder:font-sans placeholder:text-faint",
+            "focus:border-accent-line focus:outline-none disabled:opacity-60",
+          )}
+        />
+        <Button size="sm" leftIcon={<Plus />} disabled={disabled || !entry.trim()} onClick={add}>
+          Add
+        </Button>
+        {!value.some((v) => v.toLowerCase() === COPILOT_LOGIN) && (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={disabled}
+            onClick={() => onChange([...value, COPILOT_LOGIN])}
+          >
+            Add Copilot
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
@@ -353,7 +509,7 @@ function DedicatedAccount({ projectId, repo }: { projectId?: string; repo?: stri
           placeholder={
             status?.configured
               ? "Paste a new token to replace the current one"
-              : "github_pat_… — the reviewer account's token"
+              : "ghp_… or github_pat_… — the reviewer account's token"
           }
           className={cn(
             "min-w-0 flex-1 rounded-md border border-line bg-inset px-2.5 py-1.5",
@@ -422,10 +578,18 @@ function CheckRow({ check }: { check: ReviewerCheck }) {
  * The four things you have to do on GitHub, in order.
  *
  * Written out rather than linked because every one of them is a place people get
- * it wrong in a way the app cannot fix afterwards: a classic token instead of a
- * fine-grained one, `Contents` instead of `Pull requests`, and — the one that
- * costs an afternoon — forgetting that the account has to be a collaborator at
- * all before GitHub will let it be requested.
+ * it wrong in a way the app cannot fix afterwards: the wrong token TYPE for who
+ * owns the repo, `Contents` instead of `Pull requests`, and — the one that costs
+ * an afternoon — forgetting that the account has to be a collaborator at all
+ * before GitHub will let it be requested.
+ *
+ * The token step named a path GitHub no longer has (Developer settings), and
+ * told everyone to make a fine-grained token, which for the ordinary case here
+ * CANNOT WORK: a fine-grained token only reaches repositories owned by its own
+ * resource owner, and the reviewer is a machine account that owns nothing — it
+ * is a collaborator on YOUR repo. GitHub lists that as a standing gap, and the
+ * failure it produces is a token that authenticates fine and then 404s on the
+ * repo, which reads as "the reviewer is broken" rather than "wrong token type".
  */
 function SetupSteps({ repo }: { repo?: string }) {
   const steps: Array<[string, React.ReactNode]> = [
@@ -441,17 +605,33 @@ function SetupSteps({ repo }: { repo?: string }) {
       "Invite it to the repo",
       <>
         In {repo ? <span className="cm-mono">{repo}</span> : "this repository"} → Settings →
-        Collaborators, invite that account with <span className="font-medium">Read</span> access,
-        and accept the invite from the new account. Read is enough to be requested as a reviewer,
-        and it means a leaked token still cannot push.
+        Access → Collaborators, invite that account with{" "}
+        <span className="font-medium">Read</span> access, and accept the invite from the new
+        account. Read is enough to be requested as a reviewer, and it means a leaked token still
+        cannot push.
       </>,
     ],
     [
-      "Make a fine-grained token",
+      "Make it a token",
       <>
-        Signed in as the new account: Settings → Developer settings → Personal access tokens →
-        Fine-grained. Scope it to this repository and grant exactly one permission —{" "}
-        <span className="cm-mono">Pull requests: Read and write</span>. Nothing else is needed.
+        Signed in as the new account: Settings → Access → Credentials → Personal access tokens.
+        Which kind depends on who owns the repo, and getting it wrong produces a token that
+        authenticates and then cannot see the repository:
+        <span className="mt-1 block">
+          <span className="font-medium">Owned by someone else</span> — the usual case, since the
+          reviewer is a collaborator on your repo — needs a{" "}
+          <span className="font-medium">classic</span> token with the{" "}
+          <span className="cm-mono">repo</span> scope (
+          <span className="cm-mono">public_repo</span> if the repo is public). Fine-grained
+          tokens only reach repositories owned by the account that made them, which a machine
+          account never is.
+        </span>
+        <span className="mt-1 block">
+          <span className="font-medium">Owned by the reviewer account</span> (or an org it
+          belongs to) — use a <span className="font-medium">fine-grained</span> token scoped to
+          this repository, with exactly one permission:{" "}
+          <span className="cm-mono">Pull requests: Read and write</span>.
+        </span>
       </>,
     ],
     [
