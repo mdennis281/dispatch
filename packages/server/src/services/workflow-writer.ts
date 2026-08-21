@@ -19,7 +19,12 @@
  * written atomically before this returns.
  */
 import { existsSync } from "node:fs";
-import { loadManifest, saveManifest, resolveProjectPaths } from "@dispatch/cli/core";
+import {
+  loadManifest,
+  saveManifest,
+  resolveProjectPaths,
+  type LoadedManifest,
+} from "@dispatch/cli/core";
 import {
   WorkflowConfigSchema,
   type Project,
@@ -59,11 +64,70 @@ export function isManifestBacked(project: Project): boolean {
 }
 
 /**
+ * The store-backed twin of {@link applyAuthored} — same merge rule, applied to a
+ * plain object instead of a YAML document.
+ */
+function mergeWorkflow(prev: WorkflowConfig | undefined, next: WorkflowConfig): WorkflowConfig {
+  return mergeBlocks(prev ?? {}, next) as WorkflowConfig;
+}
+
+function mergeBlocks(
+  prev: Record<string, unknown>,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...prev };
+  for (const [k, v] of Object.entries(next)) {
+    if (v === undefined) continue;
+    const before = out[k];
+    out[k] = isBlock(v) && isBlock(before) ? mergeBlocks(before, v) : v;
+  }
+  return out;
+}
+
+/** A block to recurse into, as opposed to a scalar or a list to write whole. */
+function isBlock(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Write one authored value at `path`, recursing into nested blocks.
+ *
+ * Recursing is the whole point: `setIn(["workflow","pr"], value)` replaces that
+ * NODE, so a sender holding only half of `pr` would drop the other half — and
+ * `pr` genuinely has several owners (the Reviewer pane, the reviewer list, and
+ * three keys with no editor at all). Arrays are written whole on purpose:
+ * `reviewers: []` is a decision ("ask nobody"), and merging it index-by-index
+ * into the previous list would make that decision unexpressible.
+ */
+function applyAuthored(doc: LoadedManifest["doc"], path: string[], value: unknown): void {
+  // Absent is not a deletion request — see `saveProjectWorkflow`'s docblock.
+  if (value === undefined) return;
+  if (isBlock(value)) {
+    for (const [k, v] of Object.entries(value)) applyAuthored(doc, [...path, k], v);
+    return;
+  }
+  doc.setIn(path, value);
+}
+
+/**
  * Save `workflow` for a project, choosing the manifest or the store as above.
  *
- * The incoming block REPLACES the previous one rather than merging into it: the
- * UI always sends the complete block it's showing, and a merge would make
- * clearing a field (back to its profile default) impossible to express.
+ * The incoming block MERGES into the previous one, key by key and level by
+ * level. It used to replace it — an absent key was read as "clear this" — and
+ * that is wrong for a reason no caller can work around: over JSON, `undefined`
+ * and "not mentioned" are the same thing on the wire, so delete-on-absent makes
+ * every partial payload a deletion request against a COMMITTED file, and the
+ * only defence is every caller remembering to send the entire block. Nothing
+ * enforced that contract, and the app's own settings page broke it: its saved
+ * baseline omitted `pr`, so saving the Workflow section deleted `workflow.pr` —
+ * reviewers, `requireReview`, `requireChecks` and `reviewAgent` — out of
+ * `project.yaml` with no error and no UI able to restore any of it.
+ *
+ * What that costs is the ability to clear a key back to its profile default by
+ * omitting it, and nothing needs it: every control in the settings pane sends
+ * its RESOLVED value, so "unset" and "the profile default, written down" are the
+ * same effective config. Actually REMOVING a key is an edit to the file, and the
+ * config page already opens `project.yaml` in the editor for exactly that.
  */
 export async function saveProjectWorkflow(
   deps: { store: Store; projectConfig: ProjectConfigService },
@@ -73,19 +137,26 @@ export async function saveProjectWorkflow(
   const project = await deps.store.getProject(projectId).catch(() => null);
   if (!project) return null;
 
+  // Validating the PAYLOAD, not just the result: the manifest write used to
+  // catch a malformed block on the way out, because `saveManifest` re-validates
+  // the whole document. A merge can't lean on that any more — an incoming `{}`
+  // changes nothing, so a garbage payload would land as a silent no-op instead
+  // of an error the caller can see.
+  const incoming = WorkflowConfigSchema.parse(workflow);
+
   if (!isManifestBacked(project)) {
-    const saved = await deps.store.saveProject({ ...project, workflow });
+    // The store path makes the same promise as the manifest one, or a project
+    // would keep or lose its `pr` block depending on whether the repo happens to
+    // carry a `.dispatch/`.
+    const merged = mergeWorkflow(project.workflow, incoming);
+    const saved = await deps.store.saveProject({ ...project, workflow: merged });
     return { target: "store", project: saved };
   }
 
   const loaded = await loadManifest(project.repoPath);
-  // Set/delete key-by-key (rather than replacing the whole `workflow` node) so
-  // comments attached to the keys we aren't touching survive the write.
-  for (const key of WORKFLOW_KEYS) {
-    const value = workflow[key];
-    if (value === undefined) loaded.doc.deleteIn(["workflow", key]);
-    else loaded.doc.setIn(["workflow", key], value);
-  }
+  // Key-by-key (rather than replacing the whole `workflow` node) so comments
+  // attached to the keys we aren't touching survive the write.
+  for (const key of WORKFLOW_KEYS) applyAuthored(loaded.doc, ["workflow", key], incoming[key]);
   const manifestPath = await saveManifest(loaded);
 
   // Re-read from disk so the store, the cached config and every WS client end up

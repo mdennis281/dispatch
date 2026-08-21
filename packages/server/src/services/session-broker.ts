@@ -658,12 +658,27 @@ export interface SessionPrRegistry {
    * GitHub login, where there is no reviewer account to put in GitHub's queue.
    */
   requestReviewAgent(repo: string, prNumber: number, by: string): Promise<unknown>;
+  /**
+   * Record that this chat's review actually landed — the completion signal the
+   * lease cannot be, since it is taken before the reviewer chat exists.
+   */
+  notePostedReview(
+    repo: string,
+    prNumber: number,
+    by: {
+      chatId: string;
+      findings?: number;
+      event?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
+    },
+  ): Promise<unknown>;
 }
 
 function makePrRegistryBinding(
   registry: SessionPrRegistry,
   github: GitHubService,
   cwd: string | undefined,
+  /** Whose review this is. The registry ignores a post from a chat holding no lease. */
+  chatId: string,
 ): ManagerMcpPrRegistry {
   const repoFor = makeRepoResolver(github, cwd);
   // Every method degrades to null rather than throwing: a card is a nicety, and
@@ -680,6 +695,10 @@ function makePrRegistryBinding(
     noteWatched: async (n, repo) => {
       const r = await repoFor(repo);
       if (r) await registry.noteWatched(r, n);
+    },
+    notePostedReview: async (n, repo, by) => {
+      const r = await repoFor(repo);
+      if (r) await registry.notePostedReview(r, n, { ...by, chatId });
     },
     // Thread ids are globally unique node ids, so these need no repo at all.
     refreshByThread: (threadId) => registry.refreshByThread(threadId),
@@ -4918,7 +4937,7 @@ export class SessionBroker {
         // The PR catalog, so every PR tool can freeze a card into its result.
         prRegistry:
           github && this.prRegistry
-            ? makePrRegistryBinding(this.prRegistry, github, cwd)
+            ? makePrRegistryBinding(this.prRegistry, github, cwd, session.chatId)
             : undefined,
         github: github
           ? makeGithubBinding(
