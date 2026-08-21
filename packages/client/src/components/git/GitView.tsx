@@ -14,7 +14,7 @@
  * from git, because a checkout or a stash pop changes far more than the call
  * itself touched.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Archive,
   ArrowDownToLine,
@@ -25,6 +25,7 @@ import {
   GitCompare,
   RefreshCw,
   RotateCw,
+  Trash2,
 } from "lucide-react";
 import type { GitBranch as GitBranchInfo, GitCommitFile, WorktreeInfo } from "@dispatch/shared";
 import { useActiveProject } from "../../stores/projects.js";
@@ -45,6 +46,7 @@ import { ChangesTab } from "./ChangesTab.js";
 import { HistoryTab } from "./HistoryTab.js";
 import { StashesTab } from "./StashesTab.js";
 import { BranchMenu, localNameFor } from "./BranchMenu.js";
+import { CleanupWorktreesModal } from "./CleanupWorktreesModal.js";
 import { GitDiffPane } from "./GitDiffPane.js";
 
 /** How often the open view re-reads git state (cheap: one `git status`). */
@@ -225,6 +227,7 @@ export function GitView() {
   const [expandedStash, setExpandedStash] = useState<string | null>(null);
   const [stashFiles, setStashFiles] = useState<Record<string, GitCommitFile[]>>({});
   const [generating, setGenerating] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
 
   // Point the store at the project checkout whenever the project changes; the
   // picker below can then move it to any worktree.
@@ -234,20 +237,21 @@ export function GitView() {
 
   // The repo picker needs the project's worktrees. Best-effort: a repo with
   // none simply offers the checkout.
-  useEffect(() => {
+  const loadWorktrees = useCallback(async () => {
     if (!project?.id) {
       setWorktrees([]);
       return;
     }
-    let live = true;
-    void api.worktrees
-      .list(project.id)
-      .then((w) => live && setWorktrees(w))
-      .catch(() => live && setWorktrees([]));
-    return () => {
-      live = false;
-    };
+    try {
+      setWorktrees(await api.worktrees.list(project.id));
+    } catch {
+      setWorktrees([]);
+    }
   }, [project?.id]);
+
+  useEffect(() => {
+    void loadWorktrees();
+  }, [loadWorktrees]);
 
   // Keep the open view live. A mutation already refreshes; this catches changes
   // made OUTSIDE the UI — which is the common case here, since the agents in
@@ -444,6 +448,21 @@ export function GitView() {
         )}
 
         <div className="ml-auto flex items-center gap-1.5">
+          {/* Worktree cleanup lives here, next to the repo picker that lists
+              them, because this toolbar is the only place in the app where the
+              set of worktrees is already the thing you're looking at. The
+              reaper does this unattended too; the button is for draining a
+              backlog and for seeing the reasoning first. */}
+          <Button
+            size="sm"
+            variant="subtle"
+            leftIcon={<Trash2 />}
+            disabled={!!busy}
+            onClick={() => setCleaning(true)}
+            title="Remove worktrees whose branch has already merged"
+          >
+            Clean up
+          </Button>
           <SweepButton
             projectId={project.id}
             repoPath={repoPath}
@@ -569,6 +588,25 @@ export function GitView() {
           </div>
         )}
       </div>
+
+      {cleaning && (
+        <CleanupWorktreesModal
+          projectId={project.id}
+          onClose={() => setCleaning(false)}
+          onDone={(result) => {
+            // The picker is now listing directories that no longer exist — and
+            // the view may be POINTED at one of them, which would leave every
+            // panel below re-reading a path that isn't there. Re-read the
+            // roster, and retreat to the checkout only if the repo in hand is
+            // one of the ones that just went.
+            void loadWorktrees();
+            const gone = result.outcomes.some(
+              (o) => o.removed && o.path === repoPath,
+            );
+            if (gone) setRepoPath(project.repoPath);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -8,6 +8,8 @@
  *   GET    /api/worktrees/file?worktreePath=&relPath=&ref= → WorktreeFile (Monaco)
  *   PUT    /api/worktrees/file {worktreePath,relPath,content} → write (Monaco save)
  *   GET    /api/worktrees/refresh?projectId=      → force a detection pass
+ *   GET    /api/worktrees/cleanup?projectId=&probe= → ReapPlan (what's stale)
+ *   POST   /api/worktrees/cleanup {paths,deleteBranch?} → ReapResult (remove them)
  * Mutations run through the same service the WS `create-worktree`/`remove-worktree`
  * actions use (publishing `worktree-update` / `chat-update` / `notice`).
  */
@@ -16,7 +18,7 @@ import { parseRegistryQuery, RegistryQueryError } from "@dispatch/shared";
 
 export function registerWorktreeRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
-  const { worktrees, worktreeDetector } = app.services;
+  const { worktrees, worktreeDetector, worktreeReaper } = app.services;
 
   // The catalog read. `?projectId=` keeps its old meaning (one project's trees);
   // with no projectId it sweeps every project, which is the app-wide scope the
@@ -186,6 +188,59 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
       };
     },
   );
+
+  /**
+   * What the cleanup panel opens with.
+   *
+   * `probe=0` (the default) returns the CHEAP verdict for every tree — every
+   * gate but "is the working tree dirty", answered from batched git and
+   * in-memory state. That comes back in one round trip even for ninety trees.
+   * `probe=1` then runs the real cleanliness probe over the survivors, which
+   * costs ~35s PER TREE on this repo and is why it is a second, explicit call
+   * the client makes behind a progress indicator rather than something baked
+   * into the first paint.
+   */
+  app.get<{
+    Querystring: { projectId?: string; probe?: string };
+  }>("/api/worktrees/cleanup", async (req, reply) => {
+    const probe = req.query.probe === "1" || req.query.probe === "true";
+    try {
+      return await worktreeReaper.plan({
+        projectId: req.query.projectId,
+        cheapOnly: !probe,
+        // A human is watching this one, so it gets the complete answer rather
+        // than the unattended sweep's deliberately small budget.
+        probeCap: Infinity,
+      });
+    } catch (err) {
+      return reply
+        .code(502)
+        .send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Remove the approved trees. Every path is RE-JUDGED at full depth first
+   * (`reap` does it unless told not to): minutes pass between a human reading
+   * the list and pressing the button, and a tree can go dirty in that window.
+   * A path that no longer qualifies comes back as a failed outcome with its
+   * blockers, not as a silent skip.
+   */
+  app.post("/api/worktrees/cleanup", async (req, reply) => {
+    const body = (req.body ?? {}) as { paths?: string[]; deleteBranch?: boolean };
+    if (!Array.isArray(body.paths) || body.paths.length === 0) {
+      return reply.code(400).send({ error: "paths required" });
+    }
+    try {
+      return await worktreeReaper.reap(body.paths, {
+        deleteBranch: body.deleteBranch ?? false,
+      });
+    } catch (err) {
+      return reply
+        .code(502)
+        .send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
 
   app.get<{ Querystring: { worktreePath?: string; base?: string } }>(
     "/api/worktrees/diff",

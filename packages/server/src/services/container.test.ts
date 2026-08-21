@@ -60,6 +60,7 @@ describe("createServices().start() resilience", () => {
       checkpoints: stub(),
       worktrees: stub(),
       worktreeDetector: stub(),
+      worktreeReaper: stub(),
       runner: stub(),
       github: stub(),
       notifier: stub(),

@@ -33,6 +33,7 @@ import { TitleService, makeFakeTitleGenerator } from "./title.js";
 import { CheckpointService } from "./checkpoint.js";
 import { WorktreeService } from "./worktree.js";
 import { WorktreeDetector } from "./worktree-detector.js";
+import { WorktreeReaper } from "./worktree-reaper.js";
 import { GitService } from "./git.js";
 import { CommitMessageService } from "./commit-message.js";
 import { RunnerService } from "./runner.js";
@@ -77,6 +78,7 @@ export interface ServiceOverrides {
   checkpoints?: CheckpointService;
   worktrees?: WorktreeService;
   worktreeDetector?: WorktreeDetector;
+  worktreeReaper?: WorktreeReaper;
   git?: GitService;
   commitMessage?: CommitMessageService;
   runner?: RunnerService;
@@ -118,6 +120,8 @@ export interface Services extends ServiceBase {
   checkpoints: CheckpointService;
   worktrees: WorktreeService;
   worktreeDetector: WorktreeDetector;
+  /** Removes worktrees whose branch has landed, so nobody has to remember to. */
+  worktreeReaper: WorktreeReaper;
   /** Working-copy git (status/stage/commit/branch/stash) for the Source Control UI. */
   git: GitService;
   /** One-shot AI commit messages drafted from the staged diff. */
@@ -192,6 +196,12 @@ export function createServices(
   // How often the terminal retention sweep runs. Hourly: the window it enforces
   // is measured in days, so anything tighter is just disk churn.
   const TERMINAL_SWEEP_MS = 60 * 60_000;
+  // How often the unattended worktree sweep runs. Hourly for the same reason,
+  // plus one this timer alone doesn't carry: the chat-idle trigger already
+  // removes a landed tree seconds after its owner stops, so by the time this
+  // fires there is usually nothing left for it to find. It exists for the trees
+  // whose chat never came back.
+  const WORKTREE_SWEEP_MS = 60 * 60_000;
   // Persistent named shells exposed to sessions as `mcp__manager__terminal`.
   // The store makes them durable: the roster and each shell's transcript survive
   // a restart, so "what did that build print?" outlives the process that ran it.
@@ -319,6 +329,30 @@ export function createServices(
   // detaches the chat record outside the detector, so evict the path from `known`
   // or a worktree recreated at the same path would never be re-attributed.
   worktrees.onWorktreeRemoved = (path) => worktreeDetector.forget(path);
+  // The other end of a worktree's life. The detector notices trees appearing;
+  // this removes the ones whose branch has landed and which nothing is standing
+  // in — the step of the loop that previously only ever happened when a human
+  // noticed the disk filling up. Constructed with the live shell + subApp
+  // registries so "a dev server is running out of that directory" is a gate
+  // rather than a surprise.
+  const worktreeReaper =
+    overrides.worktreeReaper ??
+    new WorktreeReaper({
+      store,
+      bus,
+      worktrees,
+      terminals,
+      runners: runner,
+      // Read per pass, not at boot: a toggle in Settings has to take effect
+      // without a restart, or it reads as broken.
+      policy: async () => {
+        const s = await store.getSettings();
+        return {
+          enabled: s.worktreeCleanup?.enabled ?? true,
+          deleteBranch: s.worktreeCleanup?.deleteBranch ?? true,
+        };
+      },
+    });
   // Removing a worktree hands its MCP ports back. Assigned here rather than
   // injected because the broker that owns the leases is constructed above this.
   worktrees.mcpPorts = broker.mcpPorts;
@@ -526,6 +560,7 @@ export function createServices(
 
   let offCheckpoint: (() => void) | undefined;
   let offTitle: (() => void) | undefined;
+  let offReap: (() => void) | undefined;
   let offMemoryMigrate: (() => void) | undefined;
 
   const services: Services = {
@@ -546,6 +581,7 @@ export function createServices(
     checkpoints,
     worktrees,
     worktreeDetector,
+    worktreeReaper,
     git,
     commitMessage,
     runner,
@@ -707,6 +743,26 @@ export function createServices(
         void terminals.sweep().catch(() => {});
       }, TERMINAL_SWEEP_MS);
       terminalSweep.unref?.();
+
+      // Worktree cleanup, on two triggers that share one gate.
+      //
+      // The hourly sweep is the backstop — it catches trees whose owning chat
+      // never came back, and drains a backlog a few at a time (its probe is the
+      // expensive part; see WorktreeReaper's cost model).
+      //
+      // The chat-idle sweep is the one you actually feel: the moment a turn
+      // ends, that chat's own landed worktrees go. It is deliberately NOT
+      // wired to the merge itself — `approve_pr` runs mid-turn with the agent's
+      // cwd inside the very tree that just became disposable, so removing it
+      // there would pull the floor out from under a live session.
+      // Both triggers are armed unconditionally; the reaper's own `policy` hook
+      // decides at fire time whether cleanup is on. Gating the WIRING on the
+      // setting would mean enabling it in Settings did nothing until a restart.
+      worktreeReaper.start(WORKTREE_SWEEP_MS);
+      offReap = bus.on("chat-status", (evt) => {
+        if (evt.status !== "idle" && evt.status !== "done") return;
+        void worktreeReaper.sweepChat(evt.chatId).catch(() => {});
+      });
     },
 
     async dispose(): Promise<void> {
@@ -714,6 +770,12 @@ export function createServices(
       offCheckpoint = undefined;
       offTitle?.();
       offTitle = undefined;
+      offReap?.();
+      offReap = undefined;
+      worktreeReaper.stop();
+      // Let an in-flight sweep land rather than tearing the store out from
+      // under a removal that is halfway through updating the registry.
+      await worktreeReaper.drain().catch(() => {});
       offMemoryMigrate?.();
       offMemoryMigrate = undefined;
       // Unsubscribe FIRST (so broker teardown's `done` events don't enqueue new

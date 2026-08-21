@@ -67,6 +67,15 @@ function normalize(s: AppSettings): AppSettings {
     showInjectedContext: s.showInjectedContext ?? false,
     shellFilter: s.shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES],
     spawnChat: { autoApprove: s.spawnChat?.autoApprove ?? false },
+    // Both default TRUE — unset means fully enabled (see the schema). Spelling
+    // the effective values out here is what keeps a save of some unrelated
+    // preference from silently clearing them: PUT /api/settings is a full
+    // replace, so a field missing from this draft is a field being turned off.
+    worktreeCleanup: {
+      enabled: s.worktreeCleanup?.enabled ?? true,
+      deleteBranch: s.worktreeCleanup?.deleteBranch ?? true,
+      graceMinutes: s.worktreeCleanup?.graceMinutes,
+    },
     harness: {
       defaultHarness: s.harness?.defaultHarness ?? "claude",
       defaults: s.harness?.defaults ?? {},

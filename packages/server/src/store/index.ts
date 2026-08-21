@@ -172,6 +172,30 @@ export const AppSettingsSchema = z.object({
     })
     .optional(),
   /**
+   * Automatic worktree cleanup (see WorktreeReaper).
+   *
+   * ON by default, unlike `spawnChat` above — and the asymmetry is the point.
+   * A spawn does something new and unbounded on your behalf; the reaper only
+   * removes a directory whose branch has already merged, is clean, is fully
+   * pushed, and which nothing is standing in. Left off by default it would keep
+   * the problem it exists to fix: 91 worktrees nobody remembered to remove.
+   *
+   * `deleteBranch` is the second half — `git worktree remove` leaves the local
+   * branch behind, so without it a drained backlog leaves one dead ref per tree.
+   *
+   * Optional rather than `.default(...)` so every existing AppSettings literal
+   * (tests, DEFAULT_SETTINGS) stays valid; unset reads as fully enabled.
+   */
+  worktreeCleanup: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** Also delete the local branch when the tree's work has landed. */
+      deleteBranch: z.boolean().default(true),
+      /** Minutes a tree must sit untouched before the unattended sweep takes it. */
+      graceMinutes: z.number().int().positive().optional(),
+    })
+    .optional(),
+  /**
    * Authentication is deliberately optional. Existing config.json files have no
    * auth key, and that absence MUST keep an upgraded installation open.
    */
