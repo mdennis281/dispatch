@@ -13,6 +13,7 @@ import {
   Play,
   MessageSquare,
   Bot,
+  ScanEye,
   Send,
   Tag,
   Plus,
@@ -37,6 +38,7 @@ import { IconButton } from "../ui/IconButton.js";
 import { Spinner } from "../ui/Spinner.js";
 import { Popover } from "../ui/Popover.js";
 import { SectionLabel } from "../ui/Panel.js";
+import { TaskLauncherDialog } from "../tasks/TaskLauncherDialog.js";
 import { cn } from "../../lib/cn.js";
 import { relTime } from "../../lib/format.js";
 
@@ -388,17 +390,21 @@ const STATE_TONE: Record<PRInfo["state"], Tone> = {
 function PrCard({
   pr,
   chatId,
+  projectId,
   primary,
   refreshing,
   onRefresh,
 }: {
   pr: PRInfo;
   chatId: string;
+  /** Needed to launch a review — the task endpoint is project-scoped. */
+  projectId: string | null;
   primary?: boolean;
   refreshing?: boolean;
   onRefresh?: () => void;
 }) {
   const { busy, run } = useBusy();
+  const [reviewing, setReviewing] = useState(false);
   const threads = pr.reviewThreads ?? [];
   const unresolved = threads.filter((t) => !t.isResolved);
   const commentCount = pr.commentCount ?? 0;
@@ -572,6 +578,24 @@ function PrCard({
         >
           {busy === "review" ? <Spinner size={12} /> : <Bot />}
         </IconButton>
+        {/* Dispatch's own reviewer, launched by hand. The automatic path is the
+            review REQUEST (see `workflow.pr.reviewAgent`); this is for the PR
+            you want looked at now, and for a draft, which the sweep skips. */}
+        <IconButton
+          size="sm"
+          tip="Review with Dispatch"
+          disabled={!isOpen || !projectId}
+          onClick={() => setReviewing(true)}
+        >
+          <ScanEye />
+        </IconButton>
+        <TaskLauncherDialog
+          taskId="pr:review"
+          projectId={projectId}
+          open={reviewing}
+          onClose={() => setReviewing(false)}
+          params={{ number: pr.number, repo: pr.repo }}
+        />
         <IconButton
           size="sm"
           tip="Refresh status"
@@ -621,6 +645,7 @@ export function PRsPanel({ chat }: { chat: Chat }) {
         <PrCard
           pr={primary}
           chatId={chat.id}
+          projectId={chat.projectId || null}
           primary
           refreshing={refreshing}
           onRefresh={() => void refresh()}
@@ -653,7 +678,12 @@ export function PRsPanel({ chat }: { chat: Chat }) {
           <SectionLabel className="mb-1 px-0.5">History</SectionLabel>
           <div className="space-y-1.5">
             {history.map((pr) => (
-              <PrCard key={pr.number} pr={pr} chatId={chat.id} />
+              <PrCard
+                key={pr.number}
+                pr={pr}
+                chatId={chat.id}
+                projectId={chat.projectId || null}
+              />
             ))}
           </div>
         </div>

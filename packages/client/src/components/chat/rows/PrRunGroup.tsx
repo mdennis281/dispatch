@@ -60,6 +60,7 @@ const VERB: Record<string, string> = {
   watch_pr: "watch",
   resolve_thread: "resolve",
   request_review: "request review",
+  post_review: "review",
   approve_pr: "merge",
 };
 

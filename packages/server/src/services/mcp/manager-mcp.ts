@@ -355,6 +355,24 @@ export interface PrWatchSnapshot extends PrPollResult {
 }
 
 /**
+ * What a submitted review actually became.
+ *
+ * `event` is reported back because it may not be the one that was asked for:
+ * GitHub refuses `REQUEST_CHANGES` on your own pull request, and Dispatch posts
+ * under the human's own token unless a machine account is configured — so a
+ * downgrade to `COMMENT` is the ordinary case, not an error. It is surfaced
+ * rather than swallowed because the agent asked to block a merge and did not.
+ */
+export interface SubmitReviewOutcome {
+  posted: boolean;
+  url?: string;
+  event?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
+  /** Findings GitHub would not attach to a line, folded into the summary instead. */
+  droppedComments?: number;
+  error?: string;
+}
+
+/**
  * The narrow GitHub surface the manager MCP needs to watch a PR — already bound
  * to this session's default repo (its worktree cwd, else the project root) by
  * the broker. `repo` is an optional `owner/name` override.
@@ -377,6 +395,38 @@ export interface ManagerMcpGitHub {
   replyToThread?(threadId: string, body: string): Promise<void>;
   /** Mark a review thread resolved. Omitted → the `resolve_thread` tool isn't offered. */
   resolveThread?(threadId: string): Promise<void>;
+  /**
+   * Submit a review — verdict, summary, inline comments. Omitted → the
+   * `post_review` tool isn't offered, which is how it stays absent on every
+   * project that has not configured a Dispatch reviewer.
+   */
+  submitReview?(
+    prNumber: number,
+    input: {
+      event: "COMMENT" | "REQUEST_CHANGES";
+      body: string;
+      comments?: ReadonlyArray<{
+        path: string;
+        line: number;
+        startLine?: number;
+        side?: "LEFT" | "RIGHT";
+        body: string;
+      }>;
+      commitId?: string;
+    },
+    repo?: string,
+  ): Promise<SubmitReviewOutcome>;
+  /**
+   * Ask Dispatch's OWN reviewer to look at a PR.
+   *
+   * Bound only where the project configures a review agent with no GitHub login
+   * — the mode where there is no account to put in GitHub's reviewer queue, so
+   * the request is recorded on the PR's registry row instead and the background
+   * sweep spawns off it. `request_review` calls this ALONGSIDE the GitHub
+   * request rather than instead of it, because a project can genuinely want
+   * both: a bot on GitHub and a reviewer here.
+   */
+  requestReviewAgent?(prNumber: number, repo?: string): Promise<{ ok: boolean; detail: string }>;
   /**
    * The reviewers this project asks for (`workflow.pr.reviewers`), so
    * `request_review` has a default and the stalled-queue report can name them.
@@ -2353,6 +2403,186 @@ export function createManagerTools(ctx: ManagerMcpContext) {
     },
   );
 
+  const postReview = tool(
+    "post_review",
+    "Submit a REVIEW on a pull request: a verdict, a summary, and inline comments " +
+      "on specific lines. This is how Dispatch's own reviewer speaks, and the " +
+      "inline comments are the point — each one becomes a review THREAD, which is " +
+      "what makes it visible to watch_pr, resolvable with resolve_thread, and " +
+      "blocking for approve_pr. The same findings posted as one issue comment have " +
+      "none of those properties and will be scrolled past. Prefer this over a " +
+      "hand-rolled `gh api … /reviews`. Do not use it to reply to an existing " +
+      "thread — that is resolve_thread's job.",
+    {
+      number: z.number().describe("The PR number being reviewed."),
+      body: z
+        .string()
+        .describe(
+          "The review summary. For what does not belong on a single line — a problem " +
+            "whose shape spans files, or what you could not check. Keep it short; if " +
+            "every finding is inline, one sentence is right. An empty review with " +
+            "'nothing blocking' is a legitimate result.",
+        ),
+      event: z
+        .enum(["comment", "request_changes"])
+        .optional()
+        .describe(
+          "Default 'comment'. Use 'request_changes' only for something that will " +
+            "actually break or that you would not want merged as-is. Approving is " +
+            "deliberately not offered: this reviewer raises findings, it does not " +
+            "clear a PR to land.",
+        ),
+      comments: z
+        .array(
+          z.object({
+            path: z.string().describe("Repo-relative path, exactly as it appears in the diff."),
+            line: z
+              .number()
+              .describe(
+                "Line in the NEW file. It must be a line this PR's diff actually " +
+                  "touches — GitHub rejects anything else.",
+              ),
+            startLine: z
+              .number()
+              .optional()
+              .describe("First line of a multi-line comment. Omit for a single line."),
+            side: z
+              .enum(["LEFT", "RIGHT"])
+              .optional()
+              .describe("Default RIGHT (the new file). LEFT comments on a removed line."),
+            body: z
+              .string()
+              .describe(
+                "The finding: what goes wrong, and the input or state that makes it " +
+                  "go wrong. Not a summary of what the line does.",
+              ),
+          }),
+        )
+        .optional()
+        .describe("One entry per finding. Omit entirely when there is nothing to raise."),
+      commitId: z
+        .string()
+        .optional()
+        .describe("Head sha the review was written against, so GitHub dates it correctly."),
+      repo: z
+        .string()
+        .optional()
+        .describe("Optional 'owner/name' override; defaults to the chat's repo."),
+    },
+    async (args): Promise<CallToolResult> => {
+      const gh = ctx.github;
+      if (!gh?.submitReview) {
+        return textResult(
+          "The post_review tool is not available in this session. This project has no " +
+            "Dispatch reviewer configured (`workflow.pr.reviewAgent` in " +
+            "`.dispatch/project.yaml`).",
+          true,
+        );
+      }
+      const number =
+        typeof args.number === "number" && Number.isInteger(args.number) ? args.number : NaN;
+      if (!Number.isFinite(number) || number <= 0) {
+        return textResult("post_review requires a positive integer PR number.", true);
+      }
+      const body = typeof args.body === "string" ? args.body.trim() : "";
+      const comments = Array.isArray(args.comments) ? args.comments : [];
+      // A review with neither a verdict sentence nor a finding says nothing at
+      // all, and posting it would still clear `requireReview` — a rubber stamp
+      // with a bot's name on it is worse than no review.
+      if (!body && !comments.length) {
+        return textResult(
+          "post_review needs a `body`, inline `comments`, or both. An empty review would " +
+            "still count as a review and clear this project's `requireReview` bar, which " +
+            "makes it worse than not posting at all.",
+          true,
+        );
+      }
+      const repo =
+        typeof args.repo === "string" && args.repo.trim() ? args.repo.trim() : undefined;
+      const event = args.event === "request_changes" ? "REQUEST_CHANGES" : "COMMENT";
+
+      let res: SubmitReviewOutcome;
+      try {
+        res = await gh.submitReview(number, {
+          event,
+          body: body || "No blocking findings.",
+          comments,
+          commitId: typeof args.commitId === "string" ? args.commitId : undefined,
+        }, repo);
+      } catch (err) {
+        return textResult(
+          `Could not post the review on PR #${number}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          true,
+        );
+      }
+
+      if (!res.posted) {
+        return prToolResult(
+          "post_review",
+          {
+            summary: `Could not post the review on PR #${number}`,
+            ok: false,
+            details: [res.error ?? "GitHub refused the review"],
+          },
+          (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null,
+          {
+            isError: true,
+            text:
+              `Could not post the review on PR #${number}: ${res.error ?? "GitHub refused it"}. ` +
+              "If it names a line, that line is not part of this PR's diff — re-check it " +
+              "against the diff and post again. Do NOT fall back to `gh api`.",
+          },
+        );
+      }
+
+      const details: string[] = [];
+      // A downgrade is REPORTED, never silent: the agent asked to block a merge
+      // and did not, and finding that out from the PR page later is the kind of
+      // surprise that makes a tool untrustworthy.
+      if (res.event && res.event !== event) {
+        details.push(
+          `posted as ${res.event.toLowerCase().replace(/_/g, " ")} rather than ` +
+            `${event.toLowerCase().replace(/_/g, " ")} — GitHub does not allow that verdict ` +
+            "on your own pull request",
+        );
+      }
+      if (res.droppedComments) {
+        details.push(
+          `${res.droppedComments} finding(s) could not be attached to their lines and were ` +
+            "folded into the summary — GitHub rejected the positions as outside the diff",
+        );
+      }
+      if (comments.length && !res.droppedComments) {
+        details.push(`${comments.length} inline comment(s), each now an open review thread`);
+      }
+
+      return prToolResult(
+        "post_review",
+        {
+          summary: `Reviewed PR #${number}${
+            comments.length ? ` — ${comments.length} finding(s)` : " — nothing blocking"
+          }`,
+          ok: true,
+          details,
+        },
+        // Re-poll rather than re-read: the threads this review just created are
+        // the whole result, and a card that doesn't show them is reporting the
+        // state from before the tool ran.
+        (await ctx.prRegistry?.refresh(number, repo).catch(() => null)) ?? null,
+        {
+          text:
+            `Posted a ${(res.event ?? event).toLowerCase().replace(/_/g, " ")} review on PR ` +
+            `#${number}${res.url ? ` (${res.url})` : ""}.` +
+            (details.length ? `\n${details.map((d) => `  · ${d}`).join("\n")}` : "") +
+            "\n\nYou are done with this PR. Do NOT resolve the threads you just opened — " +
+            "that is the author's half of the loop.",
+        },
+      );
+    },
+  );
+
   const requestReview = tool(
     "request_review",
     "Put reviewers back on the hook for a PR. GitHub CLEARS a reviewer's request " +
@@ -2397,8 +2627,38 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       )
         .map((r) => String(r).trim())
         .filter(Boolean);
+      // Dispatch's own reviewer, where the project configured one with no GitHub
+      // account to queue. Asked ALONGSIDE the GitHub reviewers rather than
+      // instead of them: a project can genuinely want both, and it is the same
+      // verb either way — which is the point of routing it through this tool
+      // instead of adding a second one the loop instructions would have to teach.
+      const local = gh.requestReviewAgent
+        ? await gh.requestReviewAgent(number, repo).catch(() => ({
+            ok: false,
+            detail: "Dispatch's reviewer could not be asked",
+          }))
+        : null;
+
       // An empty list is a CONFIG problem, not a call to retry with. Saying so
       // here stops the loop where an agent re-requests nothing and re-watches.
+      // Unless Dispatch's own reviewer took it — then somebody IS on the hook,
+      // and "nobody will ever be asked" would be false.
+      if (!asked.length && local?.ok) {
+        return prToolResult(
+          "request_review",
+          {
+            summary: `Asked Dispatch's reviewer to look at PR #${number}`,
+            ok: true,
+            details: [local.detail],
+          },
+          (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null,
+          {
+            text:
+              `Asked Dispatch's own reviewer to look at PR #${number}. ${local.detail}. ` +
+              "Now call `mcp__manager__watch_pr` to wait for it to report.",
+          },
+        );
+      }
       if (!asked.length) {
         return textResult(
           "No reviewers to request: none were passed and this project configures none " +
@@ -2432,6 +2692,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       for (const f of res.failed) {
         lines.push(`  · ⚠ could not ask ${f.reviewer}: ${f.error}`);
       }
+      if (local) lines.push(`  · ${local.ok ? "" : "⚠ "}${local.detail}`);
 
       // VERIFY, don't trust the status code. GitHub answers 200 for this POST and
       // can still queue nobody — observed asking Copilot for a re-review after it
@@ -2452,8 +2713,12 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       }
 
       // Truth is what's on the hook now. Only fall back to "gh said ok" when the
-      // queue genuinely couldn't be re-read.
-      const ok = onHook !== null ? onHook.length > 0 : res.requested.length > 0;
+      // queue genuinely couldn't be re-read. Dispatch's own reviewer counts as
+      // on the hook even so: it never appears in GitHub's queue, and reading an
+      // empty queue as "nobody is coming" while a reviewer is starting up is the
+      // same false stall the queue code already exists to prevent.
+      const ok =
+        (onHook !== null ? onHook.length > 0 : res.requested.length > 0) || Boolean(local?.ok);
       const advice = ok
         ? "Now call `mcp__manager__watch_pr` again to wait for their review."
         : onHook !== null && !res.failed.length
@@ -4384,6 +4649,7 @@ ${look}` : "")
     compactContext,
     watchPr,
     resolveThread,
+    postReview,
     requestReview,
     createPr,
     approvePr,
@@ -4424,6 +4690,7 @@ const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
   compact_context: null,
   watch_pr: "github",
   resolve_thread: "github",
+  post_review: "github",
   request_review: "github",
   create_pr: "prCreate",
   approve_pr: "prApproval",
@@ -4539,6 +4806,7 @@ export function createManagerMcpServer(
     compactContext,
     watchPr,
     resolveThread,
+    postReview,
     requestReview,
     createPr,
     approvePr,
@@ -4576,6 +4844,10 @@ export function createManagerMcpServer(
     // re-queueing the reviewer afterwards. Each is gated on its own binding so a
     // GitHub surface missing one still offers the other.
     ...(ctx.github?.resolveThread ? [resolveThread] : []),
+    // Bound only where the project configured a Dispatch reviewer — the same
+    // shape as `approve_pr`'s auto-merge gate, so the ability to speak AS a
+    // reviewer is absent (not merely discouraged) everywhere it wasn't asked for.
+    ...(ctx.github?.submitReview ? [postReview] : []),
     ...(ctx.github?.requestReviewers ? [requestReview] : []),
     // Only on a project whose change ships through PRs — which is also the only
     // place the guard refuses a raw `gh pr create`, so the two stay in step.

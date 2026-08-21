@@ -121,6 +121,7 @@ function commandPreview(use: ToolUseRow, tool: string, subject: string | undefin
   if (tool === "approve_pr") return `merge ${subject ?? "pull request"}`;
   if (tool === "resolve_thread") return `resolve ${subject ?? "review thread"}`;
   if (tool === "request_review") return `request review${subject ? ` for ${subject}` : ""}`;
+  if (tool === "post_review") return `review ${subject ?? "pull request"}`;
   if (tool === "run_subapp") return `${use.input.stop === true ? "stop" : "start"} ${subject ?? "app"}`;
   if (tool === "terminal_output") return `read ${subject ?? "terminal"}`;
   return subject ?? activity;

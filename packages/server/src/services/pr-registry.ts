@@ -30,6 +30,7 @@ import {
   isHeldByLabel,
   PrSnapshotSchema,
   type PrRecord,
+  type PrReviewAgentState,
   type PrSnapshot,
   type PRRef,
   type RegistryQuery,
@@ -281,6 +282,109 @@ export class PrRegistry {
       watchedUntil,
       nextPollAt: Math.min(prev.nextPollAt, now + PR_POLL_WATCHED_MS),
     });
+  }
+
+  /**
+   * Record that Dispatch's own reviewer has been ASKED to look at this PR.
+   *
+   * This is the write behind both request sources — a configured machine
+   * account showing up in GitHub's reviewer queue, and a local request from
+   * `request_review` or the PR row's own button. Downstream there is one fact
+   * to read, which is the entire reason the state lives here rather than being
+   * re-derived from GitHub on one path and remembered in memory on the other.
+   *
+   * Idempotent against the HEAD it was asked at: re-asking for a review of code
+   * that has not moved is not a new request, and the sweep re-observes GitHub's
+   * queue every pass, so a write per pass would be a write per 90 seconds
+   * forever. A push moves the sha and genuinely does re-arm it.
+   *
+   * A no-op for a PR the catalog has never heard of — same rule as
+   * `noteWatched`: a request must not conjure a hollow row.
+   */
+  async requestReviewAgent(repo: string, number: number, by: string): Promise<PrRecord | null> {
+    const key = prRecordKey(repo, number);
+    const prev = await this.store.getPrRecord(key);
+    if (!prev) return null;
+    const sha = prev.headRefOid;
+    const state = prev.reviewAgent;
+    // Already asked at this head, and nothing has served it yet.
+    if (state?.requestedSha === sha && state?.requestedAt) return prev;
+    const now = this.now();
+    return this.publish(
+      await this.store.upsertPrRecord(key, { ...prev }, {
+        reviewAgent: {
+          ...(state ?? { rounds: 0 }),
+          requestedSha: sha,
+          requestedAt: now,
+          requestedBy: by,
+        },
+      }),
+    );
+  }
+
+  /**
+   * Take the review job for this PR, or return null because there isn't one.
+   *
+   * The lease is written BEFORE the review happens — `reviewedSha` is set at
+   * claim time, not at post time. That is deliberate and it is the difference
+   * between one reviewer and a fleet of them: the sweep comes round every 90
+   * seconds and a review takes minutes, so a claim recorded only on completion
+   * would spawn a fresh reviewer every pass for the whole duration of the first.
+   *
+   * The cost is that a reviewer chat which dies mid-run has still spent its
+   * round. That is the right direction to fail in — a spent round is one missing
+   * review the human can re-trigger, where the other direction is unbounded
+   * spawning that looks like progress while it burns quota.
+   */
+  async claimReviewAgent(
+    repo: string,
+    number: number,
+    opts: { maxRounds: number },
+  ): Promise<PrRecord | null> {
+    const key = prRecordKey(repo, number);
+    const prev = await this.store.getPrRecord(key);
+    if (!prev || prev.state !== "open") return null;
+    const state: PrReviewAgentState = prev.reviewAgent ?? { rounds: 0 };
+    if (!state.requestedAt) return null;
+    if (state.rounds >= opts.maxRounds) return null;
+    // Dedup on the HEAD, not on "has been reviewed": a review is only spent on
+    // the code it read, so a push re-arms it and a re-request on unchanged code
+    // does not.
+    const sha = prev.headRefOid;
+    if (sha && state.reviewedSha === sha) return null;
+    const now = this.now();
+    return this.publish(
+      await this.store.upsertPrRecord(key, { ...prev }, {
+        reviewAgent: {
+          ...state,
+          requestedSha: undefined,
+          requestedAt: undefined,
+          reviewedSha: sha,
+          reviewedAt: now,
+          rounds: state.rounds + 1,
+        },
+      }),
+    );
+  }
+
+  /**
+   * Attach the reviewer's chat to the row, once it exists.
+   *
+   * Separate from the claim because the claim has to happen BEFORE the chat does
+   * — the lease is what stops the next sweep spawning a second reviewer while
+   * the first is still being created. A spawn that fails simply never gets here,
+   * and the row keeps a spent round with no chat, which is a state the catalog
+   * can show honestly.
+   */
+  async noteReviewChat(repo: string, number: number, chatId: string): Promise<PrRecord | null> {
+    const key = prRecordKey(repo, number);
+    const prev = await this.store.getPrRecord(key);
+    if (!prev?.reviewAgent) return null;
+    return this.publish(
+      await this.store.upsertPrRecord(key, { ...prev }, {
+        reviewAgent: { ...prev.reviewAgent, chatId },
+      }),
+    );
   }
 
   /**

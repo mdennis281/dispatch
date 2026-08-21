@@ -27,6 +27,7 @@
  * so a repo can sit on `review` but (say) keep its own sync policy.
  */
 import * as z from "zod";
+import { EffortSchema } from "./common.js";
 
 /* ------------------------------------------------------------------ profile */
 
@@ -82,6 +83,88 @@ export const WorkflowMergeMethodSchema = z.enum(["squash", "merge", "rebase"]);
 export type WorkflowMergeMethod = z.infer<typeof WorkflowMergeMethodSchema>;
 
 /**
+ * Dispatch's OWN reviewer: a chat spawned to review a pull request, in place of
+ * (or alongside) whatever bot the repo asks.
+ *
+ * WHY this is a workflow concern rather than a button somewhere. The review loop
+ * this app is built around — ship, watch, fix, re-request, land — only turns
+ * because something reviews. When the configured reviewer stops answering (a
+ * quota runs out, a bot is uninstalled, a repo never had one), every chat on the
+ * `review` rung stalls in exactly the same place: `approve_pr` refuses for
+ * `no-review`, and the only ways out are a human override card or turning the
+ * requirement off. Naming the reviewer in the profile is what lets a project
+ * answer that with "spawn one" instead.
+ *
+ * The trigger is deliberately the REVIEW REQUEST, not "a PR opened". A request
+ * is a fact the whole loop already produces and re-produces: `create_pr` makes
+ * one, `request_review` makes another after every fix round, and a human can
+ * make one by hand on GitHub. Hanging the reviewer off it means no new protocol,
+ * and re-review after a fix round comes for free.
+ *
+ * Where that request COMES FROM depends on {@link WorkflowReviewAgentConfigSchema.login}:
+ *
+ *   - **With a login** — a GitHub machine account, added to the repo as a Read
+ *     collaborator. It goes on `reviewers` like any other reviewer, GitHub's own
+ *     queue is the trigger, and the review is posted under that account's name.
+ *     This is the full-fat version; it costs one free GitHub account to set up.
+ *   - **Without one** — the request is recorded on the PR's registry row instead,
+ *     and the review is posted under whatever identity `gh` is authenticated as.
+ *     Nothing to set up, and the same trigger concept: adding the login later is
+ *     config, not a rewrite.
+ *
+ * A login is NOT a GitHub App, and cannot be. `POST /pulls/{n}/requested_reviewers`
+ * takes `reviewers[]` (user logins) and `team_reviewers[]` — there is no bots
+ * key, and Copilot appears in the queue only because GitHub special-cases it
+ * server-side (the read side of that asymmetry is documented at
+ * `GitHubService.prReviewState`). An App could post the review but could never
+ * be asked for it, which is the half that matters here.
+ */
+export const WorkflowReviewAgentConfigSchema = z.object({
+  /** Spawn a reviewer when one is requested here. Off unless a project says so. */
+  enabled: z.boolean().optional(),
+  /**
+   * GitHub login whose review request triggers the spawn — a machine account
+   * with Read access to the repo. Unset = the local-request mode above.
+   */
+  login: z.string().optional(),
+  /** Reasoning effort the reviewer runs at. Reviewing well is not a cheap job. */
+  effort: EffortSchema.optional(),
+  model: z.string().optional(),
+  /** A configured agent (`.dispatch/agents/`) to run the review as. */
+  agentId: z.string().optional(),
+  /** House rules appended to the briefing — what to be strict about, what to skip. */
+  instructions: z.string().optional(),
+  /**
+   * Hard cap on review rounds per PR.
+   *
+   * Review → fix → `request_review` → review is a genuine cycle, and the
+   * per-head-sha dedup only bounds it while the author stops pushing. A run of
+   * rounds that never converges is the failure mode worth capping, because it
+   * spends quota indefinitely and looks like progress the whole time.
+   */
+  maxRounds: z.number().int().min(1).max(20).optional(),
+  /**
+   * Post the review to GitHub. Off = the reviewer reports in its own chat and
+   * touches nothing — the honest way to try this on a repo before trusting it.
+   */
+  post: z.boolean().optional(),
+});
+export type WorkflowReviewAgentConfig = z.infer<typeof WorkflowReviewAgentConfigSchema>;
+
+/** The reviewer policy with every implication made explicit. */
+export const ResolvedReviewAgentSchema = z.object({
+  enabled: z.boolean(),
+  login: z.string().optional(),
+  effort: EffortSchema,
+  model: z.string().optional(),
+  agentId: z.string().optional(),
+  instructions: z.string().optional(),
+  maxRounds: z.number().int(),
+  post: z.boolean(),
+});
+export type ResolvedReviewAgent = z.infer<typeof ResolvedReviewAgentSchema>;
+
+/**
  * The PR policy — what OPENING a pull request here must include, and what
  * "ready to land" actually requires.
  *
@@ -114,6 +197,8 @@ export const WorkflowPrConfigSchema = z.object({
   requireChecks: z.boolean().optional(),
   /** Open the PR as a draft. */
   draft: z.boolean().optional(),
+  /** Dispatch's own reviewer (see {@link WorkflowReviewAgentConfigSchema}). */
+  reviewAgent: WorkflowReviewAgentConfigSchema.optional(),
 });
 export type WorkflowPrConfig = z.infer<typeof WorkflowPrConfigSchema>;
 
@@ -123,6 +208,7 @@ export const ResolvedPrPolicySchema = z.object({
   requireReview: z.boolean(),
   requireChecks: z.boolean(),
   draft: z.boolean(),
+  reviewAgent: ResolvedReviewAgentSchema,
 });
 export type ResolvedPrPolicy = z.infer<typeof ResolvedPrPolicySchema>;
 
@@ -223,12 +309,29 @@ export const ResolvedWorkflowSchema = z.object({
 });
 export type ResolvedWorkflow = z.infer<typeof ResolvedWorkflowSchema>;
 
+/**
+ * The reviewer, off — what every rung without a PR resolves to, and the base
+ * every authored `reviewAgent` block is applied on top of.
+ *
+ * `high` rather than `medium` because effort is the biggest quality lever on a
+ * one-shot reading job, and the same reasoning the agent-task catalog uses for
+ * its own hard tasks applies here: a review that misses the bug is worse than no
+ * review, because it reads as a clean bill of health.
+ */
+const REVIEW_AGENT_OFF: ResolvedReviewAgent = {
+  enabled: false,
+  effort: "high",
+  maxRounds: 4,
+  post: true,
+};
+
 /** The inert PR policy — what the rungs with no PR resolve to. */
 const INERT_PR_POLICY: ResolvedPrPolicy = {
   reviewers: [],
   requireReview: false,
   requireChecks: false,
   draft: false,
+  reviewAgent: REVIEW_AGENT_OFF,
 };
 
 /** The per-profile defaults every override is applied on top of. */
@@ -290,6 +393,11 @@ const PROFILE_DEFAULTS: Record<WorkflowProfile, Omit<ResolvedWorkflow, "worktree
         requireReview: true,
         requireChecks: true,
         draft: false,
+        // Off by default, on the same reasoning as `autoMerge` above: spending
+        // a human's model quota on every PR that opens is a real delegation, so
+        // it is a toggle they flip rather than something a profile choice hands
+        // over silently.
+        reviewAgent: REVIEW_AGENT_OFF,
       },
     },
   };
@@ -338,9 +446,35 @@ export function resolveWorkflow(source: WorkflowSource | null | undefined): Reso
             requireReview: pr?.requireReview ?? base.pr.requireReview,
             requireChecks: pr?.requireChecks ?? base.pr.requireChecks,
             draft: pr?.draft ?? base.pr.draft,
+            reviewAgent: resolveReviewAgent(pr?.reviewAgent, base.pr.reviewAgent),
           }
         : INERT_PR_POLICY,
   });
+}
+
+/**
+ * Apply an authored reviewer block over the profile's default.
+ *
+ * Field-by-field rather than a spread, for the reason every other resolver here
+ * is: an authored block that omits `maxRounds` must inherit the cap, not resolve
+ * it to `undefined` and hand every consumer an unbounded loop to re-derive.
+ */
+function resolveReviewAgent(
+  authored: WorkflowReviewAgentConfig | undefined,
+  base: ResolvedReviewAgent,
+): ResolvedReviewAgent {
+  return {
+    enabled: authored?.enabled ?? base.enabled,
+    // A blank login is the same as none — a half-filled config field must not
+    // send the trigger looking for a reviewer called "".
+    login: authored?.login?.trim() || base.login,
+    effort: authored?.effort ?? base.effort,
+    model: authored?.model ?? base.model,
+    agentId: authored?.agentId ?? base.agentId,
+    instructions: authored?.instructions ?? base.instructions,
+    maxRounds: authored?.maxRounds ?? base.maxRounds,
+    post: authored?.post ?? base.post,
+  };
 }
 
 /* -------------------------------------------------------------------- guard */

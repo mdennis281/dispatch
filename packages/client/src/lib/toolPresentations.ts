@@ -185,6 +185,7 @@ const DISPATCH_COPY: Record<string, { title: string; activity: string; category:
   approve_pr: { title: "Approve and merge", activity: "Merging pull request", category: "pr" },
   resolve_thread: { title: "Resolve review thread", activity: "Resolving review thread", category: "pr" },
   request_review: { title: "Request review", activity: "Requesting review", category: "pr" },
+  post_review: { title: "Post review", activity: "Reviewing pull request", category: "pr" },
   run_subapp: { title: "App preview", activity: "Starting app preview", category: "preview" },
   context_usage: { title: "Context usage", activity: "Measuring context", category: "chat" },
   compact_context: { title: "Compact context", activity: "Compacting context", category: "chat" },

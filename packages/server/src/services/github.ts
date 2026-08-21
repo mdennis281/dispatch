@@ -18,7 +18,8 @@
  * - execa is injectable (`deps.exec`) so tests assert exact argv construction and
  *   drive JSON parsing without any real `gh`/network calls.
  */
-import { realpath } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execa } from "execa";
 import { parse as parseYaml } from "yaml";
@@ -236,6 +237,44 @@ export interface PrReviewState {
   requested: string[];
   /** Reviews that have been submitted, newest-per-author. */
   reported: Array<{ author: string; state: string }>;
+}
+
+/** One inline comment on a submitted review — a file, a line, and what's wrong. */
+export interface ReviewComment {
+  /** Repo-relative path, exactly as it appears in the diff. */
+  path: string;
+  /** Line in the HEAD file. GitHub rejects a line not present in the diff. */
+  line: number;
+  /** First line of a multi-line comment; omit for a single line. */
+  startLine?: number;
+  /** Which side of the diff `line` refers to. Defaults to the new file. */
+  side?: "LEFT" | "RIGHT";
+  body: string;
+}
+
+/** A review to submit: the verdict, the summary, and the inline comments. */
+export interface SubmitReviewInput {
+  event: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
+  body: string;
+  comments?: readonly ReviewComment[];
+  /** Head sha the review was written against, so GitHub dates it correctly. */
+  commitId?: string;
+}
+
+/**
+ * What actually landed. Never throws: a review that GitHub refuses is a thing
+ * the caller has to REPORT, not a crash — see `submitReview` for the refusals
+ * that are entirely expected.
+ */
+export interface SubmitReviewResult {
+  posted: boolean;
+  /** The submitted review's html url, when GitHub gave us one. */
+  url?: string;
+  /** The event GitHub actually accepted (may be downgraded — see `submitReview`). */
+  event?: SubmitReviewInput["event"];
+  /** Inline comments GitHub dropped because their line isn't in the diff. */
+  droppedComments?: number;
+  error?: string;
 }
 
 /** Outcome of requesting a batch of reviewers (some may not exist / lack access). */
@@ -1160,6 +1199,32 @@ export class GitHubService {
    * `gh pr create --base <default> --head <branch> --fill` then requests Copilot.
    * Emits pr-update with the enriched PR.
    */
+  /**
+   * The PR's unified diff, as the reviewer will read it.
+   *
+   * Capped, because the cap is the honest part: a 2MB generated-file diff would
+   * either blow the reviewer's context or get silently trimmed by whatever
+   * truncates last, and a reviewer that quietly saw half a PR reports a clean
+   * bill of health on the half it read. Returning `truncated` lets the briefing
+   * SAY so and tell the agent to fetch the rest itself.
+   *
+   * `null` = the diff could not be read at all, which is different from empty.
+   */
+  async prDiff(
+    repo: string,
+    prNumber: number,
+    maxBytes = 400_000,
+  ): Promise<{ text: string; truncated: boolean } | null> {
+    const out = await this.gh(
+      ["pr", "diff", String(prNumber), "--repo", this.assertRepo(repo)],
+      { allowFail: true },
+    ).catch(() => "");
+    if (!out) return null;
+    return out.length > maxBytes
+      ? { text: out.slice(0, maxBytes), truncated: true }
+      : { text: out, truncated: false };
+  }
+
   async ship(
     project: Project,
     branch: string,
@@ -1483,6 +1548,136 @@ export class GitHubService {
       { allowFail: true },
     );
     this.emitNotice(`Requested review from ${reviewer} on PR #${prNumber}`, "info", opts.chatId);
+  }
+
+  /**
+   * Submit a review on a PR — a verdict, a summary, and inline comments.
+   *
+   * This is how Dispatch's own reviewer speaks. The inline comments are the
+   * point: they become real review THREADS, which means everything downstream
+   * already works on them — `watch_pr` reports them, `resolve_thread` closes
+   * them, and `approve_pr` refuses to merge while any is open. The same review
+   * posted as one issue comment would have none of those properties.
+   *
+   * Sent through a temp FILE rather than `-f` fields because `comments` is an
+   * array of objects, which `gh api`'s field flags cannot express at all.
+   *
+   * Never throws, and degrades twice rather than losing the work:
+   *
+   *   - **Self-review.** GitHub refuses `APPROVE`/`REQUEST_CHANGES` on your own
+   *     pull request, and while Dispatch posts under the human's own token that
+   *     is the ordinary case, not an error. It retries as `COMMENT` and reports
+   *     the downgrade. The inline comments still land, and open threads still
+   *     block the merge — so the review keeps its teeth without the verdict.
+   *   - **A line that isn't in the diff.** GitHub rejects the WHOLE review over
+   *     one bad line number, which would throw away a good review for a
+   *     misremembered offset. It retries with the findings folded into the
+   *     summary body and reports how many it had to move.
+   */
+  async submitReview(
+    repo: string,
+    prNumber: number,
+    input: SubmitReviewInput,
+    opts: OpCtx = {},
+  ): Promise<SubmitReviewResult> {
+    const r = this.assertRepo(repo);
+    const comments = (input.comments ?? []).filter((c) => c.path && c.body);
+
+    const post = async (
+      event: SubmitReviewInput["event"],
+      body: string,
+      inline: readonly ReviewComment[],
+    ): Promise<{ ok: boolean; url?: string; detail: string }> => {
+      const payload: Record<string, unknown> = { event, body };
+      if (input.commitId) payload.commit_id = input.commitId;
+      if (inline.length) {
+        payload.comments = inline.map((c) => ({
+          path: c.path,
+          line: c.line,
+          ...(c.startLine && c.startLine < c.line ? { start_line: c.startLine } : {}),
+          side: c.side ?? "RIGHT",
+          body: c.body,
+        }));
+      }
+      // A temp DIR, removed whole: the payload carries the entire review text,
+      // and leaving that lying in the system temp dir is a small but real leak
+      // of whatever the reviewer had to say about a private repo.
+      const dir = await mkdtemp(join(tmpdir(), "dispatch-review-"));
+      const file = join(dir, "review.json");
+      try {
+        await writeFile(file, JSON.stringify(payload), "utf8");
+        const res = await this.exec(
+          "gh",
+          ["api", "--method", "POST", `repos/${r}/pulls/${prNumber}/reviews`, "--input", file],
+          { reject: false },
+        ).catch((e: unknown) => ({
+          stdout: "",
+          stderr: e instanceof Error ? e.message : String(e),
+          exitCode: 1,
+        }));
+        const detail = (res.stderr || res.stdout || `gh exited ${res.exitCode}`).trim();
+        if (res.exitCode !== 0) return { ok: false, detail };
+        let url: string | undefined;
+        try {
+          url = (JSON.parse(res.stdout) as { html_url?: string }).html_url;
+        } catch {
+          /* a 200 with unparseable output still posted the review */
+        }
+        return { ok: true, url, detail };
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    };
+
+    let event = input.event;
+    let attempt = await post(event, input.body, comments);
+
+    // GitHub's wording has varied ("Can not approve your own pull request",
+    // "Can not request changes on your own pull request"), so match the shape
+    // rather than the sentence.
+    if (!attempt.ok && event !== "COMMENT" && /your own pull request/i.test(attempt.detail)) {
+      event = "COMMENT";
+      attempt = await post(event, input.body, comments);
+    }
+
+    // One bad line number sinks the whole review. Keep the findings, move them.
+    if (
+      !attempt.ok &&
+      comments.length &&
+      /part of the diff|must be part of|start_line|invalid.*position/i.test(attempt.detail)
+    ) {
+      const folded = [
+        input.body,
+        "",
+        "---",
+        "",
+        "_These findings could not be attached to their lines — GitHub rejected the " +
+          "positions as outside this PR's diff._",
+        "",
+        ...comments.map((c) => `- \`${c.path}:${c.line}\` — ${c.body}`),
+      ].join("\n");
+      attempt = await post(event, folded, []);
+      if (attempt.ok) {
+        this.emitNotice(
+          `Posted a ${event.toLowerCase().replace(/_/g, " ")} review on PR #${prNumber} with ` +
+            `${comments.length} finding(s) folded into the summary — GitHub rejected their ` +
+            "line positions",
+          "warn",
+          opts.chatId,
+        );
+        return { posted: true, url: attempt.url, event, droppedComments: comments.length };
+      }
+    }
+
+    if (!attempt.ok) return { posted: false, error: attempt.detail.slice(0, 400) };
+
+    this.emitNotice(
+      `Posted a ${event.toLowerCase().replace(/_/g, " ")} review on PR #${prNumber}` +
+        (comments.length ? ` (${comments.length} inline)` : ""),
+      "info",
+      opts.chatId,
+    );
+    return { posted: true, url: attempt.url, event };
   }
 
   /**

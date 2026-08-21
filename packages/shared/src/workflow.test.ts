@@ -103,6 +103,9 @@ describe("resolveWorkflow", () => {
       requireReview: true,
       requireChecks: true,
       draft: false,
+      // Off by default: spawning a reviewer spends the human's model quota, so
+      // it is a toggle they flip, not something the profile hands over.
+      reviewAgent: { enabled: false, effort: "high", maxRounds: 4, post: true },
     });
   });
 
@@ -123,7 +126,35 @@ describe("resolveWorkflow", () => {
       requireReview: true,
       requireChecks: false,
       draft: true,
+      reviewAgent: { enabled: false, effort: "high", maxRounds: 4, post: true },
     });
+  });
+
+  it("merges an authored reviewAgent block field-by-field over the default", () => {
+    // A spread would resolve the omitted `maxRounds` to undefined and hand every
+    // consumer an uncapped review loop to re-derive.
+    const wf = resolveWorkflow({
+      workflow: {
+        profile: "review",
+        pr: { reviewAgent: { enabled: true, effort: "max", login: "dispatch-reviewer" } },
+      },
+    });
+    expect(wf.pr.reviewAgent).toEqual({
+      enabled: true,
+      effort: "max",
+      login: "dispatch-reviewer",
+      maxRounds: 4,
+      post: true,
+    });
+  });
+
+  it("treats a blank reviewer login as none", () => {
+    // A half-filled config field must not send the trigger looking for a
+    // reviewer called "" — which no GitHub queue will ever contain.
+    const wf = resolveWorkflow({
+      workflow: { profile: "review", pr: { reviewAgent: { enabled: true, login: "  " } } },
+    });
+    expect(wf.pr.reviewAgent.login).toBeUndefined();
   });
 
   it("lets an authored empty list opt out of the default reviewer", () => {
@@ -140,7 +171,13 @@ describe("resolveWorkflow", () => {
       const wf = resolveWorkflow({
         workflow: {
           profile,
-          pr: { reviewers: ["someone"], requireReview: true, requireChecks: true, draft: true },
+          pr: {
+            reviewers: ["someone"],
+            requireReview: true,
+            requireChecks: true,
+            draft: true,
+            reviewAgent: { enabled: true, maxRounds: 9 },
+          },
         },
       });
       expect(wf.pr, profile).toEqual({
@@ -148,6 +185,7 @@ describe("resolveWorkflow", () => {
         requireReview: false,
         requireChecks: false,
         draft: false,
+        reviewAgent: { enabled: false, effort: "high", maxRounds: 4, post: true },
       });
     }
   });

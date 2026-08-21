@@ -409,3 +409,65 @@ describe("PrRegistry — the catalog query", () => {
     expect(records()[0]!.pollError).toBeUndefined();
   });
 });
+
+describe("PrRegistry — Dispatch's own reviewer", () => {
+  it("is idempotent against the head it was asked at", async () => {
+    // The sweep re-observes GitHub's reviewer queue every pass. A write per pass
+    // would be a write every 90 seconds, forever, for one standing request.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    const first = await reg.requestReviewAgent(REPO, 42, "c1");
+    now += 60_000;
+    const again = await reg.requestReviewAgent(REPO, 42, "c1");
+
+    expect(first?.reviewAgent).toMatchObject({ requestedSha: "sha-1", requestedBy: "c1" });
+    expect(again?.reviewAgent?.requestedAt).toBe(first?.reviewAgent?.requestedAt);
+  });
+
+  it("re-arms once the head moves, because a push is genuinely new code", async () => {
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    const first = await reg.requestReviewAgent(REPO, 42, "c1");
+    now += 60_000;
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+    const after = await reg.requestReviewAgent(REPO, 42, "c1");
+
+    expect(first?.reviewAgent?.requestedSha).toBe("sha-1");
+    expect(after?.reviewAgent?.requestedSha).toBe("sha-2");
+  });
+
+  it("does nothing for a PR the catalog has never heard of", async () => {
+    // Same rule as `noteWatched`: a request must not conjure a hollow row.
+    const reg = makeRegistry();
+    expect(await reg.requestReviewAgent(REPO, 999, "c1")).toBeNull();
+    expect(await store.getPrRecord("octo/repo#999")).toBeNull();
+  });
+
+  it("refuses a claim with no request behind it", async () => {
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    expect(await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 })).toBeNull();
+  });
+
+  it("keeps the reviewer's state across an ordinary poll", async () => {
+    // `record()` rewrites the row from the snapshot every sweep, and the
+    // reviewer's bookkeeping is not in a snapshot. If it were spread away here,
+    // the dedup would reset on the next poll and re-review the same head.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 });
+    await reg.noteReviewChat(REPO, 42, "chat-9");
+
+    now += 60_000;
+    await reg.record(snapshot({ headRefOid: "sha-1", title: "renamed" }), { chatId: "c1" });
+
+    const row = await store.getPrRecord(KEY);
+    expect(row?.title).toBe("renamed");
+    expect(row?.reviewAgent).toMatchObject({
+      rounds: 1,
+      reviewedSha: "sha-1",
+      chatId: "chat-9",
+    });
+  });
+});

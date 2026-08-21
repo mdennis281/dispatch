@@ -37,6 +37,7 @@ export const AGENT_TASK_IDS = [
   "config:subApps",
   "git:commit-sweep",
   "memory:consolidate",
+  "pr:review",
 ] as const;
 
 export const AgentTaskIdSchema = z.enum(AGENT_TASK_IDS);
@@ -269,6 +270,37 @@ export const AGENT_TASKS: Record<AgentTaskId, AgentTaskMeta> = {
       },
     ],
   },
+  "pr:review": {
+    id: "pr:review",
+    action: "Review this PR",
+    noun: "PR review",
+    icon: "ScanEye",
+    // "review: #97 a file explorer, in a modal…" — the number and title are
+    // what tell you which run this was; the category is what the eye scans for.
+    titlePrefix: "review",
+    blurb: "Reads the diff against the branch it targets and posts a real GitHub review.",
+    placeholder:
+      "optional — e.g. be strict about the shutdown path and anything spawning a subprocess; " +
+      "skip the generated client types",
+    // Same reasoning as the sweep and the consolidation: effort is the biggest
+    // quality lever on a one-shot reading job, and a review that misses the bug
+    // is worse than no review — it reads as a clean bill of health.
+    defaultEffort: "high",
+    toggles: [
+      {
+        id: "post",
+        label: "Post the review to GitHub",
+        hint: "off = report the findings in this chat and touch nothing",
+        default: true,
+      },
+      {
+        id: "blocking",
+        label: "May request changes",
+        hint: "off = comment only, never a blocking verdict",
+        default: true,
+      },
+    ],
+  },
 };
 
 /** Catalog entries in a stable display order. */
@@ -307,6 +339,13 @@ export const LaunchAgentTaskInputSchema = z.object({
    * outcome from pinning today's default and freezing it.
    */
   model: z.string().optional(),
+  /**
+   * A configured agent to run the task as. Omitted = the project's default,
+   * which is what every human-launched task wants. It exists for the launches
+   * nobody types — a project can name the agent its PR reviews run as, and that
+   * has to reach `createChat` from the config rather than from a form.
+   */
+  agentId: z.string().optional(),
   /** Task-specific extras: toggle values, a target repo path, etc. */
   params: z.record(z.string(), z.unknown()).optional(),
 });
