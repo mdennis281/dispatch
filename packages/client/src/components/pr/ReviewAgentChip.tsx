@@ -88,8 +88,12 @@ export function ReviewAgentChip({
         v.findings && v.findings > 0
           ? ` · ${v.findings} finding${v.findings === 1 ? "" : "s"}`
           : "";
+      // The cap says so IN THE LABEL, not just in the tone. A spent cap is a
+      // permanent stop — the sweep will never spawn another round for this head
+      // — and leaving that to a colour is how it stayed a silent stop.
+      const last = v.phase === "spent" ? " · last round" : "";
       label = v.posted
-        ? `reviewed${rounds(v)}${found}`
+        ? `reviewed${rounds(v)}${found}${last}`
         : `reviews spent${rounds(v)}`;
       title = !v.posted
         ? `Every review round is spent (${v.round} of ${v.maxRounds}) and none of them ` +
