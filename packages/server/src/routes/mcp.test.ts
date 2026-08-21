@@ -467,7 +467,16 @@ describe("PUT /api/projects/:projectId/mcp/:name/enabled", () => {
     return { projectId: created.json().id as string, repo: dir };
   }
 
-  const toggle = (projectId: string, name: string, body: unknown) =>
+  /**
+   * `payload` is typed rather than `unknown` on purpose: `inject`'s overloads
+   * resolve to the callback (void-returning) form when the argument object
+   * isn't fully known, and the result then has no `.statusCode` at all.
+   */
+  const toggle = (
+    projectId: string,
+    name: string,
+    body: { scope?: string; enabled?: boolean | null },
+  ) =>
     app.inject({
       method: "PUT",
       url: `/api/projects/${projectId}/mcp/${name}/enabled`,
