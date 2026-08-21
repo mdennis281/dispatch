@@ -10,13 +10,21 @@
  *   - {@link verifyReviewer} answers "will this actually work", at setup time,
  *     rather than at the first PR.
  *
- * The second matters more than it looks. The dedicated-account setup has two
- * failure modes and neither is visible until a review is requested for real: a
- * token that doesn't authenticate, and an account that authenticates perfectly
- * but was never added to the repository — which GitHub rejects only at request
- * time, with *"Reviews may only be requested from collaborators"*. A setup panel
- * that cannot tell you which of those you have is a setup panel that sends you
- * to the GitHub docs.
+ * The second matters more than it looks. The dedicated-account setup has THREE
+ * failure modes and none is visible until a review is attempted for real:
+ *
+ *   - a token that doesn't authenticate;
+ *   - an account that authenticates perfectly but was never added to the
+ *     repository — which GitHub rejects only at request time, with *"Reviews may
+ *     only be requested from collaborators"*;
+ *   - an account that is a collaborator whose TOKEN was never scoped to this
+ *     repository, which passes both checks above and then fails at
+ *     `post_review` with a 404 that reads like a missing pull request.
+ *
+ * The third is the cruellest, because the two grants are independent and only
+ * one of them is visible from the repo's own settings page. A setup panel that
+ * cannot tell you which of these you have is a setup panel that sends you to the
+ * GitHub docs.
  */
 import {
   resolveWorkflow,
@@ -33,7 +41,10 @@ import type { Store } from "../store/index.js";
  * is testable without a GitHubService (and so it stays obvious that setup never
  * WRITES anything to GitHub).
  */
-export type ReviewerGitHub = Pick<GitHubService, "whoami" | "isCollaborator">;
+export type ReviewerGitHub = Pick<
+  GitHubService,
+  "whoami" | "isCollaborator" | "canReadRepoAs"
+>;
 
 /** The credential reads a verification needs, kept structural for the same reason. */
 export type ReviewerStore = Pick<Store, "getReviewer">;
@@ -158,6 +169,38 @@ export async function verifyReviewer(
   }
 
   if (input.repo) {
+    // Being a collaborator and being IN THE TOKEN'S SCOPE are two independent
+    // grants, and the panel used to check only the first — which is the half
+    // that runs as the human. A fine-grained PAT lists the repositories it may
+    // touch, and adding its account to a repo does not widen a token minted for
+    // another one; the account passes as a collaborator, GitHub queues it, and
+    // the review dies at `post_review` with a 404 that reads like a missing PR.
+    const access = await github.canReadRepoAs(input.repo, token);
+    checks.push(
+      access === true
+        ? {
+            id: "access",
+            state: "pass",
+            detail: `This token can read ${input.repo}.`,
+          }
+        : access === false
+          ? {
+              id: "access",
+              state: "fail",
+              detail:
+                `This token cannot see ${input.repo}, even though it authenticates. A ` +
+                "fine-grained token grants access per repository — adding the account as a " +
+                "collaborator does not widen a token minted for a different repo. Edit the " +
+                "token's Repository access setting to include this one. Left as is, reviews are " +
+                "written and then rejected with a 404 that looks like a missing pull request.",
+            }
+          : {
+              id: "access",
+              state: "warn",
+              detail: `Could not check whether this token can read ${input.repo}.`,
+            },
+    );
+
     const collab = await github.isCollaborator(input.repo, who.login);
     checks.push(
       collab === true
@@ -173,7 +216,7 @@ export async function verifyReviewer(
               detail:
                 `${who.login} is not a collaborator on ${input.repo}. GitHub refuses to ` +
                 "request a review from a non-collaborator. Invite the account with " +
-                "**Read** access — that is enough, and it cannot push.",
+                "Read access — that is enough, and it cannot push.",
             }
           : {
               id: "collaborator",

@@ -66,7 +66,7 @@ export type ReviewerStatus = z.infer<typeof ReviewerStatusSchema>;
 
 /** One thing the setup check looked at, and how it went. */
 export const ReviewerCheckSchema = z.object({
-  id: z.enum(["token", "distinct", "collaborator"]),
+  id: z.enum(["token", "distinct", "collaborator", "access"]),
   /** `pass` = verified good. `warn` = works, but will bite. `fail` = won't work. */
   state: z.enum(["pass", "warn", "fail"]),
   /** One line, written for the human reading the setup panel. */

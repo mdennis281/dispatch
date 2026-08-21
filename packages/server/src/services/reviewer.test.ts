@@ -20,11 +20,16 @@ const REVIEW = (
   reviewAgent: NonNullable<NonNullable<WorkflowConfig["pr"]>["reviewAgent"]>,
 ): WorkflowConfig => ({ profile: "review", pr: { reviewAgent } });
 
-/** A GitHub that answers `whoami` per token and knows one collaborator. */
+/**
+ * A GitHub that answers `whoami` per token, knows one collaborator, and knows
+ * whether the reviewer's token can see the repo — which is a SEPARATE answer
+ * from the collaborator one on purpose, because that is the whole trap.
+ */
 function fakeGitHub(over: {
   logins?: Record<string, string>;
   me?: string;
   collaborator?: boolean | null;
+  canRead?: boolean | null;
 } = {}): ReviewerGitHub {
   return {
     whoami: async (token?: string) => {
@@ -33,6 +38,7 @@ function fakeGitHub(over: {
       return login ? { login } : { error: "Bad credentials" };
     },
     isCollaborator: async () => over.collaborator ?? null,
+    canReadRepoAs: async () => (over.canRead === undefined ? true : over.canRead),
   };
 }
 
@@ -96,9 +102,12 @@ describe("verifyReviewer — catching the setup mistakes before the first PR", (
     );
     expect(out.ok).toBe(true);
     expect(out.login).toBe("dispatch-reviewer");
+    // The whole list, in order, so a check that silently stops running is a
+    // failure here rather than a reviewer that quietly breaks in six months.
     expect(out.checks.map((c) => [c.id, c.state])).toEqual([
       ["token", "pass"],
       ["distinct", "pass"],
+      ["access", "pass"],
       ["collaborator", "pass"],
     ]);
   });
@@ -165,5 +174,75 @@ describe("verifyReviewer — catching the setup mistakes before the first PR", (
     const out = await verifyReviewer(fakeGitHub(), storeWith(null));
     expect(out.ok).toBe(false);
     expect(out.checks[0]!.detail).toMatch(/paste the reviewer account's token/i);
+  });
+});
+
+describe("verifyReviewer — the token's own repository scope", () => {
+  it("fails a collaborator account whose TOKEN cannot see the repo", async () => {
+    // The case that passed every check and still broke: the account IS a
+    // collaborator, so GitHub queues it as a reviewer and the setup panel is
+    // happy — but a fine-grained PAT grants access per repository, and adding
+    // the account to a repo does not widen a token minted for a different one.
+    // The review is then written and rejected with a 404 that reads like a
+    // missing pull request (mdennis281/the-salesman #134).
+    const out = await verifyReviewer(
+      fakeGitHub({
+        logins: { tok: "dispatch-review" },
+        me: "mdennis281",
+        collaborator: true,
+        canRead: false,
+      }),
+      storeWith(null),
+      { token: "tok", repo: "octo/repo" },
+    );
+    expect(out.ok).toBe(false);
+    const access = out.checks.find((c) => c.id === "access");
+    expect(access?.state).toBe("fail");
+    expect(access?.detail).toMatch(/Repository access/i);
+    // The collaborator half still passes — that is exactly why one check could
+    // not stand in for the other.
+    expect(out.checks.find((c) => c.id === "collaborator")?.state).toBe("pass");
+  });
+
+  it("passes when the token can read the repo", async () => {
+    const out = await verifyReviewer(
+      fakeGitHub({
+        logins: { tok: "dispatch-review" },
+        me: "mdennis281",
+        collaborator: true,
+        canRead: true,
+      }),
+      storeWith(null),
+      { token: "tok", repo: "octo/repo" },
+    );
+    expect(out.ok).toBe(true);
+    expect(out.checks.find((c) => c.id === "access")?.state).toBe("pass");
+  });
+
+  it("degrades an unreadable answer to a warning, never a failure", async () => {
+    // Same rule as every other check here: a setup panel that shows an error
+    // when GitHub is briefly unreachable trains people to ignore its errors.
+    const out = await verifyReviewer(
+      fakeGitHub({
+        logins: { tok: "dispatch-review" },
+        me: "mdennis281",
+        collaborator: true,
+        canRead: null,
+      }),
+      storeWith(null),
+      { token: "tok", repo: "octo/repo" },
+    );
+    expect(out.ok).toBe(true);
+    expect(out.checks.find((c) => c.id === "access")?.state).toBe("warn");
+  });
+
+  it("skips the scope check when no repo was named", async () => {
+    // Same rule as the collaborator check: no repo means don't guess at one.
+    const out = await verifyReviewer(
+      fakeGitHub({ logins: { tok: "dispatch-review" }, me: "mdennis281" }),
+      storeWith(null),
+      { token: "tok" },
+    );
+    expect(out.checks.some((c) => c.id === "access")).toBe(false);
   });
 });

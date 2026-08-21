@@ -906,6 +906,42 @@ export class GitHubService {
     return /HTTP 404|Not Found/i.test(res.stderr || res.stdout || "") ? false : null;
   }
 
+  /**
+   * Can the REVIEWER's own token see this repository at all?
+   *
+   * The gate `isCollaborator` cannot answer, because they are two independent
+   * grants that look identical from the setup panel. Adding the machine account
+   * as a collaborator is what lets GitHub QUEUE it as a reviewer; a fine-grained
+   * PAT additionally lists the repositories it may touch, and adding the account
+   * to a repo does not retroactively widen a token that was minted for another
+   * one. So the account is a collaborator, `isCollaborator` says yes — it runs
+   * as the human — and the review still dies at `post_review`.
+   *
+   * GitHub answers **404, not 403**, for a repo a token cannot see, so the
+   * failure reads as "no such pull request" and sends you hunting through line
+   * anchors and PR numbers. Observed on mdennis281/the-salesman #134: the
+   * reviewer was queued, claimed its round, read the diff, wrote the review, and
+   * three `post_review` attempts — including a body-only one with no inline
+   * comments at all — came back 404.
+   *
+   * `null` = could not tell, which the caller must not report as "no access".
+   */
+  async canReadRepoAs(repo: string, token: string): Promise<boolean | null> {
+    const r = this.assertRepo(repo);
+    const env = this.tokenEnv(token);
+    const res = await this.exec("gh", ["api", `repos/${r}`, "--silent"], {
+      reject: false,
+      ...(env ? { env } : {}),
+    }).catch(() => null);
+    if (!res) return null;
+    if (res.exitCode === 0) return true;
+    // The 404-for-403 substitution is the whole reason this check exists, so
+    // both are a definite "no". Anything else is genuinely unknown.
+    return /HTTP 404|Not Found|HTTP 403|Forbidden/i.test(res.stderr || res.stdout || "")
+      ? false
+      : null;
+  }
+
   /** Run `gh <args>`; throw on non-zero unless allowFail. Returns trimmed stdout. */
   private async gh(
     args: string[],
