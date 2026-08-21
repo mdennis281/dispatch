@@ -104,6 +104,7 @@ function ErrorList({ errors }: { errors: ProjectConfigError[] }) {
  */
 function savedWorkflow(project: Project | null): WorkflowConfig {
   const r = resolveWorkflow(project);
+  const pr = prBaseline(project);
   return {
     profile: r.profile,
     ...(r.worktreeCmd ? { worktree: r.worktreeCmd } : {}),
@@ -113,7 +114,44 @@ function savedWorkflow(project: Project | null): WorkflowConfig {
     guard: r.guard,
     autoMerge: r.autoMerge,
     mergeMethod: r.mergeMethod,
+    pr: {
+      reviewers: pr.reviewers,
+      requireReview: pr.requireReview,
+      requireChecks: pr.requireChecks,
+      draft: pr.draft,
+      reviewAgent: {
+        enabled: pr.reviewAgent.enabled,
+        identity: pr.reviewAgent.identity,
+        effort: pr.reviewAgent.effort,
+        maxRounds: pr.reviewAgent.maxRounds,
+        post: pr.reviewAgent.post,
+        ...(pr.reviewAgent.model ? { model: pr.reviewAgent.model } : {}),
+        ...(pr.reviewAgent.agentId ? { agentId: pr.reviewAgent.agentId } : {}),
+        ...(pr.reviewAgent.instructions ? { instructions: pr.reviewAgent.instructions } : {}),
+      },
+    },
   };
+}
+
+/**
+ * The `pr` half of the baseline, resolved as though the project were already on
+ * the `review` rung.
+ *
+ * `resolveWorkflow` clamps `pr` INERT on the lower rungs — correctly, because no
+ * PR is opened there — but a baseline built from that clamp reports a project's
+ * AUTHORED reviewer settings as off the moment its profile is anything else, and
+ * then a Save writes the clamp back over them. The Reviewer pane says these
+ * settings are kept either way and take effect when the profile is; this is what
+ * makes that true.
+ *
+ * `login` is deliberately not carried through: the server overlays it from the
+ * stored credential and it is not part of the authored block.
+ */
+function prBaseline(project: Project | null) {
+  return resolveWorkflow({
+    ...project,
+    workflow: { ...project?.workflow, profile: "review" },
+  }).pr;
 }
 
 /* --------------------------------------------------------------------- page */
@@ -313,7 +351,10 @@ export function ProjectSettingsView() {
         label: s.label,
         blurb: s.blurb,
         count: s.id === "workflow" ? null : sectionItems(s.id, config, memories).length,
-        dirty: s.id === "workflow" && dirty,
+        // Both panes edit ONE draft behind ONE Save, so the warn dot belongs on
+        // both. Marking only Workflow meant reviewer edits looked saved from the
+        // rail — the section you were just editing was the one not flagged.
+        dirty: (s.id === "workflow" || s.id === "reviewer") && dirty,
       }))}
       active={section}
       onSelect={setSection}
