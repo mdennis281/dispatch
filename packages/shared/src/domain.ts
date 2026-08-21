@@ -421,6 +421,28 @@ export const PrReviewAgentStateSchema = z.object({
    * costing, which is where somebody wonders about it.
    */
   problem: z.string().optional(),
+  /**
+   * GitHub's own refusal, the last time Dispatch tried to put the reviewer into
+   * THIS PR's review queue.
+   *
+   * Separate from {@link problem} because the two have different owners and
+   * different lifetimes. `problem` is the project's identity failing to resolve,
+   * and the sweep rewrites it from `resolveReviewer` on every pass — so a
+   * per-PR fact parked there would be erased within 90 seconds. This is written
+   * once, at the moment a request is refused, and cleared when the reviewer is
+   * next seen in the queue.
+   *
+   * The refusal it was built for: a `dedicated` reviewer that is not a
+   * collaborator on the repository gets
+   * *"422 Reviews may only be requested from collaborators"*. In dedicated mode
+   * that queue entry is the ONLY trigger for a review — nothing records a local
+   * request, deliberately, so that one account cannot fire two triggers — which
+   * makes the refusal permanent and total: no review will ever start on that PR.
+   * It was reported once, as a warning line in a `create_pr` result, and then
+   * lost the moment the transcript scrolled. Every PR that reviewer never looked
+   * at afterwards was indistinguishable from a project with no reviewer at all.
+   */
+  requestError: z.string().optional(),
 });
 export type PrReviewAgentState = z.infer<typeof PrReviewAgentStateSchema>;
 

@@ -106,6 +106,33 @@ describe("prReviewAgentView — the reviewer's state on one PR", () => {
     ).toMatchObject({ phase: "blocked", problem: "no reviewer account is set up" });
   });
 
+  it("blocks on a refused review request, not just an unresolvable identity", () => {
+    // GitHub refusing to queue the reviewer is total in `dedicated` mode: that
+    // queue entry is the only trigger there is, so the PR reads as if no
+    // reviewer were configured at all until this says otherwise.
+    expect(
+      prReviewAgentView({
+        rounds: 0,
+        requestError: "Reviews may only be requested from collaborators",
+      }),
+    ).toMatchObject({
+      phase: "blocked",
+      problem: "Reviews may only be requested from collaborators",
+    });
+  });
+
+  it("names the cause over the symptom when both are recorded", () => {
+    // An identity that does not resolve is WHY no request was attempted, so
+    // reporting GitHub's refusal of some older attempt would mislead.
+    expect(
+      prReviewAgentView({
+        rounds: 0,
+        problem: "no reviewer account is set up",
+        requestError: "Reviews may only be requested from collaborators",
+      }),
+    ).toMatchObject({ phase: "blocked", problem: "no reviewer account is set up" });
+  });
+
   it("ranks an outstanding request above the last finished round", () => {
     // A claim clears the request, so one being present means the row is waiting
     // on the next sweep rather than resting on its last verdict.

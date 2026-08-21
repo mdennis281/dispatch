@@ -307,8 +307,12 @@ export class PrRegistry {
     if (!prev) return null;
     const sha = prev.headRefOid;
     const state = prev.reviewAgent;
-    // Already asked at this head, and nothing has served it yet.
-    if (state?.requestedSha === sha && state?.requestedAt) return prev;
+    // Already asked at this head, and nothing has served it yet. A parked
+    // refusal defeats the short-circuit on purpose: getting here means the
+    // reviewer IS in the queue now, so the recorded "GitHub would not queue it"
+    // is stale, and skipping the write would leave the row saying no review is
+    // coming while one is about to start.
+    if (state?.requestedSha === sha && state?.requestedAt && !state.requestError) return prev;
     const now = this.now();
     return this.publish(
       await this.store.upsertPrRecord(key, { ...prev }, {
@@ -317,6 +321,7 @@ export class PrRegistry {
           requestedSha: sha,
           requestedAt: now,
           requestedBy: by,
+          requestError: undefined,
         },
       }),
     );
@@ -405,6 +410,40 @@ export class PrRegistry {
           findings: by.findings,
           postedEvent: by.event,
         },
+      }),
+    );
+  }
+
+  /**
+   * Record GitHub's refusal to put the reviewer into this PR's review queue —
+   * or clear a stale one by passing no error.
+   *
+   * Kept off {@link notePolicy}'s `problem` because the sweep rewrites that
+   * field from `resolveReviewer` every 90 seconds, which would erase a per-PR
+   * fact almost as fast as it was written. See `PrReviewAgentStateSchema`.
+   *
+   * Like every other reviewer write here, a no-op for a PR the catalog has not
+   * heard of, and silent when nothing changed — this runs on every `create_pr`
+   * and every `request_review`, and a write per call for an error that is
+   * usually absent would be a broadcast per call to every connected client.
+   */
+  async noteReviewRequestError(
+    repo: string,
+    number: number,
+    error?: string,
+  ): Promise<PrRecord | null> {
+    const key = prRecordKey(repo, number);
+    const prev = await this.store.getPrRecord(key);
+    if (!prev) return null;
+    const state = prev.reviewAgent;
+    // Nothing recorded and nothing to record. Notably this is the CLEAR path for
+    // a healthy PR, which must not conjure reviewer state onto every row that
+    // ever had a PR opened for it.
+    if (!state && !error) return prev;
+    if (state?.requestError === error) return prev;
+    return this.publish(
+      await this.store.upsertPrRecord(key, { ...prev }, {
+        reviewAgent: { ...(state ?? { rounds: 0 }), requestError: error },
       }),
     );
   }
