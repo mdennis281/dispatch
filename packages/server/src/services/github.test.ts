@@ -14,7 +14,8 @@ import { GitHubService, COPILOT_LOGIN, type ExecResult, type ExecaLike } from ".
 interface Call {
   file: string;
   args: string[];
-  options?: { cwd?: string; reject?: boolean };
+  /** `env` included: switching identity is an env change, so it has to be assertable. */
+  options?: { cwd?: string; reject?: boolean; env?: NodeJS.ProcessEnv };
 }
 
 /** A sequential execa mock: records every call, returns queued results in order. */
@@ -1222,6 +1223,32 @@ describe("submitReview — how Dispatch's reviewer speaks", () => {
     const push = (r: Partial<ExecResult>) => queue.push({ stdout: "{}", exitCode: 0, ...r });
     return { exec, calls, bodies, push };
   }
+
+  it("posts as the dedicated account when given its token, and as you without one", async () => {
+    // The identity switch is one environment variable. GH_TOKEN outranks both
+    // GITHUB_TOKEN and the hosts.yml login, so this is what makes the review
+    // carry the bot's name — and its absence is what keeps every OTHER call in
+    // this service attributed to the human.
+    const withToken = makeReviewExec();
+    withToken.push({ stdout: "{}" });
+    await new GitHubService({ bus, exec: withToken.exec }).submitReview(
+      REPO,
+      7,
+      { event: "COMMENT", body: "hi" },
+      { token: "github_pat_secret" },
+    );
+    expect(withToken.calls[0].options?.env?.GH_TOKEN).toBe("github_pat_secret");
+
+    const without = makeReviewExec();
+    without.push({ stdout: "{}" });
+    await new GitHubService({ bus, exec: without.exec }).submitReview(REPO, 7, {
+      event: "COMMENT",
+      body: "hi",
+    });
+    // Not an empty env — undefined, so the child simply inherits rather than
+    // being handed a scrubbed environment with no PATH.
+    expect(without.calls[0].options?.env).toBeUndefined();
+  });
 
   it("posts the verdict, the summary and one inline comment per finding", async () => {
     const { exec, calls, bodies, push } = makeReviewExec();

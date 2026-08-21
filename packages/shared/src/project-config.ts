@@ -440,6 +440,7 @@ export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
  */
 export const ConfigSectionSchema = z.enum([
   "workflow",
+  "reviewer",
   "instructions",
   "agents",
   "modes",

@@ -28,6 +28,7 @@
  */
 import * as z from "zod";
 import { EffortSchema } from "./common.js";
+import { ReviewerIdentitySchema } from "./reviewer.js";
 
 /* ------------------------------------------------------------------ profile */
 
@@ -101,32 +102,36 @@ export type WorkflowMergeMethod = z.infer<typeof WorkflowMergeMethodSchema>;
  * make one by hand on GitHub. Hanging the reviewer off it means no new protocol,
  * and re-review after a fix round comes for free.
  *
- * Where that request COMES FROM depends on {@link WorkflowReviewAgentConfigSchema.login}:
+ * Where that request COMES FROM depends on {@link WorkflowReviewAgentConfigSchema.identity}:
  *
- *   - **With a login** — a GitHub machine account, added to the repo as a Read
- *     collaborator. It goes on `reviewers` like any other reviewer, GitHub's own
- *     queue is the trigger, and the review is posted under that account's name.
- *     This is the full-fat version; it costs one free GitHub account to set up.
- *   - **Without one** — the request is recorded on the PR's registry row instead,
- *     and the review is posted under whatever identity `gh` is authenticated as.
- *     Nothing to set up, and the same trigger concept: adding the login later is
- *     config, not a rewrite.
+ *   - **`self`** — the request is recorded on the PR's registry row, and the
+ *     review is posted under whatever identity `gh` is already authenticated as
+ *     (you). Nothing to set up. GitHub refuses `APPROVE`/`REQUEST_CHANGES` on
+ *     your own pull request, so the verdict degrades to a comment — the inline
+ *     threads still block the merge, so it keeps its teeth, just not its title.
+ *   - **`dedicated`** — a GitHub machine account, added to the repo as a Read
+ *     collaborator. It goes on `reviewers` like any other reviewer, so GitHub's
+ *     OWN queue is the trigger, it can genuinely request changes, and the review
+ *     carries its own name and avatar. Costs one free GitHub account.
  *
- * A login is NOT a GitHub App, and cannot be. `POST /pulls/{n}/requested_reviewers`
- * takes `reviewers[]` (user logins) and `team_reviewers[]` — there is no bots
- * key, and Copilot appears in the queue only because GitHub special-cases it
- * server-side (the read side of that asymmetry is documented at
- * `GitHubService.prReviewState`). An App could post the review but could never
- * be asked for it, which is the half that matters here.
+ * The account's login and token are NOT here. This file is committed, so a token
+ * in it would be a published secret; and one machine account naturally serves
+ * every repo you own, which makes it app-level rather than project-level state.
+ * It lives in the config dir beside `auth.json` — see {@link ReviewerCredential}
+ * — and this key only decides whether to USE it.
+ *
+ * A dedicated reviewer cannot be a GitHub App, and that is not a gap to close
+ * later. `POST /pulls/{n}/requested_reviewers` takes `reviewers[]` (user logins)
+ * and `team_reviewers[]` — there is no bots key, and Copilot appears in the
+ * queue only because GitHub special-cases it server-side (the read side of that
+ * asymmetry is documented at `GitHubService.prReviewState`). An App could post
+ * the review but could never be asked for it, which is the half that matters.
  */
 export const WorkflowReviewAgentConfigSchema = z.object({
   /** Spawn a reviewer when one is requested here. Off unless a project says so. */
   enabled: z.boolean().optional(),
-  /**
-   * GitHub login whose review request triggers the spawn — a machine account
-   * with Read access to the repo. Unset = the local-request mode above.
-   */
-  login: z.string().optional(),
+  /** Who the review is posted as (see the docblock). Default `self`. */
+  identity: ReviewerIdentitySchema.optional(),
   /** Reasoning effort the reviewer runs at. Reviewing well is not a cheap job. */
   effort: EffortSchema.optional(),
   model: z.string().optional(),
@@ -154,6 +159,18 @@ export type WorkflowReviewAgentConfig = z.infer<typeof WorkflowReviewAgentConfig
 /** The reviewer policy with every implication made explicit. */
 export const ResolvedReviewAgentSchema = z.object({
   enabled: z.boolean(),
+  identity: ReviewerIdentitySchema,
+  /**
+   * The dedicated account's login, overlaid by the SERVER from the stored
+   * credential — never authored here.
+   *
+   * `resolveWorkflow` is pure and lives in a package that cannot read the config
+   * dir, so it always resolves this to `undefined`; whoever holds the credential
+   * store fills it in (see `reviewerPolicyFor` in the container). Consumers must
+   * therefore treat "identity is dedicated but login is absent" as NOT CONFIGURED
+   * rather than as self-review — silently posting under the human's own name
+   * because a token went missing is the one outcome nobody asked for.
+   */
   login: z.string().optional(),
   effort: EffortSchema,
   model: z.string().optional(),
@@ -320,6 +337,7 @@ export type ResolvedWorkflow = z.infer<typeof ResolvedWorkflowSchema>;
  */
 const REVIEW_AGENT_OFF: ResolvedReviewAgent = {
   enabled: false,
+  identity: "self",
   effort: "high",
   maxRounds: 4,
   post: true,
@@ -465,9 +483,10 @@ function resolveReviewAgent(
 ): ResolvedReviewAgent {
   return {
     enabled: authored?.enabled ?? base.enabled,
-    // A blank login is the same as none — a half-filled config field must not
-    // send the trigger looking for a reviewer called "".
-    login: authored?.login?.trim() || base.login,
+    identity: authored?.identity ?? base.identity,
+    // Always absent here: the login comes from the credential store, which this
+    // package cannot read. See the field's docblock.
+    login: undefined,
     effort: authored?.effort ?? base.effort,
     model: authored?.model ?? base.model,
     agentId: authored?.agentId ?? base.agentId,

@@ -21,6 +21,7 @@ import {
   Brain,
   FileCog,
   GitPullRequest,
+  ScanEye,
   ScrollText,
   ShieldCheck,
   Wand2,
@@ -62,6 +63,21 @@ export const SECTIONS: SectionDef[] = [
       "it's enforced, not just suggested: the same profile drives the injected rules and the " +
       "guard that refuses a push to the trunk.",
     noun: "workflow",
+    countable: false,
+  },
+  {
+    id: "reviewer",
+    icon: ScanEye,
+    label: "Reviewer",
+    blurb: "Who reviews the PRs agents open here",
+    explainer:
+      "The review loop only turns because something reviews. When the configured reviewer " +
+      "stops answering — a quota runs out, a bot is uninstalled, a repo never had one — every " +
+      "chat stalls in the same place, waiting for a review that will never arrive. This is " +
+      "where you point that job at a Dispatch agent instead, and decide whose name the review " +
+      "goes out under: yours, or a machine account with its own.",
+    noun: "reviewer",
+    manifestBacked: true,
     countable: false,
   },
   {

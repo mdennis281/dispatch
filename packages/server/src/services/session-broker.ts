@@ -78,6 +78,7 @@ import type {
   SubApp,
   BrowserMcpConfig,
   ContextUsage,
+  ResolvedReviewAgent,
   ResolvedWorkflow,
   WorkflowExemption,
   WorkflowExemptionScope,
@@ -437,7 +438,7 @@ function makeGithubBinding(
       ? async (n, input, repo) => {
           const r = await repoFor(repo);
           if (!r) throw new Error("could not resolve the repo — pass `repo` as 'owner/name'");
-          return github.submitReview(r, n, input, { chatId });
+          return github.submitReview(r, n, input, { chatId, token: reviewAgent.token });
         }
       : undefined,
     requestReviewAgent: reviewAgent?.requestLocal
@@ -471,6 +472,13 @@ function makeGithubBinding(
 interface ReviewAgentBinding {
   /** The project configured a reviewer → this session may submit reviews. */
   post: boolean;
+  /**
+   * The dedicated account's token. Absent = self-review, and `gh` posts as the
+   * human. It is passed per-call rather than held in the session's environment
+   * so it reaches exactly one operation — submitting the review — and no shell
+   * the agent can run.
+   */
+  token?: string;
   /**
    * Record a review request on the PR's catalog row. Present only in the mode
    * with no GitHub login, where there is no reviewer account to queue.
@@ -1442,6 +1450,19 @@ export class SessionBroker {
    * Absent → `create_pr` says so out loud rather than implying it's watched.
    */
   armPrWatch?: (chatId: string, ref: PRRef) => void;
+  /**
+   * This project's reviewer identity — the committed policy joined to the
+   * app-wide credential. Settable after construction for the same reason as
+   * `armPrWatch`.
+   *
+   * A function rather than a field on the resolved workflow because the token is
+   * a SECRET living outside the repo: `resolveWorkflow` is pure and runs in a
+   * package with no filesystem, so the join has to happen somewhere that can
+   * read the config dir. Absent → `post_review` posts as whoever `gh` is.
+   */
+  resolveReviewer?: (
+    projectId: string | undefined,
+  ) => Promise<{ policy: ResolvedReviewAgent; token?: string } | null>;
   /**
    * Hand every `watch_pr` poll to the PR catalog. Settable after construction
    * for the same reason as `armPrWatch`: the registry is built after the broker.
@@ -4500,6 +4521,13 @@ export class SessionBroker {
     session.branch = wfCtx.branch;
     session.inWorktree = Boolean(session.worktreeCwd) || wfCtx.linked;
     const canApprovePr = Boolean(this.github) && workflow.autoMerge === "on-green";
+    // The reviewer identity, resolved ONCE: the tools directive below has to say
+    // whether `post_review` exists, and the MCP binding further down needs the
+    // token. Two resolutions would be two chances to disagree about who this
+    // session reviews as.
+    const reviewer = this.github
+      ? await this.resolveReviewer?.(session.projectId).catch(() => null)
+      : null;
     // `create_pr` exists wherever change ships through a PR — the same condition
     // the guard uses to refuse a raw `gh pr create`, so a refusal always has a
     // sanctioned path to name.
@@ -4522,11 +4550,8 @@ export class SessionBroker {
         prApproval: canApprovePr,
         prCreate: canCreatePr,
         prReviewers: workflow.pr.reviewers,
-        reviewAgent: Boolean(this.github) && workflow.pr.reviewAgent.enabled,
-        reviewAgentLocal:
-          Boolean(this.github) &&
-          workflow.pr.reviewAgent.enabled &&
-          !workflow.pr.reviewAgent.login,
+        reviewAgent: Boolean(reviewer?.policy.enabled),
+        reviewAgentLocal: reviewer?.policy.enabled === true && reviewer.policy.identity === "self",
       }),
     );
     // The rendered contract itself comes next — before the project's own
@@ -4902,14 +4927,16 @@ export class SessionBroker {
               session.chatId,
               workflow.pr.reviewers,
               this.onPrSnapshot,
-              workflow.pr.reviewAgent.enabled
+              reviewer?.policy.enabled
                 ? {
                     post: true,
-                    // With a login configured, GitHub's own reviewer queue is
-                    // the request — recording a second, local one here would
-                    // give the sweep two ways to trigger the same review.
+                    token: reviewer.token,
+                    // Only self-review records a LOCAL request. A dedicated
+                    // account sits in GitHub's own reviewer queue, and a second
+                    // request here would give the sweep two ways to trigger one
+                    // review.
                     requestLocal:
-                      !workflow.pr.reviewAgent.login && this.prRegistry
+                      reviewer.policy.identity === "self" && this.prRegistry
                         ? async (repo, n) =>
                             Boolean(
                               await this.prRegistry?.requestReviewAgent(repo, n, session.chatId),

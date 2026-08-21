@@ -63,6 +63,7 @@ import { useView } from "../../stores/view.js";
 import { useProjectSettingsDraft } from "../../stores/settingsDraft.js";
 import { api } from "../../lib/api.js";
 import { WorkflowProfilePicker } from "./WorkflowProfilePicker.js";
+import { ReviewerSection } from "./ReviewerSection.js";
 import { ConfigSectionPane } from "./ConfigSectionPane.js";
 import { sectionItems } from "./configItems.js";
 import { SECTIONS } from "./sections.js";
@@ -470,6 +471,20 @@ export function ProjectSettingsView() {
                   />
                 </div>
               </div>
+            )}
+
+            {/* Reads and writes the SAME workflow draft as the section above —
+                the reviewer is `workflow.pr.reviewAgent`, so both save through
+                one manifest write. Only the account half talks to the server on
+                its own, because a secret is not a draft. */}
+            {activeSection.id === "reviewer" && project && (
+              <ReviewerSection
+                value={workflow}
+                onChange={setDraft}
+                projectId={projectId}
+                fromManifest={hasDir}
+                disabled={saving}
+              />
             )}
           </ConfigSectionPane>
         </div>

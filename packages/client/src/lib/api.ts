@@ -72,6 +72,8 @@ import type {
   FsSelectKind,
   FsMutation,
   FsMutationResult,
+  ReviewerStatus,
+  ReviewerVerify,
 } from "@dispatch/shared";
 import { sessionFetch } from "../stores/auth.js";
 
@@ -898,6 +900,25 @@ export const api = {
   settings: {
     get: () => get<AppSettings>("/api/settings"),
     update: (body: Partial<AppSettings>) => put<AppSettings>("/api/settings", body),
+  },
+
+  /**
+   * The PR reviewer's machine account (see routes/reviewer.ts).
+   *
+   * App-wide, not per-project: one account reviews every repo you own, and its
+   * token is a secret that must never reach `.dispatch/project.yaml` — which is
+   * committed. The token is WRITE-ONLY across this boundary; nothing here ever
+   * returns it, so a session that didn't set it can't read it back.
+   */
+  reviewer: {
+    get: () => get<ReviewerStatus>("/api/reviewer"),
+    /** Verified before it is stored — a rejected token is a 400, not a saved one. */
+    save: (body: { token: string; projectId?: string }) =>
+      put<ReviewerStatus & { verify: ReviewerVerify }>("/api/reviewer", body),
+    remove: () => del<void>("/api/reviewer"),
+    /** Re-check what's stored, or try a candidate token before committing to it. */
+    verify: (body: { token?: string; projectId?: string } = {}) =>
+      post<ReviewerVerify>("/api/reviewer/verify", body),
   },
 
   /* stop the whole app (see routes/shutdown.ts) */

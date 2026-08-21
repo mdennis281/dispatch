@@ -829,6 +829,83 @@ export class GitHubService {
 
   /* ---------------------------------------------------------- gh primitives */
 
+  /**
+   * The environment that makes `gh` act as somebody else.
+   *
+   * `GH_TOKEN` and nothing else: it takes precedence over both `GITHUB_TOKEN`
+   * and the `hosts.yml` login, so one variable is enough to switch identity
+   * without touching the human's `gh auth` state — which matters because this
+   * process shares that state with every other thing the human runs.
+   *
+   * Returns `undefined` for an absent token so the caller spreads nothing and
+   * the child simply inherits, rather than being handed a scrubbed environment.
+   */
+  private tokenEnv(token?: string): NodeJS.ProcessEnv | undefined {
+    return token ? { ...process.env, GH_TOKEN: token } : undefined;
+  }
+
+  /**
+   * Which account is this? With a token, whose token is it; without one, who is
+   * `gh` logged in as.
+   *
+   * Both halves of reviewer setup need this and they need it to be the SAME
+   * call: the check that actually catches a mistake is comparing the two logins,
+   * and comparing answers from two different code paths is how you get a
+   * comparison that passes on a technicality.
+   *
+   * `gh api user` is the cheapest call that proves authentication AND names the
+   * account — worth more than a boolean, because the mistake people really make
+   * is pasting a token for the wrong account and then getting reviews from
+   * themselves wearing a bot's name.
+   *
+   * Never throws: a bad token is the expected answer here, not an exception.
+   */
+  async whoami(token?: string): Promise<{ login?: string; error?: string }> {
+    const env = this.tokenEnv(token);
+    const res = await this.exec("gh", ["api", "user", "--jq", ".login"], {
+      reject: false,
+      ...(env ? { env } : {}),
+    }).catch((e: unknown) => ({
+      stdout: "",
+      stderr: e instanceof Error ? e.message : String(e),
+      exitCode: 1,
+    }));
+    if (res.exitCode !== 0) {
+      return { error: (res.stderr || res.stdout || "gh could not authenticate").trim().slice(0, 300) };
+    }
+    const login = (res.stdout ?? "").trim();
+    return login ? { login } : { error: "GitHub accepted the token but named no account" };
+  }
+
+  /**
+   * Is this login a collaborator on this repo?
+   *
+   * The second half of reviewer setup, and the one nobody remembers: GitHub
+   * refuses `requested_reviewers` for a non-collaborator with *"Reviews may only
+   * be requested from collaborators"*, and that error arrives at the first PR —
+   * long after the setup panel said everything was fine. **Read** access is
+   * enough, which is the whole point of checking rather than telling people to
+   * grant write.
+   *
+   * Runs as the HUMAN, not as the reviewer: reading a repo's collaborator list
+   * is a permission the reviewer's own narrow token is not expected to have.
+   * `null` = could not tell, which the caller must not report as "not a
+   * collaborator".
+   */
+  async isCollaborator(repo: string, login: string): Promise<boolean | null> {
+    const r = this.assertRepo(repo);
+    const res = await this.exec(
+      "gh",
+      ["api", `repos/${r}/collaborators/${encodeURIComponent(login)}`, "--silent"],
+      { reject: false },
+    ).catch(() => null);
+    if (!res) return null;
+    if (res.exitCode === 0) return true;
+    // 404 is the documented "not a collaborator" answer. Anything else (403 on a
+    // repo we can't read, a network failure) is genuinely unknown.
+    return /HTTP 404|Not Found/i.test(res.stderr || res.stdout || "") ? false : null;
+  }
+
   /** Run `gh <args>`; throw on non-zero unless allowFail. Returns trimmed stdout. */
   private async gh(
     args: string[],
@@ -1578,10 +1655,15 @@ export class GitHubService {
     repo: string,
     prNumber: number,
     input: SubmitReviewInput,
-    opts: OpCtx = {},
+    opts: OpCtx & { token?: string } = {},
   ): Promise<SubmitReviewResult> {
     const r = this.assertRepo(repo);
     const comments = (input.comments ?? []).filter((c) => c.path && c.body);
+    // The dedicated reviewer's token, when there is one. This is the ONLY call
+    // in this service that runs as somebody other than the human — everything
+    // else (requesting the reviewer, merging, labelling) is an action the human
+    // is taking, and doing those as the bot would misattribute them.
+    const env = this.tokenEnv(opts.token);
 
     const post = async (
       event: SubmitReviewInput["event"],
@@ -1609,7 +1691,7 @@ export class GitHubService {
         const res = await this.exec(
           "gh",
           ["api", "--method", "POST", `repos/${r}/pulls/${prNumber}/reviews`, "--input", file],
-          { reject: false },
+          { reject: false, ...(env ? { env } : {}) },
         ).catch((e: unknown) => ({
           stdout: "",
           stderr: e instanceof Error ? e.message : String(e),

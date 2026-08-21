@@ -38,13 +38,19 @@ workflow:
     # reviewer that has stopped answering, every chat stalls on `no-review` and
     # the only ways out are a human override or dropping the requirement.
     #
-    # No `login`, so there is no GitHub account to sit in the reviewer queue:
-    # the request is recorded on the PR's catalog row instead, by `create_pr`
-    # and by every `request_review` after a fix round, and the background sweep
-    # spawns off that. Reviews post under whatever identity `gh` is
-    # authenticated as. Adding a machine account later is one line here.
+    # `identity` picks WHO the review is posted as, and it is the only half
+    # that lives here. The account and its token are a secret and this file is
+    # committed, so they sit in the config dir beside auth.json instead — set up
+    # once in Config → Reviewer, shared by every project.
+    #
+    #   self      — posts as whoever `gh` is authenticated as (you). Nothing to
+    #               set up. GitHub refuses a verdict on your own PR, so reviews
+    #               land as comments; the inline threads still block the merge.
+    #   dedicated — a machine account. It goes in GitHub's own reviewer queue, so
+    #               the request itself is the trigger, and it can request changes.
     reviewAgent:
       enabled: true
+      identity: self
 
 instructions:
   - file: house-rules.md

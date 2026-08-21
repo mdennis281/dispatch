@@ -12,6 +12,7 @@ export * from "./project-config.js";
 export * from "./manifest.js";
 export * from "./agent-tasks.js";
 export * from "./workflow.js";
+export * from "./reviewer.js";
 export * from "./env-expand.js";
 export * from "./usage.js";
 export * from "./user-agent.js";

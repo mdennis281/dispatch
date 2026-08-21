@@ -95,7 +95,12 @@ import {
   type McpPortLease,
   ShellTranscriptFilterSchema,
 } from "@dispatch/shared";
-import { HarnessSettingsSchema, UpdateChannelSchema } from "@dispatch/shared";
+import {
+  HarnessSettingsSchema,
+  ReviewerCredentialSchema,
+  UpdateChannelSchema,
+  type ReviewerCredential,
+} from "@dispatch/shared";
 import {
   KeyedMutex,
   readJson,
@@ -461,6 +466,17 @@ export class Store {
   /** Stable auth identities and their provider credentials share the config root. */
   authFile() {
     return join(this.configDir, "auth.json");
+  }
+  /**
+   * The PR reviewer's machine account and its token.
+   *
+   * In the CONFIG root, beside `auth.json`, for the two reasons that dir exists:
+   * it is shared between the stable and dev instances (one account, set up once),
+   * and install/upgrade never replace it. Emphatically NOT in the repo — the
+   * project manifest is committed, so a token authored there is a published one.
+   */
+  reviewerFile() {
+    return join(this.configDir, "reviewer.json");
   }
   /** Refresh families are high-write and must never be shared by two processes. */
   authSessionsFile() {
@@ -1458,5 +1474,39 @@ export class Store {
       writeJsonAtomic(this.settingsFile(), validated),
     );
     return validated;
+  }
+
+  /* ---------------------------------------------------------- reviewer */
+
+  /**
+   * The reviewer's machine account, token included. **Server-side only** — every
+   * route that answers with this must redact it through `reviewerStatus()`.
+   *
+   * A malformed file reads as "not configured" rather than throwing. The
+   * alternative is an unparseable credential taking the whole config view down,
+   * and the recovery from "not configured" is the same setup panel you would
+   * need anyway.
+   */
+  async getReviewer(): Promise<ReviewerCredential | null> {
+    const raw = await readJson(this.reviewerFile());
+    if (raw === undefined) return null;
+    const parsed = ReviewerCredentialSchema.safeParse(raw);
+    return parsed.success ? parsed.data : null;
+  }
+
+  async saveReviewer(cred: ReviewerCredential): Promise<ReviewerCredential> {
+    const validated = ReviewerCredentialSchema.parse(cred);
+    await this.mutex.run("reviewer", () =>
+      writeJsonAtomic(this.reviewerFile(), validated),
+    );
+    return validated;
+  }
+
+  /** Forget the account. Removing the file, not blanking it — a file holding an
+   *  empty token is indistinguishable from a corrupt one on the next read. */
+  async clearReviewer(): Promise<void> {
+    await this.mutex.run("reviewer", async () => {
+      await rm(this.reviewerFile(), { force: true });
+    });
   }
 }

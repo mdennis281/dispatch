@@ -651,6 +651,7 @@ describe("PrReviewWatcher — the PR catalog", () => {
 describe("PrReviewWatcher — Dispatch's own reviewer", () => {
   const POLICY: ResolvedReviewAgent = {
     enabled: true,
+    identity: "self",
     effort: "high",
     maxRounds: 2,
     post: true,
@@ -800,7 +801,7 @@ describe("PrReviewWatcher — Dispatch's own reviewer", () => {
     // appears in `requested` between one sweep and the next.
     await makeChat("c1", [REF]);
     const { registry, watcher, spawned } = await withReviewer({
-      policy: { ...POLICY, login: "dispatch-reviewer" },
+      policy: { ...POLICY, identity: "dedicated", login: "dispatch-reviewer" },
       github: fakeGitHub({
         patch: { headRefOid: "sha-1" },
         prReviewState: async () => ({ requested: ["dispatch-reviewer"], reported: [] }),
@@ -815,7 +816,7 @@ describe("PrReviewWatcher — Dispatch's own reviewer", () => {
   it("ignores a queue that holds someone else", async () => {
     await makeChat("c1", [REF]);
     const { registry, watcher, spawned } = await withReviewer({
-      policy: { ...POLICY, login: "dispatch-reviewer" },
+      policy: { ...POLICY, identity: "dedicated", login: "dispatch-reviewer" },
       github: fakeGitHub({
         patch: { headRefOid: "sha-1" },
         prReviewState: async () => ({ requested: ["copilot"], reported: [] }),

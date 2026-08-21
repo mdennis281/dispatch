@@ -26,6 +26,7 @@ import {
   type PrSnapshot,
 } from "@dispatch/shared";
 import { launchAgentTask } from "./agent-tasks.js";
+import { resolveReviewer } from "./reviewer.js";
 import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
 import { SessionBroker } from "./session-broker.js";
@@ -500,7 +501,13 @@ export function createServices(
         policyFor: async (projectId) => {
           if (!projectId) return null;
           const project = await store.getProject(projectId).catch(() => null);
-          return project ? resolveWorkflow(project).pr.reviewAgent : null;
+          if (!project) return null;
+          // Through `resolveReviewer` rather than `resolveWorkflow` directly, so
+          // a project asking for a dedicated account it has no credential for
+          // comes back DISABLED instead of quietly reviewing as the human.
+          const { policy, problem } = await resolveReviewer(store, project);
+          if (problem) bus.publish({ type: "notice", level: "warn", text: problem });
+          return policy;
         },
         spawn: async ({ projectId, repo, number, round, policy }) => {
           const out = await launchAgentTask(services, {
@@ -548,8 +555,11 @@ export function createServices(
       if (!chat?.projectId || !ref.repo) return;
       const project = await store.getProject(chat.projectId).catch(() => null);
       if (!project) return;
-      const policy = resolveWorkflow(project).pr.reviewAgent;
-      if (!policy.enabled || policy.login) return;
+      const { policy } = await resolveReviewer(store, project);
+      // Only self-review records a LOCAL request: a dedicated account is put in
+      // GitHub's own reviewer queue by `create_pr`, and recording a second
+      // request here would give the sweep two ways to trigger one review.
+      if (!policy.enabled || policy.identity !== "self") return;
       await prRegistry.requestReviewAgent(ref.repo, ref.number, chatId).catch(() => {});
     })();
   };
@@ -560,6 +570,14 @@ export function createServices(
   // project defaults, worktree isolation, workflow profile and guards. The purpose
   // tag is the only difference, and it exists so the sidebar can say where the
   // chat came from.
+  // The reviewer identity for a session — the policy joined to the app-wide
+  // credential. A function on the broker rather than a Store reach-in, so the
+  // broker keeps knowing nothing about where credentials are kept.
+  broker.resolveReviewer = async (projectId) => {
+    if (!projectId) return null;
+    const project = await store.getProject(projectId).catch(() => null);
+    return project ? resolveReviewer(store, project) : null;
+  };
   broker.spawnChat = async ({ request, project, parentChatId }) => {
     const chat = await createChat(services, {
       projectId: project.id,

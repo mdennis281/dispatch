@@ -105,7 +105,14 @@ describe("resolveWorkflow", () => {
       draft: false,
       // Off by default: spawning a reviewer spends the human's model quota, so
       // it is a toggle they flip, not something the profile hands over.
-      reviewAgent: { enabled: false, effort: "high", maxRounds: 4, post: true },
+      reviewAgent: {
+        enabled: false,
+        identity: "self",
+        login: undefined,
+        effort: "high",
+        maxRounds: 4,
+        post: true,
+      },
     });
   });
 
@@ -126,7 +133,14 @@ describe("resolveWorkflow", () => {
       requireReview: true,
       requireChecks: false,
       draft: true,
-      reviewAgent: { enabled: false, effort: "high", maxRounds: 4, post: true },
+      reviewAgent: {
+        enabled: false,
+        identity: "self",
+        login: undefined,
+        effort: "high",
+        maxRounds: 4,
+        post: true,
+      },
     });
   });
 
@@ -136,24 +150,28 @@ describe("resolveWorkflow", () => {
     const wf = resolveWorkflow({
       workflow: {
         profile: "review",
-        pr: { reviewAgent: { enabled: true, effort: "max", login: "dispatch-reviewer" } },
+        pr: { reviewAgent: { enabled: true, effort: "max", identity: "dedicated" } },
       },
     });
     expect(wf.pr.reviewAgent).toEqual({
       enabled: true,
+      identity: "dedicated",
+      login: undefined,
       effort: "max",
-      login: "dispatch-reviewer",
       maxRounds: 4,
       post: true,
     });
   });
 
-  it("treats a blank reviewer login as none", () => {
-    // A half-filled config field must not send the trigger looking for a
-    // reviewer called "" — which no GitHub queue will ever contain.
+  it("never resolves a reviewer login here, even asking for a dedicated account", () => {
+    // The login lives with the TOKEN, in the config dir, because this file is
+    // committed. This package cannot read that, so the server overlays it — and
+    // a consumer seeing `dedicated` with no login must read that as NOT
+    // CONFIGURED rather than falling back to the human's own account.
     const wf = resolveWorkflow({
-      workflow: { profile: "review", pr: { reviewAgent: { enabled: true, login: "  " } } },
+      workflow: { profile: "review", pr: { reviewAgent: { enabled: true, identity: "dedicated" } } },
     });
+    expect(wf.pr.reviewAgent.identity).toBe("dedicated");
     expect(wf.pr.reviewAgent.login).toBeUndefined();
   });
 
@@ -176,7 +194,7 @@ describe("resolveWorkflow", () => {
             requireReview: true,
             requireChecks: true,
             draft: true,
-            reviewAgent: { enabled: true, maxRounds: 9 },
+            reviewAgent: { enabled: true, maxRounds: 9, identity: "dedicated" },
           },
         },
       });
@@ -185,7 +203,14 @@ describe("resolveWorkflow", () => {
         requireReview: false,
         requireChecks: false,
         draft: false,
-        reviewAgent: { enabled: false, effort: "high", maxRounds: 4, post: true },
+        reviewAgent: {
+          enabled: false,
+          identity: "self",
+          login: undefined,
+          effort: "high",
+          maxRounds: 4,
+          post: true,
+        },
       });
     }
   });
