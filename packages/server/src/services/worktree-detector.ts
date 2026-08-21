@@ -838,7 +838,55 @@ const PKG_MANAGERS = new Set(["pnpm", "npm", "yarn", "npx", "bun"]);
 /** Cheap gate: does the command create a worktree at all (git add / pnpm worktree)? */
 export function looksLikeWorktreeCreate(command: string): boolean {
   if (/\bgit\b[^\n]*\bworktree\b[^\n]*\badd\b/.test(command)) return true;
-  return /\b(?:pnpm|npm|yarn|npx|bun)\b[^\n&|;]*\bworktree\b/.test(command);
+  return command.split(/[\n&|;]+/).some(runsWorktreeScript);
+}
+
+/** Option flags that consume the NEXT token as their value. */
+const FLAGS_WITH_VALUE = /^(?:-C|--dir|--filter|-F|-w|--workspace|--prefix)$/;
+
+/**
+ * Does this command segment run a package-manager script literally NAMED
+ * `worktree` (`pnpm worktree feat/x`, `npm run worktree x`, `pnpm -C repo
+ * worktree x`)?
+ *
+ * This used to be `/\b(pnpm|npm|…)\b[^\n&|;]*\bworktree\b/` — a package manager
+ * followed by the word "worktree" ANYWHERE in the rest of the segment. That
+ * matched far more than it meant to: `npx vitest run …/worktree-reaper.test.ts`
+ * is a read-only test run, and the guard refused it because the word appears in
+ * a FILENAME. Anyone working on worktree code was blocked from running the tests
+ * for the code they were working on.
+ *
+ * So the match is now positional: `worktree` has to be the first non-flag token
+ * after the package manager (past `run` / `exec`), which is the only position
+ * that makes it a script name rather than an argument.
+ */
+function runsWorktreeScript(segment: string): boolean {
+  const tokens = segment.trim().split(/\s+/).filter(Boolean);
+  let i = 0;
+  // `FOO=bar pnpm worktree x` — step over leading env assignments.
+  while (tokens[i] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) i++;
+  const pm = tokens[i];
+  if (!pm) return false;
+  // Tolerate an absolute path to the binary, and a `.cmd`/`.exe` shim.
+  const name = pm.split(/[/\\]/).pop()!.replace(/\.(cmd|exe|ps1)$/i, "");
+  if (!PKG_MANAGERS.has(name)) return false;
+  i++;
+  while (i < tokens.length) {
+    const tok = tokens[i]!;
+    if (tok === "run" || tok === "run-script" || tok === "exec") {
+      i++;
+      continue;
+    }
+    if (tok.startsWith("-")) {
+      i++;
+      // `-C <dir>` style: the value is a separate token, not an argument yet.
+      if (FLAGS_WITH_VALUE.test(tok)) i++;
+      continue;
+    }
+    // The first real argument. It is the script name — or it isn't.
+    return tok === "worktree";
+  }
+  return false;
 }
 
 /** Strip one layer of surrounding matching quotes from a shell token. */
