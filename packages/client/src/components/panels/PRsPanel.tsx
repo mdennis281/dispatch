@@ -28,6 +28,8 @@ import type {
   ReviewDecision,
 } from "@dispatch/shared";
 import { usePanels } from "../../stores/panels.js";
+import { usePrReviewAgent } from "../../stores/prs.js";
+import { ReviewAgentChip, ReviewerProblemNotice } from "../pr/ReviewAgentChip.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
 import { worktreeMatchesChat } from "./panelBus.js";
@@ -405,6 +407,10 @@ function PrCard({
 }) {
   const { busy, run } = useBusy();
   const [reviewing, setReviewing] = useState(false);
+  // Dispatch's reviewer is registry bookkeeping, not something `gh pr view`
+  // returns — so it is joined in from the standing PR catalog rather than being
+  // on the `PRInfo` this card is built from.
+  const reviewAgent = usePrReviewAgent(chatId, pr.number, pr.repo);
   const threads = pr.reviewThreads ?? [];
   const unresolved = threads.filter((t) => !t.isResolved);
   const commentCount = pr.commentCount ?? 0;
@@ -472,12 +478,22 @@ function PrCard({
             </Chip>
           )}
           {merge && <Chip tone={merge.tone}>{merge.label}</Chip>}
+          <ReviewAgentChip state={reviewAgent} />
           <span className="ml-auto flex shrink-0 items-center gap-1.5">
             <span className="tabular-nums text-2xs text-success">+{pr.additions ?? 0}</span>
             <span className="tabular-nums text-2xs text-danger">−{pr.deletions ?? 0}</span>
           </span>
         </div>
       </div>
+
+      {/* The reviewer refusing to RUN is a standing misconfiguration, not a
+          per-PR fact, so it gets a line of its own rather than a chip that says
+          "off" and makes you hover to find out why. */}
+      {reviewAgent?.problem && (
+        <div className="border-t border-line-soft px-3 py-2">
+          <ReviewerProblemNotice prs={[{ reviewAgent }]} />
+        </div>
+      )}
 
       <LabelsRow pr={pr} chatId={chatId} />
 

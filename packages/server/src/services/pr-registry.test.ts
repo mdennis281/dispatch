@@ -470,4 +470,101 @@ describe("PrRegistry — Dispatch's own reviewer", () => {
       chatId: "chat-9",
     });
   });
+
+  it("records a posted review, so a finished round is not still 'in flight'", async () => {
+    // The claim is taken before the reviewer chat exists, so `reviewedAt` cannot
+    // be the completion signal. This is.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 });
+    await reg.noteReviewChat(REPO, 42, "chat-9");
+    now += 60_000;
+
+    const done = await reg.notePostedReview(REPO, 42, {
+      chatId: "chat-9",
+      findings: 2,
+      event: "REQUEST_CHANGES",
+    });
+    expect(done?.reviewAgent).toMatchObject({
+      postedAt: now,
+      findings: 2,
+      postedEvent: "REQUEST_CHANGES",
+      maxRounds: 3,
+    });
+  });
+
+  it("ignores a post from a chat that holds no lease on this PR", async () => {
+    // A human's chat calling `post_review` on a PR Dispatch reviewed last week
+    // would otherwise re-date that old round to now and overwrite its findings.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 });
+    await reg.noteReviewChat(REPO, 42, "chat-9");
+
+    expect(await reg.notePostedReview(REPO, 42, { chatId: "somebody-else" })).toBeNull();
+    expect((await store.getPrRecord(KEY))?.reviewAgent?.postedAt).toBeUndefined();
+  });
+
+  it("clears the previous round's verdict when the next one is claimed", async () => {
+    // Otherwise a round that dies before filing keeps showing the round BEFORE
+    // it as its result — the row would report findings about code it never saw.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 });
+    await reg.noteReviewChat(REPO, 42, "chat-9");
+    await reg.notePostedReview(REPO, 42, { chatId: "chat-9", findings: 2, event: "COMMENT" });
+
+    now += 60_000;
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    const second = await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 });
+
+    expect(second?.reviewAgent).toMatchObject({ rounds: 2, reviewedSha: "sha-2" });
+    expect(second?.reviewAgent?.postedAt).toBeUndefined();
+    expect(second?.reviewAgent?.findings).toBeUndefined();
+    expect(second?.reviewAgent?.postedEvent).toBeUndefined();
+  });
+});
+
+describe("PrRegistry — why the reviewer is not running", () => {
+  it("records a blocking problem even though nothing ever asked for a review", async () => {
+    // The dedicated-with-no-credential case records NO request — there is no
+    // account to put in GitHub's queue and nothing local asks on its behalf. So
+    // this is the one write that may create the reviewer state from nothing;
+    // without it the fault has no row to sit on and stays invisible.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+
+    const row = await reg.notePolicy(REPO, 42, { maxRounds: 4, problem: "no account" });
+    expect(row?.reviewAgent).toMatchObject({ rounds: 0, maxRounds: 4, problem: "no account" });
+  });
+
+  it("conjures nothing for a healthy project that has never asked", async () => {
+    // `maxRounds` alone is not worth turning "nobody asked" into a stored object
+    // on every open PR in every project.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+
+    expect(await reg.notePolicy(REPO, 42, { maxRounds: 4 })).not.toBeNull();
+    expect((await store.getPrRecord(KEY))?.reviewAgent).toBeUndefined();
+  });
+
+  it("writes only on a real change — the sweep asks every 90 seconds", async () => {
+    // A write per pass would be a `pr-record-update` broadcast per pass to every
+    // connected client, for a value that changes about once a year.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.notePolicy(REPO, 42, { maxRounds: 4, problem: "no account" });
+    const before = events.filter((e) => e.type === "pr-record-update").length;
+
+    await reg.notePolicy(REPO, 42, { maxRounds: 4, problem: "no account" });
+    expect(events.filter((e) => e.type === "pr-record-update").length).toBe(before);
+
+    await reg.notePolicy(REPO, 42, { maxRounds: 4 });
+    expect(events.filter((e) => e.type === "pr-record-update").length).toBe(before + 1);
+    expect((await store.getPrRecord(KEY))?.reviewAgent?.problem).toBeUndefined();
+  });
 });

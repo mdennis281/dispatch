@@ -573,6 +573,7 @@ describe("PrReviewWatcher — the PR catalog", () => {
       requestReviewAgent: registry.requestReviewAgent.bind(registry),
       claimReviewAgent: registry.claimReviewAgent.bind(registry),
       noteReviewChat: registry.noteReviewChat.bind(registry),
+      notePolicy: registry.notePolicy.bind(registry),
       due: (t?: number) => {
         dueCalls += 1;
         return registry.due(t);
@@ -680,7 +681,10 @@ describe("PrReviewWatcher — Dispatch's own reviewer", () => {
       github: over.github ?? fakeGitHub({ patch: { headRefOid: "sha-1" } }),
       registry,
       reviewAgent: {
-        policyFor: async () => (over.policy === undefined ? POLICY : over.policy),
+        policyFor: async () => {
+          const policy = over.policy === undefined ? POLICY : over.policy;
+          return policy ? { policy } : null;
+        },
         spawn: async ({ number, round }) => {
           spawned.push({ number, round });
           return over.spawn ? over.spawn() : { chatId: `review-${round}` };

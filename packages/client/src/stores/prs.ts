@@ -63,3 +63,31 @@ export function selectPrs(s: PrsStore): PrRecord[] {
 export function useAllPrs(): PrRecord[] {
   return usePrs(useShallow(selectPrs));
 }
+
+/**
+ * The reviewer state for ONE pull request, from the registry row behind it.
+ *
+ * Exists because the per-chat PRs panel renders `PRInfo` — a live `gh` read that
+ * knows nothing about Dispatch's own reviewer, which is registry bookkeeping and
+ * lives only on `PrRecord`. Rather than widening that endpoint, the panel joins
+ * to the standing catalog it is already subscribed to.
+ *
+ * Keyed by `owner/repo#number` where the repo is known. The `chatId` fallback is
+ * for the rows that predate `repo` being recorded on a PR ref: a bare number is
+ * ambiguous across repositories (see this module's docblock), but a bare number
+ * scoped to ONE chat is not, because a chat has one checkout.
+ *
+ * Returns the stored object by reference, so it is safe to select directly —
+ * unlike `selectPrs`, this builds nothing.
+ */
+export function usePrReviewAgent(
+  chatId: string,
+  prNumber: number,
+  repo?: string,
+): PrRecord["reviewAgent"] {
+  return usePrs((s) => {
+    if (repo) return s.byKey[`${repo}#${prNumber}`]?.reviewAgent;
+    return Object.values(s.byKey).find((r) => r.chatId === chatId && r.number === prNumber)
+      ?.reviewAgent;
+  });
+}

@@ -72,6 +72,7 @@ import { useChats } from "../../stores/chats.js";
 import { useProjects } from "../../stores/projects.js";
 import { useAllPrs } from "../../stores/prs.js";
 import { selectChat } from "../../stores/navigation.js";
+import { ReviewAgentChip, ReviewerProblemNotice } from "../pr/ReviewAgentChip.js";
 import {
   useWorkspace,
   type WorkspaceFilters,
@@ -427,6 +428,7 @@ function ReviewerChip({ reviewer }: { reviewer: PrReviewer }) {
 }
 
 function PrRow({ pr, showProject }: { pr: PrRecord; showProject: boolean }) {
+  const closeOverlay = useOverlay("workspace").close;
   const link = pr.url && pr.url !== "#" ? pr.url : undefined;
   const open = pr.state === "open";
   const unresolved = pr.threads.filter((t) => !t.isResolved && !t.isOutdated).length;
@@ -492,6 +494,10 @@ function PrRow({ pr, showProject }: { pr: PrRecord; showProject: boolean }) {
             </Chip>
           )}
           {open && pr.reviewers.map((r) => <ReviewerChip key={r.login} reviewer={r} />)}
+          {/* Dispatch's own reviewer. Not folded into `reviewers` above: those
+              come from GitHub's queue, and in self-review mode ours is not in
+              it — the state lives only on our row. */}
+          <ReviewAgentChip state={pr.reviewAgent} onNavigate={closeOverlay} />
         </>
       }
       actions={
@@ -772,6 +778,7 @@ export function WorkspaceView() {
         </label>
 
         {error && <InlineError message={error} />}
+        {kind === "prs" && <ReviewerProblemNotice prs={rows.prs} />}
 
         <div className="cm-scroll flex max-h-[55vh] flex-col gap-2 overflow-y-auto">
           {loading && list.length === 0 && kind !== "prs" ? (

@@ -366,11 +366,61 @@ export const PrReviewAgentStateSchema = z.object({
   requestedBy: z.string().optional(),
   /** Head sha the last spawned review actually covered. */
   reviewedSha: z.string().optional(),
+  /**
+   * When the round was CLAIMED — not when a review landed. The lease is taken
+   * before the reviewer chat exists (see `PrRegistry.claimReviewAgent`), so this
+   * moves the instant the sweep decides to review and says nothing about whether
+   * anything came of it. {@link postedAt} is the completion signal.
+   */
   reviewedAt: z.number().int().optional(),
   /** The chat doing (or last to do) the review, so the row can link to it. */
   chatId: z.string().optional(),
   /** Reviews spawned for this PR — capped by `workflow.pr.reviewAgent.maxRounds`. */
   rounds: z.number().int().default(0),
+  /**
+   * When the reviewer actually POSTED its review, set from `post_review`
+   * succeeding and cleared by the next claim.
+   *
+   * Added because there was no honest way to tell a review that is still running
+   * from one that finished: `reviewedAt` is claim time, so a row carrying it is
+   * equally a reviewer three minutes into reading the diff and one that filed
+   * its findings an hour ago. The gap between `reviewedAt` and this is exactly
+   * the in-flight window, and it is the only state in which "nothing has
+   * appeared on the PR yet" is expected rather than a failure.
+   */
+  postedAt: z.number().int().optional(),
+  /** Inline findings the last posted review left, so a round can say what it cost. */
+  findings: z.number().int().optional(),
+  /**
+   * The verdict GitHub actually accepted for the last posted review.
+   *
+   * Worth keeping separately from the PR's own `reviewDecision` because in
+   * self-review mode GitHub refuses a verdict on your own pull request and
+   * downgrades it to a plain comment — so `reviewDecision` stays null however
+   * blocking the findings were, and this is the only record that the reviewer
+   * tried to block.
+   */
+  postedEvent: z.enum(["COMMENT", "REQUEST_CHANGES", "APPROVE"]).optional(),
+  /**
+   * The round cap in force, mirrored onto the row.
+   *
+   * `workflow.pr.reviewAgent.maxRounds` is per-project config the PR catalog
+   * never sees, and a bare `rounds: 3` is indistinguishable from three of three
+   * (the reviewer is done, permanently) and three of eight (another is coming).
+   * Without this the cap is a silent stop.
+   */
+  maxRounds: z.number().int().optional(),
+  /**
+   * Why Dispatch's reviewer will not run for this PR at all.
+   *
+   * From `resolveReviewer`'s `problem`: a project that asks to review as a
+   * dedicated account with no credential configured gets a DISABLED reviewer,
+   * not one downgraded to self-review. That used to surface as a single
+   * transient bus notice — miss the toast and the reviewer is simply, silently
+   * not running. Held on the row it survives a reload and sits on the PRs it is
+   * costing, which is where somebody wonders about it.
+   */
+  problem: z.string().optional(),
 });
 export type PrReviewAgentState = z.infer<typeof PrReviewAgentStateSchema>;
 
@@ -420,10 +470,11 @@ export const PrRecordSchema = PrSnapshotSchema.extend({
    */
   pollError: z.string().optional(),
   /**
-   * Dispatch's own reviewer, on this PR. Absent = never asked. On the RECORD
-   * rather than the snapshot because it is bookkeeping: a tool result frozen
-   * into a transcript should say what the PR looked like, not carry a counter
-   * that keeps moving.
+   * Dispatch's own reviewer, on this PR: what it was asked for, what it has
+   * done, and what is stopping it. Absent = nobody asked and nothing is in the
+   * way. On the RECORD rather than the snapshot because it is bookkeeping: a
+   * tool result frozen into a transcript should say what the PR looked like,
+   * not carry a counter that keeps moving.
    */
   reviewAgent: PrReviewAgentStateSchema.optional(),
 });

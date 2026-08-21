@@ -728,6 +728,20 @@ export interface ManagerMcpPrRegistry {
    * call to draw it is not.
    */
   snapshotByThread(threadId: string): Promise<PrSnapshot | null>;
+  /**
+   * Report that this session just posted a review on a PR, so the catalog can
+   * tell a reviewer that FINISHED from one still reading the diff. The lease
+   * that spawned the reviewer is taken minutes earlier, before the chat exists,
+   * so it cannot answer that — see `PrReviewAgentStateSchema.postedAt`.
+   */
+  notePostedReview(
+    prNumber: number,
+    repo: string | undefined,
+    by: {
+      findings?: number;
+      event?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
+    },
+  ): Promise<void>;
 }
 
 export interface ManagerMcpPrApproval {
@@ -2536,6 +2550,15 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           },
         );
       }
+
+      // The row's completion signal. Best-effort and BEFORE the reporting below,
+      // so a catalog write cannot change what the agent is told happened.
+      await ctx.prRegistry
+        ?.notePostedReview(number, repo, {
+          findings: comments.length,
+          event: res.event ?? event,
+        })
+        .catch(() => undefined);
 
       const details: string[] = [];
       // A downgrade is REPORTED, never silent: the agent asked to block a merge

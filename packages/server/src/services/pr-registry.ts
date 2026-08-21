@@ -362,7 +362,85 @@ export class PrRegistry {
           reviewedSha: sha,
           reviewedAt: now,
           rounds: state.rounds + 1,
+          maxRounds: opts.maxRounds,
+          // The previous round's verdict is cleared HERE rather than left to be
+          // overwritten on post. A round that dies before filing would otherwise
+          // keep showing the round before it as its result — the row would read
+          // "reviewed, 3 findings" about code that reviewer never saw.
+          postedAt: undefined,
+          findings: undefined,
+          postedEvent: undefined,
         },
+      }),
+    );
+  }
+
+  /**
+   * Record that the reviewer chat actually POSTED — the completion signal the
+   * claim deliberately cannot be.
+   *
+   * Only the chat holding the lease may complete a row. A human's chat calling
+   * `post_review` on a PR Dispatch reviewed last week is a different event, and
+   * letting it land here would date that old round to now and change its
+   * findings count to this one's.
+   */
+  async notePostedReview(
+    repo: string,
+    number: number,
+    by: {
+      chatId: string;
+      findings?: number;
+      event?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
+    },
+  ): Promise<PrRecord | null> {
+    const key = prRecordKey(repo, number);
+    const prev = await this.store.getPrRecord(key);
+    const state = prev?.reviewAgent;
+    if (!prev || !state || state.chatId !== by.chatId) return null;
+    return this.publish(
+      await this.store.upsertPrRecord(key, { ...prev }, {
+        reviewAgent: {
+          ...state,
+          postedAt: this.now(),
+          findings: by.findings,
+          postedEvent: by.event,
+        },
+      }),
+    );
+  }
+
+  /**
+   * Mirror the reviewer POLICY onto the row — the round cap, and why the
+   * reviewer is refusing to run at all.
+   *
+   * Called off every sweep pass, so it writes only on a real change: the sweep
+   * sees each PR every 90 seconds, and a write per pass would be a broadcast per
+   * pass to every connected client for a value that changes once a year.
+   *
+   * A `problem` may CREATE the reviewer state where none exists, and that is the
+   * point — the misconfiguration this reports is precisely the one in which no
+   * request is ever recorded, because there is no reviewer account to put in
+   * GitHub's queue and nothing local asks on its behalf. Without this the state
+   * has no row to sit on. A clean policy conjures nothing: `maxRounds` alone is
+   * not worth turning "nobody asked" into a stored object on every PR.
+   */
+  async notePolicy(
+    repo: string,
+    number: number,
+    policy: { maxRounds?: number; problem?: string },
+  ): Promise<PrRecord | null> {
+    const key = prRecordKey(repo, number);
+    const prev = await this.store.getPrRecord(key);
+    if (!prev) return null;
+    const state = prev.reviewAgent;
+    // Null only ever means "no such row", as everywhere else here — an
+    // unchanged row comes back as itself.
+    if (!state && !policy.problem) return prev;
+    const maxRounds = policy.maxRounds ?? state?.maxRounds;
+    if (state?.problem === policy.problem && state?.maxRounds === maxRounds) return prev;
+    return this.publish(
+      await this.store.upsertPrRecord(key, { ...prev }, {
+        reviewAgent: { ...(state ?? { rounds: 0 }), maxRounds, problem: policy.problem },
       }),
     );
   }
