@@ -36,12 +36,40 @@ let worktrees: WorktreeService;
 let reaper: WorktreeReaper;
 let liveTerminals: TerminalInfo[];
 
+/**
+ * Identity and signing come from the ENVIRONMENT, not from `git config` calls.
+ *
+ * That is a performance decision, not a style one. Every git subprocess on the
+ * author's Windows box costs ~6s of pure spawn overhead, so the three
+ * `git config` calls this replaces were ~18 seconds of EVERY test's setup —
+ * about eleven minutes across the file. `GIT_CONFIG_*` overrides a global
+ * `commit.gpgsign = true` the same way `git config` would.
+ */
 const GIT_ENV = {
   GIT_AUTHOR_NAME: "t",
   GIT_AUTHOR_EMAIL: "t@t",
   GIT_COMMITTER_NAME: "t",
   GIT_COMMITTER_EMAIL: "t@t",
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "commit.gpgsign",
+  GIT_CONFIG_VALUE_0: "false",
 };
+
+/**
+ * Per-test ceiling for this file.
+ *
+ * The global `testTimeout` is 60s (see vitest.config.ts, which documents these
+ * git-driven suites failing on the clock rather than on breakage). These cases
+ * drive REAL git — a bare remote, a clone, worktrees, merges — and the two
+ * heaviest measured 100s and 91s on Windows at ~6s per subprocess. Raising it
+ * HERE rather than globally keeps the 60s gate meaningful for every suite that
+ * doesn't have this excuse.
+ */
+const GIT_TEST_TIMEOUT = 180_000;
+
+/** `it`, with this file's git-speed timeout baked in. Every case here uses it. */
+const gitIt = (name: string, fn: () => Promise<void>) =>
+  it(name, fn, GIT_TEST_TIMEOUT);
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const r = await execa("git", args, { cwd, env: GIT_ENV, stripFinalNewline: true });
@@ -154,14 +182,16 @@ beforeEach(async () => {
   await mkdir(wtRoot, { recursive: true });
 
   // A real bare remote, so `@{upstream}` and `[gone]` mean what they mean.
+  //
+  // Four git calls, and the count is deliberate: at ~6s a spawn this runs 38
+  // times, so every call removed here is ~4 minutes off the file. The root
+  // commit is `--allow-empty` rather than a written-and-added file because
+  // nothing needs a shared file — each branch brings its own.
   await execa("git", ["-c", "init.defaultBranch=main", "init", "--bare", origin]);
-  await execa("git", ["-c", "init.defaultBranch=main", "clone", origin, repo]);
-  await git(repo, "config", "user.email", "t@t");
-  await git(repo, "config", "user.name", "t");
-  await git(repo, "config", "commit.gpgsign", "false");
-  await writeFile(join(repo, "keep.txt"), "one\n");
-  await git(repo, "add", "-A");
-  await git(repo, "commit", "-m", "init");
+  await execa("git", ["-c", "init.defaultBranch=main", "clone", origin, repo], {
+    env: GIT_ENV,
+  });
+  await git(repo, "commit", "--allow-empty", "-m", "init");
   await git(repo, "push", "-u", "origin", "main");
 
   bus = new EventBus();
@@ -185,7 +215,10 @@ beforeEach(async () => {
 afterEach(async () => {
   reaper.stop();
   store.close();
-  await rm(root, { recursive: true, force: true });
+  // Windows holds handles on a directory git was just working in, so this
+  // rmdir intermittently throws EBUSY. A temp dir the OS will clean up anyway
+  // is not worth failing a green test over.
+  await rm(root, { recursive: true, force: true }).catch(() => {});
 });
 
 /**
@@ -207,7 +240,7 @@ async function judge(path: string, opts: Parameters<WorktreeReaper["plan"]>[0] =
 /* ------------------------------------------------------------- the gates */
 
 describe("WorktreeReaper.plan — what blocks a removal", () => {
-  it("clears a merged, clean, fully-pushed worktree", async () => {
+  gitIt("clears a merged, clean, fully-pushed worktree", async () => {
     const p = await makeBranchWorktree("feat/done");
     await push(p, "feat/done");
     await mergeToMain("feat/done");
@@ -218,23 +251,25 @@ describe("WorktreeReaper.plan — what blocks a removal", () => {
     expect(c.branchDeletable).toBe(true);
   });
 
-  it("blocks a tree whose branch has not landed", async () => {
+  gitIt("blocks a tree whose branch has not landed", async () => {
     const p = await makeBranchWorktree("feat/wip");
     await push(p, "feat/wip");
 
     expect((await judge(p)).blockers).toContain("unmerged");
   });
 
-  it("blocks a tree with uncommitted changes", async () => {
+  gitIt("blocks a tree with uncommitted changes", async () => {
     const p = await makeBranchWorktree("feat/dirty");
     await push(p, "feat/dirty");
     await mergeToMain("feat/dirty");
-    await writeFile(join(p, "keep.txt"), "edited\n");
+    // Edit the branch's OWN tracked file — a modification, not an addition, so
+    // this is distinct from the untracked case below.
+    await writeFile(join(p, "feat-dirty.txt"), "edited\n");
 
     expect((await judge(p)).blockers).toContain("dirty");
   });
 
-  it("blocks a tree with an UNTRACKED file — the one that exists nowhere else", async () => {
+  gitIt("blocks a tree with an UNTRACKED file — the one that exists nowhere else", async () => {
     const p = await makeBranchWorktree("feat/untracked");
     await push(p, "feat/untracked");
     await mergeToMain("feat/untracked");
@@ -243,7 +278,7 @@ describe("WorktreeReaper.plan — what blocks a removal", () => {
     expect((await judge(p)).blockers).toContain("dirty");
   });
 
-  it("blocks a tree holding commits the remote never saw", async () => {
+  gitIt("blocks a tree holding commits the remote never saw", async () => {
     const p = await makeBranchWorktree("feat/ahead");
     await push(p, "feat/ahead");
     await mergeToMain("feat/ahead");
@@ -255,7 +290,7 @@ describe("WorktreeReaper.plan — what blocks a removal", () => {
     expect((await judge(p)).blockers).toContain("unpushed");
   });
 
-  it("blocks a never-pushed branch with no merged PR to vouch for it", async () => {
+  gitIt("blocks a never-pushed branch with no merged PR to vouch for it", async () => {
     const p = await makeBranchWorktree("feat/local-only");
     // Merged into main locally, but the branch itself never left this machine
     // and nothing recorded a PR. There is no evidence the work exists elsewhere.
@@ -265,7 +300,7 @@ describe("WorktreeReaper.plan — what blocks a removal", () => {
     expect(c.blockers).toContain("unpushed");
   });
 
-  it("treats a branch it can't get tracking for as unpushed", async () => {
+  gitIt("treats a branch it can't get tracking for as unpushed", async () => {
     const p = await makeBranchWorktree("feat/detached-head");
     await push(p, "feat/detached-head");
     await mergeToMain("feat/detached-head");
@@ -277,12 +312,12 @@ describe("WorktreeReaper.plan — what blocks a removal", () => {
     expect(c.blockers).toContain("unpushed");
   });
 
-  it("never offers the primary checkout", async () => {
+  gitIt("never offers the primary checkout", async () => {
     const c = await judge(repo);
     expect(c.blockers).toContain("primary");
   });
 
-  it("never offers a worktree sitting on the trunk", async () => {
+  gitIt("never offers a worktree sitting on the trunk", async () => {
     // git refuses to check a branch out in two places, so the primary has to
     // step off main first — which is exactly the arrangement that produces a
     // `main` worktree in real life.
@@ -296,7 +331,7 @@ describe("WorktreeReaper.plan — what blocks a removal", () => {
     expect(c.blockers).toContain("default-branch");
   });
 
-  it("respects `git worktree lock` as an explicit keep", async () => {
+  gitIt("respects `git worktree lock` as an explicit keep", async () => {
     const p = await makeBranchWorktree("feat/locked");
     await push(p, "feat/locked");
     await mergeToMain("feat/locked");
@@ -305,7 +340,7 @@ describe("WorktreeReaper.plan — what blocks a removal", () => {
     expect((await judge(p)).blockers).toContain("locked");
   });
 
-  it("blocks while the owning chat is mid-turn", async () => {
+  gitIt("blocks while the owning chat is mid-turn", async () => {
     const p = await makeBranchWorktree("feat/busy");
     await push(p, "feat/busy");
     await mergeToMain("feat/busy");
@@ -315,7 +350,7 @@ describe("WorktreeReaper.plan — what blocks a removal", () => {
     expect((await judge(p)).blockers).toContain("chat-live");
   });
 
-  it("releases the tree once that chat goes idle", async () => {
+  gitIt("releases the tree once that chat goes idle", async () => {
     const p = await makeBranchWorktree("feat/wasbusy");
     await push(p, "feat/wasbusy");
     await mergeToMain("feat/wasbusy");
@@ -325,7 +360,7 @@ describe("WorktreeReaper.plan — what blocks a removal", () => {
     expect((await judge(p)).blockers).toEqual([]);
   });
 
-  it("blocks while a live shell is sitting in it", async () => {
+  gitIt("blocks while a live shell is sitting in it", async () => {
     const p = await makeBranchWorktree("feat/shell");
     await push(p, "feat/shell");
     await mergeToMain("feat/shell");
@@ -335,7 +370,7 @@ describe("WorktreeReaper.plan — what blocks a removal", () => {
     expect((await judge(p)).blockers).toContain("terminal-live");
   });
 
-  it("ignores a shell that has already exited", async () => {
+  gitIt("ignores a shell that has already exited", async () => {
     const p = await makeBranchWorktree("feat/deadshell");
     await push(p, "feat/deadshell");
     await mergeToMain("feat/deadshell");
@@ -344,7 +379,7 @@ describe("WorktreeReaper.plan — what blocks a removal", () => {
     expect((await judge(p)).blockers).toEqual([]);
   });
 
-  it("honors the grace window", async () => {
+  gitIt("honors the grace window", async () => {
     const graced = new WorktreeReaper({
       store,
       bus,
@@ -368,7 +403,7 @@ describe("WorktreeReaper — squash merges", () => {
   // answer is TTL-cached inside WorktreeService, so recording the PR and
   // re-asking within the window would just replay the first answer — and the
   // test would "prove" the fix doesn't work.
-  it("ancestry alone calls a squash-merged branch unmerged, forever", async () => {
+  gitIt("ancestry alone calls a squash-merged branch unmerged, forever", async () => {
     const p = await makeBranchWorktree("feat/squashed-nopr");
     await push(p, "feat/squashed-nopr");
     await squashMergeToMain("feat/squashed-nopr");
@@ -378,7 +413,7 @@ describe("WorktreeReaper — squash merges", () => {
     expect((await judge(p)).blockers).toContain("unmerged");
   });
 
-  it("still reaps a squash-merged branch, on the strength of its recorded PR", async () => {
+  gitIt("still reaps a squash-merged branch, on the strength of its recorded PR", async () => {
     const p = await makeBranchWorktree("feat/squashed");
     await push(p, "feat/squashed");
     await squashMergeToMain("feat/squashed");
@@ -401,7 +436,7 @@ describe("WorktreeReaper — squash merges", () => {
     expect(c.branchDeletable).toBe(true);
   });
 
-  it("does not treat an OPEN PR as landed", async () => {
+  gitIt("does not treat an OPEN PR as landed", async () => {
     const p = await makeBranchWorktree("feat/open-pr");
     await push(p, "feat/open-pr");
     await squashMergeToMain("feat/open-pr");
@@ -425,7 +460,7 @@ describe("WorktreeReaper — squash merges", () => {
 /* ---------------------------------------------------------------- removal */
 
 describe("WorktreeReaper.reap", () => {
-  it("removes the directory and, when asked, the branch", async () => {
+  gitIt("removes the directory and, when asked, the branch", async () => {
     const p = await makeBranchWorktree("feat/gone");
     await push(p, "feat/gone");
     await mergeToMain("feat/gone");
@@ -437,7 +472,7 @@ describe("WorktreeReaper.reap", () => {
     expect(await git(repo, "branch", "--list", "feat/gone")).toBe("");
   });
 
-  it("leaves the branch alone when not asked", async () => {
+  gitIt("leaves the branch alone when not asked", async () => {
     const p = await makeBranchWorktree("feat/keepbranch");
     await push(p, "feat/keepbranch");
     await mergeToMain("feat/keepbranch");
@@ -449,7 +484,7 @@ describe("WorktreeReaper.reap", () => {
     );
   });
 
-  it("deletes a SQUASH-merged branch, which `git branch -d` would refuse", async () => {
+  gitIt("deletes a SQUASH-merged branch, which `git branch -d` would refuse", async () => {
     const p = await makeBranchWorktree("feat/squash-branch");
     await push(p, "feat/squash-branch");
     await squashMergeToMain("feat/squash-branch");
@@ -471,7 +506,7 @@ describe("WorktreeReaper.reap", () => {
     expect(await git(repo, "branch", "--list", "feat/squash-branch")).toBe("");
   });
 
-  it("RE-JUDGES before removing — a tree that went dirty since the plan is refused", async () => {
+  gitIt("RE-JUDGES before removing — a tree that went dirty since the plan is refused", async () => {
     const p = await makeBranchWorktree("feat/raced");
     await push(p, "feat/raced");
     await mergeToMain("feat/raced");
@@ -487,7 +522,7 @@ describe("WorktreeReaper.reap", () => {
     expect(existsSync(p)).toBe(true);
   });
 
-  it("refuses a blocked path rather than skipping it silently", async () => {
+  gitIt("refuses a blocked path rather than skipping it silently", async () => {
     const p = await makeBranchWorktree("feat/notdone");
     await push(p, "feat/notdone");
 
@@ -497,7 +532,7 @@ describe("WorktreeReaper.reap", () => {
     expect(existsSync(p)).toBe(true);
   });
 
-  it("reports an unknown path instead of throwing", async () => {
+  gitIt("reports an unknown path instead of throwing", async () => {
     const result = await reaper.reap([join(wtRoot, "never-existed")]);
     expect(result.removed).toBe(0);
     expect(result.outcomes[0]?.error).toMatch(/no longer a known worktree/);
@@ -507,7 +542,7 @@ describe("WorktreeReaper.reap", () => {
 /* ----------------------------------------------------------------- sweeps */
 
 describe("WorktreeReaper.sweep", () => {
-  it("takes the landed trees and leaves everything else", async () => {
+  gitIt("takes the landed trees and leaves everything else", async () => {
     const done = await makeBranchWorktree("feat/sweep-done");
     await push(done, "feat/sweep-done");
     await mergeToMain("feat/sweep-done");
@@ -527,7 +562,7 @@ describe("WorktreeReaper.sweep", () => {
     expect(existsSync(dirty)).toBe(true);
   });
 
-  it("stays within its probe budget, and says so", async () => {
+  gitIt("stays within its probe budget, and says so", async () => {
     for (const b of ["feat/a", "feat/b", "feat/c"]) {
       const p = await makeBranchWorktree(b);
       await push(p, b);
@@ -538,7 +573,7 @@ describe("WorktreeReaper.sweep", () => {
     expect(plan.truncated).toBe(true);
   });
 
-  it("names what it removed, rather than just counting", async () => {
+  gitIt("names what it removed, rather than just counting", async () => {
     const notices: string[] = [];
     bus.subscribe((e) => {
       if (e.type === "notice") notices.push(e.text);
@@ -551,7 +586,7 @@ describe("WorktreeReaper.sweep", () => {
     expect(notices.some((t) => t.includes("feat/announced"))).toBe(true);
   });
 
-  it("does nothing, and says nothing, when there is nothing to do", async () => {
+  gitIt("does nothing, and says nothing, when there is nothing to do", async () => {
     const notices: string[] = [];
     bus.subscribe((e) => {
       if (e.type === "notice") notices.push(e.text);
@@ -567,7 +602,7 @@ describe("WorktreeReaper.sweep", () => {
 });
 
 describe("WorktreeReaper.sweepChat", () => {
-  it("only touches trees the chat owns", async () => {
+  gitIt("only touches trees the chat owns", async () => {
     const mine = await makeBranchWorktree("feat/mine");
     await push(mine, "feat/mine");
     await mergeToMain("feat/mine");
@@ -586,7 +621,7 @@ describe("WorktreeReaper.sweepChat", () => {
     expect(existsSync(theirs)).toBe(true);
   });
 
-  it("ignores the grace window — the owner stopping is better evidence than a timer", async () => {
+  gitIt("ignores the grace window — the owner stopping is better evidence than a timer", async () => {
     const graced = new WorktreeReaper({
       store,
       bus,
@@ -603,7 +638,7 @@ describe("WorktreeReaper.sweepChat", () => {
     expect(existsSync(p)).toBe(false);
   });
 
-  it("still refuses a dirty tree, however idle its owner", async () => {
+  gitIt("still refuses a dirty tree, however idle its owner", async () => {
     const p = await makeBranchWorktree("feat/idle-dirty");
     await push(p, "feat/idle-dirty");
     await mergeToMain("feat/idle-dirty");
@@ -615,7 +650,7 @@ describe("WorktreeReaper.sweepChat", () => {
     expect(existsSync(p)).toBe(true);
   });
 
-  it("is a no-op for a chat that owns nothing", async () => {
+  gitIt("is a no-op for a chat that owns nothing", async () => {
     await store.saveChat(mkChat({ status: "idle" }));
     expect((await reaper.sweepChat("chatA")).removed).toBe(0);
   });
@@ -636,7 +671,7 @@ describe("WorktreeReaper — the settings policy", () => {
     return new WorktreeReaper({ store, bus, worktrees, graceMs: 0, policy });
   }
 
-  it("does nothing automatic while cleanup is switched off", async () => {
+  gitIt("does nothing automatic while cleanup is switched off", async () => {
     const p = await landedTree("feat/policy-off");
     const r = withPolicy(async () => ({ enabled: false, deleteBranch: true }));
 
@@ -647,7 +682,7 @@ describe("WorktreeReaper — the settings policy", () => {
     expect(existsSync(p)).toBe(true);
   });
 
-  it("still lets a human do it by hand — the switch is about UNATTENDED passes", async () => {
+  gitIt("still lets a human do it by hand — the switch is about UNATTENDED passes", async () => {
     const p = await landedTree("feat/manual-anyway");
     const r = withPolicy(async () => ({ enabled: false, deleteBranch: true }));
 
@@ -656,7 +691,7 @@ describe("WorktreeReaper — the settings policy", () => {
     expect(existsSync(p)).toBe(false);
   });
 
-  it("takes `deleteBranch` from the policy rather than assuming", async () => {
+  gitIt("takes `deleteBranch` from the policy rather than assuming", async () => {
     await landedTree("feat/policy-keeps-branch");
     const r = withPolicy(async () => ({ enabled: true, deleteBranch: false }));
 
@@ -666,7 +701,7 @@ describe("WorktreeReaper — the settings policy", () => {
     );
   });
 
-  it("deletes the branch on a SWEEP when the policy says so", async () => {
+  gitIt("deletes the branch on a SWEEP when the policy says so", async () => {
     await landedTree("feat/sweep-branch-gone");
     const r = withPolicy(async () => ({ enabled: true, deleteBranch: true }));
 
@@ -675,7 +710,7 @@ describe("WorktreeReaper — the settings policy", () => {
     expect(await git(repo, "branch", "--list", "feat/sweep-branch-gone")).toBe("");
   });
 
-  it("fails CLOSED when the policy can't be read", async () => {
+  gitIt("fails CLOSED when the policy can't be read", async () => {
     const p = await landedTree("feat/policy-throws");
     const r = withPolicy(async () => {
       throw new Error("config unreadable");
@@ -690,7 +725,7 @@ describe("WorktreeReaper — the settings policy", () => {
 /* -------------------------------------------------------- the cheap pass */
 
 describe("WorktreeReaper.plan — cheapOnly", () => {
-  it("answers every gate but cleanliness, and admits it hasn't probed", async () => {
+  gitIt("answers every gate but cleanliness, and admits it hasn't probed", async () => {
     const p = await makeBranchWorktree("feat/cheap");
     await push(p, "feat/cheap");
     await mergeToMain("feat/cheap");
