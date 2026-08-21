@@ -78,6 +78,7 @@ import type {
   SubApp,
   BrowserMcpConfig,
   ContextUsage,
+  ResolvedReviewAgent,
   ResolvedWorkflow,
   WorkflowExemption,
   WorkflowExemptionScope,
@@ -181,6 +182,10 @@ export function buildManagerToolsDirective(caps: {
   prCreate?: boolean;
   /** Reviewers `create_pr` will request (`workflow.pr.reviewers`). */
   prReviewers?: readonly string[];
+  /** The project configured a Dispatch reviewer → `post_review` is bound. */
+  reviewAgent?: boolean;
+  /** …and it has no GitHub login, so `request_review` is what summons it. */
+  reviewAgentLocal?: boolean;
 }): string {
   const lines = [
     "# Manager tools — prefer these over improvising",
@@ -220,7 +225,21 @@ export function buildManagerToolsDirective(caps: {
       "- `mcp__manager__request_review` — put reviewers back on the hook. GitHub clears a " +
         "reviewer's request the moment they submit, and your fix commits do NOT re-queue " +
         "them — so after you address a round, call this (once your fixes are PUSHED) and " +
-        "then go back to `watch_pr`. Without it the PR sits with an empty queue forever.",
+        "then go back to `watch_pr`. Without it the PR sits with an empty queue forever." +
+        (caps.reviewAgentLocal
+          ? " It also summons Dispatch's OWN reviewer, which is what actually reviews here " +
+            "— it never appears in GitHub's reviewer queue, so an empty queue after this " +
+            "call is not a stall."
+          : ""),
+    );
+  }
+  if (caps.reviewAgent) {
+    lines.push(
+      "- `mcp__manager__post_review` — submit a REVIEW on a PR: a verdict, a summary, and " +
+        "inline comments on specific lines. Each inline comment becomes a review THREAD, " +
+        "which is what makes it visible to `watch_pr`, resolvable with `resolve_thread`, " +
+        "and blocking for `approve_pr`. Only for reviewing someone else's change — do not " +
+        "review your own PR to clear its review bar.",
     );
   }
   if (caps.prCreate) {
@@ -386,6 +405,7 @@ function makeGithubBinding(
   chatId: string,
   reviewers: readonly string[] = [],
   onSnapshot?: (chatId: string, snapshot: PrPollSnapshot) => void,
+  reviewAgent?: ReviewAgentBinding,
 ): ManagerMcpGitHub {
   const repoFor = makeRepoResolver(github, cwd);
   return {
@@ -414,9 +434,56 @@ function makeGithubBinding(
     },
     replyToThread: (threadId, body) => github.replyToThread(threadId, body, { chatId }),
     resolveThread: (threadId) => github.resolveThread(threadId, { chatId }),
+    submitReview: reviewAgent?.post
+      ? async (n, input, repo) => {
+          const r = await repoFor(repo);
+          if (!r) throw new Error("could not resolve the repo — pass `repo` as 'owner/name'");
+          return github.submitReview(r, n, input, { chatId, token: reviewAgent.token });
+        }
+      : undefined,
+    requestReviewAgent: reviewAgent?.requestLocal
+      ? async (n, repo) => {
+          const r = await repoFor(repo);
+          if (!r) {
+            return { ok: false, detail: "could not resolve the repo for this PR" };
+          }
+          const ok = await reviewAgent.requestLocal!(r, n).catch(() => false);
+          return {
+            ok,
+            detail: ok
+              ? "Dispatch's own reviewer has been asked; it starts within a couple of minutes"
+              : "Dispatch's reviewer could not be asked — this PR is not in the catalog yet",
+          };
+        }
+      : undefined,
     defaultReviewers: reviewers,
     notePrMerged: () => github.notePrMerged(chatId),
   };
+}
+
+/**
+ * What a session may do with Dispatch's own reviewer.
+ *
+ * Both halves are OPTIONAL and independent, because a project can want either
+ * without the other: a repo with a machine account configured can be asked
+ * through GitHub's own queue and needs no local request, while a project that
+ * only ever launches reviews by hand still wants `post_review` to exist.
+ */
+interface ReviewAgentBinding {
+  /** The project configured a reviewer → this session may submit reviews. */
+  post: boolean;
+  /**
+   * The dedicated account's token. Absent = self-review, and `gh` posts as the
+   * human. It is passed per-call rather than held in the session's environment
+   * so it reaches exactly one operation — submitting the review — and no shell
+   * the agent can run.
+   */
+  token?: string;
+  /**
+   * Record a review request on the PR's catalog row. Present only in the mode
+   * with no GitHub login, where there is no reviewer account to queue.
+   */
+  requestLocal?: (repo: string, prNumber: number) => Promise<boolean>;
 }
 
 /**
@@ -586,6 +653,11 @@ export interface SessionPrRegistry {
   noteWatched(repo: string, prNumber: number): Promise<void>;
   refreshByThread(threadId: string): Promise<PrSnapshot | null>;
   snapshotByThread(threadId: string): Promise<PrSnapshot | null>;
+  /**
+   * Record a request for Dispatch's own reviewer. Used only in the mode with no
+   * GitHub login, where there is no reviewer account to put in GitHub's queue.
+   */
+  requestReviewAgent(repo: string, prNumber: number, by: string): Promise<unknown>;
 }
 
 function makePrRegistryBinding(
@@ -1378,6 +1450,19 @@ export class SessionBroker {
    * Absent → `create_pr` says so out loud rather than implying it's watched.
    */
   armPrWatch?: (chatId: string, ref: PRRef) => void;
+  /**
+   * This project's reviewer identity — the committed policy joined to the
+   * app-wide credential. Settable after construction for the same reason as
+   * `armPrWatch`.
+   *
+   * A function rather than a field on the resolved workflow because the token is
+   * a SECRET living outside the repo: `resolveWorkflow` is pure and runs in a
+   * package with no filesystem, so the join has to happen somewhere that can
+   * read the config dir. Absent → `post_review` posts as whoever `gh` is.
+   */
+  resolveReviewer?: (
+    projectId: string | undefined,
+  ) => Promise<{ policy: ResolvedReviewAgent; token?: string } | null>;
   /**
    * Hand every `watch_pr` poll to the PR catalog. Settable after construction
    * for the same reason as `armPrWatch`: the registry is built after the broker.
@@ -4436,6 +4521,13 @@ export class SessionBroker {
     session.branch = wfCtx.branch;
     session.inWorktree = Boolean(session.worktreeCwd) || wfCtx.linked;
     const canApprovePr = Boolean(this.github) && workflow.autoMerge === "on-green";
+    // The reviewer identity, resolved ONCE: the tools directive below has to say
+    // whether `post_review` exists, and the MCP binding further down needs the
+    // token. Two resolutions would be two chances to disagree about who this
+    // session reviews as.
+    const reviewer = this.github
+      ? await this.resolveReviewer?.(session.projectId).catch(() => null)
+      : null;
     // `create_pr` exists wherever change ships through a PR — the same condition
     // the guard uses to refuse a raw `gh pr create`, so a refusal always has a
     // sanctioned path to name.
@@ -4458,6 +4550,8 @@ export class SessionBroker {
         prApproval: canApprovePr,
         prCreate: canCreatePr,
         prReviewers: workflow.pr.reviewers,
+        reviewAgent: Boolean(reviewer?.policy.enabled),
+        reviewAgentLocal: reviewer?.policy.enabled === true && reviewer.policy.identity === "self",
       }),
     );
     // The rendered contract itself comes next — before the project's own
@@ -4833,6 +4927,23 @@ export class SessionBroker {
               session.chatId,
               workflow.pr.reviewers,
               this.onPrSnapshot,
+              reviewer?.policy.enabled
+                ? {
+                    post: true,
+                    token: reviewer.token,
+                    // Only self-review records a LOCAL request. A dedicated
+                    // account sits in GitHub's own reviewer queue, and a second
+                    // request here would give the sweep two ways to trigger one
+                    // review.
+                    requestLocal:
+                      reviewer.policy.identity === "self" && this.prRegistry
+                        ? async (repo, n) =>
+                            Boolean(
+                              await this.prRegistry?.requestReviewAgent(repo, n, session.chatId),
+                            )
+                        : undefined,
+                  }
+                : undefined,
             )
           : undefined,
         // The PR-landing surface — bound ONLY when this project's workflow opted

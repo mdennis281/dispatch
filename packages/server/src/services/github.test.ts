@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { execa } from "execa";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventBus } from "../bus.js";
@@ -14,7 +14,8 @@ import { GitHubService, COPILOT_LOGIN, type ExecResult, type ExecaLike } from ".
 interface Call {
   file: string;
   args: string[];
-  options?: { cwd?: string; reject?: boolean };
+  /** `env` included: switching identity is an env change, so it has to be assertable. */
+  options?: { cwd?: string; reject?: boolean; env?: NodeJS.ProcessEnv };
 }
 
 /** A sequential execa mock: records every call, returns queued results in order. */
@@ -1199,3 +1200,152 @@ const PR_LIST_JSON_FIELDS_EXPECTED =
   "number,title,headRefName,state,isDraft,statusCheckRollup,reviewDecision,comments,updatedAt,url,labels";
 const PR_DETAIL_JSON_FIELDS_EXPECTED =
   "number,url,title,state,headRefName,baseRefName,isDraft,author,body,mergeable,mergeStateStatus,labels,additions,deletions,updatedAt,createdAt,statusCheckRollup,reviewDecision,comments";
+
+/* ------------------------------------------------------------- submitReview */
+
+describe("submitReview — how Dispatch's reviewer speaks", () => {
+  /**
+   * The payload goes over a temp FILE (`gh api --input`), because `comments` is
+   * an array of objects and `gh`'s `-f` flags cannot express one. So the mock
+   * reads it back at call time — the real service deletes the directory the
+   * moment the call returns.
+   */
+  function makeReviewExec() {
+    const bodies: unknown[] = [];
+    const queue: ExecResult[] = [];
+    const calls: Call[] = [];
+    const exec: ExecaLike = async (file, args = [], options) => {
+      calls.push({ file, args: [...args], options: options as Call["options"] });
+      const i = args.indexOf("--input");
+      if (i >= 0) bodies.push(JSON.parse(await readFile(args[i + 1] as string, "utf8")));
+      return queue.shift() ?? { stdout: "{}", exitCode: 0 };
+    };
+    const push = (r: Partial<ExecResult>) => queue.push({ stdout: "{}", exitCode: 0, ...r });
+    return { exec, calls, bodies, push };
+  }
+
+  it("posts as the dedicated account when given its token, and as you without one", async () => {
+    // The identity switch is one environment variable. GH_TOKEN outranks both
+    // GITHUB_TOKEN and the hosts.yml login, so this is what makes the review
+    // carry the bot's name — and its absence is what keeps every OTHER call in
+    // this service attributed to the human.
+    const withToken = makeReviewExec();
+    withToken.push({ stdout: "{}" });
+    await new GitHubService({ bus, exec: withToken.exec }).submitReview(
+      REPO,
+      7,
+      { event: "COMMENT", body: "hi" },
+      { token: "github_pat_secret" },
+    );
+    expect(withToken.calls[0].options?.env?.GH_TOKEN).toBe("github_pat_secret");
+
+    const without = makeReviewExec();
+    without.push({ stdout: "{}" });
+    await new GitHubService({ bus, exec: without.exec }).submitReview(REPO, 7, {
+      event: "COMMENT",
+      body: "hi",
+    });
+    // Not an empty env — undefined, so the child simply inherits rather than
+    // being handed a scrubbed environment with no PATH.
+    expect(without.calls[0].options?.env).toBeUndefined();
+  });
+
+  it("posts the verdict, the summary and one inline comment per finding", async () => {
+    const { exec, calls, bodies, push } = makeReviewExec();
+    push({ stdout: JSON.stringify({ html_url: "https://github.com/o/r/pull/7#r1" }) });
+    const gh = new GitHubService({ bus, exec });
+
+    const res = await gh.submitReview(REPO, 7, {
+      event: "REQUEST_CHANGES",
+      body: "One real problem.",
+      commitId: "deadbeef",
+      comments: [
+        { path: "src/a.ts", line: 12, body: "null on the empty case" },
+        { path: "src/b.ts", line: 40, startLine: 38, side: "RIGHT", body: "unawaited promise" },
+      ],
+    });
+
+    expect(res).toMatchObject({ posted: true, event: "REQUEST_CHANGES" });
+    expect(res.url).toContain("#r1");
+    expect(calls[0].args.slice(0, 4)).toEqual([
+      "api",
+      "--method",
+      "POST",
+      `repos/${REPO}/pulls/7/reviews`,
+    ]);
+    expect(bodies[0]).toEqual({
+      event: "REQUEST_CHANGES",
+      body: "One real problem.",
+      commit_id: "deadbeef",
+      comments: [
+        { path: "src/a.ts", line: 12, side: "RIGHT", body: "null on the empty case" },
+        {
+          path: "src/b.ts",
+          line: 40,
+          start_line: 38,
+          side: "RIGHT",
+          body: "unawaited promise",
+        },
+      ],
+    });
+  });
+
+  it("downgrades to COMMENT on your own PR, and says that it did", async () => {
+    // The ordinary case while Dispatch posts under the human's own token —
+    // GitHub refuses APPROVE/REQUEST_CHANGES on a PR you authored. The comments
+    // still land, and the open threads still block the merge.
+    const { exec, bodies, push } = makeReviewExec();
+    push({
+      exitCode: 1,
+      stderr: "HTTP 422: Can not request changes on your own pull request",
+    });
+    push({ stdout: JSON.stringify({ html_url: "u" }) });
+    const gh = new GitHubService({ bus, exec });
+
+    const res = await gh.submitReview(REPO, 7, {
+      event: "REQUEST_CHANGES",
+      body: "problem",
+      comments: [{ path: "a.ts", line: 1, body: "here" }],
+    });
+
+    expect(res).toMatchObject({ posted: true, event: "COMMENT" });
+    expect((bodies[1] as { event: string }).event).toBe("COMMENT");
+    // The findings survive the downgrade — that is the point of retrying.
+    expect((bodies[1] as { comments: unknown[] }).comments).toHaveLength(1);
+  });
+
+  it("folds the findings into the summary when GitHub rejects their lines", async () => {
+    // GitHub rejects the WHOLE review over one bad line number. Losing a good
+    // review to a misremembered offset is the failure worth degrading for.
+    const { exec, bodies, push } = makeReviewExec();
+    push({
+      exitCode: 1,
+      stderr: "HTTP 422: line must be part of the diff",
+    });
+    push({ stdout: JSON.stringify({ html_url: "u" }) });
+    const gh = new GitHubService({ bus, exec });
+
+    const res = await gh.submitReview(REPO, 7, {
+      event: "COMMENT",
+      body: "Summary.",
+      comments: [{ path: "src/a.ts", line: 999, body: "null on the empty case" }],
+    });
+
+    expect(res).toMatchObject({ posted: true, droppedComments: 1 });
+    const folded = bodies[1] as { body: string; comments?: unknown };
+    expect(folded.comments).toBeUndefined();
+    expect(folded.body).toContain("Summary.");
+    expect(folded.body).toContain("src/a.ts:999");
+    expect(folded.body).toContain("null on the empty case");
+  });
+
+  it("reports a refusal rather than throwing", async () => {
+    const { exec, push } = makeReviewExec();
+    push({ exitCode: 1, stderr: "HTTP 403: Resource not accessible by integration" });
+    const gh = new GitHubService({ bus, exec });
+
+    const res = await gh.submitReview(REPO, 7, { event: "COMMENT", body: "hi" });
+    expect(res.posted).toBe(false);
+    expect(res.error).toContain("403");
+  });
+});

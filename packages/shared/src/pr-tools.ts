@@ -24,6 +24,7 @@ export const PrToolKindSchema = z.enum([
   "watch_pr",
   "resolve_thread",
   "request_review",
+  "post_review",
   "approve_pr",
 ]);
 export type PrToolKind = z.infer<typeof PrToolKindSchema>;

@@ -345,6 +345,36 @@ export const PrSnapshotSchema = z.object({
 export type PrSnapshot = z.infer<typeof PrSnapshotSchema>;
 
 /**
+ * What Dispatch's own reviewer has been asked for on a PR, and what it has done.
+ *
+ * This is the "review requested" fact, held HERE rather than read live off
+ * GitHub, because it has two sources that must look identical downstream: a
+ * configured machine account appearing in GitHub's own reviewer queue, and a
+ * local request recorded when no such account exists (see
+ * `WorkflowReviewAgentConfigSchema`). The trigger reads one field either way.
+ *
+ * `reviewedSha` is the dedup, and it is a SHA rather than a flag on purpose: a
+ * review is only spent on the code it read, so a push re-arms it while a
+ * re-request on unchanged code does not. `rounds` is the backstop for the case
+ * that defeats — an author who keeps pushing and re-requesting forever.
+ */
+export const PrReviewAgentStateSchema = z.object({
+  /** Head sha a review was requested at and not yet served. */
+  requestedSha: z.string().optional(),
+  requestedAt: z.number().int().optional(),
+  /** Who asked — a chat id, or the login found in GitHub's queue. */
+  requestedBy: z.string().optional(),
+  /** Head sha the last spawned review actually covered. */
+  reviewedSha: z.string().optional(),
+  reviewedAt: z.number().int().optional(),
+  /** The chat doing (or last to do) the review, so the row can link to it. */
+  chatId: z.string().optional(),
+  /** Reviews spawned for this PR — capped by `workflow.pr.reviewAgent.maxRounds`. */
+  rounds: z.number().int().default(0),
+});
+export type PrReviewAgentState = z.infer<typeof PrReviewAgentStateSchema>;
+
+/**
  * A tracked PR's registry row: everything {@link PrSnapshotSchema} shows, plus
  * the bookkeeping that keeps it current.
  *
@@ -389,6 +419,13 @@ export const PrRecordSchema = PrSnapshotSchema.extend({
    * five-minute-old state as current is not.
    */
   pollError: z.string().optional(),
+  /**
+   * Dispatch's own reviewer, on this PR. Absent = never asked. On the RECORD
+   * rather than the snapshot because it is bookkeeping: a tool result frozen
+   * into a transcript should say what the PR looked like, not carry a counter
+   * that keeps moving.
+   */
+  reviewAgent: PrReviewAgentStateSchema.optional(),
 });
 export type PrRecord = z.infer<typeof PrRecordSchema>;
 

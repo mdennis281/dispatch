@@ -17,7 +17,16 @@ import type { ServerConfig } from "../config.js";
 // Value import (not `import type`): the InspectService needs to CONSTRUCT a
 // second Store over the installed instance's roots for `instance: "stable"`.
 import { Store } from "../store/index.js";
-import { PrSnapshotSchema, prRecordKey, type PRRef, type PrRecord, type PrSnapshot } from "@dispatch/shared";
+import {
+  PrSnapshotSchema,
+  prRecordKey,
+  resolveWorkflow,
+  type PRRef,
+  type PrRecord,
+  type PrSnapshot,
+} from "@dispatch/shared";
+import { launchAgentTask } from "./agent-tasks.js";
+import { resolveReviewer } from "./reviewer.js";
 import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
 import { SessionBroker } from "./session-broker.js";
@@ -467,6 +476,7 @@ export function createServices(
       return toPrSnapshot(await prRegistry.refresh(row.key));
     },
     snapshotByThread: async (threadId) => toPrSnapshot(await prRegistry.findByThread(threadId)),
+    requestReviewAgent: (repo, number, by) => prRegistry.requestReviewAgent(repo, number, by),
   };
   const prReviewWatcher =
     overrides.prReviewWatcher ??
@@ -517,6 +527,46 @@ export function createServices(
           status === "running" || status === "waiting" || status === "awaiting-input"
         );
       },
+      // Dispatch's own reviewer. Resolving the policy needs the project record
+      // and spawning needs the whole task launcher, so both live here rather
+      // than widening the watcher — which stays a thing that notices, and hands
+      // off what to do about it.
+      reviewAgent: {
+        policyFor: async (projectId) => {
+          if (!projectId) return null;
+          const project = await store.getProject(projectId).catch(() => null);
+          if (!project) return null;
+          // Through `resolveReviewer` rather than `resolveWorkflow` directly, so
+          // a project asking for a dedicated account it has no credential for
+          // comes back DISABLED instead of quietly reviewing as the human.
+          const { policy, problem } = await resolveReviewer(store, project);
+          if (problem) bus.publish({ type: "notice", level: "warn", text: problem });
+          return policy;
+        },
+        spawn: async ({ projectId, repo, number, round, policy }) => {
+          const out = await launchAgentTask(services, {
+            projectId,
+            taskId: "pr:review",
+            effort: policy.effort,
+            model: policy.model,
+            agentId: policy.agentId,
+            params: {
+              repo,
+              number,
+              round,
+              maxRounds: policy.maxRounds,
+              post: policy.post,
+              // The reviewer may block. Which verdicts it can actually reach is
+              // GitHub's call in the end — it refuses REQUEST_CHANGES on your
+              // own PR — and `submitReview` reports the downgrade rather than
+              // hiding it.
+              blocking: true,
+              houseRules: policy.instructions,
+            },
+          }).catch(() => null);
+          return out ? { chatId: out.chat.id } : null;
+        },
+      },
     });
   // `create_pr` pre-seeds the watcher so the first sweep after a PR opens can't
   // badge the chat for activity that predates it.
@@ -530,6 +580,22 @@ export function createServices(
     // this records the row so the PR is in the catalog the instant it is opened
     // — even if that read fails, and even before the first sweep.
     void prRegistry.track(ref, { chatId }).catch(() => {});
+    // Ask Dispatch's own reviewer, where the project configured one with no
+    // GitHub account to queue. This is `create_pr`'s half of the same request
+    // `request_review` makes on later rounds — without it, the first round is
+    // the only one nobody asks for, which is precisely the round that matters.
+    void (async () => {
+      const chat = await store.getChat(chatId).catch(() => null);
+      if (!chat?.projectId || !ref.repo) return;
+      const project = await store.getProject(chat.projectId).catch(() => null);
+      if (!project) return;
+      const { policy } = await resolveReviewer(store, project);
+      // Only self-review records a LOCAL request: a dedicated account is put in
+      // GitHub's own reviewer queue by `create_pr`, and recording a second
+      // request here would give the sweep two ways to trigger one review.
+      if (!policy.enabled || policy.identity !== "self") return;
+      await prRegistry.requestReviewAgent(ref.repo, ref.number, chatId).catch(() => {});
+    })();
   };
   // `mcp__manager__spawn_chat`: an agent starting ANOTHER chat, after the human
   // approved it (the broker asks; this only runs once they said yes). Deliberately
@@ -538,6 +604,14 @@ export function createServices(
   // project defaults, worktree isolation, workflow profile and guards. The purpose
   // tag is the only difference, and it exists so the sidebar can say where the
   // chat came from.
+  // The reviewer identity for a session — the policy joined to the app-wide
+  // credential. A function on the broker rather than a Store reach-in, so the
+  // broker keeps knowing nothing about where credentials are kept.
+  broker.resolveReviewer = async (projectId) => {
+    if (!projectId) return null;
+    const project = await store.getProject(projectId).catch(() => null);
+    return project ? resolveReviewer(store, project) : null;
+  };
   broker.spawnChat = async ({ request, project, parentChatId }) => {
     const chat = await createChat(services, {
       projectId: project.id,

@@ -104,6 +104,7 @@ function isRemoteWait(n: string): boolean {
     n.includes("manager__create_pr") ||
     n.includes("manager__approve_pr") ||
     n.includes("manager__request_review") ||
+    n.includes("manager__post_review") ||
     n.includes("manager__resolve_thread")
   );
 }

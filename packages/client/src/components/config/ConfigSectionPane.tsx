@@ -161,7 +161,10 @@ export function ConfigSectionPane({
           })}
         </ul>
       ) : (
-        section.id !== "workflow" && (
+        // The catalog already records which sections are LISTS; asking it beats
+        // naming one section here, which is how the second non-countable
+        // section ends up announcing "No reviewers in this project yet".
+        section.countable !== false && (
           <div className="rounded-md border border-dashed border-line px-3 py-5 text-center">
             <Icon className="mx-auto mb-1 size-4 text-faint" />
             <p className="text-xs text-secondary">

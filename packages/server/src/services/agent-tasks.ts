@@ -50,6 +50,7 @@ import {
   type MessagePart,
   type Project,
   type ProjectConfig,
+  type ReviewThread,
 } from "@dispatch/shared";
 import type { Services } from "./container.js";
 import type { MemoryInventoryEntry } from "./memory.js";
@@ -771,6 +772,242 @@ function memoryInventoryText(rows: readonly MemoryInventoryEntry[], max = 250): 
   ].join("\n");
 }
 
+/* --------------------------------------------------------------- pr review */
+
+/** Everything a review briefing needs about the pull request it is reading. */
+export interface PrReviewContext {
+  repo: string;
+  number: number;
+  url: string;
+  title: string;
+  branch: string;
+  baseBranch: string;
+  author?: string;
+  headRefOid?: string;
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
+  /** The unified diff, and whether we had to cut it short. */
+  diff?: { text: string; truncated: boolean };
+  /** Threads already open on this PR — what an earlier round already said. */
+  openThreads: ReviewThread[];
+  /** Which round this is, and the cap, so the briefing can say both. */
+  round: number;
+  maxRounds: number;
+  /** Where to run git commands — the project's checkout. */
+  repoPath: string;
+}
+
+/**
+ * The review briefing.
+ *
+ * Written as a job with a BAR rather than "please review this PR", because the
+ * failure mode of an under-briefed reviewer is not silence — it is a confident
+ * page of restated diff, three style nits and no bugs, which costs the author
+ * more to read than it saves. So this states what counts as a finding, what
+ * explicitly does not, and that an empty review is a legitimate outcome.
+ */
+function prReviewBriefText(input: {
+  pr: PrReviewContext;
+  post: boolean;
+  blocking: boolean;
+  houseRules?: string;
+}): string {
+  const { pr, post, blocking } = input;
+  const size =
+    pr.additions !== undefined || pr.deletions !== undefined
+      ? `+${pr.additions ?? 0} -${pr.deletions ?? 0}` +
+        (pr.changedFiles
+          ? ` across ${pr.changedFiles} ${pr.changedFiles === 1 ? "file" : "files"}`
+          : "")
+      : "";
+
+  const lines = [
+    `Review pull request #${pr.number} and ${
+      post ? "post a real GitHub review on it" : "report your findings here"
+    }.`,
+    "",
+    `**The PR** — ${pr.title ? `"${pr.title}"` : `#${pr.number}`}`,
+    "",
+    `- ${pr.url}`,
+    `- \`${pr.branch}\` into \`${pr.baseBranch}\`${pr.author ? `, by ${pr.author}` : ""}${
+      pr.headRefOid ? `, head \`${pr.headRefOid.slice(0, 7)}\`` : ""
+    }`,
+  ];
+  if (size) lines.push(`- ${size}`);
+
+  lines.push(
+    "",
+    "**Read it properly**",
+    "",
+    "- The unified diff is attached below. Read all of it before forming an opinion.",
+    "- The diff alone is not enough to review from. For every file you have a finding in, " +
+      "read the WHOLE file at THIS PR's head. A hunk that looks wrong in isolation is " +
+      "usually right in context, and that asymmetry is where false findings come from:",
+    "",
+    "  ```sh",
+    `  cd ${pr.repoPath}`,
+    `  git fetch origin pull/${pr.number}/head   # writes no branch, touches no working tree`,
+    "  git show FETCH_HEAD:<path>",
+    "  ```",
+    "",
+    "- Read the callers too, not just the changed function. Most real bugs in a reviewed " +
+      "diff live at the boundary between what changed and what did not.",
+  );
+
+  if (pr.diff?.truncated) {
+    lines.push(
+      "- The attached diff was TRUNCATED because it is large. Do not review only the part " +
+        `you were handed: get the rest with \`gh pr diff ${pr.number} --repo ${pr.repo}\`, and ` +
+        "say in the review if you could not cover all of it.",
+    );
+  }
+
+  lines.push(
+    "",
+    "**What counts as a finding**, in the order worth spending attention on:",
+    "",
+    "1. **Correctness** — it does the wrong thing for some input or state. Off-by-one, " +
+      "inverted condition, wrong variable, unhandled null, a promise nobody awaits, an " +
+      "error swallowed into a success.",
+    "2. **Contract breaks** — a caller this change did not update, a field read somewhere it " +
+      "is never written, a behaviour change nothing downstream expects.",
+    "3. **Resource and lifecycle** — a listener, timer, subprocess or handle that outlives " +
+      "what created it; a lock held across an await; an unbounded cache or loop.",
+    "4. **Security** — untrusted input reaching a shell, a path, a query or a template; a " +
+      "credential in a committed file; a permission check that moved or disappeared.",
+    "5. **Missing tests** — but only where the untested path is one of the above. \"Add " +
+      "tests\" as a general sentiment is not a finding.",
+    "",
+    "**What is NOT a finding. Do not post these.**",
+    "",
+    "- A summary of what the diff does. The author wrote it; they know.",
+    "- Praise, encouragement, or \"consider extracting this\" refactors nobody asked for.",
+    "- Style, naming and formatting that a linter or the surrounding code already settles.",
+    "- Anything you are guessing at. Every finding must survive this sentence: *given " +
+      "<concrete input or state>, <this specific thing> goes wrong*. If you cannot fill that " +
+      "in against the real file, it is not a finding and it does not go in.",
+    "",
+    "**An empty review is a real outcome.** If the change is fine, submit with no inline " +
+      "comments and one line saying nothing is blocking. A review padded with nits to look " +
+      "thorough is worse than a short one: it teaches the author to skim the next one.",
+  );
+
+  if (input.houseRules) {
+    lines.push("", "**What this project asks for specifically**", "", input.houseRules);
+  }
+
+  if (pr.openThreads.length) {
+    lines.push(
+      "",
+      `**This is round ${pr.round} of at most ${pr.maxRounds}.** ` +
+        `${pr.openThreads.length} review ${
+          pr.openThreads.length === 1 ? "thread is" : "threads are"
+        } already open on this PR (listed below). Do NOT raise them again. Your job this ` +
+        "round is the code as it stands now: whether what was raised is actually addressed, " +
+        "and what the new commits changed.",
+    );
+  }
+
+  if (post) {
+    lines.push(
+      "",
+      "**Posting the review**",
+      "",
+      "- Post it with `mcp__manager__post_review`. One inline comment per finding, with " +
+        "`path` and `line` as they appear in the NEW file — that is what makes each finding " +
+        "a review THREAD the author can answer and resolve.",
+      blocking
+        ? "- `event`: `request_changes` only for something that will actually break, or that " +
+          "you would not want merged as-is. Everything else is `comment`. Never `approve` — " +
+          "approving is not this reviewer's job."
+        : "- `event`: always `comment`. This reviewer does not block: raise the findings and " +
+          "let the author judge.",
+      "- The summary `body` is for what does not belong on a single line — a problem whose " +
+        "shape spans files, or something you could not check. Keep it short.",
+      "- Do NOT resolve any thread. Resolving is the author's half of the loop; a reviewer " +
+        "that closes its own comments is talking to itself.",
+    );
+  } else {
+    lines.push(
+      "",
+      "**Post nothing.** Report the findings in this chat: file, line, what goes wrong, and " +
+        "the input or state that makes it go wrong. Nothing reaches GitHub.",
+    );
+  }
+
+  lines.push(
+    "",
+    "**You are reading, not writing.** Do not edit a file, commit, push, create a worktree, " +
+      "open a PR, merge, or touch any branch. The review itself is the only write you make.",
+  );
+  return lines.join("\n");
+}
+
+/** Threads already on the PR, as context — what an earlier round already said. */
+function openThreadsText(threads: readonly ReviewThread[]): string {
+  return threads
+    .map((t) => {
+      const where = t.path ? `${t.path}${t.line ? `:${t.line}` : ""}` : "(not on a file)";
+      const who = t.author ? ` — ${t.author}` : "";
+      const body = (t.body ?? "").replace(/\s+/g, " ").trim().slice(0, 400);
+      return `- ${where}${who}\n    ${body}`;
+    })
+    .join("\n");
+}
+
+/**
+ * Resolve everything the review briefing needs: the catalog first, GitHub only
+ * for what the catalog does not hold.
+ *
+ * The registry row is preferred for the PR's own facts because the sweep has
+ * already read them, and a launch should not wait on a round trip to restate
+ * what it already knows. The diff is the exception — nothing caches it, and it
+ * is the entire point of the briefing.
+ */
+async function readPrReviewContext(
+  services: Services,
+  project: Project,
+  params: Record<string, unknown>,
+): Promise<PrReviewContext | null> {
+  const number =
+    typeof params.number === "number" && Number.isInteger(params.number) ? params.number : NaN;
+  if (!Number.isFinite(number) || number <= 0) return null;
+  const repo =
+    (typeof params.repo === "string" && params.repo.trim()) ||
+    (await services.github.repoForProject(project).catch(() => "")) ||
+    "";
+  if (!repo) return null;
+
+  const row = await services.prRegistry.snapshot(repo, number).catch(() => null);
+  const detail = row ? null : await services.github.prDetail(repo, number).catch(() => null);
+  if (!row && !detail) return null;
+
+  const diff = await services.github.prDiff(repo, number).catch(() => null);
+  const threads = (row?.threads ?? detail?.reviewThreads ?? []).filter(
+    (t) => !t.isResolved && !t.isOutdated,
+  );
+
+  return {
+    repo,
+    number,
+    url: row?.url ?? detail?.url ?? "",
+    title: row?.title ?? detail?.title ?? "",
+    branch: row?.branch ?? detail?.branch ?? "",
+    baseBranch: row?.baseBranch ?? detail?.baseBranch ?? "",
+    author: row?.author ?? detail?.author,
+    headRefOid: row?.headRefOid,
+    additions: row?.additions ?? detail?.additions,
+    deletions: row?.deletions ?? detail?.deletions,
+    changedFiles: row?.changedFiles,
+    diff: diff ?? undefined,
+    openThreads: threads,
+    round: intParam(params, "round", 1),
+    maxRounds: intParam(params, "maxRounds", 4),
+    repoPath: project.repoPath,
+  };
+}
+
 /* ----------------------------------------------------------------- assembly */
 
 /** Everything a task's briefing can draw on, resolved before composition. */
@@ -789,6 +1026,8 @@ interface BriefContext {
   savedManifest?: { text: string; adopted: boolean };
   /** Memory consolidation only: the store to audit, already filtered to scope. */
   memory?: MemoryConsolidationContext;
+  /** PR review only: the pull request being read (see `readPrReviewContext`). */
+  pr?: PrReviewContext | null;
 }
 
 /** Everything a consolidation briefing needs about the store it's auditing. */
@@ -805,6 +1044,9 @@ interface MemoryConsolidationContext {
 
 const boolParam = (params: Record<string, unknown>, id: string, fallback: boolean): boolean =>
   typeof params[id] === "boolean" ? (params[id] as boolean) : fallback;
+
+const intParam = (params: Record<string, unknown>, id: string, fallback: number): number =>
+  typeof params[id] === "number" && Number.isInteger(params[id]) ? (params[id] as number) : fallback;
 
 /**
  * Compose a task's message parts. The parts ARE the message (see
@@ -844,6 +1086,26 @@ export function buildTaskParts(ctx: BriefContext): MessagePart[] {
         committed: mem?.committed ?? false,
       }),
     });
+  } else if (ctx.taskId === "pr:review") {
+    parts.push({
+      kind: "brief",
+      label: ctx.pr ? `Review PR #${ctx.pr.number} — ${ctx.pr.repo}` : "PR review",
+      text: ctx.pr
+        ? prReviewBriefText({
+            pr: ctx.pr,
+            post: boolParam(ctx.params, "post", true),
+            blocking: boolParam(ctx.params, "blocking", true),
+            houseRules:
+              typeof ctx.params.houseRules === "string" && ctx.params.houseRules.trim()
+                ? ctx.params.houseRules.trim()
+                : undefined,
+          })
+        : // The launcher refuses a bad PR before it gets here, so this is the
+          // "GitHub was unreadable at launch" case — say so rather than briefing
+          // a review of nothing.
+          "The pull request to review could not be read from GitHub. Say so and stop; do " +
+            "not guess at what the change was.",
+    });
   } else if (ctx.taskId === "project:setup") {
     parts.push({
       kind: "brief",
@@ -868,6 +1130,29 @@ export function buildTaskParts(ctx: BriefContext): MessagePart[] {
   const instructions = ctx.instructions.trim();
   if (instructions) {
     parts.push({ kind: "instructions", label: "What I want", text: instructions });
+  }
+
+  if (ctx.taskId === "pr:review" && ctx.pr) {
+    // The diff comes FIRST of the context parts: it is the thing being reviewed,
+    // and everything else is only there to keep the reviewer from repeating a
+    // round it has already had.
+    if (ctx.pr.diff?.text) {
+      parts.push({
+        kind: "context",
+        label:
+          `Diff of PR #${ctx.pr.number}` + (ctx.pr.diff.truncated ? " — TRUNCATED, see brief" : ""),
+        text: ctx.pr.diff.text,
+      });
+    }
+    if (ctx.pr.openThreads.length) {
+      parts.push({
+        kind: "context",
+        label: `Already raised — ${ctx.pr.openThreads.length} open ${
+          ctx.pr.openThreads.length === 1 ? "thread" : "threads"
+        }`,
+        text: openThreadsText(ctx.pr.openThreads),
+      });
+    }
   }
 
   // The manifest as it is ON DISK, verbatim. The agent could open the file (and
@@ -976,6 +1261,7 @@ export async function launchAgentTask(
     instructions?: string;
     effort?: Effort;
     model?: string;
+    agentId?: string;
     params?: Record<string, unknown>;
   },
 ): Promise<LaunchAgentTaskResult | null> {
@@ -1010,6 +1296,12 @@ export async function launchAgentTask(
     input.taskId === "memory:consolidate"
       ? await readMemoryContext(services, input.projectId, project, params)
       : undefined;
+  // A review reads GitHub at launch rather than telling the agent to go and
+  // fetch it: the diff IS the briefing, and a reviewer whose first three turns
+  // are shell calls to find out what it is reviewing has spent its best context
+  // on plumbing.
+  const pr =
+    input.taskId === "pr:review" ? await readPrReviewContext(services, project, params) : undefined;
 
   const parts = buildTaskParts({
     taskId: input.taskId,
@@ -1022,6 +1314,7 @@ export async function launchAgentTask(
     fresh,
     savedManifest,
     memory,
+    pr,
   });
   const prompt = composeMessageText(parts);
 
@@ -1039,13 +1332,16 @@ export async function launchAgentTask(
           ? project.name
           : input.taskId === "memory:consolidate"
             ? consolidateSubject(memory)
-            : sweepSubject(status),
+            : input.taskId === "pr:review"
+              ? prSubject(pr)
+              : sweepSubject(status),
     ),
     effort: input.effort ?? meta.defaultEffort,
     model: input.model ?? meta.defaultModel,
+    agentId: input.agentId,
     purpose: {
       kind: input.taskId,
-      label: taskLabel(input.taskId, status, project, memory),
+      label: taskLabel(input.taskId, status, project, memory, pr),
     },
   });
 
@@ -1060,8 +1356,12 @@ function taskLabel(
   status: GitStatus | null,
   project?: Project,
   memory?: MemoryConsolidationContext,
+  pr?: PrReviewContext | null,
 ): string {
   const meta = AGENT_TASKS[taskId];
+  if (taskId === "pr:review") {
+    return pr ? `Reviewing PR #${pr.number} in ${pr.repo}` : "Reviewing a pull request";
+  }
   if (taskId === "project:setup") {
     return project ? `Setting up ${project.name}` : "Setting this project up";
   }
@@ -1079,6 +1379,12 @@ function taskLabel(
   return status?.branch
     ? `Grouping the working tree into commits on ${status.branch}`
     : "Grouping the working tree into commits";
+}
+
+/** The title's subject for a review — which PR, in the words on the PR. */
+function prSubject(pr: PrReviewContext | null | undefined): string {
+  if (!pr) return "";
+  return pr.title ? `#${pr.number} ${summarize(pr.title)}` : `#${pr.number}`;
 }
 
 /** The title's subject for a consolidation — the scale of what it's chewing on. */

@@ -32,7 +32,7 @@
  * this pass" (never a false badge, never an abort), and a resume failure leaves
  * the badge standing so the human can still act on it.
  */
-import type { AttentionItem, Chat, PRRef, ReviewKind } from "@dispatch/shared";
+import type { AttentionItem, Chat, PRRef, ResolvedReviewAgent, ReviewKind } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 import type { PrPollSnapshot } from "./github.js";
@@ -90,6 +90,37 @@ export interface PrReviewRegistry {
   track(ref: PRRef, scope: PrScope): Promise<unknown>;
   noteError(repo: string, number: number, error: string): Promise<void>;
   due(now?: number): Promise<Array<{ repo: string; number: number } & PrScope>>;
+  /** Record that Dispatch's own reviewer was asked (idempotent per head sha). */
+  requestReviewAgent(repo: string, number: number, by: string): Promise<unknown>;
+  /** Take the review job, or null because there isn't one. See the registry. */
+  claimReviewAgent(
+    repo: string,
+    number: number,
+    opts: { maxRounds: number },
+  ): Promise<{ reviewAgent?: { rounds: number } } | null>;
+  /** Attach the reviewer's chat to the row, once it exists. */
+  noteReviewChat(repo: string, number: number, chatId: string): Promise<unknown>;
+}
+
+/**
+ * How the sweep spawns a review, and how it finds out whether it should.
+ *
+ * Split into a policy read and an action for the same reason the spawn consent
+ * surface is: the decision has to be answerable without doing anything. The
+ * sweep asks this per PR it just polled, so `policyFor` must be cheap — it reads
+ * the project record, which the store already holds.
+ */
+export interface PrReviewAgentHooks {
+  /** This project's reviewer policy; null = no project, or GitHub is unreadable. */
+  policyFor(projectId: string | undefined): Promise<ResolvedReviewAgent | null>;
+  /** Launch the reviewer. Returns the chat it created, so the row can link to it. */
+  spawn(input: {
+    projectId: string;
+    repo: string;
+    number: number;
+    round: number;
+    policy: ResolvedReviewAgent;
+  }): Promise<{ chatId: string } | null>;
 }
 
 /** Per-(chat, PR) dedup memory — what we have ALREADY told this chat about. */
@@ -142,6 +173,16 @@ export interface PrReviewWatcherOptions {
    * discovery is off and the catalog holds only what chats own.
    */
   discover?: () => Promise<Array<{ projectId: string; ref: PRRef }>>;
+  /**
+   * Dispatch's own reviewer. Absent → the sweep never spawns one, which is
+   * exactly how it behaved before this existed.
+   *
+   * It hangs off the sweep rather than off `create_pr` because the trigger is a
+   * review REQUEST, and requests keep arriving long after a PR is opened — after
+   * every fix round, and whenever a human asks on GitHub. The sweep is already
+   * the thing that notices what happened on a PR while nobody was looking.
+   */
+  reviewAgent?: PrReviewAgentHooks;
   intervalMs?: number;
   discoverMs?: number;
   now?: () => number;
@@ -158,6 +199,7 @@ export class PrReviewWatcher {
   private readonly isBusy: (chatId: string) => boolean;
   private readonly registry?: PrReviewRegistry;
   private readonly discoverFn?: () => Promise<Array<{ projectId: string; ref: PRRef }>>;
+  private readonly reviewAgent?: PrReviewAgentHooks;
   private readonly intervalMs: number;
   private readonly discoverMs: number;
   /** When discovery last ran; 0 = never, so the first sweep discovers. */
@@ -181,6 +223,7 @@ export class PrReviewWatcher {
     this.isBusy = opts.isBusy ?? (() => false);
     this.registry = opts.registry;
     this.discoverFn = opts.discover;
+    this.reviewAgent = opts.reviewAgent;
     this.intervalMs = opts.intervalMs ?? PR_REVIEW_POLL_MS;
     this.discoverMs = opts.discoverMs ?? PR_DISCOVER_MS;
     this.now = opts.now ?? (() => Date.now());
@@ -373,6 +416,71 @@ export class PrReviewWatcher {
         continue;
       }
       await this.registry.record(snap, { projectId: row.projectId }).catch(() => undefined);
+      await this.maybeSpawnReview(snap, { projectId: row.projectId }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Spawn Dispatch's own reviewer, if this PR is asking for one.
+   *
+   * Runs off every poll rather than off any single event, because the two
+   * request sources arrive differently: a local request is a write we made, and
+   * a GitHub one is a field that quietly appears in the reviewer queue between
+   * one sweep and the next. Reading both from the same snapshot is what keeps
+   * "was a review requested" a single question with a single answer.
+   *
+   * Every failure here is swallowed. A sweep that cannot spawn a reviewer must
+   * still record the poll, raise its attention items and move to the next PR —
+   * this is an addition to the sweep, not a new way for it to die.
+   */
+  private async maybeSpawnReview(snapshot: PrPollSnapshot, scope: PrScope): Promise<void> {
+    const hooks = this.reviewAgent;
+    const registry = this.registry;
+    if (!hooks || !registry || snapshot.state !== "open") return;
+    // A draft is the author saying "not yet". Reviewing one spends a round on
+    // code that is expected to change, and `create_pr` requests reviewers on
+    // drafts too — so honouring the request here would make `draft: true` cost
+    // a review every time. A draft can still be reviewed on demand from its row.
+    if (snapshot.isDraft) return;
+    const projectId = scope.projectId;
+    if (!projectId) return;
+    const policy = await hooks.policyFor(projectId);
+    if (!policy?.enabled) return;
+
+    // GitHub-sourced request: the configured account is sitting in the queue.
+    // Recorded onto the row first so both sources converge on one fact before
+    // anything reads it — see `PrReviewAgentStateSchema`.
+    if (policy.login) {
+      const login = policy.login.toLowerCase();
+      if (snapshot.requested.some((r) => r.toLowerCase() === login)) {
+        await registry.requestReviewAgent(snapshot.repo, snapshot.number, policy.login);
+      }
+    }
+
+    const claimed = await registry.claimReviewAgent(snapshot.repo, snapshot.number, {
+      maxRounds: policy.maxRounds,
+    });
+    if (!claimed) return;
+
+    const round = claimed.reviewAgent?.rounds ?? 1;
+    const chat = await hooks.spawn({
+      projectId,
+      repo: snapshot.repo,
+      number: snapshot.number,
+      round,
+      policy,
+    });
+    if (chat) {
+      await registry
+        .noteReviewChat(snapshot.repo, snapshot.number, chat.chatId)
+        .catch(() => undefined);
+      this.bus.publish({
+        type: "notice",
+        level: "info",
+        text:
+          `Reviewing PR #${snapshot.number} in ${snapshot.repo} ` +
+          `(round ${round} of ${policy.maxRounds})`,
+      });
     }
   }
 
@@ -402,6 +510,7 @@ export class PrReviewWatcher {
       return null;
     }
     await this.registry?.record(snap, scope).catch(() => undefined);
+    await this.maybeSpawnReview(snap, scope).catch(() => undefined);
     if (snap.state !== "open") {
       await this.markSettled(chat.id, ref, snap.state);
       return null;

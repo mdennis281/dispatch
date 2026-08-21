@@ -103,6 +103,16 @@ describe("resolveWorkflow", () => {
       requireReview: true,
       requireChecks: true,
       draft: false,
+      // Off by default: spawning a reviewer spends the human's model quota, so
+      // it is a toggle they flip, not something the profile hands over.
+      reviewAgent: {
+        enabled: false,
+        identity: "self",
+        login: undefined,
+        effort: "high",
+        maxRounds: 4,
+        post: true,
+      },
     });
   });
 
@@ -123,7 +133,46 @@ describe("resolveWorkflow", () => {
       requireReview: true,
       requireChecks: false,
       draft: true,
+      reviewAgent: {
+        enabled: false,
+        identity: "self",
+        login: undefined,
+        effort: "high",
+        maxRounds: 4,
+        post: true,
+      },
     });
+  });
+
+  it("merges an authored reviewAgent block field-by-field over the default", () => {
+    // A spread would resolve the omitted `maxRounds` to undefined and hand every
+    // consumer an uncapped review loop to re-derive.
+    const wf = resolveWorkflow({
+      workflow: {
+        profile: "review",
+        pr: { reviewAgent: { enabled: true, effort: "max", identity: "dedicated" } },
+      },
+    });
+    expect(wf.pr.reviewAgent).toEqual({
+      enabled: true,
+      identity: "dedicated",
+      login: undefined,
+      effort: "max",
+      maxRounds: 4,
+      post: true,
+    });
+  });
+
+  it("never resolves a reviewer login here, even asking for a dedicated account", () => {
+    // The login lives with the TOKEN, in the config dir, because this file is
+    // committed. This package cannot read that, so the server overlays it — and
+    // a consumer seeing `dedicated` with no login must read that as NOT
+    // CONFIGURED rather than falling back to the human's own account.
+    const wf = resolveWorkflow({
+      workflow: { profile: "review", pr: { reviewAgent: { enabled: true, identity: "dedicated" } } },
+    });
+    expect(wf.pr.reviewAgent.identity).toBe("dedicated");
+    expect(wf.pr.reviewAgent.login).toBeUndefined();
   });
 
   it("lets an authored empty list opt out of the default reviewer", () => {
@@ -140,7 +189,13 @@ describe("resolveWorkflow", () => {
       const wf = resolveWorkflow({
         workflow: {
           profile,
-          pr: { reviewers: ["someone"], requireReview: true, requireChecks: true, draft: true },
+          pr: {
+            reviewers: ["someone"],
+            requireReview: true,
+            requireChecks: true,
+            draft: true,
+            reviewAgent: { enabled: true, maxRounds: 9, identity: "dedicated" },
+          },
         },
       });
       expect(wf.pr, profile).toEqual({
@@ -148,6 +203,14 @@ describe("resolveWorkflow", () => {
         requireReview: false,
         requireChecks: false,
         draft: false,
+        reviewAgent: {
+          enabled: false,
+          identity: "self",
+          login: undefined,
+          effort: "high",
+          maxRounds: 4,
+          post: true,
+        },
       });
     }
   });

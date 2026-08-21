@@ -33,6 +33,24 @@ workflow:
     # first workflow to .github/workflows — before that this repo genuinely had
     # no checks, and PRs #1 and #3 both merged reporting exactly that.
     requireChecks: true
+    # Dispatch's own reviewer, because Copilot's review quota here is spent —
+    # which is the failure this exists for: with `requireReview: true` and a
+    # reviewer that has stopped answering, every chat stalls on `no-review` and
+    # the only ways out are a human override or dropping the requirement.
+    #
+    # `identity` picks WHO the review is posted as, and it is the only half
+    # that lives here. The account and its token are a secret and this file is
+    # committed, so they sit in the config dir beside auth.json instead — set up
+    # once in Config → Reviewer, shared by every project.
+    #
+    #   self      — posts as whoever `gh` is authenticated as (you). Nothing to
+    #               set up. GitHub refuses a verdict on your own PR, so reviews
+    #               land as comments; the inline threads still block the merge.
+    #   dedicated — a machine account. It goes in GitHub's own reviewer queue, so
+    #               the request itself is the trigger, and it can request changes.
+    reviewAgent:
+      enabled: true
+      identity: self
 
 instructions:
   - file: house-rules.md

@@ -674,3 +674,86 @@ describe("launchAgentTask", () => {
     expect(out?.chat.purpose?.label).toBe("Consolidating this project's durable memory");
   });
 });
+
+describe("buildTaskParts — pr:review", () => {
+  const PR = {
+    repo: "octo/repo",
+    number: 97,
+    url: "https://github.com/octo/repo/pull/97",
+    title: "feat: a file explorer",
+    branch: "feat/files",
+    baseBranch: "main",
+    author: "octocat",
+    headRefOid: "abcdef1234",
+    additions: 120,
+    deletions: 8,
+    changedFiles: 6,
+    diff: { text: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-a\n+b\n", truncated: false },
+    openThreads: [],
+    round: 1,
+    maxRounds: 4,
+    repoPath: "/repo",
+  };
+
+  it("attaches the diff as its own part — the reviewer should not have to fetch it", () => {
+    const out = parts("pr:review", { params: {}, pr: PR });
+    const diff = out.find((p) => p.label?.startsWith("Diff of PR"));
+    expect(diff?.kind).toBe("context");
+    expect(diff?.text).toContain("+++ b/src/a.ts");
+  });
+
+  it("names the PR, and where to read the files at its head", () => {
+    const brief = briefOf("pr:review", { params: {}, pr: PR });
+    expect(brief).toContain("#97");
+    expect(brief).toContain("feat/files");
+    expect(brief).toContain("git fetch origin pull/97/head");
+    // The bar, not just the request — an under-briefed reviewer produces a page
+    // of restated diff and three style nits.
+    expect(brief).toContain("An empty review is a real outcome");
+    expect(brief).toContain("post_review");
+  });
+
+  it("says to post nothing when the launch asked for a dry run", () => {
+    const brief = briefOf("pr:review", { params: { post: false }, pr: PR });
+    expect(brief).toContain("Post nothing");
+    expect(brief).not.toContain("post_review");
+  });
+
+  it("drops the blocking verdict when the reviewer may not request changes", () => {
+    const brief = briefOf("pr:review", { params: { blocking: false }, pr: PR });
+    expect(brief).toContain("always `comment`");
+    expect(brief).not.toContain("`request_changes` only for");
+  });
+
+  it("warns when the diff was truncated, rather than reviewing half a PR quietly", () => {
+    const brief = briefOf("pr:review", {
+      params: {},
+      pr: { ...PR, diff: { text: "x", truncated: true } },
+    });
+    expect(brief).toContain("TRUNCATED");
+    expect(brief).toContain("gh pr diff 97");
+  });
+
+  it("hands over what an earlier round already raised, and says not to repeat it", () => {
+    const out = parts("pr:review", {
+      params: { round: 2 },
+      pr: {
+        ...PR,
+        round: 2,
+        openThreads: [
+          { id: "T1", isResolved: false, path: "src/a.ts", line: 4, author: "octocat", body: "unawaited" },
+        ],
+      },
+    });
+    const brief = out.find((p) => p.kind === "brief")!.text;
+    expect(brief).toContain("round 2 of at most 4");
+    expect(brief).toContain("Do NOT raise them again");
+    expect(out.find((p) => p.label?.startsWith("Already raised"))?.text).toContain("src/a.ts:4");
+  });
+
+  it("refuses to invent a change when the PR could not be read", () => {
+    const brief = briefOf("pr:review", { params: {}, pr: null });
+    expect(brief).toContain("could not be read");
+    expect(brief).toContain("do not guess");
+  });
+});

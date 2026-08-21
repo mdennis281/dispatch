@@ -39,6 +39,7 @@ export function registerAgentTaskRoutes(app: FastifyInstance): void {
           instructions: input.instructions,
           effort: input.effort,
           model: input.model,
+          agentId: input.agentId,
           params: input.params,
         });
         if (!out) return reply.code(404).send({ error: "project not found" });

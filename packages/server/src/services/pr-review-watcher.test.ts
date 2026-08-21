@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Chat, PRRef, WsServerEvent } from "@dispatch/shared";
+import type { Chat, PRRef, ResolvedReviewAgent, WsServerEvent } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { PrReviewWatcher, type PrReviewGitHub } from "./pr-review-watcher.js";
@@ -34,6 +34,8 @@ interface FakePrScript {
     requested: string[];
     reported: Array<{ author: string; state: string }>;
   } | null>;
+  /** Fields of the assembled snapshot a test cares about directly (head sha, draft). */
+  patch?: Partial<PrPollSnapshot>;
 }
 
 function fakeGitHub(over: FakePrScript = {}): PrReviewGitHub {
@@ -63,6 +65,7 @@ function fakeGitHub(over: FakePrScript = {}): PrReviewGitHub {
         checks: checks as PrPollSnapshot["checks"],
         requested: review?.requested ?? [],
         reported: review?.reported ?? [],
+        ...over.patch,
       };
     },
   };
@@ -567,6 +570,9 @@ describe("PrReviewWatcher — the PR catalog", () => {
       record: registry.record.bind(registry),
       track: registry.track.bind(registry),
       noteError: registry.noteError.bind(registry),
+      requestReviewAgent: registry.requestReviewAgent.bind(registry),
+      claimReviewAgent: registry.claimReviewAgent.bind(registry),
+      noteReviewChat: registry.noteReviewChat.bind(registry),
       due: (t?: number) => {
         dueCalls += 1;
         return registry.due(t);
@@ -639,5 +645,218 @@ describe("PrReviewWatcher — the PR catalog", () => {
     await dark.sweep();
 
     expect((await registry.list())[0]!.pollError).toContain("could not be read");
+  });
+});
+
+describe("PrReviewWatcher — Dispatch's own reviewer", () => {
+  const POLICY: ResolvedReviewAgent = {
+    enabled: true,
+    identity: "self",
+    effort: "high",
+    maxRounds: 2,
+    post: true,
+  };
+
+  /** A watcher wired to a real registry, with the spawn recorded rather than run. */
+  async function withReviewer(
+    over: {
+      github?: PrReviewGitHub;
+      policy?: ResolvedReviewAgent | null;
+      spawn?: () => Promise<{ chatId: string } | null>;
+    } = {},
+  ) {
+    const spawned: Array<{ number: number; round: number }> = [];
+    // One injected clock for both, because the registry's adaptive cadence is
+    // what decides whether a PR is polled at all: two sweeps in the same
+    // millisecond only ever look at it once, which would make a "does it spawn
+    // twice" test pass for the wrong reason.
+    const clock = { t: 1_000_000 };
+    const now = () => clock.t;
+    const registry = new PrRegistry({ store, bus, now });
+    const watcher = new PrReviewWatcher({
+      store,
+      bus,
+      now,
+      github: over.github ?? fakeGitHub({ patch: { headRefOid: "sha-1" } }),
+      registry,
+      reviewAgent: {
+        policyFor: async () => (over.policy === undefined ? POLICY : over.policy),
+        spawn: async ({ number, round }) => {
+          spawned.push({ number, round });
+          return over.spawn ? over.spawn() : { chatId: `review-${round}` };
+        },
+      },
+    });
+    return { registry, watcher, spawned, clock, tick: () => (clock.t += 20 * 60_000) };
+  }
+
+  it("spawns a reviewer when one has been asked for, and links the chat to the row", async () => {
+    await makeChat("c1", [REF]);
+    const { registry, watcher, spawned } = await withReviewer();
+    // The row has to exist before it can be asked — same rule as `noteWatched`.
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+
+    await watcher.sweep();
+
+    expect(spawned).toEqual([{ number: 42, round: 1 }]);
+    const row = await store.getPrRecord("octo/repo#42");
+    expect(row?.reviewAgent).toMatchObject({
+      rounds: 1,
+      reviewedSha: "sha-1",
+      chatId: "review-1",
+    });
+    // The request is spent, not left standing — otherwise the next sweep reads
+    // it as a fresh ask.
+    expect(row?.reviewAgent?.requestedAt).toBeUndefined();
+  });
+
+  it("does not spawn a second reviewer while the first is still working", async () => {
+    // The claim is written BEFORE the chat exists precisely for this: a review
+    // takes minutes and the sweep comes round every 90 seconds.
+    await makeChat("c1", [REF]);
+    const { registry, watcher, spawned, tick } = await withReviewer();
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+
+    await watcher.sweep();
+    tick();
+    await watcher.sweep();
+    tick();
+    await watcher.sweep();
+
+    expect(spawned.length).toBe(1);
+  });
+
+  it("re-arms on a push, because a review is only spent on the code it read", async () => {
+    await makeChat("c1", [REF]);
+    let head = "sha-1";
+    const { registry, watcher, spawned, tick } = await withReviewer({
+      github: {
+        pollPrState: async (repo, number) => ({
+          ...(await fakeGitHub().pollPrState(repo, number))!,
+          headRefOid: head,
+        }),
+      },
+    });
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+    await watcher.sweep();
+
+    // A new head, and the author asks again after pushing the fix.
+    head = "sha-2";
+    tick();
+    await watcher.sweep(); // records the new sha
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+    tick();
+    await watcher.sweep();
+
+    expect(spawned).toEqual([
+      { number: 42, round: 1 },
+      { number: 42, round: 2 },
+    ]);
+  });
+
+  it("stops at maxRounds even while requests keep arriving", async () => {
+    // The head-sha dedup only bounds this while the author stops pushing; a run
+    // that never converges is the failure worth capping.
+    await makeChat("c1", [REF]);
+    let head = "sha-0";
+    const { registry, watcher, spawned, tick } = await withReviewer({
+      github: {
+        pollPrState: async (repo, number) => ({
+          ...(await fakeGitHub().pollPrState(repo, number))!,
+          headRefOid: head,
+        }),
+      },
+    });
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+
+    for (let i = 1; i <= 5; i++) {
+      head = `sha-${i}`;
+      tick();
+      await watcher.sweep();
+      await registry.requestReviewAgent("octo/repo", 42, "c1");
+      tick();
+      await watcher.sweep();
+    }
+
+    expect(spawned.length).toBe(POLICY.maxRounds);
+  });
+
+  it("skips a draft, whose reviewers `create_pr` requested anyway", async () => {
+    await makeChat("c1", [REF]);
+    const { registry, watcher, spawned } = await withReviewer({
+      github: fakeGitHub({ patch: { headRefOid: "sha-1", isDraft: true } }),
+    });
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+
+    await watcher.sweep();
+    expect(spawned).toEqual([]);
+  });
+
+  it("triggers off GitHub's own queue when a reviewer login is configured", async () => {
+    // The machine-account mode: nothing records a local request, the login just
+    // appears in `requested` between one sweep and the next.
+    await makeChat("c1", [REF]);
+    const { registry, watcher, spawned } = await withReviewer({
+      policy: { ...POLICY, identity: "dedicated", login: "dispatch-reviewer" },
+      github: fakeGitHub({
+        patch: { headRefOid: "sha-1" },
+        prReviewState: async () => ({ requested: ["dispatch-reviewer"], reported: [] }),
+      }),
+    });
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+
+    await watcher.sweep();
+    expect(spawned).toEqual([{ number: 42, round: 1 }]);
+  });
+
+  it("ignores a queue that holds someone else", async () => {
+    await makeChat("c1", [REF]);
+    const { registry, watcher, spawned } = await withReviewer({
+      policy: { ...POLICY, identity: "dedicated", login: "dispatch-reviewer" },
+      github: fakeGitHub({
+        patch: { headRefOid: "sha-1" },
+        prReviewState: async () => ({ requested: ["copilot"], reported: [] }),
+      }),
+    });
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+
+    await watcher.sweep();
+    expect(spawned).toEqual([]);
+  });
+
+  it("spawns nothing when the project has not turned the reviewer on", async () => {
+    await makeChat("c1", [REF]);
+    const { registry, watcher, spawned } = await withReviewer({
+      policy: { ...POLICY, enabled: false },
+    });
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+
+    await watcher.sweep();
+    expect(spawned).toEqual([]);
+  });
+
+  it("keeps sweeping when the spawn fails, and leaves the round spent", async () => {
+    // A failed spawn must not sink the sweep — it still has attention items to
+    // raise and other PRs to poll. The spent round is the deliberate cost of
+    // claiming before the chat exists; the alternative is unbounded spawning.
+    await makeChat("c1", [REF]);
+    const { registry, watcher, spawned } = await withReviewer({
+      spawn: async () => {
+        throw new Error("launcher exploded");
+      },
+    });
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+
+    await expect(watcher.sweep()).resolves.toBeDefined();
+    expect(spawned.length).toBe(1);
+    const row = await store.getPrRecord("octo/repo#42");
+    expect(row?.reviewAgent?.rounds).toBe(1);
+    expect(row?.reviewAgent?.chatId).toBeUndefined();
   });
 });
