@@ -136,14 +136,105 @@ describe("workflow-writer", () => {
     expect(yaml).not.toMatch(/guard: deny/);
   });
 
-  it("removes a key the caller cleared rather than leaving the old value", async () => {
-    await writeManifest("name: Seed\nworkflow:\n  profile: review\n  autoMerge: on-green\n");
+  it("overwrites a key the caller sent, without touching one it didn't", async () => {
+    await writeManifest(
+      "name: Seed\nworkflow:\n  profile: review\n  autoMerge: on-green\n  guard: deny\n",
+    );
     await seedProject();
 
-    await saveProjectWorkflow(deps(), "p1", { profile: "review" });
+    await saveProjectWorkflow(deps(), "p1", { profile: "review", autoMerge: "off" });
 
     const yaml = await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8");
-    expect(yaml).not.toContain("autoMerge");
+    expect(yaml).toContain("autoMerge: off");
+    expect(yaml).not.toContain("on-green");
+    // Absent ≠ "delete it" — see `saveProjectWorkflow`'s docblock.
+    expect(yaml).toContain("guard: deny");
+  });
+
+  /**
+   * The regression that turned this writer from a replace into a merge.
+   *
+   * `workflow.pr` is authored from a DIFFERENT settings pane than the rest of
+   * the block, and `pr.requireReview` / `requireChecks` / `draft` have no editor
+   * anywhere. So when the Workflow pane saved a block that — correctly, for it —
+   * said nothing about `pr`, the entire `pr:` node was deleted out of a
+   * COMMITTED file: reviewers, review requirements and the reviewer agent, gone
+   * silently, with no UI able to put any of it back.
+   */
+  it("leaves an authored pr block alone when the caller only touches the workflow section", async () => {
+    await writeManifest(
+      [
+        "name: Seed",
+        "workflow:",
+        "  profile: review",
+        "  pr:",
+        "    reviewers:",
+        "      - copilot-pull-request-reviewer[bot]",
+        "    requireReview: true",
+        "    requireChecks: true",
+        "    reviewAgent:",
+        "      enabled: true",
+        "      identity: dedicated",
+        "",
+      ].join("\n"),
+    );
+    await seedProject();
+
+    await saveProjectWorkflow(deps(), "p1", { profile: "review", guard: "warn" });
+
+    const yaml = await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8");
+    expect(yaml).toContain("guard: warn");
+    expect(yaml).toContain("- copilot-pull-request-reviewer[bot]");
+    expect(yaml).toContain("requireReview: true");
+    expect(yaml).toContain("requireChecks: true");
+    expect(resolveWorkflow(await store.getProject("p1")).pr.reviewAgent).toMatchObject({
+      enabled: true,
+      identity: "dedicated",
+    });
+  });
+
+  it("makes the same promise to a project with no manifest", async () => {
+    await seedProject({
+      workflow: {
+        profile: "review",
+        pr: { reviewers: ["someone"], reviewAgent: { enabled: true } },
+      },
+    });
+
+    await saveProjectWorkflow(deps(), "p1", { profile: "review", guard: "warn" });
+
+    expect(resolveWorkflow(await store.getProject("p1"))).toMatchObject({
+      guard: "warn",
+      pr: { reviewers: ["someone"], reviewAgent: { enabled: true } },
+    });
+  });
+
+  it("merges INTO a nested block rather than replacing the whole node", async () => {
+    await writeManifest(
+      "name: Seed\nworkflow:\n  profile: review\n  pr:\n    requireChecks: true\n",
+    );
+    await seedProject();
+
+    // What the Reviewer pane sends: a `pr` block holding only the half it owns.
+    await saveProjectWorkflow(deps(), "p1", {
+      profile: "review",
+      pr: { reviewAgent: { enabled: true } },
+    });
+
+    const yaml = await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8");
+    expect(yaml).toContain("requireChecks: true");
+    expect(yaml).toContain("enabled: true");
+  });
+
+  it("writes an empty reviewer list as the decision it is, not as an unset key", async () => {
+    await writeManifest("name: Seed\nworkflow:\n  profile: review\n");
+    await seedProject();
+
+    await saveProjectWorkflow(deps(), "p1", { profile: "review", pr: { reviewers: [] } });
+
+    // `resolveWorkflow` reads `[]` as "ask nobody" rather than falling back to
+    // the profile's Copilot default — the write has to preserve that distinction.
+    expect(resolveWorkflow(await store.getProject("p1")).pr.reviewers).toEqual([]);
   });
 
   it("refuses to write an invalid block instead of corrupting the manifest", async () => {

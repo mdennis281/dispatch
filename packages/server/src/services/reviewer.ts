@@ -123,8 +123,9 @@ export async function verifyReviewer(
           state: "fail",
           detail:
             `GitHub rejected this token: ${who.error ?? "it did not authenticate"}. ` +
-            "A fine-grained token must not be expired, and must list this repository " +
-            "under its resource access.",
+            "A classic token needs the `repo` scope; a fine-grained one must not be expired " +
+            "and must list this repository under its resource access — which it can only do " +
+            "for repositories the reviewer account itself owns.",
         },
       ],
     };
