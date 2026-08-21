@@ -47,18 +47,26 @@ export interface ExecResult {
   exitCode: number;
 }
 
-/** Injectable process runner (tests mock this; prod = execa). */
+/**
+ * Injectable process runner (tests mock this; prod = execa).
+ *
+ * `timeout` exists for the one caller that needs a ceiling rather than an
+ * answer: WorktreeReaper's cleanliness probe, where a `git status` inside a
+ * worktree of this repo costs ~35s and a wedged one must not hold a sweep open
+ * forever. A timeout surfaces as a NON-ZERO exit, never as a clean result.
+ */
 export type ExecFn = (
   file: string,
   args: string[],
-  opts: { cwd: string },
+  opts: { cwd: string; timeout?: number },
 ) => Promise<ExecResult>;
 
 /** Default runner: execa with an argument array, never rejecting. */
-const realExec: ExecFn = async (file, args, opts) => {
+export const realExec: ExecFn = async (file, args, opts) => {
   try {
     const r = await execa(file, args, {
       cwd: opts.cwd,
+      ...(opts.timeout ? { timeout: opts.timeout } : {}),
       reject: false,
       stripFinalNewline: false,
       windowsHide: true,

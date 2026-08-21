@@ -123,6 +123,33 @@ describe("worktree guard", () => {
     expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
   });
 
+  it("does not fire on a command that merely MENTIONS a worktree path", async () => {
+    // The word is in a FILENAME here, not the script being run. This exact shape
+    // — running the worktree tests — used to be refused, which blocked anyone
+    // working on worktree code from testing the code they were working on.
+    for (const command of [
+      "npx vitest run packages/server/src/services/worktree-reaper.test.ts",
+      "pnpm test -- worktree",
+      "npm run build --filter worktree-ui",
+      "pnpm exec tsc -p packages/server --noEmit # worktree types",
+    ]) {
+      expect(await wtGuard()("Bash", { command }), command).toEqual({});
+    }
+  });
+
+  it("still fires on every package-manager script shape", async () => {
+    for (const command of [
+      "pnpm worktree feat/z",
+      "npm run worktree feat/z",
+      "pnpm -C /repo worktree feat/z",
+      "cd /repo && pnpm run worktree feat/z",
+      "FOO=1 pnpm worktree feat/z",
+    ]) {
+      const out = await wtGuard()("Bash", { command });
+      expect(out.hookSpecificOutput?.permissionDecision, command).toBe("deny");
+    }
+  });
+
   it("leaves inspection and teardown alone", async () => {
     expect(await wtGuard()("Bash", { command: "git worktree list" })).toEqual({});
     expect(await wtGuard()("Bash", { command: "git worktree remove ../wt/x" })).toEqual({});

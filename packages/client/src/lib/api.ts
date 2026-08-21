@@ -20,6 +20,8 @@ import type {
   TerminalInfo,
   WorktreeInfo,
   BranchInfo,
+  ReapPlan,
+  ReapResult,
   PRInfo,
   PrRecord,
   WorkflowDef,
@@ -111,6 +113,18 @@ export interface AppSettings {
    */
   spawnChat?: {
     autoApprove?: boolean;
+  };
+  /**
+   * Automatic worktree cleanup. ON when unset, unlike `spawnChat` above: the
+   * reaper only removes a tree whose branch has merged, which is clean, fully
+   * pushed and which nothing is running in — and left off by default it would
+   * preserve the problem it exists to solve.
+   */
+  worktreeCleanup?: {
+    enabled?: boolean;
+    /** Also delete the local branch — `git worktree remove` leaves it behind. */
+    deleteBranch?: boolean;
+    graceMinutes?: number;
   };
   auth?: {
     enabled?: boolean;
@@ -783,6 +797,25 @@ export const api = {
         relPath,
         content,
       }),
+    /**
+     * What the cleanup panel opens with. TWO calls on purpose, not one.
+     *
+     * `probe: false` answers every gate but "is the working tree dirty" from
+     * batched git and in-memory state — instant, even for ninety trees. The
+     * probe pass then enters each surviving tree, which costs ~35s PER TREE on
+     * this repo, so it runs behind a progress indicator instead of holding the
+     * first paint hostage.
+     */
+    cleanupPlan: (opts: { projectId?: string; probe?: boolean } = {}) =>
+      get<ReapPlan>(
+        `/api/worktrees/cleanup${qs({
+          projectId: opts.projectId,
+          probe: opts.probe ? "1" : undefined,
+        })}`,
+      ),
+    /** Remove the approved trees. Each is re-judged server-side first. */
+    cleanup: (paths: string[], deleteBranch: boolean) =>
+      post<ReapResult>("/api/worktrees/cleanup", { paths, deleteBranch }),
   },
 
   /**

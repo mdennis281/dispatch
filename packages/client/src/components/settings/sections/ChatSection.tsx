@@ -171,6 +171,60 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
           />
         </div>
       </div>
+
+      <div className="border-t border-line-soft pt-3">
+        <SectionLabel className="mb-1.5 px-0">Worktrees</SectionLabel>
+        {/* On by default, unlike the spawn toggle above — see the schema comment
+            on `worktreeCleanup`. Removal is gated on merged + clean + pushed +
+            nothing running in it; this switch is for turning the whole thing
+            off, not for making it safer. */}
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-secondary">Clean up merged worktrees</div>
+            <p className="mt-0.5 text-2xs leading-snug text-faint">
+              Removes a worktree once its branch has merged, the tree is clean, everything is
+              pushed and nothing is running in it — when the owning chat goes idle, and hourly
+              for the ones whose chat never came back. <span className="font-mono">git
+              worktree lock</span> keeps any tree permanently.
+            </p>
+          </div>
+          <Switch
+            checked={draft.worktreeCleanup?.enabled !== false}
+            onChange={(v) =>
+              patch({
+                worktreeCleanup: {
+                  enabled: v,
+                  deleteBranch: draft.worktreeCleanup?.deleteBranch ?? true,
+                },
+              })
+            }
+            label={draft.worktreeCleanup?.enabled !== false ? "Automatic" : "Off"}
+          />
+        </div>
+        {draft.worktreeCleanup?.enabled !== false && (
+          <div className="mt-2.5 flex items-start justify-between gap-3 pl-3">
+            <div className="min-w-0">
+              <div className="text-xs font-medium text-secondary">Delete the branch too</div>
+              <p className="mt-0.5 text-2xs leading-snug text-faint">
+                <span className="font-mono">git worktree remove</span> leaves the local branch
+                behind, so without this a drained backlog leaves one dead ref per tree.
+              </p>
+            </div>
+            <Switch
+              checked={draft.worktreeCleanup?.deleteBranch !== false}
+              onChange={(v) =>
+                patch({
+                  worktreeCleanup: {
+                    enabled: draft.worktreeCleanup?.enabled ?? true,
+                    deleteBranch: v,
+                  },
+                })
+              }
+              label={draft.worktreeCleanup?.deleteBranch !== false ? "Yes" : "Keep"}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
