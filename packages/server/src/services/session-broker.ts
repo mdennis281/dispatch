@@ -87,6 +87,7 @@ import type {
   PRRef,
   HarnessKind,
   PrSnapshot,
+  PrReviewAgentState,
 } from "@dispatch/shared";
 import {
   DEFAULT_HARNESS,
@@ -217,8 +218,12 @@ export function buildManagerToolsDirective(caps: {
         "polling loops or a background Bash/Monitor task to watch a PR — `watch_pr` is " +
         "the supported way and, unlike a one-shot loop, keeps surfacing each NEW round " +
         "of review comments so you don't stop watching after the first fix. It also " +
-        "reports `reviewStalled:true` when NO reviewer is actually queued, so you stop " +
-        "waiting on a review that isn't coming.",
+        "reports `reviewStalled:true` when NO reviewer is actually queued, and " +
+        "`reviewsSpent:true` when Dispatch's own reviewer has used up its round cap on " +
+        "this PR — so you stop waiting on a review that isn't coming. Those two want " +
+        "opposite things: a stalled queue is fixed by `request_review`, a spent cap by " +
+        "nothing at all (it also tells you `landableOnChecks` when the PR is ready to " +
+        "land on green checks alone).",
       "- `mcp__manager__resolve_thread` — reply in a review thread and mark it RESOLVED. " +
         "Fixing the code and replying is not enough: an unresolved thread still reads as " +
         "outstanding and blocks the merge. Call it for every comment you addressed, " +
@@ -655,6 +660,8 @@ export interface SessionPrRegistry {
   noteWatched(repo: string, prNumber: number): Promise<void>;
   refreshByThread(threadId: string): Promise<PrSnapshot | null>;
   snapshotByThread(threadId: string): Promise<PrSnapshot | null>;
+  /** Dispatch's own reviewer on this PR — round count, cap, and last verdict. */
+  reviewAgent(repo: string, prNumber: number): Promise<PrReviewAgentState | null>;
   /**
    * Record a request for Dispatch's own reviewer. Used only in the mode with no
    * GitHub login, where there is no reviewer account to put in GitHub's queue.
@@ -724,6 +731,10 @@ function makePrRegistryBinding(
     notePostedReview: async (n, repo, by) => {
       const r = await repoFor(repo);
       if (r) await registry.notePostedReview(r, n, { ...by, chatId });
+    },
+    reviewAgent: async (n, repo) => {
+      const r = await repoFor(repo);
+      return r ? registry.reviewAgent(r, n) : null;
     },
     // Thread ids are globally unique node ids, so these need no repo at all.
     refreshByThread: (threadId) => registry.refreshByThread(threadId),

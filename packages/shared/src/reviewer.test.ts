@@ -133,6 +133,29 @@ describe("prReviewAgentView — the reviewer's state on one PR", () => {
     ).toMatchObject({ phase: "blocked", problem: "no reviewer account is set up" });
   });
 
+  it("reports a spent cap on every phase, not just the one it is named after", () => {
+    // `roundsSpent` is the mechanical fact — `claimReviewAgent` refuses on
+    // exactly this comparison — and it has to survive the phase ranking above
+    // it. A final round that was claimed and never posted reads as `running`
+    // forever, and that is precisely the row `watch_pr` used to block on for
+    // half an hour waiting for a round that could not be claimed.
+    expect(prReviewAgentView({ rounds: 2, reviewedAt: 5, maxRounds: 2 })).toMatchObject({
+      phase: "running",
+      roundsSpent: true,
+    });
+    expect(prReviewAgentView({ rounds: 2, reviewedAt: 1, postedAt: 2, maxRounds: 2 })).toMatchObject(
+      { phase: "spent", roundsSpent: true },
+    );
+    // An outstanding request at the cap is the trap in the loop it fixes: the
+    // request is real, and nothing will ever serve it.
+    expect(
+      prReviewAgentView({ rounds: 2, reviewedAt: 1, postedAt: 2, requestedAt: 9, maxRounds: 2 }),
+    ).toMatchObject({ phase: "queued", roundsSpent: true });
+    // Under the cap, and an unknown cap, both mean another round can follow.
+    expect(prReviewAgentView({ rounds: 1, reviewedAt: 5, maxRounds: 2 })?.roundsSpent).toBe(false);
+    expect(prReviewAgentView({ rounds: 9, reviewedAt: 1, postedAt: 2 })?.roundsSpent).toBe(false);
+  });
+
   it("ranks an outstanding request above the last finished round", () => {
     // A claim clears the request, so one being present means the row is waiting
     // on the next sweep rather than resting on its last verdict.

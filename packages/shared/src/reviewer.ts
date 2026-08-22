@@ -125,6 +125,10 @@ export function reviewerStatus(cred: ReviewerCredential | null | undefined): Rev
  *   - `reviewed` — a review landed. `spent` says whether another can follow.
  *   - `spent`    — every round used and nothing outstanding. A silent stop
  *                  otherwise: the sweep simply stops spawning, forever.
+ *
+ * The phase is not the whole answer to "will another review ever run" — a final
+ * round that was claimed and never posted reads as `running` forever. That
+ * question is {@link PrReviewAgentView.roundsSpent}.
  */
 export type PrReviewAgentPhase = "blocked" | "queued" | "running" | "reviewed" | "spent";
 
@@ -134,6 +138,22 @@ export interface PrReviewAgentView {
   round: number;
   /** The cap, when the row knows it. Absent on rows written before it was recorded. */
   maxRounds?: number;
+  /**
+   * Every allowed round has been claimed, so `PrRegistry.claimReviewAgent` will
+   * refuse the next one — no further reviewer can spawn for this PR, ever,
+   * whatever GitHub's reviewer queue says.
+   *
+   * NOT the same question as `phase === "spent"`, and they diverge on exactly
+   * the case that matters. `phase` is what to SHOW, and a claimed-but-unposted
+   * round outranks the cap there because the row cannot tell a reviewer three
+   * minutes into the diff from one whose chat died. This is the mechanical fact
+   * underneath, true on that `running` row too: the cap is spent either way.
+   *
+   * False when `maxRounds` is absent. A row that never recorded its cap cannot
+   * say the cap is reached, and guessing would turn "we don't know" into a
+   * confident permanent stop.
+   */
+  roundsSpent: boolean;
   /** The reviewer chat, so a row can link to the transcript behind the verdict. */
   chatId?: string;
   /**
@@ -179,7 +199,18 @@ export function prReviewAgentView(
 ): PrReviewAgentView | null {
   if (!state) return null;
   const round = state.rounds ?? 0;
-  const base = { round, maxRounds: state.maxRounds, chatId: state.chatId, posted: false };
+  // The cap rule, spelled ONCE. `claimReviewAgent` refuses on exactly this
+  // comparison, and every surface that wants to say "the reviewer is done" —
+  // the chip, and `watch_pr`, which otherwise blocks for half an hour on a round
+  // that can never be claimed — has to mean the same thing by it.
+  const roundsSpent = state.maxRounds != null && round >= state.maxRounds;
+  const base = {
+    round,
+    maxRounds: state.maxRounds,
+    roundsSpent,
+    chatId: state.chatId,
+    posted: false,
+  };
 
   // First, because these are the answer to "why has nothing happened" and every
   // other phase below would answer that question wrongly.
@@ -210,10 +241,9 @@ export function prReviewAgentView(
   }
 
   if (state.postedAt) {
-    const done = state.maxRounds != null && round >= state.maxRounds;
     return {
       ...base,
-      phase: done ? "spent" : "reviewed",
+      phase: roundsSpent ? "spent" : "reviewed",
       posted: true,
       findings: state.findings,
       postedEvent: state.postedEvent,

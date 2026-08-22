@@ -80,9 +80,11 @@ import {
   WorkflowExemptionScopeSchema,
   WorkflowMergeMethodSchema,
   describeExemptionScope,
+  prReviewAgentView,
   type ChatStatus,
   type CheckRun,
   type ContextUsage,
+  type PrReviewAgentState,
   type PrSnapshot,
   type PrToolKind,
   type PrToolOutcome,
@@ -144,6 +146,20 @@ export const NO_CHECKS_GRACE_MS = 60_000;
  * {@link NO_CHECKS_GRACE_MS}.
  */
 export const REVIEW_QUEUE_GRACE_MS = 60_000;
+
+/**
+ * How long a CLAIMED-but-unposted review round is presumed to still be running
+ * when its chat cannot be found in the broker.
+ *
+ * The round lease is written BEFORE the reviewer chat exists (see
+ * `PrRegistry.claimReviewAgent`), and a chat that has finished is no longer a
+ * live session — so `broker.getStatus` answers `undefined` for both "spawning"
+ * and "long gone". This window separates them: inside it the round gets the
+ * benefit of the doubt, outside it a round that has posted nothing has stopped.
+ * A round whose chat IS live overrides the window in either direction, so this
+ * only has to cover spawn latency, never the length of a review.
+ */
+export const REVIEW_ROUND_GRACE_MS = 5 * 60_000;
 
 /** One structured question the manager MCP can put in front of the human. */
 export interface ManagerAskQuestion {
@@ -728,6 +744,16 @@ export interface ManagerMcpPrRegistry {
    * call to draw it is not.
    */
   snapshotByThread(threadId: string): Promise<PrSnapshot | null>;
+  /**
+   * Dispatch's own reviewer on this PR — the block `PrSnapshot` deliberately
+   * omits, because it is bookkeeping rather than a picture of the PR.
+   *
+   * `watch_pr` needs it because the reviewer's round cap is a stop that GitHub
+   * cannot see: the queue can hold a request that nothing will ever serve, so
+   * every GitHub-side signal says "a review is coming" while the sweep has
+   * permanently stopped spawning. Costs no GitHub call — the row already knows.
+   */
+  reviewAgent(prNumber: number, repo?: string): Promise<PrReviewAgentState | null>;
   /**
    * Report that this session just posted a review on a PR, so the catalog can
    * tell a reviewer that FINISHED from one still reading the diff. The lease
@@ -1614,6 +1640,33 @@ export type WatchPrEvent =
    * followed by a fresh emptying re-fires.
    */
   | { type: "review-stalled"; reported: Array<{ author: string; state: string }> }
+  /**
+   * Dispatch's OWN reviewer has spent every round it is allowed on this PR, and
+   * the last of them is over.
+   *
+   * A different fact from {@link WatchPrEvent} `review-stalled`, and the two need
+   * opposite actions — which is the whole reason it is a separate event. A
+   * stalled queue is fixed by `request_review`; a spent cap is not fixed by
+   * anything, because `claimReviewAgent` refuses on the round count and a
+   * re-request only puts a request in front of a sweep that will never serve it.
+   * They are also independently true: on a dedicated-account project the
+   * reviewer sits in GitHub's queue for as long as it never submits, so the
+   * queue reads healthy while the cap is long gone. That combination is exactly
+   * what left PRs #141 and #143 blocked on a review that could not arrive.
+   */
+  | {
+      type: "reviews-spent";
+      round: number;
+      maxRounds: number;
+      /**
+       * A review actually landed. False = every round was claimed and none of
+       * them filed anything, which is a real outcome and currently the common
+       * one here (the reviewer credential 403s on post).
+       */
+      posted: boolean;
+      /** CI green and no thread open: nothing but the merge is left to do. */
+      landable: boolean;
+    }
   | {
       type: "review-comment";
       threadId: string;
@@ -1654,6 +1707,48 @@ export interface WatchPrState {
   notedStalled?: boolean;
   /** First poll at which the reviewer queue was seen empty (drives the grace window). */
   queueEmptySince?: number;
+  /**
+   * The spent-round-cap note has been delivered for this PR.
+   *
+   * Once-ever, unlike {@link notedStalled}: the cap only moves in one direction,
+   * so there is no later state for it to re-fire on. The LANDABLE case ignores
+   * this flag on purpose — see where the event is pushed.
+   */
+  notedSpent?: boolean;
+  /**
+   * The spent cap as of the last poll, whether or not it was news this call.
+   *
+   * Separate from {@link notedSpent} because the ADVICE needs the standing fact
+   * and the event only carries the news. Without it, a stalled queue reported
+   * one call after the cap was announced would tell the agent to
+   * `request_review` — putting a request in front of a sweep that can never
+   * claim it, which is the exact dead end this whole signal exists to prevent.
+   *
+   * Only recorded once the final round is over (`inFlight` false), so "the
+   * reviewer is DONE" is never said over a review being written right now.
+   */
+  spent?: SpentReviewRounds & { landable: boolean };
+}
+
+/**
+ * A spent review cap, as `watch_pr` needs it: the counters to report, and
+ * whether anything can still arrive from the final round.
+ *
+ * Only ever built for a cap that IS spent — the rule itself lives in
+ * `prReviewAgentView`, so the tool and the PR row can never disagree about when
+ * the reviewer is done.
+ */
+export interface SpentReviewRounds {
+  round: number;
+  maxRounds: number;
+  posted: boolean;
+  /**
+   * The final round is claimed and hasn't posted, and its chat is (or may still
+   * be) working. Nothing is reported while this holds: "no review is coming" is
+   * a false claim about a review being written right now, and the watch has
+   * something real to wait for.
+   */
+  inFlight: boolean;
 }
 
 type WatchPrOutcome =
@@ -1695,6 +1790,17 @@ async function watchForPrActivity(
      * of the fast cadence is that it holds for as long as somebody is waiting.
      */
     onPoll?: () => void;
+    /**
+     * Dispatch's own reviewer on this PR, reduced to the one question GitHub
+     * cannot answer: has the round cap been spent, and is the final round over?
+     * Null = it hasn't (or there is no reviewer, or no catalog to ask).
+     *
+     * Called per POLL rather than once, because the round that spends the cap is
+     * normally claimed by the background sweep while this watch is already
+     * blocked. It reads a stored row and costs no GitHub call, which is what
+     * makes that affordable.
+     */
+    reviewRounds?: () => Promise<SpentReviewRounds | null>;
   },
 ): Promise<WatchPrOutcome> {
   const started = opts.now();
@@ -1744,7 +1850,8 @@ async function watchForPrActivity(
     // CI is green: every check has finished and none of them failed. A check
     // still queued/in_progress means the run isn't over, so keep waiting — the
     // agent must not be told "passing" while a job could still go red.
-    if (runs.length > 0 && !anyFailing && runs.every((c) => c.status === "completed")) {
+    const allGreen = runs.length > 0 && !anyFailing && runs.every((c) => c.status === "completed");
+    if (allGreen) {
       const green = runs
         .map((c) => `${c.name}:${c.conclusion ?? "completed"}`)
         .sort()
@@ -1793,6 +1900,46 @@ async function watchForPrActivity(
       }
     }
 
+    // Dispatch's own reviewer stops on a per-PR ROUND CAP, and that stop is
+    // permanent: once every round is claimed, `claimReviewAgent` refuses the
+    // next one forever. Nothing above can see it. The reviewer queue can be full
+    // of a request nothing will ever serve, so every GitHub-side signal reads
+    // "a review is coming" while the sweep has quietly stopped spawning — and
+    // the author blocks here for the whole window waiting on it.
+    //
+    // `undefined` = the row could not be read this poll. That is not the same
+    // claim as "the cap is not spent", so the standing fact below is left
+    // exactly as it was — same rule the reviewer queue follows for a blind poll.
+    const spent = opts.reviewRounds ? await opts.reviewRounds().catch(() => undefined) : null;
+    if (spent !== undefined) {
+      // `null` threads is a failed read, not an empty list — claiming a PR is
+      // landable off a thread list we never got would be a guess about the one
+      // thing that blocks a merge.
+      const openThreads = threads === null ? null : threads.filter((t) => !t.isResolved).length;
+      const landable = allGreen && openThreads === 0;
+      // The standing fact, refreshed every poll — the advice reads this even on
+      // a call where the event below is deduped away.
+      st.spent = spent && !spent.inFlight ? { ...spent, landable } : undefined;
+      // Cleared together with it: a cap that is no longer spent (the human
+      // raised it in project config) is news again the next time it fills.
+      if (!st.spent) st.notedSpent = false;
+      // Deduped differently in the two cases, on purpose.
+      //
+      // "The cap is spent and CI is still moving" is news exactly once: there is
+      // still something real to wait for, so the watch says it and goes back to
+      // waiting.
+      //
+      // "Spent AND landable" is not news, it is a STANDING state in which
+      // nothing can arrive — no round can spawn, no check can change, no thread
+      // can appear. Blocking on it would be a lie about what watching means, so
+      // it re-reports on every call instead of going quiet for half an hour.
+      if (st.spent && (landable || !st.notedSpent)) {
+        st.notedSpent = true;
+        const { round, maxRounds, posted } = st.spent;
+        events.push({ type: "reviews-spent", round, maxRounds, posted, landable });
+      }
+    }
+
     for (const t of threads ?? []) {
       if (!t.isResolved && !st.threads.has(t.id)) {
         events.push({
@@ -1814,6 +1961,39 @@ async function watchForPrActivity(
       return { kind: "aborted" };
     }
   }
+}
+
+/**
+ * Reduce a PR row's reviewer state to {@link SpentReviewRounds} — or null,
+ * meaning another round can still spawn and `watch_pr` should keep waiting the
+ * way it always has.
+ *
+ * The cap rule itself is `prReviewAgentView`'s `roundsSpent`, not re-derived
+ * here: the chip on the PR row and this tool have to mean the same thing by
+ * "the reviewer is done", and two copies of `rounds >= maxRounds` would drift
+ * the first time one of them grew a special case.
+ */
+export function spentReviewRounds(
+  state: PrReviewAgentState | null,
+  opts: { statusOf: (chatId: string) => ChatStatus | undefined; now: number },
+): SpentReviewRounds | null {
+  const v = prReviewAgentView(state ?? undefined);
+  // No cap recorded on the row = no claim to make. Older rows predate it, and
+  // inventing a denominator would report a permanent stop we cannot see.
+  if (!v?.roundsSpent || v.maxRounds == null) return null;
+  // `running` means a round is CLAIMED and nothing has been posted for it. The
+  // row cannot tell a reviewer three minutes into the diff from one whose chat
+  // died — and here the dead one is the normal case, because the reviewer
+  // credential 403s on post — so ask the chat instead. A session we can see is
+  // authoritative in both directions; one we can't gets the spawn window (see
+  // {@link REVIEW_ROUND_GRACE_MS}) and nothing more.
+  const live = v.chatId ? opts.statusOf(v.chatId) : undefined;
+  const inFlight =
+    v.phase === "running" &&
+    (live !== undefined
+      ? !TERMINAL_STATES.has(live)
+      : opts.now - (v.at ?? 0) < REVIEW_ROUND_GRACE_MS);
+  return { round: v.round, maxRounds: v.maxRounds, posted: v.posted, inFlight };
 }
 
 /** One-line, length-bounded rendering of a review comment body for the summary. */
@@ -2073,7 +2253,12 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "if no reviewer is actually on the hook it returns reviewStalled:true rather " +
       "than blocking on a review that will never arrive (GitHub clears a reviewer's " +
       "request when they submit, and your fix commits do NOT re-queue them — use " +
-      "request_review). It returns done:true only when the PR merges or closes — " +
+      "request_review). It watches Dispatch's OWN reviewer too: when that reviewer " +
+      "has spent its per-PR round cap it returns reviewsSpent:true, which is a " +
+      "DIFFERENT problem with a different answer — no further round can ever spawn, " +
+      "so request_review cannot help, and if CI is green with no open thread it also " +
+      "returns landableOnChecks:true meaning the PR is ready to land on checks alone. " +
+      "It returns done:true only when the PR merges or closes — " +
       "keep calling until then and you'll never miss a late review round.",
     {
       number: z.number().describe("The PR number to watch."),
@@ -2131,6 +2316,14 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         signals: [ctx.signal, extraSignal(extra)],
         now: ctx.now ?? (() => Date.now()),
         onPoll: () => void ctx.prRegistry?.noteWatched(number, repo).catch(() => {}),
+        reviewRounds: async () =>
+          spentReviewRounds(
+            (await ctx.prRegistry?.reviewAgent(number, repo).catch(() => null)) ?? null,
+            {
+              statusOf: (id) => ctx.broker.getStatus(id),
+              now: (ctx.now ?? Date.now)(),
+            },
+          ),
       });
 
       /** The PR as it stands at the moment we answer — watch_pr's whole subject. */
@@ -2219,12 +2412,24 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       const passed = events.find((e) => e.type === "ci-passed");
       const noChecks = events.some((e) => e.type === "no-checks");
       const stalled = events.find((e) => e.type === "review-stalled");
+      const spentNews = events.find((e) => e.type === "reviews-spent");
+      // The STANDING cap fact, not just this call's news. The advice has to know
+      // the reviewer is finished on every call, or the round where only a stall
+      // fires sends the agent to `request_review` and back into the dead wait.
+      const spent = st.spent;
       const parts: string[] = [];
       if (failing.length) parts.push(`${failing.length} failing check(s)`);
       if (comments.length) parts.push(`${comments.length} new review comment(s)`);
       if (passed) parts.push(`all ${passed.names.length} check(s) passing`);
       if (noChecks) parts.push("no CI checks configured");
       if (stalled) parts.push("no reviewer is queued");
+      if (spentNews) {
+        parts.push(
+          spentNews.landable
+            ? "every review round is spent and the PR is landable on checks alone"
+            : "every review round is spent",
+        );
+      }
       const lines = events.map((e) => {
         switch (e.type) {
           case "ci-failed":
@@ -2241,6 +2446,16 @@ export function createManagerTools(ctx: ManagerMcpContext) {
                 `commits since then did NOT re-queue them.`
               : `  ⏸ nobody is queued to review and nobody has reviewed — no review will ` +
                 `ever arrive on this PR as it stands.`;
+          case "reviews-spent":
+            return (
+              `  ⏹ Dispatch's reviewer has spent all ${e.round} of ${e.maxRounds} rounds ` +
+              `on this PR` +
+              (e.posted
+                ? "."
+                : " and none of them posted a review (check the reviewer chat — a round " +
+                  "is spent when it is claimed, whether or not it filed anything).") +
+              ` No further round can spawn.`
+            );
           default:
             // The threadId is here so `resolve_thread` is one obvious call away.
             // Replying without resolving is the failure mode; making the id
@@ -2261,16 +2476,39 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             "actually fixed (pass the thread id above, and a `reply` saying what you did) " +
             "— an unresolved thread blocks the merge even after the code is fixed.",
         );
-      } else if (!stalled) {
+      } else if (!stalled && !spent) {
         adviceParts.push(
           "Nothing to fix. Merge it if you're ready, or call watch_pr again to wait for " +
             "the merge and any later review round.",
         );
       }
-      // A stalled queue is the one case where "call watch_pr again" is WRONG
-      // advice — it would block for the full window on a review nobody is going
-      // to write. Name the action instead.
-      if (stalled) {
+      // A spent cap SUPERSEDES the stalled-queue advice, and has to. Both are
+      // routinely true at once — a reviewer that never submits is never
+      // dequeued either, so the queue can read healthy or empty while the cap is
+      // long gone — and `request_review` is the one action that cannot help
+      // here. Emitting both would hand the agent a contradiction, and the half
+      // it picked would send it straight back into the dead wait.
+      if (spent) {
+        adviceParts.push(
+          `Dispatch's reviewer is DONE with this PR: the ${spent.maxRounds}-round cap is ` +
+            "spent, so `mcp__manager__request_review` cannot bring another one — it " +
+            "re-queues a reviewer on GitHub, it does not reset the cap. Stop waiting for " +
+            "a review here.",
+        );
+        adviceParts.push(
+          spent.landable
+            ? "CI is green and no review thread is open, so this PR is landable on checks " +
+                "alone — call `mcp__manager__approve_pr`. It re-checks everything and will " +
+                "still refuse if the project's review bar isn't met; that refusal is the " +
+                "human's to waive, not yours. Do NOT call watch_pr again for a review, " +
+                "there is none coming."
+            : "Wait on CI instead — fix whatever is failing above, then call watch_pr " +
+                "again for the checks and land it on those.",
+        );
+      } else if (stalled) {
+        // A stalled queue is the one case where "call watch_pr again" is WRONG
+        // advice — it would block for the full window on a review nobody is going
+        // to write. Name the action instead.
         adviceParts.push(
           "Do NOT just call watch_pr again — with an empty queue it will sit until the " +
             "timeout for nothing. Either call `mcp__manager__request_review` to put a " +
@@ -2303,6 +2541,12 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             done: false,
             checksPassing: !!passed,
             reviewStalled: !!stalled,
+            // Separate from `reviewStalled` because the actions are opposite:
+            // a stalled queue is fixed by `request_review`, a spent cap by
+            // nothing. Reported as a STANDING state rather than as news, so a
+            // later call about something else still carries it.
+            reviewsSpent: !!spent,
+            ...(spent ? { landableOnChecks: spent.landable } : {}),
             events,
           }) },
       );

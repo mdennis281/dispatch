@@ -534,6 +534,20 @@ export class PrRegistry {
   }
 
   /**
+   * Dispatch's own reviewer on this row — the bookkeeping half {@link snapshot}
+   * deliberately strips.
+   *
+   * Read rather than polled, because none of it comes from GitHub: the round
+   * count and the cap are written here, by the sweep. That is what makes it
+   * cheap enough for `watch_pr` to ask on every poll, which it must — the round
+   * that spends the cap is claimed while the author is already blocked.
+   */
+  async reviewAgent(repo: string, number: number): Promise<PrReviewAgentState | null> {
+    const row = await this.store.getPrRecord(prRecordKey(repo, number));
+    return row?.reviewAgent ?? null;
+  }
+
+  /**
    * Note that a poll failed, ON the row. A stale row that says why it's stale is
    * honest; one that keeps presenting five-minute-old state as current is not.
    * The row is still re-polled on the hot cadence — a failure is not a reason to
