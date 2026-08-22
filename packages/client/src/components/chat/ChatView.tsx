@@ -3,7 +3,6 @@ import {
   MoreHorizontal,
   Activity,
   Skull,
-  Hash,
   Copy,
   ChevronDown,
   MessagesSquare,
@@ -199,7 +198,6 @@ export function ChatView({ chat }: { chat: Chat }) {
     void api.chats.update(chat.id, { showInjectedContext: next }).catch(() => {});
   }, [chat, injected.show]);
 
-  const sessionId = chat.sessionId;
   const pushToast = useNotices((s) => s.push);
   const copyId = useCallback(
     (value: string, label: string) => {
@@ -605,9 +603,15 @@ export function ChatView({ chat }: { chat: Chat }) {
                     Move chat to {harnessLabel(moveTarget)}…
                   </MenuItem>
                   <div className="my-1 h-px bg-line" />
-                  {/* The ids used to ride in the header as a chip, which cost a
+                  {/* The id used to ride in the header as a chip, which cost a
                       permanent slice of the title bar to show a string nobody
-                      reads — only copies. Here they cost nothing until wanted. */}
+                      reads — only copies. Here it costs nothing until wanted.
+
+                      Only the CHAT id. The harness session id sat beside it and
+                      was the one people grabbed by mistake: nothing in Dispatch
+                      takes it — `chat_read`/`chat_find` and the chat routes are
+                      all keyed by `chat.id` — and it changes under you on a
+                      resume or a harness move, so a copied one goes stale. */}
                   <MenuItem
                     icon={<Copy />}
                     onClick={() => {
@@ -617,17 +621,6 @@ export function ChatView({ chat }: { chat: Chat }) {
                   >
                     Copy chat ID
                   </MenuItem>
-                  {sessionId && (
-                    <MenuItem
-                      icon={<Hash />}
-                      onClick={() => {
-                        copyId(sessionId, "Session ID");
-                        close();
-                      }}
-                    >
-                      Copy session ID
-                    </MenuItem>
-                  )}
                   <div className="my-1 h-px bg-line" />
                   {/* Show what Dispatch attached to a turn on your behalf —
                       surfaced memories, repo snapshots. Rendering only: the
