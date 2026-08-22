@@ -2,7 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Chat, PRRef, ResolvedReviewAgent, WsServerEvent } from "@dispatch/shared";
+import type {
+  Chat,
+  MessagePart,
+  PRRef,
+  ResolvedReviewAgent,
+  WsServerEvent,
+} from "@dispatch/shared";
+import { composeMessageText } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { PrReviewWatcher, type PrReviewGitHub } from "./pr-review-watcher.js";
@@ -368,6 +375,33 @@ describe("PrReviewWatcher — auto-resume", () => {
     expect(prompts[0]).toMatch(/watch_pr/);
   });
 
+  it("sends the nudge as a Dispatch brief, not as words the human typed", async () => {
+    // It used to arrive as a bare user message, so the transcript showed the
+    // human dictating the watcher's standing instructions to themselves. The
+    // `brief` part is what makes the row render as "Dispatch → Claude".
+    await makeChat("owner", [REF]);
+    const sent: Array<{ text: string; parts?: MessagePart[] }> = [];
+    const watcher = new PrReviewWatcher({
+      store,
+      bus,
+      github: fakeGitHub({
+        reviewThreads: async () => [{ id: "T_1", isResolved: false, author: "copilot" }],
+      }),
+      resume: async (_chatId, text, parts) => {
+        sent.push({ text, parts });
+      },
+    });
+
+    await watcher.sweep();
+    expect(sent[0]!.parts).toEqual([
+      { kind: "brief", label: "PR #42 — new review activity", text: sent[0]!.text },
+    ]);
+    // The model must still receive exactly the prompt it always did: a lone
+    // brief composes to its own text, so widening the seam changed the row, not
+    // what was asked of the agent.
+    expect(composeMessageText(sent[0]!.parts!)).toBe(sent[0]!.text);
+  });
+
   it("badges but does NOT nudge a chat that's already mid-turn", async () => {
     // It's already working — very possibly inside watch_pr. Queuing a message
     // behind that helps nobody.
@@ -570,6 +604,7 @@ describe("PrReviewWatcher — the PR catalog", () => {
       record: registry.record.bind(registry),
       track: registry.track.bind(registry),
       noteError: registry.noteError.bind(registry),
+      snapshot: registry.snapshot.bind(registry),
       requestReviewAgent: registry.requestReviewAgent.bind(registry),
       claimReviewAgent: registry.claimReviewAgent.bind(registry),
       noteReviewChat: registry.noteReviewChat.bind(registry),
@@ -786,6 +821,34 @@ describe("PrReviewWatcher — Dispatch's own reviewer", () => {
     }
 
     expect(spawned.length).toBe(POLICY.maxRounds);
+  });
+
+  it("spawns for a PR whose POLL isn't due — `watch_pr` must not starve the reviewer", async () => {
+    // The bug this exists for, in full: every `watch_pr` poll lands in the
+    // catalog, which re-arms `nextPollAt` to 30s out, and `watch_pr` polls every
+    // 20s. So an author looping on it — which is exactly what the workflow tells
+    // it to do the moment `create_pr` returns — held its own PR permanently
+    // un-due, the sweep returned at the cadence gate every 90s pass, and no
+    // reviewer was ever launched. The chat then waited on a review its own
+    // waiting had suppressed. Seen on the-salesman#138: 13 minutes in
+    // `watch_pr`, the reviewer in the queue throughout, merged unreviewed.
+    await makeChat("c1", [REF]);
+    const { registry, watcher, spawned, clock } = await withReviewer();
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+
+    // Stand in for that `watch_pr` poll: a snapshot recorded moments before the
+    // sweep, which leaves the row fresh and therefore not due.
+    const snap = (await fakeGitHub({ patch: { headRefOid: "sha-1" } }).pollPrState(
+      "octo/repo",
+      42,
+    ))!;
+    await registry.record(snap, { chatId: "c1" });
+    expect(await registry.due(clock.t)).toEqual([]);
+
+    await watcher.sweep();
+
+    expect(spawned).toEqual([{ number: 42, round: 1 }]);
   });
 
   it("skips a draft, whose reviewers `create_pr` requested anyway", async () => {

@@ -37,6 +37,7 @@ import {
   LEGACY_CONFIG_DIR_NAME,
   MANIFEST_FILE,
   composeMessageText,
+  prRecordKey,
   projectToManifest,
   renderManifestYaml,
   resolveWorkflow,
@@ -1343,6 +1344,11 @@ export async function launchAgentTask(
       kind: input.taskId,
       label: taskLabel(input.taskId, status, project, memory, pr),
     },
+    // The reviewer's durable pointer at what it is reviewing. `purpose.label`
+    // says the same thing in a sentence, but that is display text — this is the
+    // edge the sidebar joins on to file a reviewer under the chat that opened
+    // the PR, and it has to survive a label rewording.
+    ...(pr ? { reviewOf: prRecordKey(pr.repo, pr.number) } : {}),
   });
 
   await ensureSession(services, chat.id);

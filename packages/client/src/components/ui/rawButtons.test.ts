@@ -51,8 +51,14 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * Revoke `Button` beside it — so the clickable thing is the row itself, not a
  * control inside it. `Button` cannot be that without dropping its own padding,
  * height floor and single-line layout, which is the whole component.
+ *
+ * 83 → 84: the sidebar's nested `ReviewRow`, for the same reason and in the same
+ * file as the `ChatRow` directly above it, which has always been a bare element.
+ * It's a full-width row of a glyph, a fixed `#139`, a summary that truncates and
+ * an age pinned right — and `Button` is `h-6 justify-center whitespace-nowrap`
+ * with padding of its own, every one of which this row would have to override.
  */
-const BASELINE = 83;
+const BASELINE = 84;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

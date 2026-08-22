@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSessionLimit, type Chat } from "@dispatch/shared";
+import { parseSessionLimit, composeMessageText, type Chat, type MessagePart } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { ResumeScheduler, RESUME_PROMPT } from "./resume-scheduler.js";
@@ -72,7 +72,7 @@ describe("ResumeScheduler", () => {
   /** Pending fake timers: fire them by hand so nothing waits on wall-clock. */
   let timers: { id: number; fn: () => void; ms: number }[];
   let clock: number;
-  let sent: { chatId: string; text: string }[];
+  let sent: { chatId: string; text: string; parts?: MessagePart[] }[];
   let sendFails: string | null;
 
   const NOW = Date.parse("2026-08-01T18:00:00.000Z");
@@ -82,9 +82,9 @@ describe("ResumeScheduler", () => {
     return new ResumeScheduler({
       store,
       bus,
-      send: async (chatId, text) => {
+      send: async (chatId, text, parts) => {
         if (sendFails) throw new Error(sendFails);
-        sent.push({ chatId, text });
+        sent.push({ chatId, text, parts });
       },
       deps: {
         now: () => clock,
@@ -160,7 +160,19 @@ describe("ResumeScheduler", () => {
     clock = plan!.at;
     await tick(s);
 
-    expect(sent).toEqual([{ chatId: "c1", text: RESUME_PROMPT }]);
+    // Sent as a Dispatch `brief`, not as words the human typed: a chat that
+    // resumed itself must not read as though they came back and asked it to.
+    // The composed text is unchanged, so the model gets the same prompt.
+    expect(sent).toEqual([
+      {
+        chatId: "c1",
+        text: RESUME_PROMPT,
+        parts: [
+          { kind: "brief", label: "Usage limit lifted — continuing", text: RESUME_PROMPT },
+        ],
+      },
+    ]);
+    expect(composeMessageText(sent[0]!.parts!)).toBe(RESUME_PROMPT);
     // Marked fired so a later restore() can't send it a second time.
     expect((await store.getChat("c1"))?.resume?.firedAt).toBe(clock);
     // …and the transcript explains where the new turn came from.
@@ -254,7 +266,7 @@ describe("ResumeScheduler", () => {
 
     clock = NOW + 5_000;
     await tick(s);
-    expect(sent).toEqual([{ chatId: "c2", text: RESUME_PROMPT }]);
+    expect(sent).toMatchObject([{ chatId: "c2", text: RESUME_PROMPT }]);
   });
 
   it("fires straight away for a plan whose reset passed while the server was down", async () => {
@@ -266,7 +278,7 @@ describe("ResumeScheduler", () => {
     await s.restore();
     expect(timers.find((t) => t.ms === 0)).toBeTruthy();
     await tick(s);
-    expect(sent).toEqual([{ chatId: "c5", text: RESUME_PROMPT }]);
+    expect(sent).toMatchObject([{ chatId: "c5", text: RESUME_PROMPT }]);
   });
 
   it("dispose drops every armed timer", async () => {

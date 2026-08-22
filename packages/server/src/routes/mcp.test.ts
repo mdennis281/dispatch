@@ -444,6 +444,26 @@ describe("GET /api/projects/:projectId/mcp", () => {
       ),
     ).toBe(true);
 
+    // Every tool whose backing service the container builds UNCONDITIONALLY must
+    // come back available through the real route. The builder tests above pass
+    // bindings by hand, so they cannot catch the route forgetting one — which is
+    // how `worktree`/`chat_find`/`chat_read`/`project_info` shipped wearing an
+    // "unavailable" chip while every session could call them perfectly well.
+    for (const name of [
+      "terminal",
+      "terminal_output",
+      "worktree",
+      "remember",
+      "recall",
+      "spawn_chat",
+      "mcp_list",
+      "chat_find",
+      "chat_read",
+      "project_info",
+    ]) {
+      expect(manager.tools.find((t) => t.name === name)).toMatchObject({ name, available: true });
+    }
+
     const missing = await app.inject({ method: "GET", url: "/api/projects/nope/mcp" });
     expect(missing.statusCode).toBe(404);
   });

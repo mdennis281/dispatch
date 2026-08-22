@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { Chat } from "@dispatch/shared";
-import { useChats, chatsForProject, countProjectAgents } from "./chats.js";
+import type { Chat, PrRecord } from "@dispatch/shared";
+import {
+  useChats,
+  chatsForProject,
+  countProjectAgents,
+  buildChatTree,
+  reviewTargetKey,
+} from "./chats.js";
 
 function chat(id: string, projectId: string, updatedAt = 1): Chat {
   return {
@@ -212,5 +218,107 @@ describe("countProjectAgents", () => {
     );
 
     expect(counts).toEqual({});
+  });
+});
+
+describe("buildChatTree — reviewers file under the chat that opened the PR", () => {
+  const pr = (key: string, number: number, chatId?: string, reviewChatId?: string): PrRecord =>
+    ({
+      key,
+      number,
+      chatId,
+      ...(reviewChatId ? { reviewAgent: { chatId: reviewChatId, rounds: 1 } } : {}),
+    }) as PrRecord;
+
+  const reviewer = (id: string, key: string, updatedAt = 1): Chat => ({
+    ...chat(id, "p1", updatedAt),
+    reviewOf: key,
+    purpose: { kind: "pr:review" },
+  });
+
+  const shape = (bs: ReturnType<typeof buildChatTree>) =>
+    bs.map((b) => [b.chat.id, ids(b.reviews)] as const);
+
+  it("nests every round, not just the one the registry remembers", () => {
+    // The bug this exists for: `reviewAgent.chatId` holds ONE round, so three of
+    // four reviewers on a four-round PR were unattributable.
+    const chats = [
+      chat("author", "p1", 100),
+      reviewer("r4", "o/r#7", 40),
+      reviewer("r3", "o/r#7", 30),
+      reviewer("r2", "o/r#7", 20),
+      reviewer("r1", "o/r#7", 10),
+    ];
+    const tree = buildChatTree(chats, {}, { "o/r#7": pr("o/r#7", 7, "author", "r4") });
+
+    expect(shape(tree)).toEqual([["author", ["r4", "r3", "r2", "r1"]]]);
+  });
+
+  it("reads a pre-`reviewOf` reviewer's target back out of its purpose label", () => {
+    const legacy: Chat = {
+      ...chat("legacy", "p1", 5),
+      purpose: { kind: "pr:review", label: "Reviewing PR #139 in mdennis281/dispatch" },
+    };
+    const tree = buildChatTree(
+      [chat("author", "p1", 100), legacy],
+      {},
+      { "mdennis281/dispatch#139": pr("mdennis281/dispatch#139", 139, "author") },
+    );
+
+    expect(shape(tree)).toEqual([["author", ["legacy"]]]);
+  });
+
+  it("leaves a reviewer at the top level when its parent isn't here", () => {
+    // Nesting hides a row inside another row. Hiding one inside a row that
+    // doesn't exist would delete it from the sidebar outright.
+    const orphan = reviewer("orphan", "o/r#7", 50);
+    const unattributed = buildChatTree([chat("a", "p1", 100), orphan], {}, {
+      "o/r#7": pr("o/r#7", 7), // nobody in Dispatch opened it
+    });
+    const deletedParent = buildChatTree([chat("a", "p1", 100), orphan], {}, {
+      "o/r#7": pr("o/r#7", 7, "gone"),
+    });
+
+    expect(shape(unattributed)).toEqual([["a", []], ["orphan", []]]);
+    expect(shape(deletedParent)).toEqual([["a", []], ["orphan", []]]);
+  });
+
+  it("ranks a branch by its newest clock, so a live review lifts its parent", () => {
+    const chats = [chat("busy", "p1", 500), chat("stale", "p1", 10), reviewer("r", "o/r#7", 900)];
+    const tree = buildChatTree(chats, {}, { "o/r#7": pr("o/r#7", 7, "stale") });
+
+    expect(shape(tree)).toEqual([["stale", ["r"]], ["busy", []]]);
+  });
+
+  it("prefers the live activity clock over the hydrated one for that rank", () => {
+    const chats = [chat("busy", "p1", 500), chat("stale", "p1", 10), reviewer("r", "o/r#7", 20)];
+    const tree = buildChatTree(chats, { r: 900 }, { "o/r#7": pr("o/r#7", 7, "stale") });
+
+    expect(shape(tree)).toEqual([["stale", ["r"]], ["busy", []]]);
+  });
+
+  it("never files a chat under itself", () => {
+    const self = reviewer("self", "o/r#7", 10);
+    const tree = buildChatTree([self], {}, { "o/r#7": pr("o/r#7", 7, "self") });
+
+    expect(shape(tree)).toEqual([["self", []]]);
+  });
+});
+
+describe("reviewTargetKey", () => {
+  it("ignores a purpose label that isn't a review's", () => {
+    const spawned: Chat = {
+      ...chat("s", "p1"),
+      purpose: { kind: "spawned", label: "Reviewing PR #1 in o/r" },
+    };
+    expect(reviewTargetKey(spawned)).toBeNull();
+  });
+
+  it("ignores a review whose label was reworded out from under the parser", () => {
+    const odd: Chat = {
+      ...chat("s", "p1"),
+      purpose: { kind: "pr:review", label: "Reviewing a pull request" },
+    };
+    expect(reviewTargetKey(odd)).toBeNull();
   });
 });

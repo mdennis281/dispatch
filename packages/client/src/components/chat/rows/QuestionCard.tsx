@@ -78,8 +78,19 @@ function parseQuestions(input: Record<string, unknown>): ParsedQuestion[] {
  *
  * A resolved question can't be re-opened: its `canUseTool` promise settled the
  * moment it was answered and the model has already acted on it. So the revert
- * interrupts the turn and states the correction as a normal user message —
- * which is what you'd otherwise type by hand.
+ * interrupts the turn and delivers the correction as a message instead.
+ *
+ * Written ABOUT the human rather than AS them, because it ships as a `brief` —
+ * Dispatch's words, not theirs. The card header says so in the transcript, but
+ * the model only ever sees this text, so the voice has to carry it: a first
+ * person "I" here would read as Dispatch claiming to have answered its own
+ * question.
+ *
+ * Laid out as MARKDOWN for the same reason: a brief is rendered through
+ * `Markdown`, not `whitespace-pre-wrap`. Written with bare newlines the answer
+ * and the notes collapsed onto one run-on line — "Revised answer: X Additional
+ * instructions: Y" — so each field is its own list item and every block is
+ * blank-line separated.
  */
 function buildCorrection(
   questions: ParsedQuestion[],
@@ -87,21 +98,23 @@ function buildCorrection(
   previous: string | undefined,
   wasDeclined: boolean,
 ): string {
-  const out = ["I picked the wrong answer to your question and stopped you. Correcting it:", ""];
+  const out = ["The human picked the wrong answer to your question and stopped you to fix it:", ""];
   for (const [qi, q] of questions.entries()) {
     const a = answers.find((x) => x.questionIndex === qi);
     if (!a) continue;
-    if (questions.length > 1) out.push(`Question: ${q.question}`);
-    out.push(`Corrected answer: ${a.answer ?? a.optionId ?? ""}`);
-    if (a.notes) out.push(`Additional instructions: ${a.notes}`);
+    // The question paragraph also keeps each question's bullets a separate
+    // list; back-to-back bullet groups would otherwise merge into one.
+    if (questions.length > 1) out.push(`**Question:** ${q.question}`, "");
+    out.push(`- **Revised answer:** ${a.answer ?? a.optionId ?? ""}`);
+    if (a.notes) out.push(`- **Additional instructions:** ${a.notes}`);
     out.push("");
   }
   out.push(
     wasDeclined
-      ? "(I previously declined to answer.)"
-      : `(My previous answer was: ${previous ?? "unknown"}.)`,
+      ? "(They previously declined to answer.)"
+      : `(Their previous answer was: ${previous ?? "unknown"}.)`,
     "",
-    "Disregard the previous answer and continue from the corrected one.",
+    "Disregard the previous answer and continue from the revised one.",
   );
   return out.join("\n");
 }
@@ -229,14 +242,20 @@ export function QuestionCard({ row }: QuestionCardProps) {
 
     if (reverting) {
       // The original request is long resolved — deliver the correction as a
-      // composed instruction. `send-message` also steers an active turn, so the
-      // quick-action-style parts survive if the interrupt has not landed yet.
+      // composed brief. `send-message` also steers an active turn, so the parts
+      // survive if the interrupt has not landed yet.
+      //
+      // `brief`, not `instructions`: the human chose an option, but every word
+      // of this message is Dispatch's — so it gets the "Dispatch → Claude" card
+      // the launched tasks use, rather than the speech bubble that presented an
+      // app-composed paragraph as something they typed.
+      //
       // No `answered` latch here: clearing `reverting` closes the card in the
       // same batch, so `pending` goes false and re-entry is already blocked.
       const parts: MessagePart[] = [
         {
-          kind: "instructions",
-          label: "Re-answer",
+          kind: "brief",
+          label: multi ? "Revised answers" : "Revised answer",
           text: buildCorrection(questions, answers, row.message, declined),
         },
       ];
