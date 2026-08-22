@@ -2,7 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Chat, PRRef, ResolvedReviewAgent, WsServerEvent } from "@dispatch/shared";
+import type {
+  Chat,
+  MessagePart,
+  PRRef,
+  ResolvedReviewAgent,
+  WsServerEvent,
+} from "@dispatch/shared";
+import { composeMessageText } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { PrReviewWatcher, type PrReviewGitHub } from "./pr-review-watcher.js";
@@ -366,6 +373,33 @@ describe("PrReviewWatcher — auto-resume", () => {
     expect(prompts[0]).toMatch(/PR #42/);
     expect(prompts[0]).toMatch(/check "build" failure/);
     expect(prompts[0]).toMatch(/watch_pr/);
+  });
+
+  it("sends the nudge as a Dispatch brief, not as words the human typed", async () => {
+    // It used to arrive as a bare user message, so the transcript showed the
+    // human dictating the watcher's standing instructions to themselves. The
+    // `brief` part is what makes the row render as "Dispatch → Claude".
+    await makeChat("owner", [REF]);
+    const sent: Array<{ text: string; parts?: MessagePart[] }> = [];
+    const watcher = new PrReviewWatcher({
+      store,
+      bus,
+      github: fakeGitHub({
+        reviewThreads: async () => [{ id: "T_1", isResolved: false, author: "copilot" }],
+      }),
+      resume: async (_chatId, text, parts) => {
+        sent.push({ text, parts });
+      },
+    });
+
+    await watcher.sweep();
+    expect(sent[0]!.parts).toEqual([
+      { kind: "brief", label: "PR #42 — new review activity", text: sent[0]!.text },
+    ]);
+    // The model must still receive exactly the prompt it always did: a lone
+    // brief composes to its own text, so widening the seam changed the row, not
+    // what was asked of the agent.
+    expect(composeMessageText(sent[0]!.parts!)).toBe(sent[0]!.text);
   });
 
   it("badges but does NOT nudge a chat that's already mid-turn", async () => {

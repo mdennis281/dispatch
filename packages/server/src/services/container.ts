@@ -422,9 +422,9 @@ export function createServices(
     new ResumeScheduler({
       store,
       bus,
-      send: async (chatId, text) => {
+      send: async (chatId, text, parts) => {
         await ensureSession(services, chatId);
-        await broker.sendMessage(chatId, text);
+        await broker.sendMessage(chatId, text, { parts });
       },
     });
   broker.onTurnError = (chatId, reason) => {
@@ -516,9 +516,9 @@ export function createServices(
       },
       // Same lazy-session path the ResumeScheduler uses — by the time a review
       // round lands, the chat's subprocess is long gone.
-      resume: async (chatId, text) => {
+      resume: async (chatId, text, parts) => {
         await ensureSession(services, chatId);
-        await broker.sendMessage(chatId, text);
+        await broker.sendMessage(chatId, text, { parts });
       },
       // A chat that's mid-turn is already working (quite possibly inside
       // `watch_pr`); it gets the badge and nothing more.

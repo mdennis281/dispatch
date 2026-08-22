@@ -32,7 +32,14 @@
  * this pass" (never a false badge, never an abort), and a resume failure leaves
  * the badge standing so the human can still act on it.
  */
-import type { AttentionItem, Chat, PRRef, ResolvedReviewAgent, ReviewKind } from "@dispatch/shared";
+import type {
+  AttentionItem,
+  Chat,
+  MessagePart,
+  PRRef,
+  ResolvedReviewAgent,
+  ReviewKind,
+} from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
 import type { Store } from "../store/index.js";
 import type { PrPollSnapshot } from "./github.js";
@@ -164,8 +171,12 @@ export interface PrReviewWatcherOptions {
    * Wake a chat with a prompt. Must ensure a live session first — by the time a
    * review round lands the subprocess is usually long gone (same contract as
    * ResumeScheduler's `send`).
+   *
+   * `parts` is the authorship breakdown for the transcript row: this prompt is
+   * DISPATCH talking, and must be rendered as such rather than as a sentence the
+   * human sat and typed.
    */
-  resume?: (chatId: string, text: string) => Promise<void>;
+  resume?: (chatId: string, text: string, parts?: MessagePart[]) => Promise<void>;
   /**
    * Is this chat currently busy? A chat mid-turn is already working (very
    * possibly inside `watch_pr`); nudging it would just queue a message behind
@@ -210,7 +221,11 @@ export class PrReviewWatcher {
   private readonly store: Store;
   private readonly bus: EventBus;
   private readonly github: PrReviewGitHub;
-  private readonly resumeFn?: (chatId: string, text: string) => Promise<void>;
+  private readonly resumeFn?: (
+    chatId: string,
+    text: string,
+    parts?: MessagePart[],
+  ) => Promise<void>;
   private readonly isBusy: (chatId: string) => boolean;
   private readonly registry?: PrReviewRegistry;
   private readonly discoverFn?: () => Promise<Array<{ projectId: string; ref: PRRef }>>;
@@ -618,7 +633,16 @@ export class PrReviewWatcher {
       "fixed, and once your fixes are pushed call `mcp__manager__request_review` to put " +
       "the reviewer back on the hook (submitting a review clears their request — new " +
       "commits do NOT re-queue them). Keep going until the PR lands.";
-    await this.resumeFn(chatId, prompt).catch((err: unknown) => {
+    // Sent as a `brief`, not as bare text: nobody typed this. Rendered flat it
+    // arrived in the human's own speech bubble, so the transcript read as though
+    // they had sat there and dictated the watcher's standing instructions —
+    // which is both untrue and unreadable next to what they actually said.
+    // `composeMessageText` of a lone brief is the text verbatim, so the model
+    // receives exactly the prompt it always did.
+    const parts: MessagePart[] = [
+      { kind: "brief", label: `PR #${ref.number} — new review activity`, text: prompt },
+    ];
+    await this.resumeFn(chatId, prompt, parts).catch((err: unknown) => {
       // Leave the badge standing — the human can still act on it.
       this.bus.publish({
         type: "notice",
