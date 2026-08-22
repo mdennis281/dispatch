@@ -10,10 +10,20 @@
 # at files in this repo and config that lags the code it references just fails.
 name: Dispatch
 # Relative, so it survives being committed: resolved against the repo root (see
-# WorktreeService / github.ts), which lands on the same directory the absolute
-# path did — without baking one machine's home directory into a public file.
-# Already gitignored, so the worktrees themselves stay out of every diff.
-worktreeRoot: .worktrees
+# WorktreeService / github.ts) — without baking one machine's home directory
+# into a public file.
+#
+# It points OUTSIDE the repo, and that `../` is load-bearing. With the root at
+# `.worktrees` the checkout accumulated ~100 sibling copies of itself inside
+# itself, and a plain `grep -rn` from the repo root took over two minutes and
+# was killed before it answered — every search paid for 100 duplicate trees.
+# .gitignore keeps them out of `git status`; it does not keep them out of a
+# tool that walks the filesystem. `.claude/worktrees/` (the Claude Code
+# harness's own root, which this key does not control) had the same effect.
+#
+# The `dispatch/` leaf keeps one project's trees together, so a second repo
+# sharing `projects/.worktrees` doesn't interleave with these.
+worktreeRoot: ../.worktrees/dispatch
 workflow:
   profile: review
   autoMerge: on-green
