@@ -666,11 +666,18 @@ export const MOCK_MISSION: MissionSpec = {
       teamId: "assurance",
       title: "Sweep every stale reference",
       brief:
-        "182 occurrences across 48 files in packages/ alone, plus bundled skills (mcp-setup " +
-        "SKILL.md), the injected workflow rules in shared/workflow.ts, the .dispatch/ project " +
-        "instructions, and project MEMORY - memories are markdown in the primary checkout and " +
-        "will keep teaching agents the dead names until they are rewritten. Finish with a " +
-        "verifier script wired into CI so the count cannot climb back.",
+        "185 occurrences across 49 tracked files: server 152, shared 15, client 13, RUNNING.md " +
+        "3, cli 2. That includes the bundled mcp-setup skill and the workflow rules in " +
+        "shared/workflow.ts, which are INJECTED into every chat - leave those and the app " +
+        "keeps teaching the dead names to every new session.\n" +
+        "Project memory is a separate surface and the easiest to forget: 49 more occurrences " +
+        "across 30 files in .dispatch/memory/, led by mcp__manager__terminal (22) and " +
+        "ask_user (8). Those are markdown in the PRIMARY checkout, not this worktree, and they " +
+        "are surfaced to agents as trusted context - a stale memory outlives the rename " +
+        "indefinitely. Rewrite them through the memory tools, never by hand.\n" +
+        "Wire the verifier into CI as `git grep`, not a filesystem walk: .worktrees/ holds a " +
+        "dozen sibling checkouts of this repo and is gitignored, so a naive walk finds ~15k " +
+        "hits and can never go green.",
       dependsOn: ["t-split-servers"],
       satisfies: ["ts-no-stale-refs"],
       acceptance: [],
