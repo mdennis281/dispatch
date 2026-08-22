@@ -37,6 +37,7 @@ import type {
   Chat,
   MessagePart,
   PRRef,
+  PrSnapshot,
   ResolvedReviewAgent,
   ReviewKind,
 } from "@dispatch/shared";
@@ -88,6 +89,24 @@ export interface PrReviewGitHub {
 }
 
 /**
+ * Everything a review-spawn decision reads, and nothing else.
+ *
+ * Narrow on purpose: it makes a stored catalog row and a live poll
+ * interchangeable inputs, which is what lets the decision run on a pass where
+ * the poll wasn't due. `PrPollSnapshot` satisfies it directly; a stored
+ * `PrSnapshot` holds the same queue as reviewers in the `requested` state, and
+ * is converted by {@link maybeSpawnReviewFromRow}.
+ */
+export interface ReviewCandidate {
+  repo: string;
+  number: number;
+  state: "open" | "closed" | "merged";
+  isDraft: boolean;
+  /** Logins with an OUTSTANDING review request. */
+  requested: string[];
+}
+
+/**
  * The PR catalog, as this watcher needs it. Structural so the watcher stays
  * testable without a Store, and so the sweep's cadence questions
  * (`due`) live with the rows rather than here.
@@ -97,6 +116,11 @@ export interface PrReviewRegistry {
   track(ref: PRRef, scope: PrScope): Promise<unknown>;
   noteError(repo: string, number: number, error: string): Promise<void>;
   due(now?: number): Promise<Array<{ repo: string; number: number } & PrScope>>;
+  /**
+   * A stored row, cadence ignored — what the review-spawn check reads on the
+   * passes where the poll wasn't due. See {@link maybeSpawnReviewFromRow}.
+   */
+  snapshot(repo: string, number: number): Promise<PrSnapshot | null>;
   /** Record that Dispatch's own reviewer was asked (idempotent per head sha). */
   requestReviewAgent(repo: string, number: number, by: string): Promise<unknown>;
   /** Take the review job, or null because there isn't one. See the registry. */
@@ -451,6 +475,36 @@ export class PrReviewWatcher {
   }
 
   /**
+   * Consider spawning a reviewer for a PR this pass did NOT poll.
+   *
+   * The decision needs a reviewer queue, not a fresh one — so it reads the
+   * catalog row, which costs one indexed row read and no GitHub call. That is
+   * what lets it run on every sweep for every open PR regardless of the poll
+   * cadence, which is the whole point: see the bug at {@link checkOne}.
+   */
+  private async maybeSpawnReviewFromRow(
+    repo: string,
+    number: number,
+    scope: PrScope,
+  ): Promise<void> {
+    if (!this.reviewAgent || !this.registry) return;
+    const row = await this.registry.snapshot(repo, number).catch(() => null);
+    if (!row) return;
+    await this.maybeSpawnReview(
+      {
+        repo: row.repo,
+        number: row.number,
+        state: row.state,
+        isDraft: row.isDraft,
+        // The same derivation `pollPrState` makes — the row stores the queue as
+        // reviewer states, and the two must not drift.
+        requested: row.reviewers.filter((r) => r.state === "requested").map((r) => r.login),
+      },
+      scope,
+    );
+  }
+
+  /**
    * Spawn Dispatch's own reviewer, if this PR is asking for one.
    *
    * Runs off every poll rather than off any single event, because the two
@@ -459,11 +513,14 @@ export class PrReviewWatcher {
    * one sweep and the next. Reading both from the same snapshot is what keeps
    * "was a review requested" a single question with a single answer.
    *
+   * Takes only {@link ReviewCandidate} — the four facts the decision actually
+   * reads — so a stored row serves it exactly as well as a live poll does.
+   *
    * Every failure here is swallowed. A sweep that cannot spawn a reviewer must
    * still record the poll, raise its attention items and move to the next PR —
    * this is an addition to the sweep, not a new way for it to die.
    */
-  private async maybeSpawnReview(snapshot: PrPollSnapshot, scope: PrScope): Promise<void> {
+  private async maybeSpawnReview(snapshot: ReviewCandidate, scope: PrScope): Promise<void> {
     const hooks = this.reviewAgent;
     const registry = this.registry;
     if (!hooks || !registry || snapshot.state !== "open") return;
@@ -539,7 +596,21 @@ export class PrReviewWatcher {
     // The catalog decides WHEN, via its adaptive cadence: a PR with a reviewer on
     // the hook or CI in flight stays on the sweep's own interval, and only a
     // genuinely parked one backs off.
-    if (due && !due.has(`${repo}#${ref.number}`)) return null;
+    //
+    // The review-spawn check runs ANYWAY, off the stored row. It used to sit
+    // below this line, and that starved it in the one case it exists for: every
+    // `watch_pr` poll records a snapshot, which re-arms `nextPollAt` to 30s out,
+    // and `watch_pr` polls every 20s. So an author looping on `watch_pr` — which
+    // is exactly what the workflow tells it to do the moment `create_pr`
+    // returns — held its own PR permanently un-due, this returned before the
+    // spawn every single 90s pass, and no reviewer was ever launched. The chat
+    // then waited for a review its own waiting had suppressed. Observed on
+    // the-salesman#138: 13 minutes in `watch_pr`, `dispatch-review` sitting in
+    // the queue the whole time, zero rounds spent, merged unreviewed.
+    if (due && !due.has(`${repo}#${ref.number}`)) {
+      await this.maybeSpawnReviewFromRow(repo, ref.number, scope).catch(() => undefined);
+      return null;
+    }
 
     const snap = await this.github.pollPrState(repo, ref.number).catch(() => null);
     // Unreadable this pass → say nothing. A badge raised on a failed read is a

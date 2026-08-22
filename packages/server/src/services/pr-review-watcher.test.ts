@@ -604,6 +604,7 @@ describe("PrReviewWatcher — the PR catalog", () => {
       record: registry.record.bind(registry),
       track: registry.track.bind(registry),
       noteError: registry.noteError.bind(registry),
+      snapshot: registry.snapshot.bind(registry),
       requestReviewAgent: registry.requestReviewAgent.bind(registry),
       claimReviewAgent: registry.claimReviewAgent.bind(registry),
       noteReviewChat: registry.noteReviewChat.bind(registry),
@@ -820,6 +821,34 @@ describe("PrReviewWatcher — Dispatch's own reviewer", () => {
     }
 
     expect(spawned.length).toBe(POLICY.maxRounds);
+  });
+
+  it("spawns for a PR whose POLL isn't due — `watch_pr` must not starve the reviewer", async () => {
+    // The bug this exists for, in full: every `watch_pr` poll lands in the
+    // catalog, which re-arms `nextPollAt` to 30s out, and `watch_pr` polls every
+    // 20s. So an author looping on it — which is exactly what the workflow tells
+    // it to do the moment `create_pr` returns — held its own PR permanently
+    // un-due, the sweep returned at the cadence gate every 90s pass, and no
+    // reviewer was ever launched. The chat then waited on a review its own
+    // waiting had suppressed. Seen on the-salesman#138: 13 minutes in
+    // `watch_pr`, the reviewer in the queue throughout, merged unreviewed.
+    await makeChat("c1", [REF]);
+    const { registry, watcher, spawned, clock } = await withReviewer();
+    await registry.track(REF, { chatId: "c1", projectId: "p1" });
+    await registry.requestReviewAgent("octo/repo", 42, "c1");
+
+    // Stand in for that `watch_pr` poll: a snapshot recorded moments before the
+    // sweep, which leaves the row fresh and therefore not due.
+    const snap = (await fakeGitHub({ patch: { headRefOid: "sha-1" } }).pollPrState(
+      "octo/repo",
+      42,
+    ))!;
+    await registry.record(snap, { chatId: "c1" });
+    expect(await registry.due(clock.t)).toEqual([]);
+
+    await watcher.sweep();
+
+    expect(spawned).toEqual([{ number: 42, round: 1 }]);
   });
 
   it("skips a draft, whose reviewers `create_pr` requested anyway", async () => {
