@@ -28,7 +28,7 @@ import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { basename, extname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { realpath, stat } from "node:fs/promises";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
-import { buildBrowserMcpServers } from "./mcp/browser-mcp.js";
+import { buildBrowserMcpServers, effectiveSubApps } from "./mcp/browser-mcp.js";
 import { McpPrewarmService } from "./mcp-prewarm.js";
 import { tmpdir } from "node:os";
 import {
@@ -4816,18 +4816,15 @@ export class SessionBroker {
       app: appSettings?.mcpEnabled,
       project: projectId ? this.projectConfig?.getMcpEnabled?.(projectId) : undefined,
     };
-    // Config-sourced sub-apps decide the browser auto-gate — but fall back on
-    // EMPTY, not on nullish. `getSubApps` answers `[]` for a project whose
-    // config isn't in the cache yet (a restart, a project loaded moments ago),
-    // and `[] ?? project.subApps` keeps the empty array: the session then
-    // silently comes up with no browser tools in a repo that declares three web
-    // sub-apps. The store copy is synced FROM the same config, so it is the
-    // right answer whenever the live one has nothing to say.
-    const configSubApps =
-      (projectId ? this.projectConfig?.getSubApps?.(projectId) : undefined) ?? [];
     const browserMcp = buildBrowserMcpServers({
       config: projectId ? this.projectConfig?.getBrowserConfig?.(projectId) : undefined,
-      subApps: configSubApps.length ? configSubApps : (project?.subApps ?? []),
+      // Config-first, but see `effectiveSubApps` for why this can't be a `??`
+      // chain: a cold config cache answers `[]`, and the session would come up
+      // with no browser tools in a repo that declares three web sub-apps.
+      subApps: effectiveSubApps(
+        projectId ? this.projectConfig?.getSubApps?.(projectId) : undefined,
+        project?.subApps,
+      ),
       enablement: mcpEnablement,
       chatId: session.chatId,
       onUnavailable: (name, pkg) =>

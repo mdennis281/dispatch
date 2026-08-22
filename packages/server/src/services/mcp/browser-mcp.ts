@@ -122,6 +122,31 @@ export function hasWebSubApp(subApps: readonly SubApp[]): boolean {
 }
 
 /**
+ * The sub-apps to gate on: the live `.dispatch/` ones when there are any, else
+ * the store's synced copy.
+ *
+ * Falling back on EMPTY rather than on nullish, which is the whole reason this
+ * is a function instead of a `??` chain at each call site. `getSubApps` answers
+ * `[]` — not `undefined` — for a project whose config isn't in the cache yet (a
+ * restart, a project loaded moments ago), so `getSubApps(id) ?? project.subApps`
+ * keeps the empty array and never falls back at all.
+ *
+ * Observed, not theorised: the MCP catalog reported both browser servers gated
+ * off ("no sub-app declares a url") for a project that declares three of them.
+ * The same expression was in `buildOptions`, where it means a session comes up
+ * with no browser tools and says nothing about it.
+ *
+ * The store copy is synced FROM the same config, so it is the right answer
+ * whenever the live one has nothing to say.
+ */
+export function effectiveSubApps(
+  fromConfig: readonly SubApp[] | undefined,
+  fromStore: readonly SubApp[] | undefined,
+): readonly SubApp[] {
+  return fromConfig?.length ? fromConfig : (fromStore ?? []);
+}
+
+/**
  * What the `browser:` block alone says about one server, before any toggle.
  *
  * `auto` is gated on a sub-app with a `url` because these two cost 53 tools of

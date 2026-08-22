@@ -361,3 +361,63 @@ describe("setServerEnabled", () => {
     await expect(setServerEnabled(dir, "playwright", false)).rejects.toThrow();
   });
 });
+
+describe("manifest fidelity", () => {
+  /**
+   * A realistic hand-authored manifest: comments above and between keys, and
+   * flow sequences that have nothing to do with the edit.
+   *
+   * The 4-line scratch manifests above can't catch a whole-document reflow —
+   * they have nothing else in them to reflow. This one does, and it caught a
+   * real case: the emitter's default `flowCollectionPadding` rewrote
+   * `ports: [4319]` to `ports: [ 4319 ]` three keys away from the edit, which is
+   * how a UI toggle ends up putting noise in somebody's review diff.
+   */
+  const AUTHORED = [
+    "# The project config, hand-written and committed.",
+    "name: Hivebreak",
+    "# How change ships here.",
+    "workflow:",
+    "  profile: review",
+    "  pr:",
+    "    # The bot that actually reviews.",
+    '    reviewers: ["copilot-pull-request-reviewer[bot]"]',
+    "subApps:",
+    "  - id: dev-server",
+    "    name: Dev server",
+    "    cwd: .",
+    "    # Offset per launch; the server reads DISPATCH_PORT.",
+    "    ports: [4319, 4320]",
+    "    url: http://localhost:{port}",
+    "",
+  ].join("\n");
+
+  it("changes only the lines it means to", async () => {
+    await seedManifest(AUTHORED);
+    await setServerEnabled(dir, "playwright", false);
+
+    const after = await readFile(manifestPath(), "utf8");
+    const removed = AUTHORED.split("\n").filter((l) => !after.split("\n").includes(l));
+    // Nothing from the original may disappear — not a comment, not a flow seq.
+    expect(removed).toEqual([]);
+    expect(after).toContain('reviewers: ["copilot-pull-request-reviewer[bot]"]');
+    expect(after).toContain("ports: [4319, 4320]");
+    expect(after).toContain("playwright: false");
+  });
+
+  it("holds for add and remove too — the reflow was never toggle-specific", async () => {
+    await seedManifest(AUTHORED);
+    await addServer(dir, {
+      name: "ripgrep",
+      transport: { type: "stdio", command: "npx", args: ["-y", "mcp-ripgrep"] },
+    });
+    let after = await readFile(manifestPath(), "utf8");
+    expect(after).toContain("ports: [4319, 4320]");
+    expect(after).toContain("# Offset per launch; the server reads DISPATCH_PORT.");
+
+    await removeServer(dir, "ripgrep");
+    after = await readFile(manifestPath(), "utf8");
+    expect(after).toContain("ports: [4319, 4320]");
+    expect(after).toContain('reviewers: ["copilot-pull-request-reviewer[bot]"]');
+  });
+});

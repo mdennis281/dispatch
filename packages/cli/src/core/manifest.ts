@@ -4,9 +4,16 @@
  * `project.yaml` is a HAND-AUTHORED, committable file: contributors write it,
  * review it in PRs, and comment it. So every edit here goes through the `yaml`
  * package's Document API rather than a parse → mutate-JS → re-serialize round
- * trip, which would silently strip every comment and reflow the whole file. Only
- * the nodes an operation actually touches are rewritten; the rest of the document
- * — key order, blank lines, comments — survives byte-for-byte.
+ * trip, which would silently strip every comment and reflow the whole file.
+ * Comments, key order and blank lines survive.
+ *
+ * "Only the nodes an operation touches are rewritten" is what this file used to
+ * claim, and it was not true: `toString` re-emits the WHOLE document, so any
+ * emitter default that disagrees with how a human wrote a node rewrites that
+ * node too. `saveManifest` pins the one such default that reached real
+ * manifests — see the note there. Treat the claim as "comments and structure
+ * survive", not as byte-for-byte, and check `mcp.test.ts`'s `manifest fidelity`
+ * cases before assuming a write is inert.
  *
  * Two invariants hold for every write:
  *   - the resulting document is re-validated against {@link ProjectManifestSchema}
@@ -154,7 +161,25 @@ export async function saveManifest(loaded: LoadedManifest): Promise<string> {
   // tmp + rename: a crash mid-write leaves the previous config intact rather
   // than a half-written file that breaks every session in the project.
   const tmp = `${manifestPath}.${process.pid}.tmp`;
-  await writeFile(tmp, loaded.doc.toString({ lineWidth: 0 }), "utf8");
+  // `flowCollectionPadding: false` because the emitter's default rewrites every
+  // flow collection in the document — `ports: [4319]` comes back as
+  // `ports: [ 4319 ]` — even when the edit was three keys away. The Document API
+  // protects the comments and the key order; it does NOT protect nodes it
+  // re-emits, and this is the one such reflow that hits real manifests.
+  //
+  // It matters more than it reads: this file is committed and reviewed, so an
+  // edit that touches lines nobody changed puts noise in someone's diff. And the
+  // MCP toggles now write it on a UI click, not just on an occasional
+  // `dispatch mcp add`, so the churn compounds.
+  //
+  // `false` is a style choice, not fidelity — the emitter has one setting for
+  // the whole document. It matches the unpadded form every manifest in this repo
+  // is written in.
+  await writeFile(
+    tmp,
+    loaded.doc.toString({ lineWidth: 0, flowCollectionPadding: false }),
+    "utf8",
+  );
   await rename(tmp, manifestPath);
   return manifestPath;
 }

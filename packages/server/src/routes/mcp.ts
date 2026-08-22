@@ -35,6 +35,7 @@ import {
   buildBrowserMcpServers,
   browserServerDefault,
   browserServerDefaultReason,
+  effectiveSubApps,
 } from "../services/mcp/browser-mcp.js";
 import { resolveMcpServers } from "../services/mcp-session.js";
 
@@ -112,15 +113,12 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     );
     // Config-first for the same reason the broker is: a live manifest edit that
     // added a sub-app should move the browser auto-gate on the next READ, not
-    // only after the store re-syncs.
-    //
-    // Falling back on EMPTY rather than on nullish, because `getSubApps` answers
-    // `[]` for a project whose config hasn't been loaded into the cache yet —
-    // and `[] ?? project.subApps` keeps the empty array. Observed: opening this
-    // view early enough after a restart reported both browser servers gated off
-    // ("no sub-app declares a url") for a project with three of them.
-    const configSubApps = services.projectConfig?.getSubApps?.(project.id) ?? [];
-    const subApps = configSubApps.length ? configSubApps : (project.subApps ?? []);
+    // only after the store re-syncs. See `effectiveSubApps` for why the fallback
+    // is on empty rather than on nullish.
+    const subApps = effectiveSubApps(
+      services.projectConfig?.getSubApps?.(project.id),
+      project.subApps,
+    );
     return buildProjectMcpCatalog(project, {
       // terminal/memory/github are all wired in production, so their manager
       // tools show as available; a missing binding flips the tool to unavailable.

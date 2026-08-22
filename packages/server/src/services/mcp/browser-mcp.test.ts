@@ -22,6 +22,7 @@ import { buildProjectMcpCatalog } from "./mcp-catalog.js";
 import {
   buildBrowserMcpServers,
   browserServerDefault,
+  effectiveSubApps,
   selectBrowserServers,
   hasWebSubApp,
 } from "./browser-mcp.js";
@@ -108,6 +109,38 @@ describe("hasWebSubApp", () => {
   it("is true only when some sub-app declares a url", () => {
     expect(hasWebSubApp([cliApp, webApp])).toBe(true);
     expect(hasWebSubApp([cliApp])).toBe(false);
+  });
+});
+
+describe("effectiveSubApps", () => {
+  it("falls back to the store copy when the config answers EMPTY, not just undefined", () => {
+    // The bug this exists for. `getSubApps` returns `[]` — never `undefined` —
+    // for a project whose config isn't in the cache yet, so the obvious
+    // `getSubApps(id) ?? project.subApps` never falls back and the browser
+    // auto-gate concludes "no sub-app declares a url" for a project with three.
+    expect(effectiveSubApps([], [webApp])).toEqual([webApp]);
+    expect(effectiveSubApps(undefined, [webApp])).toEqual([webApp]);
+  });
+
+  it("still prefers the live config when it has anything to say", () => {
+    // Config-first is the point: a manifest edit that ADDED a sub-app has to
+    // win over the store copy that hasn't re-synced yet.
+    expect(effectiveSubApps([webApp], [cliApp])).toEqual([webApp]);
+    // …including when the live answer REMOVES the url — a non-empty config is
+    // an answer, so the gate must close rather than reach for the stale copy.
+    expect(effectiveSubApps([cliApp], [webApp])).toEqual([cliApp]);
+  });
+
+  it("is empty when neither side has anything", () => {
+    expect(effectiveSubApps(undefined, undefined)).toEqual([]);
+    expect(effectiveSubApps([], [])).toEqual([]);
+  });
+
+  it("gates the browser servers on correctly through a cold config cache", () => {
+    // End to end through the thing that actually consumes it: a cold cache used
+    // to take the browser tools away from a session that should have had them.
+    const cold = effectiveSubApps([], [webApp]);
+    expect(selectBrowserServers(cfg(), cold)).toEqual(["playwright", "chrome-devtools"]);
   });
 });
 
