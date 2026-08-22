@@ -422,9 +422,9 @@ export function createServices(
     new ResumeScheduler({
       store,
       bus,
-      send: async (chatId, text) => {
+      send: async (chatId, text, parts) => {
         await ensureSession(services, chatId);
-        await broker.sendMessage(chatId, text);
+        await broker.sendMessage(chatId, text, { parts });
       },
     });
   broker.onTurnError = (chatId, reason) => {

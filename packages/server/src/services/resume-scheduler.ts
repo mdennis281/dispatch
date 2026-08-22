@@ -16,7 +16,12 @@
  * Sending goes through an injected `send` so this service never has to know how
  * a session is (re)built — that stays with the route layer's `ensureSession`.
  */
-import { parseSessionLimit, type Chat, type ResumePlan } from "@dispatch/shared";
+import {
+  parseSessionLimit,
+  type Chat,
+  type MessagePart,
+  type ResumePlan,
+} from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 
@@ -41,15 +46,22 @@ export interface ResumeSchedulerOpts {
   /**
    * Deliver the continuation prompt. Must ensure a live session first — the
    * subprocess is long gone by the time a limit lifts.
+   *
+   * `parts` is the authorship breakdown for the transcript row: this prompt is
+   * DISPATCH talking, and must not be rendered as something the human typed.
    */
-  send: (chatId: string, text: string) => Promise<void>;
+  send: (chatId: string, text: string, parts?: MessagePart[]) => Promise<void>;
   deps?: ResumeSchedulerDeps;
 }
 
 export class ResumeScheduler {
   private readonly store: Store;
   private readonly bus: EventBus;
-  private readonly send: (chatId: string, text: string) => Promise<void>;
+  private readonly send: (
+    chatId: string,
+    text: string,
+    parts?: MessagePart[],
+  ) => Promise<void>;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
@@ -185,7 +197,14 @@ export class ResumeScheduler {
     await this.patch(chatId, { ...plan, firedAt: this.now() });
     await this.notice(chatId, "Usage limit lifted — continuing automatically.");
     try {
-      await this.send(chatId, plan.prompt);
+      // A `brief`, not bare text: nobody typed this. Rendered flat it landed in
+      // the human's own speech bubble, so a chat that resumed itself read as
+      // though they had come back and asked it to carry on. A lone brief
+      // composes to its own text, so the model gets exactly the prompt it did
+      // before.
+      await this.send(chatId, plan.prompt, [
+        { kind: "brief", label: "Usage limit lifted — continuing", text: plan.prompt },
+      ]);
     } catch (err) {
       await this.notice(
         chatId,
