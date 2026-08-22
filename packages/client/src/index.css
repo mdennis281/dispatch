@@ -609,6 +609,19 @@
 @media (pointer: coarse) {
   .cm-touch-reveal {
     opacity: 1;
+    /* ChatRow's action tray also SLIDES in (`translate-x-1.5`). Revealed
+     * without this it sits parked 6px off the row's right edge, half under the
+     * scrollbar. */
+    transform: none;
+  }
+
+  /*
+   * The other half of the same idea: a marker that exists only to say something
+   * while the hover controls are away. `group-hover:hidden` never fires on a
+   * coarse pointer, so it would sit underneath a tray that is permanently out.
+   */
+  .cm-touch-hide {
+    display: none;
   }
 
   /*

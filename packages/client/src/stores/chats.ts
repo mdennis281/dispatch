@@ -1,9 +1,16 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { Chat, ChatStatus, AgentActivity, WorkflowExemption } from "@dispatch/shared";
+import type {
+  Chat,
+  ChatStatus,
+  AgentActivity,
+  PrRecord,
+  WorkflowExemption,
+} from "@dispatch/shared";
 import { isPrSettledIdle } from "@dispatch/shared";
 import { clearDraft } from "../lib/composerDrafts.js";
+import { usePrs } from "./prs.js";
 
 interface ChatsStore {
   /** chatId → Chat */
@@ -202,6 +209,95 @@ export function chatsForProject(
 /** Selector: chats for a project, ordered by most-recent activity first. */
 export function useProjectChats(projectId: string | null): Chat[] {
   return useChats(useShallow((s) => chatsForProject(s, projectId)));
+}
+
+/**
+ * The pull request a reviewer chat was pointed at, as a `PrRecord` key.
+ *
+ * `reviewOf` is the record. The label parse behind it covers the reviewers
+ * spawned BEFORE that field existed, whose only trace of their target is the
+ * sentence `taskLabel` (server `agent-tasks.ts`) wrote for the sidebar. Dropping
+ * it would strand every review already on disk at the top level — which is the
+ * clutter the nesting exists to clear, so on the machine that asked for this the
+ * feature would have looked like it did nothing.
+ */
+export function reviewTargetKey(chat: Chat): string | null {
+  if (chat.reviewOf) return chat.reviewOf;
+  if (chat.purpose?.kind !== "pr:review") return null;
+  const m = /^Reviewing PR #(\d+) in (\S+)$/.exec(chat.purpose.label ?? "");
+  return m ? `${m[2]}#${m[1]}` : null;
+}
+
+/** A top-level chat plus the reviewer chats filed under it. */
+export interface ChatBranch {
+  chat: Chat;
+  /** Reviewers of this chat's PRs, newest round first. Usually empty. */
+  reviews: Chat[];
+}
+
+/**
+ * Fold a flat chat list into one level of nesting: every reviewer chat moves
+ * under the chat that opened the PR it is reading.
+ *
+ * One level, never more — a reviewer of a reviewer is not a thing, and a tree
+ * that can nest arbitrarily is a tree somebody has to indent-guard.
+ *
+ * A reviewer whose parent isn't here (the PR is unattributed, or the chat that
+ * opened it was deleted) stays where it was. Nesting hides a row inside another
+ * row, and hiding one inside a row that doesn't exist would just delete it from
+ * the sidebar.
+ *
+ * A branch ranks by the NEWEST clock in it, its own or a child's. Without that,
+ * a review that starts on a week-old chat sinks to wherever its parent sits and
+ * the one row that is actually doing something is off the bottom of the list.
+ */
+export function buildChatTree(
+  chats: Chat[],
+  lastActivity: Record<string, number>,
+  prsByKey: Record<string, PrRecord>,
+): ChatBranch[] {
+  const at = (c: Chat) => lastActivity[c.id] ?? c.updatedAt ?? c.createdAt;
+  const present = new Set(chats.map((c) => c.id));
+  const reviews = new Map<string, Chat[]>();
+  const roots: Chat[] = [];
+
+  for (const chat of chats) {
+    const key = reviewTargetKey(chat);
+    const parent = key ? prsByKey[key]?.chatId : undefined;
+    if (parent && parent !== chat.id && present.has(parent)) {
+      const list = reviews.get(parent);
+      if (list) list.push(chat);
+      else reviews.set(parent, [chat]);
+    } else {
+      roots.push(chat);
+    }
+  }
+
+  return roots
+    .map((chat) => ({ chat, reviews: reviews.get(chat.id) ?? [] }))
+    .sort((a, b) => rankBranch(b, at) - rankBranch(a, at));
+}
+
+const rankBranch = (b: ChatBranch, at: (c: Chat) => number): number =>
+  b.reviews.reduce((max, r) => Math.max(max, at(r)), at(b.chat));
+
+/**
+ * Selector: this project's chats as branches, newest first.
+ *
+ * Built in a `useMemo` over three STABLE store references rather than inside a
+ * zustand selector. `useShallow` compares elements by identity and a branch is a
+ * fresh object every call, so as a selector this would hand
+ * `useSyncExternalStore` a new snapshot on every check and never converge — the
+ * `Minified React error #185` that `stores/prs.ts` documents at length.
+ */
+export function useProjectChatTree(projectId: string | null): ChatBranch[] {
+  const chats = useProjectChats(projectId);
+  const lastActivity = useChats((s) => s.lastActivity);
+  const prsByKey = usePrs((s) => s.byKey);
+  return useMemo(
+    () => buildChatTree(chats, lastActivity, prsByKey),
+    [chats, lastActivity, prsByKey],
+  );
 }
 
 /**

@@ -12,17 +12,19 @@ import {
   Circle,
   Trash2,
   Pencil,
+  ScanEye,
   BarChart3,
   Brain,
   FolderOpen,
   GitBranch,
   type LucideIcon,
 } from "lucide-react";
-import type { Chat, SubApp, RunnerInstance, Project } from "@dispatch/shared";
+import { parsePrRecordKey } from "@dispatch/shared";
+import type { Chat, PrRecord, SubApp, RunnerInstance, Project } from "@dispatch/shared";
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { IconButton } from "../ui/IconButton.js";
 import { SectionLabel } from "../ui/Panel.js";
-import { StatusDot, statusMeta, toneText } from "../ui/StatusDot.js";
+import { StatusDot, statusMeta, toneText, type DotTone } from "../ui/StatusDot.js";
 import { TitleText } from "../ui/TitleText.js";
 import { purposeIcon } from "../config/sections.js";
 import { Chip } from "../ui/Chip.js";
@@ -31,10 +33,13 @@ import { ScrollArea } from "../ui/ScrollArea.js";
 import { useProjects, useActiveProject } from "../../stores/projects.js";
 import {
   useChats,
-  useProjectChats,
+  useProjectChatTree,
   useProjectAgentCounts,
+  reviewTargetKey,
+  type ChatBranch,
   type ProjectAgentCounts,
 } from "../../stores/chats.js";
+import { usePrs } from "../../stores/prs.js";
 import { useView, openOverlay } from "../../stores/view.js";
 import { useLayout, dismissLeftDrawer } from "../../stores/layout.js";
 import { selectChat, selectProject } from "../../stores/navigation.js";
@@ -291,11 +296,79 @@ function SubAppRow({
 
 /* -------------------------------------------------------------------- chat */
 
+/**
+ * A chat, and the reviewer chats filed under it.
+ *
+ * Dispatch spawns one reviewer chat PER ROUND, so a PR reviewed four times put
+ * four near-identical `review: #135 …` rows in the sidebar — four rows about one
+ * change, interleaved by recency with everything else and never next to the chat
+ * that made it. Folded under their parent they cost one row and stay one click
+ * away.
+ *
+ * Collapsed by default, and the flag is component state rather than a store:
+ * it's where this reader's eye is right now, and nothing else in the app has an
+ * opinion about it.
+ */
+function ChatBranchRows({
+  branch,
+  activeChatId,
+  attentionByChat,
+  now,
+  onSelect,
+}: {
+  branch: ChatBranch;
+  activeChatId: string | null;
+  attentionByChat: Set<string>;
+  now: number;
+  onSelect: (id: string) => void;
+}) {
+  const { chat, reviews } = branch;
+  const [expanded, setExpanded] = useState(false);
+  // A branch never hides the transcript that's on screen. The PRs panel links
+  // straight to a reviewer chat, and landing there with its parent collapsed
+  // left the sidebar with no row for what you were looking at.
+  const open = expanded || reviews.some((r) => r.id === activeChatId);
+
+  return (
+    <div data-flip-id={chat.id}>
+      <ChatRow
+        chat={chat}
+        active={chat.id === activeChatId}
+        needsInput={attentionByChat.has(chat.id)}
+        now={now}
+        reviews={reviews}
+        reviewsNeedInput={reviews.some((r) => attentionByChat.has(r.id))}
+        expanded={open}
+        onToggleReviews={() => setExpanded((v) => !v)}
+        onClick={() => onSelect(chat.id)}
+      />
+      {open && reviews.length > 0 && (
+        <div className="mt-0.5 ml-4 space-y-0.5 border-l border-line-soft pl-2">
+          {reviews.map((review) => (
+            <ReviewRow
+              key={review.id}
+              chat={review}
+              active={review.id === activeChatId}
+              needsInput={attentionByChat.has(review.id)}
+              now={now}
+              onClick={() => onSelect(review.id)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChatRow({
   chat,
   active,
   needsInput,
   now,
+  reviews,
+  reviewsNeedInput,
+  expanded,
+  onToggleReviews,
   onClick,
 }: {
   chat: Chat;
@@ -303,6 +376,11 @@ function ChatRow({
   needsInput: boolean;
   /** Shared "current time" tick so every row ages in lockstep. */
   now: number;
+  /** Reviewer chats folded under this row. Usually empty. */
+  reviews: Chat[];
+  reviewsNeedInput: boolean;
+  expanded: boolean;
+  onToggleReviews: () => void;
   onClick: () => void;
 }) {
   const prSettled = useChats((s) => s.prSettled[chat.id] ?? false);
@@ -317,8 +395,18 @@ function ChatRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const rename = useChatRename(chat);
 
+  // What the folded reviews are up to, in one colour: somebody is stopped on a
+  // question, somebody is mid-review, or nothing is moving. Collapsing the rows
+  // must not collapse the fact that one of them needs you.
+  const reviewTone: DotTone = reviewsNeedInput
+    ? "warn"
+    : reviews.some((r) => r.status === "running" || r.status === "waiting")
+      ? "working"
+      : "muted";
+  const reviewCount = `${reviews.length} review${reviews.length === 1 ? "" : "s"}`;
+
   return (
-    <div className="group/row relative" data-flip-id={chat.id}>
+    <div className="group/row relative">
       <button
         data-testid="chat-row"
         onClick={onClick}
@@ -382,43 +470,79 @@ function ChatRow({
         </div>
       )}
 
-      {/* right rail (sibling of the row button — never a nested button): the
-          needs-input dot by default, swapped for hover-revealed actions.
-          The actions stay MOUNTED at opacity-0 so they keep their tab stop and
-          their fade — but an opacity-0 button is invisible and still occupies
-          its 24px, so a dot sharing their flex row got pushed two icon-widths
-          off the right edge and read as a stray dot floating mid-row. Hence the
-          dot is taken out of flow and pinned to the rail's right edge instead.
-          It stands down for EITHER way the actions can appear: pointer hover of
-          the row, or keyboard focus landing in the rail. */}
+      {/* right rail (sibling of the row button — never a nested button): what the
+          row is quietly telling you at rest, and the actions that slide in over
+          it on hover.
+
+          The actions are a TRAY with its own surface, not bare glyphs. They
+          overhang the title — three 24px buttons in a 32px gutter always will —
+          and against a chat called `**review**: #139 chore(config): commit the…`
+          a transparent pencil sat in the middle of the word it was covering.
+          Opaque, bordered, and slid in from the edge, it reads as something that
+          arrived on top of the row rather than something wrong with the row.
+
+          It stays MOUNTED at opacity-0 so its buttons keep their tab stop and
+          their fade, which is why the resting markers are taken out of flow and
+          pinned instead: sharing a flex row with three invisible-but-present
+          24px buttons pushed them off the right edge entirely. They stand down
+          for EITHER way the tray can appear — pointer hover, or keyboard focus
+          landing in the rail — and on a coarse pointer, where the tray is simply
+          always out (`cm-touch-reveal`), they never show at all. */}
       {!rename.editing && (
-        <div className="group/rail absolute inset-y-0 right-1.5 flex items-center gap-0.5">
-          {needsInput && (
+        <div className="group/rail absolute inset-y-0 right-1.5 flex items-center">
+          {(needsInput || (reviews.length > 0 && !expanded)) && (
             <span
               className={cn(
-                "pointer-events-none absolute inset-y-0 right-0 flex w-6 items-center justify-center",
+                "cm-touch-hide pointer-events-none absolute inset-y-0 right-0 flex items-center gap-1.5",
                 "group-hover/row:hidden group-focus-within/rail:hidden",
               )}
             >
-              <StatusDot tone="warn" pulse size={6} />
+              {reviews.length > 0 && !expanded && (
+                <span
+                  title={reviewCount}
+                  className={cn(
+                    "flex items-center gap-0.5 text-2xs tabular-nums [&_svg]:size-3",
+                    toneText(reviewTone),
+                  )}
+                >
+                  <ScanEye />
+                  {reviews.length}
+                </span>
+              )}
+              {needsInput && <StatusDot tone="warn" pulse size={6} />}
             </span>
           )}
-          <IconButton
-            size="sm"
-            tip="Rename chat"
-            onClick={rename.start}
-            className="cm-touch-reveal opacity-0 transition-opacity duration-150 focus-visible:opacity-100 group-hover/row:opacity-100"
+          <div
+            className={cn(
+              "cm-touch-reveal flex items-center gap-0.5 rounded-md border border-line bg-elevated px-0.5 shadow-sm",
+              // 12px is the whole gutter: at rest the tray sits 13px inside the
+              // sidebar's edge, so it starts flush against it and slides inward —
+              // far enough to read as arriving from off-panel, and not one pixel
+              // further, because the shell is `overflow-hidden` and anything past
+              // the edge is clipped silently rather than scrolled to.
+              "translate-x-3 opacity-0 transition duration-150 ease-[var(--ease-out)]",
+              "group-hover/row:translate-x-0 group-hover/row:opacity-100",
+              "group-focus-within/rail:translate-x-0 group-focus-within/rail:opacity-100",
+            )}
           >
-            <Pencil />
-          </IconButton>
-          <IconButton
-            size="sm"
-            tip="Delete chat"
-            onClick={() => setConfirmDelete(true)}
-            className="cm-touch-reveal opacity-0 transition-opacity duration-150 focus-visible:opacity-100 group-hover/row:opacity-100"
-          >
-            <Trash2 />
-          </IconButton>
+            {reviews.length > 0 && (
+              <IconButton
+                size="sm"
+                active={expanded}
+                aria-expanded={expanded}
+                tip={expanded ? `Hide ${reviewCount}` : `Show ${reviewCount}`}
+                onClick={onToggleReviews}
+              >
+                <ScanEye />
+              </IconButton>
+            )}
+            <IconButton size="sm" tip="Rename chat" onClick={rename.start}>
+              <Pencil />
+            </IconButton>
+            <IconButton size="sm" tip="Delete chat" onClick={() => setConfirmDelete(true)}>
+              <Trash2 />
+            </IconButton>
+          </div>
         </div>
       )}
 
@@ -430,6 +554,86 @@ function ChatRow({
       />
     </div>
   );
+}
+
+/**
+ * One reviewer chat, under the chat whose PR it read.
+ *
+ * Deliberately NOT a `ChatRow`. The parent directly above already carries the
+ * change's title, and `review: #139 chore(config): commit the…` repeated under
+ * it is the same sentence twice at half the width. What the parent can't say is
+ * which PR this round read and what came back of it, so that is the whole row.
+ */
+function ReviewRow({
+  chat,
+  active,
+  needsInput,
+  now,
+  onClick,
+}: {
+  chat: Chat;
+  active: boolean;
+  needsInput: boolean;
+  now: number;
+  onClick: () => void;
+}) {
+  const key = reviewTargetKey(chat);
+  const record = usePrs((s) => (key ? s.byKey[key] : undefined));
+  const activityAt = useChats(
+    (s) => s.lastActivity[chat.id] ?? chat.updatedAt ?? chat.createdAt,
+  );
+  const meta = statusMeta(chat.status);
+  const number = record?.number ?? (key ? parsePrRecordKey(key)?.number : undefined);
+  const summary = reviewSummary(chat, record) ?? meta.label;
+
+  return (
+    <button
+      data-testid="review-row"
+      onClick={onClick}
+      title={record?.title ?? chat.purpose?.label}
+      className={cn(
+        "flex w-full items-center gap-2 rounded-md py-1 pl-1.5 pr-2 text-left transition-colors",
+        active ? "bg-accent-ghost/70" : "hover:bg-hover",
+      )}
+    >
+      <span
+        className={cn(
+          "flex size-3.5 shrink-0 items-center justify-center [&_svg]:size-3",
+          toneText(meta.tone),
+          "transition-colors duration-300",
+          meta.pulse && "animate-pulse",
+        )}
+      >
+        <ScanEye />
+      </span>
+      <span
+        className={cn("cm-mono shrink-0 !text-2xs", active ? "text-primary" : "text-secondary")}
+      >
+        {number != null ? `#${number}` : "PR"}
+      </span>
+      <span className="min-w-0 flex-1 truncate text-2xs text-faint">{summary}</span>
+      {needsInput ? (
+        <StatusDot tone="warn" pulse size={5} />
+      ) : (
+        <span className="shrink-0 text-2xs text-faint/70">{relTimeShort(activityAt, now)}</span>
+      )}
+    </button>
+  );
+}
+
+/**
+ * What this reviewer left on the pull request, when the registry still knows.
+ *
+ * `reviewAgent` remembers ONE round — the last — so only the reviewer whose chat
+ * id it names can be credited with its findings. Any earlier round falls back to
+ * its own status, because labelling it with the newest round's count would be a
+ * confident claim about work it never did.
+ */
+function reviewSummary(chat: Chat, record: PrRecord | undefined): string | null {
+  const agent = record?.reviewAgent;
+  if (!agent || agent.chatId !== chat.id || !agent.postedAt) return null;
+  const n = agent.findings ?? 0;
+  return n ? `${n} comment${n === 1 ? "" : "s"}` : "no comments";
 }
 
 /* -------------------------------------------------------------- top-level nav */
@@ -518,7 +722,8 @@ export function Sidebar() {
   const inDrawer = mode === "sm";
 
   const project = useActiveProject();
-  const chats = useProjectChats(project?.id ?? null);
+  const branches = useProjectChatTree(project?.id ?? null);
+  const chatCount = branches.reduce((n, b) => n + 1 + b.reviews.length, 0);
   const activeChatId = useChats((s) => s.activeChatId);
   const runners = useRunners((s) => s.byId);
   const attentionItems = useAttention((s) => s.items);
@@ -717,22 +922,25 @@ export function Sidebar() {
             position, and it's labelled. */}
         <div className="mb-1 flex items-center justify-between px-2.5 pb-1">
           <SectionLabel className="px-0">Chats</SectionLabel>
-          <span className="cm-mono !text-2xs text-faint">{chats.length || ""}</span>
+          {/* Every chat, folded reviewers included — the tally answers "how much
+              is in this project", and a count that dropped by four when a PR got
+              reviewed four times would answer something else. */}
+          <span className="cm-mono !text-2xs text-faint">{chatCount || ""}</span>
         </div>
         <div ref={chatListRef} className="space-y-0.5 px-1.5">
-          {chats.length === 0 ? (
+          {chatCount === 0 ? (
             <p className="px-2 py-1.5 text-xs text-faint">
               {project ? "No chats yet." : "Select a project to see its chats."}
             </p>
           ) : (
-            chats.map((chat) => (
-              <ChatRow
-                key={chat.id}
-                chat={chat}
-                active={chat.id === activeChatId}
-                needsInput={attentionByChat.has(chat.id)}
+            branches.map((branch) => (
+              <ChatBranchRows
+                key={branch.chat.id}
+                branch={branch}
+                activeChatId={activeChatId}
+                attentionByChat={attentionByChat}
                 now={now}
-                onClick={() => setActiveChat(chat.id)}
+                onSelect={setActiveChat}
               />
             ))
           )}

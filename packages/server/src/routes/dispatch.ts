@@ -60,6 +60,8 @@ export interface CreateChatInput {
   model?: string;
   /** Why the app spawned this chat (drives its sidebar icon/tint). */
   purpose?: ChatPurpose;
+  /** The PR this chat reviews, `owner/repo#number`. See `Chat.reviewOf`. */
+  reviewOf?: string;
 }
 
 /**
@@ -95,6 +97,7 @@ export async function createChat(
     prs: [],
     status: "idle",
     ...(input.purpose ? { purpose: input.purpose } : {}),
+    ...(input.reviewOf ? { reviewOf: input.reviewOf } : {}),
     createdAt: now,
     updatedAt: now,
   };

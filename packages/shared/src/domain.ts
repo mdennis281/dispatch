@@ -485,6 +485,21 @@ export function prRecordKey(repo: string, number: number): string {
   return `${repo}#${number}`;
 }
 
+/**
+ * Read a registry key back apart — the inverse of {@link prRecordKey}, and here
+ * so the shape stays spelled in exactly one place.
+ *
+ * `lastIndexOf` because a repository name can't contain `#` but a future scoped
+ * one might; the number is always the tail. Returns null rather than a partial
+ * result, so a caller can't half-trust it.
+ */
+export function parsePrRecordKey(key: string): { repo: string; number: number } | null {
+  const at = key.lastIndexOf("#");
+  if (at <= 0) return null;
+  const number = Number(key.slice(at + 1));
+  return Number.isInteger(number) && number > 0 ? { repo: key.slice(0, at), number } : null;
+}
+
 /** A GitHub Actions workflow definition. */
 export const WorkflowDefSchema = z.object({
   id: z.number().int(),
@@ -609,6 +624,22 @@ export const ChatSchema = z.object({
   /** Worktree paths this chat has created/owns. */
   worktrees: z.array(z.string()).default([]),
   prs: z.array(PRRefSchema).default([]),
+  /**
+   * The pull request this chat was spawned to REVIEW, as the catalog key
+   * `owner/repo#number` (see {@link prRecordKey}).
+   *
+   * Deliberately NOT a {@link PRRef} in {@link prs}: that array means the PRs a
+   * chat OPENED, and it is what the workspace roster attributes a row by. A
+   * reviewer owns nothing — it is a second chat pointed at somebody else's pull
+   * request — so recording it there would credit it with authoring the change it
+   * was asked to criticise.
+   *
+   * `PrRecord.reviewAgent.chatId` is the reverse edge and cannot serve here: it
+   * holds only the LATEST round. On a PR reviewed four times, three of the four
+   * reviewer chats had no way back to the PR or to the chat that opened it, so
+   * they sat at the sidebar's top level as four unrelated rows.
+   */
+  reviewOf: z.string().optional(),
   /** Last-known live status (authoritative source is the SessionBroker). */
   status: ChatStatusSchema.optional(),
   /** Why this chat exists, when the app spawned it for a job. Display-only. */
