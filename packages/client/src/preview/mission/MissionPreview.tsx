@@ -33,7 +33,7 @@ import { MOCK_MANAGER_CHAT, MOCK_RUN, effectiveTasks } from "./mockRun.js";
 import { validate, type Plan } from "./derive.js";
 import type { MissionPolicy, MissionSpec, TeamId } from "./types.js";
 import { Crumbs, RunStatusPill } from "./chrome.js";
-import { crumbsFor, type Nav, type Route } from "./nav.js";
+import { crumbsFor, parentOf, type Nav, type Route } from "./nav.js";
 import { defaultOpen, type SectionState } from "./sections.js";
 import { MissionScreen } from "./MissionScreen.js";
 import { PhaseScreen } from "./PhaseScreen.js";
@@ -117,7 +117,13 @@ export function MissionPreview() {
       <div className="flex min-w-0 flex-1 flex-col">
         {/* -------------------------------------------------------- header */}
         <div className="flex h-11 shrink-0 items-center gap-2 px-3 cm-hairline-b">
-          <Crumbs crumbs={crumbsFor(plan, nav)} />
+          <Crumbs
+            crumbs={crumbsFor(plan, nav)}
+            onBack={(() => {
+              const up = parentOf(plan, route);
+              return up ? () => setRoute(up) : undefined;
+            })()}
+          />
           <span className="shrink-0 text-faint">·</span>
           <RunStatusPill status={run.status} />
           <span className="shrink-0 text-2xs text-faint">

@@ -30,7 +30,11 @@ export function crumbsFor(plan: Plan, nav: Nav): Crumb[] {
   const { spec, run } = plan;
   const { route } = nav;
   const root: Crumb = {
-    label: spec.title,
+    // "Mission Base" rather than the mission title. The title is already on the
+    // sidebar row and in the window, so repeating it here spends the widest
+    // crumb on the one thing you cannot be confused about. Naming the
+    // DESTINATION instead makes the leftmost crumb read as somewhere to go.
+    label: "Mission Base",
     onClick: route.at === "mission" ? undefined : () => nav.go({ at: "mission" }),
   };
   if (route.at === "mission") return [root];
@@ -68,4 +72,26 @@ export function crumbsFor(plan: Plan, nav: Nav): Crumb[] {
   }
   trail.push({ label: a?.name ?? route.actorId });
   return trail;
+}
+
+/**
+ * One level up from where you are — what the Back control goes to.
+ *
+ * Derived from the route rather than a history stack on purpose: after
+ * jumping from an agent straight to a task via the sidebar, "back" should mean
+ * UP THE TREE, not "undo my last click". A history stack would send you back to
+ * the agent you were deliberately leaving.
+ */
+export function parentOf(plan: Plan, route: Route): Route | undefined {
+  if (route.at === "mission") return undefined;
+  if (route.at === "phase") return { at: "mission" };
+  if (route.at === "task") {
+    const t = plan.tasks.find((x) => x.id === route.taskId);
+    return t ? { at: "phase", phaseId: t.phaseId } : { at: "mission" };
+  }
+  const a = plan.run?.actors.find((x) => x.id === route.actorId);
+  if (a?.taskId && plan.tasks.some((t) => t.id === a.taskId)) {
+    return { at: "task", taskId: a.taskId };
+  }
+  return { at: "mission" };
 }

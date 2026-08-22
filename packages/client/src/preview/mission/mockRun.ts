@@ -165,7 +165,7 @@ const ACTORS: LiveActor[] = [
 
 /* ------------------------------------------------------------------- tasks */
 
-/** MissionTask ids that are finished, in the order they landed. */
+/** Task ids that are finished, in the order they landed. */
 const DONE = [
   "t-schema",
   "t-limits",

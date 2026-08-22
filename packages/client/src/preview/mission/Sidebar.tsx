@@ -26,6 +26,7 @@ import {
   Eye,
   EyeOff,
   HardHat,
+  Home,
   MessageSquare,
   SearchCheck,
   Sparkles,
@@ -238,6 +239,24 @@ export function Sidebar({
             </button>
           );
         })}
+
+        {/* The base of the tree. Everything above drills DOWN from here, so it
+            sits at the bottom as the floor you land back on — and it is the one
+            row that is a destination rather than a thing. */}
+        <button
+          type="button"
+          onClick={() => nav.go({ at: "mission" })}
+          className={cn(
+            "mt-3 flex w-full items-center gap-1.5 rounded-md border px-1.5 py-1.5 text-left transition-colors",
+            route.at === "mission"
+              ? "border-accent-2-line bg-accent-2-ghost text-primary"
+              : "border-line bg-panel-2 text-secondary hover:border-line-strong hover:text-primary",
+          )}
+        >
+          <Home className="size-3 shrink-0" />
+          <span className="flex-1 text-[11px] font-medium leading-4">Mission Base</span>
+          <span className="cm-mono text-[9px] leading-3 text-faint">{pct}%</span>
+        </button>
       </div>
 
       {/* ------------------------------------------- sections, this screen */}

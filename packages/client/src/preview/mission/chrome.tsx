@@ -9,7 +9,7 @@
  * and when `onEdit` is wired it simply starts working.
  */
 import type { ReactNode } from "react";
-import { ChevronDown, ChevronRight, Lock, Minus, Pencil, Plus } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Home, Lock, Minus, Pencil, Plus } from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import type { Tone } from "../../components/ui/index.js";
 import { Chip } from "../../components/ui/index.js";
@@ -52,23 +52,44 @@ export interface Crumb {
   onClick?: () => void;
 }
 
-/** Drill-in navigation. The back path is the crumb, not a browser button. */
-export function Crumbs({ crumbs }: { crumbs: Crumb[] }) {
+/**
+ * Drill-in navigation.
+ *
+ * Deliberately styled as CONTROLS rather than as a caption. The first version
+ * was muted 11px text with a faint chevron, which read as a title telling you
+ * where you were — so the way back was there, but nothing about it invited a
+ * click. Ancestor crumbs are now bordered, hoverable and full-contrast; only
+ * the current level is plain text, because it is the one thing that is not a
+ * destination.
+ */
+export function Crumbs({ crumbs, onBack }: { crumbs: Crumb[]; onBack?: () => void }) {
   return (
-    <nav className="flex min-w-0 items-center gap-1">
+    <nav className="flex min-w-0 items-center gap-1.5">
+      {onBack && (
+        <button
+          type="button"
+          onClick={onBack}
+          title="Up one level"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-panel-2 py-1 pl-1 pr-2 text-xs text-secondary transition-colors hover:border-line-strong hover:bg-hover hover:text-primary"
+        >
+          <ArrowLeft className="size-3.5" />
+          Back
+        </button>
+      )}
       {crumbs.map((c, i) => (
-        <span key={i} className="flex min-w-0 items-center gap-1">
-          {i > 0 && <ChevronRight className="size-3 shrink-0 text-faint" />}
+        <span key={i} className="flex min-w-0 items-center gap-1.5">
+          {i > 0 && <ChevronRight className="size-3.5 shrink-0 text-muted" />}
           {c.onClick ? (
             <button
               type="button"
               onClick={c.onClick}
-              className="truncate rounded px-1 py-0.5 text-xs text-muted transition-colors hover:bg-hover hover:text-primary"
+              className="flex shrink-0 items-center gap-1 truncate rounded-md border border-line bg-panel-2 px-2 py-1 text-xs text-secondary transition-colors hover:border-line-strong hover:bg-hover hover:text-primary"
             >
+              {i === 0 && <Home className="size-3" />}
               {c.label}
             </button>
           ) : (
-            <span className="truncate px-1 text-xs font-semibold text-primary">{c.label}</span>
+            <span className="truncate text-sm font-semibold text-primary">{c.label}</span>
           )}
         </span>
       ))}

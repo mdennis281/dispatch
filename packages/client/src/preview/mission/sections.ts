@@ -32,7 +32,7 @@ export const SECTIONS: Record<Route["at"], SectionDef[]> = {
   ],
   task: [
     { id: "task-brief", label: "Brief" },
-    { id: "task-acceptance", label: "MissionTask acceptance" },
+    { id: "task-acceptance", label: "Task acceptance" },
     { id: "task-graph", label: "Dependencies" },
     { id: "task-prs", label: "Pull requests" },
     { id: "task-satisfies", label: "Satisfies" },

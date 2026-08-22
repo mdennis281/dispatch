@@ -297,7 +297,7 @@ export interface MissionTask {
   brief: string;
   /** Same-phase task ids. Cross-phase ordering comes free from the phase gate. */
   dependsOn: MissionTaskId[];
-  /** MissionTask-local checks, judged by the lead on intake. */
+  /** Task-local checks, judged by the lead on intake. */
   acceptance: Criterion[];
   /**
    * Phase/mission criteria this task contributes to.

@@ -74,7 +74,7 @@ export function TaskScreen({
 
       <Section
         id="task-acceptance"
-        title="MissionTask acceptance"
+        title="Task acceptance"
         state={sections}
         hint="judged by the lead on intake"
       >
