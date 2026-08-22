@@ -150,6 +150,11 @@ function ProjectSelector({
       align="start"
       width={236}
       className="p-1"
+      // Without this the row is only as wide as its own content: the trigger
+      // wrapper is `inline-flex`, so the button's `w-full` measures against
+      // itself. A short project name left the highlight stopping mid-band with
+      // bare `surface` beside it, and the chevron floating mid-row.
+      triggerClassName="w-full"
       trigger={({ open, toggle }) => (
         <button
           onClick={toggle}
@@ -314,7 +319,10 @@ function ActiveRail({ active }: { active: boolean }) {
     <span
       aria-hidden
       className={cn(
-        "pointer-events-none absolute inset-y-0 left-0 w-[3px] origin-left bg-accent",
+        // `cm-rail` is the hook reduced-motion needs: the retract is a Tailwind
+        // transition on the inactive branch below, which a rule naming only
+        // `cm-rail-in` cannot reach.
+        "cm-rail pointer-events-none absolute inset-y-0 left-0 w-[3px] origin-left bg-accent",
         active
           ? "cm-rail-in scale-x-100 opacity-100"
           // `scale`, NOT `transform`, and the difference is the whole retract.

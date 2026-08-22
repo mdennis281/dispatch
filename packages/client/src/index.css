@@ -765,10 +765,17 @@
 /*
  * Motion here is decoration on a state that is ALSO carried by colour, so it is
  * the first thing to go. The rail still appears — it just stops travelling.
+ *
+ * BOTH directions. `cm-rail-in` is only the arrival; the retract is a Tailwind
+ * transition on the rail element itself, so a rule naming just the animation
+ * left deselecting a row still running a 200ms scale-to-zero — half a promise.
  */
 @media (prefers-reduced-motion: reduce) {
   .cm-rail-in {
     animation: none;
+  }
+  .cm-rail {
+    transition: none;
   }
 }
 
