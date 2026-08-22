@@ -197,8 +197,40 @@ export function useShouldAskToNotify(): boolean {
 /**
  * Constructor-path notifications, kept so `attention-resolve` can withdraw one.
  * The SW path doesn't need this — `getNotifications({ tag })` finds them.
+ *
+ * Keyed by CHAT, matching the tag scheme below: one live toast per chat.
  */
 const live = new Map<string, Notification>();
+
+/**
+ * One notification per chat rather than per item — the same scheme the service
+ * worker uses for pushes (see `chatTag` in public/sw.js), so the two paths
+ * replace each other's toasts instead of doubling up on a desktop that gets
+ * both.
+ */
+const chatTag = (chatId: string): string => `chat:${chatId}`;
+
+/**
+ * `renotify` is a real, Chrome-honoured member that TypeScript's DOM lib still
+ * doesn't declare. Widened here rather than cast at the call site so everything
+ * else in the options object keeps its type checking.
+ */
+type NotifyOptions = NotificationOptions & { renotify?: boolean };
+
+/**
+ * Mirror the outstanding count onto the app icon.
+ *
+ * Installed-PWA only in practice (Chrome on Windows/macOS, iOS home-screen), and
+ * absent on Linux entirely — hence the optional call rather than a feature test.
+ */
+export async function setAttentionBadge(count: number): Promise<void> {
+  try {
+    if (count > 0) await navigator.setAppBadge?.(count);
+    else await navigator.clearAppBadge?.();
+  } catch {
+    /* no badging on this platform */
+  }
+}
 
 /** True when the human is demonstrably looking at the app right now. */
 function appIsInFront(): boolean {
@@ -218,7 +250,12 @@ async function swRegistration(): Promise<ServiceWorkerRegistration | undefined> 
  * Raise an OS notification for one attention item. Never throws and never
  * awaits anything the caller needs — the WS reducer calls it and moves on.
  */
-export async function notifyAttention(item: AttentionItem, chatTitle?: string): Promise<void> {
+export async function notifyAttention(
+  item: AttentionItem,
+  chatTitle?: string,
+  /** Items outstanding for this chat INCLUDING this one, for the "+N more" suffix. */
+  outstanding = 1,
+): Promise<void> {
   const { enabled, permission } = useBrowserNotify.getState();
   if (!enabled || permission !== "granted") return;
   if (appIsInFront()) return;
@@ -226,17 +263,29 @@ export async function notifyAttention(item: AttentionItem, chatTitle?: string): 
   // Both sides run the ONE predicate in shared/notify.ts, so a kind muted in
   // Settings cannot leak through whichever path happens to deliver first.
   if (!shouldNotify(useWebPush.getState().prefs, item, Date.now())) return;
+  await showForChat(item, chatTitle, outstanding);
+}
 
+/** Render one chat's top outstanding item as its single toast. */
+async function showForChat(
+  item: AttentionItem,
+  chatTitle: string | undefined,
+  outstanding: number,
+): Promise<void> {
   const meta = KIND_META[item.kind];
   if (!meta) return; // defensive: a kind added server-side that we don't know
 
-  const title = chatTitle ? `${meta.title} — ${chatTitle}` : meta.title;
-  const options: NotificationOptions = {
+  const more = outstanding > 1 ? ` (+${outstanding - 1} more)` : "";
+  const title = (chatTitle ? `${meta.title} — ${chatTitle}` : meta.title) + more;
+  const tag = chatTag(item.chatId);
+  const options: NotifyOptions = {
     body: item.summary,
     icon: ICON,
     badge: ICON,
-    // One toast per item: a re-sent `attention-add` replaces rather than stacks.
-    tag: item.id,
+    tag,
+    // Silently correct the count on a toast that is already up; only a chat with
+    // nothing showing gets to buzz.
+    renotify: false,
     requireInteraction: meta.sticky,
     data: {
       type: "attention-focus",
@@ -256,9 +305,14 @@ export async function notifyAttention(item: AttentionItem, chatTitle?: string): 
   }
 
   try {
+    // The constructor path has no `tag` replacement on Safari, so close the
+    // chat's previous toast by hand before opening its successor.
+    live.get(item.chatId)?.close();
     const n = new Notification(title, options);
-    live.set(item.id, n);
-    n.onclose = () => live.delete(item.id);
+    live.set(item.chatId, n);
+    n.onclose = () => {
+      if (live.get(item.chatId) === n) live.delete(item.chatId);
+    };
     n.onclick = () => {
       window.focus();
       n.close();
@@ -274,15 +328,44 @@ export async function notifyAttention(item: AttentionItem, chatTitle?: string): 
   }
 }
 
-/** Withdraw the toast for an item that no longer needs anyone (resolved / cleared). */
-export async function closeAttentionNotification(id: string): Promise<void> {
-  live.get(id)?.close();
-  live.delete(id);
+/**
+ * Bring a chat's toast in line with what is actually still outstanding for it.
+ *
+ * Called when something resolves — a permission answered, a thread resolved, a
+ * PR merged. `remaining` is that chat's outstanding items, most urgent first;
+ * empty withdraws the toast entirely.
+ *
+ * Unlike {@link notifyAttention} this NEVER creates a toast that wasn't already
+ * there. Resolving the second of three items should correct a notification you
+ * are holding, not conjure one for a chat you had already cleared.
+ */
+export async function syncChatNotification(
+  chatId: string,
+  remaining: AttentionItem[],
+  chatTitle?: string,
+): Promise<void> {
+  const tag = chatTag(chatId);
   const reg = await swRegistration();
-  if (!reg) return;
-  try {
-    for (const n of await reg.getNotifications({ tag: id })) n.close();
-  } catch {
-    /* not supported here — the toast just lingers until dismissed */
+  let wasShowing = live.has(chatId);
+
+  if (reg) {
+    try {
+      const open = await reg.getNotifications({ tag });
+      wasShowing ||= open.length > 0;
+      for (const n of open) n.close();
+    } catch {
+      /* not supported here — the toast lingers until dismissed */
+    }
   }
+  live.get(chatId)?.close();
+  live.delete(chatId);
+
+  const [top] = remaining;
+  if (!top || !wasShowing) return;
+  await showForChat(top, chatTitle, remaining.length);
+}
+
+/** Withdraw a chat's toast outright (the chat itself is gone). */
+export async function closeChatNotification(chatId: string): Promise<void> {
+  await syncChatNotification(chatId, []);
 }

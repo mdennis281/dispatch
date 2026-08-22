@@ -5,7 +5,14 @@ import { join } from "node:path";
 import type { AttentionItem, NotificationPrefs } from "@dispatch/shared";
 import { DEFAULT_NOTIFICATION_PREFS } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
-import { PushService, isValidVapidSubject, type WebPushLike, type PushSubscriptionJson } from "./push.js";
+import {
+  PushService,
+  isValidVapidSubject,
+  isAppleEndpoint,
+  topicForChat,
+  type WebPushLike,
+  type PushSubscriptionJson,
+} from "./push.js";
 
 function sub(n = 1): PushSubscriptionJson {
   return {
@@ -20,17 +27,30 @@ function attn(kind: AttentionItem["kind"], over: Partial<AttentionItem> = {}): A
 
 /** A `web-push` stand-in that records sends and can be told to fail. */
 function webPushMock(fail?: (endpoint: string) => number | undefined) {
-  const sent: Array<{ endpoint: string; payload: string }> = [];
+  const sent: Array<{ endpoint: string; payload: string; topic?: string }> = [];
   const mock: WebPushLike = {
     generateVAPIDKeys: () => ({ publicKey: "PUB", privateKey: "PRIV" }),
-    sendNotification: vi.fn(async (subscription, payload) => {
+    sendNotification: vi.fn(async (subscription, payload, options) => {
       const status = fail?.(subscription.endpoint);
       if (status) throw Object.assign(new Error(`push failed ${status}`), { statusCode: status });
-      sent.push({ endpoint: subscription.endpoint, payload });
+      sent.push({ endpoint: subscription.endpoint, payload, topic: options.topic });
       return {};
     }),
   };
   return { mock, sent };
+}
+
+/** An endpoint on Apple's push service — the one the withdraw path must skip. */
+function appleSub(n = 1): PushSubscriptionJson {
+  return {
+    endpoint: `https://web.push.apple.com/${n}`,
+    keys: { p256dh: `p${n}`, auth: `a${n}` },
+  };
+}
+
+/** Decoded payloads, in send order. */
+function payloads(sent: Array<{ payload: string }>): Array<Record<string, unknown>> {
+  return sent.map((s) => JSON.parse(s.payload) as Record<string, unknown>);
 }
 
 describe("isValidVapidSubject", () => {
@@ -50,6 +70,41 @@ describe("isValidVapidSubject", () => {
     ["", false],
   ])("%s → %s", (subject, expected) => {
     expect(isValidVapidSubject(subject)).toBe(expected);
+  });
+});
+
+describe("topicForChat", () => {
+  it("passes a nanoid chat id through untouched", () => {
+    // Chat ids are 21 chars of exactly the alphabet RFC 8030 allows, so the
+    // common case needs no encoding at all.
+    expect(topicForChat("-5JN2xTRaRJ473uzloWVG")).toBe("-5JN2xTRaRJ473uzloWVG");
+  });
+
+  it("digests anything the Topic header would reject", () => {
+    // `web-push` throws on a bad topic, which would turn a cosmetic id into a
+    // total push outage for that chat.
+    for (const id of ["a chat with spaces", "sl/ash", "é", "x".repeat(40), ""]) {
+      const topic = topicForChat(id);
+      expect(topic).toMatch(/^[A-Za-z0-9_-]{1,32}$/);
+    }
+  });
+
+  it("is stable and collision-free across ids", () => {
+    expect(topicForChat("a/b")).toBe(topicForChat("a/b"));
+    expect(topicForChat("a/b")).not.toBe(topicForChat("a/c"));
+  });
+});
+
+describe("isAppleEndpoint", () => {
+  it.each([
+    ["https://web.push.apple.com/abc", true],
+    ["https://fcm.googleapis.com/fcm/send/abc", false],
+    ["https://updates.push.services.mozilla.com/wpush/v2/abc", false],
+    // Not a suffix match: a lookalike host must not be mistaken for Apple's.
+    ["https://web.push.apple.com.evil.test/abc", false],
+    ["not a url", false],
+  ])("%s → %s", (endpoint, expected) => {
+    expect(isAppleEndpoint(endpoint)).toBe(expected);
   });
 });
 
@@ -361,6 +416,120 @@ describe("PushService", () => {
     expect(await svc.unsubscribe(sub(1).endpoint)).toBe(true);
     expect(await svc.unsubscribe(sub(1).endpoint)).toBe(false);
     expect(await svc.list()).toHaveLength(1);
+  });
+
+  /* ------------------------------------ consolidation + withdrawal */
+
+  it("stamps every chat push with that chat's Topic", async () => {
+    // RFC 8030 §5.4: the push service drops an undelivered message when a newer
+    // one shares its topic, so a phone that was off wakes to one item per chat
+    // rather than the whole backlog.
+    const { svc, sent } = make();
+    await svc.subscribe(sub(1));
+    await svc.fanOut(attn("permission", { chatId: "c1" }));
+    await svc.fanOut(attn("question", { id: "a2", chatId: "c2" }));
+    expect(sent.map((s) => s.topic)).toEqual(["c1", "c2"]);
+  });
+
+  it("counts a chat's outstanding items so the worker can collapse them", async () => {
+    const { svc, sent } = make();
+    await svc.subscribe(sub(1));
+    svc.start();
+    bus.publish({ type: "attention-add", item: attn("permission", { id: "a1" }) });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    bus.publish({ type: "attention-add", item: attn("question", { id: "a2" }) });
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    // Second push for the same chat says "2 waiting" — the worker replaces the
+    // first notification rather than stacking a second row.
+    expect(payloads(sent).map((p) => p.outstanding)).toEqual([1, 2]);
+    expect(payloads(sent).map((p) => p.badge)).toEqual([1, 2]);
+    svc.stop();
+  });
+
+  it("withdraws a chat's notification once its last item resolves", async () => {
+    const { svc, sent } = make();
+    await svc.subscribe(sub(1));
+    svc.start();
+    bus.publish({ type: "attention-add", item: attn("permission", { id: "a1" }) });
+    bus.publish({ type: "attention-add", item: attn("question", { id: "a2" }) });
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+
+    // One of two resolved: something is still waiting, so nothing is withdrawn.
+    bus.publish({ type: "attention-resolve", id: "a1", chatId: "c1" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(2);
+
+    // The last one: the reason is gone, so take the notification back.
+    bus.publish({ type: "attention-resolve", id: "a2", chatId: "c1" });
+    await vi.waitFor(() => expect(sent).toHaveLength(3));
+    expect(payloads(sent)[2]).toMatchObject({ chatId: "c1", outstanding: 0, badge: 0 });
+    expect(sent[2]!.topic).toBe("c1");
+    svc.stop();
+  });
+
+  it("never sends a withdrawal to an iPhone", async () => {
+    // A push that displays nothing is what makes WebKit revoke the subscription,
+    // and the symptom is notifications silently stopping days later.
+    const { svc, sent } = make();
+    await svc.subscribe(appleSub(1));
+    await svc.subscribe(sub(2));
+    svc.start();
+    bus.publish({ type: "attention-add", item: attn("permission", { id: "a1" }) });
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    bus.publish({ type: "attention-resolve", id: "a1", chatId: "c1" });
+    await vi.waitFor(() => expect(sent).toHaveLength(3));
+    expect(sent[2]!.endpoint).toBe(sub(2).endpoint);
+    // And no second attempt on a later resolve for the same chat.
+    bus.publish({ type: "attention-add", item: attn("done", { id: "a2" }) });
+    await vi.waitFor(() => expect(sent).toHaveLength(5));
+    svc.stop();
+  });
+
+  it("does not wake a device that never got a notification for that chat", async () => {
+    // Waking every registered device to close something most of them never had
+    // spends Chrome's push budget for nothing.
+    const { svc, sent } = make();
+    await svc.subscribe(sub(1));
+    svc.start();
+    bus.publish({ type: "attention-add", item: attn("permission", { id: "a1", chatId: "c1" }) });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    // A chat this device was never pushed about.
+    bus.publish({ type: "attention-resolve", id: "zz", chatId: "c9" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(1);
+    svc.stop();
+  });
+
+  it("withdraws once for a burst of resolves, not once per item", async () => {
+    // Deleting a chat resolves every one of its items at once; only the last
+    // empties the chat, so exactly one withdrawal goes out.
+    const { svc, sent } = make();
+    await svc.subscribe(sub(1));
+    svc.start();
+    for (const id of ["a1", "a2", "a3"]) {
+      bus.publish({ type: "attention-add", item: attn("permission", { id }) });
+    }
+    await vi.waitFor(() => expect(sent).toHaveLength(3));
+    for (const id of ["a1", "a2", "a3"]) {
+      bus.publish({ type: "attention-resolve", id, chatId: "c1" });
+    }
+    await vi.waitFor(() => expect(sent).toHaveLength(4));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(4);
+    expect(payloads(sent)[3]).toMatchObject({ outstanding: 0 });
+    svc.stop();
+  });
+
+  it("finds the owning chat when the resolve event omits chatId", async () => {
+    const { svc, sent } = make();
+    await svc.subscribe(sub(1));
+    svc.start();
+    bus.publish({ type: "attention-add", item: attn("permission", { id: "a1", chatId: "c7" }) });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    bus.publish({ type: "attention-resolve", id: "a1" });
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    expect(payloads(sent)[1]).toMatchObject({ chatId: "c7", outstanding: 0 });
+    svc.stop();
   });
 
   it("serializes concurrent registrations rather than losing writes", async () => {

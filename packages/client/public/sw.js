@@ -226,21 +226,95 @@ self.addEventListener("fetch", (event) => {
  *     server-side (services/push.ts) precisely because dropping a push locally
  *     is the thing that costs you the subscription.
  */
-self.addEventListener("push", (event) => {
-  let data = null;
+/**
+ * One notification per CHAT, not per attention item.
+ *
+ * Six things happening in one chat used to be six rows in the tray, and clearing
+ * them was six swipes. They collapse into one that says how many are waiting.
+ */
+const chatTag = (chatId) => (chatId ? `chat:${chatId}` : "dispatch");
+
+/**
+ * Is this device subscribed through Apple's push service?
+ *
+ * Compares the parsed HOSTNAME, not a substring: `https://evil.test/?x=web.
+ * push.apple.com` contains the name without being Apple, and the answer here
+ * decides whether it is safe to display nothing. Mirrors `isAppleEndpoint` in
+ * services/push.ts.
+ *
+ * Fails SAFE — an endpoint it cannot read is treated as Apple. Being wrong that
+ * way shows one unnecessary notification on a desktop; being wrong the other way
+ * costs an iPhone its subscription and stops notifications for days.
+ */
+async function isApplePushDevice() {
   try {
-    data = event.data ? event.data.json() : null;
+    const sub = await self.registration.pushManager.getSubscription();
+    if (!sub) return true;
+    return new URL(sub.endpoint).hostname === "web.push.apple.com";
   } catch {
-    /* fall through to the generic notification below */
+    return true;
+  }
+}
+
+/** Best-effort app-icon badge. Absent on Linux Chrome and in dev; never fatal. */
+async function setBadge(count) {
+  try {
+    if (typeof count !== "number") return; // omitted — leave the badge alone
+    if (count > 0) await self.navigator.setAppBadge?.(count);
+    else await self.navigator.clearAppBadge?.();
+  } catch {
+    /* unsupported here */
+  }
+}
+
+/**
+ * Render a chat's CURRENT state into the tray.
+ *
+ * Every push carries the whole state of one chat rather than a delta, which is
+ * what makes this safe to run out of order and what lets the push service
+ * collapse queued messages by `Topic` (see `topicForChat` in services/push.ts).
+ */
+async function renderChatNotification(data) {
+  const tag = chatTag(data?.chatId);
+
+  // Close what this push supersedes. On Chrome `tag` alone would do it, but iOS
+  // ignores `tag` outright (WebKit bug 258922, open since 2023), so without an
+  // explicit close every push stacks another row on the phone.
+  try {
+    for (const n of await self.registration.getNotifications({ tag })) n.close();
+  } catch {
+    /* older WebKit answered this with an empty list; `tag` still helps on Chrome */
   }
 
-  const title = data?.title || "Dispatch";
-  const options = {
+  await setBadge(data?.badge);
+
+  if (data && data.outstanding === 0) {
+    // A withdrawal: the reason is gone, so nothing replaces what we just closed.
+    //
+    // The push service never sends one of these to an Apple endpoint, because a
+    // push that displays nothing is what makes iOS revoke the subscription. This
+    // re-checks it HERE anyway: the cost of being wrong is that notifications
+    // stop working days later with no error anywhere, and the check is one await.
+    if (!(await isApplePushDevice())) return;
+    await self.registration.showNotification("Dispatch", {
+      body: "That's been handled.",
+      icon: "/icons/icon-192.png",
+      badge: "/icons/icon-192.png",
+      tag,
+    });
+    return;
+  }
+
+  const more = data && data.outstanding > 1 ? ` (+${data.outstanding - 1} more)` : "";
+  await self.registration.showNotification((data?.title || "Dispatch") + more, {
     body: data?.body || "An agent needs you.",
     icon: "/icons/icon-192.png",
     badge: "/icons/icon-192.png",
-    // One toast per attention item: a re-sent event replaces rather than stacks.
-    tag: data?.id || "dispatch",
+    tag,
+    // Replacing a notification must not buzz a second time for something the
+    // human has already been told about; a genuinely new one still alerts,
+    // because there was nothing there to replace.
+    renotify: false,
     requireInteraction: !!data?.sticky,
     data: data
       ? {
@@ -250,9 +324,30 @@ self.addEventListener("push", (event) => {
           url: data.url,
         }
       : null,
-  };
+  });
+}
 
-  event.waitUntil(self.registration.showNotification(title, options));
+self.addEventListener("push", (event) => {
+  let data = null;
+  try {
+    data = event.data ? event.data.json() : null;
+  } catch {
+    /* fall through to the generic notification below */
+  }
+
+  // Never a bare async fn that might resolve without displaying anything — see
+  // the header note above. `renderChatNotification` shows something on every
+  // path except the withdrawal, which is gated on not being an Apple endpoint.
+  event.waitUntil(
+    renderChatNotification(data).catch(() =>
+      self.registration.showNotification("Dispatch", {
+        body: data?.body || "An agent needs you.",
+        icon: "/icons/icon-192.png",
+        badge: "/icons/icon-192.png",
+        tag: chatTag(data?.chatId),
+      }),
+    ),
+  );
 });
 
 /**
