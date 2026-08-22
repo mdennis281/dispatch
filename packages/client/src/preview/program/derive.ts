@@ -1,14 +1,36 @@
 /**
- * Everything the plan view SHOWS but the spec does not STORE.
+ * Everything the board SHOWS but the spec does not STORE.
  *
  * Waves, the concurrency schedule and a gate's signatory list are all pure
- * functions of the spec. Persisting any of them would be storing a second copy
+ * functions of the plan. Persisting any of them would be storing a second copy
  * of the truth that can disagree with the first — a stored `wave` on a task
  * survives an edit to `dependsOn` and then quietly lies. They recompute in
  * microseconds; derive them.
+ *
+ * Every function takes a {@link Plan}, not a spec, because the spec is not what
+ * runs. A phase QA reopened is executing `spec.tasks` PLUS the tasks of every
+ * accepted remediation, and a view that reads `spec.tasks` renders a reopened
+ * phase as though nothing had changed.
  */
-import type { Criterion, ProgramSpec, Task, TaskId, TeamId } from "./types.js";
+import type {
+  Criterion,
+  LiveActor,
+  ProgramRun,
+  ProgramSpec,
+  Task,
+  TaskId,
+  TaskStatus,
+  TeamId,
+} from "./types.js";
 import { CAPS } from "./types.js";
+
+/** The spec, the tasks actually being executed, and (optionally) live state. */
+export interface Plan {
+  spec: ProgramSpec;
+  /** `spec.tasks` plus accepted remediation tasks. */
+  tasks: Task[];
+  run?: ProgramRun;
+}
 
 /* -------------------------------------------------------------------- waves */
 
@@ -21,8 +43,8 @@ import { CAPS } from "./types.js";
  * concurrently is {@link scheduleFor}, which then applies the concurrency caps.
  * Showing both is the point: the gap between them is the plan's real cost.
  */
-export function wavesFor(spec: ProgramSpec, phaseId: string): Map<TaskId, number> {
-  const tasks = spec.tasks.filter((t) => t.phaseId === phaseId);
+export function wavesFor(plan: Plan, phaseId: string): Map<TaskId, number> {
+  const tasks = plan.tasks.filter((t) => t.phaseId === phaseId);
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const wave = new Map<TaskId, number>();
 
@@ -47,14 +69,46 @@ export function wavesFor(spec: ProgramSpec, phaseId: string): Map<TaskId, number
 }
 
 /** Tasks of one phase, grouped by wave and ordered. */
-export function waveGroups(spec: ProgramSpec, phaseId: string): Task[][] {
-  const wave = wavesFor(spec, phaseId);
+export function waveGroups(plan: Plan, phaseId: string): Task[][] {
+  const wave = wavesFor(plan, phaseId);
   const groups: Task[][] = [];
-  for (const t of spec.tasks.filter((x) => x.phaseId === phaseId)) {
+  for (const t of plan.tasks.filter((x) => x.phaseId === phaseId)) {
     const w = (wave.get(t.id) ?? 1) - 1;
     (groups[w] ??= []).push(t);
   }
   return groups.map((g) => g ?? []);
+}
+
+/* ------------------------------------------------------------------- counts */
+
+/** The numbers the base screen shows per phase. */
+export interface PhaseCounts {
+  tasks: number;
+  waves: number;
+  /** PHASE acceptance criteria — not the tasks' own. */
+  criteria: number;
+  teams: TeamId[];
+  done: number;
+  running: number;
+  /** Tasks QA added after the fact. */
+  remediation: number;
+  qaRounds: number;
+}
+
+export function phaseCounts(plan: Plan, phaseId: string): PhaseCounts {
+  const phase = plan.spec.phases.find((p) => p.id === phaseId);
+  const tasks = plan.tasks.filter((t) => t.phaseId === phaseId);
+  const state = (id: TaskId): TaskStatus | undefined => plan.run?.tasks[id]?.status;
+  return {
+    tasks: tasks.length,
+    waves: waveGroups(plan, phaseId).length,
+    criteria: phase?.acceptance.length ?? 0,
+    teams: [...new Set(tasks.map((t) => t.teamId))],
+    done: tasks.filter((t) => state(t.id) === "done").length,
+    running: tasks.filter((t) => state(t.id) === "running" || state(t.id) === "in-review").length,
+    remediation: tasks.filter((t) => t.remediationRound !== undefined).length,
+    qaRounds: plan.run?.phases[phaseId]?.qaRounds ?? 0,
+  };
 }
 
 /* ----------------------------------------------------------------- schedule */
@@ -72,13 +126,13 @@ export interface Slot {
  *
  * Greedy by step: take everything whose dependencies already completed, then
  * admit tasks until either the program-wide `maxParallelTasks` or the owning
- * team's `maxParallel` is full. Whatever is left over is `deferred` — and that
+ * team's `hireBudget` is full. Whatever is left over is `deferred` — and that
  * list is the honest version of "this phase is parallel", because a wave of
  * five tasks under a cap of four is two steps, not one.
  */
-export function scheduleFor(spec: ProgramSpec, phaseId: string): Slot[] {
-  const tasks = spec.tasks.filter((t) => t.phaseId === phaseId);
-  const teamCap = new Map(spec.teams.map((t) => [t.id, t.maxParallel]));
+export function scheduleFor(plan: Plan, phaseId: string): Slot[] {
+  const tasks = plan.tasks.filter((t) => t.phaseId === phaseId);
+  const teamCap = new Map(plan.spec.teams.map((t) => [t.id, t.hireBudget]));
   const done = new Set<TaskId>();
   const slots: Slot[] = [];
   let remaining = [...tasks];
@@ -98,7 +152,7 @@ export function scheduleFor(spec: ProgramSpec, phaseId: string): Slot[] {
     for (const t of eligible) {
       const used = perTeam.get(t.teamId) ?? 0;
       const cap = teamCap.get(t.teamId) ?? 1;
-      if (admitted.length >= spec.policy.maxParallelTasks || used >= cap) {
+      if (admitted.length >= plan.spec.policy.maxParallelTasks || used >= cap) {
         deferred.push(t);
         continue;
       }
@@ -134,14 +188,13 @@ export interface GatePreview {
  * Every criterion with the leads who would have to agree it is done.
  *
  * Signatories are derived from `task.satisfies` rather than authored, which is
- * what keeps "the lead is omitted if uninvolved" true after a plan edit. A
- * criterion with an EMPTY signatory list is not an empty gate — it is a plan
- * hole, and the validator raises it.
+ * what keeps "the lead is omitted if uninvolved" true after a plan edit.
  */
-export function gatePreviews(spec: ProgramSpec): GatePreview[] {
+export function gatePreviews(plan: Plan, opts?: { phaseId?: string }): GatePreview[] {
+  const { spec } = plan;
   const out: GatePreview[] = [];
   const forCriterion = (criterion: Criterion, scope: "program" | "phase", phaseId?: string) => {
-    const satisfiedBy = spec.tasks.filter((t) => t.satisfies.includes(criterion.id));
+    const satisfiedBy = plan.tasks.filter((t) => t.satisfies.includes(criterion.id));
     let signatories = [...new Set(satisfiedBy.map((t) => t.teamId))];
     // A PHASE criterion is frequently a property of the phase as a whole —
     // "specs round-trip", "every view was screenshotted" — that no single task
@@ -154,14 +207,17 @@ export function gatePreviews(spec: ProgramSpec): GatePreview[] {
     let implied = false;
     if (signatories.length === 0 && scope === "phase" && phaseId) {
       signatories = [
-        ...new Set(spec.tasks.filter((t) => t.phaseId === phaseId).map((t) => t.teamId)),
+        ...new Set(plan.tasks.filter((t) => t.phaseId === phaseId).map((t) => t.teamId)),
       ];
       implied = true;
     }
     out.push({ criterion, scope, phaseId, signatories, satisfiedBy, implied });
   };
-  for (const c of spec.acceptance) forCriterion(c, "program");
-  for (const p of spec.phases) for (const c of p.acceptance) forCriterion(c, "phase", p.id);
+  if (!opts?.phaseId) for (const c of spec.acceptance) forCriterion(c, "program");
+  for (const p of spec.phases) {
+    if (opts?.phaseId && p.id !== opts.phaseId) continue;
+    for (const c of p.acceptance) forCriterion(c, "phase", p.id);
+  }
   return out;
 }
 
@@ -174,15 +230,16 @@ export interface Issue {
 }
 
 /**
- * The authoring gate, run live so the picture can show a bad plan as bad.
+ * The authoring gate, run live so the board can show a bad plan as bad.
  *
  * Mirrors what `validateProgramSpec` would enforce server-side. The rules that
- * matter most are the ones a human eye slides past: an acceptance criterion no
- * task contributes to (the program can never be declared done), and a
- * dependency edge crossing a phase boundary (two contradictory orderings, since
- * the phase gate already sequences them).
+ * matter most are the ones a human eye slides past: a program criterion no task
+ * contributes to (it can never be declared met), and a dependency edge crossing
+ * a phase boundary (two contradictory orderings, since the phase gate already
+ * sequences them).
  */
-export function validate(spec: ProgramSpec): Issue[] {
+export function validate(plan: Plan): Issue[] {
+  const { spec } = plan;
   const issues: Issue[] = [];
   const err = (where: string, message: string) =>
     issues.push({ severity: "error", where, message });
@@ -200,7 +257,8 @@ export function validate(spec: ProgramSpec): Issue[] {
   if (spec.phases.length > CAPS.phases)
     err("phases", `${spec.phases.length} phases, cap ${CAPS.phases}`);
   if (spec.teams.length > CAPS.teams) err("teams", `${spec.teams.length} teams, cap ${CAPS.teams}`);
-  if (spec.tasks.length > CAPS.tasks) err("tasks", `${spec.tasks.length} tasks, cap ${CAPS.tasks}`);
+  if (plan.tasks.length > CAPS.tasks)
+    err("tasks", `${plan.tasks.length} tasks, cap ${CAPS.tasks}`);
 
   /* phase order */
   const orders = spec.phases.map((p) => p.order).sort((a, b) => a - b);
@@ -208,11 +266,12 @@ export function validate(spec: ProgramSpec): Issue[] {
     if (o !== i + 1) err("phases", `order must be contiguous from 1 — saw ${orders.join(",")}`);
   });
 
-  const taskById = new Map(spec.tasks.map((t) => [t.id, t]));
+  const taskById = new Map(plan.tasks.map((t) => [t.id, t]));
   const phaseIds = new Set(spec.phases.map((p) => p.id));
   const teamIds = new Set(spec.teams.map((t) => t.id));
+  const roleIds = new Set(spec.roles.map((r) => r.id));
 
-  for (const t of spec.tasks) {
+  for (const t of plan.tasks) {
     if (t.brief.length > CAPS.taskBrief)
       err(t.id, `brief is ${t.brief.length} chars, cap ${CAPS.taskBrief}`);
     if (!phaseIds.has(t.phaseId)) err(t.id, `unknown phaseId "${t.phaseId}"`);
@@ -231,17 +290,17 @@ export function validate(spec: ProgramSpec): Issue[] {
 
   /* cycles, named */
   for (const p of spec.phases) {
-    const cycle = findCycle(spec.tasks.filter((t) => t.phaseId === p.id));
+    const cycle = findCycle(plan.tasks.filter((t) => t.phaseId === p.id));
     if (cycle) err(p.id, `dependency cycle: ${cycle.join(" → ")}`);
   }
 
   /* coverage — the rules that catch a plan hole */
-  // Only PROGRAM criteria must be named by a task. A phase criterion that no
-  // task claims falls back to a whole-phase signatory list (see gatePreviews),
-  // so it is answerable — it just isn't attributable to one piece of work.
   for (const c of spec.acceptance) {
-    if (!spec.tasks.some((t) => t.satisfies.includes(c.id)))
-      err("acceptance", `criterion "${c.id}" is satisfied by no task — it can never be declared met`);
+    if (!plan.tasks.some((t) => t.satisfies.includes(c.id)))
+      err(
+        "acceptance",
+        `criterion "${c.id}" is satisfied by no task — it can never be declared met`,
+      );
   }
   const allCriteria = [
     ...spec.acceptance.map((c) => ({ c, where: "acceptance" })),
@@ -252,23 +311,21 @@ export function validate(spec: ProgramSpec): Issue[] {
       err(where, `criterion "${c.id}" is verify:'command' with no check`);
   }
   for (const team of spec.teams) {
-    if (!spec.tasks.some((t) => t.teamId === team.id))
-      err("teams", `team "${team.id}" owns no tasks`);
+    if (!plan.tasks.some((t) => t.teamId === team.id)) err("teams", `team "${team.id}" owns no tasks`);
+    for (const r of team.hireableRoles) {
+      if (!roleIds.has(r)) err(team.id, `hireableRole "${r}" resolves to no role template`);
+    }
+    if (team.hireBudget < 1) err(team.id, "hireBudget must be at least 1");
   }
   for (const p of spec.phases) {
-    if (!spec.tasks.some((t) => t.phaseId === p.id)) err(p.id, "phase has no tasks");
+    if (!plan.tasks.some((t) => t.phaseId === p.id)) err(p.id, "phase has no tasks");
   }
 
   /* personas */
   const personas: Array<[string, { agentId?: string; instructions?: string }]> = [
     ["orchestrator", spec.orchestrator],
-    ...spec.teams.flatMap(
-      (t) =>
-        [
-          [`${t.id}.lead`, t.lead],
-          [`${t.id}.developer`, t.developer],
-        ] as Array<[string, { agentId?: string; instructions?: string }]>,
-    ),
+    ["qa", spec.qa],
+    ...spec.teams.map((t) => [`${t.id}.lead`, t.lead] as [string, { instructions?: string }]),
   ];
   for (const [where, p] of personas) {
     if (!!p.agentId === !!p.instructions)
@@ -278,13 +335,16 @@ export function validate(spec: ProgramSpec): Issue[] {
   }
 
   /* soft signals */
-  const unlinked = spec.tasks.filter((t) => t.satisfies.length === 0);
+  const unlinked = plan.tasks.filter((t) => t.satisfies.length === 0);
   if (unlinked.length)
     warn(
       "tasks",
-      `${unlinked.length} task(s) satisfy no criterion — legal for scaffolding, but ` +
-        `their team gets no vote at any gate`,
+      `${unlinked.length} task(s) satisfy no criterion — legal for scaffolding, but their ` +
+        `team gets no vote at any gate`,
     );
+  for (const p of spec.phases) {
+    if (!p.qa) warn(p.id, "no QA pass — nothing independently checks this phase's criteria");
+  }
 
   return issues;
 }
@@ -324,4 +384,26 @@ function findCycle(tasks: Task[]): TaskId[] | null {
 export function teamColor(spec: ProgramSpec, teamId: TeamId): string {
   const i = spec.teams.findIndex((t) => t.id === teamId);
   return `var(--p-cat-${(i < 0 ? 0 : i) + 1})`;
+}
+
+/* ------------------------------------------------------------------ actors */
+
+/** Live actors attached to one task, oldest first. */
+export function actorsForTask(plan: Plan, taskId: TaskId): LiveActor[] {
+  const ids = plan.run?.tasks[taskId]?.actorIds ?? [];
+  return ids
+    .map((id) => plan.run?.actors.find((a) => a.id === id))
+    .filter((a): a is LiveActor => Boolean(a));
+}
+
+/** The lead actor for a team, live or retired. */
+export function leadForTeam(plan: Plan, teamId: TeamId): LiveActor | undefined {
+  return plan.run?.actors.find((a) => a.kind === "lead" && a.teamId === teamId);
+}
+
+/** Hires currently occupying a team's budget. */
+export function liveHires(plan: Plan, teamId: TeamId): LiveActor[] {
+  return (plan.run?.actors ?? []).filter(
+    (a) => a.kind === "hire" && a.teamId === teamId && a.status !== "retired" && a.status !== "idle",
+  );
 }
