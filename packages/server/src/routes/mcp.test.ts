@@ -6,9 +6,15 @@
  * with non-empty input schemas + flattened params, and an external server that
  * fails to connect must surface as `status:"error"` WITHOUT failing the endpoint
  * (the external probe is injected here, so nothing is ever spawned).
+ *
+ * The toggle endpoint is covered against a REAL temp repo rather than a mock,
+ * because the two halves worth protecting are both on-disk: a project pin has to
+ * land in `.dispatch/project.yaml`, and an app pin has to land in settings and
+ * NOT in the repo — a leak in either direction commits somebody's local
+ * preference or strands a team decision on one machine.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -282,6 +288,98 @@ describe("mcp-catalog — builder", () => {
     );
     expect(seen).toBe("/tmp/elsewhere");
   });
+
+  it("lists a bundled server under its own kind, probed like any other", async () => {
+    // The gap this closes: the browser pair was injected into every session and
+    // named nowhere in the one view that claims to list everything available.
+    const probe: McpProbe = async () => ({
+      status: "ok",
+      tools: [{ name: "browser_navigate", description: "go", inputSchema: {} }],
+    });
+    const catalog = await buildProjectMcpCatalog(makeProject(), {
+      probe,
+      bundled: [
+        {
+          name: "playwright",
+          config: { type: "stdio", command: "node", args: ["cli.js"] },
+          byDefault: true,
+          defaultReason: "on automatically — this project has a sub-app with a url",
+        },
+      ],
+    });
+    const pw = catalog.servers.find((s) => s.name === "playwright")!;
+    expect(pw.kind).toBe("bundled");
+    expect(pw.status).toBe("ok");
+    expect(pw.enablement).toMatchObject({ effective: true, source: "default", byDefault: true });
+    expect(pw.defaultReason).toMatch(/sub-app/);
+    expect(pw.tools[0]!.qualifiedName).toBe("mcp__playwright__browser_navigate");
+  });
+
+  it("lists a disabled server WITHOUT probing it", async () => {
+    // The point of switching one off is that it never runs — so spawning it to
+    // enumerate tools nobody can call would defeat the feature it implements.
+    let probed = false;
+    const probe: McpProbe = async () => {
+      probed = true;
+      return { status: "ok", tools: [] };
+    };
+    const catalog = await buildProjectMcpCatalog(makeProject({ sim: { command: "node" } }), {
+      probe,
+      enablement: { project: { sim: false } },
+    });
+    const sim = catalog.servers.find((s) => s.name === "sim")!;
+    expect(sim.status).toBe("disabled");
+    expect(sim.tools).toEqual([]);
+    expect(sim.enablement).toMatchObject({ effective: false, source: "project" });
+    expect(probed).toBe(false);
+  });
+
+  it("reports manager as always-on whatever the layers say", async () => {
+    const catalog = await buildProjectMcpCatalog(makeProject(), {
+      enablement: { app: { manager: false } },
+    });
+    const manager = catalog.servers.find((s) => s.name === "manager")!;
+    expect(manager.enablement).toMatchObject({ effective: true, alwaysOn: true });
+    expect(manager.status).toBe("ok");
+  });
+
+  it("drops a bundled server the project declares itself, so only one row wins", async () => {
+    // The broker's merge lets a project's own `mcpServers` entry override the
+    // bundled one outright; listing both would show a row no session gets.
+    const probe: McpProbe = async () => ({ status: "ok", tools: [] });
+    const catalog = await buildProjectMcpCatalog(makeProject(), {
+      probe,
+      mcpServers: { playwright: { command: "my-own-playwright" } },
+      bundled: [{ name: "playwright", config: { command: "node" }, byDefault: true }],
+    });
+    const rows = catalog.servers.filter((s) => s.name === "playwright");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.kind).toBe("external");
+    expect(rows[0]!.transport).toMatchObject({ command: "my-own-playwright" });
+  });
+
+  it("surfaces an unresolvable bundled package as an error rather than a silent absence", async () => {
+    let probed = false;
+    const probe: McpProbe = async () => {
+      probed = true;
+      return { status: "ok", tools: [] };
+    };
+    const catalog = await buildProjectMcpCatalog(makeProject(), {
+      probe,
+      bundled: [
+        {
+          name: "chrome-devtools",
+          config: {},
+          byDefault: true,
+          unavailable: "chrome-devtools-mcp is not installed",
+        },
+      ],
+    });
+    const cdt = catalog.servers.find((s) => s.name === "chrome-devtools")!;
+    expect(cdt.status).toBe("error");
+    expect(cdt.error).toMatch(/not installed/);
+    expect(probed).toBe(false);
+  });
 });
 
 describe("mcp-catalog — paramsFromJsonSchema", () => {
@@ -367,6 +465,128 @@ describe("GET /api/projects/:projectId/mcp", () => {
     }
 
     const missing = await app.inject({ method: "GET", url: "/api/projects/nope/mcp" });
+    expect(missing.statusCode).toBe(404);
+  });
+});
+
+describe("PUT /api/projects/:projectId/mcp/:name/enabled", () => {
+  /** A live app with one project rooted at a real temp dir. */
+  async function setup(): Promise<{ projectId: string; repo: string }> {
+    dir = await mkdtemp(join(tmpdir(), "cm-mcp-toggle-"));
+    const store = new Store(dir);
+    await store.init();
+    const bus = new EventBus();
+    const config = { ...loadConfig(), dataDir: dir };
+    app = await buildApp({ config, store, bus });
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects",
+      payload: { name: "Widget", repoPath: dir, worktreeRoot: "wt" },
+    });
+    expect(created.statusCode).toBe(201);
+    return { projectId: created.json().id as string, repo: dir };
+  }
+
+  /**
+   * `payload` is typed rather than `unknown` on purpose: `inject`'s overloads
+   * resolve to the callback (void-returning) form when the argument object
+   * isn't fully known, and the result then has no `.statusCode` at all.
+   */
+  const toggle = (
+    projectId: string,
+    name: string,
+    body: { scope?: string; enabled?: boolean | null },
+  ) =>
+    app.inject({
+      method: "PUT",
+      url: `/api/projects/${projectId}/mcp/${name}/enabled`,
+      payload: body,
+    });
+
+  it("lists the bundled browser pair, off by default with no web sub-app", async () => {
+    const { projectId } = await setup();
+    const res = await app.inject({ method: "GET", url: `/api/projects/${projectId}/mcp` });
+    const catalog = res.json() as McpCatalog;
+
+    const bundled = catalog.servers.filter((s) => s.kind === "bundled").map((s) => s.name);
+    expect(bundled).toEqual(["playwright", "chrome-devtools"]);
+    const pw = catalog.servers.find((s) => s.name === "playwright")!;
+    // The auto-gate: a project with nothing to point a browser at pays no context.
+    expect(pw.status).toBe("disabled");
+    expect(pw.enablement).toMatchObject({ effective: false, source: "default" });
+    expect(pw.defaultReason).toMatch(/no sub-app/);
+  });
+
+  it("writes a project pin to .dispatch/project.yaml and returns the rebuilt catalog", async () => {
+    const { projectId, repo } = await setup();
+    const res = await toggle(projectId, "chrome-devtools", { scope: "project", enabled: false });
+    expect(res.statusCode).toBe(200);
+
+    const manifest = await readFile(join(repo, ".dispatch", "project.yaml"), "utf8");
+    expect(manifest).toContain("mcpEnabled");
+    expect(manifest).toContain("chrome-devtools: false");
+
+    // The response must already reflect the write — the config watcher is
+    // debounced, and a catalog built off the stale cache would snap the switch
+    // straight back in the UI.
+    const cdt = (res.json() as McpCatalog).servers.find((s) => s.name === "chrome-devtools")!;
+    expect(cdt.enablement).toMatchObject({ project: false, effective: false, source: "project" });
+  });
+
+  it("writes an app pin to settings, not to the repo", async () => {
+    const { projectId, repo } = await setup();
+    const res = await toggle(projectId, "playwright", { scope: "app", enabled: true });
+    expect(res.statusCode).toBe(200);
+
+    const settings = await app.inject({ method: "GET", url: "/api/settings" });
+    expect(settings.json().mcpEnabled).toEqual({ playwright: true });
+    // Never committed: an install-level preference has no business in the repo,
+    // whose manifest project creation already scaffolded.
+    const manifest = await readFile(join(repo, ".dispatch", "project.yaml"), "utf8");
+    expect(manifest).not.toContain("mcpEnabled");
+
+    // …and it takes effect: the auto-gate said off, the pin says on.
+    const pw = (res.json() as McpCatalog).servers.find((s) => s.name === "playwright")!;
+    expect(pw.enablement).toMatchObject({ app: true, byDefault: false, effective: true });
+  });
+
+  it("clears a pin with null and inherits again", async () => {
+    const { projectId } = await setup();
+    await toggle(projectId, "playwright", { scope: "app", enabled: true });
+    const res = await toggle(projectId, "playwright", { scope: "app", enabled: null });
+
+    const pw = (res.json() as McpCatalog).servers.find((s) => s.name === "playwright")!;
+    expect(pw.enablement.app).toBeUndefined();
+    expect(pw.enablement.source).toBe("default");
+    const settings = await app.inject({ method: "GET", url: "/api/settings" });
+    expect(settings.json().mcpEnabled).toBeUndefined();
+  });
+
+  it("keeps an app pin through an unrelated full-replace settings save", async () => {
+    // PUT /api/settings is a full replace and this pin is written elsewhere, so
+    // the two paths have to be able to coexist without one erasing the other.
+    const { projectId } = await setup();
+    await toggle(projectId, "playwright", { scope: "app", enabled: false });
+    const current = (await app.inject({ method: "GET", url: "/api/settings" })).json();
+    const saved = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      payload: { ...current, theme: "light" },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().mcpEnabled).toEqual({ playwright: false });
+  });
+
+  it("refuses to disable manager, and refuses a bad scope", async () => {
+    const { projectId } = await setup();
+    const manager = await toggle(projectId, "manager", { scope: "app", enabled: false });
+    expect(manager.statusCode).toBe(400);
+    expect(manager.json().error).toMatch(/cannot be disabled/);
+
+    const scope = await toggle(projectId, "playwright", { scope: "chat", enabled: false });
+    expect(scope.statusCode).toBe(400);
+
+    const missing = await toggle("nope", "playwright", { scope: "app", enabled: false });
     expect(missing.statusCode).toBe(404);
   });
 });

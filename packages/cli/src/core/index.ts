@@ -22,6 +22,7 @@ export {
 export {
   addServer,
   removeServer,
+  setServerEnabled,
   listServers,
   getServer,
   importServers,

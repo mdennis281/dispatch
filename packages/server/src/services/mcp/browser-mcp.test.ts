@@ -19,7 +19,13 @@ import {
   type SubApp,
 } from "@dispatch/shared";
 import { buildProjectMcpCatalog } from "./mcp-catalog.js";
-import { buildBrowserMcpServers, selectBrowserServers, hasWebSubApp } from "./browser-mcp.js";
+import {
+  buildBrowserMcpServers,
+  browserServerDefault,
+  effectiveSubApps,
+  selectBrowserServers,
+  hasWebSubApp,
+} from "./browser-mcp.js";
 
 const webApp = { id: "dev", name: "Dev", url: "http://localhost:4319" } as SubApp;
 const cliApp = { id: "cli", name: "CLI" } as SubApp;
@@ -55,12 +61,86 @@ describe("selectBrowserServers", () => {
   it("treats a missing config as auto, not off", () => {
     expect(selectBrowserServers(undefined, [webApp])).toHaveLength(2);
   });
+
+  it("an mcpEnabled pin overrides the auto-gate in both directions", () => {
+    // On in a repo the gate would exclude: no sub-app declares a url, but
+    // somebody asked for a browser here anyway.
+    expect(selectBrowserServers(cfg(), [cliApp], { project: { playwright: true } })).toEqual([
+      "playwright",
+    ]);
+    // …and off in a repo the gate would include.
+    expect(selectBrowserServers(cfg(), [webApp], { app: { playwright: false } })).toEqual([
+      "chrome-devtools",
+    ]);
+  });
+
+  it("a project pin beats an app pin", () => {
+    expect(
+      selectBrowserServers(cfg(), [webApp], {
+        app: { "chrome-devtools": false },
+        project: { "chrome-devtools": true },
+      }),
+    ).toEqual(["playwright", "chrome-devtools"]);
+  });
+
+  it("a pin overrides an explicit browser: list too", () => {
+    // `browser:` is the DEFAULT layer, not the answer — otherwise a repo that
+    // listed its servers could never be overridden per install.
+    expect(
+      selectBrowserServers(cfg({ servers: ["playwright"] }), [], {
+        app: { playwright: false, "chrome-devtools": true },
+      }),
+    ).toEqual(["chrome-devtools"]);
+  });
+});
+
+describe("browserServerDefault", () => {
+  it("reports what `browser:` alone says, before any pin", () => {
+    expect(browserServerDefault("playwright", cfg(), [webApp])).toBe(true);
+    expect(browserServerDefault("playwright", cfg(), [cliApp])).toBe(false);
+    expect(browserServerDefault("playwright", cfg({ servers: "off" }), [webApp])).toBe(false);
+    expect(browserServerDefault("chrome-devtools", cfg({ servers: ["playwright"] }), [])).toBe(
+      false,
+    );
+  });
 });
 
 describe("hasWebSubApp", () => {
   it("is true only when some sub-app declares a url", () => {
     expect(hasWebSubApp([cliApp, webApp])).toBe(true);
     expect(hasWebSubApp([cliApp])).toBe(false);
+  });
+});
+
+describe("effectiveSubApps", () => {
+  it("falls back to the store copy when the config answers EMPTY, not just undefined", () => {
+    // The bug this exists for. `getSubApps` returns `[]` — never `undefined` —
+    // for a project whose config isn't in the cache yet, so the obvious
+    // `getSubApps(id) ?? project.subApps` never falls back and the browser
+    // auto-gate concludes "no sub-app declares a url" for a project with three.
+    expect(effectiveSubApps([], [webApp])).toEqual([webApp]);
+    expect(effectiveSubApps(undefined, [webApp])).toEqual([webApp]);
+  });
+
+  it("still prefers the live config when it has anything to say", () => {
+    // Config-first is the point: a manifest edit that ADDED a sub-app has to
+    // win over the store copy that hasn't re-synced yet.
+    expect(effectiveSubApps([webApp], [cliApp])).toEqual([webApp]);
+    // …including when the live answer REMOVES the url — a non-empty config is
+    // an answer, so the gate must close rather than reach for the stale copy.
+    expect(effectiveSubApps([cliApp], [webApp])).toEqual([cliApp]);
+  });
+
+  it("is empty when neither side has anything", () => {
+    expect(effectiveSubApps(undefined, undefined)).toEqual([]);
+    expect(effectiveSubApps([], [])).toEqual([]);
+  });
+
+  it("gates the browser servers on correctly through a cold config cache", () => {
+    // End to end through the thing that actually consumes it: a cold cache used
+    // to take the browser tools away from a session that should have had them.
+    const cold = effectiveSubApps([], [webApp]);
+    expect(selectBrowserServers(cfg(), cold)).toEqual(["playwright", "chrome-devtools"]);
   });
 });
 
@@ -130,6 +210,25 @@ describe("buildBrowserMcpServers", () => {
 
   it("returns nothing at all when the project is gated out", () => {
     expect(buildBrowserMcpServers({ subApps: [cliApp] })).toEqual({});
+  });
+
+  it("skips a server an mcpEnabled pin switched off", () => {
+    const servers = buildBrowserMcpServers({
+      subApps: [webApp],
+      enablement: { project: { "chrome-devtools": false } },
+    });
+    expect(Object.keys(servers)).toEqual(["playwright"]);
+  });
+
+  it("an explicit `servers` list bypasses selection entirely", () => {
+    // How the catalog gets a config for a server it must still DESCRIBE (and
+    // offer a switch for) after a toggle turned it off.
+    const servers = buildBrowserMcpServers({
+      subApps: [cliApp],
+      enablement: { app: { playwright: false } },
+      servers: ["playwright"],
+    });
+    expect(Object.keys(servers)).toEqual(["playwright"]);
   });
 });
 

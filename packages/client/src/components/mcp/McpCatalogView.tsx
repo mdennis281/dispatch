@@ -1,20 +1,37 @@
 /**
  * McpCatalogView — the app-wide MCP catalog overlay. Visualizes every MCP tool
- * endpoint a project's agents can call: the in-process "manager" server plus any
- * external/passthrough servers on the project's config, each tool shown with its
- * qualified name, description, and input-parameter schema.
+ * endpoint a project's agents can call: the in-process "manager" server, the
+ * BUNDLED servers Dispatch injects on the project's behalf (playwright and
+ * chrome-devtools), and any external/passthrough servers on the project's
+ * config — each tool shown with its qualified name, description, and
+ * input-parameter schema.
+ *
+ * The bundled pair used to be missing from here entirely, which made this
+ * screen quietly dishonest: it claimed to list "every MCP endpoint available"
+ * while 53 of the tools an agent actually gets were injected somewhere else and
+ * never mentioned. They are ordinary rows now, with a `bundled` group of their
+ * own so their provenance is still legible.
+ *
+ * Every server also carries an on/off SWITCH, resolved across two layers — this
+ * install (`App`) and this repo's committed `.dispatch/project.yaml` (`Project`).
+ * One scope picker decides which layer a click writes; the switch itself always
+ * shows what actually happens, and the detail pane spells out which layer
+ * decided that. A server switched off is still listed, because this is also the
+ * only place to switch it back on.
  *
  * Mounted once in App; open state lives in the view store's `overlay` field
- * (see stores/view.ts). Left pane = server list (grouped Custom vs
- * External, each with a status dot); right pane = the selected server's tools as
- * expandable endpoint cards (params table + raw JSON Schema toggle). Pure REST via
- * the `useMcp` store — fetched on open, on project change, and on Refresh.
+ * (see stores/view.ts). Left pane = server list (grouped Custom / Bundled /
+ * External, each with a status dot and a switch); right pane = the selected
+ * server's enablement block plus its tools as expandable endpoint cards (params
+ * table + raw JSON Schema toggle). Pure REST via the `useMcp` store — fetched on
+ * open, on project change, on Refresh, and re-returned by every toggle write.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Blocks,
   Boxes,
   Cpu,
+  Globe,
   Wrench,
   Copy,
   Check,
@@ -23,8 +40,11 @@ import {
   ChevronDown,
   Code2,
   CircleSlash,
+  PowerOff,
+  RotateCcw,
 } from "lucide-react";
 import type {
+  McpEnablementScope,
   McpServerCatalogEntry,
   McpServerStatus,
   McpToolInfo,
@@ -32,10 +52,14 @@ import type {
 import { Modal, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { Chip } from "../ui/Chip.js";
+import { IconButton } from "../ui/IconButton.js";
+import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { Spinner } from "../ui/Spinner.js";
 import { StatusDot, type DotTone } from "../ui/StatusDot.js";
+import { Switch } from "../ui/Switch.js";
+import { Tooltip } from "../ui/Tooltip.js";
 import { useProjects } from "../../stores/projects.js";
-import { useMcp, useProjectMcp } from "../../stores/mcp.js";
+import { useMcp, useMcpTogglePending, useProjectMcp } from "../../stores/mcp.js";
 import { copyToClipboard } from "../../lib/clipboard.js";
 import { cn } from "../../lib/cn.js";
 import { useOverlay } from "../../stores/view.js";
@@ -46,7 +70,158 @@ const STATUS_META: Record<McpServerStatus, { tone: DotTone; label: string }> = {
   ok: { tone: "success", label: "connected" },
   error: { tone: "danger", label: "error" },
   unconfigured: { tone: "muted", label: "unconfigured" },
+  // Not an error and not a failure to connect — a deliberate choice, and the
+  // one status where an empty tool list is the correct answer.
+  disabled: { tone: "muted", label: "off" },
 };
+
+/* ------------------------------------------------------------- enablement */
+
+const SCOPE_LABEL: Record<McpEnablementScope, string> = {
+  app: "this install",
+  project: "this repo",
+};
+
+/** Where a server's resolved state came from, as a sentence fragment. */
+function sourceLabel(server: McpServerCatalogEntry): string {
+  const { enablement } = server;
+  if (enablement.alwaysOn) return "always on";
+  if (enablement.source === "default") return enablement.byDefault ? "on" : "off";
+  return `${enablement.effective ? "on" : "off"} · ${enablement.source}`;
+}
+
+/**
+ * One server's switch, writing at the CURRENT scope.
+ *
+ * The switch shows the EFFECTIVE state, not the current scope's pin — what an
+ * agent actually gets is the only thing worth reading at a glance. Flipping it
+ * writes an explicit pin at this scope; the ↺ beside it removes that pin so the
+ * server inherits again (from the app layer, then from its own default).
+ */
+function ServerToggle({
+  projectId,
+  server,
+  scope,
+  compact,
+}: {
+  projectId: string;
+  server: McpServerCatalogEntry;
+  scope: McpEnablementScope;
+  compact?: boolean;
+}) {
+  const pending = useMcpTogglePending(projectId, server.name);
+  const { enablement } = server;
+  const pinned = scope === "app" ? enablement.app : enablement.project;
+
+  if (enablement.alwaysOn) {
+    return (
+      <Tooltip
+        label={`${server.name} is how agents create PRs, record memory and write this very setting — it can't be switched off.`}
+      >
+        <Chip tone="muted">always on</Chip>
+      </Tooltip>
+    );
+  }
+
+  const set = (enabled: boolean | null) =>
+    void useMcp.getState().setEnabled(projectId, server.name, scope, enabled);
+
+  return (
+    <span
+      className="flex shrink-0 items-center gap-1"
+      // The row behind this is a select-this-server button; without stopping
+      // here, every toggle would also change the selection under the cursor.
+      onClick={(e) => e.stopPropagation()}
+    >
+      {typeof pinned === "boolean" && (
+        <IconButton
+          onClick={() => set(null)}
+          disabled={pending}
+          tip={`Pinned ${pinned ? "on" : "off"} for ${SCOPE_LABEL[scope]} — clear to inherit`}
+          aria-label={`Clear the ${scope} override for ${server.name}`}
+          className="size-5 text-faint [&_svg]:size-3"
+        >
+          <RotateCcw />
+        </IconButton>
+      )}
+      {pending ? (
+        <Spinner size={12} />
+      ) : (
+        <Switch
+          checked={enablement.effective}
+          onChange={(v) => set(v)}
+          label=""
+          ariaLabel={`${enablement.effective ? "Disable" : "Enable"} ${server.name} for ${SCOPE_LABEL[scope]}`}
+        />
+      )}
+      {!compact && (
+        <span className="text-2xs text-faint">{enablement.effective ? "on" : "off"}</span>
+      )}
+    </span>
+  );
+}
+
+/** The detail pane's "why is it on/off, and what would change it" block. */
+function EnablementPanel({
+  projectId,
+  server,
+  scope,
+}: {
+  projectId: string;
+  server: McpServerCatalogEntry;
+  scope: McpEnablementScope;
+}) {
+  const { enablement } = server;
+  const rows: Array<{ label: string; value: string; won: boolean }> = [
+    {
+      label: "Project",
+      value: pinText(enablement.project),
+      won: enablement.source === "project",
+    },
+    { label: "App", value: pinText(enablement.app), won: enablement.source === "app" },
+    {
+      label: "Default",
+      value: enablement.byDefault ? "on" : "off",
+      won: enablement.source === "default",
+    },
+  ];
+  return (
+    <div className="rounded-md border border-line bg-panel-2/40 px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <span className="flex-1 text-xs font-medium text-secondary">
+          {enablement.effective
+            ? "Running in every session in this project"
+            : "Not handed to any session — its tools cost nothing"}
+        </span>
+        <ServerToggle projectId={projectId} server={server} scope={scope} />
+      </div>
+      {!enablement.alwaysOn && (
+        <>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+            {rows.map((r) => (
+              <span key={r.label} className="inline-flex items-center gap-1 text-2xs">
+                <span className="text-faint">{r.label}</span>
+                <span className={r.won ? "font-medium text-accent-hi" : "text-muted"}>
+                  {r.value}
+                </span>
+                {r.won && <span className="text-2xs text-faint">← wins</span>}
+              </span>
+            ))}
+          </div>
+          {server.defaultReason && (
+            <p className="mt-1.5 text-2xs leading-snug text-faint">{server.defaultReason}</p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** A layer's pin as text — the empty case is "inherit", not "off". */
+function pinText(pin: boolean | undefined): string {
+  if (pin === undefined) return "—";
+  return pin ? "on" : "off";
+}
 
 /* ------------------------------------------------------------- copy button */
 
@@ -179,56 +354,72 @@ function EndpointCard({ tool }: { tool: McpToolInfo }) {
 /* ------------------------------------------------------------- server list */
 
 function ServerButton({
+  projectId,
   server,
   active,
+  scope,
   onSelect,
 }: {
+  projectId: string;
   server: McpServerCatalogEntry;
   active: boolean;
+  scope: McpEnablementScope;
   onSelect: () => void;
 }) {
   const meta = STATUS_META[server.status];
+  const off = !server.enablement.effective;
   return (
-    <button
-      onClick={onSelect}
+    // A row, not one big button: the switch on the right is itself a control, and
+    // a button inside a button is invalid markup that keyboard users can't reach.
+    <div
       className={cn(
-        "flex w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left transition-colors",
-        active
-          ? "border-accent-line bg-accent-ghost"
-          : "border-transparent hover:bg-hover",
+        "flex w-full items-center gap-2 rounded-md border px-2.5 py-2 transition-colors",
+        active ? "border-accent-line bg-accent-ghost" : "border-transparent hover:bg-hover",
       )}
     >
-      <StatusDot tone={meta.tone} size={7} />
-      <span className="min-w-0 flex-1">
-        <span
-          className={cn(
-            "block truncate cm-mono !text-xs font-medium",
-            active ? "text-accent-hi" : "text-primary",
-          )}
-        >
-          {server.name}
+      <button
+        onClick={onSelect}
+        className={cn("flex min-w-0 flex-1 items-center gap-2 text-left", off && "opacity-60")}
+      >
+        <StatusDot tone={meta.tone} size={7} />
+        <span className="min-w-0 flex-1">
+          <span
+            className={cn(
+              "block truncate cm-mono !text-xs font-medium",
+              active ? "text-accent-hi" : "text-primary",
+            )}
+          >
+            {server.name}
+          </span>
+          <span className="block truncate text-2xs text-faint">
+            {server.status === "ok"
+              ? `${server.tools.length} tool${server.tools.length === 1 ? "" : "s"}`
+              : server.status === "disabled"
+                ? sourceLabel(server)
+                : meta.label}
+          </span>
         </span>
-        <span className="block truncate text-2xs text-faint">
-          {server.status === "ok"
-            ? `${server.tools.length} tool${server.tools.length === 1 ? "" : "s"}`
-            : meta.label}
-        </span>
-      </span>
-    </button>
+      </button>
+      <ServerToggle projectId={projectId} server={server} scope={scope} compact />
+    </div>
   );
 }
 
 function ServerGroup({
+  projectId,
   label,
   icon,
   servers,
   selected,
+  scope,
   onSelect,
 }: {
+  projectId: string;
   label: string;
   icon: React.ReactNode;
   servers: McpServerCatalogEntry[];
   selected: string | null;
+  scope: McpEnablementScope;
   onSelect: (name: string) => void;
 }) {
   if (servers.length === 0) return null;
@@ -241,8 +432,10 @@ function ServerGroup({
       {servers.map((s) => (
         <ServerButton
           key={s.name}
+          projectId={projectId}
           server={s}
           active={selected === s.name}
+          scope={scope}
           onSelect={() => onSelect(s.name)}
         />
       ))}
@@ -259,6 +452,10 @@ export function McpCatalogView() {
   const { catalog, loading, error } = useProjectMcp(projectId);
 
   const [selected, setSelected] = useState<string | null>(null);
+  // Project-scoped by default: this overlay is about one project, and a decision
+  // that belongs to the repo should be the one you make without thinking. App
+  // scope is the deliberate step, because it silently changes every project.
+  const [scope, setScope] = useState<McpEnablementScope>("project");
 
   const load = useCallback(
     (fresh?: boolean) => {
@@ -274,6 +471,7 @@ export function McpCatalogView() {
 
   const servers = catalog?.servers ?? [];
   const custom = useMemo(() => servers.filter((s) => s.kind === "custom"), [servers]);
+  const bundled = useMemo(() => servers.filter((s) => s.kind === "bundled"), [servers]);
   const external = useMemo(() => servers.filter((s) => s.kind === "external"), [servers]);
 
   // Keep a valid selection: default to the first server; clear if it vanished.
@@ -284,6 +482,7 @@ export function McpCatalogView() {
 
   const activeServer = servers.find((s) => s.name === selected) ?? null;
   const toolCount = servers.reduce((n, s) => n + s.tools.length, 0);
+  const offCount = servers.filter((s) => !s.enablement.effective).length;
 
   return (
     <Modal
@@ -307,7 +506,7 @@ export function McpCatalogView() {
                 ? "Loading…"
                 : `${servers.length} server${servers.length === 1 ? "" : "s"} · ${toolCount} tool${
                     toolCount === 1 ? "" : "s"
-                  }`}
+                  }${offCount ? ` · ${offCount} off` : ""}`}
             </span>
           )}
           <Button
@@ -334,19 +533,56 @@ export function McpCatalogView() {
       ) : (
         <div className="flex h-[60vh] gap-3">
           {/* left — server list */}
-          <div className="cm-scroll w-52 shrink-0 space-y-2 overflow-y-auto border-r border-line-soft pr-2">
+          <div className="cm-scroll w-64 shrink-0 space-y-2 overflow-y-auto border-r border-line-soft pr-2">
+            {/* One picker for every switch below it: which LAYER a click writes.
+                Per-row scope pickers would mean reading the scope off each row
+                to know what you were about to change. */}
+            <div className="space-y-1 px-1 pb-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">
+                  Toggles apply to
+                </span>
+              </div>
+              <SegmentedControl
+                segments={[
+                  { value: "project", label: "Project" },
+                  { value: "app", label: "App" },
+                ]}
+                value={scope}
+                onChange={setScope}
+                className="w-full [&>button]:flex-1"
+              />
+              <p className="text-2xs leading-snug text-faint">
+                {scope === "project"
+                  ? "Committed to .dispatch/project.yaml — everyone on this repo."
+                  : "Saved to this install only, across every project. Never committed."}
+              </p>
+            </div>
             <ServerGroup
+              projectId={projectId}
               label="Custom"
               icon={<Cpu />}
               servers={custom}
               selected={selected}
+              scope={scope}
               onSelect={setSelected}
             />
             <ServerGroup
+              projectId={projectId}
+              label="Bundled"
+              icon={<Globe />}
+              servers={bundled}
+              selected={selected}
+              scope={scope}
+              onSelect={setSelected}
+            />
+            <ServerGroup
+              projectId={projectId}
               label="External"
               icon={<Boxes />}
               servers={external}
               selected={selected}
+              scope={scope}
               onSelect={setSelected}
             />
             {external.length === 0 && (
@@ -370,10 +606,22 @@ export function McpCatalogView() {
             )}
           </div>
 
-          {/* right — the selected server's tools */}
-          <div className="cm-scroll min-w-0 flex-1 overflow-y-auto">
+          {/* right — the selected server's enablement, then its tools */}
+          <div className="cm-scroll min-w-0 flex-1 space-y-2 overflow-y-auto">
             {!activeServer ? (
               <div className="pt-16 text-center text-sm text-muted">Select a server.</div>
+            ) : (
+              <EnablementPanel projectId={projectId} server={activeServer} scope={scope} />
+            )}
+            {!activeServer ? null : activeServer.status === "disabled" ? (
+              <div className="rounded-md border border-dashed border-line px-3 py-8 text-center">
+                <PowerOff className="mx-auto mb-1.5 size-5 text-faint" />
+                <p className="text-sm text-muted">“{activeServer.name}” is switched off.</p>
+                <p className="mx-auto mt-1 max-w-md text-xs text-faint">
+                  It isn’t started for any session here, so its tools cost no context and
+                  weren’t listed. Switch it on to see them.
+                </p>
+              </div>
             ) : activeServer.status === "error" ? (
               <div className="rounded-md border border-danger/30 bg-danger-ghost px-3 py-8 text-center">
                 <CircleSlash className="mx-auto mb-1.5 size-5 text-danger" />

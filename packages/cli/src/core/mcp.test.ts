@@ -16,6 +16,7 @@ import {
   listServers,
   mcpJsonEntryToTransport,
   removeServer,
+  setServerEnabled,
 } from "./mcp.js";
 import { CmError, resolveProjectPaths } from "./manifest.js";
 
@@ -260,5 +261,163 @@ describe("importServers", () => {
     const before = await readFile(manifestPath(), "utf8");
     await importServers(dir, { mcpServers: { bad: { nope: 1 } } });
     expect(await readFile(manifestPath(), "utf8")).toBe(before);
+  });
+});
+
+describe("setServerEnabled", () => {
+  it("pins a BUNDLED server the manifest never declares", async () => {
+    // The case add/remove can't serve: `playwright` has no `mcpServers` entry to
+    // edit, and switching it on must still be expressible.
+    await seedManifest("name: Hivebreak\n");
+    const { changed } = await setServerEnabled(dir, "playwright", true);
+
+    expect(changed).toBe(true);
+    const doc = parseDocument(await readFile(manifestPath(), "utf8")).toJS();
+    expect(doc.mcpEnabled).toEqual({ playwright: true });
+    expect(doc.mcpServers).toBeUndefined();
+  });
+
+  it("leaves a declared server's config in place when switching it off", async () => {
+    // Off is not delete: the transport somebody wrote down has to survive, or
+    // the switch is a one-way door with a re-typing tax.
+    await seedManifest(
+      [
+        "name: Hivebreak",
+        "mcpServers:",
+        "  # The issue tracker. Token comes from the environment.",
+        "  - name: linear",
+        "    transport:",
+        "      type: stdio",
+        "      command: npx",
+        "",
+      ].join("\n"),
+    );
+    await setServerEnabled(dir, "linear", false);
+
+    const raw = await readFile(manifestPath(), "utf8");
+    expect(raw).toContain("# The issue tracker. Token comes from the environment.");
+    const doc = parseDocument(raw).toJS();
+    expect(doc.mcpEnabled).toEqual({ linear: false });
+    expect(doc.mcpServers).toHaveLength(1);
+    expect(doc.mcpServers[0].transport.command).toBe("npx");
+  });
+
+  it("clears a pin with null and drops the key with the last one", async () => {
+    await seedManifest("name: Hivebreak\nmcpEnabled:\n  playwright: false\n  linear: true\n");
+
+    await setServerEnabled(dir, "playwright", null);
+    let doc = parseDocument(await readFile(manifestPath(), "utf8")).toJS();
+    expect(doc.mcpEnabled).toEqual({ linear: true });
+
+    await setServerEnabled(dir, "linear", null);
+    doc = parseDocument(await readFile(manifestPath(), "utf8")).toJS();
+    // Not left as an empty `mcpEnabled: {}` nobody wants to read.
+    expect(doc.mcpEnabled).toBeUndefined();
+  });
+
+  it("reports no change for a pin that already says that, and writes nothing", async () => {
+    const path = await seedManifest("name: Hivebreak\nmcpEnabled:\n  playwright: false\n");
+    const before = await readFile(path, "utf8");
+    const { changed } = await setServerEnabled(dir, "playwright", false);
+    expect(changed).toBe(false);
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  it("clearing a pin that isn't there is a no-op, not an error", async () => {
+    await seedManifest("name: Hivebreak\n");
+    expect((await setServerEnabled(dir, "playwright", null)).changed).toBe(false);
+  });
+
+  it("preserves surrounding comments and every other key", async () => {
+    await seedManifest(
+      [
+        "# Dispatch project config — committed on purpose.",
+        "name: Hivebreak",
+        "# How change ships here.",
+        "workflow:",
+        "  profile: review",
+        "",
+      ].join("\n"),
+    );
+    await setServerEnabled(dir, "chrome-devtools", false);
+
+    const raw = await readFile(manifestPath(), "utf8");
+    expect(raw).toContain("# Dispatch project config — committed on purpose.");
+    expect(raw).toContain("# How change ships here.");
+    expect(parseDocument(raw).toJS()).toMatchObject({
+      name: "Hivebreak",
+      workflow: { profile: "review" },
+      mcpEnabled: { "chrome-devtools": false },
+    });
+  });
+
+  it("refuses a name the mcp__server__tool addressing can't express", async () => {
+    await seedManifest("name: Hivebreak\n");
+    await expect(setServerEnabled(dir, "bad name!", false)).rejects.toThrow(CmError);
+  });
+
+  it("refuses to clobber an mcpEnabled key that isn't a map", async () => {
+    await seedManifest("name: Hivebreak\nmcpEnabled: nope\n").catch(() => {});
+    await expect(setServerEnabled(dir, "playwright", false)).rejects.toThrow();
+  });
+});
+
+describe("manifest fidelity", () => {
+  /**
+   * A realistic hand-authored manifest: comments above and between keys, and
+   * flow sequences that have nothing to do with the edit.
+   *
+   * The 4-line scratch manifests above can't catch a whole-document reflow —
+   * they have nothing else in them to reflow. This one does, and it caught a
+   * real case: the emitter's default `flowCollectionPadding` rewrote
+   * `ports: [4319]` to `ports: [ 4319 ]` three keys away from the edit, which is
+   * how a UI toggle ends up putting noise in somebody's review diff.
+   */
+  const AUTHORED = [
+    "# The project config, hand-written and committed.",
+    "name: Hivebreak",
+    "# How change ships here.",
+    "workflow:",
+    "  profile: review",
+    "  pr:",
+    "    # The bot that actually reviews.",
+    '    reviewers: ["copilot-pull-request-reviewer[bot]"]',
+    "subApps:",
+    "  - id: dev-server",
+    "    name: Dev server",
+    "    cwd: .",
+    "    # Offset per launch; the server reads DISPATCH_PORT.",
+    "    ports: [4319, 4320]",
+    "    url: http://localhost:{port}",
+    "",
+  ].join("\n");
+
+  it("changes only the lines it means to", async () => {
+    await seedManifest(AUTHORED);
+    await setServerEnabled(dir, "playwright", false);
+
+    const after = await readFile(manifestPath(), "utf8");
+    const removed = AUTHORED.split("\n").filter((l) => !after.split("\n").includes(l));
+    // Nothing from the original may disappear — not a comment, not a flow seq.
+    expect(removed).toEqual([]);
+    expect(after).toContain('reviewers: ["copilot-pull-request-reviewer[bot]"]');
+    expect(after).toContain("ports: [4319, 4320]");
+    expect(after).toContain("playwright: false");
+  });
+
+  it("holds for add and remove too — the reflow was never toggle-specific", async () => {
+    await seedManifest(AUTHORED);
+    await addServer(dir, {
+      name: "ripgrep",
+      transport: { type: "stdio", command: "npx", args: ["-y", "mcp-ripgrep"] },
+    });
+    let after = await readFile(manifestPath(), "utf8");
+    expect(after).toContain("ports: [4319, 4320]");
+    expect(after).toContain("# Offset per launch; the server reads DISPATCH_PORT.");
+
+    await removeServer(dir, "ripgrep");
+    after = await readFile(manifestPath(), "utf8");
+    expect(after).toContain("ports: [4319, 4320]");
+    expect(after).toContain('reviewers: ["copilot-pull-request-reviewer[bot]"]');
   });
 });

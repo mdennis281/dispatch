@@ -454,6 +454,15 @@ export class ProjectConfigService {
   }
 
   /**
+   * This project's committed per-server MCP on/off pins (manifest `mcpEnabled`).
+   * `{}` when the manifest pins nothing, which reads as "inherit" for every
+   * server — see `mcp-enablement.ts` for how that resolves against the app layer.
+   */
+  getMcpEnabled(projectId: string): Record<string, boolean> {
+    return { ...(this.getConfig(projectId)?.mcpEnabled ?? {}) };
+  }
+
+  /**
    * This project's bundled-browser block. `undefined` means the manifest said
    * nothing, which is NOT the same as `off` — the `auto` default still applies
    * and is resolved in `browser-mcp.ts`.
@@ -629,6 +638,7 @@ export class ProjectConfigService {
       instructionsText: instructionsText || undefined,
       subApps,
       mcpServers,
+      mcpEnabled: manifest.mcpEnabled,
       agents,
       modes,
       skills,

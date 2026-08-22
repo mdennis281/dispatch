@@ -94,6 +94,7 @@ import {
   McpPortLeaseSchema,
   type McpPortLease,
   ShellTranscriptFilterSchema,
+  McpEnabledMapSchema,
 } from "@dispatch/shared";
 import {
   HarnessSettingsSchema,
@@ -154,6 +155,20 @@ export const AppSettingsSchema = z.object({
   showInjectedContext: z.boolean().optional(),
   /** App-wide transcript-shell defaults. Unset resolves to every category on. */
   shellFilter: ShellTranscriptFilterSchema.optional(),
+  /**
+   * Per-server MCP on/off pins for THIS install, across every project — the
+   * layer under a project's own `mcpEnabled` (see `mcp-enablement.ts`).
+   *
+   * It lives here rather than in `.dispatch/` precisely because it is NOT
+   * committed: "don't run chrome-devtools on this machine" is a fact about the
+   * machine, and putting it in the repo would impose one person's setup on
+   * everyone who checks it out.
+   *
+   * Optional rather than `.default({})` so every existing AppSettings literal
+   * (tests, DEFAULT_SETTINGS) stays valid; unset and `{}` both mean "nothing
+   * pinned", which is not the same as "everything off".
+   */
+  mcpEnabled: McpEnabledMapSchema.optional(),
   /**
    * Which release stream this install follows. Lives here rather than in the
    * payload because `config/` is the one directory install and upgrade never
