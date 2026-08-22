@@ -1,6 +1,6 @@
 /**
- * PROPOSAL PREVIEW — the Program module, rendered so it can be argued with.
- * Reachable at `/program-preview` in a DEV build only (see main.tsx).
+ * PROPOSAL PREVIEW — the Mission module, rendered so it can be argued with.
+ * Reachable at `/mission-preview` in a DEV build only (see main.tsx).
  *
  * Nothing here talks to a server. The plan is the static mock in `mock.ts`, the
  * live state is `mockRun.ts`, and every number on screen — waves, concurrency
@@ -28,14 +28,14 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Info, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import { Chip } from "../../components/ui/index.js";
-import { MOCK_PROGRAM } from "./mock.js";
+import { MOCK_MISSION } from "./mock.js";
 import { MOCK_MANAGER_CHAT, MOCK_RUN, effectiveTasks } from "./mockRun.js";
 import { validate, type Plan } from "./derive.js";
-import { CAPS, type ProgramPolicy, type ProgramSpec, type TeamId } from "./types.js";
+import { CAPS, type MissionPolicy, type MissionSpec, type TeamId } from "./types.js";
 import { Crumbs, RunStatusPill } from "./chrome.js";
 import { crumbsFor, type Nav, type Route } from "./nav.js";
 import { defaultOpen, type SectionState } from "./sections.js";
-import { ProgramScreen } from "./ProgramScreen.js";
+import { MissionScreen } from "./MissionScreen.js";
 import { PhaseScreen } from "./PhaseScreen.js";
 import { TaskScreen } from "./TaskScreen.js";
 import { AgentScreen } from "./AgentScreen.js";
@@ -44,12 +44,12 @@ import { MiniChat } from "./MiniChat.js";
 import type { SettingsDraft } from "./SettingsSection.js";
 
 const BASE_DRAFT: SettingsDraft = {
-  policy: MOCK_PROGRAM.policy,
-  hireBudgets: Object.fromEntries(MOCK_PROGRAM.teams.map((t) => [t.id, t.hireBudget])),
+  policy: MOCK_MISSION.policy,
+  hireBudgets: Object.fromEntries(MOCK_MISSION.teams.map((t) => [t.id, t.hireBudget])),
 };
 
-export function ProgramPreview() {
-  const [route, setRoute] = useState<Route>({ at: "program" });
+export function MissionPreview() {
+  const [route, setRoute] = useState<Route>({ at: "mission" });
   const [chatOpen, setChatOpen] = useState(true);
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [draft, setDraft] = useState<SettingsDraft>(BASE_DRAFT);
@@ -62,11 +62,11 @@ export function ProgramPreview() {
   // The spec the board actually renders: the mock, with the owner's live
   // settings folded in. Everything downstream derives from this, which is what
   // makes moving a slider change the concurrency preview two screens away.
-  const spec: ProgramSpec = useMemo(
+  const spec: MissionSpec = useMemo(
     () => ({
-      ...MOCK_PROGRAM,
+      ...MOCK_MISSION,
       policy: draft.policy,
-      teams: MOCK_PROGRAM.teams.map((t) => ({
+      teams: MOCK_MISSION.teams.map((t) => ({
         ...t,
         hireBudget: draft.hireBudgets[t.id] ?? t.hireBudget,
       })),
@@ -169,8 +169,8 @@ export function ProgramPreview() {
         {issuesOpen && issues.length > 0 && <IssueBanner issues={issues} />}
 
         {/* -------------------------------------------------------- screen */}
-        {route.at === "program" && (
-          <ProgramScreen
+        {route.at === "mission" && (
+          <MissionScreen
             plan={plan}
             nav={nav}
             sections={sections}

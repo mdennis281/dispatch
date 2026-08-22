@@ -4,13 +4,13 @@
  *
  * It does three jobs, and the middle one is why it exists at all:
  *
- *   1. It shows how a Program reads in the chats list, so "visually distinct
+ *   1. It shows how a Mission reads in the chats list, so "visually distinct
  *      from a quick action" can be judged by COMPARISON rather than asserted.
  *      A quick action already has a custom icon and a tint, so an icon alone is
- *      not an answer; a program adds a filled badge, the accent-2 hue nothing
+ *      not an answer; a mission adds a filled badge, the accent-2 hue nothing
  *      else in the roster uses, a completion bar no other chat kind has, and
  *      actor chats nested underneath.
- *   2. It IS the navigation. Program, phases, the tasks inside a phase, and
+ *   2. It IS the navigation. Mission, phases, the tasks inside a phase, and
  *      every actor are rows here, and the selected row is the screen you are
  *      looking at. An earlier version of this rail was a decorative mock beside
  *      a board that navigated by clicking cards, which meant two unrelated ways
@@ -76,7 +76,7 @@ export function Sidebar({
         <div className="mb-1 flex gap-1">
           <TypeChip icon={<MessageSquare className="size-2.5" />} label="Chat" />
           <TypeChip icon={<Sparkles className="size-2.5" />} label="Quick" tint="accent" />
-          <TypeChip icon={<Target className="size-2.5" />} label="Program" filled />
+          <TypeChip icon={<Target className="size-2.5" />} label="Mission" filled />
         </div>
         <Row icon={<MessageSquare className="size-3" />} label="fix the viewport dead zone" />
         <Row
@@ -86,14 +86,14 @@ export function Sidebar({
         />
       </div>
 
-      {/* --------------------------------------------------- the program */}
+      {/* --------------------------------------------------- the mission */}
       <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
         <button
           type="button"
-          onClick={() => nav.go({ at: "program" })}
+          onClick={() => nav.go({ at: "mission" })}
           className={cn(
             "flex w-full items-start gap-1.5 rounded-md border px-1.5 py-1.5 text-left transition-colors",
-            route.at === "program"
+            route.at === "mission"
               ? "border-accent-2-line bg-accent-2-ghost"
               : "border-transparent hover:bg-hover",
           )}

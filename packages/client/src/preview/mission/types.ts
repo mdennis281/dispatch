@@ -1,20 +1,37 @@
 /**
- * PROPOSAL ONLY — the Program ("workflows") schema, as TypeScript types.
+ * PROPOSAL ONLY — the Mission ("workflows") schema, as TypeScript types.
  *
- * This is the shape being pitched, rendered by the preview at `/program-preview`
+ * This is the shape being pitched, rendered by the preview at `/mission-preview`
  * so the plan can be argued about visually before any of it is built. It lives
  * under `preview/` and is imported by nothing in the real app on purpose: the
  * engine, the comms primitive and the store tables it describes do not exist
  * yet, and a half-wired schema in `@dispatch/shared` would read as if they did.
  *
- * WHY "Program" AND NOT "Workflow". Both good names are already taken in this
- * repo: `shared/workflow.ts` is the per-project ship profile (none/commit/
- * review) that drives the permission guard, and `domain.ts` already exports
- * `WorkflowDefSchema`/`WorkflowRunSchema` for GitHub Actions. A third meaning
- * would collide with both.
+ * WHY "Mission", AND WHY NOT THE OBVIOUS NAMES.
+ *
+ *   - `Workflow` is taken TWICE. `shared/workflow.ts` is the per-project ship
+ *     profile (none/commit/review) that drives the permission guard, and
+ *     `domain.ts` already exports `WorkflowDefSchema`/`WorkflowRunSchema` for
+ *     GitHub Actions. A third meaning would collide with both.
+ *   - `Project` is a git repo here, in hundreds of places.
+ *   - `Program` collides with nothing, and was the first pick for its SAFe fit
+ *     with "RTE" — but a *program* is a piece of software, so `ProgramSpec` in a
+ *     TypeScript file reads ambiguously. That optimised for the wrong reader.
+ *   - `Effort` is reasoning effort (857 references). `Brief` is a MessagePart
+ *     kind. `Track` and `Arc` are unsearchable.
+ *
+ * `Mission` wins on the thing none of the others have: the product is called
+ * DISPATCH. Dispatch dispatches missions. The vocabulary then cascades for free
+ * — a mission has an objective and a definition of accomplished, which is what
+ * acceptance criteria are, and the board has an obvious name in Mission Control.
+ *
+ * `MissionTask` carries a prefix for the same reason: `AgentTask` already owns
+ * "task" for quick actions, and `taskId` means a harness subagent in 135 other
+ * places. The UI still says "task", because that is the right word on screen —
+ * only the type needs disambiguating.
  *
  * When this graduates, every type below becomes a zod schema in
- * `shared/src/program.ts` and every cap becomes a named constant in
+ * `shared/src/mission.ts` and every cap becomes a named constant in
  * `shared/src/limits.ts` — so the validator, the MCP tool description and this
  * UI all quote one number instead of three that drift.
  */
@@ -67,7 +84,7 @@ export type Slug = string;
 
 export type CriterionId = Slug;
 export type PhaseId = Slug;
-export type TaskId = Slug;
+export type MissionTaskId = Slug;
 export type TeamId = Slug;
 export type RoleId = Slug;
 export type ActorId = Slug;
@@ -101,7 +118,7 @@ export interface Criterion {
  * Named default tool postures, so "read-only" is one decision made once rather
  * than a deny-list pasted into every persona and drifting between them.
  *
- * A profile is the DEFAULT. The program manager can widen or narrow any actor
+ * A profile is the DEFAULT. The mission manager can widen or narrow any actor
  * with {@link Persona.toolOverrides} — which is the point: the profile carries
  * the intent ("this actor observes"), the override carries the exception
  * ("…but this one also needs the browser"), and the two stay legible apart.
@@ -153,7 +170,7 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolProfile> = {
   integrator: {
     id: "integrator",
     name: "Integrator",
-    summary: "Author plus merge rights. Reserved — no program actor gets this by default.",
+    summary: "Author plus merge rights. Reserved — no mission actor gets this by default.",
     deny: [],
   },
 };
@@ -162,11 +179,11 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolProfile> = {
 
 /**
  * A hireable ROLE — the thing a team lead picks from when it decides who it
- * needs, rather than a body the program author staffed up front.
+ * needs, rather than a body the mission author staffed up front.
  *
  * This replaced a fixed `Team.developer` template. A lead does not know at
  * authoring time whether closing a task needs a developer, a QA specialist or
- * somebody to go read an API's docs for an hour, and forcing the program author
+ * somebody to go read an API's docs for an hour, and forcing the mission author
  * to guess produced exactly one shape of worker for every kind of work.
  */
 export interface RoleTemplate {
@@ -205,7 +222,7 @@ export interface Persona {
   skills?: string[];
   toolProfile?: ToolProfileId;
   /**
-   * The program manager's exception to the profile. Kept separate from the
+   * The mission manager's exception to the profile. Kept separate from the
    * profile itself so the intent and the exception stay readable apart.
    */
   toolOverrides?: { allow?: string[]; deny?: string[] };
@@ -239,7 +256,7 @@ export interface Team {
   lead: Persona;
   /**
    * Roles this lead may hire. The lead decides WHO it needs once the task is
-   * underway; the program author decides only what is on the menu.
+   * underway; the mission author decides only what is on the menu.
    */
   hireableRoles: RoleId[];
   /**
@@ -267,8 +284,8 @@ export interface Phase {
   qa: boolean;
 }
 
-export interface Task {
-  id: TaskId;
+export interface MissionTask {
+  id: MissionTaskId;
   phaseId: PhaseId;
   teamId: TeamId;
   title: string;
@@ -279,11 +296,11 @@ export interface Task {
    */
   brief: string;
   /** Same-phase task ids. Cross-phase ordering comes free from the phase gate. */
-  dependsOn: TaskId[];
-  /** Task-local checks, judged by the lead on intake. */
+  dependsOn: MissionTaskId[];
+  /** MissionTask-local checks, judged by the lead on intake. */
   acceptance: Criterion[];
   /**
-   * Phase/program criteria this task contributes to.
+   * Phase/mission criteria this task contributes to.
    *
    * This is what makes the done-agreement DERIVABLE: a lead is a signatory on
    * criterion C iff their team owns at least one task with C in `satisfies`.
@@ -304,8 +321,8 @@ export interface Task {
 
 /* ------------------------------------------------------------------- policy */
 
-export interface ProgramPolicy {
-  /** Program-wide ceiling on concurrent hired chats, across every team. */
+export interface MissionPolicy {
+  /** Mission-wide ceiling on concurrent hired chats, across every team. */
   maxParallelTasks: number;
   /**
    * `serialize-on-merge`: a dependent task waits until EVERY PR on each of its
@@ -329,12 +346,12 @@ export interface ProgramPolicy {
    * could approve its own would make that card unreachable.
    */
   prOverride: "escalate";
-  spawnConsent: "per-spawn" | "program-grant";
+  spawnConsent: "per-spawn" | "mission-grant";
 }
 
 /* ------------------------------------------------------------------ the spec */
 
-export interface ProgramSpec {
+export interface MissionSpec {
   id: string;
   projectId: string;
   /** Bumped by an accepted change proposal. A run pins the version it executes. */
@@ -345,13 +362,13 @@ export interface ProgramSpec {
   phases: Phase[];
   teams: Team[];
   /** FLAT, not nested under phases — dependency edges need one array to validate. */
-  tasks: Task[];
+  tasks: MissionTask[];
   /** The menu every lead hires from. */
   roles: RoleTemplate[];
   orchestrator: Persona;
-  /** The QA persona. One per program, respawned fresh for every phase it checks. */
+  /** The QA persona. One per mission, respawned fresh for every phase it checks. */
   qa: Persona;
-  policy: ProgramPolicy;
+  policy: MissionPolicy;
   createdAt: number;
   createdByChatId: string;
 }
@@ -384,7 +401,7 @@ export type ActorStatus = "idle" | "running" | "waiting-human" | "blocked" | "re
 export interface ActorRef {
   role: "creator" | "orchestrator" | "lead" | "hire" | "qa" | "engine" | "human";
   teamId?: TeamId;
-  taskId?: TaskId;
+  taskId?: MissionTaskId;
   chatId?: string;
 }
 
@@ -397,7 +414,7 @@ export interface LiveActor {
   /** Set for hires: which role the lead chose off the menu. */
   roleTemplateId?: RoleId;
   teamId?: TeamId;
-  taskId?: TaskId;
+  taskId?: MissionTaskId;
   status: ActorStatus;
   /** 0..1 — drives lead recycling, read from `broker.getContextUsage`. */
   contextFill: number;
@@ -438,7 +455,7 @@ export interface LiveTask {
  */
 export interface Gate {
   criterionId: CriterionId;
-  scope: "criterion" | "phase" | "program";
+  scope: "criterion" | "phase" | "mission";
   phaseId?: PhaseId;
   /** Derived from `satisfies`, frozen when the gate opens. */
   signatories: TeamId[];
@@ -464,7 +481,7 @@ export interface Remediation {
   unmet: CriterionId[];
   findings: string;
   /** The tasks proposed to close them. Carry `remediationRound`. */
-  tasks: Task[];
+  tasks: MissionTask[];
   status: "proposed" | "accepted" | "rejected";
   decidedBy?: ActorRef;
 }
@@ -476,7 +493,7 @@ export interface LivePhase {
 }
 
 /** One entry in the capped ledger. `summary` is what a wake carries. */
-export interface ProgramEvent {
+export interface MissionEvent {
   seq: number;
   ts: number;
   from: ActorRef;
@@ -493,24 +510,24 @@ export interface ProgramEvent {
     | "hire"
     | "gate";
   phaseId?: PhaseId;
-  taskId?: TaskId;
+  taskId?: MissionTaskId;
   /** ≤ CAPS.eventSummary. The ONLY thing injected into another actor's context. */
   summary: string;
   /** ≤ CAPS.eventDetail. Never injected — pulled on demand. */
   detail?: string;
 }
 
-export interface ProgramRun {
+export interface MissionRun {
   id: string;
   specId: string;
   specVersion: number;
   status: RunStatus;
   currentPhaseId?: PhaseId;
   actors: LiveActor[];
-  tasks: Record<TaskId, LiveTask>;
+  tasks: Record<MissionTaskId, LiveTask>;
   phases: Record<PhaseId, LivePhase>;
   remediations: Remediation[];
-  events: ProgramEvent[];
+  events: MissionEvent[];
   startedAt: number;
 }
 

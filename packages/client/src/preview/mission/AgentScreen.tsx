@@ -3,7 +3,7 @@
  * state.
  *
  * The tool section shows the RESOLUTION, not just the outcome: the profile it
- * inherited, the overrides the program manager applied, and the effective
+ * inherited, the overrides the mission manager applied, and the effective
  * deny-list the session will really be built with. Showing only the final list
  * is how a widened profile quietly stops matching what anyone intended.
  */
@@ -136,7 +136,7 @@ export function AgentScreen({
             {actor.hiredBecause}
           </p>
         ) : (
-          <Empty>not a hire — this actor is part of the program's standing structure</Empty>
+          <Empty>not a hire — this actor is part of the mission's standing structure</Empty>
         )}
       </Section>
 

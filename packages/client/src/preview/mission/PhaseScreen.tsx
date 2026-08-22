@@ -14,7 +14,7 @@ import { Card, Empty, Section, TaskStatusPill } from "./chrome.js";
 import { gatePreviews, scheduleFor, teamColor, waveGroups, type Plan } from "./derive.js";
 import type { Nav } from "./nav.js";
 import type { SectionState } from "./sections.js";
-import type { Task } from "./types.js";
+import type { MissionTask } from "./types.js";
 
 export function PhaseScreen({
   plan,
@@ -271,7 +271,7 @@ function TaskCard({
   register,
 }: {
   plan: Plan;
-  task: Task;
+  task: MissionTask;
   onClick: () => void;
   register: (el: HTMLDivElement | null) => void;
 }) {

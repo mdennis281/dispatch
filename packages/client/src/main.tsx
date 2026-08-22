@@ -16,7 +16,7 @@ import "./index.css";
 import { initializeAuth, useAuth } from "./stores/auth.js";
 import type { AuthSessionResponse } from "@dispatch/shared";
 import { startLiveApp } from "./lib/live.js";
-import { ProgramPreview } from "./preview/program/ProgramPreview.js";
+import { MissionPreview } from "./preview/mission/MissionPreview.js";
 
 // The palette itself was applied by the inline script in index.html (before the
 // first paint); this only subscribes to later OS changes, which matters solely
@@ -34,17 +34,17 @@ syncThemeColor();
 // with `?logs=<runnerId>` — render only the read-only log terminal for it.
 const isLogWindow = new URLSearchParams(location.search).has("logs");
 
-// A DEV-only design surface for the Program ("workflows") proposal, reachable
-// at /program-preview. The dev server's SPA fallback hands index.html to every
+// A DEV-only design surface for the Mission ("workflows") proposal, reachable
+// at /mission-preview. The dev server's SPA fallback hands index.html to every
 // path, so a pathname check is all the routing this needs — and it is gated on
 // DEV so no production bundle can ever land on it.
-const isProgramPreview =
-  import.meta.env.DEV && location.pathname.startsWith("/program-preview");
+const isMissionPreview =
+  import.meta.env.DEV && location.pathname.startsWith("/mission-preview");
 
 // The full app shell — the only mode that should open a socket, run auth, or
 // register PWA plumbing. Both the log popup and the preview are standalone
 // renders that would otherwise fight the app for those globals.
-const isShell = !isLogWindow && !isProgramPreview;
+const isShell = !isLogWindow && !isMissionPreview;
 
 // Wire the reactive data spine (active chat → transcript, active project → panels)
 // then open the WS. The backend's `hello` triggers the REST hydrate, so live data
@@ -144,6 +144,6 @@ if (!el) throw new Error("#root not found");
 
 createRoot(el).render(
   <StrictMode>
-    {isLogWindow ? <RunnerLogWindow /> : isProgramPreview ? <ProgramPreview /> : <App />}
+    {isLogWindow ? <RunnerLogWindow /> : isMissionPreview ? <MissionPreview /> : <App />}
   </StrictMode>,
 );

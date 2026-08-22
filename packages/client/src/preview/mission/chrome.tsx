@@ -1,5 +1,5 @@
 /**
- * Shared furniture for the program board — the bits every screen repeats.
+ * Shared furniture for the mission board — the bits every screen repeats.
  *
  * {@link Tunable} is the load-bearing one. The board is meant to become the
  * place concurrency limits, tool profiles and effort get CHANGED mid-run, and

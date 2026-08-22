@@ -1,5 +1,5 @@
 /**
- * Program settings — the owner's section, with real inputs.
+ * Mission settings — the owner's section, with real inputs.
  *
  * These are live in the preview: changing `maxParallelTasks` or a team's hire
  * budget re-derives the concurrency preview on every phase screen immediately.
@@ -15,10 +15,10 @@ import { CircleAlert, RotateCcw } from "lucide-react";
 import { Select } from "../../components/ui/index.js";
 import { FormRow, LockedRow, NumberInput, PercentSlider } from "./chrome.js";
 import { teamColor } from "./derive.js";
-import type { ProgramPolicy, ProgramSpec, TeamId } from "./types.js";
+import type { MissionPolicy, MissionSpec, TeamId } from "./types.js";
 
 export interface SettingsDraft {
-  policy: ProgramPolicy;
+  policy: MissionPolicy;
   hireBudgets: Record<TeamId, number>;
 }
 
@@ -29,13 +29,13 @@ export function SettingsSection({
   onChange,
   onReset,
 }: {
-  spec: ProgramSpec;
+  spec: MissionSpec;
   draft: SettingsDraft;
   dirty: boolean;
   onChange: (next: SettingsDraft) => void;
   onReset: () => void;
 }) {
-  const set = (patch: Partial<ProgramPolicy>) =>
+  const set = (patch: Partial<MissionPolicy>) =>
     onChange({ ...draft, policy: { ...draft.policy, ...patch } });
   const setBudget = (teamId: TeamId, n: number) =>
     onChange({ ...draft, hireBudgets: { ...draft.hireBudgets, [teamId]: n } });
@@ -64,7 +64,7 @@ export function SettingsSection({
       <div className="divide-y divide-line-soft">
         <FormRow
           label="Concurrent hires"
-          help="Program-wide ceiling across every team. The engine will not start a task past it."
+          help="Mission-wide ceiling across every team. The engine will not start a task past it."
         >
           <NumberInput
             value={draft.policy.maxParallelTasks}
@@ -82,7 +82,7 @@ export function SettingsSection({
           <Select
             value={draft.policy.branching}
             width={210}
-            onChange={(v) => set({ branching: v as ProgramPolicy["branching"] })}
+            onChange={(v) => set({ branching: v as MissionPolicy["branching"] })}
             options={[
               { value: "serialize-on-merge", label: "Serialize on merge", hint: "clean history" },
               { value: "stacked", label: "Stacked PRs", hint: "faster, messier review" },
@@ -124,7 +124,7 @@ export function SettingsSection({
           <Select
             value={draft.policy.onTaskFailure}
             width={210}
-            onChange={(v) => set({ onTaskFailure: v as ProgramPolicy["onTaskFailure"] })}
+            onChange={(v) => set({ onTaskFailure: v as MissionPolicy["onTaskFailure"] })}
             options={[
               { value: "escalate", label: "Escalate", hint: "ask the RTE" },
               { value: "retry-once", label: "Retry once", hint: "then escalate" },
@@ -135,14 +135,14 @@ export function SettingsSection({
 
         <FormRow
           label="Spawn consent"
-          help="Per-spawn prompts you for every hire — a five-phase program asks dozens of times. Program-grant asks once, at approval."
+          help="Per-spawn prompts you for every hire — a five-phase mission asks dozens of times. Mission-grant asks once, at approval."
         >
           <Select
             value={draft.policy.spawnConsent}
             width={210}
-            onChange={(v) => set({ spawnConsent: v as ProgramPolicy["spawnConsent"] })}
+            onChange={(v) => set({ spawnConsent: v as MissionPolicy["spawnConsent"] })}
             options={[
-              { value: "program-grant", label: "Program grant", hint: "approve once, at start" },
+              { value: "mission-grant", label: "Mission grant", hint: "approve once, at start" },
               { value: "per-spawn", label: "Per spawn", hint: "prompt every hire" },
             ]}
           />
@@ -169,7 +169,7 @@ export function SettingsSection({
           <div className="mb-2 flex items-start gap-1.5 rounded-md border border-warn-line bg-warn-ghost px-2 py-1.5">
             <CircleAlert className="mt-px size-3 shrink-0 text-warn" />
             <span className="text-2xs leading-relaxed text-warn">
-              Budgets total {totalBudget} but the program ceiling is{" "}
+              Budgets total {totalBudget} but the mission ceiling is{" "}
               {draft.policy.maxParallelTasks}. That is legal — the ceiling wins — but it means
               teams will compete for slots and a lead can be refused a hire it has budget for.
             </span>

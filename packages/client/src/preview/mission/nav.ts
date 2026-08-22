@@ -1,7 +1,7 @@
 /**
  * Drill-in navigation for the board.
  *
- * A route, not a tab set. The levels nest — program → phase → task → agent —
+ * A route, not a tab set. The levels nest — mission → phase → task → agent —
  * and acceptance criteria live at whichever level owns them rather than in a
  * screen of their own, because "the acceptance tab" divorces a criterion from
  * the work that satisfies it, which is the one thing you always want beside it.
@@ -15,7 +15,7 @@ import type { Crumb } from "./chrome.js";
 import type { Plan } from "./derive.js";
 
 export type Route =
-  | { at: "program" }
+  | { at: "mission" }
   | { at: "phase"; phaseId: string }
   | { at: "task"; taskId: string }
   | { at: "agent"; actorId: string };
@@ -31,9 +31,9 @@ export function crumbsFor(plan: Plan, nav: Nav): Crumb[] {
   const { route } = nav;
   const root: Crumb = {
     label: spec.title,
-    onClick: route.at === "program" ? undefined : () => nav.go({ at: "program" }),
+    onClick: route.at === "mission" ? undefined : () => nav.go({ at: "mission" }),
   };
-  if (route.at === "program") return [root];
+  if (route.at === "mission") return [root];
 
   const phaseCrumb = (phaseId: string, last: boolean): Crumb => {
     const p = spec.phases.find((x) => x.id === phaseId);

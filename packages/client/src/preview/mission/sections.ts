@@ -16,11 +16,11 @@ export interface SectionDef {
 }
 
 export const SECTIONS: Record<Route["at"], SectionDef[]> = {
-  program: [
+  mission: [
     { id: "objective", label: "Objective" },
     { id: "settings", label: "Settings", closed: true },
     { id: "phases", label: "Phases" },
-    { id: "acceptance", label: "Program acceptance" },
+    { id: "acceptance", label: "Mission acceptance" },
     { id: "teams", label: "Teams" },
   ],
   phase: [
@@ -32,7 +32,7 @@ export const SECTIONS: Record<Route["at"], SectionDef[]> = {
   ],
   task: [
     { id: "task-brief", label: "Brief" },
-    { id: "task-acceptance", label: "Task acceptance" },
+    { id: "task-acceptance", label: "MissionTask acceptance" },
     { id: "task-graph", label: "Dependencies" },
     { id: "task-prs", label: "Pull requests" },
     { id: "task-satisfies", label: "Satisfies" },

@@ -1,5 +1,5 @@
 /**
- * The mini chat — the program manager conversation, and the human's only comms
+ * The mini chat — the mission manager conversation, and the human's only comms
  * path into a run.
  *
  * It is meant to BE a Dispatch chat with the rails a manager has no use for
@@ -31,18 +31,18 @@ export function MiniChat({
 }) {
   return (
     <aside className="flex w-[23rem] shrink-0 flex-col border-l border-line bg-panel">
-      {/* header — the program identity, repeated so the panel stands alone */}
+      {/* header — the mission identity, repeated so the panel stands alone */}
       <div className="flex h-11 shrink-0 items-center gap-2 px-2.5 cm-hairline-b">
         <span className="flex size-5 items-center justify-center rounded-[4px] bg-accent-2 text-accent-2-fg">
           <Target className="size-3" />
         </span>
-        <span className="text-xs font-semibold text-primary">Program manager</span>
+        <span className="text-xs font-semibold text-primary">Mission manager</span>
         <RunStatusPill status={status} />
         <div className="flex-1" />
         <button
           type="button"
           onClick={onStopAll}
-          title="Interrupt every actor in this program"
+          title="Interrupt every actor in this mission"
           className="flex items-center gap-1 rounded border border-danger-line bg-danger-ghost px-1.5 py-0.5 text-2xs text-danger-hi transition-colors hover:bg-danger/20"
         >
           <OctagonX className="size-3" />

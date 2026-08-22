@@ -1,5 +1,5 @@
 /**
- * The base screen — the program, and the phases within it.
+ * The base screen — the mission, and the phases within it.
  *
  * Counts on the phase cards are the whole job here: tasks, waves, and PHASE
  * acceptance criteria (not the tasks' own, which are a different and much
@@ -28,7 +28,7 @@ const PHASE_TONE = {
   blocked: "text-danger",
 } as const;
 
-export function ProgramScreen({
+export function MissionScreen({
   plan,
   nav,
   sections,
@@ -63,7 +63,7 @@ export function ProgramScreen({
         id="settings"
         title="Settings"
         state={sections}
-        hint="program owner — live, every view below re-derives"
+        hint="mission owner — live, every view below re-derives"
         right={dirty ? <Chip tone="accent">modified</Chip> : undefined}
       >
         <SettingsSection
@@ -158,13 +158,13 @@ export function ProgramScreen({
 
       <Section
         id="acceptance"
-        title="Program acceptance"
+        title="Mission acceptance"
         state={sections}
         hint="signatories derived from which teams build it"
       >
         <div className="flex flex-col gap-1">
           {gatePreviews(plan)
-            .filter((g) => g.scope === "program")
+            .filter((g) => g.scope === "mission")
             .map((g) => (
               <div
                 key={g.criterion.id}

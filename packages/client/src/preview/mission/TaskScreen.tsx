@@ -74,7 +74,7 @@ export function TaskScreen({
 
       <Section
         id="task-acceptance"
-        title="Task acceptance"
+        title="MissionTask acceptance"
         state={sections}
         hint="judged by the lead on intake"
       >
@@ -222,11 +222,11 @@ export function TaskScreen({
               const c =
                 spec.acceptance.find((x) => x.id === s) ??
                 spec.phases.flatMap((p) => p.acceptance).find((x) => x.id === s);
-              const scope = spec.acceptance.some((x) => x.id === s) ? "program" : "phase";
+              const scope = spec.acceptance.some((x) => x.id === s) ? "mission" : "phase";
               return (
                 <div key={s} className="rounded border border-line bg-panel px-2 py-1">
                   <div className="flex items-center gap-1.5">
-                    <Chip tone={scope === "program" ? "accent" : "neutral"}>{scope}</Chip>
+                    <Chip tone={scope === "mission" ? "accent" : "neutral"}>{scope}</Chip>
                     <span className="text-2xs text-primary">{c?.title ?? s}</span>
                   </div>
                   <span className="cm-mono text-[10px] leading-4 text-faint">{s}</span>

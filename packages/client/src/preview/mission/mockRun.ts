@@ -3,7 +3,7 @@
  *
  * Nothing here is wired to a server; it exists so the UI can be designed
  * against the shape the engine WILL produce rather than against an empty
- * skeleton. The moment `ProgramRun` is real, this file is deleted and the same
+ * skeleton. The moment `MissionRun` is real, this file is deleted and the same
  * components read the real thing.
  *
  * The scenario is deliberately not the happy path. It carries the four states
@@ -14,8 +14,8 @@
  *   - a hire that is a researcher rather than a developer, because the lead
  *     decided the task needed a question answered first.
  */
-import { MOCK_PROGRAM } from "./mock.js";
-import type { LiveActor, LiveTask, ManagerTurn, ProgramEvent, ProgramRun, Task } from "./types.js";
+import { MOCK_MISSION } from "./mock.js";
+import type { LiveActor, LiveTask, ManagerTurn, MissionEvent, MissionRun, MissionTask } from "./types.js";
 
 const T0 = Date.parse("2026-08-22T09:00:00Z");
 const min = (n: number) => T0 + n * 60_000;
@@ -157,7 +157,7 @@ const ACTORS: LiveActor[] = [
     name: "QA · Comms round 1",
     status: "retired",
     contextFill: 0.66,
-    activity: "c-usable-without-a-program NOT met — proposed 1 task",
+    activity: "c-usable-without-a-mission NOT met — proposed 1 task",
     startedAt: min(395),
     retiredAt: min(425),
   },
@@ -165,7 +165,7 @@ const ACTORS: LiveActor[] = [
 
 /* ------------------------------------------------------------------- tasks */
 
-/** Task ids that are finished, in the order they landed. */
+/** MissionTask ids that are finished, in the order they landed. */
 const DONE = [
   "t-schema",
   "t-limits",
@@ -181,22 +181,22 @@ const DONE = [
 ];
 
 const PRS: Record<string, LiveTask["prs"]> = {
-  "t-schema": [{ number: 201, state: "merged", title: "feat(program): the spec schemas" }],
+  "t-schema": [{ number: 201, state: "merged", title: "feat(mission): the spec schemas" }],
   "t-roles": [
-    { number: 204, state: "merged", title: "feat(program): tool profiles" },
-    { number: 206, state: "merged", title: "feat(program): role templates + overrides" },
+    { number: 204, state: "merged", title: "feat(mission): tool profiles" },
+    { number: 206, state: "merged", title: "feat(mission): role templates + overrides" },
   ],
   "t-chat-send": [
     { number: 209, state: "merged", title: "feat(mcp): chat_send" },
     { number: 210, state: "merged", title: "feat(mcp): chat_ask" },
   ],
-  "t-readiness": [{ number: 212, state: "merged", title: "feat(program): readiness resolver" }],
-  "t-hiring": [{ number: 218, state: "open", title: "feat(program): hiring + budget" }],
+  "t-readiness": [{ number: 212, state: "merged", title: "feat(mission): readiness resolver" }],
+  "t-hiring": [{ number: 218, state: "open", title: "feat(mission): hiring + budget" }],
 };
 
 function buildTasks(): Record<string, LiveTask> {
   const out: Record<string, LiveTask> = {};
-  for (const t of MOCK_PROGRAM.tasks) {
+  for (const t of MOCK_MISSION.tasks) {
     out[t.id] = { status: "blocked", actorIds: [], prs: [], attempts: 0 };
   }
   for (const id of DONE) {
@@ -219,7 +219,7 @@ function buildTasks(): Record<string, LiveTask> {
   out["t-comms-standalone"] = {
     status: "done",
     actorIds: [],
-    prs: [{ number: 216, state: "merged", title: "test(mcp): chat_send with no program" }],
+    prs: [{ number: 216, state: "merged", title: "test(mcp): chat_send with no mission" }],
     attempts: 1,
     startedAt: min(425),
     endedAt: min(468),
@@ -246,7 +246,7 @@ function buildTasks(): Record<string, LiveTask> {
   out["t-guard"] = {
     status: "blocked",
     actorIds: ["a-hire-guard"],
-    prs: [{ number: 215, state: "open", title: "feat(program): override guard" }],
+    prs: [{ number: 215, state: "open", title: "feat(mission): override guard" }],
     attempts: 1,
     startedAt: min(470),
   };
@@ -256,23 +256,23 @@ function buildTasks(): Record<string, LiveTask> {
 /* ------------------------------------------------------------- remediation */
 
 /** The task QA added to phase 2. Joins the run's EFFECTIVE task list. */
-const REMEDIATION_TASK: Task = {
+const REMEDIATION_TASK: MissionTask = {
   id: "t-comms-standalone",
   phaseId: "comms",
   teamId: "comms",
-  title: "Prove chat_send works with no program",
+  title: "Prove chat_send works with no mission",
   brief:
-    "QA found the criterion 'two ordinary chats can message each other with no program in " +
-    "play' untested — every existing test constructs a run first, so the Program-only coupling " +
+    "QA found the criterion 'two ordinary chats can message each other with no mission in " +
+    "play' untested — every existing test constructs a run first, so the Mission-only coupling " +
     "would not have been caught. Add a test that opens two plain chats in a scratch project and " +
-    "sends between them with no ProgramRun anywhere, and fix whatever it turns up.",
+    "sends between them with no MissionRun anywhere, and fix whatever it turns up.",
   dependsOn: [],
   satisfies: ["comms-is-general"],
   acceptance: [
     {
       id: "tcso-1",
       title: "No run required",
-      given: "Two plain chats and an empty program_run table",
+      given: "Two plain chats and an empty mission_run table",
       when: "chat_send is called",
       then: "It delivers, and no code path reads a run",
       verify: "command",
@@ -286,7 +286,7 @@ const REMEDIATION_TASK: Task = {
 
 /* ------------------------------------------------------------------ events */
 
-const EVENTS: ProgramEvent[] = [
+const EVENTS: MissionEvent[] = [
   {
     seq: 141,
     ts: min(396),
@@ -295,7 +295,7 @@ const EVENTS: ProgramEvent[] = [
     kind: "report",
     phaseId: "comms",
     summary:
-      "Comms QA r1: 2 of 3 criteria met. c-usable-without-a-program NOT met — every test " +
+      "Comms QA r1: 2 of 3 criteria met. c-usable-without-a-mission NOT met — every test " +
       "constructs a run first, so the coupling is untested.",
     detail: "…full evidence, file by file…",
   },
@@ -365,7 +365,7 @@ export const MOCK_MANAGER_CHAT: ManagerTurn[] = [
     author: "manager",
     ts: min(1),
     text:
-      "Started. 5 phases, 27 tasks, 5 teams. Program-grant consent is on, so leads hire without " +
+      "Started. 5 phases, 27 tasks, 5 teams. Mission-grant consent is on, so leads hire without " +
       "prompting you — I'll surface budget refusals, disputed gates and anything past the QA round cap.",
   },
   {
@@ -374,8 +374,8 @@ export const MOCK_MANAGER_CHAT: ManagerTurn[] = [
     ts: min(412),
     brief: { label: "Phase 2 — QA round 1", text: "Chat-to-chat comms" },
     text:
-      "QA sent Comms back. 'Two ordinary chats can message each other with no program' was never " +
-      "tested — every test built a run first, so a Program-only coupling would have shipped. RTE " +
+      "QA sent Comms back. 'Two ordinary chats can message each other with no mission' was never " +
+      "tested — every test built a run first, so a Mission-only coupling would have shipped. RTE " +
       "accepted one remediation task. Round 1 of 3; no action needed from you.",
   },
   {
@@ -406,9 +406,9 @@ export const MOCK_MANAGER_CHAT: ManagerTurn[] = [
 
 /* --------------------------------------------------------------------- run */
 
-export const MOCK_RUN: ProgramRun = {
+export const MOCK_RUN: MissionRun = {
   id: "run-01",
-  specId: MOCK_PROGRAM.id,
+  specId: MOCK_MISSION.id,
   specVersion: 1,
   status: "running",
   currentPhaseId: "engine",
@@ -421,10 +421,10 @@ export const MOCK_RUN: ProgramRun = {
       phaseId: "comms",
       round: 1,
       raisedBy: { role: "qa", chatId: "chat-qa-comms-r1" },
-      unmet: ["c-usable-without-a-program"],
+      unmet: ["c-usable-without-a-mission"],
       findings:
-        "Every chat_send test constructs a ProgramRun before sending. The criterion asks for the " +
-        "opposite — that the primitive works with no program at all — so the coupling it exists to " +
+        "Every chat_send test constructs a MissionRun before sending. The criterion asks for the " +
+        "opposite — that the primitive works with no mission at all — so the coupling it exists to " +
         "prevent is precisely what nothing exercises. Two call sites read run state on the delivery " +
         "path (courier.ts:88, chat-send.ts:140) and would throw for a plain chat.",
       tasks: [REMEDIATION_TASK],
@@ -447,9 +447,9 @@ export const MOCK_RUN: ProgramRun = {
  * executing. The board must read this rather than `spec.tasks`, or a phase that
  * QA reopened renders as though it never changed.
  */
-export function effectiveTasks(): Task[] {
+export function effectiveTasks(): MissionTask[] {
   const extra = MOCK_RUN.remediations
     .filter((r) => r.status === "accepted")
     .flatMap((r) => r.tasks);
-  return [...MOCK_PROGRAM.tasks, ...extra];
+  return [...MOCK_MISSION.tasks, ...extra];
 }

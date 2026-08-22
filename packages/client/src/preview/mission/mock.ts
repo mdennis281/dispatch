@@ -1,5 +1,5 @@
 /**
- * The mock Program: the program for building the Program module.
+ * The mock Mission: the mission for building the Mission module.
  *
  * Self-referential on purpose. A demo spec about some imaginary feature proves
  * the renderer works; a spec about the thing we are actually proposing proves
@@ -7,12 +7,12 @@
  * and acceptance criteria that more than one team has to sign off on. Every
  * awkwardness visible here is an awkwardness the schema would have in anger.
  */
-import type { ProgramSpec, RoleTemplate } from "./types.js";
+import type { MissionSpec, RoleTemplate } from "./types.js";
 
 /* ---------------------------------------------------------- the hire menu */
 
 /**
- * What a team lead may hire. The program author sets the MENU; the lead decides
+ * What a team lead may hire. The mission author sets the MENU; the lead decides
  * who it actually needs once a task is underway and it knows what the work is.
  */
 const ROLES: RoleTemplate[] = [
@@ -27,7 +27,7 @@ const ROLES: RoleTemplate[] = [
       "You own one task. Read the brief as your entire context — you inherit nothing from " +
       "the conversation that hired you.\n" +
       "Work in your own worktree, commit in small conventional commits, and open the PR " +
-      "through create_pr. Report upward exactly once, through program_report: outcome, a " +
+      "through create_pr. Report upward exactly once, through mission_report: outcome, a " +
       "summary under 500 characters, a verdict per acceptance criterion, and any followups. " +
       "Do not paste your reasoning to your lead — it has a context budget and your transcript " +
       "is one call away if it wants the detail.",
@@ -89,18 +89,18 @@ const ROLES: RoleTemplate[] = [
   },
 ];
 
-export const MOCK_PROGRAM: ProgramSpec = {
-  id: "prg-program-module",
+export const MOCK_MISSION: MissionSpec = {
+  id: "msn-mission-module",
   projectId: "dispatch",
   version: 1,
-  title: "Ship the Program module",
+  title: "Ship the Mission module",
   objective:
-    "Give Dispatch a project-manager layer: a human-approved Program spec that a deterministic " +
+    "Give Dispatch a management layer: a human-approved Mission spec that a deterministic " +
     "engine executes by spawning leads who hire their own workers, with an RTE orchestrating " +
     "cross-team comms, a multi-lead done-agreement per criterion, and a QA loop that can send a " +
     "phase back. The chat-to-chat primitives it needs land as base Dispatch capabilities.",
   createdAt: Date.parse("2026-08-22T15:00:00Z"),
-  createdByChatId: "chat-workflow-creator",
+  createdByChatId: "chat-mission-author",
   roles: ROLES,
 
   orchestrator: {
@@ -114,7 +114,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
     // somebody later "helpfully" widening the profile.
     toolOverrides: { deny: ["mcp__manager__terminal", "mcp__manager__run_subapp"] },
     instructions:
-      "You are the Release Train Engineer for this program. You do not schedule work and you do " +
+      "You are the Release Train Engineer for this mission. You do not schedule work and you do " +
       "not write code — the engine owns readiness, hiring limits and phase arithmetic, and it is " +
       "always right about them.\n\n" +
       "Your job is the communication gap:\n" +
@@ -126,7 +126,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       "  3. ADJUDICATE remediation. When QA sends a phase back, decide whether the proposed tasks " +
       "actually close the gap, and which team owns each. Rounds are capped — when the cap is hit " +
       "the human decides, not you.\n" +
-      "  4. FILTER escalations. The program manager's attention is the scarcest resource here. " +
+      "  4. FILTER escalations. The mission manager's attention is the scarcest resource here. " +
       "Forward what genuinely needs a decision; answer the rest.\n" +
       "  5. NOTICE silence. A task with no events past its threshold is a stall, not progress.\n\n" +
       "Never restate a lead's report to another lead in full — send the 280-character summary and " +
@@ -153,27 +153,27 @@ export const MOCK_PROGRAM: ProgramSpec = {
     leadRecycle: { onPhaseGap: true, contextThreshold: 0.6 },
     maxRemediationRounds: 3,
     prOverride: "escalate",
-    spawnConsent: "program-grant",
+    spawnConsent: "mission-grant",
   },
 
-  /* ----------------------------------------------------- program acceptance */
+  /* ----------------------------------------------------- mission acceptance */
 
   acceptance: [
     {
       id: "spec-validated",
       title: "A bad plan cannot be saved",
-      given: "A Program spec that breaks a cap, a DAG rule, or leaves a criterion unsatisfied",
+      given: "A Mission spec that breaks a cap, a DAG rule, or leaves a criterion unsatisfied",
       when: "It is submitted for approval",
       then: "Validation fails naming the exact field, and for a cycle, the cycle path",
       verify: "command",
-      check: "pnpm --filter @dispatch/shared exec vitest run program",
+      check: "pnpm --filter @dispatch/shared exec vitest run mission",
     },
     {
       id: "comms-is-general",
       title: "Chat-to-chat is a base capability",
-      given: "Any two Dispatch chats, with no program running",
+      given: "Any two Dispatch chats, with no mission running",
       when: "One sends the other a message",
-      then: "It lands as a Dispatch-attributed turn — the primitive is not Program-only",
+      then: "It lands as a Dispatch-attributed turn — the primitive is not Mission-only",
       verify: "review",
     },
     {
@@ -182,7 +182,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       when: "A task's dependencies are all merged and reported",
       then: "The engine marks it ready without consulting any agent",
       verify: "command",
-      check: "pnpm --filter @dispatch/server exec vitest run program-engine",
+      check: "pnpm --filter @dispatch/server exec vitest run mission-engine",
     },
     {
       id: "leads-hire",
@@ -191,7 +191,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       when: "It decides the task needs a QA specialist rather than a developer",
       then: "It hires one off the role menu, within budget, without asking the human",
       verify: "command",
-      check: "pnpm --filter @dispatch/server exec vitest run program-hiring",
+      check: "pnpm --filter @dispatch/server exec vitest run mission-hiring",
     },
     {
       id: "gate-requires-consensus",
@@ -200,7 +200,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       when: "The last of those tasks finishes",
       then: "The gate stays open until every involved lead votes, and any not-met disputes it",
       verify: "command",
-      check: "pnpm --filter @dispatch/server exec vitest run program-gates",
+      check: "pnpm --filter @dispatch/server exec vitest run mission-gates",
     },
     {
       id: "qa-can-reopen",
@@ -209,7 +209,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       when: "QA reports the gap with proposed tasks",
       then: "The phase reopens with those tasks added, up to the round cap, then the human decides",
       verify: "command",
-      check: "pnpm --filter @dispatch/server exec vitest run program-remediation",
+      check: "pnpm --filter @dispatch/server exec vitest run mission-remediation",
     },
     {
       id: "context-bounded",
@@ -217,7 +217,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       when: "An actor is woken with new activity",
       then: "The wake carries at most 8 events of at most 280 chars, plus pointers",
       verify: "command",
-      check: "pnpm --filter @dispatch/server exec vitest run program-wake",
+      check: "pnpm --filter @dispatch/server exec vitest run mission-wake",
     },
     {
       id: "escalation-reaches-human",
@@ -230,7 +230,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
     {
       id: "kill-switch",
       title: "One action stops everything",
-      when: "The human hits Stop all on a running program",
+      when: "The human hits Stop all on a running mission",
       then: "Every actor chat is interrupted and the run moves to paused, with no orphans",
       verify: "human",
     },
@@ -241,7 +241,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       when: "It attempts an override",
       then: "The guard refuses and converts the attempt into an escalation",
       verify: "command",
-      check: "pnpm --filter @dispatch/server exec vitest run program-guard",
+      check: "pnpm --filter @dispatch/server exec vitest run mission-guard",
     },
   ],
 
@@ -255,7 +255,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       description:
         "The spec shape, its caps, the role menu and tool profiles, the validator, and the two " +
         "state tables. Nothing executes yet — this phase exists so that everything after it can " +
-        "assume a Program is well-formed and has somewhere to record what happened.",
+        "assume a Mission is well-formed and has somewhere to record what happened.",
       exit: "criteria-met",
       qa: true,
       acceptance: [
@@ -264,7 +264,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           title: "Specs round-trip",
           then: "A spec written, stored and re-read is byte-identical",
           verify: "command",
-          check: "pnpm --filter @dispatch/shared exec vitest run program",
+          check: "pnpm --filter @dispatch/shared exec vitest run mission",
         },
         {
           id: "f-caps-single-source",
@@ -286,7 +286,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       title: "Chat-to-chat comms",
       description:
         "The primitive the whole design rests on, built as a BASE Dispatch capability rather " +
-        "than a Program internal — any chat can address any chat, program or not. Server-side " +
+        "than a Mission internal — any chat can address any chat, mission or not. Server-side " +
         "delivery on the existing resume path, an MCP surface over it, the capped ledger, and " +
         "the wake composer that keeps a delta from becoming a replay.",
       exit: "criteria-met",
@@ -303,12 +303,12 @@ export const MOCK_PROGRAM: ProgramSpec = {
           title: "Wakes are deltas",
           then: "An actor woken twice never sees the same event twice",
           verify: "command",
-          check: "pnpm --filter @dispatch/server exec vitest run program-wake",
+          check: "pnpm --filter @dispatch/server exec vitest run mission-wake",
         },
         {
-          id: "c-usable-without-a-program",
+          id: "c-usable-without-a-mission",
           title: "Useful on its own",
-          then: "Two ordinary chats can message each other with no program in play",
+          then: "Two ordinary chats can message each other with no mission in play",
           verify: "human",
         },
       ],
@@ -336,7 +336,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           title: "The QA loop cannot spin",
           then: "Remediation stops at the round cap and hands the phase to the human",
           verify: "command",
-          check: "pnpm --filter @dispatch/server exec vitest run program-remediation",
+          check: "pnpm --filter @dispatch/server exec vitest run mission-remediation",
         },
       ],
     },
@@ -356,14 +356,14 @@ export const MOCK_PROGRAM: ProgramSpec = {
           title: "Profiles are real",
           then: "An observer actor's session genuinely cannot call Edit, Write or create_pr",
           verify: "command",
-          check: "pnpm --filter @dispatch/server exec vitest run program-personas",
+          check: "pnpm --filter @dispatch/server exec vitest run mission-personas",
         },
         {
           id: "a-qa-is-fresh",
           title: "QA never reuses a chat",
           then: "Each QA round runs in a new chat that has not watched the work happen",
           verify: "command",
-          check: "pnpm --filter @dispatch/server exec vitest run program-qa",
+          check: "pnpm --filter @dispatch/server exec vitest run mission-qa",
         },
       ],
     },
@@ -373,21 +373,21 @@ export const MOCK_PROGRAM: ProgramSpec = {
       title: "Surface",
       description:
         "What the human touches: a new chat type with its own icon, the drill-in board " +
-        "(program → phase → task → agent), the mini chat that IS the manager conversation, and " +
+        "(mission → phase → task → agent), the mini chat that IS the manager conversation, and " +
         "the tunables that let concurrency limits and tool overrides be changed mid-run.",
       exit: "human-approval",
       qa: true,
       acceptance: [
         {
           id: "s-visually-distinct",
-          title: "A program chat is recognisable",
+          title: "A mission chat is recognisable",
           then: "It is distinguishable at a glance from a normal chat AND from a quick action",
           verify: "human",
         },
         {
           id: "s-drill-in",
           title: "Every level is reachable",
-          then: "Program → phase → task → agent each navigate, with a breadcrumb back",
+          then: "Mission → phase → task → agent each navigate, with a breadcrumb back",
           verify: "human",
         },
         {
@@ -439,7 +439,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
         effort: "high",
         skills: [],
         instructions:
-          "You own the primitive the rest of the program cannot work without, so you are the team " +
+          "You own the primitive the rest of the mission cannot work without, so you are the team " +
           "most likely to block others — say so early and loudly to the RTE rather than late and " +
           "quietly.\n" +
           "Three non-negotiables:\n" +
@@ -447,7 +447,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           "as something the human said.\n" +
           "  - Summaries are capped and details are pulled, never pushed. A tool that lets an actor " +
           "paste 4KB into another actor's context has defeated the design.\n" +
-          "  - This ships as a BASE capability. If a tool only makes sense inside a program, it is " +
+          "  - This ships as a BASE capability. If a tool only makes sense inside a mission, it is " +
           "in the wrong layer.",
       },
     },
@@ -522,10 +522,10 @@ export const MOCK_PROGRAM: ProgramSpec = {
       id: "t-schema",
       phaseId: "foundations",
       teamId: "platform",
-      title: "Author the ProgramSpec schemas",
+      title: "Author the MissionSpec schemas",
       brief:
-        "Create packages/shared/src/program.ts with zod schemas for ProgramSpec, Criterion, " +
-        "Phase, Task, Team, Persona, RoleTemplate and ProgramPolicy, mirroring the approved " +
+        "Create packages/shared/src/mission.ts with zod schemas for MissionSpec, Criterion, " +
+        "Phase, MissionTask, Team, Persona, RoleTemplate and MissionPolicy, mirroring the approved " +
         "proposal. Export types via shared/src/index.ts. Every cap must be imported from " +
         "limits.ts (task t-limits) rather than written inline — coordinate, do not duplicate. " +
         "Docblock each field with why it exists, matching the house style in domain.ts. No " +
@@ -538,7 +538,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           title: "Round-trips",
           then: "A spec parsed and re-serialized is byte-identical",
           verify: "command",
-          check: "pnpm --filter @dispatch/shared exec vitest run program",
+          check: "pnpm --filter @dispatch/shared exec vitest run mission",
         },
       ],
       deliverable: "pr",
@@ -550,7 +550,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       teamId: "platform",
       title: "Name every cap in limits.ts",
       brief:
-        "Add the PROGRAM_CAPS constant block to packages/shared/src/limits.ts covering every " +
+        "Add the MISSION_CAPS constant block to packages/shared/src/limits.ts covering every " +
         "authoring limit in the proposal (title 80, objective 500, criteria 10, phases 5, teams " +
         "5, tasks 50, task brief 1500, event summary 280, wake events 8, remediation rounds 3, " +
         "and the rest). One exported frozen object. These are the numbers the schema, the " +
@@ -569,7 +569,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       brief:
         "The hire menu. Define the named tool profiles (observer / reader / author / integrator) " +
         "as deny-lists, and RoleTemplate = { toolProfile, default instructions, default skills, " +
-        "model, effort, freshContext }. Add Persona.toolOverrides { allow, deny } so the program " +
+        "model, effort, freshContext }. Add Persona.toolOverrides { allow, deny } so the mission " +
         "manager can widen or narrow any actor without editing the profile — and keep the two " +
         "separate in the type, because the profile carries the intent and the override carries " +
         "the exception. Provide effectiveDeny(persona, roles) as the single resolver everything " +
@@ -584,7 +584,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           when: "effectiveDeny runs",
           then: "Bash is absent from the deny-list and everything else in the profile remains",
           verify: "command",
-          check: "pnpm --filter @dispatch/shared exec vitest run program",
+          check: "pnpm --filter @dispatch/shared exec vitest run mission",
         },
       ],
       deliverable: "pr",
@@ -596,11 +596,11 @@ export const MOCK_PROGRAM: ProgramSpec = {
       teamId: "assurance",
       title: "DAG and traceability validator",
       brief:
-        "Write validateProgramSpec(). Structural rules: phase orders unique and contiguous from " +
+        "Write validateMissionSpec(). Structural rules: phase orders unique and contiguous from " +
         "1; every task's phaseId and teamId resolve; every dependsOn id exists AND is in the same " +
         "phase; the dependency graph is acyclic; no self-dependency; criterion ids unique within " +
         "their owner; every team referenced by at least one task; every phase has at least one " +
-        "task; every hireableRole resolves to a role template. Traceability: every PROGRAM " +
+        "task; every hireableRole resolves to a role template. Traceability: every MISSION " +
         "criterion is satisfied by at least one task (phase criteria may be phase-wide — see the " +
         "gate fallback). Semantic: verify:'command' requires check; a Persona has exactly one of " +
         "agentId or instructions. A cycle error must NAME THE CYCLE PATH — 'a cycle exists' is " +
@@ -615,7 +615,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           when: "It is validated",
           then: "The error text contains the full cycle path",
           verify: "command",
-          check: "pnpm --filter @dispatch/shared exec vitest run program",
+          check: "pnpm --filter @dispatch/shared exec vitest run mission",
         },
       ],
       deliverable: "pr",
@@ -627,9 +627,9 @@ export const MOCK_PROGRAM: ProgramSpec = {
       teamId: "platform",
       title: "Run, event and remediation tables",
       brief:
-        "Add one APPEND-ONLY migration step to store/db.ts creating program_run (seq, id unique, " +
-        "project_id, body), program_event (seq, run_id, ts, body) indexed on (run_id, seq), and " +
-        "program_remediation (seq, run_id, phase_id, round, body). Add Store methods to read/write " +
+        "Add one APPEND-ONLY migration step to store/db.ts creating mission_run (seq, id unique, " +
+        "project_id, body), mission_event (seq, run_id, ts, body) indexed on (run_id, seq), and " +
+        "mission_remediation (seq, run_id, phase_id, round, body). Add Store methods to read/write " +
         "runs, append/range events, and record remediations. Specs are NOT stored here — they " +
         "belong in the config root as JSON beside projects, because they are low-write, diffable " +
         "and reusable as templates. Only run state and the ledger are high-write.",
@@ -651,7 +651,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
         "PrReviewWatcher uses: ensure a live session, then send with parts [{kind:'brief', label, " +
         "text}] so the transcript renders it as Dispatch speaking, never as a user turn. Handle " +
         "the busy case (target mid-run) by queuing rather than dropping. This is a GENERAL " +
-        "service — it takes a chat id and a message and knows nothing about programs.",
+        "service — it takes a chat id and a message and knows nothing about missions.",
       dependsOn: [],
       satisfies: ["comms-is-general"],
       acceptance: [],
@@ -681,18 +681,18 @@ export const MOCK_PROGRAM: ProgramSpec = {
       title: "chat_send / chat_ask MCP tools",
       brief:
         "Expose the courier to agents as BASE manager tools available to every chat, not just " +
-        "program actors: chat_send(chatId, summary, detail?) fire-and-forget, and chat_ask(chatId, " +
+        "mission actors: chat_send(chatId, summary, detail?) fire-and-forget, and chat_ask(chatId, " +
         "question) which blocks for a reply. Guard rails: rate limit per sender, refuse a send to " +
         "a chat in another project unless explicitly allowed, and record every delivery on the " +
-        "ledger. Inside a program the engine additionally enforces routing (intra-team direct, " +
+        "ledger. Inside a mission the engine additionally enforces routing (intra-team direct, " +
         "lead-to-lead via the RTE) — but that policy lives in the engine, not in these tools.",
       dependsOn: ["t-courier"],
       satisfies: ["comms-is-general"],
       acceptance: [
         {
           id: "tcs-1",
-          title: "Works with no program",
-          given: "Two ordinary chats and no program running",
+          title: "Works with no mission",
+          given: "Two ordinary chats and no mission running",
           when: "One calls chat_send on the other",
           then: "The message is delivered and attributed to Dispatch",
           verify: "human",
@@ -705,7 +705,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       id: "t-report-tool",
       phaseId: "comms",
       teamId: "comms",
-      title: "program_report — the structured hand-up",
+      title: "mission_report — the structured hand-up",
       brief:
         "How a hire finishes: outcome, summary (<=500), a verdict per acceptance criterion, and " +
         "followups. A structured shape, so a hire CANNOT hand its lead a wall of text — this is " +
@@ -738,7 +738,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           when: "A wake is composed",
           then: "It carries 8 summaries and an elision count, under the byte budget",
           verify: "command",
-          check: "pnpm --filter @dispatch/server exec vitest run program-wake",
+          check: "pnpm --filter @dispatch/server exec vitest run mission-wake",
         },
       ],
       deliverable: "pr",
@@ -755,7 +755,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
         "A pure function from (spec, run) to the set of ready tasks. Under serialize-on-merge a " +
         "task is ready when every dependency has ALL of its PRs merged and a filed report — a " +
         "task may open more than one PR, so 'the PR merged' is the wrong test. Include accepted " +
-        "remediation tasks in the effective task list. Respect team hireBudget and program " +
+        "remediation tasks in the effective task list. Respect team hireBudget and mission " +
         "maxParallelTasks. No database, no session, no model call.",
       dependsOn: [],
       satisfies: ["engine-schedules"],
@@ -769,9 +769,9 @@ export const MOCK_PROGRAM: ProgramSpec = {
       teamId: "engine",
       title: "Hiring and budget enforcement",
       brief:
-        "Let a lead hire from its team's hireableRoles under a program-grant consent (one " +
-        "approval at run start, not one per chat — a five-phase program would otherwise prompt " +
-        "the human dozens of times). Enforce hireBudget per team and maxParallelTasks program-" +
+        "Let a lead hire from its team's hireableRoles under a mission-grant consent (one " +
+        "approval at run start, not one per chat — a five-phase mission would otherwise prompt " +
+        "the human dozens of times). Enforce hireBudget per team and maxParallelTasks mission-" +
         "wide; a hire over budget is refused with the reason, not queued silently. Record the " +
         "role chosen and the lead's stated reason on the actor row: 'why is there a researcher " +
         "on this task' must be answerable later. Set Chat.purpose so the sidebar recognises them.",
@@ -785,7 +785,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           when: "The lead hires a third",
           then: "It is refused with the budget named, and the lead is told which hires to release",
           verify: "command",
-          check: "pnpm --filter @dispatch/server exec vitest run program-hiring",
+          check: "pnpm --filter @dispatch/server exec vitest run mission-hiring",
         },
       ],
       deliverable: "pr",
@@ -812,7 +812,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           when: "Its gate opens",
           then: "Platform is the sole signatory and no other lead is asked",
           verify: "command",
-          check: "pnpm --filter @dispatch/server exec vitest run program-gates",
+          check: "pnpm --filter @dispatch/server exec vitest run mission-gates",
         },
       ],
       deliverable: "pr",
@@ -840,7 +840,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           when: "The round cap is reached",
           then: "The phase blocks on the human and no further QA round is spawned",
           verify: "command",
-          check: "pnpm --filter @dispatch/server exec vitest run program-remediation",
+          check: "pnpm --filter @dispatch/server exec vitest run mission-remediation",
         },
       ],
       deliverable: "pr",
@@ -870,7 +870,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       title: "Stop all",
       brief:
         "One action that interrupts every actor chat on the run — RTE, leads, hires, any live QA " +
-        "pass — and moves it to paused. It reads the actor rows off ProgramRun, so it works " +
+        "pass — and moves it to paused. It reads the actor rows off MissionRun, so it works " +
         "whether or not any agent cooperates. Must leave no orphaned worktree or subApp process, " +
         "and must be idempotent: a second press on a paused run is a no-op, not an error.",
       dependsOn: ["t-hiring"],
@@ -900,7 +900,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           when: "The guard fires",
           then: "The call is refused and an escalation event is appended",
           verify: "command",
-          check: "pnpm --filter @dispatch/server exec vitest run program-guard",
+          check: "pnpm --filter @dispatch/server exec vitest run mission-guard",
         },
       ],
       deliverable: "pr",
@@ -968,7 +968,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       brief:
         "Spawn a NEW chat for every QA round — never reuse one, and never one that watched the " +
         "work happen: a verifier with memory of the build is confirming its own recollection, not " +
-        "checking the result. Seed it with the program objective, the phase criteria, the tasks " +
+        "checking the result. Seed it with the mission objective, the phase criteria, the tasks " +
         "claiming to satisfy them, every task report, and read access to the whole project. It " +
         "returns a verdict per criterion with evidence, plus proposed tasks for anything unmet. " +
         "It cannot add tasks itself — it proposes, the RTE adjudicates.",
@@ -982,7 +982,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
           when: "QA is spawned",
           then: "The chat id differs from round one's and shares no transcript",
           verify: "command",
-          check: "pnpm --filter @dispatch/server exec vitest run program-qa",
+          check: "pnpm --filter @dispatch/server exec vitest run mission-qa",
         },
       ],
       deliverable: "pr",
@@ -1009,11 +1009,11 @@ export const MOCK_PROGRAM: ProgramSpec = {
       id: "t-chat-type",
       phaseId: "surface",
       teamId: "experience",
-      title: "Program as a new chat type",
+      title: "Mission as a new chat type",
       brief:
-        "Add Program to the chats dropdown as its own type, visually distinct from BOTH an " +
+        "Add Mission to the chats dropdown as its own type, visually distinct from BOTH an " +
         "ordinary chat and a quick action — its own icon, its own tint, its own row treatment in " +
-        "the sidebar. A program chat opens the board as its primary surface rather than a " +
+        "the sidebar. A mission chat opens the board as its primary surface rather than a " +
         "transcript. Hires, leads, the RTE and QA rounds file UNDER it in the sidebar, the way " +
         "reviewer chats now file under the chat that opened their PR.",
       dependsOn: [],
@@ -1022,7 +1022,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
         {
           id: "tct-1",
           title: "Distinct at a glance",
-          then: "A program chat is not mistakable for a normal chat or a quick action",
+          then: "A mission chat is not mistakable for a normal chat or a quick action",
           verify: "human",
         },
       ],
@@ -1035,7 +1035,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       teamId: "experience",
       title: "The drill-in board",
       brief:
-        "Program → phase → task → agent, each a screen with a breadcrumb back, not tabs. The base " +
+        "Mission → phase → task → agent, each a screen with a breadcrumb back, not tabs. The base " +
         "screen lists phases with task count, wave count and phase-AC count. A phase screen shows " +
         "its waves, tasks, acceptance criteria and QA history. A task screen shows the brief, " +
         "dependencies, the criteria it satisfies and the agents that worked it. An agent screen " +
@@ -1070,7 +1070,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       teamId: "experience",
       title: "Editable limits and overrides",
       brief:
-        "Let the human change a running program: concurrency limits (maxParallelTasks, per-team " +
+        "Let the human change a running mission: concurrency limits (maxParallelTasks, per-team " +
         "hireBudget), tool profiles and per-persona overrides, effort and model. Every change is " +
         "an event on the ledger with who and why, and takes effect at the next scheduling pass " +
         "rather than mid-turn. Widening a tool profile on a live actor must NOT silently apply to " +
@@ -1088,7 +1088,7 @@ export const MOCK_PROGRAM: ProgramSpec = {
       teamId: "assurance",
       title: "End-to-end run",
       brief:
-        "Drive a small real program from approval to completion against a scratch project: " +
+        "Drive a small real mission from approval to completion against a scratch project: " +
         "actors spawn, a lead hires a researcher and then a developer, tasks serialize on merge, " +
         "a gate is disputed and resolved, QA sends one phase back once and it recovers, a lead is " +
         "recycled at a phase gap, and Stop all leaves nothing orphaned.",

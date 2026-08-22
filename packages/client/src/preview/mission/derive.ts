@@ -15,10 +15,10 @@
 import type {
   Criterion,
   LiveActor,
-  ProgramRun,
-  ProgramSpec,
-  Task,
-  TaskId,
+  MissionRun,
+  MissionSpec,
+  MissionTask,
+  MissionTaskId,
   TaskStatus,
   TeamId,
 } from "./types.js";
@@ -26,10 +26,10 @@ import { CAPS } from "./types.js";
 
 /** The spec, the tasks actually being executed, and (optionally) live state. */
 export interface Plan {
-  spec: ProgramSpec;
+  spec: MissionSpec;
   /** `spec.tasks` plus accepted remediation tasks. */
-  tasks: Task[];
-  run?: ProgramRun;
+  tasks: MissionTask[];
+  run?: MissionRun;
 }
 
 /* -------------------------------------------------------------------- waves */
@@ -43,12 +43,12 @@ export interface Plan {
  * concurrently is {@link scheduleFor}, which then applies the concurrency caps.
  * Showing both is the point: the gap between them is the plan's real cost.
  */
-export function wavesFor(plan: Plan, phaseId: string): Map<TaskId, number> {
+export function wavesFor(plan: Plan, phaseId: string): Map<MissionTaskId, number> {
   const tasks = plan.tasks.filter((t) => t.phaseId === phaseId);
   const byId = new Map(tasks.map((t) => [t.id, t]));
-  const wave = new Map<TaskId, number>();
+  const wave = new Map<MissionTaskId, number>();
 
-  const visit = (id: TaskId, seen: Set<TaskId>): number => {
+  const visit = (id: MissionTaskId, seen: Set<MissionTaskId>): number => {
     const cached = wave.get(id);
     if (cached !== undefined) return cached;
     // A cycle is a validation error, not a render error. Break it at depth 1 so
@@ -69,9 +69,9 @@ export function wavesFor(plan: Plan, phaseId: string): Map<TaskId, number> {
 }
 
 /** Tasks of one phase, grouped by wave and ordered. */
-export function waveGroups(plan: Plan, phaseId: string): Task[][] {
+export function waveGroups(plan: Plan, phaseId: string): MissionTask[][] {
   const wave = wavesFor(plan, phaseId);
-  const groups: Task[][] = [];
+  const groups: MissionTask[][] = [];
   for (const t of plan.tasks.filter((x) => x.phaseId === phaseId)) {
     const w = (wave.get(t.id) ?? 1) - 1;
     (groups[w] ??= []).push(t);
@@ -98,7 +98,7 @@ export interface PhaseCounts {
 export function phaseCounts(plan: Plan, phaseId: string): PhaseCounts {
   const phase = plan.spec.phases.find((p) => p.id === phaseId);
   const tasks = plan.tasks.filter((t) => t.phaseId === phaseId);
-  const state = (id: TaskId): TaskStatus | undefined => plan.run?.tasks[id]?.status;
+  const state = (id: MissionTaskId): TaskStatus | undefined => plan.run?.tasks[id]?.status;
   return {
     tasks: tasks.length,
     waves: waveGroups(plan, phaseId).length,
@@ -116,16 +116,16 @@ export function phaseCounts(plan: Plan, phaseId: string): PhaseCounts {
 /** One concurrent batch: what actually runs at the same time. */
 export interface Slot {
   step: number;
-  tasks: Task[];
+  tasks: MissionTask[];
   /** Tasks that were dependency-free this step but had to wait on a cap. */
-  deferred: Task[];
+  deferred: MissionTask[];
 }
 
 /**
  * Simulate the phase under both concurrency caps.
  *
  * Greedy by step: take everything whose dependencies already completed, then
- * admit tasks until either the program-wide `maxParallelTasks` or the owning
+ * admit tasks until either the mission-wide `maxParallelTasks` or the owning
  * team's `hireBudget` is full. Whatever is left over is `deferred` — and that
  * list is the honest version of "this phase is parallel", because a wave of
  * five tasks under a cap of four is two steps, not one.
@@ -133,7 +133,7 @@ export interface Slot {
 export function scheduleFor(plan: Plan, phaseId: string): Slot[] {
   const tasks = plan.tasks.filter((t) => t.phaseId === phaseId);
   const teamCap = new Map(plan.spec.teams.map((t) => [t.id, t.hireBudget]));
-  const done = new Set<TaskId>();
+  const done = new Set<MissionTaskId>();
   const slots: Slot[] = [];
   let remaining = [...tasks];
   let step = 1;
@@ -146,8 +146,8 @@ export function scheduleFor(plan: Plan, phaseId: string): Slot[] {
     );
     if (eligible.length === 0) break; // cycle — validator reports it
 
-    const admitted: Task[] = [];
-    const deferred: Task[] = [];
+    const admitted: MissionTask[] = [];
+    const deferred: MissionTask[] = [];
     const perTeam = new Map<TeamId, number>();
     for (const t of eligible) {
       const used = perTeam.get(t.teamId) ?? 0;
@@ -172,11 +172,11 @@ export function scheduleFor(plan: Plan, phaseId: string): Slot[] {
 
 export interface GatePreview {
   criterion: Criterion;
-  scope: "program" | "phase";
+  scope: "mission" | "phase";
   phaseId?: string;
   /** Teams owning at least one satisfying task — the derived signatory list. */
   signatories: TeamId[];
-  satisfiedBy: Task[];
+  satisfiedBy: MissionTask[];
   /**
    * True when no task named this criterion and the signatories fell back to
    * "every team working in the phase". See {@link gatePreviews}.
@@ -193,7 +193,7 @@ export interface GatePreview {
 export function gatePreviews(plan: Plan, opts?: { phaseId?: string }): GatePreview[] {
   const { spec } = plan;
   const out: GatePreview[] = [];
-  const forCriterion = (criterion: Criterion, scope: "program" | "phase", phaseId?: string) => {
+  const forCriterion = (criterion: Criterion, scope: "mission" | "phase", phaseId?: string) => {
     const satisfiedBy = plan.tasks.filter((t) => t.satisfies.includes(criterion.id));
     let signatories = [...new Set(satisfiedBy.map((t) => t.teamId))];
     // A PHASE criterion is frequently a property of the phase as a whole —
@@ -202,7 +202,7 @@ export function gatePreviews(plan: Plan, opts?: { phaseId?: string }): GatePrevi
     // seven of eight phase criteria failed it, and linking each to an arbitrary
     // task would have been bookkeeping, not traceability. So an unnamed phase
     // criterion falls back to "every team working in this phase signs", which
-    // is what a phase gate means anyway. Program criteria get no such fallback:
+    // is what a phase gate means anyway. Mission criteria get no such fallback:
     // there, nothing building it really is a plan hole.
     let implied = false;
     if (signatories.length === 0 && scope === "phase" && phaseId) {
@@ -213,7 +213,7 @@ export function gatePreviews(plan: Plan, opts?: { phaseId?: string }): GatePrevi
     }
     out.push({ criterion, scope, phaseId, signatories, satisfiedBy, implied });
   };
-  if (!opts?.phaseId) for (const c of spec.acceptance) forCriterion(c, "program");
+  if (!opts?.phaseId) for (const c of spec.acceptance) forCriterion(c, "mission");
   for (const p of spec.phases) {
     if (opts?.phaseId && p.id !== opts.phaseId) continue;
     for (const c of p.acceptance) forCriterion(c, "phase", p.id);
@@ -232,8 +232,8 @@ export interface Issue {
 /**
  * The authoring gate, run live so the board can show a bad plan as bad.
  *
- * Mirrors what `validateProgramSpec` would enforce server-side. The rules that
- * matter most are the ones a human eye slides past: a program criterion no task
+ * Mirrors what `validateMissionSpec` would enforce server-side. The rules that
+ * matter most are the ones a human eye slides past: a mission criterion no task
  * contributes to (it can never be declared met), and a dependency edge crossing
  * a phase boundary (two contradictory orderings, since the phase gate already
  * sequences them).
@@ -253,7 +253,7 @@ export function validate(plan: Plan): Issue[] {
   if (spec.acceptance.length > CAPS.criteria)
     err("acceptance", `${spec.acceptance.length} criteria, cap ${CAPS.criteria}`);
   if (spec.acceptance.length === 0)
-    err("acceptance", "a program with no definition of done cannot be gated");
+    err("acceptance", "a mission with no definition of done cannot be gated");
   if (spec.phases.length > CAPS.phases)
     err("phases", `${spec.phases.length} phases, cap ${CAPS.phases}`);
   if (spec.teams.length > CAPS.teams) err("teams", `${spec.teams.length} teams, cap ${CAPS.teams}`);
@@ -350,12 +350,12 @@ export function validate(plan: Plan): Issue[] {
 }
 
 /** Depth-first cycle hunt that returns the PATH, because "a cycle exists" is not actionable. */
-function findCycle(tasks: Task[]): TaskId[] | null {
+function findCycle(tasks: MissionTask[]): MissionTaskId[] | null {
   const byId = new Map(tasks.map((t) => [t.id, t]));
-  const state = new Map<TaskId, "open" | "done">();
-  const stack: TaskId[] = [];
+  const state = new Map<MissionTaskId, "open" | "done">();
+  const stack: MissionTaskId[] = [];
 
-  const walk = (id: TaskId): TaskId[] | null => {
+  const walk = (id: MissionTaskId): MissionTaskId[] | null => {
     const s = state.get(id);
     if (s === "done") return null;
     if (s === "open") return [...stack.slice(stack.indexOf(id)), id];
@@ -381,7 +381,7 @@ function findCycle(tasks: Task[]): TaskId[] | null {
 /* ------------------------------------------------------------------ colours */
 
 /** Stable team → palette slot, so a team is the same colour in every view. */
-export function teamColor(spec: ProgramSpec, teamId: TeamId): string {
+export function teamColor(spec: MissionSpec, teamId: TeamId): string {
   const i = spec.teams.findIndex((t) => t.id === teamId);
   return `var(--p-cat-${(i < 0 ? 0 : i) + 1})`;
 }
@@ -389,7 +389,7 @@ export function teamColor(spec: ProgramSpec, teamId: TeamId): string {
 /* ------------------------------------------------------------------ actors */
 
 /** Live actors attached to one task, oldest first. */
-export function actorsForTask(plan: Plan, taskId: TaskId): LiveActor[] {
+export function actorsForTask(plan: Plan, taskId: MissionTaskId): LiveActor[] {
   const ids = plan.run?.tasks[taskId]?.actorIds ?? [];
   return ids
     .map((id) => plan.run?.actors.find((a) => a.id === id))
