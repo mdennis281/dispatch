@@ -274,7 +274,12 @@ export const AGENT_TASKS: Record<AgentTaskId, AgentTaskMeta> = {
     id: "pr:review",
     action: "Review this PR",
     noun: "PR review",
-    icon: "ScanEye",
+    // Speech bubbles, not the scanning eye it used to be: what a reviewer chat
+    // leaves behind is COMMENTS on a pull request, and that's what its row in
+    // the sidebar is counting. The eye is still right on the buttons that START
+    // a review (`PRsPanel`, `ReviewerSection`) — that's an act of looking; this
+    // is the record of what was said.
+    icon: "MessagesSquare",
     // "review: #97 a file explorer, in a modal…" — the number and title are
     // what tell you which run this was; the category is what the eye scans for.
     titlePrefix: "review",

@@ -12,7 +12,7 @@ import {
   Circle,
   Trash2,
   Pencil,
-  ScanEye,
+  MessagesSquare,
   BarChart3,
   Brain,
   FolderOpen,
@@ -25,6 +25,7 @@ import { Popover, MenuItem } from "../ui/Popover.js";
 import { IconButton } from "../ui/IconButton.js";
 import { SectionLabel } from "../ui/Panel.js";
 import { StatusDot, statusMeta, toneText, type DotTone } from "../ui/StatusDot.js";
+import { formatDuration } from "../metrics/duration.js";
 import { TitleText } from "../ui/TitleText.js";
 import { purposeIcon } from "../config/sections.js";
 import { Chip } from "../ui/Chip.js";
@@ -40,6 +41,7 @@ import {
   type ProjectAgentCounts,
 } from "../../stores/chats.js";
 import { usePrs } from "../../stores/prs.js";
+import { useChatRuntime, branchRuntimeMs } from "../../stores/chatRuntime.js";
 import { useView, openOverlay } from "../../stores/view.js";
 import { useLayout, dismissLeftDrawer } from "../../stores/layout.js";
 import { selectChat, selectProject } from "../../stores/navigation.js";
@@ -313,12 +315,14 @@ function ChatBranchRows({
   branch,
   activeChatId,
   attentionByChat,
+  runtimeByChat,
   now,
   onSelect,
 }: {
   branch: ChatBranch;
   activeChatId: string | null;
   attentionByChat: Set<string>;
+  runtimeByChat: Record<string, number>;
   now: number;
   onSelect: (id: string) => void;
 }) {
@@ -336,6 +340,7 @@ function ChatBranchRows({
         active={chat.id === activeChatId}
         needsInput={attentionByChat.has(chat.id)}
         now={now}
+        runtimeMs={branchRuntimeMs(runtimeByChat, chat.id, reviews)}
         reviews={reviews}
         reviewsNeedInput={reviews.some((r) => attentionByChat.has(r.id))}
         expanded={open}
@@ -343,7 +348,12 @@ function ChatBranchRows({
         onClick={() => onSelect(chat.id)}
       />
       {open && reviews.length > 0 && (
-        <div className="mt-0.5 ml-4 space-y-0.5 border-l border-line-soft pl-2">
+        // The thread rail is drawn once, absolutely, rather than as a border on
+        // a padded wrapper: the wrapper's padding would inset the rows, and a
+        // reviewer row's highlight has to reach both edges exactly like every
+        // other row's. Indentation is the row's own left padding instead.
+        <div className="relative">
+          <span className="pointer-events-none absolute inset-y-0 left-4 w-px bg-line-soft" />
           {reviews.map((review) => (
             <ReviewRow
               key={review.id}
@@ -351,6 +361,7 @@ function ChatBranchRows({
               active={review.id === activeChatId}
               needsInput={attentionByChat.has(review.id)}
               now={now}
+              runtimeMs={runtimeByChat[review.id] ?? 0}
               onClick={() => onSelect(review.id)}
             />
           ))}
@@ -360,11 +371,20 @@ function ChatBranchRows({
   );
 }
 
+/**
+ * The subtext's separator. Dimmer than either figure it sits between, so the
+ * eye reads three values rather than one punctuated string.
+ */
+function Dot() {
+  return <span className="text-faint/50"> · </span>;
+}
+
 function ChatRow({
   chat,
   active,
   needsInput,
   now,
+  runtimeMs,
   reviews,
   reviewsNeedInput,
   expanded,
@@ -376,6 +396,8 @@ function ChatRow({
   needsInput: boolean;
   /** Shared "current time" tick so every row ages in lockstep. */
   now: number;
+  /** Agent time under this chat — its own, its subagents', its reviewers'. */
+  runtimeMs: number;
   /** Reviewer chats folded under this row. Usually empty. */
   reviews: Chat[];
   reviewsNeedInput: boolean;
@@ -406,16 +428,22 @@ function ChatRow({
   const reviewCount = `${reviews.length} review${reviews.length === 1 ? "" : "s"}`;
 
   return (
-    <div className="group/row relative">
+    // `overflow-hidden` is what lets the action tray start fully off the row and
+    // slide in: clipped HERE it can never reach the scroll container, where an
+    // element past the right edge turns `overflow-y: auto` into a horizontal
+    // scrollbar across the whole list.
+    <div className="group/row relative overflow-hidden">
       <button
         data-testid="chat-row"
         onClick={onClick}
         className={cn(
-          "relative flex w-full items-center gap-2.5 rounded-md py-1.5 pl-2.5 pr-8 text-left transition-colors",
+          // Square and full-bleed: the highlight is the ROW, so it runs edge to
+          // edge and the list reads as a list rather than a stack of cards.
+          "relative flex w-full items-center gap-2.5 py-1.5 pl-2.5 pr-8 text-left transition-colors",
           active ? "bg-accent-ghost/70" : "hover:bg-hover",
         )}
       >
-        {active && <span className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-accent" />}
+        {active && <span className="absolute inset-y-0 left-0 w-0.5 bg-accent" />}
         {/* A chat the app spawned for a job wears that job's icon instead of the
             status dot — in a sidebar of a dozen rows it's the only way to spot
             the one that's off editing your config. It's a bare glyph in the
@@ -449,9 +477,33 @@ function ChatRow({
                 what the eye scans a long sidebar FOR. See ui/TitleText. */}
             <TitleText title={chat.title} />
           </span>
-          <span className="mt-px block truncate text-2xs text-faint">
-            {meta.label}
-            <span className="text-faint/70"> · {age}</span>
+          {/* Three different measurements, so three different colours — one grey
+              run of text made them read as a single caption nobody parsed.
+              STATUS takes the tone its own dot already has, so the row keeps one
+              colour language (idle stays faint; a failure is red in both places).
+              AGE is neutral. RUNTIME is `accent-2`, which is this palette's
+              "something the machine did on your behalf" — the same violet
+              `ui/Chip`'s `agent` tone uses for a subagent. */}
+          <span className="mt-px block truncate text-2xs">
+            <span className={toneText(meta.tone)}>{meta.label}</span>
+            <Dot />
+            <span className="text-muted">{age}</span>
+            {runtimeMs > 0 && (
+              <>
+                <Dot />
+                <span
+                  className="text-accent-2"
+                  title={
+                    reviews.length
+                      ? `${formatDuration(runtimeMs)} of agent time — this chat, its ` +
+                        `subagents, and ${reviewCount}`
+                      : `${formatDuration(runtimeMs)} of agent time — this chat and its subagents`
+                  }
+                >
+                  {formatDuration(runtimeMs)}
+                </span>
+              </>
+            )}
           </span>
         </span>
       </button>
@@ -471,29 +523,31 @@ function ChatRow({
       )}
 
       {/* right rail (sibling of the row button — never a nested button): what the
-          row is quietly telling you at rest, and the actions that slide in over
-          it on hover.
+          row is quietly telling you at rest, and the actions that slide over it.
 
-          The actions are a TRAY with its own surface, not bare glyphs. They
-          overhang the title — three 24px buttons in a 32px gutter always will —
-          and against a chat called `**review**: #139 chore(config): commit the…`
-          a transparent pencil sat in the middle of the word it was covering.
-          Opaque, bordered, and slid in from the edge, it reads as something that
-          arrived on top of the row rather than something wrong with the row.
+          The actions are a full-height TRAY, not floating glyphs. They overhang
+          the title — three 24px buttons in a 32px gutter always will — and
+          against a chat called `**review**: #139 chore(config): commit the…` a
+          transparent pencil sat in the middle of the word it was covering. The
+          tray carries the row's own highlight one step further (`bg-active` over
+          `bg-hover`, `accent-ghost` at full strength over the selected row's
+          70%), so it reads as part of this row rather than a card dropped on
+          top, and the left border is the only edge it needs: where the border
+          is, the title ends.
 
-          It stays MOUNTED at opacity-0 so its buttons keep their tab stop and
-          their fade, which is why the resting markers are taken out of flow and
-          pinned instead: sharing a flex row with three invisible-but-present
-          24px buttons pushed them off the right edge entirely. They stand down
-          for EITHER way the tray can appear — pointer hover, or keyboard focus
-          landing in the rail — and on a coarse pointer, where the tray is simply
-          always out (`cm-touch-reveal`), they never show at all. */}
+          It stays MOUNTED and merely translated, so its buttons keep their tab
+          stop — which is why the resting markers are pinned rather than in
+          flow, and why they stand down for EITHER way the tray can arrive
+          (pointer hover, or keyboard focus landing in the rail). On a coarse
+          pointer `cm-touch-reveal` parks the tray permanently out, so
+          `cm-touch-hide` takes the markers away entirely rather than leaving
+          them underneath it. */}
       {!rename.editing && (
-        <div className="group/rail absolute inset-y-0 right-1.5 flex items-center">
+        <div className="group/rail absolute inset-y-0 right-0">
           {(needsInput || (reviews.length > 0 && !expanded)) && (
             <span
               className={cn(
-                "cm-touch-hide pointer-events-none absolute inset-y-0 right-0 flex items-center gap-1.5",
+                "cm-touch-hide pointer-events-none absolute inset-y-0 right-0 flex items-center gap-1.5 pr-2.5",
                 "group-hover/row:hidden group-focus-within/rail:hidden",
               )}
             >
@@ -505,7 +559,7 @@ function ChatRow({
                     toneText(reviewTone),
                   )}
                 >
-                  <ScanEye />
+                  <MessagesSquare />
                   {reviews.length}
                 </span>
               )}
@@ -514,15 +568,10 @@ function ChatRow({
           )}
           <div
             className={cn(
-              "cm-touch-reveal flex items-center gap-0.5 rounded-md border border-line bg-elevated px-0.5 shadow-sm",
-              // 12px is the whole gutter: at rest the tray sits 13px inside the
-              // sidebar's edge, so it starts flush against it and slides inward —
-              // far enough to read as arriving from off-panel, and not one pixel
-              // further, because the shell is `overflow-hidden` and anything past
-              // the edge is clipped silently rather than scrolled to.
-              "translate-x-3 opacity-0 transition duration-150 ease-[var(--ease-out)]",
-              "group-hover/row:translate-x-0 group-hover/row:opacity-100",
-              "group-focus-within/rail:translate-x-0 group-focus-within/rail:opacity-100",
+              "cm-touch-reveal absolute inset-y-0 right-0 flex items-center gap-0.5 border-l border-line px-1.5",
+              "translate-x-full transition-transform duration-150 ease-[var(--ease-out)]",
+              "group-hover/row:translate-x-0 group-focus-within/rail:translate-x-0",
+              active ? "bg-accent-ghost" : "bg-active",
             )}
           >
             {reviews.length > 0 && (
@@ -533,7 +582,7 @@ function ChatRow({
                 tip={expanded ? `Hide ${reviewCount}` : `Show ${reviewCount}`}
                 onClick={onToggleReviews}
               >
-                <ScanEye />
+                <MessagesSquare />
               </IconButton>
             )}
             <IconButton size="sm" tip="Rename chat" onClick={rename.start}>
@@ -562,19 +611,22 @@ function ChatRow({
  * Deliberately NOT a `ChatRow`. The parent directly above already carries the
  * change's title, and `review: #139 chore(config): commit the…` repeated under
  * it is the same sentence twice at half the width. What the parent can't say is
- * which PR this round read and what came back of it, so that is the whole row.
+ * which PR this round read, what came back of it, and what it cost — so that is
+ * the whole row, on one line, in the same four colours the parent's subtext uses.
  */
 function ReviewRow({
   chat,
   active,
   needsInput,
   now,
+  runtimeMs,
   onClick,
 }: {
   chat: Chat;
   active: boolean;
   needsInput: boolean;
   now: number;
+  runtimeMs: number;
   onClick: () => void;
 }) {
   const key = reviewTargetKey(chat);
@@ -584,7 +636,7 @@ function ReviewRow({
   );
   const meta = statusMeta(chat.status);
   const number = record?.number ?? (key ? parsePrRecordKey(key)?.number : undefined);
-  const summary = reviewSummary(chat, record) ?? meta.label;
+  const posted = reviewSummary(chat, record);
 
   return (
     <button
@@ -592,10 +644,13 @@ function ReviewRow({
       onClick={onClick}
       title={record?.title ?? chat.purpose?.label}
       className={cn(
-        "flex w-full items-center gap-2 rounded-md py-1 pl-1.5 pr-2 text-left transition-colors",
+        // Indented by PADDING, not by a margin — the highlight still runs the
+        // full width of the sidebar, exactly like the row it hangs off.
+        "relative flex w-full items-center gap-2 py-1 pl-7 pr-2.5 text-left transition-colors",
         active ? "bg-accent-ghost/70" : "hover:bg-hover",
       )}
     >
+      {active && <span className="absolute inset-y-0 left-0 w-0.5 bg-accent" />}
       <span
         className={cn(
           "flex size-3.5 shrink-0 items-center justify-center [&_svg]:size-3",
@@ -604,18 +659,38 @@ function ReviewRow({
           meta.pulse && "animate-pulse",
         )}
       >
-        <ScanEye />
+        <MessagesSquare />
       </span>
       <span
         className={cn("cm-mono shrink-0 !text-2xs", active ? "text-primary" : "text-secondary")}
       >
         {number != null ? `#${number}` : "PR"}
       </span>
-      <span className="min-w-0 flex-1 truncate text-2xs text-faint">{summary}</span>
+      {/* What came back, or — when the registry can't say — what the reviewer is
+          doing. Findings take `warn` when the review asked for changes, because
+          "3 comments" and "3 comments that block the merge" are not the same
+          news and the row is the only place that distinction is cheap to make. */}
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate text-2xs",
+          posted
+            ? record?.reviewAgent?.postedEvent === "REQUEST_CHANGES"
+              ? "text-warn"
+              : "text-info"
+            : toneText(meta.tone),
+        )}
+      >
+        {posted ?? meta.label}
+      </span>
+      {runtimeMs > 0 && (
+        <span className="shrink-0 text-2xs text-accent-2" title={`${formatDuration(runtimeMs)} reviewing`}>
+          {formatDuration(runtimeMs)}
+        </span>
+      )}
       {needsInput ? (
         <StatusDot tone="warn" pulse size={5} />
       ) : (
-        <span className="shrink-0 text-2xs text-faint/70">{relTimeShort(activityAt, now)}</span>
+        <span className="shrink-0 text-2xs text-muted">{relTimeShort(activityAt, now)}</span>
       )}
     </button>
   );
@@ -724,6 +799,8 @@ export function Sidebar() {
   const project = useActiveProject();
   const branches = useProjectChatTree(project?.id ?? null);
   const chatCount = branches.reduce((n, b) => n + 1 + b.reviews.length, 0);
+  const runtimeByChat = useChatRuntime((s) => s.byChat);
+  const refreshRuntime = useChatRuntime((s) => s.refresh);
   const activeChatId = useChats((s) => s.activeChatId);
   const runners = useRunners((s) => s.byId);
   const attentionItems = useAttention((s) => s.items);
@@ -764,6 +841,16 @@ export function Sidebar() {
     setBranch: setSelectedBranch,
     target: selectedTarget,
   } = useLaunchBranch(project?.id, targets, project?.repoPath);
+
+  // Agent time per row. One indexed GROUP BY behind it, so the poll is cheap —
+  // see `stores/chatRuntime` for why this is polled rather than pushed. Same
+  // 30s beat as the age clock below: both label the same rows, and refreshing
+  // one without the other makes a live chat's two figures disagree.
+  useEffect(() => {
+    void refreshRuntime();
+    const t = setInterval(() => void refreshRuntime(), 30_000);
+    return () => clearInterval(t);
+  }, [refreshRuntime]);
 
   // Shared clock so every chat row's "age" label ages together. 30s is plenty
   // for m/h/d/w granularity and keeps the sidebar idle-cheap.
@@ -927,9 +1014,12 @@ export function Sidebar() {
               reviewed four times would answer something else. */}
           <span className="cm-mono !text-2xs text-faint">{chatCount || ""}</span>
         </div>
-        <div ref={chatListRef} className="space-y-0.5 px-1.5">
+        {/* No horizontal padding and no gaps: a row's highlight has to reach both
+            edges of the sidebar, which it can't do from inside a padded box, and
+            square rows with air between them read as a stack of cards. */}
+        <div ref={chatListRef}>
           {chatCount === 0 ? (
-            <p className="px-2 py-1.5 text-xs text-faint">
+            <p className="px-2.5 py-1.5 text-xs text-faint">
               {project ? "No chats yet." : "Select a project to see its chats."}
             </p>
           ) : (
@@ -939,6 +1029,7 @@ export function Sidebar() {
                 branch={branch}
                 activeChatId={activeChatId}
                 attentionByChat={attentionByChat}
+                runtimeByChat={runtimeByChat}
                 now={now}
                 onSelect={setActiveChat}
               />

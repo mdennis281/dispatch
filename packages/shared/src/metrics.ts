@@ -645,6 +645,29 @@ export const MetricSpanSummarySchema = z.object({
 });
 export type MetricSpanSummary = z.infer<typeof MetricSpanSummarySchema>;
 
+/**
+ * Total recorded runtime per chat, all time — the sidebar's per-row figure.
+ *
+ * ATTRIBUTED milliseconds, not busy time, because the question a row asks is
+ * "how much agent time went into this", and two subagents working in parallel
+ * for a minute really are two minutes of agent. A subagent's spans carry its
+ * PARENT's `chatId` (the actor is `(chatId, runId)`; see this file's span
+ * docblock), so one row already covers a chat's main loop and everything it
+ * spawned.
+ *
+ * Every chat in one answer and no window, unlike {@link MetricSpanTotal}, which
+ * caps at 50 groups and folds the rest into `__other__` — right for a top-N
+ * chart, useless for labelling three hundred sidebar rows whose work finished
+ * weeks ago.
+ */
+export const ChatRuntimeResponseSchema = z.object({
+  /** chatId → summed milliseconds. A chat with no recorded spans is ABSENT, not 0. */
+  byChat: z.record(z.string(), z.number()),
+  /** When it was measured. Spans still open are counted up to this instant. */
+  at: z.number().int(),
+});
+export type ChatRuntimeResponse = z.infer<typeof ChatRuntimeResponseSchema>;
+
 /** Distinct values per span dimension, for the runtime filter controls. */
 export const MetricSpanFacetsResponseSchema = z.object({
   facets: z.partialRecord(MetricSpanDimensionSchema, z.array(MetricFacetValueSchema)),

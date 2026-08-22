@@ -29,6 +29,7 @@ import {
   METRIC_STATE_LABELS,
   activityClass,
   resolveBucket,
+  type ChatRuntimeResponse,
   type MetricActivityClass,
   type MetricDimension,
   type MetricEvent,
@@ -725,6 +726,43 @@ export class MetricsService {
       spansBuffered: this.spanBuffer.length + this.spanCloses.size,
       openSpans: this.openKeys.size,
     };
+  }
+
+  /**
+   * Total recorded runtime for EVERY chat, keyed by id — the sidebar's per-row
+   * figure. See {@link ChatRuntimeResponse} for what the number means.
+   *
+   * Deliberately not `spanTotals({ groupBy: "chatId" })`, which is the obvious
+   * reuse and the wrong one twice over: it caps at 50 groups and folds the rest
+   * into `__other__`, and it ships every clipped span row out to Node to union
+   * them into `busyMs`. Neither is survivable on a poll that has to label every
+   * row in the list.
+   *
+   * One statement, answered from `metric_span_chat` without touching the table.
+   * `MAX(end, start)` floors the pathological row whose end precedes its start;
+   * `COALESCE(end_ts, at)` counts a span still running up to now, which is what
+   * makes a live chat's number climb while you watch it.
+   */
+  chatRuntime(): ChatRuntimeResponse {
+    this.flush();
+    const at = this.now();
+    const rows = this.db
+      .prepare(
+        `SELECT chat_id AS id,
+                SUM(MAX(COALESCE(end_ts, ?), start_ts) - start_ts) AS ms
+           FROM metric_span
+          WHERE chat_id IS NOT NULL
+          GROUP BY chat_id`,
+      )
+      .all(at) as { id: string; ms: number | null }[];
+    const byChat: Record<string, number> = {};
+    for (const row of rows) {
+      const ms = Number(row.ms ?? 0);
+      // Absent rather than 0: the row renders nothing for a chat it has no
+      // reading for, and "0s" is a claim that it ran and took no time.
+      if (ms > 0) byChat[row.id] = ms;
+    }
+    return { byChat, at };
   }
 
   /**
