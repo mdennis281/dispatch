@@ -529,6 +529,69 @@ describe("PrRegistry — Dispatch's own reviewer", () => {
   });
 });
 
+describe("PrRegistry — a refused review request", () => {
+  it("records GitHub's refusal, so it outlives the tool result that said it once", async () => {
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+
+    const row = await reg.noteReviewRequestError(
+      REPO,
+      42,
+      "Reviews may only be requested from collaborators",
+    );
+    expect(row?.reviewAgent).toMatchObject({
+      rounds: 0,
+      requestError: "Reviews may only be requested from collaborators",
+    });
+  });
+
+  it("conjures nothing when there was no refusal and no state", async () => {
+    // The clear path runs on EVERY create_pr and request_review. It must not
+    // turn "nobody asked" into a stored object on every PR that ever succeeded.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+
+    await reg.noteReviewRequestError(REPO, 42, undefined);
+    expect((await store.getPrRecord(KEY))?.reviewAgent).toBeUndefined();
+  });
+
+  it("writes only on a change — this runs on every create_pr", async () => {
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.noteReviewRequestError(REPO, 42, "nope");
+    const before = events.filter((e) => e.type === "pr-record-update").length;
+
+    await reg.noteReviewRequestError(REPO, 42, "nope");
+    expect(events.filter((e) => e.type === "pr-record-update").length).toBe(before);
+  });
+
+  it("clears a stale refusal once the reviewer is actually in the queue", async () => {
+    // Getting a request recorded means the login WAS found in GitHub's queue, so
+    // a stored "GitHub would not queue it" is now a lie about a review that is
+    // seconds from starting. This is also the case the idempotency
+    // short-circuit in `requestReviewAgent` would otherwise swallow.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "dispatch-review");
+    await reg.noteReviewRequestError(REPO, 42, "Reviews may only be requested from collaborators");
+
+    const after = await reg.requestReviewAgent(REPO, 42, "dispatch-review");
+    expect(after?.reviewAgent?.requestError).toBeUndefined();
+    expect(after?.reviewAgent?.requestedSha).toBe("sha-1");
+  });
+
+  it("still short-circuits a repeat request when nothing is parked", async () => {
+    // The sweep re-observes GitHub's queue every 90 seconds; the refusal check
+    // must not have cost that idempotency.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    const first = await reg.requestReviewAgent(REPO, 42, "dispatch-review");
+    now += 60_000;
+    const again = await reg.requestReviewAgent(REPO, 42, "dispatch-review");
+    expect(again?.reviewAgent?.requestedAt).toBe(first?.reviewAgent?.requestedAt);
+  });
+});
+
 describe("PrRegistry — why the reviewer is not running", () => {
   it("records a blocking problem even though nothing ever asked for a review", async () => {
     // The dedicated-with-no-credential case records NO request — there is no

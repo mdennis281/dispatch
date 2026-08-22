@@ -478,6 +478,8 @@ export function createServices(
     snapshotByThread: async (threadId) => toPrSnapshot(await prRegistry.findByThread(threadId)),
     requestReviewAgent: (repo, number, by) => prRegistry.requestReviewAgent(repo, number, by),
     notePostedReview: (repo, number, by) => prRegistry.notePostedReview(repo, number, by),
+    noteReviewRequestError: (repo, number, error) =>
+      prRegistry.noteReviewRequestError(repo, number, error),
   };
   const prReviewWatcher =
     overrides.prReviewWatcher ??

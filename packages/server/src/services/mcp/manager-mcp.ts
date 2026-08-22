@@ -734,6 +734,17 @@ export interface ManagerMcpPrRegistry {
    * that spawned the reviewer is taken minutes earlier, before the chat exists,
    * so it cannot answer that — see `PrReviewAgentStateSchema.postedAt`.
    */
+  /**
+   * Report what GitHub said about each reviewer it would NOT queue, so a refusal
+   * outlives the tool result that mentioned it once. Passing an empty list is
+   * the CLEAR — a request that refused nobody is what makes a recorded refusal
+   * stale. The binding decides which of these is Dispatch's own reviewer.
+   */
+  noteReviewRequestError(
+    prNumber: number,
+    repo: string | undefined,
+    failed: ReadonlyArray<{ reviewer: string; error: string }>,
+  ): Promise<void>;
   notePostedReview(
     prNumber: number,
     repo: string | undefined,
@@ -2735,6 +2746,13 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         lines.push(`  · asked ${res.requested.join(", ")} (queue not re-read)`);
       }
 
+      // Persist a refusal of OUR reviewer. `res.failed` is already the per-reviewer
+      // verdict; the binding matches it against the configured login. Best-effort
+      // — a catalog write must not change what the agent is told happened.
+      await ctx.prRegistry
+        ?.noteReviewRequestError(number, repo, res.failed)
+        .catch(() => undefined);
+
       // Truth is what's on the hook now. Only fall back to "gh said ok" when the
       // queue genuinely couldn't be re-read. Dispatch's own reviewer counts as
       // on the hook even so: it never appears in GitHub's queue, and reading an
@@ -2962,6 +2980,17 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           },
         );
       }
+
+      // Persist a refused reviewer BEFORE the summary is built. The warning line
+      // below has always said this; what it could not do is survive being read
+      // once. In `dedicated` mode a refused queue entry means no review will ever
+      // start on this PR, and the row is where somebody goes to ask why.
+      //
+      // `create_pr` takes no repo argument — the binding resolves it from the
+      // session's checkout, the same way every other PR tool here does.
+      await ctx.prRegistry
+        ?.noteReviewRequestError(res.number, undefined, res.reviewersFailed)
+        .catch(() => undefined);
 
       const lines = [
         `Opened PR #${res.number} — ${res.url}`,

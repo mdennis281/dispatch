@@ -66,7 +66,7 @@ export type ReviewerStatus = z.infer<typeof ReviewerStatusSchema>;
 
 /** One thing the setup check looked at, and how it went. */
 export const ReviewerCheckSchema = z.object({
-  id: z.enum(["token", "distinct", "collaborator"]),
+  id: z.enum(["token", "distinct", "collaborator", "access"]),
   /** `pass` = verified good. `warn` = works, but will bite. `fail` = won't work. */
   state: z.enum(["pass", "warn", "fail"]),
   /** One line, written for the human reading the setup panel. */
@@ -117,7 +117,9 @@ export function reviewerStatus(cred: ReviewerCredential | null | undefined): Rev
  * it means none of the rest is going to happen. The PRs panel and the workspace
  * roster both show this, and they must agree.
  *
- *   - `blocked`  — configured wrong; the reviewer is disabled, not degraded.
+ *   - `blocked`  — the reviewer will not run: either the identity does not
+ *                  resolve (`problem`), or GitHub refused to queue it on this
+ *                  PR (`requestError`). Disabled, not degraded.
  *   - `queued`   — asked for, waiting on the ~90s sweep to pick it up.
  *   - `running`  — a round is claimed and nothing has been posted for it yet.
  *   - `reviewed` — a review landed. `spent` says whether another can follow.
@@ -171,6 +173,7 @@ export function prReviewAgentView(
         postedEvent?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
         maxRounds?: number;
         problem?: string;
+        requestError?: string;
       }
     | undefined,
 ): PrReviewAgentView | null {
@@ -178,10 +181,15 @@ export function prReviewAgentView(
   const round = state.rounds ?? 0;
   const base = { round, maxRounds: state.maxRounds, chatId: state.chatId, posted: false };
 
-  // First, because it is the answer to "why has nothing happened" and every
+  // First, because these are the answer to "why has nothing happened" and every
   // other phase below would answer that question wrongly.
-  if (state.problem) {
-    return { ...base, phase: "blocked", problem: state.problem, at: state.requestedAt };
+  //
+  // `problem` outranks `requestError`: an identity that does not resolve is why
+  // the request was never even attempted, so reporting GitHub's refusal of an
+  // older attempt would name a symptom over its cause.
+  const blocked = state.problem ?? state.requestError;
+  if (blocked) {
+    return { ...base, phase: "blocked", problem: blocked, at: state.requestedAt };
   }
 
   // A claim clears the request, so an outstanding one always outranks the last

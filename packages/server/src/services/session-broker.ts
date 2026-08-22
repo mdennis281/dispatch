@@ -662,6 +662,8 @@ export interface SessionPrRegistry {
    * Record that this chat's review actually landed — the completion signal the
    * lease cannot be, since it is taken before the reviewer chat exists.
    */
+  /** Record (or clear) GitHub's refusal to queue the reviewer on this PR. */
+  noteReviewRequestError(repo: string, prNumber: number, error?: string): Promise<unknown>;
   notePostedReview(
     repo: string,
     prNumber: number,
@@ -679,6 +681,16 @@ function makePrRegistryBinding(
   cwd: string | undefined,
   /** Whose review this is. The registry ignores a post from a chat holding no lease. */
   chatId: string,
+  /**
+   * The reviewer this project reviews AS, when it has one.
+   *
+   * The login lives here rather than in the MCP layer because this is where the
+   * reviewer identity is already resolved. It is what turns "GitHub refused some
+   * reviewer" into "Dispatch's reviewer will not run on this PR" — a request
+   * that fails for a human on the reviewers list is a different, much smaller
+   * problem, and recording it as a reviewer fault would cry wolf.
+   */
+  reviewerLogin: string | undefined,
 ): ManagerMcpPrRegistry {
   const repoFor = makeRepoResolver(github, cwd);
   // Every method degrades to null rather than throwing: a card is a nicety, and
@@ -695,6 +707,17 @@ function makePrRegistryBinding(
     noteWatched: async (n, repo) => {
       const r = await repoFor(repo);
       if (r) await registry.noteWatched(r, n);
+    },
+    noteReviewRequestError: async (n, repo, failed) => {
+      const r = await repoFor(repo);
+      if (!r) return;
+      const login = reviewerLogin?.toLowerCase();
+      const mine = login
+        ? failed.find((f) => f.reviewer.toLowerCase() === login)
+        : undefined;
+      // Undefined CLEARS. A call that reports no refusal for our reviewer is a
+      // request that worked, which is exactly when a recorded one goes stale.
+      await registry.noteReviewRequestError(r, n, mine?.error);
     },
     notePostedReview: async (n, repo, by) => {
       const r = await repoFor(repo);
@@ -4937,7 +4960,13 @@ export class SessionBroker {
         // The PR catalog, so every PR tool can freeze a card into its result.
         prRegistry:
           github && this.prRegistry
-            ? makePrRegistryBinding(this.prRegistry, github, cwd, session.chatId)
+            ? makePrRegistryBinding(
+                this.prRegistry,
+                github,
+                cwd,
+                session.chatId,
+                reviewer?.policy.login,
+              )
             : undefined,
         github: github
           ? makeGithubBinding(
