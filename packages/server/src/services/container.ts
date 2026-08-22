@@ -476,6 +476,7 @@ export function createServices(
       return toPrSnapshot(await prRegistry.refresh(row.key));
     },
     snapshotByThread: async (threadId) => toPrSnapshot(await prRegistry.findByThread(threadId)),
+    reviewAgent: (repo, number) => prRegistry.reviewAgent(repo, number),
     requestReviewAgent: (repo, number, by) => prRegistry.requestReviewAgent(repo, number, by),
     notePostedReview: (repo, number, by) => prRegistry.notePostedReview(repo, number, by),
     noteReviewRequestError: (repo, number, error) =>

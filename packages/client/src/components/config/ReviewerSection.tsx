@@ -90,10 +90,24 @@ const IDENTITIES: IdentityOption[] = [
   },
 ];
 
-const ROUND_OPTIONS = [2, 3, 4, 6, 8, 12].map((n) => ({
-  value: String(n),
-  label: `${n} rounds`,
-}));
+/**
+ * The round cap, as offered here.
+ *
+ * `1` is one-and-done — the reviewer reads the PR once and never comes back,
+ * however many times the author pushes. `WorkflowReviewAgentConfigSchema` has
+ * always allowed it (`min(1)`), so a hand-written manifest could ask for it and
+ * this picker could not, which is the kind of gap nobody finds until they go
+ * looking for it in the file.
+ *
+ * Spelled out rather than counted, because `1 rounds` is wrong and `1 round`
+ * still doesn't say what it costs you: at this setting a push does NOT buy
+ * another look — the cap is checked before the "new code re-arms the reviewer"
+ * rule, so it stops the loop outright.
+ */
+const ROUND_OPTIONS = [
+  { value: "1", label: "1 round · no re-review" },
+  ...[2, 3, 4, 6, 8, 12].map((n) => ({ value: String(n), label: `${n} rounds` })),
+];
 
 export function ReviewerSection({
   value,

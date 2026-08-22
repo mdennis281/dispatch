@@ -53,6 +53,7 @@ import { actions } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate, relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
+import { foldedReviewsLabel } from "./reviewLabel.js";
 import { DeleteChatDialog } from "../chat/DeleteChatDialog.js";
 import { useChatRename } from "../chat/useChatRename.js";
 import { BranchWorktreePicker } from "../panels/BranchWorktreePicker.js";
@@ -426,6 +427,10 @@ function ChatRow({
       ? "working"
       : "muted";
   const reviewCount = `${reviews.length} review${reviews.length === 1 ? "" : "s"}`;
+  // Which PRs those reviews belong to, for the two places that stand in for the
+  // expanded rows. The runtime tooltip keeps the plain count — it is about where
+  // the time went, and a per-PR breakdown there is noise.
+  const reviewsByPr = foldedReviewsLabel(reviews);
 
   return (
     // `overflow-hidden` is what lets the action tray start fully off the row and
@@ -553,7 +558,7 @@ function ChatRow({
             >
               {reviews.length > 0 && !expanded && (
                 <span
-                  title={reviewCount}
+                  title={reviewsByPr}
                   className={cn(
                     "flex items-center gap-0.5 text-2xs tabular-nums [&_svg]:size-3",
                     toneText(reviewTone),
@@ -579,7 +584,7 @@ function ChatRow({
                 size="sm"
                 active={expanded}
                 aria-expanded={expanded}
-                tip={expanded ? `Hide ${reviewCount}` : `Show ${reviewCount}`}
+                tip={expanded ? `Hide ${reviewsByPr}` : `Show ${reviewsByPr}`}
                 onClick={onToggleReviews}
               >
                 <MessagesSquare />

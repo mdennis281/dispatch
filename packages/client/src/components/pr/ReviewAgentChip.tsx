@@ -95,14 +95,18 @@ export function ReviewAgentChip({
       label = v.posted
         ? `reviewed${rounds(v)}${found}${last}`
         : `reviews spent${rounds(v)}`;
+      // What a spent cap actually means: `claimReviewAgent` checks the round
+      // count BEFORE the "new code re-arms the reviewer" rule, so a push buys
+      // nothing here and neither does a re-request. Saying otherwise sent
+      // authors back round a loop that had already stopped.
       title = !v.posted
         ? `Every review round is spent (${v.round} of ${v.maxRounds}) and none of them ` +
-          "posted anything. Push a commit or re-request to get another."
+          "posted anything. Nothing will review this PR again unless the cap is raised."
         : `Dispatch reviewed this ${when}` +
           (blocked ? ", asking for changes" : "") +
           (v.phase === "spent"
-            ? `. That was the last round (${v.round} of ${v.maxRounds}) — push a commit ` +
-              "or re-request to get another."
+            ? `. That was the last round (${v.round} of ${v.maxRounds}) — a push won't buy ` +
+              "another, only raising the cap will."
             : "");
       break;
     }

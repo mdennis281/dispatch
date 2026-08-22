@@ -6,6 +6,7 @@ import type {
   ReviewThread,
   WsServerEvent,
   ProjectMemory,
+  PrReviewAgentState,
   WorkflowExemption,
 } from "@dispatch/shared";
 import { EventBus } from "../../bus.js";
@@ -24,11 +25,13 @@ import {
   PR_POLL_INTERVAL_MS,
   NO_CHECKS_GRACE_MS,
   REVIEW_QUEUE_GRACE_MS,
+  REVIEW_ROUND_GRACE_MS,
   type ManagerMcpBroker,
   type ManagerMcpMemory,
   type ManagerMcpGitHub,
   type ManagerMcpPrApproval,
   type ManagerMcpPrCreate,
+  type ManagerMcpPrRegistry,
   type PrPollResult,
   type PrWatchSnapshot,
   type PrReadiness,
@@ -702,6 +705,256 @@ describe("manager-mcp — watch_pr", () => {
     // A full fresh window of continuous emptiness — now it's earned.
     await vi.advanceTimersByTimeAsync(REVIEW_QUEUE_GRACE_MS);
     expect(resultText(await p)).toContain("review-stalled");
+  });
+
+  /* ------------------------------------------- the reviewer's own round cap */
+
+  // The failure these exist for: Dispatch's reviewer stops on a per-PR round
+  // cap, and that stop is invisible from GitHub. On a dedicated-account project
+  // the reviewer never leaves the queue (it never submits), so every GitHub-side
+  // signal reads "a review is coming" while the sweep has permanently stopped
+  // spawning — and the author burns the full 1800s window, twice, on PRs #141
+  // and #143.
+  describe("spent round cap", () => {
+    /** rounds/maxRounds spent, with a review that actually landed. */
+    const SPENT_POSTED: PrReviewAgentState = {
+      rounds: 2,
+      maxRounds: 2,
+      chatId: "reviewer-1",
+      reviewedAt: 1_000,
+      postedAt: 2_000,
+      findings: 3,
+    };
+
+    /**
+     * A catalog that answers only the reviewer question — the one thing
+     * `watch_pr` reads off a stored row rather than off GitHub. Every other
+     * method degrades to null, which is the interface's documented contract.
+     */
+    function fakeRegistry(state: PrReviewAgentState | null): ManagerMcpPrRegistry {
+      return {
+        snapshot: async () => null,
+        refresh: async () => null,
+        noteWatched: async () => {},
+        refreshByThread: async () => null,
+        snapshotByThread: async () => null,
+        reviewAgent: async () => state,
+        noteReviewRequestError: async () => {},
+        notePostedReview: async () => {},
+      };
+    }
+
+    it("returns instead of blocking once the cap is spent, and does NOT send the agent to request_review", async () => {
+      // A still-running check keeps every other signal quiet, so the spent cap
+      // is the only thing that can end this watch — exactly the shape of the
+      // real dead wait.
+      const gh = fakeGitHub([{ merge: OPEN, checks: [RUNNING_BUILD], threads: [] }]);
+      const { watchPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({ "reviewer-1": "done" }),
+        github: gh,
+        prRegistry: fakeRegistry(SPENT_POSTED),
+      });
+
+      const res = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+
+      expect(resultText(res)).toContain('"reviewsSpent":true');
+      expect(resultText(res)).toContain('"type":"reviews-spent"');
+      expect(resultText(res)).toContain("spent all 2 of 2 rounds");
+      // CI is still running, so there is something real left to wait for.
+      expect(resultText(res)).toContain('"landableOnChecks":false');
+      expect(resultText(res)).toContain("Wait on CI instead");
+      // The whole point of the separate signal: `request_review` is the one
+      // action that cannot help, and the advice must say so rather than send
+      // the agent back round the loop that hung.
+      expect(resultText(res)).toContain("cannot bring another one");
+      expect(resultText(res)).not.toContain("put a reviewer back on the hook");
+    });
+
+    it("calls the PR landable on checks alone when CI is green and no thread is open", async () => {
+      const gh = fakeGitHub([{ merge: OPEN, checks: [PASS_BUILD, PASS_LINT], threads: [] }]);
+      const { watchPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({ "reviewer-1": "done" }),
+        github: gh,
+        prRegistry: fakeRegistry(SPENT_POSTED),
+      });
+
+      const res = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+
+      expect(resultText(res)).toContain('"landableOnChecks":true');
+      expect(resultText(res)).toContain("landable on checks alone");
+      expect(resultText(res)).toContain("approve_pr");
+      // Landing stays approve_pr's job, and its own refusals stay the human's
+      // to waive — the tool must not hint at an override.
+      expect(resultText(res)).not.toContain("allowNoReview");
+    });
+
+    it("keeps answering the landable state rather than blocking on a re-call", async () => {
+      const gh = fakeGitHub([{ merge: OPEN, checks: [PASS_BUILD], threads: [] }]);
+      const { watchPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({ "reviewer-1": "done" }),
+        github: gh,
+        prRegistry: fakeRegistry(SPENT_POSTED),
+      });
+
+      await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+
+      // Green is deduped and no round can spawn, so with a once-ever flag this
+      // second call would sit for the full window with NOTHING that could ever
+      // end it. That is the bug in its purest form.
+      const second = await watchPr.handler(
+        { number: 83, repo: undefined, timeoutSeconds: 1800 },
+        {},
+      );
+      expect(resultText(second)).toContain('"landableOnChecks":true');
+      expect(resultText(second)).not.toContain('"timedOut":true');
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("says the cap is spent even when no round ever posted anything", async () => {
+      // The normal case on this repo: the reviewer credential 403s on post, so
+      // rounds run, spend the cap, and leave `postedAt` unset forever. Nothing
+      // more is coming and the row cannot say so on its own.
+      const gh = fakeGitHub([{ merge: OPEN, checks: [RUNNING_BUILD], threads: [] }]);
+      const { watchPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({ "reviewer-1": "done" }),
+        github: gh,
+        prRegistry: fakeRegistry({
+          rounds: 2,
+          maxRounds: 2,
+          chatId: "reviewer-1",
+          reviewedAt: Date.now(),
+        }),
+      });
+
+      const res = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+
+      expect(resultText(res)).toContain('"reviewsSpent":true');
+      expect(resultText(res)).toContain("none of them posted a review");
+      expect(resultText(res)).toContain('"posted":false');
+    });
+
+    it("keeps waiting while the final round's chat is still working", async () => {
+      // Claimed and unposted with a LIVE reviewer chat is a review being
+      // written right now. Calling that "no review is coming" would race it.
+      const gh = fakeGitHub([{ merge: OPEN, checks: [PASS_BUILD], threads: [] }]);
+      const { watchPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({ "reviewer-1": "running" }),
+        github: gh,
+        prRegistry: fakeRegistry({
+          rounds: 2,
+          maxRounds: 2,
+          chatId: "reviewer-1",
+          reviewedAt: Date.now(),
+        }),
+      });
+
+      const first = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+      expect(resultText(first)).toContain("ci-passed"); // green still reports
+      expect(resultText(first)).not.toContain("reviews-spent");
+
+      const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 30 }, {});
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(resultText(await p)).toContain('"timedOut":true');
+    });
+
+    it("gives a round whose chat it cannot find the spawn window, then calls it over", async () => {
+      // The lease is taken before the reviewer chat exists, so an unknown chat
+      // is equally "spawning" and "long gone". Only the window separates them.
+      const gh = fakeGitHub([{ merge: OPEN, checks: [RUNNING_BUILD], threads: [] }]);
+      const { watchPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({}),
+        github: gh,
+        prRegistry: fakeRegistry({ rounds: 1, maxRounds: 1, reviewedAt: Date.now() }),
+      });
+
+      const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+      await vi.advanceTimersByTimeAsync(PR_POLL_INTERVAL_MS);
+      expect(vi.getTimerCount()).toBeGreaterThan(0); // still inside the window
+
+      await vi.advanceTimersByTimeAsync(REVIEW_ROUND_GRACE_MS);
+      expect(resultText(await p)).toContain('"reviewsSpent":true');
+    });
+
+    it("supersedes the stalled-queue advice a call LATER, when the cap is no longer news", async () => {
+      const gh = fakeGitHub([
+        {
+          merge: OPEN,
+          checks: [RUNNING_BUILD],
+          threads: [],
+          review: { requested: [], reported: [{ author: "dispatch-review", state: "COMMENTED" }] },
+        },
+      ]);
+      const { watchPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({ "reviewer-1": "done" }),
+        github: gh,
+        prRegistry: fakeRegistry(SPENT_POSTED),
+      });
+
+      // Call one returns on the cap immediately — well inside the stall's grace
+      // window, so the two signals arrive on DIFFERENT calls in practice.
+      expect(
+        resultText(await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {})),
+      ).toContain('"type":"reviews-spent"');
+
+      const p = watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+      await vi.advanceTimersByTimeAsync(REVIEW_QUEUE_GRACE_MS);
+      const res = await p;
+
+      // The cap is deduped away as news, but it is still TRUE…
+      expect(resultText(res)).toContain('"reviewStalled":true');
+      expect(resultText(res)).toContain('"reviewsSpent":true');
+      // …and only one action survives. Telling the agent to re-request here is
+      // exactly how it ends up watching a queue entry the sweep can never claim.
+      expect(resultText(res)).not.toContain("put a reviewer back on the hook");
+      expect(resultText(res)).toContain("cannot bring another one");
+    });
+
+    it("stays quiet while another round can still spawn", async () => {
+      const gh = fakeGitHub([{ merge: OPEN, checks: [PASS_BUILD], threads: [] }]);
+      const { watchPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({ "reviewer-1": "done" }),
+        github: gh,
+        prRegistry: fakeRegistry({ ...SPENT_POSTED, rounds: 1, maxRounds: 4 }),
+      });
+
+      const res = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+
+      expect(resultText(res)).toContain('"reviewsSpent":false');
+      expect(resultText(res)).not.toContain("reviews-spent");
+    });
+
+    it("says nothing when the row never recorded a cap", async () => {
+      // Rows written before `maxRounds` was mirrored onto them. Inventing a
+      // denominator would report a permanent stop nobody can see.
+      const gh = fakeGitHub([{ merge: OPEN, checks: [PASS_BUILD], threads: [] }]);
+      const { watchPr } = createManagerTools({
+        chatId: "c1",
+        bus,
+        broker: fakeBroker({ "reviewer-1": "done" }),
+        github: gh,
+        prRegistry: fakeRegistry({ rounds: 9, chatId: "reviewer-1", postedAt: 2_000 }),
+      });
+
+      const res = await watchPr.handler({ number: 83, repo: undefined, timeoutSeconds: 1800 }, {});
+
+      expect(resultText(res)).toContain('"reviewsSpent":false');
+    });
   });
 
   it("prints each review comment's thread id so resolve_thread is one call away", async () => {
