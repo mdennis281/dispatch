@@ -234,6 +234,28 @@ self.addEventListener("fetch", (event) => {
  */
 const chatTag = (chatId) => (chatId ? `chat:${chatId}` : "dispatch");
 
+/**
+ * Is this device subscribed through Apple's push service?
+ *
+ * Compares the parsed HOSTNAME, not a substring: `https://evil.test/?x=web.
+ * push.apple.com` contains the name without being Apple, and the answer here
+ * decides whether it is safe to display nothing. Mirrors `isAppleEndpoint` in
+ * services/push.ts.
+ *
+ * Fails SAFE — an endpoint it cannot read is treated as Apple. Being wrong that
+ * way shows one unnecessary notification on a desktop; being wrong the other way
+ * costs an iPhone its subscription and stops notifications for days.
+ */
+async function isApplePushDevice() {
+  try {
+    const sub = await self.registration.pushManager.getSubscription();
+    if (!sub) return true;
+    return new URL(sub.endpoint).hostname === "web.push.apple.com";
+  } catch {
+    return true;
+  }
+}
+
 /** Best-effort app-icon badge. Absent on Linux Chrome and in dev; never fatal. */
 async function setBadge(count) {
   try {
@@ -273,8 +295,7 @@ async function renderChatNotification(data) {
     // push that displays nothing is what makes iOS revoke the subscription. This
     // re-checks it HERE anyway: the cost of being wrong is that notifications
     // stop working days later with no error anywhere, and the check is one await.
-    const sub = await self.registration.pushManager.getSubscription().catch(() => null);
-    if (!sub || !sub.endpoint.includes("web.push.apple.com")) return;
+    if (!(await isApplePushDevice())) return;
     await self.registration.showNotification("Dispatch", {
       body: "That's been handled.",
       icon: "/icons/icon-192.png",

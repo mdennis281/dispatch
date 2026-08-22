@@ -172,6 +172,23 @@ describe("sw.js push handler", () => {
     expect(ios.tray()[0]!.title).toBe("Dispatch");
   });
 
+  it("is not fooled by a host that merely contains Apple's name", async () => {
+    // A substring test would call this Apple and leave a stray notification
+    // behind on a desktop instead of withdrawing (CodeQL js/incomplete-url-
+    // substring-sanitization).
+    const lookalike = loadWorker({ endpoint: "https://evil.test/?x=web.push.apple.com" });
+    await lookalike.push(payload({ outstanding: 1 }));
+    await lookalike.push(payload({ outstanding: 0 }));
+    expect(lookalike.tray()).toHaveLength(0);
+  });
+
+  it("treats an unreadable endpoint as Apple rather than risk a silent push", async () => {
+    const unknown = loadWorker({ endpoint: "not a url" });
+    await unknown.push(payload({ outstanding: 1 }));
+    await unknown.push(payload({ outstanding: 0 }));
+    expect(unknown.tray()).toHaveLength(1);
+  });
+
   it("always shows something, even for an unreadable payload", async () => {
     const handler = loadWorker();
     await handler.push(null);
