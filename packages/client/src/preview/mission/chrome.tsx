@@ -58,9 +58,13 @@ export interface Crumb {
  * Deliberately styled as CONTROLS rather than as a caption. The first version
  * was muted 11px text with a faint chevron, which read as a title telling you
  * where you were — so the way back was there, but nothing about it invited a
- * click. Ancestor crumbs are now bordered, hoverable and full-contrast; only
- * the current level is plain text, because it is the one thing that is not a
+ * click. Ancestor crumbs are bordered, hoverable and full-contrast; only the
+ * current level is plain text, because it is the one thing that is not a
  * destination.
+ *
+ * The current crumb is deliberately UNDEREMPHASISED. This strip sits under a
+ * page title that already names where you are in full, so a bold restatement
+ * here would make the loudest thing in the nav the one place you cannot go.
  */
 export function Crumbs({ crumbs, onBack }: { crumbs: Crumb[]; onBack?: () => void }) {
   return (
@@ -89,7 +93,7 @@ export function Crumbs({ crumbs, onBack }: { crumbs: Crumb[]; onBack?: () => voi
               {c.label}
             </button>
           ) : (
-            <span className="truncate text-sm font-semibold text-primary">{c.label}</span>
+            <span className="truncate px-1 text-xs font-medium text-secondary">{c.label}</span>
           )}
         </span>
       ))}

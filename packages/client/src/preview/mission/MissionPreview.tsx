@@ -25,7 +25,16 @@
  * ways to reach anything and a rail that never agreed with the content.
  */
 import { useCallback, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Info, PanelRightClose, PanelRightOpen } from "lucide-react";
+import {
+  AlertTriangle,
+  HardHat,
+  Info,
+  Layers,
+  ListChecks,
+  PanelRightClose,
+  PanelRightOpen,
+  Target,
+} from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import { Chip } from "../../components/ui/index.js";
 import { MOCK_MISSION } from "./mock.js";
@@ -33,7 +42,7 @@ import { MOCK_MANAGER_CHAT, MOCK_RUN, effectiveTasks } from "./mockRun.js";
 import { validate, type Plan } from "./derive.js";
 import type { MissionPolicy, MissionSpec, TeamId } from "./types.js";
 import { Crumbs, RunStatusPill } from "./chrome.js";
-import { crumbsFor, parentOf, type Nav, type Route } from "./nav.js";
+import { crumbsFor, parentOf, titleFor, type Nav, type Route } from "./nav.js";
 import { defaultOpen, type SectionState } from "./sections.js";
 import { MissionScreen } from "./MissionScreen.js";
 import { PhaseScreen } from "./PhaseScreen.js";
@@ -109,35 +118,41 @@ export function MissionPreview() {
   const issues = validate(plan);
   const errors = issues.filter((i) => i.severity === "error");
   const run = MOCK_RUN;
+  const title = titleFor(plan, route);
 
   return (
     <div className="flex h-dvh w-full bg-app text-primary">
       <Sidebar plan={plan} nav={nav} sections={sections} />
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* -------------------------------------------------------- header */}
-        <div className="flex h-11 shrink-0 items-center gap-2 px-3 cm-hairline-b">
-          <Crumbs
-            crumbs={crumbsFor(plan, nav)}
-            onBack={(() => {
-              const up = parentOf(plan, route);
-              return up ? () => setRoute(up) : undefined;
-            })()}
-          />
-          <span className="shrink-0 text-faint">·</span>
-          <RunStatusPill status={run.status} />
-          <span className="shrink-0 text-2xs text-faint">
-            {run.actors.filter((a) => a.status !== "retired").length} live
+        {/* ---------------------------------------------------------- title */}
+        {/* Two bands, because they answer different questions and were fighting
+            for one row: this one is WHAT you are looking at plus the run's
+            global state, the strip below it is HOW TO MOVE. Folding them
+            together is what pushed the breadcrumb into truncation. */}
+        <div className="flex h-11 shrink-0 items-center gap-2 px-3">
+          <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-accent-2-ghost text-accent-2-hi">
+            <TitleIcon at={route.at} />
           </span>
+          <h1 className="flex min-w-0 items-baseline gap-1.5">
+            <span className="shrink-0 text-sm text-muted">{title.kind}:</span>
+            {title.ordinal !== undefined && (
+              <span className="cm-mono shrink-0 text-sm text-faint">{title.ordinal}.</span>
+            )}
+            <span className="truncate text-sm font-semibold text-primary">{title.name}</span>
+          </h1>
 
           <div className="flex-1" />
 
+          <RunStatusPill status={run.status} />
+          <span className="shrink-0 text-2xs text-muted">
+            {run.actors.filter((a) => a.status !== "retired").length} live
+          </span>
           {dirty && <Chip tone="accent">settings modified</Chip>}
-
           <button
             type="button"
             onClick={() => setIssuesOpen((v) => !v)}
-            className="ml-1 shrink-0"
+            className="shrink-0"
             title="Validation detail"
           >
             {errors.length > 0 ? (
@@ -153,7 +168,6 @@ export function MissionPreview() {
               <Chip tone="warn">{issues.length - errors.length} advisory</Chip>
             </button>
           )}
-
           <button
             type="button"
             onClick={() => setChatOpen((v) => !v)}
@@ -166,6 +180,17 @@ export function MissionPreview() {
               <PanelRightOpen className="size-3.5" />
             )}
           </button>
+        </div>
+
+        {/* ------------------------------------------------------------ nav */}
+        <div className="flex h-9 shrink-0 items-center gap-2 bg-surface px-3 cm-hairline-b">
+          <Crumbs
+            crumbs={crumbsFor(plan, nav)}
+            onBack={(() => {
+              const up = parentOf(plan, route);
+              return up ? () => setRoute(up) : undefined;
+            })()}
+          />
         </div>
 
         {issuesOpen && issues.length > 0 && <IssueBanner issues={issues} />}
@@ -221,4 +246,12 @@ function IssueBanner({ issues }: { issues: ReturnType<typeof validate> }) {
       </div>
     </div>
   );
+}
+
+/** One glyph per level, so the title bar is recognisable before it is read. */
+function TitleIcon({ at }: { at: Route["at"] }) {
+  if (at === "mission") return <Target className="size-3.5" />;
+  if (at === "phase") return <Layers className="size-3.5" />;
+  if (at === "task") return <ListChecks className="size-3.5" />;
+  return <HardHat className="size-3.5" />;
 }

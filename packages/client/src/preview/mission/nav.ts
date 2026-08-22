@@ -95,3 +95,28 @@ export function parentOf(plan: Plan, route: Route): Route | undefined {
   }
   return { at: "mission" };
 }
+
+/** The page title: what you are looking at, as opposed to how you got here. */
+export interface PageTitle {
+  /** "Phase", "Task" — the KIND, in muted lead-in position. */
+  kind: string;
+  /** The thing itself. */
+  name: string;
+  /** Ordinal for a phase, so "3." survives without bloating the name. */
+  ordinal?: number;
+}
+
+export function titleFor(plan: Plan, route: Route): PageTitle {
+  const { spec, run } = plan;
+  if (route.at === "mission") return { kind: "Mission", name: spec.title };
+  if (route.at === "phase") {
+    const p = spec.phases.find((x) => x.id === route.phaseId);
+    return { kind: "Phase", name: p?.title ?? route.phaseId, ordinal: p?.order };
+  }
+  if (route.at === "task") {
+    const t = plan.tasks.find((x) => x.id === route.taskId);
+    return { kind: "Task", name: t?.title ?? route.taskId };
+  }
+  const a = run?.actors.find((x) => x.id === route.actorId);
+  return { kind: "Agent", name: a?.name ?? route.actorId };
+}
