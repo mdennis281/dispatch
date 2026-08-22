@@ -707,6 +707,35 @@
   }
 }
 
+/*
+ * The selected row's rail, arriving with some weight behind it.
+ *
+ * A bar that simply appears says "this is selected"; one that slides in from
+ * the edge, overshoots its width and settles says the SELECTION moved, which is
+ * the thing you actually want to follow when you click down a list. The
+ * overshoot is the whole point — it reads as velocity the bar has to recover
+ * from, not as a size change.
+ *
+ * `scaleX` from a left origin rather than an animated `width`: transform is
+ * composited, so a hundred mounted rails cost the compositor and not layout.
+ * Leaving is a plain transition back to `scale-x-0` (see `Sidebar`), so the
+ * rail retracts on the row you left while this plays on the row you picked.
+ */
+@keyframes cm-rail-in {
+  0% {
+    transform: translateX(-3px) scaleX(0.2);
+    opacity: 0.4;
+  }
+  55% {
+    transform: translateX(0) scaleX(2.6);
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(0) scaleX(1);
+    opacity: 1;
+  }
+}
+
 @keyframes cm-sheen {
   0% {
     background-position: -160% 0;
@@ -727,6 +756,20 @@
 }
 .cm-anim-spin {
   animation: cm-spin 0.7s linear infinite;
+}
+.cm-rail-in {
+  animation: cm-rail-in 360ms cubic-bezier(0.22, 0.9, 0.24, 1) both;
+  transform-origin: left center;
+}
+
+/*
+ * Motion here is decoration on a state that is ALSO carried by colour, so it is
+ * the first thing to go. The rail still appears — it just stops travelling.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .cm-rail-in {
+    animation: none;
+  }
 }
 
 .cm-typing-dot {
