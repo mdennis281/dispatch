@@ -134,6 +134,11 @@ export function registerMetricsRoutes(app: FastifyInstance): void {
     return metrics.recentSpans(parsed.data);
   });
 
+  // GET, unlike every read above: it takes no query at all. The whole ledger,
+  // grouped by chat — see `MetricsService.chatRuntime` for why it isn't
+  // `spans/totals` with a `groupBy`.
+  app.get("/api/metrics/chat-runtime", async () => metrics.chatRuntime());
+
   app.get("/api/metrics/stats", async () => metrics.stats());
 
   app.post<{ Body: unknown }>("/api/metrics/prune", async (req, reply) => {

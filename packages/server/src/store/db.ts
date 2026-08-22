@@ -229,6 +229,18 @@ const MIGRATIONS: ReadonlyArray<string> = [
   -- this keeps that from scanning a table of millions of closed ones.
   CREATE INDEX metric_span_open    ON metric_span(start_ts) WHERE end_ts IS NULL;
   `,
+
+  // 4 — the per-chat runtime rollup's covering index.
+  //
+  // `MetricsService.chatRuntime` sums every span in the table grouped by chat,
+  // for the figure on each sidebar row. `metric_span_actor` orders by chat but
+  // stops at `(chat_id, run_id, start_ts)`, so the sum still had to fetch each
+  // row for its `end_ts` — a table lookup per span, on a poll, over the whole
+  // ledger. With `end_ts` in the index the query is answered from the index
+  // alone and never touches the table.
+  `
+  CREATE INDEX metric_span_chat ON metric_span(chat_id, end_ts, start_ts);
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

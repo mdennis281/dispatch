@@ -689,3 +689,64 @@ describe("MetricsService — span facets and retention", () => {
     expect(metrics.stats().spans).toBe(2);
   });
 });
+
+describe("MetricsService — chatRuntime (the sidebar's per-row figure)", () => {
+  it("sums a chat's main loop and its subagents into one number", () => {
+    // A subagent's spans carry its PARENT's chatId — the actor is (chatId,
+    // runId) — so "all the agents under this chat" needs no join, and the two
+    // parallel subagents below really are 2 minutes of agent time between them.
+    metrics.openSpan(span({ startTs: NOW - 10 * MIN, endTs: NOW - 9 * MIN, toolUseId: "main" }));
+    metrics.openSpan(
+      span({ startTs: NOW - 8 * MIN, endTs: NOW - 7 * MIN, runId: "r1", toolUseId: "s1" }),
+    );
+    metrics.openSpan(
+      span({ startTs: NOW - 8 * MIN, endTs: NOW - 7 * MIN, runId: "r2", toolUseId: "s2" }),
+    );
+
+    expect(metrics.chatRuntime().byChat).toEqual({ c1: 3 * MIN });
+  });
+
+  it("keeps chats apart and reports every one of them", () => {
+    // The reason this isn't `spanTotals({groupBy:"chatId"})`: that one caps at
+    // 50 groups and folds the rest into `__other__`, which cannot label a
+    // sidebar. Every chat gets its own key here, however many there are.
+    for (let i = 0; i < 60; i++) {
+      metrics.openSpan(
+        span({ chatId: `c${i}`, startTs: NOW - MIN, endTs: NOW - MIN + 1_000, toolUseId: `t${i}` }),
+      );
+    }
+    const { byChat } = metrics.chatRuntime();
+
+    expect(Object.keys(byChat)).toHaveLength(60);
+    expect(byChat.c59).toBe(1_000);
+  });
+
+  it("counts a span that is still running, up to the instant it measured", () => {
+    metrics.openSpan(span({ startTs: NOW - 4 * MIN }));
+    const { byChat, at } = metrics.chatRuntime();
+
+    expect(at).toBe(NOW);
+    expect(byChat.c1).toBe(4 * MIN);
+  });
+
+  it("has no window — a chat that last ran months ago still reports", () => {
+    // The figure sits beside "3d ago" on a row whose work is long finished. The
+    // 7-day default every other span read uses would quietly show it as absent.
+    metrics.openSpan(span({ startTs: NOW - 90 * DAY, endTs: NOW - 90 * DAY + 5 * MIN }));
+
+    expect(metrics.chatRuntime().byChat).toEqual({ c1: 5 * MIN });
+  });
+
+  it("omits a chat it has no reading for rather than claiming zero", () => {
+    metrics.openSpan(span({ startTs: NOW - MIN, endTs: NOW - MIN, toolUseId: "instant" }));
+
+    expect(metrics.chatRuntime().byChat).toEqual({});
+  });
+
+  it("flushes buffered spans first, so a just-finished turn is already counted", () => {
+    metrics.openSpan(span({ startTs: NOW - 2 * MIN, endTs: NOW - MIN }));
+    expect(metrics.stats().spansBuffered).toBe(1);
+
+    expect(metrics.chatRuntime().byChat.c1).toBe(MIN);
+  });
+});

@@ -41,6 +41,7 @@ import type {
   GitStash,
   ProjectConfigResult,
   UsageSnapshot,
+  ChatRuntimeResponse,
   MetricDimension,
   MetricEvent,
   MetricFacetsResponse,
@@ -1024,6 +1025,8 @@ export const api = {
     recent: (scope: { from?: number; to?: number; filter?: MetricFilter; limit?: number }) =>
       post<MetricEvent[]>("/api/metrics/recent", scope),
     stats: () => get<{ rows: number; buffered: number; dropped: number }>("/api/metrics/stats"),
+    /** Total runtime per chat, all time — one small object for every chat. */
+    chatRuntime: () => get<ChatRuntimeResponse>("/api/metrics/chat-runtime"),
     prune: (before: number) => post<{ deleted: number }>("/api/metrics/prune", { before }),
 
     /* The RUNTIME half — the same window, answered in milliseconds.
