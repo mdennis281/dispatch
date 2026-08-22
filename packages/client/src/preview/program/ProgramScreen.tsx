@@ -5,22 +5,19 @@
  * acceptance criteria (not the tasks' own, which are a different and much
  * larger number and would make every card look the same). Everything deeper is
  * a drill-in, not a tab.
+ *
+ * Every block is a {@link Section}, indexed and collapsible from the left rail,
+ * because the interesting block differs by what you came here to do: mid-run
+ * you want Phases, while tuning you want Settings and nothing else.
  */
-import { Boxes, CheckCircle2, Layers, ShieldCheck, TriangleAlert, Users } from "lucide-react";
+import { Boxes, TriangleAlert } from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import { Chip } from "../../components/ui/index.js";
-import {
-  ActorStatusPill,
-  Card,
-  ContextBar,
-  Crumbs,
-  Empty,
-  Metric,
-  SectionTitle,
-  Tunable,
-} from "./chrome.js";
+import { ActorStatusPill, Card, ContextBar, Empty, Metric, Section } from "./chrome.js";
 import { gatePreviews, leadForTeam, liveHires, phaseCounts, teamColor, type Plan } from "./derive.js";
 import type { Nav } from "./nav.js";
+import type { SectionState } from "./sections.js";
+import { SettingsSection, type SettingsDraft } from "./SettingsSection.js";
 
 const PHASE_TONE = {
   pending: "text-faint",
@@ -31,39 +28,65 @@ const PHASE_TONE = {
   blocked: "text-danger",
 } as const;
 
-export function ProgramScreen({ plan, nav }: { plan: Plan; nav: Nav }) {
+export function ProgramScreen({
+  plan,
+  nav,
+  sections,
+  draft,
+  dirty,
+  onDraft,
+  onReset,
+}: {
+  plan: Plan;
+  nav: Nav;
+  sections: SectionState;
+  draft: SettingsDraft;
+  dirty: boolean;
+  onDraft: (d: SettingsDraft) => void;
+  onReset: () => void;
+}) {
   const { spec, run } = plan;
   const threshold = spec.policy.leadRecycle.contextThreshold;
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
-      <div className="px-4 pb-3 pt-3">
-        <Crumbs crumbs={[{ label: spec.title }]} />
-        <p className="mt-2 max-w-5xl text-xs leading-relaxed text-secondary">{spec.objective}</p>
-        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-          <Tunable label="concurrent" value={`≤${spec.policy.maxParallelTasks}`} />
-          <Tunable label="branching" value={spec.policy.branching} />
-          <Tunable label="recycle at" value={`${Math.round(threshold * 100)}%`} />
-          <Tunable label="QA rounds" value={`≤${spec.policy.maxRemediationRounds}`} />
-          <Tunable label="consent" value={spec.policy.spawnConsent} />
-          <Chip tone="warn" icon={<ShieldCheck />}>
-            PR override: {spec.policy.prOverride}
-          </Chip>
-        </div>
-      </div>
+      <Section
+        id="objective"
+        title="Objective"
+        state={sections}
+        hint={`${spec.objective.length} / 500 chars`}
+      >
+        <p className="max-w-5xl text-xs leading-relaxed text-secondary">{spec.objective}</p>
+      </Section>
 
-      {/* ------------------------------------------------------------ phases */}
-      <div className="px-4 pb-5">
-        <SectionTitle icon={<Layers className="size-3.5" />} label="Phases">
-          sequential gates — drill in for waves, tasks and acceptance
-        </SectionTitle>
+      <Section
+        id="settings"
+        title="Settings"
+        state={sections}
+        hint="program owner — live, every view below re-derives"
+        right={dirty ? <Chip tone="accent">modified</Chip> : undefined}
+      >
+        <SettingsSection
+          spec={spec}
+          draft={draft}
+          dirty={dirty}
+          onChange={onDraft}
+          onReset={onReset}
+        />
+      </Section>
+
+      <Section
+        id="phases"
+        title="Phases"
+        state={sections}
+        hint="sequential gates — drill in for waves, tasks and acceptance"
+      >
         <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fill,minmax(19rem,1fr))]">
           {[...spec.phases]
             .sort((a, b) => a.order - b.order)
             .map((p) => {
               const c = phaseCounts(plan, p.id);
-              const live = run?.phases[p.id];
-              const status = live?.status ?? "pending";
+              const status = run?.phases[p.id]?.status ?? "pending";
               const isCurrent = run?.currentPhaseId === p.id;
               return (
                 <Card
@@ -74,7 +97,7 @@ export function ProgramScreen({ plan, nav }: { plan: Plan; nav: Nav }) {
                   <div className="flex items-center gap-1.5">
                     <span
                       className={cn(
-                        "cm-mono flex size-4.5 items-center justify-center rounded text-2xs",
+                        "cm-mono flex size-4 items-center justify-center rounded text-2xs",
                         isCurrent ? "bg-accent text-accent-fg" : "bg-inset text-muted",
                       )}
                     >
@@ -119,9 +142,7 @@ export function ProgramScreen({ plan, nav }: { plan: Plan; nav: Nav }) {
                         />
                       ))}
                     </span>
-                    {c.remediation > 0 && (
-                      <Chip tone="warn">+{c.remediation} from QA</Chip>
-                    )}
+                    {c.remediation > 0 && <Chip tone="warn">+{c.remediation} from QA</Chip>}
                     {!p.qa && (
                       <Chip tone="muted" icon={<TriangleAlert />}>
                         no QA
@@ -133,13 +154,14 @@ export function ProgramScreen({ plan, nav }: { plan: Plan; nav: Nav }) {
               );
             })}
         </div>
-      </div>
+      </Section>
 
-      {/* -------------------------------------------- program acceptance */}
-      <div className="px-4 pb-5">
-        <SectionTitle icon={<CheckCircle2 className="size-3.5" />} label="Program acceptance">
-          the done-agreement for the whole run — signatories derived from which teams build it
-        </SectionTitle>
+      <Section
+        id="acceptance"
+        title="Program acceptance"
+        state={sections}
+        hint="signatories derived from which teams build it"
+      >
         <div className="flex flex-col gap-1">
           {gatePreviews(plan)
             .filter((g) => g.scope === "program")
@@ -172,13 +194,14 @@ export function ProgramScreen({ plan, nav }: { plan: Plan; nav: Nav }) {
               </div>
             ))}
         </div>
-      </div>
+      </Section>
 
-      {/* ------------------------------------------------------------- teams */}
-      <div className="px-4 pb-6">
-        <SectionTitle icon={<Users className="size-3.5" />} label="Teams">
-          leads are permanent for the run; workers are hired per task, from the menu
-        </SectionTitle>
+      <Section
+        id="teams"
+        title="Teams"
+        state={sections}
+        hint="leads are permanent for the run; workers are hired per task, from the menu"
+      >
         <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fill,minmax(18rem,1fr))]">
           {spec.teams.map((team) => {
             const color = teamColor(spec, team.id);
@@ -221,15 +244,15 @@ export function ProgramScreen({ plan, nav }: { plan: Plan; nav: Nav }) {
                 )}
 
                 <div className="mt-2 flex items-center gap-1.5">
-                  <Tunable label="hire budget" value={`${hires.length}/${team.hireBudget}`} />
+                  <span className="text-[10px] leading-4 text-faint">hires</span>
+                  <span className="cm-mono text-2xs text-secondary">
+                    {hires.length}/{team.hireBudget}
+                  </span>
                   <span className="flex flex-1 gap-0.5">
                     {Array.from({ length: team.hireBudget }).map((_, i) => (
                       <span
                         key={i}
-                        className={cn(
-                          "h-1.5 flex-1 rounded-full",
-                          i < hires.length ? "" : "bg-inset",
-                        )}
+                        className={cn("h-1.5 flex-1 rounded-full", i < hires.length ? "" : "bg-inset")}
                         style={i < hires.length ? { background: color } : undefined}
                       />
                     ))}
@@ -279,7 +302,7 @@ export function ProgramScreen({ plan, nav }: { plan: Plan; nav: Nav }) {
             );
           })}
         </div>
-      </div>
+      </Section>
     </div>
   );
 }

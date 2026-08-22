@@ -7,48 +7,40 @@
  * building".
  */
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, GitBranch, Layers, RotateCcw, Terminal, UserCheck } from "lucide-react";
+import { Terminal, UserCheck } from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import { Chip } from "../../components/ui/index.js";
-import {
-  Card,
-  Crumbs,
-  Empty,
-  SectionTitle,
-  TaskStatusPill,
-  Tunable,
-} from "./chrome.js";
-import {
-  gatePreviews,
-  scheduleFor,
-  teamColor,
-  waveGroups,
-  type Plan,
-} from "./derive.js";
+import { Card, Empty, Section, TaskStatusPill } from "./chrome.js";
+import { gatePreviews, scheduleFor, teamColor, waveGroups, type Plan } from "./derive.js";
 import type { Nav } from "./nav.js";
+import type { SectionState } from "./sections.js";
 import type { Task } from "./types.js";
 
-export function PhaseScreen({ plan, phaseId, nav }: { plan: Plan; phaseId: string; nav: Nav }) {
+export function PhaseScreen({
+  plan,
+  phaseId,
+  nav,
+  sections,
+}: {
+  plan: Plan;
+  phaseId: string;
+  nav: Nav;
+  sections: SectionState;
+}) {
   const { spec, run } = plan;
   const phase = spec.phases.find((p) => p.id === phaseId);
   if (!phase) return <div className="p-4 text-xs text-faint">no such phase</div>;
   const live = run?.phases[phaseId];
   const remediations = (run?.remediations ?? []).filter((r) => r.phaseId === phaseId);
+  const counts = { waves: waveGroups(plan, phaseId).length };
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
-      <div className="px-4 pb-3 pt-3">
-        <Crumbs
-          crumbs={[
-            { label: spec.title, onClick: () => nav.go({ at: "program" }) },
-            { label: `${phase.order}. ${phase.title}` },
-          ]}
-        />
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+      <Section id="phase-detail" title="Detail" state={sections} hint={`exit: ${phase.exit}`}>
+        <div className="mb-2 flex flex-wrap items-center gap-1.5">
           <Chip tone={live?.status === "done" ? "success" : "accent"}>
             {live?.status ?? "pending"}
           </Chip>
-          <Chip tone="neutral">exit: {phase.exit}</Chip>
           {phase.qa ? (
             <Chip tone="info">QA on · fresh context each round</Chip>
           ) : (
@@ -59,15 +51,47 @@ export function PhaseScreen({ plan, phaseId, nav }: { plan: Plan; phaseId: strin
               {live?.qaRounds} QA {live?.qaRounds === 1 ? "round" : "rounds"}
             </Chip>
           )}
-          <Tunable label="round cap" value={spec.policy.maxRemediationRounds} />
+          <Chip tone="neutral">round cap {spec.policy.maxRemediationRounds}</Chip>
+          <Chip tone="neutral">{counts.waves} waves</Chip>
         </div>
-        <p className="mt-2 max-w-4xl text-xs leading-relaxed text-secondary">{phase.description}</p>
-      </div>
+        <p className="max-w-4xl text-xs leading-relaxed text-secondary">{phase.description}</p>
+      </Section>
 
-      <PhaseAcceptance plan={plan} phaseId={phaseId} />
-      <Dag plan={plan} phaseId={phaseId} nav={nav} />
-      <ScheduleStrip plan={plan} phaseId={phaseId} />
-      {remediations.length > 0 && <QaHistory plan={plan} phaseId={phaseId} nav={nav} />}
+      <Section
+        id="phase-acceptance"
+        title="Phase acceptance"
+        state={sections}
+        hint="what QA checks before the gate — every involved lead must agree"
+      >
+        <PhaseAcceptance plan={plan} phaseId={phaseId} />
+      </Section>
+
+      <Section
+        id="phase-dag"
+        title="Waves and tasks"
+        state={sections}
+        hint="columns are waves — every task in a column can start at the same moment"
+      >
+        <Dag plan={plan} phaseId={phaseId} nav={nav} />
+      </Section>
+
+      <Section
+        id="phase-schedule"
+        title="Concurrency"
+        state={sections}
+        hint="what the caps actually permit"
+      >
+        <ScheduleStrip plan={plan} phaseId={phaseId} />
+      </Section>
+
+      <Section
+        id="phase-qa"
+        title="QA history"
+        state={sections}
+        hint="the spec is never edited — accepted tasks join the run's effective list"
+      >
+        <QaHistory plan={plan} phaseId={phaseId} nav={nav} />
+      </Section>
     </div>
   );
 }
@@ -76,83 +100,76 @@ export function PhaseScreen({ plan, phaseId, nav }: { plan: Plan; phaseId: strin
 
 function PhaseAcceptance({ plan, phaseId }: { plan: Plan; phaseId: string }) {
   const gates = gatePreviews(plan, { phaseId });
-  if (gates.length === 0) return null;
+  if (gates.length === 0) return <Empty>this phase declares no acceptance criteria</Empty>;
   return (
-    <div className="px-4 pb-4">
-      <SectionTitle icon={<CheckCircle2 className="size-3.5" />} label="Phase acceptance">
-        what QA checks before the gate — every involved lead must agree
-      </SectionTitle>
-      <div className="flex flex-col gap-1.5">
-        {gates.map((g) => (
-          <div key={g.criterion.id} className="rounded-lg border border-line bg-panel px-2.5 py-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium text-primary">{g.criterion.title}</span>
-              <span className="cm-mono text-2xs text-faint">{g.criterion.id}</span>
-              <Chip
-                tone={
-                  g.criterion.verify === "command"
-                    ? "success"
-                    : g.criterion.verify === "human"
-                      ? "warn"
-                      : "info"
-                }
-                icon={
-                  g.criterion.verify === "command" ? <Terminal /> : <UserCheck />
-                }
-              >
-                {g.criterion.verify}
-              </Chip>
-              <span className="ml-auto flex items-center gap-1.5">
-                <span className="text-2xs text-faint">
-                  {g.implied ? "whole phase signs" : `${g.signatories.length} sign`}
-                </span>
-                {g.signatories.map((tid) => (
-                  <span
-                    key={tid}
-                    title={plan.spec.teams.find((t) => t.id === tid)?.name}
-                    className="flex items-center gap-1 rounded border border-line bg-panel-2 px-1.5 py-px text-2xs text-secondary"
-                  >
-                    <span
-                      className="size-1.5 rounded-full"
-                      style={{ background: teamColor(plan.spec, tid) }}
-                    />
-                    {plan.spec.teams.find((t) => t.id === tid)?.name ?? tid}
-                  </span>
-                ))}
+    <div className="flex flex-col gap-1.5">
+      {gates.map((g) => (
+        <div key={g.criterion.id} className="rounded-lg border border-line bg-panel px-2.5 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-primary">{g.criterion.title}</span>
+            <span className="cm-mono text-2xs text-faint">{g.criterion.id}</span>
+            <Chip
+              tone={
+                g.criterion.verify === "command"
+                  ? "success"
+                  : g.criterion.verify === "human"
+                    ? "warn"
+                    : "info"
+              }
+              icon={g.criterion.verify === "command" ? <Terminal /> : <UserCheck />}
+            >
+              {g.criterion.verify}
+            </Chip>
+            <span className="ml-auto flex items-center gap-1.5">
+              <span className="text-2xs text-faint">
+                {g.implied ? "whole phase signs" : `${g.signatories.length} sign`}
               </span>
-            </div>
-            <div className="mt-1.5 grid gap-x-3 gap-y-0.5 text-2xs leading-relaxed [grid-template-columns:2.6rem_1fr]">
-              {g.criterion.given && (
-                <>
-                  <span className="cm-mono text-faint">given</span>
-                  <span className="text-muted">{g.criterion.given}</span>
-                </>
-              )}
-              {g.criterion.when && (
-                <>
-                  <span className="cm-mono text-faint">when</span>
-                  <span className="text-muted">{g.criterion.when}</span>
-                </>
-              )}
-              <span className="cm-mono text-faint">then</span>
-              <span className="text-secondary">{g.criterion.then}</span>
-            </div>
-            {g.satisfiedBy.length > 0 && (
-              <div className="mt-1.5 flex flex-wrap items-center gap-1">
-                <span className="text-[10px] leading-4 text-faint">built by</span>
-                {g.satisfiedBy.map((t) => (
+              {g.signatories.map((tid) => (
+                <span
+                  key={tid}
+                  title={plan.spec.teams.find((t) => t.id === tid)?.name}
+                  className="flex items-center gap-1 rounded border border-line bg-panel-2 px-1.5 py-px text-2xs text-secondary"
+                >
                   <span
-                    key={t.id}
-                    className="cm-mono rounded bg-inset px-1 text-[10px] leading-4 text-muted"
-                  >
-                    {t.id}
-                  </span>
-                ))}
-              </div>
-            )}
+                    className="size-1.5 rounded-full"
+                    style={{ background: teamColor(plan.spec, tid) }}
+                  />
+                  {plan.spec.teams.find((t) => t.id === tid)?.name ?? tid}
+                </span>
+              ))}
+            </span>
           </div>
-        ))}
-      </div>
+          <div className="mt-1.5 grid gap-x-3 gap-y-0.5 text-2xs leading-relaxed [grid-template-columns:2.6rem_1fr]">
+            {g.criterion.given && (
+              <>
+                <span className="cm-mono text-faint">given</span>
+                <span className="text-muted">{g.criterion.given}</span>
+              </>
+            )}
+            {g.criterion.when && (
+              <>
+                <span className="cm-mono text-faint">when</span>
+                <span className="text-muted">{g.criterion.when}</span>
+              </>
+            )}
+            <span className="cm-mono text-faint">then</span>
+            <span className="text-secondary">{g.criterion.then}</span>
+          </div>
+          {g.satisfiedBy.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+              <span className="text-[10px] leading-4 text-faint">built by</span>
+              {g.satisfiedBy.map((t) => (
+                <span
+                  key={t.id}
+                  className="cm-mono rounded bg-inset px-1 text-[10px] leading-4 text-muted"
+                >
+                  {t.id}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -208,46 +225,41 @@ function Dag({ plan, phaseId, nav }: { plan: Plan; phaseId: string; nav: Nav }) 
   }, [plan, phaseId, groups]);
 
   return (
-    <div className="px-4 pb-2">
-      <SectionTitle icon={<GitBranch className="size-3.5" />} label="Waves and tasks">
-        columns are waves — every task in a column can start at the same moment
-      </SectionTitle>
-      <div ref={wrap} className="relative flex items-start gap-8 overflow-x-auto pb-3 pt-1">
-        <svg className="pointer-events-none absolute inset-0 size-full overflow-visible">
-          {edges.map((e) => (
-            <path
-              key={e.key}
-              d={e.d}
-              fill="none"
-              stroke={e.color}
-              strokeWidth={1.5}
-              strokeOpacity={0.55}
+    <div ref={wrap} className="relative flex items-start gap-8 overflow-x-auto pb-2">
+      <svg className="pointer-events-none absolute inset-0 size-full overflow-visible">
+        {edges.map((e) => (
+          <path
+            key={e.key}
+            d={e.d}
+            fill="none"
+            stroke={e.color}
+            strokeWidth={1.5}
+            strokeOpacity={0.55}
+          />
+        ))}
+      </svg>
+      {groups.map((tasks, i) => (
+        <div key={i} className="relative flex min-w-[15.5rem] flex-col gap-2">
+          <div className="flex items-center gap-1.5 pb-0.5">
+            <span className="cm-mono rounded bg-inset px-1 py-px text-2xs text-muted">
+              wave {i + 1}
+            </span>
+            <span className="text-2xs text-faint">{tasks.length}</span>
+          </div>
+          {tasks.map((t) => (
+            <TaskCard
+              key={t.id}
+              plan={plan}
+              task={t}
+              onClick={() => nav.go({ at: "task", taskId: t.id })}
+              register={(el) => {
+                if (el) cards.current.set(t.id, el);
+                else cards.current.delete(t.id);
+              }}
             />
           ))}
-        </svg>
-        {groups.map((tasks, i) => (
-          <div key={i} className="relative flex min-w-[15.5rem] flex-col gap-2">
-            <div className="flex items-center gap-1.5 pb-0.5">
-              <span className="cm-mono rounded bg-inset px-1 py-px text-2xs text-muted">
-                wave {i + 1}
-              </span>
-              <span className="text-2xs text-faint">{tasks.length}</span>
-            </div>
-            {tasks.map((t) => (
-              <TaskCard
-                key={t.id}
-                plan={plan}
-                task={t}
-                onClick={() => nav.go({ at: "task", taskId: t.id })}
-                register={(el) => {
-                  if (el) cards.current.set(t.id, el);
-                  else cards.current.delete(t.id);
-                }}
-              />
-            ))}
-          </div>
-        ))}
-      </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -328,12 +340,12 @@ function ScheduleStrip({ plan, phaseId }: { plan: Plan; phaseId: string }) {
   const clamped = slots.length > waves;
 
   return (
-    <div className="px-4 pb-6 pt-1">
-      <SectionTitle icon={<Layers className="size-3.5" />} label="Concurrency preview">
+    <div>
+      <p className="mb-2 text-2xs text-faint">
         {waves} waves → <span className={cn(clamped && "text-warn")}>{slots.length} steps</span>{" "}
         under maxParallelTasks {plan.spec.policy.maxParallelTasks} and each team's hire budget
         {clamped && " — the caps serialize this phase further than its graph does"}
-      </SectionTitle>
+      </p>
       <div className="flex flex-wrap gap-2">
         {slots.map((s) => (
           <div key={s.step} className="rounded-lg border border-line bg-panel-2 p-2">
@@ -371,64 +383,58 @@ function ScheduleStrip({ plan, phaseId }: { plan: Plan; phaseId: string }) {
 
 function QaHistory({ plan, phaseId, nav }: { plan: Plan; phaseId: string; nav: Nav }) {
   const rounds = (plan.run?.remediations ?? []).filter((r) => r.phaseId === phaseId);
+  if (rounds.length === 0) return <Empty>no QA round has sent this phase back</Empty>;
   return (
-    <div className="px-4 pb-6">
-      <SectionTitle icon={<RotateCcw className="size-3.5" />} label="QA history">
-        the spec is never edited — accepted tasks join the run's effective list, and the round is
-        recorded forever
-      </SectionTitle>
-      <div className="flex flex-col gap-2">
-        {rounds.map((r) => {
-          const qa = plan.run?.actors.find((a) => a.chatId === r.raisedBy.chatId);
-          return (
-            <div key={r.id} className="rounded-lg border border-warn-line bg-warn-ghost p-2.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <Chip tone="warn">round {r.round}</Chip>
-                <span className="text-xs font-medium text-primary">
-                  {r.unmet.length} criterion not met
+    <div className="flex flex-col gap-2">
+      {rounds.map((r) => {
+        const qa = plan.run?.actors.find((a) => a.chatId === r.raisedBy.chatId);
+        return (
+          <div key={r.id} className="rounded-lg border border-warn-line bg-warn-ghost p-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <Chip tone="warn">round {r.round}</Chip>
+              <span className="text-xs font-medium text-primary">
+                {r.unmet.length} criterion not met
+              </span>
+              {r.unmet.map((u) => (
+                <span key={u} className="cm-mono text-2xs text-warn">
+                  {u}
                 </span>
-                {r.unmet.map((u) => (
-                  <span key={u} className="cm-mono text-2xs text-warn">
-                    {u}
-                  </span>
-                ))}
-                <Chip tone={r.status === "accepted" ? "success" : "neutral"}>{r.status}</Chip>
-                {qa && (
+              ))}
+              <Chip tone={r.status === "accepted" ? "success" : "neutral"}>{r.status}</Chip>
+              {qa && (
+                <button
+                  type="button"
+                  onClick={() => nav.go({ at: "agent", actorId: qa.id })}
+                  className="ml-auto rounded px-1.5 py-0.5 text-2xs text-muted hover:bg-hover hover:text-primary"
+                >
+                  {qa.name} →
+                </button>
+              )}
+            </div>
+            <p className="mt-1.5 text-2xs leading-relaxed text-secondary">{r.findings}</p>
+            <div className="mt-2">
+              <span className="text-[10px] leading-4 text-faint">tasks added</span>
+              <div className="mt-1 flex flex-col gap-1">
+                {r.tasks.map((t) => (
                   <button
+                    key={t.id}
                     type="button"
-                    onClick={() => nav.go({ at: "agent", actorId: qa.id })}
-                    className="ml-auto rounded px-1.5 py-0.5 text-2xs text-muted hover:bg-hover hover:text-primary"
+                    onClick={() => nav.go({ at: "task", taskId: t.id })}
+                    className="flex items-center gap-1.5 rounded border border-line bg-panel px-2 py-1 text-left hover:border-line-strong"
                   >
-                    {qa.name} →
+                    <span
+                      className="size-1.5 shrink-0 rounded-full"
+                      style={{ background: teamColor(plan.spec, t.teamId) }}
+                    />
+                    <span className="flex-1 truncate text-2xs text-primary">{t.title}</span>
+                    <span className="cm-mono text-[10px] leading-4 text-faint">{t.id}</span>
                   </button>
-                )}
-              </div>
-              <p className="mt-1.5 text-2xs leading-relaxed text-secondary">{r.findings}</p>
-              <div className="mt-2">
-                <span className="text-[10px] leading-4 text-faint">tasks added</span>
-                <div className="mt-1 flex flex-col gap-1">
-                  {r.tasks.map((t) => (
-                    <button
-                      key={t.id}
-                      type="button"
-                      onClick={() => nav.go({ at: "task", taskId: t.id })}
-                      className="flex items-center gap-1.5 rounded border border-line bg-panel px-2 py-1 text-left hover:border-line-strong"
-                    >
-                      <span
-                        className="size-1.5 shrink-0 rounded-full"
-                        style={{ background: teamColor(plan.spec, t.teamId) }}
-                      />
-                      <span className="flex-1 truncate text-2xs text-primary">{t.title}</span>
-                      <span className="cm-mono text-[10px] leading-4 text-faint">{t.id}</span>
-                    </button>
-                  ))}
-                </div>
+                ))}
               </div>
             </div>
-          );
-        })}
-        {rounds.length === 0 && <Empty>no QA round has sent this phase back</Empty>}
-      </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

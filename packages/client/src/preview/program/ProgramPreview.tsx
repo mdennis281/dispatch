@@ -8,67 +8,128 @@
  * deny-lists — is derived from them by `derive.ts`. That is deliberate: it makes
  * the picture a real test of the schema rather than an illustration of it, and
  * editing the mock immediately shows whether the shape can express what you
- * wanted. It has already earned that twice — once on the phase-criterion rule,
+ * wanted. It has earned that twice already — once on the phase-criterion rule,
  * once on discovering the run needs an EFFECTIVE task list distinct from the
  * spec's, because QA can add tasks to a phase that is already running.
  *
- * LAYOUT is part of the proposal: the sidebar treatment on the left (so
- * "visually distinct from a quick action" can be judged by comparison rather
- * than asserted), the drill-in board in the middle, and the manager's mini chat
- * on the right — because the board and the conversation about it are ONE chat,
- * not two places.
+ * THE SETTINGS ARE LIVE. `policy` and the per-team hire budgets are state here,
+ * not constants, and the whole board re-derives from them. That is the argument
+ * for putting them on the board at all: the effect of `maxParallelTasks` is not
+ * legible from the number, only from what it does to a phase's schedule, so the
+ * form and the thing it changes have to be on the same screen.
+ *
+ * NAVIGATION lives in one place. The sidebar tree, the header breadcrumb and the
+ * content all read the same {@link Route}; the sidebar also owns which sections
+ * of the current screen are open. An earlier draft had a decorative sidebar
+ * beside a board that navigated by clicking cards, which meant two unrelated
+ * ways to reach anything and a rail that never agreed with the content.
  */
-import { useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Info, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import { Chip } from "../../components/ui/index.js";
 import { MOCK_PROGRAM } from "./mock.js";
 import { MOCK_MANAGER_CHAT, MOCK_RUN, effectiveTasks } from "./mockRun.js";
 import { validate, type Plan } from "./derive.js";
-import { CAPS } from "./types.js";
-import { RunStatusPill } from "./chrome.js";
-import type { Route } from "./nav.js";
+import { CAPS, type ProgramPolicy, type ProgramSpec, type TeamId } from "./types.js";
+import { Crumbs, RunStatusPill } from "./chrome.js";
+import { crumbsFor, type Nav, type Route } from "./nav.js";
+import { defaultOpen, type SectionState } from "./sections.js";
 import { ProgramScreen } from "./ProgramScreen.js";
 import { PhaseScreen } from "./PhaseScreen.js";
 import { TaskScreen } from "./TaskScreen.js";
 import { AgentScreen } from "./AgentScreen.js";
-import { SidebarMock } from "./SidebarMock.js";
+import { Sidebar } from "./Sidebar.js";
 import { MiniChat } from "./MiniChat.js";
+import type { SettingsDraft } from "./SettingsSection.js";
+
+const BASE_DRAFT: SettingsDraft = {
+  policy: MOCK_PROGRAM.policy,
+  hireBudgets: Object.fromEntries(MOCK_PROGRAM.teams.map((t) => [t.id, t.hireBudget])),
+};
 
 export function ProgramPreview() {
-  const plan: Plan = { spec: MOCK_PROGRAM, tasks: effectiveTasks(), run: MOCK_RUN };
   const [route, setRoute] = useState<Route>({ at: "program" });
   const [chatOpen, setChatOpen] = useState(true);
   const [issuesOpen, setIssuesOpen] = useState(false);
-  const nav = { route, go: setRoute };
+  const [draft, setDraft] = useState<SettingsDraft>(BASE_DRAFT);
+  const [open, setOpenMap] = useState<Record<string, boolean>>(defaultOpen);
+  const refs = useRef(new Map<string, HTMLElement>());
 
+  const dirty =
+    JSON.stringify(draft) !== JSON.stringify(BASE_DRAFT);
+
+  // The spec the board actually renders: the mock, with the owner's live
+  // settings folded in. Everything downstream derives from this, which is what
+  // makes moving a slider change the concurrency preview two screens away.
+  const spec: ProgramSpec = useMemo(
+    () => ({
+      ...MOCK_PROGRAM,
+      policy: draft.policy,
+      teams: MOCK_PROGRAM.teams.map((t) => ({
+        ...t,
+        hireBudget: draft.hireBudgets[t.id] ?? t.hireBudget,
+      })),
+    }),
+    [draft],
+  );
+
+  const plan: Plan = useMemo(
+    () => ({ spec, tasks: effectiveTasks(), run: MOCK_RUN }),
+    [spec],
+  );
+
+  const setOpen = useCallback(
+    (id: string, v: boolean) => setOpenMap((m) => ({ ...m, [id]: v })),
+    [],
+  );
+
+  const sections: SectionState = useMemo(
+    () => ({
+      isOpen: (id) => open[id] ?? true,
+      toggle: (id) => setOpenMap((m) => ({ ...m, [id]: !(m[id] ?? true) })),
+      setOpen,
+      focus: (id) => {
+        setOpenMap((m) => ({ ...m, [id]: true }));
+        // Next frame: the section may have just been expanded, and scrolling to
+        // a zero-height element lands in the wrong place.
+        requestAnimationFrame(() =>
+          refs.current.get(id)?.scrollIntoView({ behavior: "smooth", block: "start" }),
+        );
+      },
+      register: (id, el) => {
+        if (el) refs.current.set(id, el);
+        else refs.current.delete(id);
+      },
+    }),
+    [open, setOpen],
+  );
+
+  const nav: Nav = { route, go: setRoute };
   const issues = validate(plan);
   const errors = issues.filter((i) => i.severity === "error");
-  const run = plan.run!;
+  const run = MOCK_RUN;
 
   return (
     <div className="flex h-dvh w-full bg-app text-primary">
-      <SidebarMock plan={plan} nav={nav} />
+      <Sidebar plan={plan} nav={nav} sections={sections} />
 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* -------------------------------------------------------- header */}
         <div className="flex h-11 shrink-0 items-center gap-2 px-3 cm-hairline-b">
+          <Crumbs crumbs={crumbsFor(plan, nav)} />
+          <span className="shrink-0 text-faint">·</span>
           <RunStatusPill status={run.status} />
           <span className="shrink-0 text-2xs text-faint">
-            phase {plan.spec.phases.find((p) => p.id === run.currentPhaseId)?.order} of{" "}
-            {plan.spec.phases.length}
-          </span>
-          <span className="shrink-0 text-2xs text-faint">·</span>
-          <span className="shrink-0 text-2xs text-faint">
-            {run.actors.filter((a) => a.status !== "retired").length} live actors
+            {run.actors.filter((a) => a.status !== "retired").length} live
           </span>
 
           <div className="flex-1" />
 
-          <CapMeter label="objective" used={plan.spec.objective.length} cap={CAPS.objective} />
-          <CapMeter label="criteria" used={plan.spec.acceptance.length} cap={CAPS.criteria} />
-          <CapMeter label="phases" used={plan.spec.phases.length} cap={CAPS.phases} />
-          <CapMeter label="teams" used={plan.spec.teams.length} cap={CAPS.teams} />
+          {dirty && <Chip tone="accent">settings modified</Chip>}
+          <CapMeter label="criteria" used={spec.acceptance.length} cap={CAPS.criteria} />
+          <CapMeter label="phases" used={spec.phases.length} cap={CAPS.phases} />
+          <CapMeter label="teams" used={spec.teams.length} cap={CAPS.teams} />
           <CapMeter label="tasks" used={plan.tasks.length} cap={CAPS.tasks} />
 
           <button
@@ -108,10 +169,26 @@ export function ProgramPreview() {
         {issuesOpen && issues.length > 0 && <IssueBanner issues={issues} />}
 
         {/* -------------------------------------------------------- screen */}
-        {route.at === "program" && <ProgramScreen plan={plan} nav={nav} />}
-        {route.at === "phase" && <PhaseScreen plan={plan} phaseId={route.phaseId} nav={nav} />}
-        {route.at === "task" && <TaskScreen plan={plan} taskId={route.taskId} nav={nav} />}
-        {route.at === "agent" && <AgentScreen plan={plan} actorId={route.actorId} nav={nav} />}
+        {route.at === "program" && (
+          <ProgramScreen
+            plan={plan}
+            nav={nav}
+            sections={sections}
+            draft={draft}
+            dirty={dirty}
+            onDraft={setDraft}
+            onReset={() => setDraft(BASE_DRAFT)}
+          />
+        )}
+        {route.at === "phase" && (
+          <PhaseScreen plan={plan} phaseId={route.phaseId} nav={nav} sections={sections} />
+        )}
+        {route.at === "task" && (
+          <TaskScreen plan={plan} taskId={route.taskId} nav={nav} sections={sections} />
+        )}
+        {route.at === "agent" && (
+          <AgentScreen plan={plan} actorId={route.actorId} nav={nav} sections={sections} />
+        )}
       </div>
 
       {chatOpen && <MiniChat turns={MOCK_MANAGER_CHAT} status={run.status} />}
@@ -126,7 +203,7 @@ function CapMeter({ label, used, cap }: { label: string; used: number; cap: numb
   const pct = Math.min(100, (used / cap) * 100);
   const hot = pct > 90;
   return (
-    <div className="w-[4.8rem] shrink-0" title={`${label}: ${used} of ${cap}`}>
+    <div className="w-[4.6rem] shrink-0" title={`${label}: ${used} of ${cap}`}>
       <div className="flex items-baseline justify-between gap-1.5">
         <span className="text-[10px] leading-4 text-faint">{label}</span>
         <span className={cn("cm-mono text-[10px] leading-4", hot ? "text-warn" : "text-muted")}>
