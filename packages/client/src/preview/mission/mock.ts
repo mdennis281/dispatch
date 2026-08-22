@@ -249,8 +249,56 @@ export const MOCK_MISSION: MissionSpec = {
 
   phases: [
     {
-      id: "foundations",
+      id: "tool-surface",
       order: 1,
+      title: "Tool surface",
+      description:
+        "Break the monolithic `manager` MCP server into named category servers - github, " +
+        "confirm, chat, memory, workspace, mcp, session - so a tool's name says what it is for. " +
+        "This is a BREAKING rename of 31 tools across 182 references, so the migration and the " +
+        "live QA are the work; the split itself is the easy part. `skills` and `instructions` " +
+        "have no tools today and are a design question, not a move.",
+      exit: "criteria-met",
+      qa: true,
+      acceptance: [
+        {
+          id: "ts-categorised",
+          title: "No tool is called 'manager' any more",
+          given: "A session with every binding available",
+          when: "Its tool list is enumerated",
+          then: "Every former manager tool appears under a category server and none under manager",
+          verify: "command",
+          check: "pnpm --filter @dispatch/server exec vitest run mcp-categories",
+        },
+        {
+          id: "ts-no-stale-refs",
+          title: "Nothing still says mcp__manager__",
+          then: "No occurrence survives in code, bundled skills, project instructions or memory",
+          verify: "command",
+          check: "node tools/verify/no-stale-tool-names.mjs",
+        },
+        {
+          id: "ts-allowlists-migrated",
+          title: "An existing allowlist still works",
+          given: "A settings.json permitting the old mcp__manager__terminal",
+          when: "The app starts after the upgrade",
+          then: "It is rewritten to the new name and the user is not re-prompted",
+          verify: "command",
+          check: "pnpm --filter @dispatch/server exec vitest run settings-migration",
+        },
+        {
+          id: "ts-live-verified",
+          title: "A real review round still runs",
+          given: "A dev instance on a scratch repo with a real PR",
+          when: "watch_pr, resolve_thread, request_review and approve_pr are driven end to end",
+          then: "The round completes and the PR lands - verified on a running instance, not mocked",
+          verify: "human",
+        },
+      ],
+    },
+    {
+      id: "foundations",
+      order: 2,
       title: "Foundations",
       description:
         "The spec shape, its caps, the role menu and tool profiles, the validator, and the two " +
@@ -282,7 +330,7 @@ export const MOCK_MISSION: MissionSpec = {
     },
     {
       id: "comms",
-      order: 2,
+      order: 3,
       title: "Chat-to-chat comms",
       description:
         "The primitive the whole design rests on, built as a BASE Dispatch capability rather " +
@@ -315,7 +363,7 @@ export const MOCK_MISSION: MissionSpec = {
     },
     {
       id: "engine",
-      order: 3,
+      order: 4,
       title: "Engine",
       description:
         "The deterministic half: readiness from the DAG, hire-budget enforcement, gate " +
@@ -342,7 +390,7 @@ export const MOCK_MISSION: MissionSpec = {
     },
     {
       id: "actors",
-      order: 4,
+      order: 5,
       title: "Actors",
       description:
         "Personas become real chats: the materializer that compiles a role template plus its " +
@@ -369,7 +417,7 @@ export const MOCK_MISSION: MissionSpec = {
     },
     {
       id: "surface",
-      order: 5,
+      order: 6,
       title: "Surface",
       description:
         "What the human touches: a new chat type with its own icon, the drill-in board " +
@@ -517,7 +565,158 @@ export const MOCK_MISSION: MissionSpec = {
   /* ------------------------------------------------------------------ tasks */
 
   tasks: [
-    /* ---- phase 1: foundations ---- */
+    /* ---- phase 1: tool surface ---- */
+    {
+      id: "t-taxonomy",
+      phaseId: "tool-surface",
+      teamId: "comms",
+      title: "Category taxonomy and tool registry",
+      brief:
+        "Name the categories and write the ONE table saying which server a tool belongs to. Seed " +
+        "it from MANAGER_TOOL_GATE in manager-mcp.ts, which already maps every tool to a " +
+        "capability binding (github, memory, chats, terminals...) - that is the taxonomy in all " +
+        "but name. Proposed split of the 31 tools: github (create_pr, approve_pr, watch_pr, " +
+        "post_review, request_review, resolve_thread) - confirm (ask_user, request_exemption) - " +
+        "chat (spawn_chat, wait_for_chat, chat_find, chat_read) - memory (7) - workspace " +
+        "(worktree, terminal, terminal_output, run_subapp) - mcp (list, add, remove, prewarm) - " +
+        "session (wait, context_usage, compact_context) - project (project_info). The registry is " +
+        "the single source the server factories, the gate table, the metrics classifier and the " +
+        "catalog UI all read.",
+      dependsOn: [],
+      satisfies: ["ts-categorised"],
+      acceptance: [
+        {
+          id: "tt-1",
+          title: "Exhaustive by construction",
+          then: "A tool missing from the registry fails the build, not the runtime",
+          verify: "command",
+          check: "pnpm --filter @dispatch/server exec vitest run mcp-categories",
+        },
+      ],
+      deliverable: "pr",
+      size: "m",
+    },
+    {
+      id: "t-split-servers",
+      phaseId: "tool-surface",
+      teamId: "comms",
+      title: "Split createManagerMcpServer",
+      brief:
+        "session-broker.ts:4890 hands the SDK { manager: createManagerMcpServer(...) } - a map of " +
+        "server name to server. Turn that into one entry per category, built from the registry. " +
+        "Keep ONE factory holding the tool definitions and partition them; forking the file into " +
+        "eight lets the shared helpers (textResult, the binding checks) drift apart.\n" +
+        "HARD CUTOVER, no compatibility alias. A legacy manager server would re-declare all 31 " +
+        "tools, and a duplicated tool list costs roughly 4-5k tokens of context on every turn, " +
+        "indefinitely, to serve a name nobody should type after the sweep.",
+      dependsOn: ["t-taxonomy"],
+      satisfies: ["ts-categorised"],
+      acceptance: [],
+      deliverable: "pr",
+      size: "l",
+    },
+    {
+      id: "t-gate-rewire",
+      phaseId: "tool-surface",
+      teamId: "platform",
+      title: "Rewire everything keyed on the old names",
+      brief:
+        "SELF_GATED_TOOLS (session-broker.ts:1099) hardcodes mcp__manager__ask_user, spawn_chat " +
+        "and request_exemption - miss one and that tool double-prompts. MANAGER_TOOL_GATE, the " +
+        "metrics classifier and the MCP catalog view all key on the old names too.\n" +
+        "Metrics need a decision rather than a rename: existing rows are stored as " +
+        "{ server: 'manager', tool: 'create_pr' }. Map them forward at read time so the history " +
+        "does not split in two - a Metrics view showing create_pr as two series is worse than one " +
+        "showing it once under the new name.",
+      dependsOn: ["t-taxonomy"],
+      satisfies: ["ts-categorised"],
+      acceptance: [
+        {
+          id: "tgr-1",
+          title: "Self-gated tools do not double-prompt",
+          then: "ask_user, spawn_chat and request_exemption each raise exactly one card",
+          verify: "command",
+          check: "pnpm --filter @dispatch/server exec vitest run session-broker",
+        },
+      ],
+      deliverable: "pr",
+      size: "m",
+    },
+    {
+      id: "t-allowlist-migration",
+      phaseId: "tool-surface",
+      teamId: "platform",
+      title: "Migrate permission allowlists",
+      brief:
+        "The one breakage a user FEELS. A settings.json allowing mcp__manager__terminal stops " +
+        "matching after the rename, and the symptom is not an error - it is a permission prompt " +
+        "on a tool that was silently approved for months. Rewrite allow/deny entries on startup, " +
+        "log what changed, and make it idempotent. Then add a boot check that warns when any " +
+        "config still mentions mcp__manager__, so a hand-edited file or an old export says so " +
+        "instead of quietly prompting.",
+      dependsOn: ["t-split-servers"],
+      satisfies: ["ts-allowlists-migrated"],
+      acceptance: [],
+      deliverable: "pr",
+      size: "m",
+    },
+    {
+      id: "t-name-sweep",
+      phaseId: "tool-surface",
+      teamId: "assurance",
+      title: "Sweep every stale reference",
+      brief:
+        "182 occurrences across 48 files in packages/ alone, plus bundled skills (mcp-setup " +
+        "SKILL.md), the injected workflow rules in shared/workflow.ts, the .dispatch/ project " +
+        "instructions, and project MEMORY - memories are markdown in the primary checkout and " +
+        "will keep teaching agents the dead names until they are rewritten. Finish with a " +
+        "verifier script wired into CI so the count cannot climb back.",
+      dependsOn: ["t-split-servers"],
+      satisfies: ["ts-no-stale-refs"],
+      acceptance: [],
+      deliverable: "pr",
+      size: "m",
+    },
+    {
+      id: "t-surface-gaps",
+      phaseId: "tool-surface",
+      teamId: "comms",
+      title: "Decide what skills and instructions expose",
+      brief:
+        "Both were named as categories and NEITHER has a tool today - they are managed through " +
+        "the config agent-tasks and file editing, not MCP. So this is new capability, not a move, " +
+        "and it must not ride along inside a rename PR. Answer: what would an agent do with a " +
+        "skills or instructions tool that it cannot already do by reading and writing the files, " +
+        "and is that worth a tool? Return a recommendation and a proposed surface, or a reasoned " +
+        "no. Write no production code.",
+      dependsOn: ["t-taxonomy"],
+      satisfies: [],
+      acceptance: [],
+      deliverable: "investigation",
+      size: "s",
+    },
+    {
+      id: "t-tool-qa",
+      phaseId: "tool-surface",
+      teamId: "assurance",
+      title: "Live verification on a running instance",
+      brief:
+        "Not a unit test. Start a dev instance on an unusual port against a scratch data dir " +
+        "(another agent will be holding 4319), open a real PR on a scratch repo, and drive a full " +
+        "review round through the renamed servers: watch_pr reports the round, resolve_thread " +
+        "closes a thread, request_review re-queues the reviewer, approve_pr lands it. Then " +
+        "confirm the permission card still appears for the self-gated tools, and that Metrics " +
+        "shows one create_pr series rather than two. Attach evidence - this criterion is " +
+        "verify:'human' because a green unit suite has already passed while the real path was " +
+        "broken.",
+      dependsOn: ["t-split-servers", "t-gate-rewire", "t-allowlist-migration"],
+      satisfies: ["ts-live-verified"],
+      acceptance: [],
+      deliverable: "artifact",
+      size: "l",
+    },
+
+    /* ---- phase 2: foundations ---- */
     {
       id: "t-schema",
       phaseId: "foundations",
@@ -745,7 +944,7 @@ export const MOCK_MISSION: MissionSpec = {
       size: "m",
     },
 
-    /* ---- phase 3: engine ---- */
+    /* ---- phase 4: engine ---- */
     {
       id: "t-readiness",
       phaseId: "engine",
@@ -907,7 +1106,7 @@ export const MOCK_MISSION: MissionSpec = {
       size: "m",
     },
 
-    /* ---- phase 4: actors ---- */
+    /* ---- phase 5: actors ---- */
     {
       id: "t-personas",
       phaseId: "actors",
@@ -1004,7 +1203,7 @@ export const MOCK_MISSION: MissionSpec = {
       size: "s",
     },
 
-    /* ---- phase 5: surface ---- */
+    /* ---- phase 6: surface ---- */
     {
       id: "t-chat-type",
       phaseId: "surface",

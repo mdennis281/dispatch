@@ -167,6 +167,13 @@ const ACTORS: LiveActor[] = [
 
 /** Task ids that are finished, in the order they landed. */
 const DONE = [
+  "t-taxonomy",
+  "t-split-servers",
+  "t-gate-rewire",
+  "t-allowlist-migration",
+  "t-name-sweep",
+  "t-surface-gaps",
+  "t-tool-qa",
   "t-schema",
   "t-limits",
   "t-roles",
@@ -365,7 +372,7 @@ export const MOCK_MANAGER_CHAT: ManagerTurn[] = [
     author: "manager",
     ts: min(1),
     text:
-      "Started. 5 phases, 27 tasks, 5 teams. Mission-grant consent is on, so leads hire without " +
+      "Started. 6 phases, 35 tasks, 5 teams. Mission-grant consent is on, so leads hire without " +
       "prompting you — I'll surface budget refusals, disputed gates and anything past the QA round cap.",
   },
   {
@@ -433,6 +440,7 @@ export const MOCK_RUN: MissionRun = {
     },
   ],
   phases: {
+    "tool-surface": { status: "done", qaRounds: 1, gates: [] },
     foundations: { status: "done", qaRounds: 1, gates: [] },
     comms: { status: "done", qaRounds: 2, gates: [] },
     engine: { status: "running", qaRounds: 0, gates: [] },
