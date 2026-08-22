@@ -63,11 +63,21 @@
 
   /* ── text ────────────────────────────────────────────────────────────────
    * Near-black, never pure black — #000 on white is harsh at 13px and makes the
-   * antialiasing bloom. */
+   * antialiasing bloom.
+   *
+   * Same rule as the dark palette: every rank clears 4.5:1 against the worst
+   * surface it can land on — which here is `--p-app` (#e9edf2), NOT the white
+   * panel. The page behind everything is the darkest background in a light
+   * theme, so it is the one that binds.
+   *
+   *   faint 4.54 · muted 5.68 · secondary 6.75 · primary 15.46
+   *
+   * `faint` was #929cab (2.36 on app) and `muted` #66717e (4.22). See the dark
+   * palette's note for why that mattered and what to re-measure. */
   --p-text-primary: #11161c;
   --p-text-secondary: #48525e;
-  --p-text-muted: #66717e;
-  --p-text-faint: #929cab;
+  --p-text-muted: #545d69;
+  --p-text-faint: #5f6c7e;
 
   /* ── primary accent — brand amber, darkened to survive white ─────────────
    * The dark theme's #e5a33c sits at ~2:1 on white: unusable for text, borders

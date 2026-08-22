@@ -67,11 +67,27 @@
 
   /* ── text ────────────────────────────────────────────────────────────────
    * Four steps, each a real semantic rank rather than a lightness gradient:
-   * body / supporting / label / placeholder. */
+   * body / supporting / label / placeholder.
+   *
+   * EVERY RANK CLEARS 4.5:1 — WCAG's normal-text bar, not the 3:1 large-text
+   * one — against the worst surface it can land on (`--p-elevated`, #171c22):
+   *
+   *   faint 4.57 · muted 5.67 · secondary 6.56 · primary 14.5
+   *
+   * That floor is load-bearing rather than aspirational. `faint` and `muted`
+   * were #4b5563 and #6b7280, which measure 2.44 and 3.82 on a panel — the
+   * first is below even the 3:1 NON-text minimum, and both carry real
+   * sentences (section hints, captions, units) at 10–11px, where they were
+   * simply unreadable. It went unreported for months, which is how this defect
+   * behaves: readers assume the text they can't read wasn't important.
+   *
+   * Re-value one and re-measure the LADDER, not just the step you touched. The
+   * ranks must stay ordered AND roughly evenly spaced, and there is very
+   * little room between 4.5:1 and the primary. */
   --p-text-primary: #e6e8eb;
   --p-text-secondary: #9aa1a9;
-  --p-text-muted: #6b7280;
-  --p-text-faint: #4b5563;
+  --p-text-muted: #8d95a2;
+  --p-text-faint: #788597;
 
   /* ── primary accent — brand amber ────────────────────────────────────────
    * The UI accent IS the mark's amber. `-hi` is brighter (hover/emphasis) and
