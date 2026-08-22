@@ -15,6 +15,7 @@ import { cn } from "../../lib/cn.js";
 import { Chip } from "../../components/ui/index.js";
 import { ActorStatusPill, Card, ContextBar, Empty, Metric, Section } from "./chrome.js";
 import { gatePreviews, leadForTeam, liveHires, phaseCounts, teamColor, type Plan } from "./derive.js";
+import { CAPS } from "./types.js";
 import type { Nav } from "./nav.js";
 import type { SectionState } from "./sections.js";
 import { SettingsSection, type SettingsDraft } from "./SettingsSection.js";
@@ -50,13 +51,9 @@ export function MissionScreen({
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
-      <Section
-        id="objective"
-        title="Objective"
-        state={sections}
-        hint={`${spec.objective.length} / 500 chars`}
-      >
+      <Section id="objective" title="Objective" state={sections} hint="what done looks like">
         <p className="max-w-5xl text-xs leading-relaxed text-secondary">{spec.objective}</p>
+        <Budget plan={plan} />
       </Section>
 
       <Section
@@ -303,6 +300,46 @@ export function MissionScreen({
           })}
         </div>
       </Section>
+    </div>
+  );
+}
+
+/**
+ * The authoring budget — how much of each cap this plan spends.
+ *
+ * It lived in the header as four progress bars and was wrong there twice over:
+ * it competed with the breadcrumb for the same row and won, and it is not
+ * navigation. It belongs beside the objective, because that is where you are
+ * when the numbers matter — writing the plan, not moving around a running one.
+ *
+ * Plain text, not bars. A bar implies you should be filling it; a cap is a
+ * ceiling you would rather stay well under.
+ */
+function Budget({ plan }: { plan: Plan }) {
+  const items: Array<[string, number, number]> = [
+    ["objective", plan.spec.objective.length, CAPS.objective],
+    ["criteria", plan.spec.acceptance.length, CAPS.criteria],
+    ["phases", plan.spec.phases.length, CAPS.phases],
+    ["teams", plan.spec.teams.length, CAPS.teams],
+    ["tasks", plan.tasks.length, CAPS.tasks],
+  ];
+  return (
+    <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+      <span className="text-[10px] uppercase leading-4 tracking-wide text-faint">budget</span>
+      {items.map(([label, used, cap]) => {
+        const full = used >= cap;
+        return (
+          <span key={label} className="flex items-baseline gap-1">
+            <span className="text-[10px] leading-4 text-faint">{label}</span>
+            <span
+              className={cn("cm-mono text-2xs", full ? "text-warn" : "text-muted")}
+              title={full ? `at the cap — anything further has to displace something` : undefined}
+            >
+              {used}/{cap}
+            </span>
+          </span>
+        );
+      })}
     </div>
   );
 }

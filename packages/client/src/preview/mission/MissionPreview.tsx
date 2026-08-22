@@ -31,7 +31,7 @@ import { Chip } from "../../components/ui/index.js";
 import { MOCK_MISSION } from "./mock.js";
 import { MOCK_MANAGER_CHAT, MOCK_RUN, effectiveTasks } from "./mockRun.js";
 import { validate, type Plan } from "./derive.js";
-import { CAPS, type MissionPolicy, type MissionSpec, type TeamId } from "./types.js";
+import type { MissionPolicy, MissionSpec, TeamId } from "./types.js";
 import { Crumbs, RunStatusPill } from "./chrome.js";
 import { crumbsFor, type Nav, type Route } from "./nav.js";
 import { defaultOpen, type SectionState } from "./sections.js";
@@ -127,10 +127,6 @@ export function MissionPreview() {
           <div className="flex-1" />
 
           {dirty && <Chip tone="accent">settings modified</Chip>}
-          <CapMeter label="criteria" used={spec.acceptance.length} cap={CAPS.criteria} />
-          <CapMeter label="phases" used={spec.phases.length} cap={CAPS.phases} />
-          <CapMeter label="teams" used={spec.teams.length} cap={CAPS.teams} />
-          <CapMeter label="tasks" used={plan.tasks.length} cap={CAPS.tasks} />
 
           <button
             type="button"
@@ -198,27 +194,6 @@ export function MissionPreview() {
 
 /* ----------------------------------------------------------------- header */
 
-/** A cap and how much of it the plan spends — the authoring budget, made visible. */
-function CapMeter({ label, used, cap }: { label: string; used: number; cap: number }) {
-  const pct = Math.min(100, (used / cap) * 100);
-  const hot = pct > 90;
-  return (
-    <div className="w-[4.6rem] shrink-0" title={`${label}: ${used} of ${cap}`}>
-      <div className="flex items-baseline justify-between gap-1.5">
-        <span className="text-[10px] leading-4 text-faint">{label}</span>
-        <span className={cn("cm-mono text-[10px] leading-4", hot ? "text-warn" : "text-muted")}>
-          {used}/{cap}
-        </span>
-      </div>
-      <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-inset">
-        <div
-          className={cn("h-full rounded-full", hot ? "bg-warn" : "bg-accent")}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-    </div>
-  );
-}
 
 function IssueBanner({ issues }: { issues: ReturnType<typeof validate> }) {
   return (
