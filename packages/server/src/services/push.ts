@@ -36,6 +36,7 @@
  * upshot is a subscription made against the stable app is not also pushed to by
  * a dev server, which is what you want anyway.
  */
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   DEFAULT_NOTIFICATION_PREFS,
@@ -148,7 +149,12 @@ export interface WebPushLike {
   sendNotification(
     subscription: PushSubscriptionJson,
     payload: string,
-    options: { vapidDetails: { subject: string; publicKey: string; privateKey: string }; TTL?: number },
+    options: {
+      vapidDetails: { subject: string; publicKey: string; privateKey: string };
+      TTL?: number;
+      /** RFC 8030 §5.4 — see {@link topicForChat}. */
+      topic?: string;
+    },
   ): Promise<unknown>;
   generateVAPIDKeys(): { publicKey: string; privateKey: string };
 }
@@ -182,6 +188,66 @@ export interface PushPayload {
   sticky: boolean;
   permissionRequestId?: string;
   url?: string;
+  /**
+   * How many items this chat has outstanding INCLUDING this one, so the worker
+   * can render "…and 2 more" on the single notification it keeps per chat.
+   *
+   * Counted here rather than from `getNotifications()` on the device because the
+   * server's count is the true one: a human who swiped the last toast away has
+   * an empty tray and three things still waiting.
+   *
+   * **Zero means WITHDRAW** — close this chat's notification and show nothing.
+   * See {@link PushService.withdraw} for why that push never reaches an iPhone.
+   */
+  outstanding: number;
+  /**
+   * Total outstanding across every chat — the app icon badge. Omitted means
+   * "leave the badge alone", which is what the test push wants: proving that
+   * notifications arrive should not claim you have work waiting.
+   */
+  badge?: number;
+}
+
+/** The host Apple issues push endpoints on. */
+const APPLE_PUSH_HOST = "web.push.apple.com";
+
+/**
+ * Is this device behind Apple's push service (i.e. an iOS/macOS web app)?
+ *
+ * Load-bearing, not cosmetic: WebKit revokes a subscription after a handful of
+ * pushes that display nothing, so the withdraw path — whose whole purpose is to
+ * display nothing — must never be sent to one of these.
+ */
+export function isAppleEndpoint(endpoint: string): boolean {
+  try {
+    return new URL(endpoint).hostname === APPLE_PUSH_HOST;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The RFC 8030 §5.4 `Topic` for a chat.
+ *
+ * A push service stores at most ONE undelivered message per topic per
+ * subscription, and a new one with a matching topic *deletes* the one already
+ * queued. So a phone that was off for an hour wakes to the LATEST state of each
+ * chat instead of a burst of twelve — and, because a withdrawal shares its
+ * chat's topic, a notification whose reason has since evaporated is dropped
+ * before it is ever delivered.
+ *
+ * That only works because every push carries the chat's whole current state
+ * rather than a delta: superseding is always safe, which is not true of a
+ * "+1 item" message.
+ *
+ * The header is limited to 32 characters of the URL-safe base64 alphabet, and
+ * `web-push` rejects anything else outright. Chat ids are nanoids — 21
+ * characters of exactly that alphabet — so the fast path is the normal one; the
+ * digest is for the hand-written slugs the store also accepts as ids.
+ */
+export function topicForChat(chatId: string): string {
+  if (/^[A-Za-z0-9_-]{1,32}$/.test(chatId)) return chatId;
+  return createHash("sha256").update(chatId).digest("base64url").slice(0, 32);
 }
 
 /**
@@ -229,10 +295,31 @@ export class PushService {
   private subs: StoredSubscription[] = [];
   /** endpoint → when it last reported the app in front. In memory only. */
   private readonly inFront = new Map<string, number>();
+  /**
+   * chatId → its outstanding attention item ids.
+   *
+   * A second copy of what {@link AttentionQueue} already holds, and deliberately
+   * so: it is derived from the same two bus events in the same order, so the two
+   * cannot drift, and keeping it here means `PushService` stays constructible
+   * from `{bus, configDir, dataDir}` alone. The alternative — injecting the
+   * queue — would reorder container construction and rewrite every test's setup
+   * to buy a count this map already has.
+   */
+  private readonly outstanding = new Map<string, Set<string>>();
+  /**
+   * endpoint → chats that device is currently holding a notification for.
+   *
+   * Only an approximation of its tray (the human may have swiped one away), but
+   * it is enough to answer the one question the withdraw path asks: is there any
+   * point waking this device to close something? Without it, every resolved item
+   * would wake every registered device to close a notification most of them
+   * never had — and on Chrome a push that displays nothing spends budget.
+   */
+  private readonly shown = new Map<string, Set<string>>();
   private loaded = false;
   /** Serializes the read-modify-write of the registry file. */
   private writeChain: Promise<unknown> = Promise.resolve();
-  private off: (() => void) | null = null;
+  private offs: Array<() => void> = [];
 
   constructor(deps: PushServiceDeps) {
     this.bus = deps.bus;
@@ -270,15 +357,60 @@ export class PushService {
 
   /** Subscribe to the bus. Idempotent. */
   start(): void {
-    if (this.off) return;
-    this.off = this.bus.on("attention-add", (e) => {
-      void this.fanOut(e.item).catch((err) => this.onError?.(err));
-    });
+    if (this.offs.length) return;
+    this.offs.push(
+      this.bus.on("attention-add", (e) => {
+        this.track(e.item);
+        void this.fanOut(e.item).catch((err) => this.onError?.(err));
+      }),
+      // The other half of the deal: a notification whose reason is gone is worse
+      // than no notification, because acting on it wastes a trip to the desk.
+      this.bus.on("attention-resolve", (e) => {
+        const emptied = this.untrack(e.id, e.chatId);
+        if (emptied) void this.withdraw(emptied).catch((err) => this.onError?.(err));
+      }),
+    );
   }
 
   stop(): void {
-    this.off?.();
-    this.off = null;
+    for (const off of this.offs) off();
+    this.offs = [];
+  }
+
+  /* ------------------------------------------------- outstanding bookkeeping */
+
+  private track(item: AttentionItem): void {
+    let set = this.outstanding.get(item.chatId);
+    if (!set) this.outstanding.set(item.chatId, (set = new Set()));
+    set.add(item.id);
+  }
+
+  /**
+   * Forget one resolved item. Returns its chatId ONLY when that was the chat's
+   * last outstanding item, which is the single condition a withdrawal fires on.
+   *
+   * That is also what keeps a burst quiet without a debounce timer: deleting a
+   * chat resolves all six of its items at once, but only the sixth empties the
+   * set, so exactly one withdrawal goes out.
+   */
+  private untrack(id: string, chatId?: string): string | undefined {
+    // `chatId` is optional on the event, so fall back to finding the owner.
+    const owner =
+      chatId && this.outstanding.has(chatId)
+        ? chatId
+        : [...this.outstanding.entries()].find(([, ids]) => ids.has(id))?.[0];
+    if (!owner) return undefined;
+    const set = this.outstanding.get(owner);
+    if (!set?.delete(id) || set.size > 0) return undefined;
+    this.outstanding.delete(owner);
+    return owner;
+  }
+
+  /** Items waiting across every chat — what the app icon badges. */
+  private totalOutstanding(): number {
+    let n = 0;
+    for (const ids of this.outstanding.values()) n += ids.size;
+    return n;
   }
 
   /* ------------------------------------------------------------- web-push */
@@ -426,7 +558,7 @@ export class PushService {
   /* -------------------------------------------------------------- sending */
 
   /** Turn an attention item into the payload the service worker renders. */
-  static payloadFor(item: AttentionItem): PushPayload {
+  static payloadFor(item: AttentionItem, counts?: { outstanding: number; badge: number }): PushPayload {
     return {
       id: item.id,
       chatId: item.chatId,
@@ -436,6 +568,10 @@ export class PushService {
       sticky: STICKY.has(item.kind),
       permissionRequestId: item.permissionRequestId,
       url: item.url,
+      // Defaults describe exactly this one item, which is what a caller with no
+      // queue state (a test, the test button) means by "send this".
+      outstanding: counts?.outstanding ?? 1,
+      badge: counts?.badge,
     };
   }
 
@@ -455,8 +591,69 @@ export class PushService {
       return seen === undefined || now - seen >= PRESENCE_TTL_MS;
     });
     if (!targets.length) return;
-    const payload = JSON.stringify(PushService.payloadFor(item));
-    await Promise.all(targets.map((t) => this.send(t, payload)));
+    const payload = JSON.stringify(
+      PushService.payloadFor(item, {
+        outstanding: this.outstanding.get(item.chatId)?.size ?? 1,
+        badge: this.totalOutstanding(),
+      }),
+    );
+    // Remember who is now holding a notification for this chat, so resolving it
+    // later wakes these devices and only these devices.
+    for (const t of targets) {
+      const ep = t.subscription.endpoint;
+      let chats = this.shown.get(ep);
+      if (!chats) this.shown.set(ep, (chats = new Set()));
+      chats.add(item.chatId);
+    }
+    const topic = topicForChat(item.chatId);
+    await Promise.all(targets.map((t) => this.send(t, payload, topic)));
+  }
+
+  /**
+   * A chat has nothing outstanding any more — take its notification back.
+   *
+   * This is the "the question got answered / the thread got resolved / the PR
+   * merged while you were away" path. The device is asleep, so the only way to
+   * reach into its tray is a push whose handler closes the notification and
+   * shows nothing in its place.
+   *
+   * ── Why iPhones are skipped ────────────────────────────────────────────────
+   * That is precisely the shape of push WebKit punishes: display nothing a few
+   * times and iOS revokes the subscription, and the symptom is notifications
+   * quietly stopping days later. There is no way to withdraw on iOS *and* keep
+   * the subscription, so an iPhone keeps the stale notification until it is
+   * tapped — the behaviour it already had. Chrome is explicitly fine with this:
+   * its forced "site updated in the background" notification is skipped whenever
+   * the origin still has one showing, and otherwise costs push budget rather
+   * than the subscription.
+   */
+  async withdraw(chatId: string): Promise<void> {
+    await this.load();
+    const targets = this.subs.filter((s) => {
+      const ep = s.subscription.endpoint;
+      if (!this.shown.get(ep)?.has(chatId)) return false;
+      if (isAppleEndpoint(ep)) return false;
+      // No kind filter: this is the removal of a notification the device already
+      // accepted, so re-asking whether it wanted that kind can only strand it.
+      return s.prefs.enabled;
+    });
+    // Forget the chat everywhere, including on the devices we just declined to
+    // wake — there is no second attempt, so a lingering entry would only make a
+    // future unrelated resolve believe it has something to withdraw.
+    for (const chats of this.shown.values()) chats.delete(chatId);
+    if (!targets.length) return;
+    const payload = JSON.stringify({
+      id: `withdraw-${chatId}`,
+      chatId,
+      kind: "done",
+      title: "Dispatch",
+      body: "",
+      sticky: false,
+      outstanding: 0,
+      badge: this.totalOutstanding(),
+    } satisfies PushPayload);
+    const topic = topicForChat(chatId);
+    await Promise.all(targets.map((t) => this.send(t, payload, topic)));
   }
 
   /**
@@ -480,15 +677,22 @@ export class PushService {
       title: "Dispatch",
       body: "Push notifications are working on this device.",
       sticky: false,
+      outstanding: 1,
+      // No `badge`: a test must not make the icon claim there is work waiting.
     };
     return this.send(entry, JSON.stringify(payload));
   }
 
-  private async send(entry: StoredSubscription, payload: string): Promise<PushSendResult> {
+  private async send(
+    entry: StoredSubscription,
+    payload: string,
+    topic?: string,
+  ): Promise<PushSendResult> {
     try {
       const [wp, vapid] = await Promise.all([this.webPush(), this.vapidKeys()]);
       await wp.sendNotification(entry.subscription, payload, {
         vapidDetails: vapid,
+        topic,
         // Four hours. A permission prompt from this morning is still worth
         // delivering to a phone that just came back online; a week-old one is
         // archaeology, and the push service would hold it that long by default.

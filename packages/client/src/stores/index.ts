@@ -8,10 +8,21 @@
  *                       frame; 2b keeps the fixture seed OR replaces it with a
  *                       REST snapshot, but this dispatch path is already live.
  */
-import type { WsServerEvent, WorktreeInfo, PRInfo, WorkflowRun } from "@dispatch/shared";
+import type {
+  WsServerEvent,
+  WorktreeInfo,
+  PRInfo,
+  WorkflowRun,
+  AttentionItem,
+} from "@dispatch/shared";
 
 import { api } from "../lib/api.js";
-import { notifyAttention, closeAttentionNotification } from "../lib/browserNotify.js";
+import {
+  notifyAttention,
+  syncChatNotification,
+  closeChatNotification,
+  setAttentionBadge,
+} from "../lib/browserNotify.js";
 import { useConnection } from "./connection.js";
 import { useProjects } from "./projects.js";
 import { useChats } from "./chats.js";
@@ -90,6 +101,14 @@ export function hydrateFromMock(): void {
     prs: MOCK_PRS,
     workflowRuns: MOCK_WORKFLOW_RUNS,
   });
+}
+
+/**
+ * One chat's outstanding items, most-urgent-first (the store keeps `items`
+ * sorted). Drives the "+N more" count on that chat's single OS notification.
+ */
+function itemsForChat(chatId: string): AttentionItem[] {
+  return useAttention.getState().items.filter((i) => i.chatId === chatId);
 }
 
 /**
@@ -172,16 +191,28 @@ export function applyServerEvent(evt: WsServerEvent): void {
       // here rather than from a component so it doesn't depend on which view
       // happens to be mounted. Never awaited: delivery is best-effort.
       const title = useChats.getState().byId[evt.item.chatId]?.title;
-      void notifyAttention(evt.item, title);
+      const outstanding = itemsForChat(evt.item.chatId).length;
+      void notifyAttention(evt.item, title, outstanding);
+      void setAttentionBadge(useAttention.getState().items.length);
       return;
     }
 
-    case "attention-resolve":
+    case "attention-resolve": {
+      // The event's chatId is optional, so read the owner off the item we still
+      // hold before dropping it — otherwise there is nothing left to re-render.
+      const chatId =
+        evt.chatId ?? useAttention.getState().items.find((i) => i.id === evt.id)?.chatId;
       useAttention.getState().resolve(evt.id);
       // Answered elsewhere (or by you, in-app) — withdraw the OS toast so the
-      // notification centre doesn't hold decisions that are already made.
-      void closeAttentionNotification(evt.id);
+      // notification centre doesn't hold decisions that are already made. If the
+      // chat still has other items, the toast is corrected rather than removed.
+      if (chatId) {
+        const title = useChats.getState().byId[chatId]?.title;
+        void syncChatNotification(chatId, itemsForChat(chatId), title);
+      }
+      void setAttentionBadge(useAttention.getState().items.length);
       return;
+    }
 
     case "runner-log":
       useRunners.getState().appendLog(evt.runnerId, {
@@ -244,11 +275,10 @@ export function applyServerEvent(evt: WsServerEvent): void {
       // Authoritative deletion: drop the chat everywhere (sidebar reselects a
       // sibling) + clear any stray attention items. Idempotent, so it's a safe
       // backstop for the initiating tab and the real signal for every other tab.
-      for (const item of useAttention.getState().items) {
-        if (item.chatId === evt.chatId) void closeAttentionNotification(item.id);
-      }
+      void closeChatNotification(evt.chatId);
       useAttention.getState().clearChat(evt.chatId);
       useChats.getState().removeChat(evt.chatId);
+      void setAttentionBadge(useAttention.getState().items.length);
       return;
 
     case "project-update":
@@ -421,6 +451,9 @@ export async function hydrateFromServer(): Promise<boolean> {
   void useUpdate.getState().load();
   useChats.getState().hydrate(chats);
   useAttention.getState().hydrate(attention);
+  // The badge is OS state that outlives the page: a launch that found nothing
+  // waiting has to actively clear the count a previous session left on the icon.
+  void setAttentionBadge(attention.length);
   useRunners.getState().hydrate(runners, {});
   useTerminals.getState().hydrate(terminals, {});
   usePrs.getState().hydrate(prs);
