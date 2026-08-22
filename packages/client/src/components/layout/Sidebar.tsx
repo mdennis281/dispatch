@@ -317,7 +317,17 @@ function ActiveRail({ active }: { active: boolean }) {
         "pointer-events-none absolute inset-y-0 left-0 w-[3px] origin-left bg-accent",
         active
           ? "cm-rail-in scale-x-100 opacity-100"
-          : "scale-x-0 opacity-0 transition-[transform,opacity] duration-200 ease-[var(--ease-out)]",
+          // `scale`, NOT `transform`, and the difference is the whole retract.
+          // Tailwind v4 compiles `scale-x-*` to the independent `scale`
+          // property (`scale: var(--tw-scale-x) var(--tw-scale-y)`), so a
+          // hand-written `transition-[transform,opacity]` covers nothing here:
+          // `scale` snapped 100% → 0% on one frame and the fade had a
+          // zero-width bar left to fade. The named `transition-transform` would
+          // work — v4 expands it to `transform, translate, scale, rotate` — but
+          // it can't carry opacity too, so the list stays explicit and names
+          // `scale` itself. The entry keyframes are unaffected: they animate
+          // `transform`, which composes with `scale` independently.
+          : "scale-x-0 opacity-0 transition-[scale,opacity] duration-200 ease-[var(--ease-out)]",
       )}
     />
   );
