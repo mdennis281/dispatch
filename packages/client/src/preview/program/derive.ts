@@ -1,0 +1,327 @@
+/**
+ * Everything the plan view SHOWS but the spec does not STORE.
+ *
+ * Waves, the concurrency schedule and a gate's signatory list are all pure
+ * functions of the spec. Persisting any of them would be storing a second copy
+ * of the truth that can disagree with the first — a stored `wave` on a task
+ * survives an edit to `dependsOn` and then quietly lies. They recompute in
+ * microseconds; derive them.
+ */
+import type { Criterion, ProgramSpec, Task, TaskId, TeamId } from "./types.js";
+import { CAPS } from "./types.js";
+
+/* -------------------------------------------------------------------- waves */
+
+/**
+ * Topological level per task, 1-indexed, within one phase.
+ *
+ * A task's wave is one past the deepest wave it depends on, so every task in
+ * wave N could in principle start at the same moment. This is the THEORETICAL
+ * parallelism — what the dependency graph permits. What actually runs
+ * concurrently is {@link scheduleFor}, which then applies the concurrency caps.
+ * Showing both is the point: the gap between them is the plan's real cost.
+ */
+export function wavesFor(spec: ProgramSpec, phaseId: string): Map<TaskId, number> {
+  const tasks = spec.tasks.filter((t) => t.phaseId === phaseId);
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const wave = new Map<TaskId, number>();
+
+  const visit = (id: TaskId, seen: Set<TaskId>): number => {
+    const cached = wave.get(id);
+    if (cached !== undefined) return cached;
+    // A cycle is a validation error, not a render error. Break it at depth 1 so
+    // the picture still draws and the issues list is what explains the problem.
+    if (seen.has(id)) return 1;
+    const task = byId.get(id);
+    if (!task) return 1;
+    seen.add(id);
+    const deps = task.dependsOn.filter((d) => byId.has(d));
+    const level = deps.length === 0 ? 1 : Math.max(...deps.map((d) => visit(d, seen))) + 1;
+    seen.delete(id);
+    wave.set(id, level);
+    return level;
+  };
+
+  for (const t of tasks) visit(t.id, new Set());
+  return wave;
+}
+
+/** Tasks of one phase, grouped by wave and ordered. */
+export function waveGroups(spec: ProgramSpec, phaseId: string): Task[][] {
+  const wave = wavesFor(spec, phaseId);
+  const groups: Task[][] = [];
+  for (const t of spec.tasks.filter((x) => x.phaseId === phaseId)) {
+    const w = (wave.get(t.id) ?? 1) - 1;
+    (groups[w] ??= []).push(t);
+  }
+  return groups.map((g) => g ?? []);
+}
+
+/* ----------------------------------------------------------------- schedule */
+
+/** One concurrent batch: what actually runs at the same time. */
+export interface Slot {
+  step: number;
+  tasks: Task[];
+  /** Tasks that were dependency-free this step but had to wait on a cap. */
+  deferred: Task[];
+}
+
+/**
+ * Simulate the phase under both concurrency caps.
+ *
+ * Greedy by step: take everything whose dependencies already completed, then
+ * admit tasks until either the program-wide `maxParallelTasks` or the owning
+ * team's `maxParallel` is full. Whatever is left over is `deferred` — and that
+ * list is the honest version of "this phase is parallel", because a wave of
+ * five tasks under a cap of four is two steps, not one.
+ */
+export function scheduleFor(spec: ProgramSpec, phaseId: string): Slot[] {
+  const tasks = spec.tasks.filter((t) => t.phaseId === phaseId);
+  const teamCap = new Map(spec.teams.map((t) => [t.id, t.maxParallel]));
+  const done = new Set<TaskId>();
+  const slots: Slot[] = [];
+  let remaining = [...tasks];
+  let step = 1;
+
+  // Bounded by task count: every step completes at least one task, or the graph
+  // is cyclic and the validator has already said so.
+  while (remaining.length > 0 && step <= tasks.length + 1) {
+    const eligible = remaining.filter((t) =>
+      t.dependsOn.filter((d) => tasks.some((x) => x.id === d)).every((d) => done.has(d)),
+    );
+    if (eligible.length === 0) break; // cycle — validator reports it
+
+    const admitted: Task[] = [];
+    const deferred: Task[] = [];
+    const perTeam = new Map<TeamId, number>();
+    for (const t of eligible) {
+      const used = perTeam.get(t.teamId) ?? 0;
+      const cap = teamCap.get(t.teamId) ?? 1;
+      if (admitted.length >= spec.policy.maxParallelTasks || used >= cap) {
+        deferred.push(t);
+        continue;
+      }
+      admitted.push(t);
+      perTeam.set(t.teamId, used + 1);
+    }
+
+    slots.push({ step, tasks: admitted, deferred });
+    for (const t of admitted) done.add(t.id);
+    remaining = remaining.filter((t) => !done.has(t.id));
+    step += 1;
+  }
+  return slots;
+}
+
+/* -------------------------------------------------------------------- gates */
+
+export interface GatePreview {
+  criterion: Criterion;
+  scope: "program" | "phase";
+  phaseId?: string;
+  /** Teams owning at least one satisfying task — the derived signatory list. */
+  signatories: TeamId[];
+  satisfiedBy: Task[];
+  /**
+   * True when no task named this criterion and the signatories fell back to
+   * "every team working in the phase". See {@link gatePreviews}.
+   */
+  implied: boolean;
+}
+
+/**
+ * Every criterion with the leads who would have to agree it is done.
+ *
+ * Signatories are derived from `task.satisfies` rather than authored, which is
+ * what keeps "the lead is omitted if uninvolved" true after a plan edit. A
+ * criterion with an EMPTY signatory list is not an empty gate — it is a plan
+ * hole, and the validator raises it.
+ */
+export function gatePreviews(spec: ProgramSpec): GatePreview[] {
+  const out: GatePreview[] = [];
+  const forCriterion = (criterion: Criterion, scope: "program" | "phase", phaseId?: string) => {
+    const satisfiedBy = spec.tasks.filter((t) => t.satisfies.includes(criterion.id));
+    let signatories = [...new Set(satisfiedBy.map((t) => t.teamId))];
+    // A PHASE criterion is frequently a property of the phase as a whole —
+    // "specs round-trip", "every view was screenshotted" — that no single task
+    // owns. Demanding a task name it was the first rule this preview broke:
+    // seven of eight phase criteria failed it, and linking each to an arbitrary
+    // task would have been bookkeeping, not traceability. So an unnamed phase
+    // criterion falls back to "every team working in this phase signs", which
+    // is what a phase gate means anyway. Program criteria get no such fallback:
+    // there, nothing building it really is a plan hole.
+    let implied = false;
+    if (signatories.length === 0 && scope === "phase" && phaseId) {
+      signatories = [
+        ...new Set(spec.tasks.filter((t) => t.phaseId === phaseId).map((t) => t.teamId)),
+      ];
+      implied = true;
+    }
+    out.push({ criterion, scope, phaseId, signatories, satisfiedBy, implied });
+  };
+  for (const c of spec.acceptance) forCriterion(c, "program");
+  for (const p of spec.phases) for (const c of p.acceptance) forCriterion(c, "phase", p.id);
+  return out;
+}
+
+/* --------------------------------------------------------------- validation */
+
+export interface Issue {
+  severity: "error" | "warn";
+  where: string;
+  message: string;
+}
+
+/**
+ * The authoring gate, run live so the picture can show a bad plan as bad.
+ *
+ * Mirrors what `validateProgramSpec` would enforce server-side. The rules that
+ * matter most are the ones a human eye slides past: an acceptance criterion no
+ * task contributes to (the program can never be declared done), and a
+ * dependency edge crossing a phase boundary (two contradictory orderings, since
+ * the phase gate already sequences them).
+ */
+export function validate(spec: ProgramSpec): Issue[] {
+  const issues: Issue[] = [];
+  const err = (where: string, message: string) =>
+    issues.push({ severity: "error", where, message });
+  const warn = (where: string, message: string) =>
+    issues.push({ severity: "warn", where, message });
+
+  /* caps */
+  if (spec.title.length > CAPS.title) err("title", `over ${CAPS.title} chars`);
+  if (spec.objective.length > CAPS.objective)
+    err("objective", `${spec.objective.length} chars, cap ${CAPS.objective}`);
+  if (spec.acceptance.length > CAPS.criteria)
+    err("acceptance", `${spec.acceptance.length} criteria, cap ${CAPS.criteria}`);
+  if (spec.acceptance.length === 0)
+    err("acceptance", "a program with no definition of done cannot be gated");
+  if (spec.phases.length > CAPS.phases)
+    err("phases", `${spec.phases.length} phases, cap ${CAPS.phases}`);
+  if (spec.teams.length > CAPS.teams) err("teams", `${spec.teams.length} teams, cap ${CAPS.teams}`);
+  if (spec.tasks.length > CAPS.tasks) err("tasks", `${spec.tasks.length} tasks, cap ${CAPS.tasks}`);
+
+  /* phase order */
+  const orders = spec.phases.map((p) => p.order).sort((a, b) => a - b);
+  orders.forEach((o, i) => {
+    if (o !== i + 1) err("phases", `order must be contiguous from 1 — saw ${orders.join(",")}`);
+  });
+
+  const taskById = new Map(spec.tasks.map((t) => [t.id, t]));
+  const phaseIds = new Set(spec.phases.map((p) => p.id));
+  const teamIds = new Set(spec.teams.map((t) => t.id));
+
+  for (const t of spec.tasks) {
+    if (t.brief.length > CAPS.taskBrief)
+      err(t.id, `brief is ${t.brief.length} chars, cap ${CAPS.taskBrief}`);
+    if (!phaseIds.has(t.phaseId)) err(t.id, `unknown phaseId "${t.phaseId}"`);
+    if (!teamIds.has(t.teamId)) err(t.id, `unknown teamId "${t.teamId}"`);
+    if (t.dependsOn.includes(t.id)) err(t.id, "depends on itself");
+    for (const d of t.dependsOn) {
+      const dep = taskById.get(d);
+      if (!dep) {
+        err(t.id, `depends on unknown task "${d}"`);
+        continue;
+      }
+      if (dep.phaseId !== t.phaseId)
+        err(t.id, `depends on "${d}" in another phase — the phase gate already orders those`);
+    }
+  }
+
+  /* cycles, named */
+  for (const p of spec.phases) {
+    const cycle = findCycle(spec.tasks.filter((t) => t.phaseId === p.id));
+    if (cycle) err(p.id, `dependency cycle: ${cycle.join(" → ")}`);
+  }
+
+  /* coverage — the rules that catch a plan hole */
+  // Only PROGRAM criteria must be named by a task. A phase criterion that no
+  // task claims falls back to a whole-phase signatory list (see gatePreviews),
+  // so it is answerable — it just isn't attributable to one piece of work.
+  for (const c of spec.acceptance) {
+    if (!spec.tasks.some((t) => t.satisfies.includes(c.id)))
+      err("acceptance", `criterion "${c.id}" is satisfied by no task — it can never be declared met`);
+  }
+  const allCriteria = [
+    ...spec.acceptance.map((c) => ({ c, where: "acceptance" })),
+    ...spec.phases.flatMap((p) => p.acceptance.map((c) => ({ c, where: p.id }))),
+  ];
+  for (const { c, where } of allCriteria) {
+    if (c.verify === "command" && !c.check)
+      err(where, `criterion "${c.id}" is verify:'command' with no check`);
+  }
+  for (const team of spec.teams) {
+    if (!spec.tasks.some((t) => t.teamId === team.id))
+      err("teams", `team "${team.id}" owns no tasks`);
+  }
+  for (const p of spec.phases) {
+    if (!spec.tasks.some((t) => t.phaseId === p.id)) err(p.id, "phase has no tasks");
+  }
+
+  /* personas */
+  const personas: Array<[string, { agentId?: string; instructions?: string }]> = [
+    ["orchestrator", spec.orchestrator],
+    ...spec.teams.flatMap(
+      (t) =>
+        [
+          [`${t.id}.lead`, t.lead],
+          [`${t.id}.developer`, t.developer],
+        ] as Array<[string, { agentId?: string; instructions?: string }]>,
+    ),
+  ];
+  for (const [where, p] of personas) {
+    if (!!p.agentId === !!p.instructions)
+      err(where, "a persona needs exactly one of agentId or instructions");
+    if ((p.instructions?.length ?? 0) > CAPS.personaInstructions)
+      err(where, `instructions over ${CAPS.personaInstructions} chars`);
+  }
+
+  /* soft signals */
+  const unlinked = spec.tasks.filter((t) => t.satisfies.length === 0);
+  if (unlinked.length)
+    warn(
+      "tasks",
+      `${unlinked.length} task(s) satisfy no criterion — legal for scaffolding, but ` +
+        `their team gets no vote at any gate`,
+    );
+
+  return issues;
+}
+
+/** Depth-first cycle hunt that returns the PATH, because "a cycle exists" is not actionable. */
+function findCycle(tasks: Task[]): TaskId[] | null {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const state = new Map<TaskId, "open" | "done">();
+  const stack: TaskId[] = [];
+
+  const walk = (id: TaskId): TaskId[] | null => {
+    const s = state.get(id);
+    if (s === "done") return null;
+    if (s === "open") return [...stack.slice(stack.indexOf(id)), id];
+    state.set(id, "open");
+    stack.push(id);
+    for (const d of byId.get(id)?.dependsOn ?? []) {
+      if (!byId.has(d)) continue;
+      const found = walk(d);
+      if (found) return found;
+    }
+    stack.pop();
+    state.set(id, "done");
+    return null;
+  };
+
+  for (const t of tasks) {
+    const found = walk(t.id);
+    if (found) return found;
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ colours */
+
+/** Stable team → palette slot, so a team is the same colour in every view. */
+export function teamColor(spec: ProgramSpec, teamId: TeamId): string {
+  const i = spec.teams.findIndex((t) => t.id === teamId);
+  return `var(--p-cat-${(i < 0 ? 0 : i) + 1})`;
+}
