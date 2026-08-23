@@ -468,10 +468,12 @@ describe("PrRegistry — Dispatch's own reviewer", () => {
     expect((await store.getPrRecord(KEY))?.reviewAgent?.requestedAt).toBeUndefined();
   });
 
-  it("refuses at a head a round already REVIEWED, and says so distinctly", async () => {
-    // `claimReviewAgent` dedups on `reviewedSha`, so a request armed here could
-    // never be served either way — but "it already reviewed this code" wants
-    // different advice from "it is reviewing it right now".
+  // The in-flight guard must NOT take the finished-round case with it. The row's
+  // head is the last POLLED one, up to 90s stale, so an agent that pushes and
+  // immediately re-requests is still seen at the old head — and in self-review
+  // mode, where nothing but `create_pr` and `request_review` ever arms a local
+  // request, refusing that killed round 2 outright with no later pass to re-arm.
+  it("still arms at a head whose round has FINISHED, however stale that head is", async () => {
     const reg = makeRegistry();
     await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
     await reg.requestReviewAgent(REPO, 42, "c1");
@@ -480,9 +482,38 @@ describe("PrRegistry — Dispatch's own reviewer", () => {
     await reg.noteReviewChat(REPO, 42, "chat-9");
     await reg.notePostedReview(REPO, 42, { chatId: "chat-9" });
 
-    expect(await reg.requestReviewAgent(REPO, 42, "c1")).toMatchObject({
-      armed: false,
-      reason: "already-reviewed",
+    // The push has happened, but the catalog has not polled it yet.
+    const res = await reg.requestReviewAgent(REPO, 42, "c1");
+    expect(res).toMatchObject({ armed: true });
+    expect(res.record?.reviewAgent?.requestedSha).toBe("sha-1");
+
+    // …and it is served the moment the poll catches up, because the claim
+    // compares against the CURRENT head, not the one the request was armed at.
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+    expect(await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 })).not.toBeNull();
+  });
+
+  // `extraRounds` exists first and foremost for a reviewer chat that died
+  // without posting — which leaves the head exactly where it was, with no push
+  // behind it. Lifting only the round count left `claimReviewAgent` refusing on
+  // its SECOND test (`reviewedSha === sha`), so the granted round could never
+  // spawn while `roundsSpent` had gone false: `watch_pr` blocking a full window
+  // on a review that could not exist.
+  it("raiseReviewRoundCap buys a round on an UNCHANGED head, not just after a push", async () => {
+    const POLICY_CAP = 1;
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP });
+    // The reviewer died here: claimed, never posted, and nobody pushed.
+
+    await reg.raiseReviewRoundCap(REPO, 42, 1);
+
+    expect(await reg.requestReviewAgent(REPO, 42, "c1")).toMatchObject({ armed: true });
+    expect(await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP })).not.toBeNull();
+    expect((await store.getPrRecord(KEY))?.reviewAgent).toMatchObject({
+      rounds: 2,
+      reviewedSha: "sha-1",
     });
   });
 

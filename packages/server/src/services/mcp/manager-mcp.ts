@@ -3071,6 +3071,36 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           },
         );
       }
+      // A grant CLEARS the head dedup, which is what makes it work on the
+      // unchanged head a dead reviewer leaves behind — and would also let a
+      // second round spawn beside one still writing. So the one state it must
+      // refuse is a round that is genuinely running: claimed, unposted, and a
+      // reviewer chat we can still see. Waiting is the answer there, not a
+      // second reviewer on the same diff.
+      if (extraRounds && roundView?.phase === "running") {
+        const live = roundView.chatId ? ctx.broker.getStatus(roundView.chatId) : undefined;
+        if (live !== undefined && !TERMINAL_STATES.has(live)) {
+          return prToolResult(
+            "request_review",
+            {
+              summary: `A review round is already running on PR #${number}`,
+              ok: false,
+              details: [`round ${roundView.round} is claimed and still writing`],
+            },
+            (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null,
+            {
+              isError: true,
+              text:
+                `Not granting an extra round on PR #${number}: round ${roundView.round} is ` +
+                "claimed and its reviewer chat is still running. A second round beside it " +
+                "would put two reviewers on the same diff. Call `mcp__manager__watch_pr` " +
+                "and wait for the one in flight; ask again only if it finishes without " +
+                "posting.\n" +
+                JSON.stringify({ number, requested: [], reviewRunning: true }),
+            },
+          );
+        }
+      }
       if (extraRounds && ctx.prRegistry?.raiseReviewRoundCap) {
         await ctx.prRegistry.raiseReviewRoundCap(number, repo, extraRounds).catch(() => {});
       }

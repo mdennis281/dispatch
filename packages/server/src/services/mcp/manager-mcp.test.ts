@@ -1667,6 +1667,69 @@ describe("manager-mcp — request_review", () => {
     expect(gh.asked).toEqual([{ n: 147, list: ["alice"] }]);
   });
 
+  // A grant clears the head dedup, so it would also let a second round spawn
+  // beside one still writing — two reviewers on the same diff. Waiting is the
+  // answer there.
+  it("refuses extraRounds while a round is claimed and its chat is alive", async () => {
+    const raises: number[] = [];
+    const gh = ghWith(
+      { requested: ["dispatch-review"], failed: [] },
+      ["dispatch-review"],
+      undefined,
+      "dispatch-review",
+    );
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      // The reviewer chat is still going.
+      broker: fakeBroker({ "reviewer-1": "running" }),
+      github: gh,
+      prRegistry: reviewRegistry(
+        // Claimed, never posted — `running`.
+        { rounds: 2, maxRounds: 2, chatId: "reviewer-1", reviewedAt: 1_000 },
+        raises,
+      ),
+    });
+
+    const res = await requestReview.handler(
+      { number: 147, extraRounds: 1, reviewers: ["dispatch-review"], repo: undefined },
+      {},
+    );
+
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("still running");
+    expect(raises).toEqual([]);
+    expect(gh.asked).toEqual([]);
+  });
+
+  it("grants extraRounds once that chat is over — the reviewer-died case", async () => {
+    const raises: number[] = [];
+    const gh = ghWith(
+      { requested: ["dispatch-review"], failed: [] },
+      ["dispatch-review"],
+      undefined,
+      "dispatch-review",
+    );
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({ "reviewer-1": "error" }),
+      github: gh,
+      prRegistry: reviewRegistry(
+        { rounds: 2, maxRounds: 2, chatId: "reviewer-1", reviewedAt: 1_000 },
+        raises,
+      ),
+    });
+
+    await requestReview.handler(
+      { number: 147, extraRounds: 1, reviewers: ["dispatch-review"], repo: undefined },
+      {},
+    );
+
+    expect(raises).toEqual([1]);
+    expect(gh.asked).toEqual([{ n: 147, list: ["dispatch-review"] }]);
+  });
+
   it("leaves an unspent cap alone — this gate must not cost the ordinary path", async () => {
     const gh = ghWith({ requested: ["dispatch-review"], failed: [] });
     const { requestReview } = createManagerTools({

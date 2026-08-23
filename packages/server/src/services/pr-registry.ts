@@ -104,8 +104,6 @@ export type RequestReviewAgentReason =
   | "unknown-pr"
   /** A round is claimed at this head and has not posted — it is still coming. */
   | "in-flight"
-  /** A round already covered this exact head. Push, or raise the cap. */
-  | "already-reviewed"
   /** Every allowed round is claimed. Nothing will serve another one. */
   | "rounds-spent"
   /** Already armed at this head and still unserved — the earlier one stands. */
@@ -341,21 +339,26 @@ export class PrRegistry {
     if (!prev) return { armed: false, reason: "unknown-pr", record: null };
     const sha = prev.headRefOid;
     const state = prev.reviewAgent;
-    // A round is already CLAIMED at this head. `claimReviewAgent` dedups on
-    // `reviewedSha`, so nothing will ever serve a request armed here — and
-    // arming it is not merely useless, it is corrupting: `requestedAt` makes
+    // A round is claimed at this head and has NOT posted — it is in flight.
+    // Arming here is not merely useless, it is corrupting: `requestedAt` makes
     // `prReviewAgentView` read `queued`, which hid the round that was genuinely
     // running and let `watch_pr` announce "every round is spent, nothing is
     // coming" over a review being written at that moment (PR #147).
     //
+    // `!postedAt` is load-bearing, not a tidier spelling of the same thing. A
+    // request at a head whose round has FINISHED must still arm: `sha` here is
+    // the row's last POLLED head, up to 90 seconds stale, so an agent that
+    // pushes and immediately calls `request_review` is still seen at the old
+    // one. Refusing that killed round 2 outright in self-review mode — the
+    // default identity — where nothing but `create_pr` and `request_review`
+    // ever arms a local request, so there is no later pass to re-arm it.
+    // Armed at the stale head it is harmless: `claimReviewAgent` compares
+    // against the CURRENT head, so it simply serves once the poll catches up.
+    //
     // Checked BEFORE the cap so the two refusals stay distinguishable: a round
     // in flight ends on its own, a spent cap never does.
-    if (sha && state?.reviewedSha === sha) {
-      return {
-        armed: false,
-        reason: state.postedAt ? "already-reviewed" : "in-flight",
-        record: prev,
-      };
+    if (sha && state?.reviewedSha === sha && !state.postedAt) {
+      return { armed: false, reason: "in-flight", record: prev };
     }
     // Every allowed round is claimed. Same rule `claimReviewAgent` refuses on —
     // spelled here too because a request the sweep will silently drop reads to
@@ -418,10 +421,22 @@ export class PrRegistry {
     if (state?.maxRounds == null) return null;
     return this.publish(
       await this.store.upsertPrRecord(key, { ...prev }, {
-        // `extraRounds`, NOT `maxRounds`. The policy field is rewritten from
-        // project config by `notePolicy` on every sweep pass, so a raise parked
-        // there lasts about 90 seconds — see `PrReviewAgentStateSchema`.
-        reviewAgent: { ...state, extraRounds: (state.extraRounds ?? 0) + extra },
+        reviewAgent: {
+          ...state,
+          // `extraRounds`, NOT `maxRounds`. The policy field is rewritten from
+          // project config by `notePolicy` on every sweep pass, so a raise parked
+          // there lasts about 90 seconds — see `PrReviewAgentStateSchema`.
+          extraRounds: (state.extraRounds ?? 0) + extra,
+          // The head dedup goes with it, or the grant buys nothing in the case
+          // it exists for. `claimReviewAgent` refuses twice — once on the round
+          // count, once on `reviewedSha === sha` — and a reviewer chat that died
+          // without posting leaves the head exactly where it was, with no push
+          // behind it. Lifting only the count left the claim refusing on the
+          // second test, so the granted round could never spawn while
+          // `roundsSpent` had gone false, which is `watch_pr` blocking a full
+          // window on a review that cannot exist.
+          reviewedSha: undefined,
+        },
       }),
     );
   }

@@ -214,20 +214,22 @@ describe("prReviewAgentView — the reviewer's state on one PR", () => {
     ).toMatchObject({ roundsSpent: false, maxRounds: 3 });
   });
 
-  it("reads a stale request over a POSTED round as spent, not as queued forever", () => {
-    // The row PR #147 was left holding. Before this it read `queued` in
-    // perpetuity: a request nothing can claim, sitting on top of a finished
-    // final round, reported as a review that was about to start.
+  it("reads a request over a FINISHED round at that head as queued, not hidden", () => {
+    // The masking rule is scoped to a round still in flight. Once one has
+    // posted, a request at that head is a real pending request — the row's head
+    // is up to 90s stale, so a genuine post-push re-request routinely lands
+    // there and IS served once the poll catches up. Hiding it would report a
+    // round that is coming as one that isn't.
     expect(
       prReviewAgentView({
-        rounds: 2,
+        rounds: 1,
         reviewedSha: "sha-1",
         reviewedAt: 10,
         postedAt: 30,
         requestedSha: "sha-1",
-        requestedAt: 20,
-        maxRounds: 2,
+        requestedAt: 40,
+        maxRounds: 4,
       }),
-    ).toMatchObject({ phase: "spent", posted: true, roundsSpent: true });
+    ).toMatchObject({ phase: "queued", at: 40 });
   });
 });
