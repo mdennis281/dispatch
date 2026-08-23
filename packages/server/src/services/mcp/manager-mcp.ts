@@ -671,6 +671,19 @@ export interface ManagerMcpPrCreate {
  * worktree of the same repository the chat is bound to. That keeps the useful
  * case (this repo's other worktree) and refuses the dangerous one (some other
  * repo entirely, or another project's checkout).
+ *
+ * The validation is against a LIVE directory, which is not always the bound one:
+ * a chat's worktree can be removed out from under it after a merge, and a
+ * directory with no git identity answers "not the same repository" about
+ * everything, so validating against one would reject every hint including the
+ * right one. See `makeDirResolver` in session-broker.ts.
+ *
+ * In the corner where the chat has NO live directory at all — bound cwd dead,
+ * every recorded worktree dead, project record missing — there is nothing left
+ * to validate against and a hint that is itself a checkout is taken as given.
+ * The `cwd` argument's description says so; the guarantee is real but
+ * conditional, and stating it unconditionally would be the more dangerous
+ * error.
  */
 export type PrCreateWhere = string | undefined;
 
@@ -3459,9 +3472,13 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           "Directory whose branch to open the PR for. Defaults to the chat's " +
             "worktree, or its project root. Pass this when you are working " +
             "somewhere the chat wasn't bound to at startup — e.g. a worktree you " +
-            "entered mid-session — otherwise the PR is opened for whatever branch " +
-            "the STARTING directory is on. Must be a worktree of the same " +
-            "repository; anything else is ignored in favour of the default.",
+            "entered mid-session, or when the chat's own directory was removed " +
+            "after a merge — otherwise the PR is opened for whatever branch the " +
+            "STARTING directory is on. While the chat still has a live directory " +
+            "of its own, this must be a worktree of the same repository and " +
+            "anything else is ignored in favour of the default; if the chat has " +
+            "NO live directory left, a directory that is a checkout is used as " +
+            "given, because there is nothing left to check it against.",
         ),
     },
     async (args): Promise<CallToolResult> => {
@@ -3488,9 +3505,19 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         );
       }
       if (!st) {
+        // Two causes, and the remedy differs, so name both rather than the one
+        // that used to be printed alone. "Make sure the chat has a worktree" was
+        // the whole message for a year, and it was the WRONG advice in the case
+        // that produced it most often: the chat had a worktree, and its bound
+        // one had merely been reaped out from under it after a merge. An agent
+        // told to get a worktree it already has has nowhere to go.
         return textResult(
           "Could not resolve this chat's repo or branch, so there's nothing to open a PR " +
-            "from. Make sure the chat has a worktree.",
+            "from.\n" +
+            "  · If you have committed work somewhere, pass `cwd` pointing at that " +
+            "worktree — it is used as long as it belongs to this chat's repository.\n" +
+            "  · Otherwise `gh` could not name the repository at all (not signed in, " +
+            "no `origin`, or GitHub is down). `gh repo view` in your worktree says which.",
           true,
         );
       }

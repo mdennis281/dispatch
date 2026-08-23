@@ -11,11 +11,14 @@ import { EXEMPTION_ANSWERS } from "./mcp/manager-mcp.js";
 import {
   SessionBroker,
   EFFORT_THINKING_TOKENS,
+  makeDirResolver,
   makePrCreateBinding,
   makeRepoResolver,
   statusForTool,
   type QueryFn,
+  type SessionDirs,
 } from "./session-broker.js";
+import { GitHubService } from "./github.js";
 import { MemoryService } from "./memory.js";
 import { MetricsService } from "./metrics.js";
 import { MetricsBackfill } from "./metrics-backfill.js";
@@ -2835,6 +2838,26 @@ describe("SessionBroker — settled PRs", () => {
  * hours after GitHub had recovered. It could not discover it was wrong, because
  * a cached answer never asks again.
  */
+/**
+ * Candidates shaped exactly as `buildOptions` builds them: worktrees are
+ * checkout ROOTS by construction, the project checkout is not necessarily one
+ * (a monorepo subdirectory is a supported `repoPath`). Tests that blur the two
+ * would prove nothing about the code that has to tell them apart.
+ */
+function dirsOf(
+  cwd: string | undefined,
+  alternates: string[] = [],
+  repoPath?: string,
+): SessionDirs {
+  return {
+    candidates: async () => [
+      ...(cwd ? [{ path: cwd, requireRoot: true }] : []),
+      ...alternates.map((path) => ({ path, requireRoot: true })),
+      ...(repoPath ? [{ path: repoPath, requireRoot: false }] : []),
+    ],
+  };
+}
+
 describe("makeRepoResolver", () => {
   /**
    * Matches `GitHubService.resolveRepo(cwd: string)` rather than taking no
@@ -2843,7 +2866,14 @@ describe("makeRepoResolver", () => {
    * the regression that would make every resolve fail on a real service.
    */
   function fakeGitHub(resolveRepo: (cwd: string) => Promise<string>) {
-    return { resolveRepo } as unknown as Parameters<typeof makeRepoResolver>[0];
+    // `isRepositoryRoot` too: the resolver checks the directory is still a
+    // checkout before spending a `gh` on it, and a stub missing it would make
+    // every resolve fail for a reason this suite isn't about.
+    return {
+      resolveRepo,
+      isRepositoryRoot: async () => true,
+      isRepository: async () => true,
+    } as unknown as Parameters<typeof makeRepoResolver>[0];
   }
 
   it("retries after a failure instead of answering null for the rest of the session", async () => {
@@ -2855,7 +2885,7 @@ describe("makeRepoResolver", () => {
         if (seen.length === 1) throw new Error("HTTP 503: No server is currently available");
         return "mdennis281/dispatch";
       }),
-      "/repo",
+      dirsOf("/repo"),
     );
 
     expect(await repoFor()).toBeNull();
@@ -2872,7 +2902,7 @@ describe("makeRepoResolver", () => {
         calls += 1;
         return "mdennis281/dispatch";
       }),
-      "/repo",
+      dirsOf("/repo"),
     );
 
     await repoFor();
@@ -2889,10 +2919,14 @@ describe("makeRepoResolver", () => {
         calls += 1;
         return new Promise<string>((ok) => (release = ok));
       }),
-      "/repo",
+      dirsOf("/repo"),
     );
 
     const both = Promise.all([repoFor(), repoFor()]);
+    // `resolveRepo` is now reached after an await (the liveness check), so
+    // `release` isn't wired up until the microtask queue turns. Wait for the
+    // call rather than assuming it already happened.
+    await vi.waitFor(() => expect(calls).toBe(1));
     release("mdennis281/dispatch");
     expect(await both).toEqual(["mdennis281/dispatch", "mdennis281/dispatch"]);
     // One `gh` for two callers — the memo still has to do its actual job.
@@ -2906,7 +2940,7 @@ describe("makeRepoResolver", () => {
         calls += 1;
         return "resolved/from-cwd";
       }),
-      "/repo",
+      dirsOf("/repo"),
     );
 
     expect(await repoFor("someone/else")).toBe("someone/else");
@@ -2928,6 +2962,8 @@ describe("makePrCreateBinding — repo resolution", () => {
         if (calls === 1) throw new Error("HTTP 503: No server is currently available");
         return "mdennis281/dispatch";
       },
+      isRepository: async () => true,
+      isRepositoryRoot: async () => true,
       sameRepository: async () => true,
       prCreatePreflight: async () => ({
         branch: "feat/x",
@@ -2939,7 +2975,7 @@ describe("makePrCreateBinding — repo resolution", () => {
       }),
     } as unknown as Parameters<typeof makePrCreateBinding>[0];
 
-    const binding = makePrCreateBinding(github, "/repo", "c1", {
+    const binding = makePrCreateBinding(github, dirsOf("/repo"), "c1", {
       trunk: "main",
       reviewers: [],
       draft: false,
@@ -3323,5 +3359,411 @@ describe("SessionBroker — the runtime ledger", () => {
     const broker = makeBroker(fn);
     await runTurn(broker, chatFor("c1"));
     expect(broker.getStatus("c1")).toBe("idle");
+  });
+});
+
+/**
+ * The reaped-worktree bug: one merge took every GitHub tool in a chat down for
+ * the rest of its life.
+ *
+ * The sequence, observed 2026-08-23 on `feat/chat-lineage` after merging #151.
+ * A chat merges the PR it opened from its own worktree. When its turn ends the
+ * worktree reaper cleans that tree up — correct, and deliberately deferred to
+ * turn-end so it can't pull the floor out mid-turn. On Windows the removal fails
+ * the way it always fails on a tree carrying `node_modules`: `.git` is unlinked
+ * FIRST, then git chokes and exits 128, leaving a full directory that no git
+ * command will answer for. The session's bound cwd goes on pointing at it
+ * forever, and the chat can never open another PR.
+ *
+ * Two separate things were wrong, and fixing either alone leaves it broken:
+ *
+ *   · `repoFor` ran `gh repo view` in the husk, so the repository could not be
+ *     named — and `preflight` refuses on that BEFORE it ever looks at `cwd`,
+ *     which is why passing an explicit worktree didn't rescue it.
+ *   · `cwdFor` compared the caller's directory against the husk with
+ *     `sameRepository`, which answers a clean `false` for every directory on
+ *     earth once the left side has lost its `.git` — so the dead default beat
+ *     the live hint every time.
+ *
+ * These drive REAL git, because the whole bug lives in what git says about a
+ * directory that still exists. A mock would have to encode the very belief that
+ * was wrong ("the bound cwd is a checkout").
+ */
+describe("makePrCreateBinding — a bound cwd that has been reaped", () => {
+  let root: string;
+  let repoDir: string;
+  /** A tree stripped of its `.git`, exactly as a failed removal leaves it. */
+  let husk: string;
+  /** A healthy tree with committed work, cut AFTER the merge. */
+  let healthy: string;
+
+  const git = async (cwd: string, ...args: string[]) => {
+    const { execa } = await import("execa");
+    return execa("git", args, { cwd });
+  };
+  const cut = (branch: string, at: string) =>
+    git(repoDir, "worktree", "add", "-b", branch, at);
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "reaped-"));
+    repoDir = join(root, "repo");
+    await mkdir(repoDir);
+    await git(repoDir, "init", "-b", "main");
+    await git(repoDir, "config", "user.email", "t@example.com");
+    await git(repoDir, "config", "user.name", "T");
+    await writeFile(join(repoDir, "a.txt"), "hi");
+    await git(repoDir, "add", ".");
+    await git(repoDir, "commit", "-m", "init");
+
+    husk = join(root, "merged");
+    await cut("feat/merged", husk);
+    healthy = join(root, "next");
+    await cut("feat/next", healthy);
+    await writeFile(join(healthy, "b.txt"), "work");
+    await git(healthy, "add", ".");
+    await git(healthy, "commit", "-m", "the work that wants a PR");
+
+    // The husk. `node_modules` stands in for what made git give up partway —
+    // the directory survives, its git identity does not.
+    await rm(join(husk, ".git"), { force: true });
+    await mkdir(join(husk, "node_modules"), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  /**
+   * A GitHubService over real git, with only `gh` stubbed — and stubbed to need
+   * a checkout, because that is the property the bug turned on. A `gh` stub that
+   * answered anywhere would pass while the real one refused.
+   */
+  function githubOverRealGit(): GitHubService {
+    return new GitHubService({
+      bus,
+      exec: (async (file: string, args: string[], o: { cwd?: string }) => {
+        const { execa } = await import("execa");
+        if (file !== "gh") return execa(file, args, { ...o, reject: false });
+        const inRepo = await execa("git", ["rev-parse", "--git-dir"], {
+          cwd: o?.cwd,
+          reject: false,
+        });
+        return inRepo.exitCode === 0
+          ? { exitCode: 0, stdout: "acme/widget", stderr: "" }
+          : { exitCode: 1, stdout: "", stderr: "not a git repository" };
+      }) as never,
+    });
+  }
+
+  function bindingFor(dirs: SessionDirs) {
+    return makePrCreateBinding(githubOverRealGit(), dirs, "c1", {
+      trunk: "main",
+      reviewers: [],
+      draft: false,
+    });
+  }
+
+  it("honours an explicit, valid cwd when the bound one is a husk", async () => {
+    // THE core case. Before the fix this was null: the repo couldn't be named
+    // from the husk, so `cwd` was never even consulted.
+    const binding = bindingFor(dirsOf(husk));
+
+    const st = await binding.preflight(undefined, healthy);
+    expect(st).not.toBeNull();
+    expect(st?.branch).toBe("feat/next");
+    expect(st?.cwd).toBe(healthy);
+    // …and it is openable, which is the thing the agent actually wanted.
+    expect(st?.aheadOfBase).toBe(1);
+    expect(st?.dirty).toBe(false);
+  });
+
+  it("falls back to the chat's own trees with no cwd argument at all", async () => {
+    // The agent shouldn't have to know its session is broken to get a PR open.
+    const binding = bindingFor(dirsOf(husk, [healthy]));
+
+    const st = await binding.preflight();
+    expect(st?.cwd).toBe(healthy);
+    expect(st?.branch).toBe("feat/next");
+  });
+
+  it("skips the husk still listed in the chat record and takes the live tree", async () => {
+    // `WorktreeService.remove` throws on the failed removal BEFORE it reaches
+    // `detachFromChat`, so the reaped path is usually still sitting in
+    // `Chat.worktrees` — and it is typically first. Taking `worktrees[0]` on
+    // faith would pick the husk a second time.
+    const binding = bindingFor(dirsOf(husk, [husk, healthy], repoDir));
+
+    const st = await binding.preflight();
+    expect(st?.cwd).toBe(healthy);
+  });
+
+  it("prefers the project checkout over nothing when no tree survives", async () => {
+    // Last resort. It sits on the trunk, so this reports `main` rather than
+    // opening a PR — but that is a refusal the agent can ACT on, where a bare
+    // "there's nothing to open a PR from" is a dead end.
+    const binding = bindingFor(dirsOf(husk, [], repoDir));
+
+    const st = await binding.preflight();
+    expect(st?.cwd).toBe(repoDir);
+    expect(st?.branch).toBe("main");
+  });
+
+  it("still prefers the bound cwd while it is a real checkout", async () => {
+    // The fallback must not become the normal path: an alternate that outranked
+    // a perfectly good bound tree would open PRs from the wrong branch.
+    const binding = bindingFor(dirsOf(healthy, [], repoDir));
+
+    const st = await binding.preflight();
+    expect(st?.cwd).toBe(healthy);
+    expect(st?.branch).toBe("feat/next");
+  });
+
+  it("still refuses a cwd from another repository, and keeps the live default", async () => {
+    // The original rule, unchanged: a bad HINT must not be able to redirect a PR.
+    const stranger = join(root, "stranger");
+    await mkdir(stranger);
+    await git(stranger, "init", "-b", "main");
+    await git(stranger, "config", "user.email", "t@example.com");
+    await git(stranger, "config", "user.name", "T");
+    await writeFile(join(stranger, "c.txt"), "x");
+    await git(stranger, "add", ".");
+    await git(stranger, "commit", "-m", "not ours");
+
+    const binding = bindingFor(dirsOf(husk, [healthy]));
+
+    const st = await binding.preflight(undefined, stranger);
+    expect(st?.cwd).toBe(healthy);
+  });
+
+  it("rejects a husk that sits INSIDE the repository, where rev-parse walks up", async () => {
+    // The case the first round of fixtures missed, and it is the common layout
+    // rather than an exotic one: `.worktrees/` is the DEFAULT worktreeRoot for a
+    // new project, and the Claude Code harness cuts its own trees into
+    // `<repo>/.claude/worktrees/`.
+    //
+    // `git rev-parse` walks UP the parent chain, so a husk in either place still
+    // answers — with the MAIN checkout's `.git`, exit 0. A liveness check built
+    // on `--git-common-dir` alone calls it alive, and every question about the
+    // chat's branch is then answered by the trunk: the agent is told `on-trunk`
+    // while its commits sit one directory over. That is the exact lie this area
+    // exists to stop telling, reintroduced by the repair for it.
+    const inside = join(repoDir, ".worktrees", "feat-inside");
+    await mkdir(join(repoDir, ".worktrees"), { recursive: true });
+    await cut("feat/inside", inside);
+    await rm(join(inside, ".git"), { force: true });
+
+    // Precondition: git really does answer for it, which is why this is subtle.
+    const { execa } = await import("execa");
+    const walked = await execa(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { cwd: inside, reject: false },
+    );
+    expect(walked.exitCode).toBe(0);
+
+    const binding = bindingFor(dirsOf(inside, [healthy]));
+
+    const st = await binding.preflight();
+    expect(st?.cwd).toBe(healthy);
+    expect(st?.branch).toBe("feat/next");
+  });
+
+  it("still accepts a live worktree that sits inside the repository", async () => {
+    // The other half: rejecting husks must not reject the in-repo layout itself.
+    const inside = join(repoDir, ".worktrees", "feat-live");
+    await mkdir(join(repoDir, ".worktrees"), { recursive: true });
+    await cut("feat/live-inside", inside);
+    await writeFile(join(inside, "d.txt"), "work");
+    await git(inside, "add", ".");
+    await git(inside, "commit", "-m", "in-repo work");
+
+    const binding = bindingFor(dirsOf(inside));
+
+    const st = await binding.preflight();
+    expect(st?.cwd).toBe(inside);
+    expect(st?.branch).toBe("feat/live-inside");
+  });
+
+  it("does not mistake a subdirectory of a worktree for the worktree", async () => {
+    // Same walk-up, one level down. A candidate list is paths to checkouts, so a
+    // subdirectory arriving there means something upstream is confused; taking
+    // it would work by accident today and mislead the moment it doesn't.
+    const sub = join(healthy, "packages", "server");
+    await mkdir(sub, { recursive: true });
+
+    const binding = bindingFor(dirsOf(sub, [healthy]));
+
+    const st = await binding.preflight();
+    expect(st?.cwd).toBe(healthy);
+  });
+
+  it("keeps a monorepo-subdirectory project alive, though it is not a checkout root", async () => {
+    // `project.repoPath` is deliberately allowed to sit INSIDE a repo:
+    // `ensureRepo` in routes/projects.ts returns early on `enclosingRepoRoot`
+    // so that `apps/service`, which "has no `.git` of its own but is thoroughly
+    // tracked", is never `git init`-ed into a nested repo.
+    //
+    // It is therefore indistinguishable from a husk by `--show-toplevel` alone,
+    // and judging it by that would answer `undefined` for every candidate — not
+    // just breaking `create_pr` but taking `watch_pr` and `approve_pr` down with
+    // it, for a project that never had a worktree at all. Strictly worse than
+    // the bug being fixed, which is why `requireRoot` is per-candidate.
+    const sub = join(repoDir, "apps", "service");
+    await mkdir(sub, { recursive: true });
+
+    // Shaped as a chat with NO worktree: `cwd` is the project checkout itself.
+    const binding = bindingFor(dirsOf(undefined, [], sub));
+
+    const st = await binding.preflight();
+    expect(st).not.toBeNull();
+    expect(st?.cwd).toBe(sub);
+    // Sanity: it really is not a root, so the loose check is what saved it.
+    expect(await githubOverRealGit().isRepositoryRoot(sub)).toBe(false);
+    expect(await githubOverRealGit().isRepository(sub)).toBe(true);
+  });
+
+  it("names the repo from the caller's directory, not from a memo it can no longer see", async () => {
+    // With no live directory, `cwdFor` accepts a `requested` that is merely *a*
+    // checkout — there is nothing left to compare it against. `repoOn` must then
+    // resolve the repository FROM that directory rather than reuse the memo from
+    // a resolve that succeeded earlier in the chat.
+    //
+    // Reusing it pushes `--set-upstream origin <branch>` inside the hinted
+    // checkout, to THAT repo's origin, and then runs `gh pr create --repo <memo>`
+    // against a head ref that only exists on the other remote. Two repositories,
+    // one PR, and a branch the named repo has never heard of.
+    const other = join(root, "other");
+    await mkdir(other);
+    await git(other, "init", "-b", "main");
+    await git(other, "config", "user.email", "t@example.com");
+    await git(other, "config", "user.name", "T");
+    await writeFile(join(other, "e.txt"), "x");
+    await git(other, "add", ".");
+    await git(other, "commit", "-m", "theirs");
+    await git(other, "checkout", "-b", "feat/theirs");
+
+    const seen: string[] = [];
+    const github = new GitHubService({
+      bus,
+      exec: (async (file: string, args: string[], o: { cwd?: string }) => {
+        const { execa } = await import("execa");
+        if (file !== "gh") return execa(file, args, { ...o, reject: false });
+        const cwd = o?.cwd ?? "";
+        const inRepo = await execa("git", ["rev-parse", "--git-dir"], {
+          cwd,
+          reject: false,
+        });
+        if (inRepo.exitCode !== 0) {
+          return { exitCode: 1, stdout: "", stderr: "not a git repository" };
+        }
+        // ONLY the repo-naming call: prCreatePreflight makes its own `gh` calls
+        // and counting those would make this assertion about the wrong thing.
+        if (args.includes("repo") && args.includes("view")) seen.push(cwd);
+        // Each checkout names its OWN repository, as the real `gh` would.
+        return {
+          exitCode: 0,
+          stdout: cwd.startsWith(other) ? "someone/else" : "acme/widget",
+          stderr: "",
+        };
+      }) as never,
+    });
+
+    const binding = makePrCreateBinding(github, dirsOf(healthy), "c1", {
+      trunk: "main",
+      reviewers: [],
+      draft: false,
+    });
+
+    // The memo must be populated the way it really is: by a resolve that
+    // succeeded while the chat still HAD a live directory. A binding that starts
+    // out dead never memoises anything (`makeRepoResolver` caches only success),
+    // so binding to the husk up front would prove nothing.
+    expect((await binding.preflight())?.cwd).toBe(healthy);
+    expect(seen).toEqual([healthy]);
+
+    // NOW the worktree is reaped, exactly as it is mid-chat.
+    await rm(join(healthy, ".git"), { force: true });
+
+    // The memo still says `acme/widget` and `repoFor()` will hand it back
+    // without re-checking anything. The answer has to come from `other` instead:
+    // `createPr` pushes inside `other`, so naming the memo's repo would open a
+    // PR against a head ref that only exists on the other remote.
+    seen.length = 0;
+    const st = await binding.preflight(undefined, other);
+    expect(st?.cwd).toBe(other);
+    expect(seen).toEqual([other]);
+  });
+
+  it("reports null when nothing anywhere is a checkout — the honest failure", async () => {
+    const nowhere = join(root, "nowhere");
+    await mkdir(nowhere);
+    const binding = bindingFor(dirsOf(husk, [nowhere]));
+
+    expect(await binding.preflight()).toBeNull();
+  });
+});
+
+/**
+ * The husk breaks `watch_pr` and `approve_pr` too — they resolve the repo the
+ * same way — so the repair belongs in the shared resolver rather than in
+ * `create_pr` alone.
+ */
+describe("makeRepoResolver / makeDirResolver — a dead bound cwd", () => {
+  function fake(alive: string[], onResolve?: (dir: string) => void) {
+    return {
+      isRepositoryRoot: async (dir: string) => alive.includes(dir),
+      isRepository: async (dir: string) => alive.includes(dir),
+      resolveRepo: async (dir: string) => {
+        onResolve?.(dir);
+        if (!alive.includes(dir)) throw new Error("not a git repository");
+        return "acme/widget";
+      },
+    } as unknown as Parameters<typeof makeRepoResolver>[0];
+  }
+
+  it("resolves the repo from the first live alternate instead of the husk", async () => {
+    const seen: string[] = [];
+    const repoFor = makeRepoResolver(
+      fake(["/live"], (d) => seen.push(d)),
+      dirsOf("/husk", ["/husk", "/live"]),
+    );
+
+    expect(await repoFor()).toBe("acme/widget");
+    // And it never spent a `gh` on the directory it already knew was dead.
+    expect(seen).toEqual(["/live"]);
+  });
+
+  it("answers undefined — not the husk — when nothing survives", async () => {
+    const dirFor = makeDirResolver(fake([]), dirsOf("/husk", ["/gone"]));
+    expect(await dirFor()).toBeUndefined();
+  });
+
+  it("does not re-check liveness once the repo has resolved", async () => {
+    let checks = 0;
+    const github = {
+      isRepositoryRoot: async () => {
+        checks += 1;
+        return true;
+      },
+      isRepository: async () => true,
+      resolveRepo: async () => "acme/widget",
+    } as unknown as Parameters<typeof makeRepoResolver>[0];
+    const repoFor = makeRepoResolver(github, dirsOf("/live"));
+
+    await repoFor();
+    await repoFor();
+    await repoFor();
+    // `watch_pr` polls in a loop; a `git rev-parse` per poll would be a real cost.
+    expect(checks).toBe(1);
+  });
+
+  it("survives an alternates() that throws", async () => {
+    const dirFor = makeDirResolver(fake(["/live"]), {
+      candidates: async () => {
+        throw new Error("store is down");
+      },
+    });
+    // A store read failing must not be louder than the outage it reports.
+    expect(await dirFor()).toBeUndefined();
   });
 });

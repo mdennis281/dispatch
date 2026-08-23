@@ -994,6 +994,96 @@ describe("sameRepository", () => {
   });
 });
 
+/**
+ * The primitive `sameRepository` is built on, exposed in its own right because
+ * "is this still a checkout?" turned out to be a question several callers need
+ * to ask about a directory they are already holding.
+ *
+ * It exists for one failure: a `git worktree remove` that unlinks the tree's
+ * `.git` and then fails on `node_modules` leaves a full directory that is not a
+ * repository. `existsSync` says yes, git says no, and a session bound to it goes
+ * on believing it has a worktree.
+ */
+describe("isRepository", () => {
+  it("is false for a directory git will not answer for", async () => {
+    const { exec, push } = makeExec();
+    push({ stdout: "", stderr: "not a git repository", exitCode: 128 });
+    const gh = new GitHubService({ bus, exec });
+    expect(await gh.isRepository("/tmp/husk")).toBe(false);
+  });
+
+  it("is true for a checkout, and asks git the absolute question", async () => {
+    const { exec, calls, push } = makeExec();
+    push({ stdout: "/repo/.git\n", exitCode: 0 });
+    const gh = new GitHubService({ bus, exec });
+
+    expect(await gh.isRepository("/repo/wt/x")).toBe(true);
+    expect(calls[0].args).toEqual([
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ]);
+    expect(calls[0].options?.cwd).toBe("/repo/wt/x");
+  });
+
+  it("is false — never throws — when git cannot be run at all", async () => {
+    const gh = new GitHubService({
+      bus,
+      exec: (async () => {
+        throw new Error("ENOENT: git");
+      }) as never,
+    });
+    expect(await gh.isRepository("/repo")).toBe(false);
+  });
+
+  it("treats empty output as no, rather than as an unnamed repository", async () => {
+    const { exec, push } = makeExec();
+    push({ stdout: "   \n", exitCode: 0 });
+    const gh = new GitHubService({ bus, exec });
+    expect(await gh.isRepository("/repo")).toBe(false);
+  });
+});
+
+/**
+ * The half of the liveness check that `--git-common-dir` alone cannot answer.
+ *
+ * `git rev-parse` walks UP the parent chain, so a directory with no `.git` of
+ * its own answers with its parent's and exits 0. A reaped worktree sitting
+ * inside the repository — `.worktrees/` is the default `worktreeRoot`, and the
+ * harness cuts into `<repo>/.claude/worktrees/` — therefore looks alive to
+ * `isRepository`, and git then answers every question about it with the MAIN
+ * checkout's state.
+ */
+describe("isRepositoryRoot", () => {
+  it("is false when git answers from a PARENT rather than from this directory", async () => {
+    const { exec, calls, push } = makeExec();
+    push({ stdout: "/repo\n", exitCode: 0 });
+    const gh = new GitHubService({ bus, exec });
+
+    expect(await gh.isRepositoryRoot("/repo/.worktrees/husk")).toBe(false);
+    expect(calls[0].args).toEqual(["rev-parse", "--show-toplevel"]);
+  });
+
+  it("is true for the root git names, whatever separators git used", async () => {
+    const { exec, push } = makeExec();
+    // git answers with forward slashes even on Windows. Comparing raw strings
+    // would reject every real candidate on the platform this bug lives on.
+    const root = process.platform === "win32" ? "C:/repo" : "/repo";
+    const asGiven = process.platform === "win32" ? "C:\\repo" : "/repo";
+    push({ stdout: `${root}\n`, exitCode: 0 });
+    const gh = new GitHubService({ bus, exec });
+
+    expect(await gh.isRepositoryRoot(asGiven)).toBe(true);
+  });
+
+  it("is false — never throws — outside a repository entirely", async () => {
+    const { exec, push } = makeExec();
+    push({ stdout: "", stderr: "not a git repository", exitCode: 128 });
+    const gh = new GitHubService({ bus, exec });
+    expect(await gh.isRepositoryRoot("/tmp/nowhere")).toBe(false);
+  });
+});
+
 describe("sameRepository — against real git", () => {
   let root: string;
   let hasGit = true;

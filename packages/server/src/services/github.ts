@@ -821,6 +821,85 @@ export class GitHubService {
   }
 
   /**
+   * The repository a directory belongs to, as its absolute `--git-common-dir`;
+   * `null` for anything that isn't a checkout.
+   *
+   * The identity primitive behind {@link sameRepository} and
+   * {@link isRepository} — one `git rev-parse`, one place that knows how to read
+   * it. Never throws: an unreadable, missing or non-git directory is `null`.
+   */
+  async gitCommonDir(dir: string): Promise<string | null> {
+    const r = await this.exec(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { cwd: dir, reject: false },
+    ).catch(() => null);
+    if (!r || r.exitCode !== 0) return null;
+    const out = r.stdout.trim();
+    if (!out) return null;
+    // Resolve symlinks: on macOS a temp dir reached two ways is the same repo
+    // but two different strings, and this comparison decides whether a PR opens.
+    return await realpath(out).catch(() => resolve(out));
+  }
+
+  /**
+   * Does this directory still have a git identity?
+   *
+   * Exists because "the directory is there" and "the directory is a checkout"
+   * came apart on Windows: `git worktree remove` unlinks the worktree's `.git`
+   * FIRST and then chokes on `node_modules`, leaving a full directory that no
+   * git command will answer for (see the worktree reaper's notes). Anything
+   * holding such a path — a session's bound cwd, a chat's `worktrees[]` — is
+   * holding a dead pointer, and needs to be able to find that out.
+   *
+   * DELIBERATELY loose about WHERE in a checkout `dir` is: an agent that hands
+   * `create_pr` a subdirectory of its worktree has named a directory git will
+   * answer for, and every command run there works. Use
+   * {@link isRepositoryRoot} where the difference matters.
+   */
+  async isRepository(dir: string): Promise<boolean> {
+    return (await this.gitCommonDir(dir)) !== null;
+  }
+
+  /**
+   * Is this directory the ROOT of a checkout — the repo itself, or a worktree —
+   * rather than merely somewhere inside one?
+   *
+   * The distinction is load-bearing and cost a review round to spot.
+   * `git rev-parse` WALKS UP the parent chain, so a directory with no `.git` of
+   * its own still answers, with its parent's, and exits 0. That makes
+   * {@link isRepository} say `true` for a reaped worktree that happens to sit
+   * INSIDE the repository — which is not an exotic layout: `.worktrees/` is the
+   * default `worktreeRoot` for a new project, and the Claude Code harness cuts
+   * its own trees into `<repo>/.claude/worktrees/`. A husk there would be judged
+   * alive, and git would then answer every question about it with the MAIN
+   * checkout's state — reporting `on-trunk` for a chat whose commits are one
+   * directory over, which is the exact class of lie this whole area exists to
+   * stop telling.
+   *
+   * `--show-toplevel` is the fix because it names the enclosing worktree's root
+   * from anywhere inside it, so comparing it to `dir` distinguishes "this IS a
+   * checkout" from "this is under one".
+   */
+  async isRepositoryRoot(dir: string): Promise<boolean> {
+    const r = await this.exec("git", ["rev-parse", "--show-toplevel"], {
+      cwd: dir,
+      reject: false,
+    }).catch(() => null);
+    if (!r || r.exitCode !== 0) return false;
+    const out = r.stdout.trim();
+    if (!out) return false;
+    // `resolve` before comparing: git answers with forward slashes even on
+    // Windows (`C:/Users/...`), and `realpath` returns backslashes. Comparing
+    // the raw strings would reject every candidate on the platform this bug
+    // lives on.
+    const canonical = async (p: string): Promise<string> =>
+      await realpath(resolve(p)).catch(() => resolve(p));
+    const [top, self] = await Promise.all([canonical(out), canonical(dir)]);
+    return top === self;
+  }
+
+  /**
    * Are two directories checkouts of the SAME repository (any worktree of it)?
    *
    * `--git-common-dir` rather than a path-prefix test, deliberately: every linked
@@ -831,20 +910,7 @@ export class GitHubService {
    * Never throws — an unreadable or non-git directory is simply "no".
    */
   async sameRepository(a: string, b: string): Promise<boolean> {
-    const commonDir = async (dir: string): Promise<string | null> => {
-      const r = await this.exec(
-        "git",
-        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        { cwd: dir, reject: false },
-      ).catch(() => null);
-      if (!r || r.exitCode !== 0) return null;
-      const out = r.stdout.trim();
-      if (!out) return null;
-      // Resolve symlinks: on macOS a temp dir reached two ways is the same repo
-      // but two different strings, and this comparison decides whether a PR opens.
-      return await realpath(out).catch(() => resolve(out));
-    };
-    const [x, y] = await Promise.all([commonDir(a), commonDir(b)]);
+    const [x, y] = await Promise.all([this.gitCommonDir(a), this.gitCommonDir(b)]);
     return !!x && !!y && x === y;
   }
 

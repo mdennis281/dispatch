@@ -2839,6 +2839,27 @@ describe("manager-mcp — create_pr", () => {
     expect(res.isError).toBe(true);
     expect(resultText(res)).toMatch(/Could not resolve/);
   });
+
+  it("names both causes, and never tells the agent to get a worktree it has", async () => {
+    // This message used to be "Make sure the chat has a worktree." — which was
+    // the WRONG advice in the case that produced it most: a chat whose bound
+    // worktree had been reaped after a merge had a perfectly good one, and no
+    // way to act on being told to get another. The two live causes are a
+    // directory the server can't see (pass `cwd`) and a `gh` that can't name the
+    // repository (sign in / check `origin`), and they have different remedies.
+    const { binding } = fakePrCreate(null);
+    const { createPr } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      prCreate: binding,
+    });
+    const text = resultText(await createPr.handler(createArgs(), {}));
+
+    expect(text).toContain("pass `cwd`");
+    expect(text).toContain("gh repo view");
+    expect(text).not.toMatch(/Make sure the chat has a worktree/);
+  });
 });
 
 describe("manager-mcp — approve_pr", () => {
