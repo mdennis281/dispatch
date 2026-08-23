@@ -1486,6 +1486,8 @@ export interface ManagerMcpMessaging {
     timeoutMs: number;
     /** Both the per-call and the session abort — see `ChatMessenger.ask`. */
     signals?: (AbortSignal | undefined)[];
+    /** Fired once the ask is admitted and the wait has really begun. */
+    onWaiting?: () => void;
   }): Promise<PeerAskResult>;
   /** Synchronous: answering is just resolving a promise the asker is holding. */
   reply(input: { askId: string; answer: string }): PeerReplyResult;
@@ -1593,6 +1595,13 @@ export interface ManagerMcpContext {
 }
 
 /* ------------------------------------------------------------------ helpers */
+
+/**
+ * Floor for `chat_ask`. Below this the question cannot be answered even in
+ * principle — the target has to wake, read and compose — so a shorter request is
+ * a mistake rather than an instruction.
+ */
+const MIN_ASK_SECONDS = 5;
 
 function clampSeconds(value: unknown, cap: number): number {
   const n = typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -5314,8 +5323,10 @@ ${look}` : "")
         .enum(["queue", "interrupt"])
         .optional()
         .describe(
-          "queue (default) waits for the chat's current turn to finish; interrupt " +
-            "injects mid-turn, which can derail what it is in the middle of. Prefer queue.",
+          "queue (default) waits for the chat's current turn to finish. interrupt " +
+            "injects into the running turn, which can derail what it is in the middle " +
+            "of — and is NOT a guarantee it acts on it, since a chat inside a long " +
+            "tool call routinely finishes what it was doing first. Prefer queue.",
         ),
     },
     async (args): Promise<CallToolResult> => {
@@ -5338,18 +5349,27 @@ ${look}` : "")
         delivery: args.delivery === "interrupt" ? "interrupt" : "queue",
       });
       if (!result.ok) return peerRefusalResult(result);
+      // Every branch has to be true of what actually happened. An `interrupt`
+      // into a live turn used to fall through to "It was idle", which flatly
+      // contradicts the `chat_state` the model may have run a second earlier;
+      // and `woke` says only that there was no live session, which a chat that
+      // has never run and a chat that finished both satisfy.
       const how = result.held
         ? "It is mid-turn, so the message is queued and will be delivered the moment " +
           "that turn ends"
-        : result.woke
-          ? "It had finished, so it was woken up to receive it"
-          : "It was idle, so it has the message now";
+        : result.interrupted
+          ? "It was mid-turn and you chose interrupt, so the message was injected into " +
+            "the turn it is running now"
+          : result.woke
+            ? "It had no live session, so one was started to receive it"
+            : "It was idle, so it has the message now";
       return textResult(
         `Sent to chat ${to}. ${how}.\n` +
           JSON.stringify({
             ok: true,
             chatId: to,
             held: Boolean(result.held),
+            interrupted: Boolean(result.interrupted),
             woke: Boolean(result.woke),
           }),
       );
@@ -5384,17 +5404,15 @@ ${look}` : "")
       if (!to) return textResult("chat_ask requires a non-empty chatId.", true);
       if (!question) return textResult("chat_ask requires a non-empty question.", true);
 
+      // Floored, not just capped. `clampSeconds` bottoms out at 0 and the schema
+      // has no minimum, so `timeoutSeconds: 0` would deliver the question —
+      // costing the target a whole turn — and then expire before any answer
+      // could physically arrive. Nobody means that.
       const timeoutMs =
-        clampSeconds(args.timeoutSeconds ?? WAIT_CAP_SECONDS, WAIT_CAP_SECONDS) * 1000;
-
-      // Advertise the wait in the UI header, the same way `wait_for_chat` does —
-      // a chat blocked on a peer must not look like a chat that has hung.
-      ctx.bus.publish({
-        type: "chat-status",
-        chatId: ctx.chatId,
-        status: "running",
-        activity: { state: "tool", label: `asking chat ${to}`, toolName: "chat_ask" },
-      });
+        Math.max(
+          MIN_ASK_SECONDS,
+          clampSeconds(args.timeoutSeconds ?? WAIT_CAP_SECONDS, WAIT_CAP_SECONDS),
+        ) * 1000;
 
       const result = await ctx.messaging.ask({
         to,
@@ -5404,6 +5422,17 @@ ${look}` : "")
         // `??` the session abort was dropped whenever the MCP call carried one
         // of its own, so stopping the chat left the ask running.
         signals: [extraSignal(extra), ctx.signal],
+        // Advertise the wait the way `wait_for_chat` does, so a chat blocked on a
+        // peer doesn't look like one that has hung — but only once the ask is
+        // actually admitted. Published unconditionally up front, a refused call
+        // (a self-send, an unknown id) flashed a wait that never happened.
+        onWaiting: () =>
+          ctx.bus.publish({
+            type: "chat-status",
+            chatId: ctx.chatId,
+            status: "running",
+            activity: { state: "tool", label: `asking chat ${to}`, toolName: "chat_ask" },
+          }),
       });
       if (!result.ok) return peerRefusalResult(result);
       if (result.answered) {
@@ -5419,10 +5448,23 @@ ${look}` : "")
         result.reason === "cancelled"
           ? "the wait was interrupted"
           : `no answer within ${timeoutMs / 1000}s`;
+      // "Nobody answered" and "it never arrived" call for different next moves,
+      // so say which happened: a withdrawn question was still queued behind that
+      // chat's current turn and has been pulled back rather than left to land on
+      // a chat nobody is waiting for.
+      const fate = result.withdrawn
+        ? " It was still queued behind that chat's current turn, so it was withdrawn " +
+          "and never reached them"
+        : "";
       return textResult(
-        `No answer from chat ${to} — ${why}. Do NOT just ask again; check what it is ` +
-          "doing with chat_state, or carry on without it.\n" +
-          JSON.stringify({ answered: false, reason: result.reason, chatId: to }),
+        `No answer from chat ${to} — ${why}.${fate}. Do NOT just ask again; check ` +
+          "what it is doing with chat_state, or carry on without it.\n" +
+          JSON.stringify({
+            answered: false,
+            reason: result.reason,
+            withdrawn: Boolean(result.withdrawn),
+            chatId: to,
+          }),
       );
     },
   );

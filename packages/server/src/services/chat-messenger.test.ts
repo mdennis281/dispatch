@@ -234,6 +234,34 @@ describe("ChatMessenger delivery mode", () => {
     expect(h.delivered.map((d) => d.text)).toEqual(["stop, wrong branch"]);
   });
 
+  it("reports an interrupt as an interrupt, not as a delivery to an idle chat", async () => {
+    const h = twoChats();
+    h.setStatus("dev", "running");
+
+    const result = await h.messenger.send({
+      from: "lead",
+      to: "dev",
+      message: "now",
+      delivery: "interrupt",
+    });
+
+    // Falling through to "it was idle" contradicted the `chat_state` a caller
+    // may have run a second earlier.
+    expect(result.interrupted).toBe(true);
+    expect(result.held).toBe(false);
+  });
+
+  it("does not call a plain idle delivery an interrupt", async () => {
+    const h = twoChats();
+    const result = await h.messenger.send({
+      from: "lead",
+      to: "dev",
+      message: "now",
+      delivery: "interrupt",
+    });
+    expect(result.interrupted).toBe(false);
+  });
+
   it("interrupt delivers immediately even mid-turn", async () => {
     const h = twoChats();
     h.setStatus("dev", "running");
@@ -550,6 +578,95 @@ describe("ChatMessenger.ask / reply", () => {
     session.abort();
 
     await expect(pending).resolves.toMatchObject({ answered: false, reason: "cancelled" });
+  });
+
+  it("WITHDRAWS a still-parked question when the asker gives up", async () => {
+    const h = twoChats();
+    h.setStatus("dev", "running");
+    const pending = h.messenger.ask({
+      from: "lead",
+      to: "dev",
+      question: "status?",
+      timeoutMs: 30_000,
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(h.delivered).toHaveLength(0); // parked behind dev's turn
+
+    h.fireTimers();
+    const result = await pending;
+    expect(result.answered).toBe(false);
+    expect(result.withdrawn).toBe(true);
+
+    // The whole point: dev's turn ends and the dead question does NOT land.
+    // Before this, dev woke, spent a turn composing an answer, called
+    // chat_reply, and was told the askId was unknown.
+    h.settle("dev", "idle");
+    await new Promise((r) => setImmediate(r));
+    expect(h.delivered).toHaveLength(0);
+  });
+
+  it("withdraws only the expired question, leaving the rest of the queue", async () => {
+    const h = twoChats();
+    h.setStatus("dev", "running");
+    await h.messenger.send({ from: "lead", to: "dev", message: "before" });
+    const pending = h.messenger.ask({
+      from: "lead",
+      to: "dev",
+      question: "doomed",
+      timeoutMs: 30_000,
+    });
+    await new Promise((r) => setImmediate(r));
+    await h.messenger.send({ from: "lead", to: "dev", message: "after" });
+
+    h.fireTimers();
+    await pending;
+
+    h.settle("dev", "idle");
+    await new Promise((r) => setImmediate(r));
+    expect(h.delivered.map((d) => d.text)).toEqual(["before", "after"]);
+  });
+
+  it("reports withdrawn:false when the question had already been delivered", async () => {
+    const h = twoChats(); // dev is idle, so the ask goes straight out
+    const pending = h.messenger.ask({
+      from: "lead",
+      to: "dev",
+      question: "?",
+      timeoutMs: 30_000,
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(h.delivered).toHaveLength(1);
+
+    h.fireTimers();
+    // Already handed to the broker — there is no recalling it, and saying it was
+    // withdrawn would be a lie the caller might act on.
+    await expect(pending).resolves.toMatchObject({ answered: false, withdrawn: false });
+  });
+
+  it("signals the caller when the wait actually begins, and not when refused", async () => {
+    const h = twoChats();
+    let waits = 0;
+    await h.messenger.ask({
+      from: "lead",
+      to: "lead",
+      question: "?",
+      timeoutMs: 30_000,
+      onWaiting: () => (waits += 1),
+    });
+    // Refused outright — the UI must not flash a wait that never happened.
+    expect(waits).toBe(0);
+
+    const pending = h.messenger.ask({
+      from: "lead",
+      to: "dev",
+      question: "?",
+      timeoutMs: 30_000,
+      onWaiting: () => (waits += 1),
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(waits).toBe(1);
+    h.messenger.reply({ from: "dev", askId: h.delivered[0]!.peer.askId!, answer: "x" });
+    await pending;
   });
 
   it("releases every waiting asker on dispose", async () => {

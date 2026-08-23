@@ -8,10 +8,17 @@
  * MCP: it takes chat ids and strings, and everything it needs from the broker
  * and the store arrives through injected functions.
  *
- * WHY THERE IS NO CONSENT PROMPT. `spawn_chat` puts a card in front of the human
- * because a spawn is expensive and not reversible. A message is neither, and a
- * card per message would make this unusable as a substrate for an agent
- * project-manager. Safety is bought two other ways instead:
+ * WHY THIS RAISES NO CONSENT PROMPT OF ITS OWN. `spawn_chat` puts a card in
+ * front of the human from inside the tool, because a spawn is expensive and not
+ * reversible. A message is neither, and a bespoke card per message would make
+ * this unusable as a substrate for an agent project-manager.
+ *
+ * That is a statement about THIS layer, not a claim that a message is never
+ * gated: the ordinary MCP tool-permission layer still applies, so on a project
+ * whose mode prompts for tool calls these prompt like any other tool. What is
+ * deliberate here is that the service adds no SECOND gate of its own, and asks
+ * for nothing where the mode already allows the call. Safety is instead bought
+ * two ways that hold regardless of the mode:
  *
  *   - ATTRIBUTION. Every message lands as a `user` row stamped `origin: "peer"`
  *     with the sending chat on it. A peer message has to arrive as a user turn —
@@ -74,13 +81,30 @@ export interface PeerSendResult {
   retryAt?: number;
   /** True when the target was mid-turn and the message is being held. */
   held?: boolean;
-  /** True when the target had no live session and one was started for it. */
+  /**
+   * True when the message went out into a turn ALREADY IN FLIGHT — i.e. an
+   * `interrupt` that actually interrupted something. Distinct from a delivery to
+   * an idle chat, and reported separately because a caller told "it was idle" a
+   * second after `chat_state` said `running` has been handed a plain falsehood.
+   */
+  interrupted?: boolean;
+  /**
+   * True when the target had no live session and one was started for it. Says
+   * nothing about WHY there was none — a chat that finished and a chat that has
+   * never run look identical from here.
+   */
   woke?: boolean;
 }
 
 export interface PeerAskResult extends PeerSendResult {
   /** Correlation id the target passes to `reply`. Absent when the send failed. */
   askId?: string;
+  /**
+   * True when the question was still PARKED when the asker gave up, so it was
+   * pulled back and the target never saw it. Worth telling the caller: "nobody
+   * answered" and "it never arrived" call for different next moves.
+   */
+  withdrawn?: boolean;
   /** True only when a real answer came back. */
   answered: boolean;
   /** Why no answer, when `answered` is false and the send itself succeeded. */
@@ -308,6 +332,13 @@ export class ChatMessenger {
      * whenever a per-call signal happened to exist.
      */
     signals?: (AbortSignal | undefined)[];
+    /**
+     * Fired once the question is actually on its way and the wait has begun —
+     * i.e. after admission succeeded. For the UI's "waiting on chat X" label,
+     * which must not appear for a call that was refused outright: a header that
+     * flashes a wait which never existed is worse than no header at all.
+     */
+    onWaiting?: () => void;
   }): Promise<PeerAskResult> {
     const guard = await this.admit(input.from, input.to);
     if (!guard.ok) return { ...guard, answered: false };
@@ -360,11 +391,16 @@ export class ChatMessenger {
       this.pendingAsks.get(askId)?.cancel("cancelled");
       return { ...sent, answered: false };
     }
+    input.onWaiting?.();
 
     const outcome = await answer;
-    return outcome.answered
-      ? { ...sent, askId, answered: true, answer: outcome.answer }
-      : { ...sent, askId, answered: false, reason: outcome.reason };
+    if (outcome.answered) {
+      return { ...sent, askId, answered: true, answer: outcome.answer };
+    }
+    // Nobody is waiting on this any more, so a still-parked question must not go
+    // on to be delivered — see `dropHeld`.
+    const withdrawn = this.dropHeld(input.to, askId);
+    return { ...sent, askId, answered: false, reason: outcome.reason, withdrawn };
   }
 
   /**
@@ -558,7 +594,14 @@ export class ChatMessenger {
     // the broker already does when a turn is live, so the ONLY difference
     // between the two deliveries is whether we parked the message first.
     await this.sendFn(to, text, { peer });
-    return { ok: true, held: false, woke };
+    return {
+      ok: true,
+      held: false,
+      // Read BEFORE the send: afterwards the target is running either way, so
+      // asking then could never distinguish the two.
+      interrupted: status !== undefined && MID_TURN.has(status),
+      woke,
+    };
   }
 
   /**
@@ -586,6 +629,11 @@ export class ChatMessenger {
     this.held.delete(chatId);
     if (this.held.size === 0) this.unwatch();
     for (const msg of queue) {
+      // Re-checked per message, not just once in `dropHeld`: the queue is
+      // detached above, so an ask that expires WHILE this loop is awaiting an
+      // earlier message is out of `dropHeld`'s reach. Delivering it anyway costs
+      // the target a whole turn answering a question nobody is holding.
+      if (msg.peer.askId && !this.pendingAsks.has(msg.peer.askId)) continue;
       try {
         await this.sendFn(chatId, msg.text, { peer: msg.peer });
       } catch {
@@ -593,6 +641,31 @@ export class ChatMessenger {
         // outcome — re-parking it would spin against a session that is gone.
       }
     }
+  }
+
+  /**
+   * Pull a still-parked question back once its asker has stopped waiting.
+   *
+   * Without this a timed-out ask is delivered anyway the moment the target's
+   * turn ends: the target wakes, spends a WHOLE TURN composing an answer, calls
+   * `chat_reply`, and is told the askId is unknown. Observed end-to-end — the
+   * asker had moved on 40 seconds earlier. Nobody is served by delivering a
+   * question nobody is waiting on.
+   *
+   * Only ever removes a HELD message. One already handed to the broker is gone;
+   * there is no recalling it, and the stale-`chat_reply` path is the backstop.
+   */
+  private dropHeld(chatId: string, askId: string): boolean {
+    const queue = this.held.get(chatId);
+    if (!queue) return false;
+    const i = queue.findIndex((m) => m.peer.askId === askId);
+    if (i < 0) return false;
+    queue.splice(i, 1);
+    if (queue.length === 0) {
+      this.held.delete(chatId);
+      if (this.held.size === 0) this.unwatch();
+    }
+    return true;
   }
 
   private unwatch(): void {

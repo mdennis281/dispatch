@@ -5405,13 +5405,14 @@ export class SessionBroker {
           ? {
               send: ({ to, message, delivery }) =>
                 this.messenger!.send({ from: session.chatId, to, message, delivery }),
-              ask: ({ to, question, timeoutMs, signals }) =>
+              ask: ({ to, question, timeoutMs, signals, onWaiting }) =>
                 this.messenger!.ask({
                   from: session.chatId,
                   to,
                   question,
                   timeoutMs,
                   signals,
+                  onWaiting,
                 }),
               reply: ({ askId, answer }) =>
                 this.messenger!.reply({ from: session.chatId, askId, answer }),
