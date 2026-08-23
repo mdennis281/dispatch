@@ -420,8 +420,8 @@ describe("PrRegistry — Dispatch's own reviewer", () => {
     now += 60_000;
     const again = await reg.requestReviewAgent(REPO, 42, "c1");
 
-    expect(first?.reviewAgent).toMatchObject({ requestedSha: "sha-1", requestedBy: "c1" });
-    expect(again?.reviewAgent?.requestedAt).toBe(first?.reviewAgent?.requestedAt);
+    expect(first.record?.reviewAgent).toMatchObject({ requestedSha: "sha-1", requestedBy: "c1" });
+    expect(again.record?.reviewAgent?.requestedAt).toBe(first.record?.reviewAgent?.requestedAt);
   });
 
   it("re-arms once the head moves, because a push is genuinely new code", async () => {
@@ -432,15 +432,160 @@ describe("PrRegistry — Dispatch's own reviewer", () => {
     await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
     const after = await reg.requestReviewAgent(REPO, 42, "c1");
 
-    expect(first?.reviewAgent?.requestedSha).toBe("sha-1");
-    expect(after?.reviewAgent?.requestedSha).toBe("sha-2");
+    expect(first.record?.reviewAgent?.requestedSha).toBe("sha-1");
+    expect(after.record?.reviewAgent?.requestedSha).toBe("sha-2");
   });
 
   it("does nothing for a PR the catalog has never heard of", async () => {
     // Same rule as `noteWatched`: a request must not conjure a hollow row.
     const reg = makeRegistry();
-    expect(await reg.requestReviewAgent(REPO, 999, "c1")).toBeNull();
+    expect(await reg.requestReviewAgent(REPO, 999, "c1")).toMatchObject({
+      armed: false,
+      reason: "unknown-pr",
+    });
     expect(await store.getPrRecord("octo/repo#999")).toBeNull();
+  });
+
+  // The write that broke PR #147. A round is claimed BEFORE the reviewer chat
+  // exists and takes minutes to post; an agent that calls `request_review` in
+  // that window used to re-arm `requestedAt`, which makes `prReviewAgentView`
+  // read `queued` and hides the round that is genuinely running. `watch_pr`
+  // derives "no review is coming" from exactly that phase, so it announced the
+  // reviewer was finished over a review being written at that moment.
+  it("refuses to re-arm while a round is claimed at this head", async () => {
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 });
+
+    now += 60_000;
+    const res = await reg.requestReviewAgent(REPO, 42, "c1");
+
+    expect(res).toMatchObject({ armed: false, reason: "in-flight" });
+    // The claim CLEARS `requestedAt`; the refusal must leave it cleared, or the
+    // row reads `queued` and the running round becomes invisible.
+    expect(res.record?.reviewAgent?.requestedAt).toBeUndefined();
+    expect((await store.getPrRecord(KEY))?.reviewAgent?.requestedAt).toBeUndefined();
+  });
+
+  // The in-flight guard must NOT take the finished-round case with it. The row's
+  // head is the last POLLED one, up to 90s stale, so an agent that pushes and
+  // immediately re-requests is still seen at the old head — and in self-review
+  // mode, where nothing but `create_pr` and `request_review` ever arms a local
+  // request, refusing that killed round 2 outright with no later pass to re-arm.
+  it("still arms at a head whose round has FINISHED, however stale that head is", async () => {
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 });
+    // Only the chat holding the lease may complete the row.
+    await reg.noteReviewChat(REPO, 42, "chat-9");
+    await reg.notePostedReview(REPO, 42, { chatId: "chat-9" });
+
+    // The push has happened, but the catalog has not polled it yet.
+    const res = await reg.requestReviewAgent(REPO, 42, "c1");
+    expect(res).toMatchObject({ armed: true });
+    expect(res.record?.reviewAgent?.requestedSha).toBe("sha-1");
+
+    // …and it is served the moment the poll catches up, because the claim
+    // compares against the CURRENT head, not the one the request was armed at.
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+    expect(await reg.claimReviewAgent(REPO, 42, { maxRounds: 3 })).not.toBeNull();
+  });
+
+  // `extraRounds` exists first and foremost for a reviewer chat that died
+  // without posting — which leaves the head exactly where it was, with no push
+  // behind it. Lifting only the round count left `claimReviewAgent` refusing on
+  // its SECOND test (`reviewedSha === sha`), so the granted round could never
+  // spawn while `roundsSpent` had gone false: `watch_pr` blocking a full window
+  // on a review that could not exist.
+  it("raiseReviewRoundCap buys a round on an UNCHANGED head, not just after a push", async () => {
+    const POLICY_CAP = 1;
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP });
+    // The reviewer died here: claimed, never posted, and nobody pushed.
+
+    await reg.raiseReviewRoundCap(REPO, 42, 1);
+
+    expect(await reg.requestReviewAgent(REPO, 42, "c1")).toMatchObject({ armed: true });
+    expect(await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP })).not.toBeNull();
+    expect((await store.getPrRecord(KEY))?.reviewAgent).toMatchObject({
+      rounds: 2,
+      reviewedSha: "sha-1",
+    });
+  });
+
+  it("refuses once every round is spent, rather than arming a dead request", async () => {
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: 1 });
+    // A push moves the head, so the reviewedSha dedup no longer applies — the
+    // CAP is the only thing left refusing, which is the case this covers.
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+
+    const res = await reg.requestReviewAgent(REPO, 42, "c1");
+
+    expect(res).toMatchObject({ armed: false, reason: "rounds-spent" });
+    expect(res.record?.reviewAgent?.requestedAt).toBeUndefined();
+  });
+
+  it("raiseReviewRoundCap buys a round the SWEEP can actually claim", async () => {
+    // The sweep only ever passes the PROJECT's cap — `maybeSpawnReview` reads
+    // `policy.maxRounds` from config and has no way to produce a raised number.
+    // So the raise is worth nothing unless the claim adds the row's grant to
+    // whatever it was handed, and this test asserts it with the config value
+    // throughout rather than hand-feeding the raised one.
+    const POLICY_CAP = 1;
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP });
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+    expect(await reg.requestReviewAgent(REPO, 42, "c1")).toMatchObject({ reason: "rounds-spent" });
+
+    await reg.raiseReviewRoundCap(REPO, 42, 1);
+
+    expect(await reg.requestReviewAgent(REPO, 42, "c1")).toMatchObject({ armed: true });
+    expect(await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP })).not.toBeNull();
+    expect((await store.getPrRecord(KEY))?.reviewAgent).toMatchObject({ rounds: 2 });
+  });
+
+  // `notePolicy` rewrites `maxRounds` from project config on EVERY sweep pass,
+  // for every open PR. A raise written into that field lasted about 90 seconds
+  // — the override bought nothing, and left `requestedAt` armed at a head no
+  // claim would ever serve, which reads as `queued` forever.
+  it("survives the notePolicy pass that rewrites maxRounds every sweep", async () => {
+    const POLICY_CAP = 1;
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP });
+    await reg.raiseReviewRoundCap(REPO, 42, 1);
+
+    // The sweep, doing exactly what it does every 90 seconds.
+    await reg.notePolicy(REPO, 42, { maxRounds: POLICY_CAP });
+
+    const state = (await store.getPrRecord(KEY))?.reviewAgent;
+    expect(state?.maxRounds).toBe(POLICY_CAP);
+    expect(state?.extraRounds).toBe(1);
+    // And the grant still buys the round it promised.
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    expect(await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP })).not.toBeNull();
+  });
+
+  it("raiseReviewRoundCap invents no cap where the row never recorded one", async () => {
+    // Raising a denominator that does not exist would turn "we don't know the
+    // limit" into a confident one — the same guess `roundsSpent` refuses to make.
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+
+    expect(await reg.raiseReviewRoundCap(REPO, 42, 1)).toBeNull();
+    expect((await store.getPrRecord(KEY))?.reviewAgent?.maxRounds).toBeUndefined();
   });
 
   it("refuses a claim with no request behind it", async () => {
@@ -576,8 +721,8 @@ describe("PrRegistry — a refused review request", () => {
     await reg.noteReviewRequestError(REPO, 42, "Reviews may only be requested from collaborators");
 
     const after = await reg.requestReviewAgent(REPO, 42, "dispatch-review");
-    expect(after?.reviewAgent?.requestError).toBeUndefined();
-    expect(after?.reviewAgent?.requestedSha).toBe("sha-1");
+    expect(after.record?.reviewAgent?.requestError).toBeUndefined();
+    expect(after.record?.reviewAgent?.requestedSha).toBe("sha-1");
   });
 
   it("still short-circuits a repeat request when nothing is parked", async () => {
@@ -588,7 +733,7 @@ describe("PrRegistry — a refused review request", () => {
     const first = await reg.requestReviewAgent(REPO, 42, "dispatch-review");
     now += 60_000;
     const again = await reg.requestReviewAgent(REPO, 42, "dispatch-review");
-    expect(again?.reviewAgent?.requestedAt).toBe(first?.reviewAgent?.requestedAt);
+    expect(again.record?.reviewAgent?.requestedAt).toBe(first.record?.reviewAgent?.requestedAt);
   });
 });
 

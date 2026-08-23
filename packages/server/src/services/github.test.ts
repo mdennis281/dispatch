@@ -93,10 +93,32 @@ describe("prReviewState — the reviewer queue", () => {
   /** The GraphQL queue payload, plus the `gh pr view` reviews payload. */
   const queueJson = (
     nodes: Array<{ __typename: string; login?: string; slug?: string }>,
+    extra: {
+      author?: string;
+      head?: string;
+      reviews?: Array<{
+        author: string;
+        state: string;
+        isMinimized?: boolean;
+        submittedAt?: string;
+        commit?: string;
+      }>;
+    } = {},
   ) => ({
     data: {
       repository: {
         pullRequest: {
+          author: { login: extra.author ?? "author-of-the-pr" },
+          headRefOid: extra.head,
+          reviews: {
+            nodes: (extra.reviews ?? []).map((r) => ({
+              author: { login: r.author },
+              state: r.state,
+              isMinimized: r.isMinimized ?? false,
+              submittedAt: r.submittedAt ?? null,
+              commit: r.commit ? { oid: r.commit } : null,
+            })),
+          },
           reviewRequests: { nodes: nodes.map((requestedReviewer) => ({ requestedReviewer })) },
         },
       },
@@ -105,7 +127,13 @@ describe("prReviewState — the reviewer queue", () => {
 
   it("maps requested reviewers and submitted reviews", async () => {
     const { exec, calls, json } = makeExec();
-    json(queueJson([{ __typename: "User", login: "alice" }, { __typename: "Team", slug: "core" }]));
+    json(
+      queueJson([{ __typename: "User", login: "alice" }, { __typename: "Team", slug: "core" }], {
+        reviews: [
+          { author: "alice", state: "CHANGES_REQUESTED", submittedAt: "2026-01-01T00:00:00Z" },
+        ],
+      }),
+    );
     json({ latestReviews: [{ author: { login: "alice" }, state: "changes_requested" }] });
     const gh = new GitHubService({ bus, exec });
 
@@ -119,7 +147,86 @@ describe("prReviewState — the reviewer queue", () => {
     expect(state).toEqual({
       requested: ["alice", "core"],
       reported: [{ author: "alice", state: "CHANGES_REQUESTED" }],
+      everReported: [
+        { author: "alice", state: "CHANGES_REQUESTED", submittedAt: "2026-01-01T00:00:00Z" },
+      ],
     });
+  });
+
+  // The disagreement that made `watch_pr` and `approve_pr` contradict each other
+  // on PR #147. GitHub's `latestReviews` applies supersede-on-re-request: put a
+  // reviewer back in the queue and the review they already filed drops out of
+  // it. Dispatch's loop re-queues on EVERY round, so the live list was empty on
+  // exactly the PRs that had been reviewed the most — and `approve_pr` refused
+  // them for `no-review` while `watch_pr` called them landable.
+  it("still reports a review that latestReviews hides behind a pending re-request", async () => {
+    const { exec, json } = makeExec();
+    json(
+      queueJson([{ __typename: "User", login: "dispatch-review" }], {
+        reviews: [
+          { author: "dispatch-review", state: "COMMENTED", submittedAt: "2026-01-01T00:00:00Z" },
+        ],
+      }),
+    );
+    // Empty, because dispatch-review has just been re-requested.
+    json({ latestReviews: [] });
+
+    const state = await new GitHubService({ bus, exec }).prReviewState(REPO, 42);
+
+    expect(state!.reported).toEqual([]);
+    expect(state!.everReported).toEqual([
+      { author: "dispatch-review", state: "COMMENTED", submittedAt: "2026-01-01T00:00:00Z" },
+    ]);
+  });
+
+  // `resolve_thread` posts its reply as a `PullRequestReview` BY THE PR'S AUTHOR.
+  // `latestReviews` drops those for us; `everReported` has to do it by hand, or a
+  // PR clears its own review bar by answering its reviewer.
+  // `reviewDecision` is an aggregate GitHub never clears for a reviewer that
+  // does not submit APPROVE — which is Dispatch's own reviewer. Whether the
+  // verdict is about code that has since been REPLACED is what lets `approve_pr`
+  // tell a spent objection from a live one.
+  it("marks a review stale against the PR head, and says nothing when it can't compare", async () => {
+    const { exec, json } = makeExec();
+    json(
+      queueJson([], {
+        head: "sha-2",
+        reviews: [
+          { author: "a", state: "CHANGES_REQUESTED", commit: "sha-1" },
+          { author: "b", state: "CHANGES_REQUESTED", commit: "sha-2" },
+          { author: "c", state: "COMMENTED" },
+        ],
+      }),
+    );
+    json({ latestReviews: [] });
+
+    const state = await new GitHubService({ bus, exec }).prReviewState(REPO, 42);
+
+    // Newest first, so the order is the reverse of the query's.
+    expect(state!.everReported.map((r) => [r.author, r.stale])).toEqual([
+      ["c", undefined],
+      ["b", false],
+      ["a", true],
+    ]);
+  });
+
+  it("excludes the PR author's own reviews, and PENDING and minimized ones", async () => {
+    const { exec, json } = makeExec();
+    json(
+      queueJson([], {
+        author: "mdennis281",
+        reviews: [
+          { author: "mdennis281", state: "COMMENTED" },
+          { author: "someone", state: "PENDING" },
+          { author: "someone", state: "COMMENTED", isMinimized: true },
+        ],
+      }),
+    );
+    json({ latestReviews: [] });
+
+    const state = await new GitHubService({ bus, exec }).prReviewState(REPO, 42);
+
+    expect(state!.everReported).toEqual([]);
   });
 
   // THE bug that stuck every chat: `gh pr view --json reviewRequests` silently
@@ -174,7 +281,11 @@ describe("prReviewState — the reviewer queue", () => {
     json({ latestReviews: [] });
     const gh = new GitHubService({ bus, exec });
 
-    expect(await gh.prReviewState(REPO, 42)).toEqual({ requested: [], reported: [] });
+    expect(await gh.prReviewState(REPO, 42)).toEqual({
+      requested: [],
+      reported: [],
+      everReported: [],
+    });
   });
 });
 

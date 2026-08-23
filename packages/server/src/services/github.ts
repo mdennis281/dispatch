@@ -237,6 +237,36 @@ export interface PrReviewState {
   requested: string[];
   /** Reviews that have been submitted, newest-per-author. */
   reported: Array<{ author: string; state: string }>;
+  /**
+   * Every review EVER submitted on this PR by someone other than its author,
+   * newest first — the fact `reported` structurally cannot carry.
+   *
+   * GitHub's `latestReviews` applies supersede-on-re-request: the moment a
+   * reviewer is put back in the queue, the review they already filed drops out
+   * of it. That is the right semantics for "what is their live position", and
+   * the wrong one for "has anybody looked at this", which is what
+   * `requireReview` actually asks. `request_review` made it fire on every PR
+   * Dispatch's own loop touched — fix the finding, re-queue the reviewer, and
+   * `approve_pr` now reports that nobody has ever reviewed a PR carrying two
+   * reviews (#147).
+   *
+   * The PR's OWN author is excluded, and that exclusion is load-bearing rather
+   * than tidy: `resolve_thread` posts its reply as a `PullRequestReview` by the
+   * author, so counting those would let a PR clear its own review bar by
+   * answering itself. `latestReviews` drops author reviews for us; this list
+   * has to do it by hand.
+   */
+  everReported: Array<{
+    author: string;
+    state: string;
+    submittedAt?: string;
+    /**
+     * They reviewed a commit that is no longer this PR's head, so their verdict
+     * is about code you have since replaced. `undefined` = we could not compare
+     * (an absent head or review commit), which must not read as either.
+     */
+    stale?: boolean;
+  }>;
 }
 
 /** One inline comment on a submitted review — a file, a line, and what's wrong. */
@@ -360,6 +390,17 @@ interface RawGraphqlReviewRequests {
   data?: {
     repository?: {
       pullRequest?: {
+        author?: { login?: string } | null;
+        headRefOid?: string;
+        reviews?: {
+          nodes?: Array<{
+            author?: { login?: string } | null;
+            state?: string;
+            isMinimized?: boolean;
+            submittedAt?: string | null;
+            commit?: { oid?: string } | null;
+          } | null>;
+        };
         reviewRequests?: {
           nodes?: Array<{
             requestedReviewer?: { __typename?: string; login?: string; slug?: string } | null;
@@ -1586,9 +1627,15 @@ export class GitHubService {
     // both a Bot and a Mannequin depending on how the request was made; an
     // unfragmented union member decodes to a login-less node and vanishes the
     // same way.
+    //
+    // `reviews` and `author` ride along on the same query so `everReported` can
+    // be built — see {@link PrReviewState.everReported} for why `latestReviews`
+    // alone is not enough, and why the author has to be known to exclude them.
     const query =
       "query($owner:String!,$repo:String!,$number:Int!)" +
       "{repository(owner:$owner,name:$repo){pullRequest(number:$number){" +
+      "author{login} headRefOid " +
+      "reviews(first:100){nodes{author{login} state isMinimized submittedAt commit{oid}}} " +
       "reviewRequests(first:100){nodes{requestedReviewer{__typename " +
       "... on User{login} ... on Bot{login} ... on Mannequin{login} " +
       "... on Team{slug}}}}}}}";
@@ -1631,7 +1678,28 @@ export class GitHubService {
     const reported = (revRaw.latestReviews ?? [])
       .map((x) => ({ author: x.author?.login ?? "", state: String(x.state ?? "").toUpperCase() }))
       .filter((x) => x.author);
-    return { requested, reported };
+    const prAuthor = (
+      reqRaw.data.repository?.pullRequest?.author?.login ?? ""
+    ).toLowerCase();
+    const head = reqRaw.data.repository?.pullRequest?.headRefOid;
+    const everReported = (reqRaw.data.repository?.pullRequest?.reviews?.nodes ?? [])
+      .filter((n): n is NonNullable<typeof n> => Boolean(n?.author?.login))
+      // A minimized review has been folded away as outdated on the PR page, and
+      // a PENDING one has been begun and not submitted — neither is somebody
+      // having reported.
+      .filter((n) => !n.isMinimized && String(n.state ?? "").toUpperCase() !== "PENDING")
+      .filter((n) => (n.author?.login ?? "").toLowerCase() !== prAuthor)
+      .map((n) => ({
+        author: n.author?.login ?? "",
+        state: String(n.state ?? "").toUpperCase(),
+        submittedAt: n.submittedAt ?? undefined,
+        // Only claim staleness when we can actually compare — an absent head or
+        // review commit means "don't know", which must not read as "current"
+        // OR as "stale". Same rule `foldReviewers` follows.
+        stale: head && n.commit?.oid ? n.commit.oid !== head : undefined,
+      }))
+      .reverse();
+    return { requested, reported, everReported };
   }
 
   /**

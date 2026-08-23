@@ -163,4 +163,73 @@ describe("prReviewAgentView — the reviewer's state on one PR", () => {
       prReviewAgentView({ rounds: 1, reviewedAt: 1, postedAt: 2, requestedAt: 9, maxRounds: 4 }),
     ).toMatchObject({ phase: "queued", at: 9 });
   });
+
+  // PR #147, exactly. A `request_review` fired two minutes into a running round
+  // armed `requestedAt` at the SAME head the round had already claimed. That
+  // request can never be served — `claimReviewAgent` dedups on `reviewedSha` —
+  // but it flipped this row to `queued`, and `spentReviewRounds` reads
+  // `phase === "running"` to decide whether a review may still arrive. So
+  // `watch_pr` announced "every round is spent, nothing is coming, go merge"
+  // over a review that posted three minutes later with an open finding.
+  it("does not let a request armed at the RUNNING round's own head mask it", () => {
+    expect(
+      prReviewAgentView({
+        rounds: 2,
+        reviewedSha: "sha-1",
+        reviewedAt: 10,
+        requestedSha: "sha-1",
+        requestedAt: 20,
+        maxRounds: 2,
+      }),
+    ).toMatchObject({ phase: "running", at: 10, roundsSpent: true });
+  });
+
+  it("still ranks a request at a NEW head above the round that read the old one", () => {
+    // The genuine re-arm: a push moved the head, so this request really can be
+    // served and the row really is waiting on the next sweep.
+    expect(
+      prReviewAgentView({
+        rounds: 1,
+        reviewedSha: "sha-1",
+        reviewedAt: 10,
+        requestedSha: "sha-2",
+        requestedAt: 20,
+        maxRounds: 4,
+      }),
+    ).toMatchObject({ phase: "queued", at: 20 });
+  });
+
+  // `extraRounds` is `request_review`'s per-PR override. It is a separate field
+  // because `maxRounds` is rewritten from project config by `notePolicy` on every
+  // sweep pass, so a raise parked there is erased within ~90 seconds.
+  it("counts a per-PR extraRounds grant toward the cap it reports and enforces", () => {
+    expect(
+      prReviewAgentView({ rounds: 2, reviewedAt: 1, postedAt: 2, maxRounds: 2 }),
+    ).toMatchObject({ roundsSpent: true, maxRounds: 2 });
+    // Same row, one round granted: no longer spent, and the denominator every
+    // surface shows is the EFFECTIVE cap — "2 of 3", not the nonsense "2 of 2
+    // but keep going".
+    expect(
+      prReviewAgentView({ rounds: 2, reviewedAt: 1, postedAt: 2, maxRounds: 2, extraRounds: 1 }),
+    ).toMatchObject({ roundsSpent: false, maxRounds: 3 });
+  });
+
+  it("reads a request over a FINISHED round at that head as queued, not hidden", () => {
+    // The masking rule is scoped to a round still in flight. Once one has
+    // posted, a request at that head is a real pending request — the row's head
+    // is up to 90s stale, so a genuine post-push re-request routinely lands
+    // there and IS served once the poll catches up. Hiding it would report a
+    // round that is coming as one that isn't.
+    expect(
+      prReviewAgentView({
+        rounds: 1,
+        reviewedSha: "sha-1",
+        reviewedAt: 10,
+        postedAt: 30,
+        requestedSha: "sha-1",
+        requestedAt: 40,
+        maxRounds: 4,
+      }),
+    ).toMatchObject({ phase: "queued", at: 40 });
+  });
 });

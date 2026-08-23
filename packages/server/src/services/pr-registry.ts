@@ -88,6 +88,34 @@ export interface PrScope {
   chatId?: string;
 }
 
+/**
+ * Why a review request was or was not armed on a PR's row.
+ *
+ * A bare `PrRecord | null` could not answer it: "nothing to do, a reviewer is
+ * mid-round" and "nothing to do, the cap is spent forever" are opposite advice —
+ * wait vs. go merge — and both used to come back as an unchanged record the
+ * caller read as success. `request_review` reports the difference to the agent,
+ * which is the whole point of distinguishing them.
+ */
+export type RequestReviewAgentReason =
+  /** The request was recorded; the next sweep can claim a round for it. */
+  | "armed"
+  /** No such PR in the catalog. A request must not conjure a hollow row. */
+  | "unknown-pr"
+  /** A round is claimed at this head and has not posted — it is still coming. */
+  | "in-flight"
+  /** Every allowed round is claimed. Nothing will serve another one. */
+  | "rounds-spent"
+  /** Already armed at this head and still unserved — the earlier one stands. */
+  | "already-queued";
+
+export interface RequestReviewAgentResult {
+  armed: boolean;
+  reason: RequestReviewAgentReason;
+  /** The row as it stands, or null when there wasn't one. */
+  record: PrRecord | null;
+}
+
 export interface PrRegistryOptions {
   store: Store;
   bus: EventBus;
@@ -301,27 +329,113 @@ export class PrRegistry {
    * A no-op for a PR the catalog has never heard of — same rule as
    * `noteWatched`: a request must not conjure a hollow row.
    */
-  async requestReviewAgent(repo: string, number: number, by: string): Promise<PrRecord | null> {
+  async requestReviewAgent(
+    repo: string,
+    number: number,
+    by: string,
+  ): Promise<RequestReviewAgentResult> {
     const key = prRecordKey(repo, number);
     const prev = await this.store.getPrRecord(key);
-    if (!prev) return null;
+    if (!prev) return { armed: false, reason: "unknown-pr", record: null };
     const sha = prev.headRefOid;
     const state = prev.reviewAgent;
+    // A round is claimed at this head and has NOT posted — it is in flight.
+    // Arming here is not merely useless, it is corrupting: `requestedAt` makes
+    // `prReviewAgentView` read `queued`, which hid the round that was genuinely
+    // running and let `watch_pr` announce "every round is spent, nothing is
+    // coming" over a review being written at that moment (PR #147).
+    //
+    // `!postedAt` is load-bearing, not a tidier spelling of the same thing. A
+    // request at a head whose round has FINISHED must still arm: `sha` here is
+    // the row's last POLLED head, up to 90 seconds stale, so an agent that
+    // pushes and immediately calls `request_review` is still seen at the old
+    // one. Refusing that killed round 2 outright in self-review mode — the
+    // default identity — where nothing but `create_pr` and `request_review`
+    // ever arms a local request, so there is no later pass to re-arm it.
+    // Armed at the stale head it is harmless: `claimReviewAgent` compares
+    // against the CURRENT head, so it simply serves once the poll catches up.
+    //
+    // Checked BEFORE the cap so the two refusals stay distinguishable: a round
+    // in flight ends on its own, a spent cap never does.
+    if (sha && state?.reviewedSha === sha && !state.postedAt) {
+      return { armed: false, reason: "in-flight", record: prev };
+    }
+    // Every allowed round is claimed. Same rule `claimReviewAgent` refuses on —
+    // spelled here too because a request the sweep will silently drop reads to
+    // the caller exactly like one it is about to serve.
+    if (
+      state?.maxRounds != null &&
+      (state.rounds ?? 0) >= state.maxRounds + (state.extraRounds ?? 0)
+    ) {
+      return { armed: false, reason: "rounds-spent", record: prev };
+    }
     // Already asked at this head, and nothing has served it yet. A parked
     // refusal defeats the short-circuit on purpose: getting here means the
     // reviewer IS in the queue now, so the recorded "GitHub would not queue it"
     // is stale, and skipping the write would leave the row saying no review is
     // coming while one is about to start.
-    if (state?.requestedSha === sha && state?.requestedAt && !state.requestError) return prev;
+    if (state?.requestedSha === sha && state?.requestedAt && !state.requestError) {
+      return { armed: false, reason: "already-queued", record: prev };
+    }
     const now = this.now();
+    return {
+      armed: true,
+      reason: "armed",
+      record: this.publish(
+        await this.store.upsertPrRecord(key, { ...prev }, {
+          reviewAgent: {
+            ...(state ?? { rounds: 0 }),
+            requestedSha: sha,
+            requestedAt: now,
+            requestedBy: by,
+            requestError: undefined,
+          },
+        }),
+      ),
+    };
+  }
+
+  /**
+   * Raise THIS PR's round cap by `extra`, so one more review can be claimed.
+   *
+   * Per-PR and additive rather than a config edit: the project's
+   * `workflow.pr.reviewAgent.maxRounds` is the standing policy and an agent that
+   * wants a third look at one pull request has no business rewriting it for
+   * every future one. The raise lands on the row, which is where
+   * `claimReviewAgent` reads the cap from anyway.
+   *
+   * A no-op for a PR the catalog never heard of, and for a row that never
+   * recorded a cap — raising a denominator that does not exist would invent a
+   * limit rather than lift one.
+   */
+  async raiseReviewRoundCap(
+    repo: string,
+    number: number,
+    extra: number,
+  ): Promise<PrRecord | null> {
+    if (!Number.isInteger(extra) || extra <= 0) return null;
+    const key = prRecordKey(repo, number);
+    const prev = await this.store.getPrRecord(key);
+    if (!prev) return null;
+    const state = prev.reviewAgent;
+    if (state?.maxRounds == null) return null;
     return this.publish(
       await this.store.upsertPrRecord(key, { ...prev }, {
         reviewAgent: {
-          ...(state ?? { rounds: 0 }),
-          requestedSha: sha,
-          requestedAt: now,
-          requestedBy: by,
-          requestError: undefined,
+          ...state,
+          // `extraRounds`, NOT `maxRounds`. The policy field is rewritten from
+          // project config by `notePolicy` on every sweep pass, so a raise parked
+          // there lasts about 90 seconds — see `PrReviewAgentStateSchema`.
+          extraRounds: (state.extraRounds ?? 0) + extra,
+          // The head dedup goes with it, or the grant buys nothing in the case
+          // it exists for. `claimReviewAgent` refuses twice — once on the round
+          // count, once on `reviewedSha === sha` — and a reviewer chat that died
+          // without posting leaves the head exactly where it was, with no push
+          // behind it. Lifting only the count left the claim refusing on the
+          // second test, so the granted round could never spawn while
+          // `roundsSpent` had gone false, which is `watch_pr` blocking a full
+          // window on a review that cannot exist.
+          reviewedSha: undefined,
         },
       }),
     );
@@ -351,7 +465,12 @@ export class PrRegistry {
     if (!prev || prev.state !== "open") return null;
     const state: PrReviewAgentState = prev.reviewAgent ?? { rounds: 0 };
     if (!state.requestedAt) return null;
-    if (state.rounds >= opts.maxRounds) return null;
+    // The sweep hands us the PROJECT's cap, which is the only value it has. The
+    // per-PR grant from `request_review`'s `extraRounds` lives on the row, and
+    // adding it here is what makes that override do anything at all: written
+    // into `maxRounds` instead, it was erased by the next `notePolicy` pass and
+    // never reached this comparison.
+    if (state.rounds >= opts.maxRounds + (state.extraRounds ?? 0)) return null;
     // Dedup on the HEAD, not on "has been reviewed": a review is only spent on
     // the code it read, so a push re-arms it and a re-request on unchanged code
     // does not.

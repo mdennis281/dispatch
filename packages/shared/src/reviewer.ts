@@ -185,13 +185,16 @@ export function prReviewAgentView(
   state:
     | {
         requestedAt?: number;
+        requestedSha?: string;
         reviewedAt?: number;
+        reviewedSha?: string;
         postedAt?: number;
         chatId?: string;
         rounds?: number;
         findings?: number;
         postedEvent?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
         maxRounds?: number;
+        extraRounds?: number;
         problem?: string;
         requestError?: string;
       }
@@ -199,14 +202,20 @@ export function prReviewAgentView(
 ): PrReviewAgentView | null {
   if (!state) return null;
   const round = state.rounds ?? 0;
+  // The EFFECTIVE cap: the project's policy plus whatever `request_review`'s
+  // `extraRounds` granted on this PR alone. Reported as `maxRounds` because it
+  // is the number every surface means by "of how many" — a chip reading "3 of 2"
+  // would be nonsense, and the policy value on its own is not the limit any more.
+  const cap =
+    state.maxRounds != null ? state.maxRounds + (state.extraRounds ?? 0) : undefined;
   // The cap rule, spelled ONCE. `claimReviewAgent` refuses on exactly this
   // comparison, and every surface that wants to say "the reviewer is done" —
   // the chip, and `watch_pr`, which otherwise blocks for half an hour on a round
   // that can never be claimed — has to mean the same thing by it.
-  const roundsSpent = state.maxRounds != null && round >= state.maxRounds;
+  const roundsSpent = cap != null && round >= cap;
   const base = {
     round,
-    maxRounds: state.maxRounds,
+    maxRounds: cap,
     roundsSpent,
     chatId: state.chatId,
     posted: false,
@@ -223,9 +232,28 @@ export function prReviewAgentView(
     return { ...base, phase: "blocked", problem: blocked, at: state.requestedAt };
   }
 
-  // A claim clears the request, so an outstanding one always outranks the last
+  // A claim clears the request, so an outstanding one normally outranks the last
   // finished round: the row is waiting on the next sweep, not resting.
-  if (state.requestedAt) return { ...base, phase: "queued", at: state.requestedAt };
+  //
+  // EXCEPT when it is armed at the head of a round that is still IN FLIGHT.
+  // Letting that read as `queued` masked the round genuinely running, and that
+  // is not cosmetic: `spentReviewRounds` derives `inFlight` from
+  // `phase === "running"`, so on PR #147 a `request_review` fired two minutes
+  // into round 2 flipped the row to `queued`, `watch_pr` concluded "every round
+  // is spent and nothing is coming", and the review it had just declared
+  // impossible posted three minutes later with an unresolved finding.
+  //
+  // Scoped to `!postedAt` for the same reason the registry's guard is: once a
+  // round has finished, a request at that head is a real pending request — the
+  // row's head is up to 90s stale, so a genuine post-push re-request routinely
+  // lands there and IS served once the poll catches up.
+  const staleRequest =
+    state.requestedSha !== undefined &&
+    state.requestedSha === state.reviewedSha &&
+    !state.postedAt;
+  if (state.requestedAt && !staleRequest) {
+    return { ...base, phase: "queued", at: state.requestedAt };
+  }
 
   // Claimed and nothing posted for it. NOT derived from `reviewedAt` alone —
   // that is written at claim time and never cleared, so every reviewed PR would

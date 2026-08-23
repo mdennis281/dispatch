@@ -477,6 +477,9 @@ export function createServices(
     },
     snapshotByThread: async (threadId) => toPrSnapshot(await prRegistry.findByThread(threadId)),
     reviewAgent: (repo, number) => prRegistry.reviewAgent(repo, number),
+    raiseReviewRoundCap: async (repo, number, extra) => {
+      await prRegistry.raiseReviewRoundCap(repo, number, extra);
+    },
     requestReviewAgent: (repo, number, by) => prRegistry.requestReviewAgent(repo, number, by),
     notePostedReview: (repo, number, by) => prRegistry.notePostedReview(repo, number, by),
     noteReviewRequestError: (repo, number, error) =>
