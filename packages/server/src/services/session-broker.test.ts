@@ -2846,12 +2846,12 @@ describe("makeRepoResolver", () => {
    * the regression that would make every resolve fail on a real service.
    */
   function fakeGitHub(resolveRepo: (cwd: string) => Promise<string>) {
-    // `isRepository` too: the resolver checks the directory is still a checkout
-    // before spending a `gh` on it, and a stub missing it would make every
-    // resolve fail for a reason this suite isn't about.
+    // `isRepositoryRoot` too: the resolver checks the directory is still a
+    // checkout before spending a `gh` on it, and a stub missing it would make
+    // every resolve fail for a reason this suite isn't about.
     return {
       resolveRepo,
-      isRepository: async () => true,
+      isRepositoryRoot: async () => true,
     } as unknown as Parameters<typeof makeRepoResolver>[0];
   }
 
@@ -2942,6 +2942,7 @@ describe("makePrCreateBinding — repo resolution", () => {
         return "mdennis281/dispatch";
       },
       isRepository: async () => true,
+      isRepositoryRoot: async () => true,
       sameRepository: async () => true,
       prCreatePreflight: async () => ({
         branch: "feat/x",
@@ -3516,6 +3517,68 @@ describe("makePrCreateBinding — a bound cwd that has been reaped", () => {
     expect(st?.cwd).toBe(healthy);
   });
 
+  it("rejects a husk that sits INSIDE the repository, where rev-parse walks up", async () => {
+    // The case the first round of fixtures missed, and it is the common layout
+    // rather than an exotic one: `.worktrees/` is the DEFAULT worktreeRoot for a
+    // new project, and the Claude Code harness cuts its own trees into
+    // `<repo>/.claude/worktrees/`.
+    //
+    // `git rev-parse` walks UP the parent chain, so a husk in either place still
+    // answers — with the MAIN checkout's `.git`, exit 0. A liveness check built
+    // on `--git-common-dir` alone calls it alive, and every question about the
+    // chat's branch is then answered by the trunk: the agent is told `on-trunk`
+    // while its commits sit one directory over. That is the exact lie this area
+    // exists to stop telling, reintroduced by the repair for it.
+    const inside = join(repoDir, ".worktrees", "feat-inside");
+    await mkdir(join(repoDir, ".worktrees"), { recursive: true });
+    await cut("feat/inside", inside);
+    await rm(join(inside, ".git"), { force: true });
+
+    // Precondition: git really does answer for it, which is why this is subtle.
+    const { execa } = await import("execa");
+    const walked = await execa(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { cwd: inside, reject: false },
+    );
+    expect(walked.exitCode).toBe(0);
+
+    const binding = bindingFor({ cwd: inside, alternates: async () => [healthy] });
+
+    const st = await binding.preflight();
+    expect(st?.cwd).toBe(healthy);
+    expect(st?.branch).toBe("feat/next");
+  });
+
+  it("still accepts a live worktree that sits inside the repository", async () => {
+    // The other half: rejecting husks must not reject the in-repo layout itself.
+    const inside = join(repoDir, ".worktrees", "feat-live");
+    await mkdir(join(repoDir, ".worktrees"), { recursive: true });
+    await cut("feat/live-inside", inside);
+    await writeFile(join(inside, "d.txt"), "work");
+    await git(inside, "add", ".");
+    await git(inside, "commit", "-m", "in-repo work");
+
+    const binding = bindingFor({ cwd: inside });
+
+    const st = await binding.preflight();
+    expect(st?.cwd).toBe(inside);
+    expect(st?.branch).toBe("feat/live-inside");
+  });
+
+  it("does not mistake a subdirectory of a worktree for the worktree", async () => {
+    // Same walk-up, one level down. A candidate list is paths to checkouts, so a
+    // subdirectory arriving there means something upstream is confused; taking
+    // it would work by accident today and mislead the moment it doesn't.
+    const sub = join(healthy, "packages", "server");
+    await mkdir(sub, { recursive: true });
+
+    const binding = bindingFor({ cwd: sub, alternates: async () => [healthy] });
+
+    const st = await binding.preflight();
+    expect(st?.cwd).toBe(healthy);
+  });
+
   it("reports null when nothing anywhere is a checkout — the honest failure", async () => {
     const nowhere = join(root, "nowhere");
     await mkdir(nowhere);
@@ -3533,7 +3596,7 @@ describe("makePrCreateBinding — a bound cwd that has been reaped", () => {
 describe("makeRepoResolver / makeDirResolver — a dead bound cwd", () => {
   function fake(alive: string[], onResolve?: (dir: string) => void) {
     return {
-      isRepository: async (dir: string) => alive.includes(dir),
+      isRepositoryRoot: async (dir: string) => alive.includes(dir),
       resolveRepo: async (dir: string) => {
         onResolve?.(dir);
         if (!alive.includes(dir)) throw new Error("not a git repository");
@@ -3565,7 +3628,7 @@ describe("makeRepoResolver / makeDirResolver — a dead bound cwd", () => {
   it("does not re-check liveness once the repo has resolved", async () => {
     let checks = 0;
     const github = {
-      isRepository: async () => {
+      isRepositoryRoot: async () => {
         checks += 1;
         return true;
       },

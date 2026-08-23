@@ -399,11 +399,19 @@ export interface SessionDirs {
  * the husk a second time.
  */
 export function makeDirResolver(
-  github: Pick<GitHubService, "isRepository">,
+  github: Pick<GitHubService, "isRepositoryRoot">,
   dirs: SessionDirs,
 ): () => Promise<string | undefined> {
+  // `isRepositoryRoot`, NOT `isRepository`: `git rev-parse` walks UP, so a husk
+  // that sits inside the repository — `.worktrees/` is the default root for a
+  // new project, and the harness cuts into `<repo>/.claude/worktrees/` — answers
+  // with the MAIN checkout's `.git` and exits 0. It would be judged alive, and
+  // then every question about the chat's branch would be answered by the trunk.
+  // Every candidate this resolver sees is a checkout root by construction
+  // (`session.worktreeCwd`, `Chat.worktrees[]`, `project.repoPath`), so
+  // demanding one costs nothing and rejects exactly the husks.
   const alive = (dir: string): Promise<boolean> =>
-    github.isRepository(dir).catch(() => false);
+    github.isRepositoryRoot(dir).catch(() => false);
   return async (): Promise<string | undefined> => {
     if (dirs.cwd && (await alive(dirs.cwd))) return dirs.cwd;
     const alternates = await dirs.alternates?.().catch(() => []);
@@ -445,7 +453,7 @@ export function makeDirResolver(
  * the rest of a chat, all three reporting a repo they could not name.
  */
 export function makeRepoResolver(
-  github: Pick<GitHubService, "resolveRepo" | "isRepository">,
+  github: Pick<GitHubService, "resolveRepo" | "isRepositoryRoot">,
   dirs: SessionDirs,
 ): (override?: string) => Promise<string | null> {
   const dirFor = makeDirResolver(github, dirs);
@@ -674,6 +682,17 @@ export function makePrCreateBinding(
    * discarded. Hence {@link makeDirResolver}: validate the hint against a LIVE
    * directory, and when none survives, a hint that is itself a checkout is the
    * only evidence left — take it rather than insisting on a husk.
+   *
+   * That last branch DOES relax the same-repository rule, and the relaxation is
+   * bounded but real: with nothing live to compare against, a `requested` in an
+   * unrelated repository is accepted and the PR opens there. It is reachable
+   * only when the bound cwd is dead, every `Chat.worktrees` entry is dead, AND
+   * the project record is missing (`buildOptions` derives it through a
+   * `.catch(() => null)`) — a session that has lost every idea of where it
+   * belongs. The alternative is refusing a caller who correctly passed the
+   * directory they committed in, which is the dead end this whole change exists
+   * to remove. The tool's `cwd` description states the narrowed guarantee rather
+   * than promising one that only holds while a live directory exists.
    */
   const cwdFor = async (requested?: string): Promise<string | undefined> => {
     const live = await dirFor();
