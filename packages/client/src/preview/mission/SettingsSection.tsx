@@ -12,7 +12,7 @@
  * that cannot leave the valid range is the cheapest validator there is.
  */
 import { CircleAlert, RotateCcw } from "lucide-react";
-import { Select } from "../../components/ui/index.js";
+import { Button, Select } from "../../components/ui/index.js";
 import { FormRow, LockedRow, NumberInput, PercentSlider } from "./chrome.js";
 import { teamColor } from "./derive.js";
 import type { MissionPolicy, MissionSpec, TeamId } from "./types.js";
@@ -50,14 +50,9 @@ export function SettingsSection({
           <span className="flex-1 text-2xs text-accent-hi">
             Changed — every derived view on this board is already using these values.
           </span>
-          <button
-            type="button"
-            onClick={onReset}
-            className="flex items-center gap-1 rounded border border-line px-1.5 py-0.5 text-2xs text-muted hover:border-line-strong hover:text-primary"
-          >
-            <RotateCcw className="size-2.5" />
+          <Button variant="subtle" size="sm" onClick={onReset} leftIcon={<RotateCcw />}>
             Revert
-          </button>
+          </Button>
         </div>
       )}
 
@@ -190,7 +185,7 @@ export function SettingsSection({
                   max={5}
                   onChange={(n) => setBudget(team.id, n)}
                 />
-                <span className="text-[10px] leading-4 text-faint">
+                <span className="text-2xs leading-4 text-faint">
                   can hire {team.hireableRoles.join(", ")}
                 </span>
               </div>

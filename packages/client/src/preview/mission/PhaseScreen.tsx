@@ -10,7 +10,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Terminal, UserCheck } from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import { Chip } from "../../components/ui/index.js";
-import { Card, Empty, Section, TaskStatusPill } from "./chrome.js";
+import { Card, Empty, RowButton, Section, TaskStatusPill } from "./chrome.js";
 import { gatePreviews, scheduleFor, teamColor, waveGroups, type Plan } from "./derive.js";
 import type { Nav } from "./nav.js";
 import type { SectionState } from "./sections.js";
@@ -157,11 +157,11 @@ function PhaseAcceptance({ plan, phaseId }: { plan: Plan; phaseId: string }) {
           </div>
           {g.satisfiedBy.length > 0 && (
             <div className="mt-1.5 flex flex-wrap items-center gap-1">
-              <span className="text-[10px] leading-4 text-faint">built by</span>
+              <span className="text-2xs leading-4 text-faint">built by</span>
               {g.satisfiedBy.map((t) => (
                 <span
                   key={t.id}
-                  className="cm-mono rounded bg-inset px-1 text-[10px] leading-4 text-muted"
+                  className="cm-mono rounded bg-inset px-1 text-2xs leading-4 text-muted"
                 >
                   {t.id}
                 </span>
@@ -303,7 +303,7 @@ function TaskCard({
                   key={pr.number}
                   title={pr.title}
                   className={cn(
-                    "cm-mono rounded px-1 text-[10px] leading-4",
+                    "cm-mono rounded px-1 text-2xs leading-4",
                     pr.state === "merged"
                       ? "bg-success-ghost text-success-hi"
                       : "bg-inset text-muted",
@@ -319,7 +319,7 @@ function TaskCard({
               {task.satisfies.map((s) => (
                 <span
                   key={s}
-                  className="cm-mono rounded bg-inset px-1 text-[10px] leading-4 text-muted"
+                  className="cm-mono rounded bg-inset px-1 text-2xs leading-4 text-muted"
                 >
                   {s}
                 </span>
@@ -402,23 +402,21 @@ function QaHistory({ plan, phaseId, nav }: { plan: Plan; phaseId: string; nav: N
               ))}
               <Chip tone={r.status === "accepted" ? "success" : "neutral"}>{r.status}</Chip>
               {qa && (
-                <button
-                  type="button"
+                <RowButton
                   onClick={() => nav.go({ at: "agent", actorId: qa.id })}
                   className="ml-auto rounded px-1.5 py-0.5 text-2xs text-muted hover:bg-hover hover:text-primary"
                 >
                   {qa.name} →
-                </button>
+                </RowButton>
               )}
             </div>
             <p className="mt-1.5 text-2xs leading-relaxed text-secondary">{r.findings}</p>
             <div className="mt-2">
-              <span className="text-[10px] leading-4 text-faint">tasks added</span>
+              <span className="text-2xs leading-4 text-faint">tasks added</span>
               <div className="mt-1 flex flex-col gap-1">
                 {r.tasks.map((t) => (
-                  <button
+                  <RowButton
                     key={t.id}
-                    type="button"
                     onClick={() => nav.go({ at: "task", taskId: t.id })}
                     className="flex items-center gap-1.5 rounded border border-line bg-panel px-2 py-1 text-left hover:border-line-strong"
                   >
@@ -427,8 +425,8 @@ function QaHistory({ plan, phaseId, nav }: { plan: Plan; phaseId: string; nav: N
                       style={{ background: teamColor(plan.spec, t.teamId) }}
                     />
                     <span className="flex-1 truncate text-2xs text-primary">{t.title}</span>
-                    <span className="cm-mono text-[10px] leading-4 text-faint">{t.id}</span>
-                  </button>
+                    <span className="cm-mono text-2xs leading-4 text-faint">{t.id}</span>
+                  </RowButton>
                 ))}
               </div>
             </div>

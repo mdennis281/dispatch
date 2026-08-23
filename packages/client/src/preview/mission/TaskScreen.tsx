@@ -10,7 +10,7 @@
 import { ArrowUpRight } from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import { Chip } from "../../components/ui/index.js";
-import { ActorStatusPill, Card, Empty, Section, TaskStatusPill, Tunable } from "./chrome.js";
+import { ActorStatusPill, Card, Empty, RowButton, Section, TaskStatusPill, Tunable } from "./chrome.js";
 import { actorsForTask, teamColor, type Plan } from "./derive.js";
 import type { Nav } from "./nav.js";
 import type { SectionState } from "./sections.js";
@@ -45,7 +45,7 @@ export function TaskScreen({
         state={sections}
         hint="the hire's entire context — it inherits nothing"
         right={
-          <span className="cm-mono text-[10px] leading-4 text-faint">
+          <span className="cm-mono text-2xs leading-4 text-faint">
             {task.brief.length}/{CAPS.taskBrief}
           </span>
         }
@@ -105,7 +105,7 @@ export function TaskScreen({
                   <span className="text-secondary">{c.then}</span>
                 </div>
                 {c.check && (
-                  <code className="cm-mono mt-1.5 block rounded bg-inset px-1.5 py-1 text-[10px] leading-relaxed text-secondary">
+                  <code className="cm-mono mt-1.5 block rounded bg-inset px-1.5 py-1 text-2xs leading-relaxed text-secondary">
                     {c.check}
                   </code>
                 )}
@@ -123,7 +123,7 @@ export function TaskScreen({
       >
         <div className="grid max-w-4xl gap-4 [grid-template-columns:repeat(auto-fit,minmax(16rem,1fr))]">
           <div>
-            <div className="mb-1 text-[10px] uppercase leading-4 tracking-wide text-faint">
+            <div className="mb-1 text-2xs uppercase leading-4 tracking-wide text-faint">
               depends on
             </div>
             {task.dependsOn.length === 0 ? (
@@ -134,9 +134,8 @@ export function TaskScreen({
                   const dep = plan.tasks.find((t) => t.id === d);
                   const ds = run?.tasks[d];
                   return (
-                    <button
+                    <RowButton
                       key={d}
-                      type="button"
                       onClick={() => nav.go({ at: "task", taskId: d })}
                       className="flex items-center gap-1.5 rounded border border-line bg-panel px-2 py-1 text-left hover:border-line-strong"
                     >
@@ -148,14 +147,14 @@ export function TaskScreen({
                         {dep?.title ?? d}
                       </span>
                       {ds && <TaskStatusPill status={ds.status} />}
-                    </button>
+                    </RowButton>
                   );
                 })}
               </div>
             )}
           </div>
           <div>
-            <div className="mb-1 text-[10px] uppercase leading-4 tracking-wide text-faint">
+            <div className="mb-1 text-2xs uppercase leading-4 tracking-wide text-faint">
               blocks
             </div>
             {dependents.length === 0 ? (
@@ -163,9 +162,8 @@ export function TaskScreen({
             ) : (
               <div className="flex flex-col gap-1">
                 {dependents.map((d) => (
-                  <button
+                  <RowButton
                     key={d.id}
-                    type="button"
                     onClick={() => nav.go({ at: "task", taskId: d.id })}
                     className="flex items-center gap-1.5 rounded border border-line bg-panel px-2 py-1 text-left hover:border-line-strong"
                   >
@@ -174,7 +172,7 @@ export function TaskScreen({
                       style={{ background: teamColor(spec, d.teamId) }}
                     />
                     <span className="flex-1 truncate text-2xs text-secondary">{d.title}</span>
-                  </button>
+                  </RowButton>
                 ))}
               </div>
             )}
@@ -229,7 +227,7 @@ export function TaskScreen({
                     <Chip tone={scope === "mission" ? "accent" : "neutral"}>{scope}</Chip>
                     <span className="text-2xs text-primary">{c?.title ?? s}</span>
                   </div>
-                  <span className="cm-mono text-[10px] leading-4 text-faint">{s}</span>
+                  <span className="cm-mono text-2xs leading-4 text-faint">{s}</span>
                 </div>
               );
             })}

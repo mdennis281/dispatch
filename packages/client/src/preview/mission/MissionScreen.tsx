@@ -13,7 +13,7 @@
 import { Boxes, TriangleAlert } from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import { Chip } from "../../components/ui/index.js";
-import { ActorStatusPill, Card, ContextBar, Empty, Metric, Section } from "./chrome.js";
+import { ActorStatusPill, Card, ContextBar, Empty, Metric, RowButton, Section } from "./chrome.js";
 import { gatePreviews, leadForTeam, liveHires, phaseCounts, teamColor, type Plan } from "./derive.js";
 import { CAPS } from "./types.js";
 import type { Nav } from "./nav.js";
@@ -168,7 +168,7 @@ export function MissionScreen({
                 className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-panel px-2.5 py-1.5"
               >
                 <span className="text-2xs font-medium text-primary">{g.criterion.title}</span>
-                <span className="cm-mono text-[10px] leading-4 text-faint">{g.criterion.id}</span>
+                <span className="cm-mono text-2xs leading-4 text-faint">{g.criterion.id}</span>
                 <Chip tone={g.criterion.verify === "command" ? "success" : "info"}>
                   {g.criterion.verify}
                 </Chip>
@@ -184,7 +184,7 @@ export function MissionScreen({
                       style={{ background: teamColor(spec, tid) }}
                     />
                   ))}
-                  <span className="ml-1 cm-mono text-[10px] leading-4 text-faint">
+                  <span className="ml-1 cm-mono text-2xs leading-4 text-faint">
                     {g.signatories.length} sign
                   </span>
                 </span>
@@ -219,8 +219,7 @@ export function MissionScreen({
                 </p>
 
                 {lead && (
-                  <button
-                    type="button"
+                  <RowButton
                     onClick={() => nav.go({ at: "agent", actorId: lead.id })}
                     className="mt-2 flex w-full items-center gap-2 rounded-md border border-line-soft bg-panel-2 px-2 py-1.5 text-left hover:border-line-strong"
                   >
@@ -229,7 +228,7 @@ export function MissionScreen({
                       <span className="block truncate text-2xs font-medium text-primary">
                         {lead.name}
                       </span>
-                      <span className="block truncate text-[10px] leading-4 text-faint">
+                      <span className="block truncate text-2xs leading-4 text-faint">
                         {lead.activity}
                       </span>
                     </span>
@@ -237,11 +236,11 @@ export function MissionScreen({
                       <ActorStatusPill status={lead.status} />
                       <ContextBar fill={lead.contextFill} threshold={threshold} />
                     </span>
-                  </button>
+                  </RowButton>
                 )}
 
                 <div className="mt-2 flex items-center gap-1.5">
-                  <span className="text-[10px] leading-4 text-faint">hires</span>
+                  <span className="text-2xs leading-4 text-faint">hires</span>
                   <span className="cm-mono text-2xs text-secondary">
                     {hires.length}/{team.hireBudget}
                   </span>
@@ -257,12 +256,12 @@ export function MissionScreen({
                 </div>
 
                 <div className="mt-2">
-                  <span className="text-[10px] leading-4 text-faint">can hire</span>
+                  <span className="text-2xs leading-4 text-faint">can hire</span>
                   <div className="mt-0.5 flex flex-wrap gap-1">
                     {team.hireableRoles.map((r) => (
                       <span
                         key={r}
-                        className="cm-mono rounded bg-inset px-1 text-[10px] leading-4 text-muted"
+                        className="cm-mono rounded bg-inset px-1 text-2xs leading-4 text-muted"
                       >
                         {r}
                       </span>
@@ -273,9 +272,8 @@ export function MissionScreen({
                 {hires.length > 0 ? (
                   <div className="mt-2 flex flex-col gap-1">
                     {hires.map((h) => (
-                      <button
+                      <RowButton
                         key={h.id}
-                        type="button"
                         onClick={() => nav.go({ at: "agent", actorId: h.id })}
                         className="flex items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-hover"
                       >
@@ -287,7 +285,7 @@ export function MissionScreen({
                           {h.name}
                         </span>
                         <ActorStatusPill status={h.status} />
-                      </button>
+                      </RowButton>
                     ))}
                   </div>
                 ) : (
@@ -325,12 +323,12 @@ function Budget({ plan }: { plan: Plan }) {
   ];
   return (
     <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-      <span className="text-[10px] uppercase leading-4 tracking-wide text-faint">budget</span>
+      <span className="text-2xs uppercase leading-4 tracking-wide text-faint">budget</span>
       {items.map(([label, used, cap]) => {
         const full = used >= cap;
         return (
           <span key={label} className="flex items-baseline gap-1">
-            <span className="text-[10px] leading-4 text-faint">{label}</span>
+            <span className="text-2xs leading-4 text-faint">{label}</span>
             <span
               className={cn("cm-mono text-2xs", full ? "text-warn" : "text-muted")}
               title={full ? `at the cap — anything further has to displace something` : undefined}

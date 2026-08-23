@@ -36,12 +36,12 @@ import {
   Target,
 } from "lucide-react";
 import { cn } from "../../lib/cn.js";
-import { Chip } from "../../components/ui/index.js";
+import { Chip, IconButton } from "../../components/ui/index.js";
 import { MOCK_MISSION } from "./mock.js";
 import { MOCK_MANAGER_CHAT, MOCK_RUN, effectiveTasks } from "./mockRun.js";
 import { validate, type Plan } from "./derive.js";
 import type { MissionPolicy, MissionSpec, TeamId } from "./types.js";
-import { Crumbs, RunStatusPill } from "./chrome.js";
+import { Crumbs, RowButton, RunStatusPill } from "./chrome.js";
 import { crumbsFor, parentOf, titleFor, type Nav, type Route } from "./nav.js";
 import { defaultOpen, type SectionState } from "./sections.js";
 import { MissionScreen } from "./MissionScreen.js";
@@ -149,8 +149,7 @@ export function MissionPreview() {
             {run.actors.filter((a) => a.status !== "retired").length} live
           </span>
           {dirty && <Chip tone="accent">settings modified</Chip>}
-          <button
-            type="button"
+          <RowButton
             onClick={() => setIssuesOpen((v) => !v)}
             className="shrink-0"
             title="Validation detail"
@@ -162,24 +161,20 @@ export function MissionPreview() {
             ) : (
               <Chip tone="success">validates</Chip>
             )}
-          </button>
+          </RowButton>
           {issues.length - errors.length > 0 && (
-            <button type="button" onClick={() => setIssuesOpen((v) => !v)} className="shrink-0">
+            <RowButton onClick={() => setIssuesOpen((v) => !v)} className="shrink-0">
               <Chip tone="warn">{issues.length - errors.length} advisory</Chip>
-            </button>
+            </RowButton>
           )}
-          <button
-            type="button"
+          <IconButton
+            size="sm"
             onClick={() => setChatOpen((v) => !v)}
-            title={chatOpen ? "Hide manager chat" : "Show manager chat"}
-            className="flex size-6 shrink-0 items-center justify-center rounded text-muted hover:bg-hover hover:text-primary"
+            tip={chatOpen ? "Hide manager chat" : "Show manager chat"}
+            className="shrink-0"
           >
-            {chatOpen ? (
-              <PanelRightClose className="size-3.5" />
-            ) : (
-              <PanelRightOpen className="size-3.5" />
-            )}
-          </button>
+            {chatOpen ? <PanelRightClose /> : <PanelRightOpen />}
+          </IconButton>
         </div>
 
         {/* ------------------------------------------------------------ nav */}

@@ -34,6 +34,7 @@ import {
   Users,
 } from "lucide-react";
 import { cn } from "../../lib/cn.js";
+import { RowButton } from "./chrome.js";
 import { phaseCounts, type Plan } from "./derive.js";
 import type { Nav, Route } from "./nav.js";
 import { SECTIONS, type SectionState } from "./sections.js";
@@ -71,7 +72,7 @@ export function Sidebar({
     <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-surface">
       {/* ------------------------------------------------ the chats list */}
       <div className="shrink-0 px-2 pb-1.5 pt-2">
-        <div className="mb-1 flex items-center gap-1 text-[10px] uppercase leading-4 tracking-wide text-faint">
+        <div className="mb-1 flex items-center gap-1 text-2xs uppercase leading-4 tracking-wide text-faint">
           chats <ChevronDown className="size-2.5" />
         </div>
         <div className="mb-1 flex gap-1">
@@ -89,8 +90,7 @@ export function Sidebar({
 
       {/* --------------------------------------------------- the mission */}
       <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
-        <button
-          type="button"
+        <RowButton
           onClick={() => nav.go({ at: "mission" })}
           className={cn(
             "flex w-full items-start gap-1.5 rounded-md border px-1.5 py-1.5 text-left transition-colors",
@@ -111,10 +111,10 @@ export function Sidebar({
                   style={{ width: `${pct}%` }}
                 />
               </span>
-              <span className="cm-mono text-[9px] leading-3 text-faint">{pct}%</span>
+              <span className="cm-mono text-2xs leading-3 text-faint">{pct}%</span>
             </span>
           </span>
-        </button>
+        </RowButton>
 
         {/* phases → tasks */}
         <Group label="Phases" icon={<Target className="size-2.5" />} />
@@ -134,34 +134,32 @@ export function Sidebar({
                     on ? "bg-accent-ghost" : "hover:bg-hover",
                   )}
                 >
-                  <button
-                    type="button"
+                  <RowButton
                     onClick={() => setExpanded((e) => ({ ...e, [p.id]: !open }))}
                     className="flex size-4 shrink-0 items-center justify-center text-faint hover:text-primary"
                   >
                     <ChevronDown
                       className={cn("size-2.5 transition-transform", !open && "-rotate-90")}
                     />
-                  </button>
-                  <button
-                    type="button"
+                  </RowButton>
+                  <RowButton
                     onClick={() => nav.go({ at: "phase", phaseId: p.id })}
                     className="flex min-w-0 flex-1 items-center gap-1.5 py-0.5 text-left"
                   >
-                    <span className="cm-mono text-[9px] leading-3 text-faint">{p.order}</span>
+                    <span className="cm-mono text-2xs leading-3 text-faint">{p.order}</span>
                     <span
                       className={cn(
-                        "min-w-0 flex-1 truncate text-[11px] leading-4",
+                        "min-w-0 flex-1 truncate text-xs leading-4",
                         on ? "font-medium text-primary" : "text-secondary",
                       )}
                     >
                       {p.title}
                     </span>
                     <StatusDotMini status={status} />
-                    <span className="cm-mono shrink-0 text-[9px] leading-3 text-faint">
+                    <span className="cm-mono shrink-0 text-2xs leading-3 text-faint">
                       {c.done}/{c.tasks}
                     </span>
-                  </button>
+                  </RowButton>
                 </div>
                 {open && (
                   <div className="ml-[1.35rem] border-l border-line pl-1">
@@ -169,9 +167,8 @@ export function Sidebar({
                       const ts = run?.tasks[t.id]?.status ?? "blocked";
                       const sel = route.at === "task" && route.taskId === t.id;
                       return (
-                        <button
+                        <RowButton
                           key={t.id}
-                          type="button"
                           onClick={() => nav.go({ at: "task", taskId: t.id })}
                           className={cn(
                             "flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left",
@@ -181,18 +178,18 @@ export function Sidebar({
                           <TaskDotMini status={ts} />
                           <span
                             className={cn(
-                              "min-w-0 flex-1 truncate text-[10px] leading-4",
+                              "min-w-0 flex-1 truncate text-2xs leading-4",
                               sel ? "text-primary" : "text-muted",
                             )}
                           >
                             {t.title}
                           </span>
                           {t.remediationRound !== undefined && (
-                            <span className="cm-mono shrink-0 text-[9px] leading-3 text-warn">
+                            <span className="cm-mono shrink-0 text-2xs leading-3 text-warn">
                               QA
                             </span>
                           )}
-                        </button>
+                        </RowButton>
                       );
                     })}
                   </div>
@@ -206,9 +203,8 @@ export function Sidebar({
         {[...live, ...retired].map((a) => {
           const sel = route.at === "agent" && route.actorId === a.id;
           return (
-            <button
+            <RowButton
               key={a.id}
-              type="button"
               onClick={() => nav.go({ at: "agent", actorId: a.id })}
               className={cn(
                 "ml-2 flex w-[calc(100%-0.5rem)] items-center gap-1.5 rounded px-1 py-0.5 text-left",
@@ -229,22 +225,21 @@ export function Sidebar({
               </span>
               <span
                 className={cn(
-                  "min-w-0 flex-1 truncate text-[10px] leading-4",
+                  "min-w-0 flex-1 truncate text-2xs leading-4",
                   sel ? "text-primary" : "text-muted",
                 )}
               >
                 {a.name}
               </span>
               <ActorDotMini status={a.status} />
-            </button>
+            </RowButton>
           );
         })}
 
         {/* The base of the tree. Everything above drills DOWN from here, so it
             sits at the bottom as the floor you land back on — and it is the one
             row that is a destination rather than a thing. */}
-        <button
-          type="button"
+        <RowButton
           onClick={() => nav.go({ at: "mission" })}
           className={cn(
             "mt-3 flex w-full items-center gap-1.5 rounded-md border px-1.5 py-1.5 text-left transition-colors",
@@ -254,27 +249,26 @@ export function Sidebar({
           )}
         >
           <Home className="size-3 shrink-0" />
-          <span className="flex-1 text-[11px] font-medium leading-4">Mission Base</span>
-          <span className="cm-mono text-[9px] leading-3 text-faint">{pct}%</span>
-        </button>
+          <span className="flex-1 text-xs font-medium leading-4">Mission Base</span>
+          <span className="cm-mono text-2xs leading-3 text-faint">{pct}%</span>
+        </RowButton>
       </div>
 
       {/* ------------------------------------------- sections, this screen */}
       <div className="shrink-0 border-t border-line px-2 py-2">
         <div className="mb-1 flex items-center gap-1">
-          <span className="text-[10px] uppercase leading-4 tracking-wide text-faint">
+          <span className="text-2xs uppercase leading-4 tracking-wide text-faint">
             on this screen
           </span>
-          <button
-            type="button"
+          <RowButton
             onClick={() => {
               const allOpen = defs.every((d) => sections.isOpen(d.id));
               for (const d of defs) sections.setOpen(d.id, !allOpen);
             }}
-            className="ml-auto rounded px-1 text-[10px] leading-4 text-faint hover:bg-hover hover:text-primary"
+            className="ml-auto rounded px-1 text-2xs leading-4 text-faint hover:bg-hover hover:text-primary"
           >
             {defs.every((d) => sections.isOpen(d.id)) ? "hide all" : "show all"}
-          </button>
+          </RowButton>
         </div>
         {defs.map((d) => {
           const open = sections.isOpen(d.id);
@@ -286,24 +280,22 @@ export function Sidebar({
                 sections.active === d.id ? "bg-accent-ghost" : "hover:bg-hover",
               )}
             >
-              <button
-                type="button"
+              <RowButton
                 onClick={() => sections.focus(d.id)}
                 className={cn(
-                  "min-w-0 flex-1 truncate px-1.5 py-0.5 text-left text-[11px] leading-4",
+                  "min-w-0 flex-1 truncate px-1.5 py-0.5 text-left text-xs leading-4",
                   open ? "text-secondary" : "text-faint line-through",
                 )}
               >
                 {d.label}
-              </button>
-              <button
-                type="button"
+              </RowButton>
+              <RowButton
                 onClick={() => sections.toggle(d.id)}
                 title={open ? "Collapse" : "Expand"}
                 className="flex size-5 shrink-0 items-center justify-center rounded text-faint opacity-0 transition-opacity hover:text-primary group-hover:opacity-100"
               >
                 {open ? <Eye className="size-2.5" /> : <EyeOff className="size-2.5" />}
-              </button>
+              </RowButton>
             </div>
           );
         })}
@@ -316,7 +308,7 @@ export function Sidebar({
 
 function Group({ label, icon }: { label: string; icon: React.ReactNode }) {
   return (
-    <div className="mt-2 flex items-center gap-1 px-1 pb-0.5 text-[10px] uppercase leading-4 tracking-wide text-faint">
+    <div className="mt-2 flex items-center gap-1 px-1 pb-0.5 text-2xs uppercase leading-4 tracking-wide text-faint">
       {icon}
       {label}
     </div>
@@ -337,7 +329,7 @@ function TypeChip({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded border px-1 py-px text-[9px] leading-4",
+        "inline-flex items-center gap-1 rounded border px-1 py-px text-2xs leading-4",
         filled
           ? "border-accent-2-line bg-accent-2 font-semibold text-accent-2-fg"
           : tint === "accent"
@@ -355,7 +347,7 @@ function Row({ icon, label, tint }: { icon: React.ReactNode; label: string; tint
   return (
     <div className="flex items-center gap-1.5 rounded-md px-1 py-0.5">
       <span className={cn("shrink-0", tint ?? "text-faint")}>{icon}</span>
-      <span className="truncate text-[11px] leading-4 text-muted">{label}</span>
+      <span className="truncate text-xs leading-4 text-muted">{label}</span>
     </div>
   );
 }

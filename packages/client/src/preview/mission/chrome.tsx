@@ -8,11 +8,11 @@
  * So every such value goes through Tunable now: it renders as an affordance,
  * and when `onEdit` is wired it simply starts working.
  */
-import type { ReactNode } from "react";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { ArrowLeft, ChevronDown, ChevronRight, Home, Lock, Minus, Pencil, Plus } from "lucide-react";
 import { cn } from "../../lib/cn.js";
 import type { Tone } from "../../components/ui/index.js";
-import { Chip } from "../../components/ui/index.js";
+import { Button, Chip, IconButton } from "../../components/ui/index.js";
 import type { ActorStatus, RunStatus, TaskStatus } from "./types.js";
 import type { SectionState } from "./sections.js";
 
@@ -70,28 +70,23 @@ export function Crumbs({ crumbs, onBack }: { crumbs: Crumb[]; onBack?: () => voi
   return (
     <nav className="flex min-w-0 items-center gap-1.5">
       {onBack && (
-        <button
-          type="button"
-          onClick={onBack}
-          title="Up one level"
-          className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-panel-2 py-1 pl-1 pr-2 text-xs text-secondary transition-colors hover:border-line-strong hover:bg-hover hover:text-primary"
-        >
-          <ArrowLeft className="size-3.5" />
+        <Button variant="default" size="sm" onClick={onBack} title="Up one level" leftIcon={<ArrowLeft />}>
           Back
-        </button>
+        </Button>
       )}
       {crumbs.map((c, i) => (
         <span key={i} className="flex min-w-0 items-center gap-1.5">
           {i > 0 && <ChevronRight className="size-3.5 shrink-0 text-muted" />}
           {c.onClick ? (
-            <button
-              type="button"
+            <Button
+              variant="default"
+              size="sm"
               onClick={c.onClick}
-              className="flex shrink-0 items-center gap-1 truncate rounded-md border border-line bg-panel-2 px-2 py-1 text-xs text-secondary transition-colors hover:border-line-strong hover:bg-hover hover:text-primary"
+              className="shrink-0 truncate"
+              leftIcon={i === 0 ? <Home /> : undefined}
             >
-              {i === 0 && <Home className="size-3" />}
               {c.label}
-            </button>
+            </Button>
           ) : (
             <span className="truncate px-1 text-xs font-medium text-secondary">{c.label}</span>
           )}
@@ -173,7 +168,7 @@ export function Metric({
       >
         {value}
       </div>
-      <div className="truncate text-[10px] leading-4 text-faint">{label}</div>
+      <div className="truncate text-2xs leading-4 text-faint">{label}</div>
     </div>
   );
 }
@@ -211,7 +206,7 @@ export function Tunable({
           : "cursor-default border-line text-muted",
       )}
     >
-      <span className="text-[10px] leading-4 text-faint">{label}</span>
+      <span className="text-2xs leading-4 text-faint">{label}</span>
       <span className="font-medium">{value}</span>
       <Pencil
         className={cn(
@@ -241,7 +236,7 @@ export function ContextBar({ fill, threshold }: { fill: number; threshold: numbe
           style={{ left: `${Math.round(threshold * 100)}%` }}
         />
       </div>
-      <span className={cn("cm-mono text-[10px] leading-4", over ? "text-warn" : "text-faint")}>
+      <span className={cn("cm-mono text-2xs leading-4", over ? "text-warn" : "text-faint")}>
         {pct}%
       </span>
     </div>
@@ -359,7 +354,7 @@ export function FormRow({
     <div className="grid items-start gap-x-3 gap-y-1 py-1.5 [grid-template-columns:11rem_minmax(0,1fr)]">
       <div className="pt-1">
         <div className="text-2xs font-medium text-primary">{label}</div>
-        {help && <div className="mt-0.5 text-[10px] leading-relaxed text-faint">{help}</div>}
+        {help && <div className="mt-0.5 text-2xs leading-relaxed text-faint">{help}</div>}
       </div>
       <div className="min-w-0">{children}</div>
     </div>
@@ -384,14 +379,15 @@ export function NumberInput({
   return (
     <div className="inline-flex items-center gap-1">
       <div className="inline-flex items-center rounded-md border border-line bg-panel-2">
-        <button
-          type="button"
+        <IconButton
+          size="sm"
           onClick={() => onChange(clamp(value - 1))}
           disabled={value <= min}
-          className="flex size-6 items-center justify-center rounded-l-md text-muted hover:bg-hover hover:text-primary disabled:opacity-30 disabled:hover:bg-transparent"
+          tip="Decrease"
+          className="rounded-l-md rounded-r-none"
         >
-          <Minus className="size-3" />
-        </button>
+          <Minus />
+        </IconButton>
         <input
           type="number"
           value={value}
@@ -400,17 +396,18 @@ export function NumberInput({
           onChange={(e) => onChange(clamp(Number(e.target.value) || min))}
           className="cm-mono w-10 border-x border-line bg-transparent py-0.5 text-center text-2xs text-primary outline-none [appearance:textfield] focus:bg-inset [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
         />
-        <button
-          type="button"
+        <IconButton
+          size="sm"
           onClick={() => onChange(clamp(value + 1))}
           disabled={value >= max}
-          className="flex size-6 items-center justify-center rounded-r-md text-muted hover:bg-hover hover:text-primary disabled:opacity-30 disabled:hover:bg-transparent"
+          tip="Increase"
+          className="rounded-l-none rounded-r-md"
         >
-          <Plus className="size-3" />
-        </button>
+          <Plus />
+        </IconButton>
       </div>
       {suffix && <span className="text-2xs text-faint">{suffix}</span>}
-      <span className="cm-mono text-[10px] leading-4 text-faint">
+      <span className="cm-mono text-2xs leading-4 text-faint">
         {min}–{max}
       </span>
     </div>
@@ -441,7 +438,7 @@ export function PercentSlider({
         className="h-1 w-40 cursor-pointer appearance-none rounded-full bg-inset accent-[var(--p-accent)]"
       />
       <span className="cm-mono text-2xs text-primary">{Math.round(value * 100)}%</span>
-      <span className="cm-mono text-[10px] leading-4 text-faint">
+      <span className="cm-mono text-2xs leading-4 text-faint">
         {Math.round(min * 100)}–{Math.round(max * 100)}%
       </span>
     </div>
@@ -456,7 +453,38 @@ export function LockedRow({ value, why }: { value: ReactNode; why: string }) {
         <Lock className="size-2.5" />
         {value}
       </span>
-      <span className="flex-1 text-[10px] leading-relaxed text-faint">{why}</span>
+      <span className="flex-1 text-2xs leading-relaxed text-faint">{why}</span>
     </div>
+  );
+}
+
+/**
+ * A whole row that happens to be clickable — the drill-in board's dominant
+ * interaction, and the reason this module is not full of bare button elements.
+ *
+ * `Button` and `IconButton` are the right primitives for an ACTION: they own
+ * their height, padding and variant, which is exactly what makes them wrong
+ * here. A navigation row owns none of those — it is a full-width, left-aligned,
+ * often multi-line target whose layout IS the content (a title over a progress
+ * bar, an icon beside two lines of status). Forcing it into a variant would
+ * mean fighting the variant at every call site.
+ *
+ * So the answer the primitive kit wants is one bare element, wrapped once, in
+ * place of the same bare element written out at fifteen call sites — see
+ * `components/ui/rawButtons.test.ts`, which counts exactly that.
+ */
+export function RowButton({
+  className,
+  children,
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      type="button"
+      className={cn("text-left transition-colors", className)}
+      {...rest}
+    >
+      {children}
+    </button>
   );
 }

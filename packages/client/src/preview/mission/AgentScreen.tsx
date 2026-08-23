@@ -9,7 +9,7 @@
  */
 import { MessageSquare } from "lucide-react";
 import { cn } from "../../lib/cn.js";
-import { Chip } from "../../components/ui/index.js";
+import { Button, Chip } from "../../components/ui/index.js";
 import { ActorStatusPill, ContextBar, Empty, Section, Tunable } from "./chrome.js";
 import { teamColor, type Plan } from "./derive.js";
 import type { Nav } from "./nav.js";
@@ -66,7 +66,7 @@ export function AgentScreen({
         title="Live state"
         state={sections}
         hint="what the engine will report once the run is real"
-        right={<span className="text-[10px] leading-4 text-faint">not wired — shape only</span>}
+        right={<span className="text-2xs leading-4 text-faint">not wired — shape only</span>}
       >
         <div className="mb-2.5 flex flex-wrap items-center gap-1.5">
           <Chip tone="accent">{actor.kind}</Chip>
@@ -91,25 +91,26 @@ export function AgentScreen({
           <p className="text-xs leading-relaxed text-primary">{actor.activity}</p>
           <div className="mt-2.5 flex flex-wrap items-center gap-5">
             <div>
-              <div className="text-[10px] leading-4 text-faint">context</div>
+              <div className="text-2xs leading-4 text-faint">context</div>
               <div className="mt-0.5">
                 <ContextBar fill={actor.contextFill} threshold={threshold} />
               </div>
             </div>
             <div>
-              <div className="text-[10px] leading-4 text-faint">chat</div>
-              <button
-                type="button"
-                className="mt-0.5 flex items-center gap-1 rounded text-2xs text-muted hover:text-primary"
+              <div className="text-2xs leading-4 text-faint">chat</div>
+              <Button
+                variant="link"
+                size="sm"
+                className="mt-0.5 px-0"
                 title="Opens the actor's own chat — wired once the chat type lands"
+                leftIcon={<MessageSquare />}
               >
-                <MessageSquare className="size-3" />
-                <span className="cm-mono">{actor.chatId}</span>
-              </button>
+                <span className="cm-mono text-2xs">{actor.chatId}</span>
+              </Button>
             </div>
             {actor.retiredAt && (
               <div>
-                <div className="text-[10px] leading-4 text-faint">retired</div>
+                <div className="text-2xs leading-4 text-faint">retired</div>
                 <div className="mt-0.5 text-2xs text-muted">
                   {new Date(actor.retiredAt).toLocaleTimeString()}
                 </div>
@@ -150,12 +151,12 @@ export function AgentScreen({
 
           {(allowed.length > 0 || added.length > 0) && (
             <div className="mt-2 rounded border border-accent-line bg-accent-ghost px-2 py-1.5">
-              <div className="text-[10px] leading-4 text-accent-hi">manager overrides</div>
+              <div className="text-2xs leading-4 text-accent-hi">manager overrides</div>
               <div className="mt-1 flex flex-wrap gap-1">
                 {allowed.map((t) => (
                   <span
                     key={t}
-                    className="cm-mono rounded bg-success-ghost px-1 text-[10px] leading-4 text-success-hi"
+                    className="cm-mono rounded bg-success-ghost px-1 text-2xs leading-4 text-success-hi"
                   >
                     +{t}
                   </span>
@@ -163,7 +164,7 @@ export function AgentScreen({
                 {added.map((t) => (
                   <span
                     key={t}
-                    className="cm-mono rounded bg-danger-ghost px-1 text-[10px] leading-4 text-danger-hi"
+                    className="cm-mono rounded bg-danger-ghost px-1 text-2xs leading-4 text-danger-hi"
                   >
                     −{t}
                   </span>
@@ -173,7 +174,7 @@ export function AgentScreen({
           )}
 
           <div className="mt-2">
-            <div className="text-[10px] leading-4 text-faint">
+            <div className="text-2xs leading-4 text-faint">
               effective deny — enforced at spawn
             </div>
             <div className="mt-1 flex flex-wrap gap-1">
@@ -184,7 +185,7 @@ export function AgentScreen({
                   <span
                     key={t}
                     className={cn(
-                      "cm-mono rounded border px-1 text-[10px] leading-4",
+                      "cm-mono rounded border px-1 text-2xs leading-4",
                       "border-danger-line bg-danger-ghost text-danger-hi",
                     )}
                   >
@@ -205,7 +206,7 @@ export function AgentScreen({
             {skills.map((s) => (
               <span
                 key={s}
-                className="cm-mono rounded border border-line bg-panel-2 px-1.5 py-px text-[10px] leading-4 text-secondary"
+                className="cm-mono rounded border border-line bg-panel-2 px-1.5 py-px text-2xs leading-4 text-secondary"
               >
                 {s}
               </span>
@@ -220,7 +221,7 @@ export function AgentScreen({
         state={sections}
         hint={role ? "role template default, plus any persona override" : "authored on the persona"}
         right={
-          <span className="cm-mono text-[10px] leading-4 text-faint">
+          <span className="cm-mono text-2xs leading-4 text-faint">
             {(persona.instructions ?? "").length}/{CAPS.personaInstructions}
           </span>
         }
@@ -244,7 +245,7 @@ export function AgentScreen({
           <div className="max-w-3xl">
             <div className="mb-1.5 flex items-center gap-1.5">
               <Tunable label="budget" value={team.hireBudget} />
-              <span className="text-[10px] leading-4 text-faint">
+              <span className="text-2xs leading-4 text-faint">
                 concurrent workers, spent however the lead likes
               </span>
             </div>
@@ -258,7 +259,7 @@ export function AgentScreen({
                       <Chip tone="neutral">{r?.toolProfile}</Chip>
                       {r?.freshContext && <Chip tone="info">fresh context</Chip>}
                     </div>
-                    <p className="mt-0.5 text-[10px] leading-relaxed text-muted">{r?.summary}</p>
+                    <p className="mt-0.5 text-2xs leading-relaxed text-muted">{r?.summary}</p>
                   </div>
                 );
               })}

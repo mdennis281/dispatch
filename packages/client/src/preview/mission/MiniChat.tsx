@@ -16,7 +16,7 @@
  */
 import { ArrowUp, OctagonX, Paperclip, Target } from "lucide-react";
 import { cn } from "../../lib/cn.js";
-import { Chip } from "../../components/ui/index.js";
+import { Button, Chip } from "../../components/ui/index.js";
 import { RunStatusPill } from "./chrome.js";
 import type { ManagerTurn, RunStatus } from "./types.js";
 
@@ -39,15 +39,15 @@ export function MiniChat({
         <span className="text-xs font-semibold text-primary">Mission manager</span>
         <RunStatusPill status={status} />
         <div className="flex-1" />
-        <button
-          type="button"
+        <Button
+          variant="danger"
+          size="sm"
           onClick={onStopAll}
           title="Interrupt every actor in this mission"
-          className="flex items-center gap-1 rounded border border-danger-line bg-danger-ghost px-1.5 py-0.5 text-2xs text-danger-hi transition-colors hover:bg-danger/20"
+          leftIcon={<OctagonX />}
         >
-          <OctagonX className="size-3" />
           Stop all
-        </button>
+        </Button>
       </div>
 
       {/* transcript */}
@@ -72,7 +72,7 @@ export function MiniChat({
             </span>
           </div>
         </div>
-        <p className="mt-1.5 text-[10px] leading-relaxed text-faint">
+        <p className="mt-1.5 text-2xs leading-relaxed text-faint">
           No terminals rail, no ship rail, no worktree controls — a manager writes no code. The
           transcript, composer, permission prompts and attention badges are the real ones.
         </p>
@@ -86,13 +86,13 @@ function Turn({ turn }: { turn: ManagerTurn }) {
   return (
     <div className={cn("flex flex-col gap-1", human && "items-end")}>
       <div className="flex items-center gap-1.5 px-0.5">
-        <span className="text-[10px] leading-4 text-faint">
+        <span className="text-2xs leading-4 text-faint">
           {human ? "you" : "manager"} · {new Date(turn.ts).toLocaleTimeString()}
         </span>
       </div>
       {turn.brief && (
         <div className="w-full rounded-md border border-accent-2-line bg-accent-2-ghost px-2 py-1">
-          <div className="text-[10px] font-semibold leading-4 text-accent-2-hi">
+          <div className="text-2xs font-semibold leading-4 text-accent-2-hi">
             {turn.brief.label}
           </div>
           <div className="text-2xs text-secondary">{turn.brief.text}</div>
