@@ -86,7 +86,7 @@ describe("MetricsBackfill", () => {
   it("classifies imported rows exactly as live recording would", async () => {
     await makeChat("c1");
     await toolRow("c1", "t1", "Skill", { input: { skill: "code-review" } });
-    await toolRow("c1", "t2", "mcp__manager__create_pr");
+    await toolRow("c1", "t2", "mcp__dispatch-github__create_pr");
     await toolRow("c1", "t3", "Task", { input: { subagent_type: "Explore" } });
     await backfill.run();
 

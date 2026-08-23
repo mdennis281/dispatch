@@ -63,6 +63,9 @@ import {
   type BrowserMcpConfig,
   type McpServerConfig,
   type WorkflowConfig,
+  migrateToolList,
+  isManagerServer,
+  MANAGER_SERVER_PREFIX,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -166,6 +169,24 @@ function toStringArray(v: unknown): string[] | undefined {
   if (!Array.isArray(v)) return undefined;
   const out = v.filter((x): x is string => typeof x === "string");
   return out.length ? out : undefined;
+}
+
+/**
+ * A tool allow/deny list read off committed config, with names carried through
+ * the manager-server rename.
+ *
+ * Mapped as READ rather than rewritten on disk: `.dispatch/` is committed, and
+ * silently dirtying a working tree to carry a rename would land the change in
+ * whatever commit an agent happened to make next. Idempotent by construction, so
+ * an already-current file costs one pass and changes nothing.
+ *
+ * Preserves `undefined`. "No list" and "an empty list" are different answers —
+ * an empty `allowedTools` is a profile that permits NOTHING — so an absent key
+ * must not become `[]` on the way through.
+ */
+function toToolList(v: unknown): string[] | undefined {
+  const raw = toStringArray(v);
+  return raw ? migrateToolList(raw).tools : undefined;
 }
 
 interface Frontmatter {
@@ -600,6 +621,25 @@ export class ProjectConfigService {
     // --- mcpServers (array → keyed record; transport flattened + env-expanded) ---
     const mcpServers: Record<string, McpServerConfig> = {};
     for (const server of manifest.mcpServers ?? []) {
+      // A `dispatch-*` name is Dispatch's own. `mcp_add` and `dispatch mcp add`
+      // both refuse to write one, so this can only be a hand-edit or a file
+      // predating that guard — and it can never work: the category servers are
+      // merged LAST and win, so the entry would sit in the manifest describing a
+      // server no session ever gets. DROPPED here, at the one place that reads
+      // the manifest, rather than filtered at each consumer — and reported as a
+      // config error, which is what it is, and where a human already looks for
+      // "why isn't my config doing anything".
+      if (isManagerServer(server.name)) {
+        errors.push({
+          scope: "manifest",
+          file: MANIFEST_FILE,
+          message:
+            `MCP server "${server.name}" uses a name reserved for Dispatch's own tools. ` +
+            `It is ignored — Dispatch's server of that name is merged last and wins. ` +
+            `Rename it to something outside the "${MANAGER_SERVER_PREFIX}" prefix.`,
+        });
+        continue;
+      }
       // A `${VAR}` the manager's environment doesn't define is a config problem
       // worth SHOWING (the server will just fail to authenticate otherwise), but
       // not worth failing the load over — so it lands in `errors`, not a throw.
@@ -858,8 +898,8 @@ export class ProjectConfigService {
           name,
           instructions: body,
           permissionMode: permMode.success ? permMode.data : "default",
-          allowedTools: toStringArray(data.tools),
-          disallowedTools: toStringArray(data.disallowedTools),
+          allowedTools: toToolList(data.tools),
+          disallowedTools: toToolList(data.disallowedTools),
           model: typeof data.model === "string" ? data.model : undefined,
           // `effort:` is optional and free-form in frontmatter; an unknown level
           // means "inherit the chat's" rather than a load error for the whole agent.
@@ -921,8 +961,8 @@ export class ProjectConfigService {
           name,
           description: typeof data.description === "string" ? oneLine(data.description) : undefined,
           permissionMode: permMode.data,
-          allowedTools: toStringArray(data.allowedTools),
-          disallowedTools: toStringArray(data.disallowedTools),
+          allowedTools: toToolList(data.allowedTools),
+          disallowedTools: toToolList(data.disallowedTools),
           file,
         });
         seen.add(id);

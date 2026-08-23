@@ -110,7 +110,7 @@ describe("buildWorkflowDirective", () => {
     const out = buildWorkflowDirective(wf, ctx)!;
     expect(out).toContain("pnpm worktree <type>/<slug>");
     expect(out).toContain("pnpm ship");
-    expect(out).toContain("mcp__manager__watch_pr");
+    expect(out).toContain("mcp__dispatch-github__watch_pr");
     expect(out).toContain("Never commit or push to `main`");
     expect(out).toContain("You are in a task worktree on `feat/x`");
   });
@@ -120,7 +120,7 @@ describe("buildWorkflowDirective", () => {
     // exactly where this sentence exists to point somewhere else.
     const wf = resolveWorkflow({ workflow: { profile: "review", ship: "pnpm ship" } });
     const out = buildWorkflowDirective(wf, { ...ctx, prCreate: true })!;
-    expect(out).toContain("mcp__manager__create_pr");
+    expect(out).toContain("mcp__dispatch-github__create_pr");
     expect(out).toMatch(/never `gh pr create` by hand/);
   });
 
@@ -138,7 +138,7 @@ describe("buildWorkflowDirective", () => {
       ...ctx,
       github: false,
     })!;
-    expect(out).not.toContain("mcp__manager__watch_pr");
+    expect(out).not.toContain("mcp__dispatch-github__watch_pr");
   });
 
   it("tells a review project WITHOUT auto-merge to leave the merge alone", () => {
@@ -150,7 +150,7 @@ describe("buildWorkflowDirective", () => {
   it("tells a review project WITH auto-merge to land its own PR — unless told not to", () => {
     const wf = resolveWorkflow({ workflow: { profile: "review", autoMerge: "on-green" } });
     const out = buildWorkflowDirective(wf, ctx)!;
-    expect(out).toContain("mcp__manager__approve_pr");
+    expect(out).toContain("mcp__dispatch-github__approve_pr");
     expect(out).toContain("**Unless the user said otherwise.**");
     expect(out).toContain("`hold` label");
     // The hand-merge ban stays — approve_pr is the only sanctioned path.
@@ -255,7 +255,7 @@ describe("createWorkflowGuardHook", () => {
     const out = await run(hook, "gh pr merge 42 --squash", worktree);
     expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain(
-      "mcp__manager__approve_pr",
+      "mcp__dispatch-github__approve_pr",
     );
   });
 
@@ -266,7 +266,7 @@ describe("createWorkflowGuardHook", () => {
     const out = await run(hook, "gh pr create --fill --base main", worktree);
     expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain(
-      "mcp__manager__create_pr",
+      "mcp__dispatch-github__create_pr",
     );
     expect(seen.map((v) => v.kind)).toEqual(["pr-create-by-hand"]);
   });
@@ -342,7 +342,7 @@ describe("createWorkflowGuardHook", () => {
     const { hook } = guardFor(review, true);
     const reason = (await run(hook, "gh pr create --fill", worktree)).hookSpecificOutput
       ?.permissionDecisionReason;
-    expect(reason).toContain("mcp__manager__request_exemption");
+    expect(reason).toContain("mcp__dispatch-confirm__request_exemption");
     expect(reason).toContain('guard: "pr-create-by-hand"');
   });
 

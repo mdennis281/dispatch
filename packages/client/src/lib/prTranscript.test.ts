@@ -22,7 +22,7 @@ function use(name: string, input: Record<string, unknown> = {}, id = name): Tool
 }
 
 const mcp = (tool: string, input?: Record<string, unknown>, id?: string) =>
-  use(`mcp__manager__${tool}`, input, id);
+  use(`mcp__dispatch-github__${tool}`, input, id);
 
 describe("PR calls leave the terminal frame", () => {
   it("groups adjacent PR calls into a run of their own", () => {

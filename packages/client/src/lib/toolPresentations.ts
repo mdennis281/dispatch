@@ -1,4 +1,10 @@
-import { fileToolAction, type ChatMessage, type FileToolAction, type ToolUseRow } from "@dispatch/shared";
+import {
+  fileToolAction,
+  isManagerServerOrLegacy,
+  type ChatMessage,
+  type FileToolAction,
+  type ToolUseRow,
+} from "@dispatch/shared";
 import { parseMcpName, safeJson } from "./format.js";
 
 export type ShellLanguage = "bash" | "powershell";
@@ -98,7 +104,7 @@ const handlers: readonly ToolPresentationHandler[] = [
     // keyed through the parsed MCP identity instead of its rendered label.
     match: (use) => {
       const mcp = parseMcpName(use.name);
-      return mcp?.server === "manager" && mcp.tool === "terminal";
+      return isManagerServerOrLegacy(mcp?.server) && mcp?.tool === "terminal";
     },
     present: (use) => {
       const command = stringArg(use, "command");
@@ -148,7 +154,7 @@ const handlers: readonly ToolPresentationHandler[] = [
     // Every first-party manager tool gets a Dispatch-native presentation. The
     // handful with richer semantics map explicitly; newly added tools still get
     // a useful generic card instead of silently dropping to MCP wire formatting.
-    match: (use) => parseMcpName(use.name)?.server === "manager",
+    match: (use) => isManagerServerOrLegacy(parseMcpName(use.name)?.server),
     present: (use) => dispatchPresentation(use),
   },
 ];
@@ -203,7 +209,7 @@ function titleCaseTool(tool: string): string {
 
 function dispatchPresentation(use: ToolUseRow): DispatchToolPresentation | null {
   const mcp = parseMcpName(use.name);
-  if (!mcp || mcp.server !== "manager") return null;
+  if (!mcp || !isManagerServerOrLegacy(mcp.server)) return null;
   const copy = DISPATCH_COPY[mcp.tool] ?? {
     title: titleCaseTool(mcp.tool),
     activity: `${titleCaseTool(mcp.tool)} in progress`,

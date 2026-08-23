@@ -12,6 +12,7 @@ import {
   resolveMcpEnablement,
   MCP_ALWAYS_ON,
 } from "./mcp-enablement.js";
+import { MANAGER_SERVER_NAMES } from "./manager-tools.js";
 
 describe("resolveMcpEnablement", () => {
   it("falls through to the caller's default when neither layer pins it", () => {
@@ -62,13 +63,19 @@ describe("resolveMcpEnablement", () => {
     expect(r).toMatchObject({ app: true, project: false, byDefault: true, effective: false });
   });
 
-  it("holds `manager` on however either layer is pinned", () => {
-    // Disabling it would remove the tools that write this very setting.
-    const r = resolveMcpEnablement("manager", { app: { manager: false }, project: { manager: false } }, true);
-    expect(r.effective).toBe(true);
-    expect(r.alwaysOn).toBe(true);
-    expect(isAlwaysOnMcpServer("manager")).toBe(true);
-    expect(MCP_ALWAYS_ON).toContain("manager");
+  it("holds every Dispatch server on however either layer is pinned", () => {
+    // Disabling one would remove the tools that write this very setting — and
+    // the always-on set is DERIVED from the registry, so a category added later
+    // is protected the moment it exists rather than once somebody remembers.
+    for (const name of MANAGER_SERVER_NAMES) {
+      const r = resolveMcpEnablement(name, { app: { [name]: false }, project: { [name]: false } }, true);
+      expect(r.effective, name).toBe(true);
+      expect(r.alwaysOn, name).toBe(true);
+      expect(isAlwaysOnMcpServer(name)).toBe(true);
+      expect(MCP_ALWAYS_ON).toContain(name);
+    }
+    // The retired single server is NOT protected: nothing is served under it.
+    expect(isAlwaysOnMcpServer("manager")).toBe(false);
   });
 
   it("marks an ordinary server as not always-on", () => {
@@ -98,10 +105,12 @@ describe("applyMcpEnablement", () => {
     expect(Object.keys(out).sort()).toEqual(["ripgrep", "sentry"]);
   });
 
-  it("never drops manager, even asked to", () => {
-    const withManager = { ...servers, manager: { command: "n/a" } };
-    expect(applyMcpEnablement(withManager, { project: { manager: false } })).toHaveProperty(
-      "manager",
+  it("never drops a Dispatch server, even asked to", () => {
+    const withManager = Object.fromEntries(
+      MANAGER_SERVER_NAMES.map((n) => [n, { command: "n/a" }]),
     );
+    const off = Object.fromEntries(MANAGER_SERVER_NAMES.map((n) => [n, false]));
+    const out = applyMcpEnablement({ ...servers, ...withManager }, { project: off });
+    for (const name of MANAGER_SERVER_NAMES) expect(out).toHaveProperty(name);
   });
 });

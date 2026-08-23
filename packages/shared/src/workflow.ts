@@ -507,7 +507,7 @@ export const WorkflowViolationKindSchema = z.enum([
   /** A merge the review loop is supposed to perform, done by hand. */
   "manual-merge",
   /**
-   * A PR opened with a raw `gh pr create` instead of `mcp__manager__create_pr`.
+   * A PR opened with a raw `gh pr create` instead of `mcp__dispatch-github__create_pr`.
    *
    * This is the asymmetry that produced the failure this whole block exists for:
    * a hand-rolled `gh pr merge` was already refused and redirected at
@@ -539,7 +539,7 @@ export interface WorkflowViolation {
  * too big a hammer for "let this one chat run this one command".
  *
  * Deliberately only the WORKFLOW guard's kinds, plus `all`. The worktree guard
- * (`git worktree add` → `mcp__manager__worktree`) is NOT exemptible: its
+ * (`git worktree add` → `mcp__dispatch-workspace__worktree`) is NOT exemptible: its
  * sanctioned path has no observed failure mode, so there is no incident to
  * justify a hole in it. Widen this when one exists, not before.
  *
@@ -633,7 +633,7 @@ export interface WorkflowCommandContext {
   /**
    * True when this session may land its own PR (`autoMerge: "on-green"`). A raw
    * `gh pr merge` stays REFUSED either way — auto-merge goes through
-   * `mcp__manager__approve_pr`, which runs the readiness checks, honours the
+   * `mcp__dispatch-github__approve_pr`, which runs the readiness checks, honours the
    * `hold` label, and tells the manager the trunk moved. This flag only changes
    * the sentence the agent reads, pointing it at the sanctioned path instead of
    * telling it to wait for a human who isn't coming.
@@ -642,7 +642,7 @@ export interface WorkflowCommandContext {
   /**
    * True when this project's change reaches the trunk through a PR
    * ({@link ResolvedWorkflow.requirePr}) — i.e. opening one is a first-class step
-   * of the workflow, so it goes through `mcp__manager__create_pr`. On the rungs
+   * of the workflow, so it goes through `mcp__dispatch-github__create_pr`. On the rungs
    * that don't open PRs at all there is nothing to redirect a `gh pr create` TO,
    * so it's left alone rather than refused with no alternative.
    */
@@ -748,7 +748,7 @@ export function classifyWorkflowViolation(
         return {
           kind: "manual-merge",
           reason: ctx.autoMerge
-            ? "Use `mcp__manager__approve_pr` to land this PR — it verifies CI, review threads " +
+            ? "Use `mcp__dispatch-github__approve_pr` to land this PR — it verifies CI, review threads " +
               "and the `hold` label first, and syncs the trunk afterwards. A raw `gh pr merge` " +
               "skips all of that."
             : "Merging the PR by hand skips the review loop — ship it and let the merge land once review is green.",
@@ -763,7 +763,7 @@ export function classifyWorkflowViolation(
         return {
           kind: "pr-create-by-hand",
           reason:
-            "Use `mcp__manager__create_pr` to open this PR — it pushes the branch, requests " +
+            "Use `mcp__dispatch-github__create_pr` to open this PR — it pushes the branch, requests " +
             "the reviewers this project configured, records the PR on this chat, and arms the " +
             "watcher so review activity comes back to you. A raw `gh pr create` does none of " +
             "that: the PR opens with nobody asked to look at it and no way for the review " +

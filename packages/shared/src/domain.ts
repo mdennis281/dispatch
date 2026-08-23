@@ -886,7 +886,7 @@ export type RunnerInstance = z.infer<typeof RunnerInstanceSchema>;
 export const TerminalStatusSchema = z.enum(["live", "exited"]);
 export type TerminalStatus = z.infer<typeof TerminalStatusSchema>;
 
-/** Who opened a shell — an agent via `mcp__manager__terminal`, or a human. */
+/** Who opened a shell — an agent via `mcp__dispatch-workspace__terminal`, or a human. */
 export const TerminalOriginSchema = z.enum(["agent", "ui"]);
 export type TerminalOrigin = z.infer<typeof TerminalOriginSchema>;
 
@@ -901,7 +901,7 @@ export type TerminalLineRecord = z.infer<typeof TerminalLineSchema>;
 
 /**
  * A persistent, named shell whose cwd/env survive across commands — the agent's
- * `mcp__manager__terminal` sessions, visualized read-only in the UI. Keyed by
+ * `mcp__dispatch-workspace__terminal` sessions, visualized read-only in the UI. Keyed by
  * `${chatId}::${name}`.
  */
 export const TerminalInfoSchema = z.object({
@@ -1015,7 +1015,7 @@ export type MemoryType = z.infer<typeof MemoryTypeSchema>;
  * markdown file (frontmatter `{ name, description, type }` + a markdown body)
  * under `.data/projects/<projectId>/memory/<file>`, listed by a generated
  * `MEMORY.md` index. The index + descriptions are injected into every session at
- * start (read); agents append via `mcp__manager__remember` (write); the Memory
+ * start (read); agents append via `mcp__dispatch-memory__remember` (write); the Memory
  * panel curates them.
  */
 export const ProjectMemorySchema = z.object({

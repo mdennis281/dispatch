@@ -180,7 +180,7 @@ export const AppSettingsSchema = z.object({
    */
   updateChannel: UpdateChannelSchema.optional(),
   /**
-   * Policy for `mcp__manager__spawn_chat` — an agent starting ANOTHER chat.
+   * Policy for `mcp__dispatch-chat__spawn_chat` — an agent starting ANOTHER chat.
    * `autoApprove` off (the default, and the reason this is opt-in rather than
    * opt-out) means every spawn stops for a permission prompt the human answers;
    * the tool itself takes no bypass argument, so this setting is the ONLY way

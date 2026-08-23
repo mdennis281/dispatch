@@ -626,10 +626,13 @@ export class CodexSession implements HarnessSession {
       }
     }
     if (this.spec.managerMcp?.transport === "http") {
-      servers.manager = {
-        url: this.spec.managerMcp.url,
-        http_headers: { Authorization: `Bearer ${this.spec.managerMcp.token}` },
-      };
+      // One entry per category server. Codex has no notion of an in-process MCP,
+      // so each gets its own streamable-HTTP endpoint on the bridge — same token,
+      // different path.
+      const { token } = this.spec.managerMcp;
+      for (const [name, url] of Object.entries(this.spec.managerMcp.urls)) {
+        servers[name] = { url, http_headers: { Authorization: `Bearer ${token}` } };
+      }
     }
     if (Object.keys(servers).length) {
       configured.mcp_servers = {

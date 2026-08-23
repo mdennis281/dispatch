@@ -355,7 +355,10 @@ describe("CodexSession lifecycle", () => {
       },
       managerMcp: {
         transport: "http",
-        url: "http://127.0.0.1:4319/api/mcp/manager",
+        urls: {
+          "dispatch-session": "http://127.0.0.1:4319/api/mcp/manager/session",
+          "dispatch-github": "http://127.0.0.1:4319/api/mcp/manager/github",
+        },
         token: "secret",
         tokenEnvVar: "DISPATCH_MANAGER_MCP_TOKEN",
       },
@@ -371,8 +374,14 @@ describe("CodexSession lifecycle", () => {
           mcp_servers: {
             files: { command: "node", args: ["server.mjs"], env: { A: "1" } },
             remote: { url: "https://example.com/mcp", http_headers: { "X-Test": "yes" } },
-            manager: {
-              url: "http://127.0.0.1:4319/api/mcp/manager",
+            // One Codex MCP server per category, all sharing the session's
+            // single bearer token — the grant authorises a CHAT, not a category.
+            "dispatch-session": {
+              url: "http://127.0.0.1:4319/api/mcp/manager/session",
+              http_headers: { Authorization: "Bearer secret" },
+            },
+            "dispatch-github": {
+              url: "http://127.0.0.1:4319/api/mcp/manager/github",
               http_headers: { Authorization: "Bearer secret" },
             },
           },

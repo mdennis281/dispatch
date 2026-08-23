@@ -2,10 +2,11 @@
  * mcp-catalog — assemble the per-project MCP catalog the UI visualizes.
  *
  * The catalog reflects EXACTLY what a session gets in `SessionBroker.buildOptions`
- * (`{ ...projectMcpServers, manager }`):
+ * (`{ ...projectMcpServers, ...dispatchCategoryServers }`):
  *
- *   - the in-process "manager" server, enumerated from {@link managerToolDescriptors}
- *     (the same tool definitions the SDK registers — one source, no drift),
+ *   - Dispatch's own in-process category servers, enumerated from
+ *     {@link managerToolDescriptors} (the same tool definitions the SDK registers,
+ *     grouped by the same registry — one source, no drift),
  *   - the BUNDLED servers Dispatch injects on the project's behalf (the browser
  *     pair) — 53 tools that every gated-in session has been getting while this
  *     view, the one place that claims to list them all, never named them, and
@@ -42,6 +43,7 @@ import {
   type Project,
 } from "@dispatch/shared";
 import { managerToolDescriptors, type ManagerToolBindings } from "./manager-mcp.js";
+import { MANAGER_CATEGORIES, isManagerServer, managerServerName } from "@dispatch/shared";
 
 /** Default per-server probe budget — bounds a hanging/slow external server. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 4_000;
@@ -354,8 +356,11 @@ export interface BundledCatalogServer {
 }
 
 /**
- * Build a project's full MCP catalog: the in-process "manager" server plus every
+ * Build a project's full MCP catalog: Dispatch's own category servers plus every
  * configured external server (probed in parallel, each isolated behind a timeout).
+ *
+ * The category servers are listed FIRST and in registry order, so the view reads
+ * the same way every time rather than in whatever order a Map happened to yield.
  */
 export async function buildProjectMcpCatalog(
   project: Project,
@@ -364,29 +369,51 @@ export async function buildProjectMcpCatalog(
   const probe = opts.probe ?? probeExternalMcpServer;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
 
-  const managerEntry: McpServerCatalogEntry = {
-    name: "manager",
-    kind: "custom",
-    transport: { type: "sdk" },
-    status: "ok",
-    // Resolved rather than hard-coded so the UI reads its always-on-ness off the
-    // same rule the broker does, instead of a second copy of the exception.
-    enablement: resolveMcpEnablement("manager", opts.enablement, true),
-    tools: managerToolDescriptors(opts.bindings ?? {}).map(
-      (d): McpToolInfo => ({
-        qualifiedName: `mcp__manager__${d.name}`,
-        name: d.name,
-        description: d.description,
-        inputSchema: d.inputSchema,
-        params: paramsFromJsonSchema(d.inputSchema),
-        available: d.available,
-      }),
-    ),
-  };
+  // One entry per category server. Grouped from the SAME descriptor list the SDK
+  // registration partitions, so a tool cannot appear in the catalog under one
+  // category and be served under another.
+  const descriptors = managerToolDescriptors(opts.bindings ?? {});
+  const managerEntries: McpServerCatalogEntry[] = MANAGER_CATEGORIES.flatMap((category) => {
+    const tools = descriptors.filter((d) => d.category === category);
+    // A category with no tools is a registry bug, not a state to render — but
+    // listing an empty server would look like a broken one, so skip it.
+    if (!tools.length) return [];
+    const name = managerServerName(category);
+    return [
+      {
+        name,
+        kind: "custom",
+        transport: { type: "sdk" },
+        status: "ok",
+        // Resolved rather than hard-coded so the UI reads its always-on-ness off
+        // the same rule the broker does, instead of a second copy of the exception.
+        enablement: resolveMcpEnablement(name, opts.enablement, true),
+        tools: tools.map(
+          (d): McpToolInfo => ({
+            qualifiedName: d.qualifiedName,
+            name: d.name,
+            description: d.description,
+            inputSchema: d.inputSchema,
+            params: paramsFromJsonSchema(d.inputSchema),
+            available: d.available,
+          }),
+        ),
+      } satisfies McpServerCatalogEntry,
+    ];
+  });
 
-  const external = (opts.mcpServers ??
-    project.mcpServers ??
-    {}) as Record<string, McpServerConfig>;
+  // A `dispatch-*` entry can only reach here from the store's synced copy of an
+  // older manifest — `project-config.ts` drops it at load and reports it as a
+  // config error, which is where a human is told about it. Filtered rather than
+  // listed: emitting a row would give `catalog.servers` two entries with the
+  // same `name`, and the view keys selection on name (`servers.find(s => s.name
+  // === selected)`), so the row added to explain the problem would render the
+  // OTHER server's detail pane and never show its own message.
+  const external = Object.fromEntries(
+    Object.entries(
+      (opts.mcpServers ?? project.mcpServers ?? {}) as Record<string, McpServerConfig>,
+    ).filter(([name]) => !isManagerServer(name)),
+  );
   const cwd = opts.cwd ?? project.repoPath;
   // A project may declare a server of the same name as a bundled one, in which
   // case its declaration wins outright in the broker's merge — so listing both
@@ -418,5 +445,5 @@ export async function buildProjectMcpCatalog(
     inputs.map((input) => buildSpawnableEntry(input, opts.enablement, probe, timeoutMs, cwd)),
   );
 
-  return { servers: [managerEntry, ...entries] };
+  return { servers: [...managerEntries, ...entries] };
 }

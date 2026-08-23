@@ -351,11 +351,13 @@ export class ClaudeSession implements HarnessSession {
     const servers: Record<string, SdkMcpServerConfig> = {
       ...(this.spec.mcpServers as unknown as Record<string, SdkMcpServerConfig>),
     };
-    // Applied LAST so a project-configured server named "manager" can't shadow
-    // Dispatch's own tools.
+    // Applied LAST so a project-configured server can't shadow Dispatch's own
+    // tools even if it manages to collide with a `dispatch-*` name.
     const manager = this.spec.managerMcp;
     if (manager?.transport === "in-process") {
-      servers.manager = manager.server as SdkMcpServerConfig;
+      for (const [name, server] of Object.entries(manager.servers)) {
+        servers[name] = server as SdkMcpServerConfig;
+      }
     }
     options.mcpServers = servers;
 

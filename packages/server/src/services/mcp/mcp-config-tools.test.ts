@@ -16,7 +16,7 @@ import { listServers } from "@dispatch/cli/core";
 import { EventBus } from "../../bus.js";
 import {
   createManagerTools,
-  createManagerMcpServer,
+  createManagerMcpServers,
   managerToolDescriptors,
   type ManagerMcpBroker,
   type ManagerMcpConfig,
@@ -65,25 +65,34 @@ afterEach(async () => {
   await rm(repo, { recursive: true, force: true });
 });
 
+/** Every tool name registered across a session's category servers. */
+const registeredNames = (servers: Record<string, unknown>): string[] =>
+  Object.values(servers).flatMap((server) =>
+    Object.keys(
+      (server as { instance: { _registeredTools?: Record<string, unknown> } }).instance
+        ._registeredTools ?? {},
+    ),
+  );
+
 /* ------------------------------------------------------------------ gating */
 
 describe("MCP-config tool gating", () => {
-  it("omits the mcp_* tools when no editor is bound", () => {
-    const server = createManagerMcpServer(ctx()) as unknown as {
-      instance: { _registeredTools?: Record<string, unknown> };
-    };
-    const names = Object.keys(server.instance._registeredTools ?? {});
-    expect(names).not.toContain("mcp_add");
-    expect(names).not.toContain("mcp_list");
-    expect(names).not.toContain("mcp_remove");
+  it("omits the mcp_* tools — and their whole server — when no editor is bound", () => {
+    const servers = createManagerMcpServers(ctx());
+    // Not merely an empty `dispatch-mcp`: an unbound category is not registered
+    // at all, so the agent is never offered a server with nothing in it.
+    expect(servers["dispatch-mcp"]).toBeUndefined();
+    expect(registeredNames(servers)).not.toEqual(
+      expect.arrayContaining(["mcp_add", "mcp_list", "mcp_remove"]),
+    );
   });
 
-  it("registers them once an editor is bound", () => {
-    const server = createManagerMcpServer(
-      ctx(createMcpConfigEditor(repo)),
-    ) as unknown as { instance: { _registeredTools?: Record<string, unknown> } };
-    const names = Object.keys(server.instance._registeredTools ?? {});
-    expect(names).toEqual(expect.arrayContaining(["mcp_list", "mcp_add", "mcp_remove"]));
+  it("registers them on dispatch-mcp once an editor is bound", () => {
+    const servers = createManagerMcpServers(ctx(createMcpConfigEditor(repo)));
+    expect(servers["dispatch-mcp"]).toBeDefined();
+    expect(registeredNames(servers)).toEqual(
+      expect.arrayContaining(["mcp_list", "mcp_add", "mcp_remove"]),
+    );
   });
 
   it("marks them unavailable in the catalog without the binding", () => {

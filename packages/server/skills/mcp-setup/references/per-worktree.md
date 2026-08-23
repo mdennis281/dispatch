@@ -115,7 +115,7 @@ It is best-effort by design: worktree creation does not wait for it and a failur
 never fails the worktree. You get a notice either way.
 
 To re-warm a checkout whose server has since died, call
-`mcp__manager__prewarm_mcp` — no arguments; it acts on the calling chat's own
+`mcp__dispatch-mcp__prewarm_mcp` — no arguments; it acts on the calling chat's own
 checkout.
 
 Note the child environment is scrubbed of the manager's own `DISPATCH_*`/`CM_*`

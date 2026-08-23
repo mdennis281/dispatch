@@ -3,7 +3,7 @@
  *
  * The Bash tool resets cwd/env every call. This service gives a chat a set of
  * long-lived shells (keyed by name) whose cwd + environment survive across
- * commands, exposed to the agent as `mcp__manager__terminal` and mirrored
+ * commands, exposed to the agent as `mcp__dispatch-workspace__terminal` and mirrored
  * read-only in the UI.
  *
  * ── Backend chosen: long-lived `powershell.exe -Command -` child process ──────
@@ -376,7 +376,7 @@ export class TerminalService {
   /**
    * Open a named shell with NOTHING in it, and hand back its snapshot.
    *
-   * `run()` already spawns lazily, which is all `mcp__manager__terminal` ever
+   * `run()` already spawns lazily, which is all `mcp__dispatch-workspace__terminal` ever
    * needed — the agent always arrives with a command. A human pressing "New
    * shell" does not, and until this existed the only way to get a terminal at
    * all was to ask an agent for one, so the Terminals tab was permanently empty

@@ -4,7 +4,7 @@
  * powershell.exe, and no risk of a test leaking a live child process.
  *
  * These routes are the human-facing half of a feature that shipped agent-only:
- * `mcp__manager__terminal` was the sole way to get a shell, so the Terminals tab
+ * `mcp__dispatch-workspace__terminal` was the sole way to get a shell, so the Terminals tab
  * was permanently empty for anyone who'd never watched an agent open one. The
  * behaviour worth pinning here is that the two doors reach the SAME shell (cwd
  * resolved by the same rule) and that the failure modes are honest status codes.

@@ -836,3 +836,64 @@ describe("ProjectConfigService — vacuous auto-merge warning", () => {
     expect(res.errors.filter((e) => /vacuous/.test(e.message))).toEqual([]);
   });
 });
+
+describe("ProjectConfigService — a reserved MCP server name", () => {
+  it("drops a dispatch-* server and reports it as a config error", async () => {
+    // `mcp_add` and `dispatch mcp add` both refuse to write one, so this is a
+    // hand-edit or a manifest predating that guard. It can never work — the
+    // category servers merge LAST and win — so it is dropped at the one place
+    // that reads the manifest rather than filtered at each consumer, and
+    // reported where a human already looks for "why is my config doing nothing".
+    const project = await seedProject();
+    await writeConfig(
+      "project.yaml",
+      [
+        "name: Configured",
+        "mcpServers:",
+        "  - name: dispatch-github",
+        "    transport:",
+        "      type: http",
+        "      url: https://example.com/mcp",
+        "  - name: keeper",
+        "    transport:",
+        "      type: stdio",
+        "      command: npx",
+        "",
+      ].join("\n"),
+    );
+
+    const svc = new ProjectConfigService({ store, bus });
+    const result = await svc.load(project);
+
+    // Dropped — never reaches the broker, the catalog, or a session.
+    expect(result.config!.mcpServers["dispatch-github"]).toBeUndefined();
+    // …while its innocent sibling is untouched: one bad entry is not a reason
+    // to discard the rest of the manifest.
+    expect(result.config!.mcpServers.keeper).toMatchObject({ type: "stdio", command: "npx" });
+
+    const reserved = result.errors.find((e) => e.message.includes("dispatch-github"));
+    expect(reserved).toBeDefined();
+    expect(reserved!.message).toMatch(/reserved/i);
+    expect(reserved!.file).toBe("project.yaml");
+  });
+
+  it("leaves a name that merely resembles one alone", async () => {
+    const project = await seedProject();
+    await writeConfig(
+      "project.yaml",
+      [
+        "name: Configured",
+        "mcpServers:",
+        "  - name: dispatcher",
+        "    transport:",
+        "      type: stdio",
+        "      command: npx",
+        "",
+      ].join("\n"),
+    );
+    const svc = new ProjectConfigService({ store, bus });
+    const result = await svc.load(project);
+    expect(result.config!.mcpServers.dispatcher).toBeDefined();
+    expect(result.errors.filter((e) => /reserved/i.test(e.message))).toEqual([]);
+  });
+});

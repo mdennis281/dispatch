@@ -315,7 +315,7 @@ export function TerminalsPanel({ chat }: { chat: Chat }) {
 
   // Open a shell the way the agent's `terminal` tool does — same service, same
   // cwd rule. Until this button existed the ONLY door into this panel was
-  // mcp__manager__terminal, so a human who had never watched an agent run one
+  // mcp__dispatch-workspace__terminal, so a human who had never watched an agent run one
   // saw an empty tab and no way to fill it.
   const openShell = () => {
     if (opening) return;

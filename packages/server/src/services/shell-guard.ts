@@ -23,7 +23,7 @@
  * which kills the listening leaf and leaves the rest of the tree.
  *
  * So the guard refuses that flag and names the tracked path instead:
- * `mcp__manager__terminal({ background: true })` + `terminal_output`, whose shell
+ * `mcp__dispatch-workspace__terminal({ background: true })` + `terminal_output`, whose shell
  * has a pid Dispatch owns, is attributable to the chat, and is tree-killed with
  * it. A foreground command with a `timeout` is the other honest answer, and the
  * message says so.
@@ -43,12 +43,12 @@ const ALLOW: HookJSONOutput = {};
 const SHELL_TOOLS = new Set(["Bash", "PowerShell"]);
 
 /**
- * Every tool that can put a command on a shell. `mcp__manager__terminal` is
+ * Every tool that can put a command on a shell. `mcp__dispatch-workspace__terminal` is
  * included deliberately: it is Dispatch's OWN tool, and leaving it out would
  * make the worktree guard trivially bypassable by the one path every agent is
  * already told to prefer.
  */
-const COMMAND_TOOLS = new Set(["Bash", "PowerShell", "mcp__manager__terminal"]);
+const COMMAND_TOOLS = new Set(["Bash", "PowerShell", "mcp__dispatch-workspace__terminal"]);
 
 export interface BackgroundShellGuardDeps {
   /** False disables the guard (no TerminalService = no path to redirect to). */
@@ -63,11 +63,11 @@ export function backgroundShellRefusal(): string {
     "`run_in_background` is not available in Dispatch: the harness spawns that " +
     "shell outside the server's process tree, so it is invisible to the Ports & " +
     "processes panel and is left running when this chat ends. " +
-    "Start long-running processes with `mcp__manager__terminal({ name: \"<own-name>\", " +
+    "Start long-running processes with `mcp__dispatch-workspace__terminal({ name: \"<own-name>\", " +
     "command: \"…\", background: true })` and read them with " +
-    "`mcp__manager__terminal_output({ name: \"<own-name>\" })` — that shell is tracked " +
+    "`mcp__dispatch-workspace__terminal_output({ name: \"<own-name>\" })` — that shell is tracked " +
     "against this chat and torn down with it. For a declared sub-app, prefer " +
-    "`mcp__manager__run_subapp`. For a command that DOES finish, just run it in the " +
+    "`mcp__dispatch-workspace__run_subapp`. For a command that DOES finish, just run it in the " +
     "foreground with a `timeout`."
   );
 }
@@ -116,7 +116,7 @@ export function createBackgroundShellGuardHook(
  * was thin it guessed, or gave up and left the tree attached to nothing. That is
  * the mechanism behind every worktree in the list that no chat will admit to.
  *
- * `mcp__manager__worktree({ action: "create", branch })` runs the same git
+ * `mcp__dispatch-workspace__worktree({ action: "create", branch })` runs the same git
  * command and writes the owning chat down in the same breath, so there is
  * nothing left to infer. So the raw command is refused and the message names the
  * tool — the same trade the trunk guard makes with `gh pr create`.
@@ -129,7 +129,7 @@ export function worktreeCommandRefusal(): string {
     "Creating a worktree from a shell is not available in Dispatch: a tree cut " +
     "that way carries no record of which chat owns it, so it shows up in the " +
     "Workspace view unattributed and the manager has to guess at it afterwards. " +
-    "Use `mcp__manager__worktree({ action: \"create\", branch: \"<branch>\" })` — " +
+    "Use `mcp__dispatch-workspace__worktree({ action: \"create\", branch: \"<branch>\" })` — " +
     "it runs the same git command, records this chat as the owner, and returns " +
     "the path. `worktree({ action: \"list\" })` and `({ action: \"remove\", path })` " +
     "are there too. Inspecting worktrees from a shell (`git worktree list`, " +

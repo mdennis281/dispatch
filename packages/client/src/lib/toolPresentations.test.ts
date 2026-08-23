@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { ChatMessage, ToolUseRow } from "@dispatch/shared";
+import { LEGACY_MANAGER_TOOL_PREFIX, type ChatMessage, type ToolUseRow } from "@dispatch/shared";
 import { displayResultText, groupTranscriptRows, resultPreview, resultText, toolPresentation } from "./toolPresentations.js";
+
+/** A tool name as it was recorded before the servers were split. Composed, not
+ *  spelled, so `tools/verify/no-stale-tool-names.mjs` can stay exemption-free —
+ *  a literal here would fail the very check it exists to enforce. */
+const legacy = (tool: string) => `${LEGACY_MANAGER_TOOL_PREFIX}${tool}`;
 
 function tool(name: string, input: Record<string, unknown>, id = name): ToolUseRow {
   return { kind: "tool_use", id, toolUseId: id, chatId: "chat", ts: 1, turn: 0, name, input };
@@ -14,7 +19,7 @@ describe("tool presentation handlers", () => {
       language: "bash",
     });
     expect(
-      toolPresentation(tool("mcp__manager__terminal", { name: "build", command: "Get-ChildItem src" })),
+      toolPresentation(tool("mcp__dispatch-workspace__terminal", { name: "build", command: "Get-ChildItem src" })),
     ).toEqual({ kind: "shell", command: "Get-ChildItem src", language: "powershell", terminal: "build" });
   });
 
@@ -24,26 +29,38 @@ describe("tool presentation handlers", () => {
   });
 
   it("gives first-party Dispatch MCPs semantic presentations", () => {
-    expect(toolPresentation(tool("mcp__manager__ask_user", { questions: [] }))).toMatchObject({
+    expect(toolPresentation(tool("mcp__dispatch-confirm__ask_user", { questions: [] }))).toMatchObject({
       kind: "dispatch",
       title: "Ask user",
       activity: "Waiting for an answer",
       category: "chat",
     });
-    expect(toolPresentation(tool("mcp__manager__wait", { seconds: 10 }))).toMatchObject({
+    expect(toolPresentation(tool("mcp__dispatch-session__wait", { seconds: 10 }))).toMatchObject({
       kind: "dispatch",
       title: "Wait",
       activity: "Waiting",
       category: "wait",
       countdownSeconds: 10,
     });
-    expect(toolPresentation(tool("mcp__manager__watch_pr", { number: 40 }))).toMatchObject({
+    expect(toolPresentation(tool("mcp__dispatch-github__watch_pr", { number: 40 }))).toMatchObject({
       kind: "dispatch",
       title: "Watch pull request",
       subject: "PR #40",
       category: "pr",
     });
-    expect(toolPresentation(tool("mcp__manager__brand_new_tool", { name: "demo" }))).toMatchObject({
+    // A call recorded before the servers were split still renders as Dispatch's
+    // own — 267 of 291 transcripts on the install this shipped from contain one,
+    // and they are re-rendered from stored rows for as long as the chat exists.
+    expect(toolPresentation(tool(legacy("terminal"), { command: "ls", name: "t" }))).toMatchObject({
+      kind: "shell",
+      command: "ls",
+    });
+    expect(toolPresentation(tool(legacy("watch_pr"), { number: 40 }))).toMatchObject({
+      kind: "dispatch",
+      title: "Watch pull request",
+      category: "pr",
+    });
+    expect(toolPresentation(tool("mcp__dispatch-workspace__brand_new_tool", { name: "demo" }))).toMatchObject({
       kind: "dispatch",
       title: "Brand New Tool",
       subject: "demo",
@@ -54,7 +71,7 @@ describe("tool presentation handlers", () => {
 describe("groupTranscriptRows", () => {
   it("groups handled shell calls across their folded results", () => {
     const a = tool("Bash", { command: "pwd" }, "a");
-    const b = tool("mcp__manager__terminal", { command: "Get-Location" }, "b");
+    const b = tool("mcp__dispatch-workspace__terminal", { command: "Get-Location" }, "b");
     const result: ChatMessage = {
       kind: "tool_result", id: "r", toolUseId: "a", chatId: "chat", ts: 2, turn: 0,
       name: "Bash", ok: true, content: "/repo",
@@ -66,8 +83,8 @@ describe("groupTranscriptRows", () => {
 
   it("keeps first-party MCP exchanges inside the same terminal run", () => {
     const shell = tool("Bash", { command: "pwd" }, "shell");
-    const recall = tool("mcp__manager__recall", { query: "terminal UI" }, "recall");
-    const remember = tool("mcp__manager__remember", { name: "terminal-ui" }, "remember");
+    const recall = tool("mcp__dispatch-memory__recall", { query: "terminal UI" }, "recall");
+    const remember = tool("mcp__dispatch-memory__remember", { name: "terminal-ui" }, "remember");
     const grouped = groupTranscriptRows([shell, recall, remember]);
     expect(grouped).toHaveLength(1);
     expect(grouped[0]).toMatchObject({ kind: "shell", rows: [shell, recall, remember] });

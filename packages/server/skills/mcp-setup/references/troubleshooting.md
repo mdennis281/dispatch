@@ -53,7 +53,7 @@ cm mcp list          # names + transports
 cm mcp get <name>    # exactly what is stored, post-expansion
 ```
 
-`mcp__manager__mcp_list` is the in-session equivalent. Note both show the
+`mcp__dispatch-mcp__mcp_list` is the in-session equivalent. Note both show the
 *configured* set; the catalog shows live status.
 
 ## When you're stuck

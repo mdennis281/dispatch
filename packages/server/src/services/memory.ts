@@ -6,7 +6,7 @@
  * memory is a single `.md` file with YAML-ish frontmatter (`name` /
  * `description` / `type`) over a markdown body. The index (one line per memory)
  * is injected into every session at start (read); the
- * `mcp__manager__remember|recall|forget` tools append/query/remove it (write);
+ * `mcp__dispatch-memory__remember|recall|forget` tools append/query/remove it (write);
  * the Memory panel curates it.
  *
  * Storage location (resolved per-project via {@link dir}):
@@ -1253,7 +1253,7 @@ export class MemoryService {
       sections.push(
         "### Possibly relevant — names only\n" +
           "Judge from the one-liner; pull the full fact with " +
-          "`mcp__manager__recall({ query: \"<name>\" })` if it bears on this work.\n" +
+          "`mcp__dispatch-memory__recall({ query: \"<name>\" })` if it bears on this work.\n" +
           pointerLines.join("\n"),
       );
     }
@@ -1273,7 +1273,7 @@ export class MemoryService {
       "because they match this turn). Treat them as trusted background context and " +
       "act on them; they reflect what was true when written, so sanity-check against " +
       "live code before betting on a specific detail. If any is now wrong, fix it " +
-      "with `mcp__manager__remember` (same name overwrites) or `mcp__manager__forget`.\n\n" +
+      "with `mcp__dispatch-memory__remember` (same name overwrites) or `mcp__dispatch-memory__forget`.\n\n" +
       sections.join("\n\n") +
       "\n</system-reminder>";
     return { block, names, pointed };
@@ -1316,7 +1316,7 @@ export class MemoryService {
         "ALWAYS apply. Everything else is a lookup catalogue: as you work, the facts " +
         "that clearly bear on the current turn arrive in full automatically, and " +
         "near-misses arrive as a name + one-line description — when one of those looks " +
-        "relevant, pull it with `mcp__manager__recall({ query: \"<name>\" })` rather than " +
+        "relevant, pull it with `mcp__dispatch-memory__recall({ query: \"<name>\" })` rather than " +
         "guessing. You can also search by topic the same way. Consult it before asking " +
         "the user something they may have already answered.",
       "",
@@ -1349,7 +1349,7 @@ export class MemoryService {
       out.push(
         `${facts.length} recorded ${facts.length === 1 ? "fact" : "facts"} (project + ` +
           "reference). The relevant ones auto-surface as you work; call " +
-          "`mcp__manager__recall({ query })` to pull any by topic.",
+          "`mcp__dispatch-memory__recall({ query })` to pull any by topic.",
         "",
       );
       const areas = clusterAreas(facts);
@@ -1374,9 +1374,9 @@ export class MemoryService {
     out.push(
       "When you learn a durable fact — a preference, a correction, an architecture " +
         "decision, a reference — record it with " +
-        "`mcp__manager__remember({ name, description, type, body })` so it outlives this " +
+        "`mcp__dispatch-memory__remember({ name, description, type, body })` so it outlives this " +
         "chat; reuse a name to update an existing one instead of adding a near-duplicate, " +
-        "and `mcp__manager__forget({ name })` when one goes stale.",
+        "and `mcp__dispatch-memory__forget({ name })` when one goes stale.",
     );
 
     return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";

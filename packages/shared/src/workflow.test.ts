@@ -306,7 +306,7 @@ describe("classifyWorkflowViolation", () => {
       requirePr: true,
     });
     expect(v?.kind).toBe("pr-create-by-hand");
-    expect(v?.reason).toMatch(/mcp__manager__create_pr/);
+    expect(v?.reason).toMatch(/mcp__dispatch-github__create_pr/);
     // …and it says what the sanctioned path does that the raw command doesn't.
     expect(v?.reason).toMatch(/reviewers/);
     expect(v?.reason).toMatch(/watcher/);

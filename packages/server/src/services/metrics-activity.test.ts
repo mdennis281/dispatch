@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { MetricState } from "@dispatch/shared";
+import { LEGACY_MANAGER_TOOL_PREFIX, type MetricState } from "@dispatch/shared";
 import {
   ActivityTracker,
   MAIN_ACTOR,
@@ -84,24 +84,42 @@ describe("classifyActivity", () => {
   const cases: [string, Record<string, unknown> | undefined, MetricState][] = [
     ["Bash", undefined, "shell"],
     ["shell_command", undefined, "shell"],
-    ["mcp__manager__terminal", undefined, "shell"],
+    ["mcp__dispatch-workspace__terminal", undefined, "shell"],
     // Reading scrollback that already exists is not running a command.
-    ["mcp__manager__terminal_output", undefined, "tool"],
-    ["mcp__manager__wait", undefined, "sleeping"],
+    ["mcp__dispatch-workspace__terminal_output", undefined, "tool"],
+    ["mcp__dispatch-session__wait", undefined, "sleeping"],
     ["functions.wait", undefined, "sleeping"],
     // Matches both the sleep and the agent spelling; it's a peer, not a nap.
-    ["mcp__manager__wait_for_chat", undefined, "waiting_agent"],
+    ["mcp__dispatch-chat__wait_for_chat", undefined, "waiting_agent"],
     ["Task", undefined, "waiting_agent"],
     ["Agent", undefined, "waiting_agent"],
     ["collaboration.wait_agent", undefined, "waiting_agent"],
-    ["mcp__manager__ask_user", undefined, "waiting_human"],
+    ["mcp__dispatch-confirm__ask_user", undefined, "waiting_human"],
     ["AskUserQuestion", undefined, "waiting_human"],
-    ["mcp__manager__watch_pr", undefined, "waiting_remote"],
+    ["mcp__dispatch-github__watch_pr", undefined, "waiting_remote"],
     ["WebFetch", undefined, "waiting_remote"],
     ["Read", undefined, "tool"],
     ["mcp__playwright__browser_click", undefined, "tool"],
-    ["functions.exec", { source: "await tools.mcp__manager__terminal({})" }, "shell"],
+    ["functions.exec", { source: "await tools.mcp__dispatch-workspace__terminal({})" }, "shell"],
   ];
+  // History: a call RECORDED before the split must classify the same way, or
+  // replayed shell/wait time silently reclassifies as generic `tool`.
+  const legacyCases: Array<[string, MetricState]> = [
+    ["terminal", "shell"],
+    ["wait", "sleeping"],
+    ["wait_for_chat", "waiting_agent"],
+    ["ask_user", "waiting_human"],
+    ["watch_pr", "waiting_remote"],
+    ["terminal_output", "tool"],
+  ];
+  for (const [tool, expected] of legacyCases) {
+    // Composed rather than spelled so `no-stale-tool-names` needs no exemption.
+    const name = `${LEGACY_MANAGER_TOOL_PREFIX}${tool}`;
+    it(`files the pre-split ${name} as ${expected}`, () => {
+      expect(classifyActivity(name)).toBe(expected);
+    });
+  }
+
   for (const [name, input, expected] of cases) {
     it(`files ${name} as ${expected}`, () => {
       expect(classifyActivity(name, input)).toBe(expected);
@@ -290,7 +308,7 @@ describe("ActivityTracker — subagents are their own actors", () => {
     sink.at(0);
     track.turnStart();
     sink.at(10);
-    track.toolStart(MAIN_ACTOR, "peer-1", "mcp__manager__wait_for_chat", { chatId: "c9" });
+    track.toolStart(MAIN_ACTOR, "peer-1", "mcp__dispatch-chat__wait_for_chat", { chatId: "c9" });
     sink.at(40);
     track.toolEnd("peer-1");
     sink.at(40);
@@ -378,7 +396,7 @@ describe("ActivityTracker — one human wait per actor", () => {
     sink.at(0);
     track.turnStart();
     sink.at(10);
-    track.toolStart(MAIN_ACTOR, "tu-1", "mcp__manager__spawn_chat");
+    track.toolStart(MAIN_ACTOR, "tu-1", "mcp__dispatch-chat__spawn_chat");
     sink.at(20);
     track.blocked(MAIN_ACTOR, "perm-1", "waiting_human", "spawn_chat");
     sink.at(900);
@@ -390,7 +408,7 @@ describe("ActivityTracker — one human wait per actor", () => {
 
     expect(sink.of()).toMatchObject([
       { state: "generating", startTs: 0, endTs: 10 },
-      { state: "waiting_human", identifier: "mcp__manager__spawn_chat", startTs: 10, endTs: 1000 },
+      { state: "waiting_human", identifier: "mcp__dispatch-chat__spawn_chat", startTs: 10, endTs: 1000 },
       { state: "generating", startTs: 1000, endTs: 1000 },
     ]);
     expect(sink.msByState()).toEqual({ generating: 10, waiting_human: 990 });
@@ -406,7 +424,7 @@ describe("ActivityTracker — one human wait per actor", () => {
     sink.at(10);
     track.blocked(MAIN_ACTOR, "perm-1", "waiting_human", "spawn_chat");
     sink.at(20);
-    track.toolStart(MAIN_ACTOR, "tu-1", "mcp__manager__spawn_chat");
+    track.toolStart(MAIN_ACTOR, "tu-1", "mcp__dispatch-chat__spawn_chat");
     sink.at(900);
     track.unblocked("perm-1");
     sink.at(1000);
@@ -456,7 +474,7 @@ describe("ActivityTracker — one human wait per actor", () => {
     sink.at(0);
     track.turnStart();
     sink.at(10);
-    track.toolStart("task-1", "c1", "mcp__manager__ask_user", undefined, "worker");
+    track.toolStart("task-1", "c1", "mcp__dispatch-confirm__ask_user", undefined, "worker");
     sink.at(20);
     track.blocked(MAIN_ACTOR, "perm-1", "waiting_human", "AskUserQuestion");
     expect(sink.running.map((s) => [s.runId, s.state])).toEqual([
@@ -472,7 +490,7 @@ describe("ActivityTracker — one human wait per actor", () => {
     track.turnEnd();
 
     expect(sink.of("task-1")).toMatchObject([
-      { state: "waiting_human", identifier: "mcp__manager__ask_user", startTs: 10, endTs: 200 },
+      { state: "waiting_human", identifier: "mcp__dispatch-confirm__ask_user", startTs: 10, endTs: 200 },
       { state: "generating", startTs: 200, endTs: 250 },
     ]);
     expect(sink.of(MAIN_ACTOR)).toMatchObject([

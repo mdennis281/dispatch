@@ -21,6 +21,8 @@ import {
   type ServiceOverrides,
 } from "./services/container.js";
 import { registerRoutes } from "./routes/index.js";
+import { migrateManagerToolNames } from "./services/manager-tool-migration.js";
+import { isManagerBridgePath } from "./services/mcp/manager-http.js";
 import { healthReport } from "./health.js";
 import { AuthService, type RequestIdentity } from "./services/auth.js";
 
@@ -117,7 +119,14 @@ export async function buildApp(
         path === "/api/auth/passkeys/login/options" || path === "/api/auth/passkeys/login/verify" ||
         // The manager bridge has its own per-chat, ephemeral bearer grants. A
         // browser JWT cannot replace those without breaking tool isolation.
-        path === "/api/mcp/manager") return;
+        //
+        // A PREFIX, because the bridge serves one path per tool category. It was
+        // an exact match on the parent path, which stopped matching the moment
+        // the category segment was added: with auth ON, Codex dialled
+        // `/api/mcp/manager/session` with a grant token, `verifyJwt` returned
+        // null for it, and every Dispatch tool 401'd for the whole session.
+        // Auth-disabled installs never saw it.
+        isManagerBridgePath(path)) return;
     if (path === "/ws") {
       const ticket = new URL(req.url, "http://dispatch.local").searchParams.get("ticket") ?? undefined;
       const found = await auth.authenticateWs(ticket);
@@ -163,6 +172,31 @@ export async function buildApp(
   });
 
   registerRoutes(app);
+
+  // Carry permission allowlists and metric rows off the retired `manager` MCP
+  // server name.
+  //
+  // BEFORE `services.start()`, not after, and this ordering is load-bearing:
+  // `start()` calls `resume.restore()`, which re-arms auto-resumes persisted
+  // before the last shutdown — and one that came due while the process was down
+  // arms at a 0 ms timer. Running the migration afterwards means it awaits file
+  // reads, yields the loop, and that session starts against an allowlist that
+  // has not been migrated yet: a permission prompt on a tool approved months
+  // ago, which is the exact failure the migration exists to prevent.
+  //
+  // Never fatal — the worst case if it is skipped is that same prompt, which is
+  // strictly better than a server that will not boot.
+  await migrateManagerToolNames(
+    store,
+    (await store.listProjects().catch(() => [])).map((p) => p.repoPath).filter(Boolean),
+  ).catch(() => undefined);
+  try {
+    const moved = services.metrics.migrateLegacyManagerDetail();
+    // eslint-disable-next-line no-console
+    if (moved) console.log(`[dispatch] re-filed ${moved} metric row(s) onto their tool category`);
+  } catch {
+    /* telemetry cosmetics must never stop a boot */
+  }
 
   // Background wiring (attention aggregation, notifier, runner reconcile,
   // auto-checkpoint). Best-effort; a failure here must not stop the app booting.

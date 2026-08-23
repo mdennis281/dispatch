@@ -48,6 +48,11 @@ import {
   type MetricSpanTotalsResponse,
   type MetricState,
   type MetricTotalsResponse,
+  LEGACY_MANAGER_SERVER,
+  LEGACY_MANAGER_TOOL_PREFIX,
+  MANAGER_TOOL_CATEGORY,
+  MANAGER_TOOL_NAMES,
+  managerToolQualifiedName,
 } from "@dispatch/shared";
 import {
   SPAN_COLUMN,
@@ -253,6 +258,23 @@ export interface MetricsServiceDeps {
 interface Where {
   sql: string;
   params: (string | number)[];
+}
+
+/**
+ * Where a metric row lands when it names a Dispatch tool that no longer exists.
+ *
+ * Not a category: the tool is gone, so it has none. A distinct label keeps those
+ * rows countable without pretending they belong somewhere.
+ */
+export const RETIRED_TOOL_DETAIL = "(retired)";
+
+/**
+ * SQL string literal. Only ever applied to registry constants, never to user
+ * input — but written out rather than interpolated bare so the next person to
+ * reach for this helper doesn't have to work that out.
+ */
+function quote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
 }
 
 export class MetricsService {
@@ -485,6 +507,85 @@ export class MetricsService {
         "INSERT INTO metric_meta(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
       )
       .run(key, value);
+  }
+
+  /**
+   * Re-file historical manager rows onto their category.
+   *
+   * Before the split, a Dispatch tool call was stored as
+   * `{category:"manager", identifier:"create_pr", detail:"manager"}` — `detail`
+   * was the SERVER, and there was one. Now it is the CATEGORY. Grouping the
+   * Metrics view by `identifier` was always fine (the bare tool name never
+   * changed), but grouping by `detail` showed a permanent legacy `manager`
+   * bucket sitting alongside the eight real ones: the same `create_pr` calls
+   * split across two series with the rename as the fault line.
+   *
+   * WHY NOT THE BACKFILL. `classifyTool` forward-maps the old NAME, which covers
+   * anything imported from here on — but the transcript import is watermarked by
+   * `BACKFILL_VERSION` and never re-runs on an install that already completed it,
+   * and its INSERT is `OR IGNORE` on `event_key`, so a re-import could not update
+   * an existing row's `detail` even if it did run. Rows already on disk need an
+   * UPDATE, and this is it.
+   *
+   * RETIRED TOOLS MOVE TOO, onto {@link RETIRED_TOOL_DETAIL}. A first version
+   * looped the registry and matched on `identifier`, which left every row for a
+   * tool that has since been deleted — `wait_for_pr`, removed days before this
+   * shipped — sitting under the old server name forever. That is the ninth
+   * bucket this exists to remove, just smaller, and it would never have emptied.
+   * Their real category is genuinely unknown, so they get an honest label rather
+   * than a guessed one.
+   *
+   * Idempotent: the WHERE only matches rows still carrying the retired server
+   * name, and a migrated row no longer does. Cheap on every boot after the first
+   * (it matches nothing, against an index-covered equality). Returns how many
+   * rows moved ACROSS BOTH TABLES, for the boot log.
+   */
+  migrateLegacyManagerDetail(): number {
+    // One statement, so a row is classified exactly once: a per-tool loop plus a
+    // catch-all pass would re-read rows the loop had just rewritten.
+    const cases = MANAGER_TOOL_NAMES.map(
+      (tool) => `WHEN ${quote(tool)} THEN ${quote(MANAGER_TOOL_CATEGORY[tool])}`,
+    ).join(" ");
+    return this.db.tx(() => {
+      const res = this.db
+        .prepare(
+          `UPDATE metric
+              SET detail = CASE identifier ${cases} ELSE ${quote(RETIRED_TOOL_DETAIL)} END
+            WHERE category = 'manager' AND detail = ?`,
+        )
+        .run(LEGACY_MANAGER_SERVER);
+      return Number(res.changes ?? 0) + this.migrateLegacySpanIdentifiers();
+    });
+  }
+
+  /**
+   * The same split, one table over.
+   *
+   * `metric_span.identifier` holds the FULLY-QUALIFIED tool name — `occupy()`
+   * passes the raw name straight through — and `identifier` is a groupable span
+   * dimension. So the runtime view grouped by identifier showed a pre-split
+   * `terminal` call and `mcp__dispatch-workspace__terminal` as two disjoint
+   * series with the rename as the fault line: exactly the failure
+   * {@link migrateLegacyManagerDetail} exists to prevent for `metric`, missed
+   * because the two tables spell the same tool differently.
+   *
+   * A tool that no longer exists is LEFT ALONE here, unlike in `metric`. There
+   * the old value named a server that is gone; here it names the call that was
+   * actually made, which stays true.
+   *
+   * Runs inside the caller's transaction.
+   */
+  private migrateLegacySpanIdentifiers(): number {
+    const update = this.db.prepare(`UPDATE metric_span SET identifier = ? WHERE identifier = ?`);
+    let moved = 0;
+    for (const tool of MANAGER_TOOL_NAMES) {
+      const res = update.run(
+        managerToolQualifiedName(tool),
+        `${LEGACY_MANAGER_TOOL_PREFIX}${tool}`,
+      );
+      moved += Number(res.changes ?? 0);
+    }
+    return moved;
   }
 
   /* ------------------------------------------------------------ query */

@@ -11,10 +11,15 @@ import type {
 } from "@dispatch/shared";
 import { EventBus } from "../../bus.js";
 import { memorySimilarity } from "../memory.js";
-import { decodePrToolPayload } from "@dispatch/shared";
+import {
+  decodePrToolPayload,
+  managerToolQualifiedName,
+  type ManagerToolName,
+} from "@dispatch/shared";
 import {
   createManagerTools,
-  createManagerMcpServer,
+  createManagerMcpServers,
+  managerToolDescriptors,
   prLandingBlockers,
   overrideConsentPrompt,
   exemptionConsentQuestion,
@@ -768,7 +773,7 @@ describe("manager-mcp — watch_pr", () => {
       // The whole point of the separate signal: `request_review` is the one
       // action that cannot help, and the advice must say so rather than send
       // the agent back round the loop that hung.
-      expect(resultText(res)).toContain("Do not call `mcp__manager__request_review`");
+      expect(resultText(res)).toContain("Do not call `mcp__dispatch-github__request_review`");
       expect(resultText(res)).not.toContain("put a reviewer back on the hook");
     });
 
@@ -920,7 +925,7 @@ describe("manager-mcp — watch_pr", () => {
       // …and only one action survives. Telling the agent to re-request here is
       // exactly how it ends up watching a queue entry the sweep can never claim.
       expect(resultText(res)).not.toContain("put a reviewer back on the hook");
-      expect(resultText(res)).toContain("Do not call `mcp__manager__request_review`");
+      expect(resultText(res)).toContain("Do not call `mcp__dispatch-github__request_review`");
     });
 
     it("stays quiet while another round can still spawn", async () => {
@@ -3896,25 +3901,99 @@ describe("manager-mcp — spawn_chat", () => {
   });
 });
 
+/**
+ * Tool names registered across ALL of a session's category servers.
+ *
+ * The tests below assert which tools a binding does and does not buy, which is
+ * a question about the whole toolbox, not about one server — so the partition is
+ * flattened away here rather than in each assertion.
+ */
+const registeredNames = (ctx: Parameters<typeof createManagerMcpServers>[0]): string[] =>
+  Object.values(createManagerMcpServers(ctx)).flatMap((server) =>
+    Object.keys(
+      (server as unknown as { instance: { _registeredTools?: Record<string, unknown> } })
+        .instance._registeredTools ?? {},
+    ),
+  );
+
 describe("manager-mcp — server factory", () => {
-  it("builds an in-process SDK MCP server named 'manager'", () => {
-    const server = createManagerMcpServer({
+  it("builds one in-process SDK server per category, all `dispatch-` prefixed", () => {
+    const servers = createManagerMcpServers({
       chatId: "c1",
       bus,
       broker: fakeBroker({}),
     });
-    expect(server.type).toBe("sdk");
-    expect(server.name).toBe("manager");
-    expect(server.instance).toBeDefined();
+    // A bare session has no GitHub/memory/terminal bindings, so only the
+    // always-on categories are built — an unbound category is ABSENT rather
+    // than registered empty.
+    expect(Object.keys(servers).sort()).toEqual(["dispatch-chat", "dispatch-confirm", "dispatch-session"]);
+    for (const [name, server] of Object.entries(servers)) {
+      expect(server.type).toBe("sdk");
+      expect(server.name).toBe(name);
+      expect(server.instance).toBeDefined();
+    }
+  });
+
+  it("serves every tool from exactly one category server", () => {
+    const servers = createManagerMcpServers({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: fakeGitHub([]),
+      prCreate: fakePrCreate(readyBranch()).binding,
+      prApproval: fakeApproval(readyPr()).binding,
+      exemptions: fakeExemptions().binding,
+      chats: fakeChats({}).binding,
+    });
+    const all = Object.values(servers).flatMap((server) =>
+      Object.keys(
+        (server as unknown as { instance: { _registeredTools?: Record<string, unknown> } })
+          .instance._registeredTools ?? {},
+      ),
+    );
+    // A tool registered on two servers would give the agent two names for one
+    // thing and split its metrics; the partition exists to make that impossible.
+    expect(new Set(all).size).toBe(all.length);
+    expect(all).toContain("create_pr");
+    expect(all).toContain("ask_user");
+  });
+
+  it("gives every catalog descriptor the name its `tool(...)` definition carries", () => {
+    // `TOOL_WIRE_NAME` maps the factory's property names to wire names, and the
+    // compiler only checks that each value is SOME real tool name — a typo that
+    // lands on a different valid name type-checks and then serves `recall` under
+    // `forget`. This is the check that catches it.
+    const tools = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}) });
+    const declared = new Map(managerToolDescriptors().map((d) => [d.description, d.name]));
+    for (const def of Object.values(tools)) {
+      expect(declared.get(def.description), def.name).toBe(def.name);
+    }
+    // …and the registry covers exactly the tools the factory builds.
+    expect(managerToolDescriptors().map((d) => d.name).sort()).toEqual(
+      Object.values(tools).map((t) => t.name).sort(),
+    );
+  });
+
+  it("puts each tool on the server the shared registry names", () => {
+    const servers = createManagerMcpServers({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: fakeGitHub([]),
+    });
+    for (const [name, server] of Object.entries(servers)) {
+      const tools = Object.keys(
+        (server as unknown as { instance: { _registeredTools?: Record<string, unknown> } })
+          .instance._registeredTools ?? {},
+      );
+      for (const tool of tools) {
+        expect(managerToolQualifiedName(tool as ManagerToolName)).toBe(`mcp__${name}__${tool}`);
+      }
+    }
   });
 
   it("registers approve_pr ONLY when the approval binding is present", () => {
-    const names = (ctx: Parameters<typeof createManagerMcpServer>[0]) =>
-      Object.keys(
-        (createManagerMcpServer(ctx) as unknown as {
-          instance: { _registeredTools?: Record<string, unknown> };
-        }).instance._registeredTools ?? {},
-      );
+    const names = registeredNames;
 
     // GitHub wired but no auto-merge → the agent is offered no way to merge.
     expect(names({ chatId: "c1", bus, broker: fakeBroker({}), github: fakeGitHub([]) })).not.toContain(
@@ -3935,12 +4014,7 @@ describe("manager-mcp — server factory", () => {
     // The binding's presence is the permission — same pattern as approve_pr, and
     // it's bound exactly where the guard refuses a raw `gh pr create`, so the
     // refusal always has a sanctioned path to name.
-    const names = (ctx: Parameters<typeof createManagerMcpServer>[0]) =>
-      Object.keys(
-        (createManagerMcpServer(ctx) as unknown as {
-          instance: { _registeredTools?: Record<string, unknown> };
-        }).instance._registeredTools ?? {},
-      );
+    const names = registeredNames;
 
     expect(names({ chatId: "c1", bus, broker: fakeBroker({}), github: fakeGitHub([]) })).not.toContain(
       "create_pr",
@@ -3959,12 +4033,7 @@ describe("manager-mcp — server factory", () => {
   it("registers request_exemption ONLY when the exemptions binding is present", () => {
     // Bound only where a guard is actually enforcing. Offering it anywhere else
     // invites the agent to ask for permission nobody needed to give.
-    const names = (ctx: Parameters<typeof createManagerMcpServer>[0]) =>
-      Object.keys(
-        (createManagerMcpServer(ctx) as unknown as {
-          instance: { _registeredTools?: Record<string, unknown> };
-        }).instance._registeredTools ?? {},
-      );
+    const names = registeredNames;
 
     expect(names({ chatId: "c1", bus, broker: fakeBroker({}) })).not.toContain("request_exemption");
     expect(
@@ -3978,12 +4047,7 @@ describe("manager-mcp — server factory", () => {
   });
 
   it("registers spawn_chat ONLY when the chats binding is present", () => {
-    const names = (ctx: Parameters<typeof createManagerMcpServer>[0]) =>
-      Object.keys(
-        (createManagerMcpServer(ctx) as unknown as {
-          instance: { _registeredTools?: Record<string, unknown> };
-        }).instance._registeredTools ?? {},
-      );
+    const names = registeredNames;
 
     expect(names({ chatId: "c1", bus, broker: fakeBroker({}) })).not.toContain("spawn_chat");
     expect(

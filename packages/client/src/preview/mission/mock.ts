@@ -130,7 +130,7 @@ export const MOCK_MISSION: MissionSpec = {
     // the work instead, which is the failure mode this whole split exists to
     // prevent. Observer already denies Bash — spelled out so the intent survives
     // somebody later "helpfully" widening the profile.
-    toolOverrides: { deny: ["mcp__manager__terminal", "mcp__manager__run_subapp"] },
+    toolOverrides: { deny: ["mcp__dispatch-workspace__terminal", "mcp__dispatch-workspace__run_subapp"] },
     instructions:
       "You are the Release Train Engineer for this mission. You do not schedule work and you do " +
       "not write code — the engine owns readiness, hiring limits and phase arithmetic, and it is " +
@@ -290,7 +290,7 @@ export const MOCK_MISSION: MissionSpec = {
         },
         {
           id: "ts-no-stale-refs",
-          title: "Nothing still says mcp__manager__",
+          title: "Nothing still says the retired server name",
           then: "No occurrence survives in code, bundled skills, project instructions or memory",
           verify: "command",
           check: "node tools/verify/no-stale-tool-names.mjs",
@@ -298,7 +298,7 @@ export const MOCK_MISSION: MissionSpec = {
         {
           id: "ts-allowlists-migrated",
           title: "An existing allowlist still works",
-          given: "A settings.json permitting the old mcp__manager__terminal",
+          given: "A settings.json permitting the retired single-server terminal name",
           when: "The app starts after the upgrade",
           then: "It is rewritten to the new name and the user is not re-prompted",
           verify: "command",
@@ -639,7 +639,7 @@ export const MOCK_MISSION: MissionSpec = {
       teamId: "platform",
       title: "Rewire everything keyed on the old names",
       brief:
-        "SELF_GATED_TOOLS (session-broker.ts:1099) hardcodes mcp__manager__ask_user, spawn_chat " +
+        "SELF_GATED_TOOLS (session-broker.ts:1099) hardcodes the old ask_user, spawn_chat " +
         "and request_exemption - miss one and that tool double-prompts. MANAGER_TOOL_GATE, the " +
         "metrics classifier and the MCP catalog view all key on the old names too.\n" +
         "Metrics need a decision rather than a rename: existing rows are stored as " +
@@ -666,11 +666,11 @@ export const MOCK_MISSION: MissionSpec = {
       teamId: "platform",
       title: "Migrate permission allowlists",
       brief:
-        "The one breakage a user FEELS. A settings.json allowing mcp__manager__terminal stops " +
+        "The one breakage a user FEELS. A settings.json allowing the old terminal name stops " +
         "matching after the rename, and the symptom is not an error - it is a permission prompt " +
         "on a tool that was silently approved for months. Rewrite allow/deny entries on startup, " +
         "log what changed, and make it idempotent. Then add a boot check that warns when any " +
-        "config still mentions mcp__manager__, so a hand-edited file or an old export says so " +
+        "config still mentions a retired name, so a hand-edited file or an old export says so " +
         "instead of quietly prompting.",
       dependsOn: ["t-split-servers"],
       satisfies: ["ts-allowlists-migrated"],
@@ -693,7 +693,7 @@ export const MOCK_MISSION: MissionSpec = {
         "shared/workflow.ts, which are INJECTED into every chat - leave those and the app " +
         "keeps teaching the dead names to every new session.\n" +
         "Project memory is a separate surface and the easiest to forget: 49 more occurrences " +
-        "across 30 files in .dispatch/memory/, led by mcp__manager__terminal (22) and " +
+        "across 30 files in .dispatch/memory/, led by the old terminal name (22) and " +
         "ask_user (8). Those are markdown in the PRIMARY checkout, not this worktree, and they " +
         "are surfaced to agents as trusted context - a stale memory outlives the rename " +
         "indefinitely. Rewrite them through the memory tools, never by hand.\n" +

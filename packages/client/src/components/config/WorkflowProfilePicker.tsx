@@ -217,7 +217,7 @@ export function WorkflowProfilePicker({
               </span>
               <span className="mt-0.5 block text-2xs leading-snug text-faint">
                 Agents land their own PRs with{" "}
-                <span className="cm-mono">mcp__manager__approve_pr</span> once CI is green and
+                <span className="cm-mono">mcp__dispatch-github__approve_pr</span> once CI is green and
                 review is clean — no waiting for a human to click merge. Off means ship and wait.
               </span>
             </span>

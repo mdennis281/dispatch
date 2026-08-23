@@ -645,12 +645,12 @@ export const api = {
       post<KillResult[]>(`/api/projects/${projectId}/processes/kill`, { pids }),
   },
 
-  /* persistent named shells — opened by the agent (mcp__manager__terminal) OR
+  /* persistent named shells — opened by the agent (mcp__dispatch-workspace__terminal) OR
      by a human from the Terminals panel; both land on the same shells. */
   terminals: {
     /**
      * The catalog. Passing nothing sweeps app-wide; the scope/q filters are the
-     * same predicate the server applies to `mcp__manager__terminal_output`'s
+     * same predicate the server applies to `mcp__dispatch-workspace__terminal_output`'s
      * list, so what the Workspace view shows and what an agent sees agree.
      */
     list: (query: Partial<RegistryQuery> = {}) =>
