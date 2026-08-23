@@ -68,7 +68,9 @@
    * Same rule as the dark palette: every rank clears 4.5:1 against the worst
    * surface it can land on — which here is `--p-app` (#e9edf2), NOT the white
    * panel. The page behind everything is the darkest background in a light
-   * theme, so it is the one that binds.
+   * theme, so it is the one that binds. Note this is the mirror of dark, where
+   * the LIGHTEST surface binds: in light, `--p-elevated` and `--p-overlay` are
+   * both #ffffff and therefore the most forgiving, not the least.
    *
    *   faint 4.54 · muted 5.68 · secondary 6.75 · primary 15.46
    *

@@ -372,7 +372,8 @@ export const MOCK_MANAGER_CHAT: ManagerTurn[] = [
     author: "manager",
     ts: min(1),
     text:
-      "Started. 6 phases, 35 tasks, 5 teams. Mission-grant consent is on, so leads hire without " +
+      "Started. 6 phases, 35 tasks, 5 teams — note that is one phase OVER the cap; see my last " +
+      "message. Mission-grant consent is on, so leads hire without " +
       "prompting you — I'll surface budget refusals, disputed gates and anything past the QA round cap.",
   },
   {
@@ -409,8 +410,20 @@ export const MOCK_MANAGER_CHAT: ManagerTurn[] = [
       "grant itself the override — which is the guard behaving correctly. Do you want to review " +
       "#215 yourself, queue a reviewer, or approve the override?",
   },
+  {
+    id: "m7",
+    author: "manager",
+    ts: min(544),
+    brief: { label: "Proposal — needs you", text: "6 phases against a cap of 5" },
+    text:
+      "Adding the tool-surface phase put this mission one over CAPS.phases, so it does not " +
+      "validate and I cannot start phase 6 without your call. Three ways out: raise the cap to 6; " +
+      "merge Engine into Actors, which costs a 12-task phase behind one QA gate; or split the " +
+      "tool-surface work into its own mission, which is my recommendation since it depends on no " +
+      "Mission code. I have not picked one — widening a cap the first time it binds is how a cap " +
+      "stops being one.",
+  },
 ];
-
 /* --------------------------------------------------------------------- run */
 
 export const MOCK_RUN: MissionRun = {

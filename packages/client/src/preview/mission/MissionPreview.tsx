@@ -24,7 +24,7 @@
  * beside a board that navigated by clicking cards, which meant two unrelated
  * ways to reach anything and a rail that never agreed with the content.
  */
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   HardHat,
@@ -44,6 +44,7 @@ import type { MissionPolicy, MissionSpec, TeamId } from "./types.js";
 import { Crumbs, RowButton, RunStatusPill } from "./chrome.js";
 import { crumbsFor, parentOf, titleFor, type Nav, type Route } from "./nav.js";
 import { defaultOpen, type SectionState } from "./sections.js";
+
 import { MissionScreen } from "./MissionScreen.js";
 import { PhaseScreen } from "./PhaseScreen.js";
 import { TaskScreen } from "./TaskScreen.js";
@@ -51,6 +52,12 @@ import { AgentScreen } from "./AgentScreen.js";
 import { Sidebar } from "./Sidebar.js";
 import { MiniChat } from "./MiniChat.js";
 import type { SettingsDraft } from "./SettingsSection.js";
+
+/**
+ * Viewport y below which a section counts as "the one you are reading" — just
+ * under the two header bands (44px title + 36px nav).
+ */
+const SPY_LINE = 96;
 
 const BASE_DRAFT: SettingsDraft = {
   policy: MOCK_MISSION.policy,
@@ -63,6 +70,7 @@ export function MissionPreview() {
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [draft, setDraft] = useState<SettingsDraft>(BASE_DRAFT);
   const [open, setOpenMap] = useState<Record<string, boolean>>(defaultOpen);
+  const [active, setActive] = useState<string | undefined>();
   const refs = useRef(new Map<string, HTMLElement>());
 
   const dirty =
@@ -93,8 +101,54 @@ export function MissionPreview() {
     [],
   );
 
+  // Scroll-spy for the rail's current-section marker. `SectionState.active` was
+  // declared and documented but never assigned, so the comparison in Sidebar
+  // was always false and the rail silently had no indicator — the field being
+  // optional meant nothing type-errored either.
+  //
+  // Positions are measured rather than read off IntersectionObserver entries:
+  // "which section is nearest the top" is a question about the whole set, and
+  // an entry-by-entry callback has to reconstruct that set anyway. The observer
+  // is just a cheap trigger; the `scroll` listener is capturing, because the
+  // element that actually scrolls is a nested div inside each screen and its
+  // events never reach window in the bubble phase.
+  useEffect(() => {
+    let queued = false;
+    const compute = () => {
+      queued = false;
+      let best: string | undefined;
+      let bestTop = -Infinity;
+      let firstId: string | undefined;
+      let firstTop = Infinity;
+      for (const [id, el] of refs.current) {
+        const { top } = el.getBoundingClientRect();
+        if (top <= SPY_LINE && top > bestTop) [bestTop, best] = [top, id];
+        if (top < firstTop) [firstTop, firstId] = [top, id];
+      }
+      // Nothing has crossed the line yet (top of a short screen) — mark the
+      // first section rather than nothing, so the rail is never blank.
+      setActive(best ?? firstId);
+    };
+    const schedule = () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(compute);
+    };
+    schedule();
+    const io = new IntersectionObserver(schedule, { threshold: [0, 0.5, 1] });
+    for (const el of refs.current.values()) io.observe(el);
+    window.addEventListener("scroll", schedule, true);
+    window.addEventListener("resize", schedule);
+    return () => {
+      io.disconnect();
+      window.removeEventListener("scroll", schedule, true);
+      window.removeEventListener("resize", schedule);
+    };
+  }, [route, open]);
+
   const sections: SectionState = useMemo(
     () => ({
+      active,
       isOpen: (id) => open[id] ?? true,
       toggle: (id) => setOpenMap((m) => ({ ...m, [id]: !(m[id] ?? true) })),
       setOpen,
@@ -111,7 +165,7 @@ export function MissionPreview() {
         else refs.current.delete(id);
       },
     }),
-    [open, setOpen],
+    [active, open, setOpen],
   );
 
   const nav: Nav = { route, go: setRoute };

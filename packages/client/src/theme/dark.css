@@ -70,9 +70,16 @@
    * body / supporting / label / placeholder.
    *
    * EVERY RANK CLEARS 4.5:1 — WCAG's normal-text bar, not the 3:1 large-text
-   * one — against the worst surface it can land on (`--p-elevated`, #171c22):
+   * one — against the worst surface it can land on. That surface is
+   * `--p-overlay` (#1b2027), the LIGHTEST opaque rung: modals, the command
+   * palette and every Popover menu sit on it, and `CommandPalette.tsx` alone
+   * pairs it with `text-faint` four times at 10–11px. Measured there:
    *
-   *   faint 4.57 · muted 5.67 · secondary 6.56 · primary 14.5
+   *   faint 4.56 · muted 5.42 · secondary 6.27 · primary 13.34
+   *
+   * `--p-bubble` composites lighter still (#212326 over `--p-app`), but it is
+   * only ever paired with `text-primary`, so it does not bind. Check that again
+   * if a bubble ever carries a dimmer rank.
    *
    * That floor is load-bearing rather than aspirational. `faint` and `muted`
    * were #4b5563 and #6b7280, which measure 2.44 and 3.82 on a panel — the
@@ -81,13 +88,15 @@
    * simply unreadable. It went unreported for months, which is how this defect
    * behaves: readers assume the text they can't read wasn't important.
    *
-   * Re-value one and re-measure the LADDER, not just the step you touched. The
-   * ranks must stay ordered AND roughly evenly spaced, and there is very
-   * little room between 4.5:1 and the primary. */
+   * Re-value one and re-measure the LADDER against the LIGHTEST surface, not
+   * just the step you touched on a mid-grey panel. The first pass at this
+   * measured against `--p-elevated` and shipped a `faint` that still failed on
+   * overlay at 4.37 — the ranks must stay ordered AND roughly evenly spaced,
+   * and there is very little room between 4.5:1 and the primary. */
   --p-text-primary: #e6e8eb;
   --p-text-secondary: #9aa1a9;
   --p-text-muted: #8d95a2;
-  --p-text-faint: #788597;
+  --p-text-faint: #7c889a;
 
   /* ── primary accent — brand amber ────────────────────────────────────────
    * The UI accent IS the mark's amber. `-hi` is brighter (hover/emphasis) and

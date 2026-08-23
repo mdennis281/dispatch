@@ -6,6 +6,24 @@
  * the SCHEMA works — it has to carry a real dependency graph, a real team split,
  * and acceptance criteria that more than one team has to sign off on. Every
  * awkwardness visible here is an awkwardness the schema would have in anger.
+ *
+ * THIS MOCK DELIBERATELY FAILS VALIDATION, and the board is meant to open on a
+ * red `1 error` chip. It carries SIX phases against `CAPS.phases: 5`, because
+ * the tool-surface phase was added after the other five existed and the cap is
+ * the first constraint this plan has actually hit.
+ *
+ * It is left broken rather than papered over, for two reasons. Widening a cap
+ * the moment it first binds is how a cap stops being one — and this mock's own
+ * flagship criterion is `spec-validated`, "a bad plan cannot be saved", so a
+ * demo that quietly raised the limit to stay green would be arguing against
+ * itself. The three honest resolutions (raise the cap to 6, merge Engine into
+ * Actors, or split the tool-surface work into its own mission) are the owner's
+ * call, and the manager chat asks for it — see the last turn of
+ * `MOCK_MANAGER_CHAT`.
+ *
+ * The one advisory alongside it — `t-surface-gaps` satisfies no criterion — is
+ * also deliberate: it is an investigation, and investigations earn their team
+ * no vote at any gate.
  */
 import type { MissionSpec, RoleTemplate } from "./types.js";
 

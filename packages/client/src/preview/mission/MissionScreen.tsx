@@ -325,13 +325,26 @@ function Budget({ plan }: { plan: Plan }) {
     <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
       <span className="text-2xs uppercase leading-4 tracking-wide text-faint">budget</span>
       {items.map(([label, used, cap]) => {
-        const full = used >= cap;
+        // Over and AT the cap are different facts and were sharing one message:
+        // "anything further has to displace something" is advice for a plan
+        // sitting on its limit, not for one that has already broken it.
+        const over = used > cap;
+        const at = used === cap;
         return (
           <span key={label} className="flex items-baseline gap-1">
             <span className="text-2xs leading-4 text-faint">{label}</span>
             <span
-              className={cn("cm-mono text-2xs", full ? "text-warn" : "text-muted")}
-              title={full ? `at the cap — anything further has to displace something` : undefined}
+              className={cn(
+                "cm-mono text-2xs",
+                over ? "text-danger" : at ? "text-warn" : "text-muted",
+              )}
+              title={
+                over
+                  ? `over the cap by ${used - cap} — this plan does not validate`
+                  : at
+                    ? "at the cap — anything further has to displace something"
+                    : undefined
+              }
             >
               {used}/{cap}
             </span>
