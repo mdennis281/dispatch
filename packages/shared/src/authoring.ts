@@ -81,15 +81,29 @@ export type AuthoredItem = z.infer<typeof AuthoredItemSchema>;
  */
 export const AUTHORED_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
-/** Normalize a free-form title into a legal authored name, or null if nothing survives. */
+/**
+ * Normalize a free-form title into a legal authored name, or null if nothing
+ * survives.
+ *
+ * The dash trimming is index arithmetic rather than the obvious
+ * `.replace(/^-+|-+$/g, "")`. That pattern is QUADRATIC on a long run of dashes
+ * (CodeQL `js/polynomial-redos`): `-+$` has no anchor to the left, so the engine
+ * retries it from every position and each attempt scans to the end. The input
+ * here is a free-form title straight off a tool call — `toAuthoredName("-".
+ * repeat(50_000))` is a plausible thing for a confused model to send, and it
+ * should cost microseconds, not seconds.
+ */
 export function toAuthoredName(raw: string): string | null {
-  const slug = raw
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64)
-    .replace(/-+$/, "");
+  // `/[^a-z0-9]+/g` is fine — a global scan advances past each match, so the
+  // whole pass is linear. It is only the unanchored trims that backtrack.
+  const collapsed = raw.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  let start = 0;
+  let end = collapsed.length;
+  while (start < end && collapsed[start] === "-") start += 1;
+  while (end > start && collapsed[end - 1] === "-") end -= 1;
+  // Clamping to 64 can re-expose a dash at the tail, so trim once more after it.
+  let slug = collapsed.slice(start, Math.min(end, start + 64));
+  while (slug.endsWith("-")) slug = slug.slice(0, -1);
   return AUTHORED_NAME_RE.test(slug) ? slug : null;
 }
 

@@ -77,6 +77,17 @@ describe("toAuthoredName", () => {
     expect(toAuthoredName("   ")).toBeNull();
   });
 
+  it("stays fast on a long run of separators (no quadratic dash trim)", () => {
+    // The `/^-+|-+$/g` this replaced was O(n^2) here — CodeQL js/polynomial-redos.
+    // 200k separators is well under a millisecond with index arithmetic and
+    // seconds with the regex, so the bound is generous and still catches a
+    // regression that reintroduces backtracking.
+    const started = performance.now();
+    expect(toAuthoredName("-".repeat(200_000))).toBeNull();
+    expect(toAuthoredName(`${"!".repeat(200_000)}ok`)).toBe("ok");
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it("never leaves a trailing dash after the length clamp", () => {
     const long = toAuthoredName(`${"a".repeat(63)} b`);
     expect(long).toBe("a".repeat(63));
