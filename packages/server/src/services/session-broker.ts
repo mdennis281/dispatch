@@ -3312,8 +3312,17 @@ export class SessionBroker {
    * Two live shapes, same as `sessionPids`: a Claude chat holds the SDK `Query`
    * directly (the broker short-circuits the harness seam for it), while every
    * other provider goes through a `HarnessSession`. Both are tried; whichever
-   * exists answers. Never throws and never blocks — a menu that is one entry
-   * short is not worth failing a turn over.
+   * exists answers.
+   *
+   * CALLED FROM BOTH INIT PATHS for that reason — `handleHarnessEvent` for a
+   * neutral-seam provider and `handleMessage` for the legacy Claude loop. Wiring
+   * only the seam left the `session.query` branch below unreachable, so on a
+   * stock install (every chat `harnessKind: "claude"`) the menu's built-in half
+   * never populated and the UI's "built-in commands appear once this chat has
+   * run a turn" was a promise nothing could keep.
+   *
+   * Never throws and never blocks — a menu one entry short is not worth failing
+   * a turn over.
    */
   private async snapshotSlashCommands(session: LiveSession): Promise<void> {
     if (!this.slashCommands) return;
@@ -3823,6 +3832,12 @@ export class SessionBroker {
           // Learn this model's context window now that the subprocess is live, so
           // the very next result row carries the correct meter denominator.
           void this.refreshContextWindow(session);
+          // …and its `/` command list. This branch, not the neutral-seam one, is
+          // where a CLAUDE chat's init lands — `startQuery` short-circuits the
+          // harness seam for the default runtime — so the snapshot has to be
+          // taken in BOTH places or the menu's built-in half never populates on
+          // a stock install.
+          void this.snapshotSlashCommands(session);
         }
         // A backgrounded task (async `Agent` spawn, backgrounded `Bash`) settled.
         // This is the ONLY per-task completion signal in the stream — the task's

@@ -23,6 +23,38 @@ import { api } from "../../lib/api.js";
  */
 export const SLASH_TOKEN_RE = /^\/([a-zA-Z0-9:_-]*)$/;
 
+/** The subset of a keyboard event {@link slashKeyAction} judges. */
+export interface SlashKeyEvent {
+  key: string;
+  shiftKey?: boolean;
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  altKey?: boolean;
+}
+
+/**
+ * What an open `/` menu should do with a keystroke, or null to let it through.
+ *
+ * Pure and exported so it can be tested without a DOM — the composer's real
+ * handler is inside a TipTap `handleKeyDown` closure that the node-env client
+ * suite cannot reach, and this is exactly the logic that is easy to get subtly
+ * wrong. It already was: "a bare Enter commits the row" was implemented as
+ * `!shiftKey`, which also matched **Ctrl/Cmd+Enter** — the composer's only SEND
+ * shortcut, since plain Enter inserts a newline here. Typing `/review` in full
+ * and pressing Ctrl+Enter re-inserted the command instead of sending it.
+ *
+ * `"commit"` therefore requires NO modifier at all.
+ */
+export function slashKeyAction(event: SlashKeyEvent): "commit" | "next" | "prev" | "close" | null {
+  if (event.key === "Escape") return "close";
+  if (event.key === "ArrowDown") return "next";
+  if (event.key === "ArrowUp") return "prev";
+  if (event.key === "Tab" && !event.shiftKey) return "commit";
+  const bare = !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey;
+  if (event.key === "Enter" && bare) return "commit";
+  return null;
+}
+
 export interface SlashCommandsState {
   /** Non-null while the menu is open — the text typed after the slash. */
   query: string | null;

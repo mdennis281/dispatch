@@ -47,7 +47,7 @@ import {
 } from "../../lib/composerDrafts.js";
 import { pickPath } from "../files/filePicker.js";
 import { SlashMenu } from "./SlashMenu.js";
-import { useSlashCommands } from "./useSlashCommands.js";
+import { useSlashCommands, slashKeyAction } from "./useSlashCommands.js";
 import { fsToNative } from "../files/fsMeta.js";
 import { useFsRoots } from "../../stores/fsRoots.js";
 import { useProjects } from "../../stores/projects.js";
@@ -788,23 +788,20 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
 
   slashKeyRef.current = (event: KeyboardEvent) => {
     if (slash.query === null) return false;
-    if (event.key === "Escape") {
+    const action = slashKeyAction(event);
+    if (action === "close") {
       slash.close();
       return true;
     }
-    if (!slash.matches.length) return false;
-    if (event.key === "ArrowDown") return slash.move(1);
-    if (event.key === "ArrowUp") return slash.move(-1);
-    // Tab and a bare Enter both commit the highlighted row. Enter is claimed
-    // ONLY while the menu has a match to commit — otherwise a message that just
-    // happens to start with a slash could never be sent.
-    if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
-      const cmd = slash.current();
-      if (!cmd) return false;
-      pickCommand(cmd.name);
-      return true;
-    }
-    return false;
+    // Everything below needs a row to act on. Falling through when the list is
+    // empty is what keeps a message that merely STARTS with a slash sendable.
+    if (!action || !slash.matches.length) return false;
+    if (action === "next") return slash.move(1);
+    if (action === "prev") return slash.move(-1);
+    const cmd = slash.current();
+    if (!cmd) return false;
+    pickCommand(cmd.name);
+    return true;
   };
 
   const setMode = (modeId: string) => {
