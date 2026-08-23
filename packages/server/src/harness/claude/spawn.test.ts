@@ -43,7 +43,7 @@ describe("spawnWithPid", () => {
 
   it("hands back the child's stderr tail — the SDK can no longer collect it", async () => {
     const seen = await run(
-      "process.stderr.write('Error: --nope is not a known flag\\n'); process.exit(1)",
+      "process.stderr.write('Error: --nope is not a known flag\\n'); process.exitCode = 1",
     );
     expect(seen.tail).toContain("--nope is not a known flag");
   });
@@ -51,9 +51,13 @@ describe("spawnWithPid", () => {
   it("keeps the LAST of a long stderr rather than the first", async () => {
     // A crashing CLI's useful line is the final one; a head-biased buffer would
     // hand back the start of a stack trace and drop the message.
+    // `exitCode`, NOT `exit()`. stderr to a PIPE is async on POSIX and sync on
+    // Windows, so `process.exit()` here discards whatever is still queued — the
+    // child never writes its last line at all, and this failed on Linux while
+    // passing locally for a reason with nothing to do with the code under test.
     const seen = await run(
       "for (let i = 0; i < 4000; i++) process.stderr.write('line ' + i + '\\n');" +
-        "process.stderr.write('FINAL: the actual reason\\n'); process.exit(1)",
+        "process.stderr.write('FINAL: the actual reason\\n'); process.exitCode = 1",
     );
     expect(seen.tail).toContain("FINAL: the actual reason");
     expect(seen.tail.length).toBeLessThanOrEqual(8_192);
