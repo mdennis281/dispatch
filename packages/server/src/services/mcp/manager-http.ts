@@ -69,6 +69,18 @@ export const MANAGER_MCP_PATH = "/api/mcp/manager";
 /** The route pattern Fastify registers — the category is the last segment. */
 export const MANAGER_MCP_ROUTE = `${MANAGER_MCP_PATH}/:category`;
 
+/**
+ * Is this request path the bridge's?
+ *
+ * Exported so the global auth gate can exempt it WITHOUT restating the path —
+ * the exemption was an exact match on {@link MANAGER_MCP_PATH} and silently
+ * stopped matching when the category segment was added, 401ing every Codex
+ * session on any install with auth enabled.
+ */
+export function isManagerBridgePath(path: string): boolean {
+  return path === MANAGER_MCP_PATH || path.startsWith(`${MANAGER_MCP_PATH}/`);
+}
+
 /** Recognise a category from a URL segment, or undefined when it isn't one. */
 export function managerCategoryFromPath(segment: string | undefined): ManagerCategory | undefined {
   return MANAGER_CATEGORIES.find((c) => c === segment);

@@ -17,6 +17,11 @@ import {
 
 const legacy = (tool: string) => `${LEGACY_MANAGER_TOOL_PREFIX}${tool}`;
 
+/** A home directory with no settings file, so a project-scope assertion cannot
+ *  pick up whatever the machine running the tests happens to have in its real
+ *  `~/.claude/settings.json`. */
+const NO_HOME = join(tmpdir(), "cm-mig-no-such-home");
+
 function agent(over: Partial<AgentConfig> = {}): AgentConfig {
   return {
     id: "a1",
@@ -118,7 +123,7 @@ describe("warning about config we do not own", () => {
         join(dir, ".claude", "settings.json"),
         JSON.stringify({ permissions: { allow: [legacy("terminal"), legacy("worktree")] } }),
       );
-      const warnings = await findForeignStaleToolNames([dir]);
+      const warnings = await findForeignStaleToolNames([dir], NO_HOME);
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toContain(legacy("terminal"));
       expect(warnings[0]).toContain(legacy("worktree"));
@@ -143,10 +148,44 @@ describe("warning about config we do not own", () => {
     }
   });
 
+  it("scans the USER-scope settings file, the likeliest place of all", async () => {
+    // Sessions launch with settingSources ["user","project","local"], so the SDK
+    // reads ~/.claude/settings.json — and a permission a human granted months ago
+    // lives there far more often than in any one repo. Missing it left the boot
+    // warning silent about exactly the file most likely to start re-prompting.
+    dir = await mkdtemp(join(tmpdir(), "cm-mig-home-"));
+    try {
+      await mkdir(join(dir, ".claude"), { recursive: true });
+      await writeFile(
+        join(dir, ".claude", "settings.json"),
+        JSON.stringify({ permissions: { allow: [legacy("terminal")] } }),
+      );
+      const warnings = await findForeignStaleToolNames([], dir);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(legacy("terminal"));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not warn twice about a project rooted at the home directory", async () => {
+    dir = await mkdtemp(join(tmpdir(), "cm-mig-home-"));
+    try {
+      await mkdir(join(dir, ".claude"), { recursive: true });
+      await writeFile(
+        join(dir, ".claude", "settings.json"),
+        JSON.stringify({ permissions: { allow: [legacy("terminal")] } }),
+      );
+      expect(await findForeignStaleToolNames([dir], dir)).toHaveLength(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("says nothing about a repo with no such files", async () => {
     dir = await mkdtemp(join(tmpdir(), "cm-mig-"));
     try {
-      expect(await findForeignStaleToolNames([dir])).toEqual([]);
+      expect(await findForeignStaleToolNames([dir], NO_HOME)).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -160,7 +199,7 @@ describe("warning about config we do not own", () => {
         join(dir, ".claude", "settings.json"),
         JSON.stringify({ permissions: { allow: [LEGACY_MANAGER_SERVER_ENTRY] } }),
       );
-      const warnings = await findForeignStaleToolNames([dir]);
+      const warnings = await findForeignStaleToolNames([dir], NO_HOME);
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toContain(LEGACY_MANAGER_SERVER_ENTRY);
     } finally {
@@ -179,7 +218,7 @@ describe("warning about config we do not own", () => {
         join(dir, ".claude", "settings.json"),
         JSON.stringify({ permissions: { allow: [`${LEGACY_MANAGER_SERVER_ENTRY}x__foo`, "mcp__my-manager"] } }),
       );
-      expect(await findForeignStaleToolNames([dir])).toEqual([]);
+      expect(await findForeignStaleToolNames([dir], NO_HOME)).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -193,7 +232,7 @@ describe("warning about config we do not own", () => {
         join(dir, ".claude", "settings.json"),
         JSON.stringify({ permissions: { allow: ["mcp__dispatch-workspace__terminal"] } }),
       );
-      expect(await findForeignStaleToolNames([dir])).toEqual([]);
+      expect(await findForeignStaleToolNames([dir], NO_HOME)).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

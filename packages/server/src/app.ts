@@ -22,6 +22,7 @@ import {
 } from "./services/container.js";
 import { registerRoutes } from "./routes/index.js";
 import { migrateManagerToolNames } from "./services/manager-tool-migration.js";
+import { isManagerBridgePath } from "./services/mcp/manager-http.js";
 import { healthReport } from "./health.js";
 import { AuthService, type RequestIdentity } from "./services/auth.js";
 
@@ -118,7 +119,14 @@ export async function buildApp(
         path === "/api/auth/passkeys/login/options" || path === "/api/auth/passkeys/login/verify" ||
         // The manager bridge has its own per-chat, ephemeral bearer grants. A
         // browser JWT cannot replace those without breaking tool isolation.
-        path === "/api/mcp/manager") return;
+        //
+        // A PREFIX, because the bridge serves one path per tool category. It was
+        // an exact match on the parent path, which stopped matching the moment
+        // the category segment was added: with auth ON, Codex dialled
+        // `/api/mcp/manager/session` with a grant token, `verifyJwt` returned
+        // null for it, and every Dispatch tool 401'd for the whole session.
+        // Auth-disabled installs never saw it.
+        isManagerBridgePath(path)) return;
     if (path === "/ws") {
       const ticket = new URL(req.url, "http://dispatch.local").searchParams.get("ticket") ?? undefined;
       const found = await auth.authenticateWs(ticket);

@@ -15,7 +15,7 @@
  *     place, idempotently, with a log line naming every change. Safe because
  *     nothing else reads or versions those files.
  *
- *   - FILES THE USER OWNS — a repo's `.claude/settings.json`, `.dispatch/`
+ *   - FILES THE USER OWNS — `~/.claude/settings.json`, a repo's own, `.dispatch/`
  *     config committed to git. WARNED ABOUT, never rewritten. Silently dirtying
  *     a working tree is its own bug (an agent mid-PR would sweep the change into
  *     an unrelated commit), and `.claude/settings.json` is read by Claude Code,
@@ -29,6 +29,7 @@
  * branch, and never writes to the tree.
  */
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   findLegacyManagerMentions,
@@ -58,12 +59,27 @@ export interface ManagerToolMigrationResult {
   warnings: string[];
 }
 
-/** Files a human may have put a tool allowlist in that Dispatch does not own. */
-const FOREIGN_SETTINGS = [
-  ".claude/settings.json",
-  ".claude/settings.local.json",
-  ".mcp.json",
-];
+/**
+ * Per-repo files a human may have put a tool allowlist in that Dispatch does not
+ * own. Relative to each project's `repoPath`.
+ *
+ * `.mcp.json` is deliberately NOT here: its keys are bare server names, so it
+ * can never contain a qualified tool name and scanning it could only ever
+ * produce nothing.
+ */
+const PROJECT_SETTINGS = [".claude/settings.json", ".claude/settings.local.json"];
+
+/**
+ * User-scope settings, scanned ONCE regardless of how many projects exist.
+ *
+ * The likeliest place of all for a stale entry, and the one the first version of
+ * this missed: sessions launch with `settingSources: ["user", "project",
+ * "local"]`, so the SDK reads `~/.claude/settings.json` — and a
+ * `permissions.allow` entry a human added months ago lives there far more often
+ * than in any one repo. Missing it meant the boot warning stayed silent about
+ * exactly the file most likely to start re-prompting.
+ */
+const USER_SETTINGS = [".claude/settings.json"];
 
 /**
  * Rewrite stale tool names in Dispatch's own stored agents.
@@ -105,22 +121,28 @@ export async function migrateStoredAgentTools(
  *
  * An unreadable or absent file is not a finding — most repos have none of these.
  */
-export async function findForeignStaleToolNames(repoPaths: readonly string[]): Promise<string[]> {
+export async function findForeignStaleToolNames(
+  repoPaths: readonly string[],
+  home: string = homedir(),
+): Promise<string[]> {
+  const files = [
+    ...USER_SETTINGS.map((rel) => join(home, rel)),
+    ...repoPaths.flatMap((repoPath) => PROJECT_SETTINGS.map((rel) => join(repoPath, rel))),
+  ];
   const warnings: string[] = [];
-  for (const repoPath of repoPaths) {
-    for (const rel of FOREIGN_SETTINGS) {
-      const file = join(repoPath, rel);
-      let text: string;
-      try {
-        text = await readFile(file, "utf8");
-      } catch {
-        continue;
-      }
-      if (!mentionsLegacyManagerServer(text)) continue;
-      // Report the actual entries, not just the file: "this file mentions a dead
-      // name" sends someone reading 200 lines of JSON.
-      warnings.push(`${file}: ${findLegacyManagerMentions(text).join(", ")}`);
+  // Deduped: two projects can share a repoPath, and a project rooted at the home
+  // directory would otherwise be scanned twice and warned about twice.
+  for (const file of [...new Set(files)]) {
+    let text: string;
+    try {
+      text = await readFile(file, "utf8");
+    } catch {
+      continue;
     }
+    if (!mentionsLegacyManagerServer(text)) continue;
+    // Report the actual entries, not just the file: "this file mentions a dead
+    // name" sends someone reading 200 lines of JSON.
+    warnings.push(`${file}: ${findLegacyManagerMentions(text).join(", ")}`);
   }
   return warnings;
 }
@@ -134,6 +156,7 @@ export async function migrateManagerToolNames(
   store: ManagerToolMigrationStore,
   repoPaths: readonly string[],
   log: (message: string) => void = (m) => console.warn(m), // eslint-disable-line no-console
+  home?: string,
 ): Promise<ManagerToolMigrationResult> {
   const result: ManagerToolMigrationResult = { rewritten: [], stranded: [], warnings: [] };
   try {
@@ -144,7 +167,7 @@ export async function migrateManagerToolNames(
     log(`[dispatch] agent tool-name migration skipped: ${String(err)}`);
   }
   try {
-    result.warnings = await findForeignStaleToolNames(repoPaths);
+    result.warnings = await findForeignStaleToolNames(repoPaths, home);
   } catch {
     /* a scan that cannot read is a scan with no findings */
   }
