@@ -122,6 +122,23 @@ export const AppSettingsSchema = z.object({
   defaultModeId: z.string().optional(),
   /** App-wide runtime selection, per-runtime defaults, and context budgets. */
   harness: HarnessSettingsSchema.optional(),
+  /**
+   * How many chats may hold an execution slot at once — running, waiting on a
+   * tool, or awaiting input (idle chats are free). Over the cap a new turn parks
+   * in a visible `queued` state and drains FIFO; see SessionBroker.
+   *
+   * It lives here rather than only in the env because it is a thing you retune
+   * while working — a review round is two chats per PR (the reviewer Dispatch
+   * spawns, and the author chat parked in `watch_pr` holding its slot), so a few
+   * PRs in flight is the whole default cap, and "why is everything queued" was
+   * answerable only by editing an env var and restarting the server.
+   *
+   * Optional rather than `.default(...)`: unset does NOT mean "no cap", it means
+   * fall back to `DISPATCH_MAX_ACTIVE_SESSIONS` and then to the shared default.
+   * The env var still starts the process, so it stays the floor of the chain
+   * instead of being silently overwritten by an untouched field.
+   */
+  maxActiveSessions: z.number().int().positive().optional(),
   webhook: z
     .object({
       kind: z.enum(["ntfy", "pushover"]).optional(),

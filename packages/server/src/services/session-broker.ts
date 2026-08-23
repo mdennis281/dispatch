@@ -16,8 +16,9 @@
  *  - Forward stream messages (assistant text/thinking, tool_use, tool_result,
  *    result) as WsServerEvents AND persist them to the Store JSONL transcript.
  *  - Map UI mode/effort → SDK permissionMode / reasoning effort.
- *  - Enforce a configurable cap on concurrently-ACTIVE sessions (default 6); over
- *    the cap, new turns park in a visible `queued` state and drain in FIFO order.
+ *  - Enforce a configurable cap on concurrently-ACTIVE sessions (Settings →
+ *    Context, falling back to `DISPATCH_MAX_ACTIVE_SESSIONS`, then 6); over the
+ *    cap, new turns park in a visible `queued` state and drain in FIFO order.
  *  - Emit AttentionItems when a turn completes (idle) or the session ends (done).
  *
  * The SDK `query` function, id generator, and clock are injectable so tests can
@@ -92,6 +93,7 @@ import type {
 } from "@dispatch/shared";
 import {
   DEFAULT_HARNESS,
+  DEFAULT_MAX_ACTIVE_SESSIONS,
   EffortSchema,
   applyMcpEnablement,
   classifyWorkflowViolation,
@@ -1619,7 +1621,14 @@ interface LiveSession {
 export class SessionBroker {
   private readonly store: Store;
   private readonly bus: EventBus;
-  private readonly cap: number;
+  /** What a cleared setting falls back to: the env var, or the shared default.
+   *  Captured at construction because that is the only place it can be read
+   *  synchronously — see `setCap`. */
+  private readonly defaultCap: number;
+  /** The cap actually in force. Mutable because it is an app SETTING now, and a
+   *  setting you have to restart the server to apply is a restart, not a
+   *  setting. */
+  private cap: number;
   private readonly terminals?: TerminalService;
   private readonly memory?: MemoryService;
   private readonly memoryHistory?: MemoryHistoryService;
@@ -1719,7 +1728,8 @@ export class SessionBroker {
       });
     }
     this.bus = opts.bus;
-    this.cap = Math.max(1, opts.maxActiveSessions ?? 6);
+    this.defaultCap = Math.max(1, opts.maxActiveSessions ?? DEFAULT_MAX_ACTIVE_SESSIONS);
+    this.cap = this.defaultCap;
     this.terminals = opts.terminals;
     this.memory = opts.memory;
     this.memoryHistory = opts.memoryHistory;
@@ -2711,6 +2721,67 @@ export class SessionBroker {
     return out;
   }
 
+  /**
+   * Apply the app-level cap (`AppSettings.maxActiveSessions`). `undefined` — a
+   * cleared field — falls back to the boot value, so `DISPATCH_MAX_ACTIVE_SESSIONS`
+   * keeps meaning exactly what it did for installs that set it.
+   *
+   * Raising it drains the queue immediately rather than waiting for the next
+   * turn to settle: the reason you raise the cap is that chats are parked RIGHT
+   * NOW, and a control whose effect only shows up after some unrelated chat
+   * finishes reads as broken.
+   *
+   * Lowering it never preempts. A running turn has a subprocess, injected
+   * context and possibly a half-written file behind it; killing that to satisfy
+   * a number is a worse answer than letting the count drain down to the new cap
+   * as turns finish on their own.
+   */
+  setCap(max: number | undefined): void {
+    const next = Math.max(1, Math.floor(max ?? this.defaultCap));
+    if (!Number.isFinite(next) || next === this.cap) return;
+    const raised = next > this.cap;
+    this.cap = next;
+    if (raised) this.pump();
+  }
+
+  /** The cap in force — what a `queued` chat is queued behind. */
+  get maxActive(): number {
+    return this.cap;
+  }
+
+  /**
+   * Re-read the cap from the settings file, off the admission path.
+   *
+   * `PUT /api/settings` hands the new cap straight to THIS process's broker, and
+   * for a single instance that is the whole story. But `config.json` lives in the
+   * SHARED config root while `data/` does not (see RUNNING.md): the installed app
+   * on 4318 and a `pnpm dev` on 4319 read the same settings file and run separate
+   * brokers. Without this, saving the cap on one of them leaves the other showing
+   * a number that is not in force on the instance you are looking at, until it is
+   * restarted.
+   *
+   * Fire-and-forget rather than awaited because both callers are synchronous
+   * admission decisions that must not grow an await: the read lands microseconds
+   * later, and `setCap` pumps if it turns out the cap went up — so a chat that
+   * queued against a stale cap is released the moment the fresh one arrives. The
+   * token limits in this same settings section have never had the problem, since
+   * `withinOverallContextBudget` re-reads per turn; this gives the cap the same
+   * property without making `schedule()` async.
+   *
+   * Unthrottled on purpose: it is one small JSON read per admission decision —
+   * the same read `withinOverallContextBudget` already does at every turn start —
+   * and a time-based skip would trade that for a window where the cap you just
+   * saved on the other instance visibly isn't in force yet.
+   */
+  private refreshCap(): void {
+    void this.store
+      .getSettings()
+      .then((s) => this.setCap(s.maxActiveSessions))
+      .catch(() => {
+        /* unreadable config → keep the cap in force; never fall back silently */
+      });
+  }
+
   /** Count of sessions holding an active slot (running or awaiting-input). */
   activeCount(): number {
     let n = 0;
@@ -2755,6 +2826,9 @@ export class SessionBroker {
   }
 
   private schedule(session: LiveSession): void {
+    // Cheap and off the critical path — see refreshCap. A cap raised by the OTHER
+    // instance reaches this one here rather than only at its next restart.
+    this.refreshCap();
     // A turn is already active → inject the buffered message(s) as steering.
     if (session.started && this.isActive(session)) {
       this.flushOutbox(session);
@@ -2978,6 +3052,11 @@ export class SessionBroker {
   }
 
   private pump(): void {
+    // The other half of the reconciliation: a slot just freed, so if the cap moved
+    // under us this is the moment a parked chat should notice. `setCap` re-enters
+    // `pump` on a raise, and a no-change `setCap` returns before it does — so this
+    // cannot recurse.
+    this.refreshCap();
     while (this.activeCount() < this.cap && this.queueOrder.length > 0) {
       const id = this.queueOrder[0]!;
       const session = this.sessions.get(id);

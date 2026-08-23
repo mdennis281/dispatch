@@ -1,15 +1,35 @@
 /**
  * REST for global app settings (config.json: theme, default mode, webhook).
- *   GET /api/settings   → AppSettings
- *   PUT /api/settings   → validate (full replace) + persist
+ *   GET /api/settings          → AppSettings
+ *   PUT /api/settings          → validate (full replace) + persist
+ *   GET /api/settings/defaults → the server-side defaults a field must NAME
  */
 import type { FastifyInstance } from "fastify";
 import { AppSettingsSchema } from "../store/index.js";
 
 export function registerSettingsRoutes(app: FastifyInstance): void {
-  const { store } = app.cm;
+  const { store, config } = app.cm;
+  const { broker } = app.services;
 
   app.get("/api/settings", async () => store.getSettings());
+
+  /**
+   * What a CLEARED optional setting falls back to — a fact about how this server
+   * was started, not a stored preference.
+   *
+   * `maxActiveSessions` is the case that forced this. The setting is optional and
+   * a blank box means "whatever this server was started with", which is
+   * `DISPATCH_MAX_ACTIVE_SESSIONS` when one is set and only otherwise the shared
+   * constant. The field printed the constant, so an install running the env var at
+   * 12 was told `blank = 6` — the one place the feature misreported its own state.
+   *
+   * Deliberately NOT folded into `GET /api/settings`: that body round-trips
+   * straight back into the full-replace PUT above, so a server fact mixed into it
+   * becomes a field the client sends back as though it owned it.
+   */
+  app.get("/api/settings/defaults", async () => ({
+    maxActiveSessions: config.maxActiveSessions,
+  }));
 
   app.put("/api/settings", async (req, reply) => {
     // PUT = full replace, NOT a shallow merge. The sole caller always sends a
@@ -30,10 +50,17 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
     // full-replace save from anywhere else in Settings — picking a theme — would
     // otherwise silently unsubscribe you from unstable back to stable.
     const current = await store.getSettings();
-    return store.saveSettings({
+    const saved = await store.saveSettings({
       ...parsed.data,
       auth: current.auth,
       ...(current.updateChannel ? { updateChannel: current.updateChannel } : {}),
     });
+    // The concurrency cap is held by the LIVE broker, not re-read per turn, so a
+    // save has to hand it over or the new number means nothing until a restart —
+    // and raising it drains whatever is already parked in `queued`. Off the
+    // saved object rather than `parsed.data` so it can never disagree with what
+    // was written (the preserved-field spread above sits between the two).
+    broker.setCap(saved.maxActiveSessions);
+    return saved;
   });
 }

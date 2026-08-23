@@ -99,4 +99,44 @@ describe("createServices().start() resilience", () => {
 
     errSpy.mockRestore();
   });
+
+  it("applies the SAVED concurrency cap at boot, over the env default", async () => {
+    // `createServices` is synchronous and the setting lives behind an async store
+    // read, so the broker is constructed on the env default and corrected here.
+    // start() runs before the server listens, so nothing can be admitted against
+    // the wrong number in between.
+    const bus = new EventBus();
+    const setCap = vi.fn();
+    const services = createServices(
+      {
+        config: { maxActiveSessions: 4 } as unknown as ServerConfig,
+        store: stub<Store>({
+          getSettings: async () => ({ theme: "dark", maxActiveSessions: 9 }),
+        }),
+        bus,
+      },
+      {
+        broker: stub({ setCap }),
+        terminals: stub(),
+        memory: stub(),
+        projectConfig: stub(),
+        projectConfigArchive: stub(),
+        title: stub(),
+        checkpoints: stub(),
+        worktrees: stub(),
+        worktreeDetector: stub(),
+        worktreeReaper: stub(),
+        runner: stub(),
+        github: stub(),
+        notifier: stub(),
+        push: stub(),
+        attention: stub(),
+        usage: stub(),
+      },
+    );
+
+    await services.start();
+
+    expect(setCap).toHaveBeenCalledWith(9);
+  });
 });

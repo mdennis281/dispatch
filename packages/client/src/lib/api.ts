@@ -143,6 +143,9 @@ export interface AppSettings {
     canonicalUrl?: string;
     rpId?: string;
   };
+  /** How many chats may hold an execution slot at once. Unset = the server's
+   *  own default (`DISPATCH_MAX_ACTIVE_SESSIONS`, else DEFAULT_MAX_ACTIVE_SESSIONS). */
+  maxActiveSessions?: number;
   harness?: {
     defaultHarness?: HarnessKind;
     defaults?: Partial<Record<HarnessKind, { model?: string; effort?: Effort }>>;
@@ -151,6 +154,18 @@ export interface AppSettings {
       overallTokens?: number;
     };
   };
+}
+
+/**
+ * Server-side defaults a settings field has to NAME rather than store.
+ *
+ * Separate from {@link AppSettings} on purpose: these are facts about how the
+ * server was started (env vars), and mixing them into the settings body would
+ * put them in the full-replace PUT as though the client owned them.
+ */
+export interface AppSettingsDefaults {
+  /** Effective cap when `AppSettings.maxActiveSessions` is unset — env, else 6. */
+  maxActiveSessions: number;
 }
 
 export interface HarnessInfo {
@@ -957,6 +972,8 @@ export const api = {
   settings: {
     get: () => get<AppSettings>("/api/settings"),
     update: (body: Partial<AppSettings>) => put<AppSettings>("/api/settings", body),
+    /** What a CLEARED optional setting falls back to on THIS server. */
+    defaults: () => get<AppSettingsDefaults>("/api/settings/defaults"),
   },
 
   /**

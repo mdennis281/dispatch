@@ -57,10 +57,11 @@ export const APP_SECTIONS: AppSectionDef[] = [
     id: "context",
     icon: Layers,
     label: "Context",
-    blurb: "Token limits and auto-compaction",
+    blurb: "How many chats run at once, and token limits",
     explainer:
-      "What happens as a session's context window fills. Left alone, a full window is an error; " +
-      "with auto-compaction on it's a summary and a continuation.",
+      "How many chats Dispatch will run at the same time — the rest wait their turn as " +
+      "Queued — and what happens as a session's context window fills. Left alone, a full " +
+      "window is an error; with auto-compaction on it's a summary and a continuation.",
   },
   {
     id: "notifications",

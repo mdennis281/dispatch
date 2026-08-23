@@ -14,7 +14,7 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../app.js";
-import { loadConfig } from "../config.js";
+import { loadConfig, type ServerConfig } from "../config.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { SessionBroker, type QueryFn } from "../services/session-broker.js";
@@ -195,14 +195,22 @@ let bus: EventBus;
 let app: FastifyInstance;
 let port: number;
 
-async function boot(query: QueryFn): Promise<void> {
+async function boot(query: QueryFn, overrides: Partial<ServerConfig> = {}): Promise<void> {
   dir = await mkdtemp(join(tmpdir(), "cm-routes-"));
   store = new Store(dir);
   await store.init();
   bus = new EventBus();
-  const broker = new SessionBroker({ store, bus, deps: { query } });
+  const config = { ...loadConfig(), dataDir: dir, ...overrides };
+  // `maxActiveSessions` mirrors container.ts deliberately: it is the value a
+  // CLEARED `AppSettings.maxActiveSessions` falls back to, so a fixture that
+  // withheld it would test a fallback production never takes.
+  const broker = new SessionBroker({
+    store,
+    bus,
+    maxActiveSessions: config.maxActiveSessions,
+    deps: { query },
+  });
   const github = new GitHubService({ bus, store, exec: fakeGhExec });
-  const config = { ...loadConfig(), dataDir: dir };
   app = await buildApp({ config, store, bus, serviceOverrides: { broker, github } });
   await app.listen({ port: 0, host: "127.0.0.1" });
   port = (app.server.address() as AddressInfo).port;
@@ -224,6 +232,37 @@ async function makeProject(): Promise<string> {
 }
 
 /* -------------------------------------------------------------------- tests */
+
+describe("routes — server defaults", () => {
+  // Booted with an env-style override, because the whole point of the endpoint is
+  // the case where the effective default is NOT the shared constant.
+  beforeEach(async () => {
+    await boot(makeFakeQuery(() => [assistantText("hi"), resultMsg()]), {
+      maxActiveSessions: 11,
+    });
+  });
+
+  it("reports what a CLEARED cap falls back to, not the cap in force", async () => {
+    const before = await app.inject({ method: "GET", url: "/api/settings/defaults" });
+    expect(before.json()).toEqual({ maxActiveSessions: 11 });
+
+    await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      payload: { theme: "dark", maxActiveSessions: 3 },
+    });
+    expect(app.services.broker.maxActive).toBe(3);
+    // Still 11: this endpoint answers what the FIELD must print beside a blank
+    // box, which is not the number currently in force.
+    const after = await app.inject({ method: "GET", url: "/api/settings/defaults" });
+    expect(after.json()).toEqual({ maxActiveSessions: 11 });
+
+    // And clearing it lands on the env default rather than the shared constant —
+    // the bug this endpoint exists to stop the field from reporting.
+    await app.inject({ method: "PUT", url: "/api/settings", payload: { theme: "dark" } });
+    expect(app.services.broker.maxActive).toBe(11);
+  });
+});
 
 describe("routes — REST CRUD", () => {
   beforeEach(async () => {
@@ -261,6 +300,39 @@ describe("routes — REST CRUD", () => {
 
     const att = await app.inject({ method: "GET", url: "/api/attention" });
     expect(att.json()).toEqual([]);
+  });
+
+  it("PUT /api/settings hands the concurrency cap to the LIVE broker", async () => {
+    // The cap is held in memory and never re-read per turn, so a save that only
+    // reached config.json would be a setting that does nothing until the next
+    // restart — which is what it was before it became a setting at all.
+    const saved = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      payload: { theme: "dark", maxActiveSessions: 2 },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().maxActiveSessions).toBe(2);
+    expect(app.services.broker.maxActive).toBe(2);
+
+    // Cleared → the value the server booted with, NOT "unlimited".
+    const cleared = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      payload: { theme: "dark" },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(app.services.broker.maxActive).toBe(app.cm.config.maxActiveSessions);
+
+    // Zero is refused rather than silently clamped to one: a cap of nothing is a
+    // typo, and honouring it would wedge every chat in the app.
+    const bad = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      payload: { theme: "dark", maxActiveSessions: 0 },
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(app.services.broker.maxActive).toBe(app.cm.config.maxActiveSessions);
   });
 
   it("GET /messages serves a LEAN window, and /messages/full rehydrates it", async () => {

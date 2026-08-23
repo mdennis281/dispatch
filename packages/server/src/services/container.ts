@@ -728,6 +728,18 @@ export function createServices(
         console.error("[Dispatch] chat status recovery failed (continuing):", err);
       });
 
+      // The concurrency cap is an app SETTING; `config.maxActiveSessions` (the
+      // env var) is only its default. Applied here rather than in the broker's
+      // constructor because reading it is async and `buildServices` is not —
+      // and `start()` still runs before the server listens, so no turn can be
+      // admitted against the boot default first.
+      await store
+        .getSettings()
+        .then((s) => broker.setCap(s.maxActiveSessions))
+        .catch(() => {
+          /* best-effort: an unreadable config leaves the env/default cap in force */
+        });
+
       // One-time transparent memory migration: when a project has (or gains) a
       // `.dispatch/` config, copy any legacy `.data` memories into the
       // repo `memory/` source of truth. Subscribed BEFORE `projectConfig.start()`

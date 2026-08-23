@@ -1,5 +1,5 @@
 import type { HarnessKind, ModelOption } from "@dispatch/shared";
-import type { AppSettings, HarnessInfo } from "../../../lib/api.js";
+import type { AppSettings, AppSettingsDefaults, HarnessInfo } from "../../../lib/api.js";
 
 /**
  * What every editable app-settings subpage gets.
@@ -16,4 +16,7 @@ export interface AppPaneProps {
   harnesses: HarnessInfo[];
   /** Model catalog per provider, filled in as each request lands. */
   catalogs: Partial<Record<HarnessKind, ModelOption[]>>;
+  /** What a cleared optional field falls back to on this server. `null` until the
+   *  request lands — a section must render something honest in the meantime. */
+  serverDefaults: AppSettingsDefaults | null;
 }
