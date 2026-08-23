@@ -62,8 +62,25 @@ export function Chip({ tone = "neutral", icon, mono, className, children, ...res
   );
 }
 
-/** A small numeric badge (attention count etc). */
-export function Badge({ count, tone = "accent" }: { count: number; tone?: Tone }) {
+/**
+ * A small numeric badge (attention count etc).
+ *
+ * `size="sm"` is for a badge PINNED TO A GLYPH rather than sitting beside a
+ * label: at the default 16px it is as wide as a 16px icon, so anchoring one to
+ * an icon's corner covers the icon instead of annotating it. 13px leaves the
+ * glyph readable underneath. Still `text-2xs`, which is the smallest step on the
+ * scale — the box shrinks, the digits don't, because 10px is already the floor
+ * for something meant to be read at a glance.
+ */
+export function Badge({
+  count,
+  tone = "accent",
+  size = "md",
+}: {
+  count: number;
+  tone?: Tone;
+  size?: "md" | "sm";
+}) {
   if (count <= 0) return null;
   // One foreground for all three fills. `-fg` tokens are the ink for a
   // SATURATED fill, and every saturated colour in a given theme shares the same
@@ -79,11 +96,17 @@ export function Badge({ count, tone = "accent" }: { count: number; tone?: Tone }
           ? "bg-accent-2 text-accent-2-fg"
           : tone === "info"
             ? "bg-info text-accent-fg"
-            : "bg-accent text-accent-fg";
+            : // `success` used to fall through to the accent fill, which only
+              // showed once a badge was pinned to a green glyph: a green icon
+              // wearing an amber bubble reads as two states, not one thing.
+              tone === "success"
+              ? "bg-success text-accent-fg"
+              : "bg-accent text-accent-fg";
   return (
     <span
       className={cn(
-        "inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-2xs font-semibold tabular-nums",
+        "inline-flex items-center justify-center rounded-full text-2xs font-semibold tabular-nums",
+        size === "sm" ? "h-[13px] min-w-[13px] px-[3px]" : "h-4 min-w-4 px-1",
         toneCls,
       )}
     >

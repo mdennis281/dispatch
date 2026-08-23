@@ -66,6 +66,11 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       // Every one of them: the catalog describes what COULD run here, and the
       // toggle beside a disabled row is how it starts running.
       servers: BROWSER_MCP_SERVERS,
+      // Unfronted, because this config is shown and probed rather than run. A
+      // catalog row describing the lazy shim's argv would be describing the
+      // shim, and a probe answered from its cached manifest would be reporting
+      // what the server said last time rather than what it says now.
+      eager: true,
       onUnavailable: (name, pkg) =>
         unavailable.set(name, `${pkg} is not installed — reinstall Dispatch's dependencies.`),
     });

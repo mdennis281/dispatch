@@ -139,6 +139,21 @@ export const AppSettingsSchema = z.object({
    * instead of being silently overwritten by an untouched field.
    */
   maxActiveSessions: z.number().int().positive().optional(),
+  /**
+   * Minutes a chat may sit idle before its runtime subprocess (and every MCP
+   * server under it) is retired. `0` switches the sweep off.
+   *
+   * Safe to be automatic in a way eviction generally is not, because nothing is
+   * lost: `SessionBroker.stop()` re-arms `resumeSessionId`, so the next message
+   * resumes the SDK session with its context. The cost is that message's
+   * spin-up. Background shells are NOT touched — a chat parked for someone to
+   * test against a dev server it started still has the dev server.
+   *
+   * `nonnegative`, not `positive`, precisely so `0` can mean "never purge";
+   * optional so a cleared field falls back to `DISPATCH_IDLE_SESSION_MINUTES`
+   * and then to the shared default, the same chain as `maxActiveSessions`.
+   */
+  idleSessionMinutes: z.number().int().nonnegative().optional(),
   webhook: z
     .object({
       kind: z.enum(["ntfy", "pushover"]).optional(),

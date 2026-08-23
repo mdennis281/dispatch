@@ -38,6 +38,7 @@ import type {
 import { ClaudeStreamDecoder, QUESTION_TOOL } from "./stream.js";
 import { buildQuestionAnswer, neutralQuestions } from "./questions.js";
 import { claudeExecutableOption } from "../../services/runtime.js";
+import { spawnWithPid } from "./spawn.js";
 
 /** The subset of the SDK `query` signature this session calls. */
 export type QueryFn = (params: {
@@ -116,6 +117,24 @@ class InputChannel implements AsyncIterable<SDKUserMessage> {
   }
 }
 
+/**
+ * Put the subprocess's stderr back on a bare process-exit error.
+ *
+ * ONLY on that shape. `fail()` also handles transport errors, aborts and
+ * anything the stream threw, and stapling the last subprocess's stderr onto an
+ * unrelated failure would be worse than saying nothing — the tail outlives the
+ * process it came from, so it could describe a run that already ended.
+ *
+ * A message that already carries a tail (the SDK's own launcher ran, because
+ * this session didn't provide a spawner) is left exactly as it was.
+ */
+export function withStderrTail(message: string, tail: string): string {
+  if (!tail.trim()) return message;
+  if (!/process exited with code/i.test(message)) return message;
+  if (message.includes(tail.trim().slice(-80))) return message;
+  return `${message}\n${tail.trimEnd()}`;
+}
+
 export interface ClaudeSessionOpts {
   spec: HarnessSessionSpec;
   query?: QueryFn;
@@ -154,6 +173,25 @@ export class ClaudeSession implements HarnessSession {
   private readonly queue: HarnessEvent[] = [];
   private waiter?: () => void;
   private ended = false;
+
+  /**
+   * Pid of the live Claude Code subprocess, or undefined between runs.
+   *
+   * The root of this chat's process tree — every MCP server the session spawns
+   * descends from it — which is what makes "how many processes is this chat
+   * holding" and "reap them" answerable. See {@link spawnWithPid}.
+   */
+  private livePid?: number;
+
+  /**
+   * The dead subprocess's last stderr, kept for the error message.
+   *
+   * Providing `spawnClaudeCodeProcess` is what stops the SDK collecting its own
+   * tail (`SpawnedProcess` declares no `stderr`), so without this a session that
+   * dies on a bad flag reports a bare "process exited with code 1" instead of
+   * the CLI's own account of why. See {@link spawnWithPid}.
+   */
+  private lastStderrTail = "";
 
   constructor(opts: ClaudeSessionOpts) {
     this.spec = opts.spec;
@@ -214,6 +252,10 @@ export class ClaudeSession implements HarnessSession {
     return this.input?.pending() ?? this.outbox.length;
   }
 
+  pid(): number | undefined {
+    return this.livePid;
+  }
+
   private async start(): Promise<void> {
     // Set synchronously before the first await so concurrent steering pushes
     // land in the channel rather than being dropped.
@@ -264,7 +306,10 @@ export class ClaudeSession implements HarnessSession {
   }
 
   private fail(err: unknown): void {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = withStderrTail(
+      err instanceof Error ? err.message : String(err),
+      this.lastStderrTail,
+    );
     this.emit({ type: "turn-end", ok: false, subtype: "error", result: message });
     this.end();
   }
@@ -293,6 +338,21 @@ export class ClaudeSession implements HarnessSession {
       // bundled one. MUST match what the model probe uses, or the picker would
       // offer models the session can't run.
       ...claudeExecutableOption(),
+      // Spawn the subprocess ourselves ONLY to learn its pid — see spawn.ts.
+      // The cast is because the SDK types the hook against its own structural
+      // `SpawnedProcess`, which `ChildProcess` satisfies but does not name.
+      spawnClaudeCodeProcess: spawnWithPid({
+        onSpawn: (pid) => {
+          this.livePid = pid;
+        },
+        onExit: (pid, stderrTail) => {
+          // Guarded: a `dispose()` → immediate restart can land the new pid
+          // before the old child's `exit` fires, and clearing unconditionally
+          // would blank the pid of the session that is actually running.
+          if (this.livePid === pid) this.livePid = undefined;
+          if (stderrTail) this.lastStderrTail = stderrTail;
+        },
+      }) as unknown as Options["spawnClaudeCodeProcess"],
     };
     if (this.spec.cwd) options.cwd = this.spec.cwd;
     if (this.modelOverride) options.model = this.modelOverride;

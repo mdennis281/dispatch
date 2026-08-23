@@ -3,7 +3,7 @@
  * No secrets: auth is the Claude subscription (~/.claude/.credentials.json),
  * never an API key.
  */
-import { DEFAULT_MAX_ACTIVE_SESSIONS } from "@dispatch/shared";
+import { DEFAULT_MAX_ACTIVE_SESSIONS, DEFAULT_IDLE_SESSION_MINUTES } from "@dispatch/shared";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
@@ -35,6 +35,11 @@ export interface ServerConfig {
    * need a restart; this is what a cleared setting falls back to.
    */
   maxActiveSessions: number;
+  /**
+   * Minutes a chat may sit idle before its subprocess is retired — the DEFAULT
+   * only, same chain as `maxActiveSessions`. `0` switches the sweep off.
+   */
+  idleSessionMinutes: number;
 }
 
 const DEFAULT_PORT = 4319;
@@ -133,6 +138,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     maxActiveSessions: Math.max(
       1,
       intFromEnv(env, "MAX_ACTIVE_SESSIONS", DEFAULT_MAX_ACTIVE_SESSIONS),
+    ),
+    // Floored at 0, not at 1: unlike the cap, zero is MEANINGFUL here — it is
+    // how you switch the idle sweep off. Only a negative value is nonsense.
+    idleSessionMinutes: Math.max(
+      0,
+      intFromEnv(env, "IDLE_SESSION_MINUTES", DEFAULT_IDLE_SESSION_MINUTES),
     ),
   };
 }

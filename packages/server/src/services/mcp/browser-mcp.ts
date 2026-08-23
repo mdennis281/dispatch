@@ -26,6 +26,17 @@
  * `.cmd` shim, and since the CVE-2024-27980 fix Node refuses to spawn one
  * without a shell. `process.execPath` is a real executable and needs none.
  *
+ * NOT RUNNING UNTIL ASKED. Each one is fronted by `lazy-browser-shim.mjs`,
+ * which answers `initialize` and `tools/list` from a cached manifest and only
+ * spawns the real server when something actually CALLS a tool. Both stay
+ * advertised — neither is preferred, the agent picks whichever answers its
+ * question — but a session that never opens a browser never pays for one. This
+ * matters at the multiplier: fifteen resident chats were holding thirty idle
+ * browser-server processes between them, ~100 MB each. What it does NOT change
+ * is the `auto` gate below: the shim removes the PROCESS cost of advertising
+ * these, not the 53 tools of context, so a repo with nothing to point a browser
+ * at still shouldn't be offered them.
+ *
  * NO PORT LEASE. Every other server that fronts a browser wants one (see
  * `references/per-worktree.md`), because two worktrees on one port means the
  * second drives the first one's browser and reports success against the wrong
@@ -35,6 +46,8 @@
  */
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import {
   BROWSER_MCP_SERVERS,
@@ -220,6 +233,15 @@ export interface BrowserMcpBuildOptions {
   chatId?: string;
   /** Called when a selected server isn't installed, so it can be surfaced. */
   onUnavailable?: (server: BrowserMcpServer, pkg: string) => void;
+  /**
+   * Spawn the real server directly instead of fronting it with the lazy shim.
+   *
+   * For callers that need the SERVER's own answers rather than a cached
+   * projection of them — the catalog, which probes a server to describe its
+   * tools. A session never wants this: paying for a process to list tools it
+   * may never call is the cost the shim exists to remove.
+   */
+  eager?: boolean;
 }
 
 /**
@@ -250,12 +272,65 @@ export function buildBrowserMcpServers(
     // stray dir on disk says which caller omitted the id instead of implying
     // some deliberate sharing arrangement.
     const outDir = join(tmpdir(), "dispatch-browser-mcp", opts.chatId ?? "no-chat");
+    const realArgs = [entry, ...spec.args(cfg, outDir)];
+    // The SAME argv with the per-chat output dir standing in as a placeholder.
+    // Keying the manifest on `realArgs` would fold the chat id into the hash and
+    // give every new chat its own cache — which is a cold start each time, i.e.
+    // exactly the eager spawn the shim exists to avoid. What the tool list
+    // actually depends on is the CLI and its config flags, and neither of those
+    // is the directory screenshots land in.
+    const keyArgs = [entry, ...spec.args(cfg, MANIFEST_KEY_OUTDIR)];
     out[name] = {
       type: "stdio",
       command: process.execPath,
-      args: [entry, ...spec.args(cfg, outDir)],
+      // Fronted by the lazy shim unless the caller opted out. The CATALOG opts
+      // out: it builds these configs to describe and probe a server, and a
+      // description that reports the shim's cached manifest instead of the
+      // server's own answer would be describing the cache.
+      args: opts.eager
+        ? realArgs
+        : [SHIM_ENTRY, "--manifest", manifestPathFor(name, keyArgs), "--", process.execPath, ...realArgs],
       ...(spec.env ? { env: spec.env } : {}),
     };
   }
   return out;
+}
+
+/**
+ * The shim that stands in for a browser server until something calls it.
+ *
+ * Resolved relative to THIS module so the same expression is right in both
+ * modes — `src/services/mcp/` under `tsx watch`, `dist/services/mcp/` under
+ * `node dist/index.js` — which is the whole reason the shim is a hand-written
+ * `.mjs` copied by the build rather than a `.ts` that tsc would only ever emit
+ * to one of those two places. See `scripts/copy-mjs-assets.mjs`.
+ */
+const SHIM_ENTRY = fileURLToPath(new URL("./lazy-browser-shim.mjs", import.meta.url));
+
+/**
+ * Stands in for the per-chat output dir when hashing a manifest key.
+ *
+ * A literal, not a real path, so the key is identical for every chat — see the
+ * `keyArgs` note in {@link buildBrowserMcpServers}.
+ */
+const MANIFEST_KEY_OUTDIR = "<per-chat-output-dir>";
+
+/**
+ * Where one server's cached manifest lives.
+ *
+ * Keyed by the EXACT argv it fronts, so a flag change (a different `browser:`
+ * config, a new bundled version resolving to a different entry path) misses the
+ * cache and re-learns rather than advertising the tools of a server nobody is
+ * going to run. Hashing keeps a long argv inside a filename; a collision would
+ * cost one wrong tool list, so a non-cryptographic digest would be the wrong
+ * kind of cheap.
+ *
+ * Joined on NUL — written as an escape, never as a literal, because a literal
+ * control byte in a source file makes git call it binary and GitHub then shows
+ * reviewers an opaque blob instead of the diff. NUL rather than a space so an
+ * argument that CONTAINS a space can't forge a different argv's key.
+ */
+function manifestPathFor(name: BrowserMcpServer, argv: readonly string[]): string {
+  const key = createHash("sha256").update(argv.join("\u0000")).digest("hex").slice(0, 16);
+  return join(tmpdir(), "dispatch-browser-mcp", "manifests", `${name}-${key}.json`);
 }

@@ -1,4 +1,7 @@
-import { DEFAULT_MAX_ACTIVE_SESSIONS } from "@dispatch/shared";
+import {
+  DEFAULT_MAX_ACTIVE_SESSIONS,
+  DEFAULT_IDLE_SESSION_MINUTES,
+} from "@dispatch/shared";
 import { Field, TextInput } from "../../sidebar/Modal.js";
 import { Switch } from "../../ui/Switch.js";
 import { positiveTokenLimit } from "../../../lib/harness.js";
@@ -23,6 +26,7 @@ export function ContextSection({ draft, patch, serverDefaults }: AppPaneProps) {
   // any install that sets the env var. The constant is only the stand-in for the
   // moment before the answer lands (and if the request failed).
   const defaultCap = serverDefaults?.maxActiveSessions ?? DEFAULT_MAX_ACTIVE_SESSIONS;
+  const defaultIdle = serverDefaults?.idleSessionMinutes ?? DEFAULT_IDLE_SESSION_MINUTES;
 
   const patchLimits = (p: Partial<typeof limits>) =>
     patch({ harness: { ...harness, contextLimits: { ...limits, ...p } } });
@@ -47,6 +51,30 @@ export function ContextSection({ draft, patch, serverDefaults }: AppPaneProps) {
           cap a turn shows as Queued and starts as soon as a slot frees, oldest first.
           Raising this drains the queue immediately; lowering it never interrupts a chat
           that's already running.
+        </p>
+      </div>
+
+      <div className="space-y-2 border-b border-line-soft pb-3">
+        <Field
+          label="Retire idle chats"
+          hint={`minutes; blank = ${defaultIdle}, 0 = never`}
+          className="max-w-[12rem]"
+        >
+          <TextInput
+            mono
+            inputMode="numeric"
+            value={draft.idleSessionMinutes != null ? String(draft.idleSessionMinutes) : ""}
+            onChange={(e) => patch({ idleSessionMinutes: numberField(e.target.value) })}
+            placeholder={String(defaultIdle)}
+          />
+        </Field>
+        <p className="text-xs leading-snug text-faint">
+          A chat you stop talking to keeps its runtime process and every MCP server under
+          it — around 1.3&nbsp;GB each, and nothing used to take it back. After this long
+          idle, that tree is retired. Nothing is lost: the transcript stays, and the next
+          message resumes the session with its context, so the only cost is that message
+          starting a little slower. Background shells are never touched — a chat parked for
+          you to test against a dev server it started still has the dev server.
         </p>
       </div>
 

@@ -13,6 +13,9 @@ import {
   Trash2,
   Pencil,
   MessagesSquare,
+  Cpu,
+  Power,
+  SquareTerminal,
   BarChart3,
   Brain,
   FolderOpen,
@@ -28,7 +31,7 @@ import { StatusDot, statusMeta, toneText, type DotTone } from "../ui/StatusDot.j
 import { formatDuration } from "../metrics/duration.js";
 import { TitleText } from "../ui/TitleText.js";
 import { purposeIcon } from "../config/sections.js";
-import { Chip } from "../ui/Chip.js";
+import { Chip, Badge, type Tone } from "../ui/Chip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { useProjects, useActiveProject } from "../../stores/projects.js";
@@ -42,6 +45,11 @@ import {
 } from "../../stores/chats.js";
 import { usePrs } from "../../stores/prs.js";
 import { useChatRuntime, branchRuntimeMs } from "../../stores/chatRuntime.js";
+import {
+  useChatProcesses,
+  branchProcessCount,
+  branchChatIds,
+} from "../../stores/chatProcesses.js";
 import { useView, openOverlay } from "../../stores/view.js";
 import { useLayout, dismissLeftDrawer } from "../../stores/layout.js";
 import { selectChat, selectProject } from "../../stores/navigation.js";
@@ -475,6 +483,47 @@ function ChatRow({
       ? "working"
       : "muted";
   const reviewCount = `${reviews.length} review${reviews.length === 1 ? "" : "s"}`;
+
+  // OS processes this branch is holding — the session subprocess, every MCP
+  // server under it, and any background shell it started, summed across the
+  // reviewer chats folded into the row. Per-row subscription like `activityAt`
+  // above: one poll updates every row, and only the rows whose number moved
+  // re-render.
+  // `useMemo` over the STORE'S OWN reference, never a selector that computes.
+  // `branchProcessCount` returns a fresh `{session, shells}` every call, and a
+  // zustand selector is compared with `Object.is` — so as a selector this hands
+  // `useSyncExternalStore` a new snapshot on every check, never converges, and
+  // takes the whole app down with `Minified React error #185`. Not theoretical:
+  // it did, the first time this returned an object instead of a number. Same
+  // trap `useProjectChatTree` documents, and `stores/prs.ts` explains at length.
+  const procByChat = useChatProcesses((s) => s.byChat);
+  const procs = useMemo(
+    () => branchProcessCount(procByChat, chat.id, reviews),
+    [procByChat, chat.id, reviews],
+  );
+  const processCount = procs.session + procs.shells;
+  const killProcesses = useChatProcesses((s) => s.kill);
+  const [killing, setKilling] = useState(false);
+  const branchRunning =
+    chat.status === "running" || reviews.some((r) => r.status === "running");
+  // A LABEL, not an explanation. These sit on hover over a 24px button in a
+  // narrow column, and a sentence there is a paragraph floating over the
+  // sidebar — the rationale belongs in Settings → Context, which is where the
+  // policy is actually set. The one thing worth interrupting for is that a turn
+  // is mid-flight, because that is the only part which is not recoverable.
+  const killTip = branchRunning
+    ? `End ${processCount} processes — interrupts a running turn`
+    : `End ${processCount} processes`;
+
+  const onKillProcesses = async (): Promise<void> => {
+    if (killing) return;
+    setKilling(true);
+    try {
+      await killProcesses(branchChatIds(chat.id, reviews));
+    } finally {
+      setKilling(false);
+    }
+  };
   // Which PRs those reviews belong to, for the two places that stand in for the
   // expanded rows. The runtime tooltip keeps the plain count — it is about where
   // the time went, and a per-PR breakdown there is noise.
@@ -597,24 +646,64 @@ function ChatRow({
           them underneath it. */}
       {!rename.editing && (
         <div className="group/rail absolute inset-y-0 right-0">
-          {(needsInput || (reviews.length > 0 && !expanded)) && (
+          {(needsInput || processCount > 0 || (reviews.length > 0 && !expanded)) && (
             <span
               className={cn(
-                "cm-touch-hide pointer-events-none absolute inset-y-0 right-0 flex items-center gap-1.5 pr-2.5",
+                // The scroll track shares this surface's background, so gutter
+                // and scrollbar read as one undifferentiated band and the
+                // markers looked like they were floating in it. `pr-2.5` is as
+                // tight as the bubble's 8px overhang allows — any tighter and
+                // the row's `overflow-hidden` takes a bite out of it.
+                // `gap-3.5` because each bubble overhangs to the RIGHT, so the
+                // spacing between the two pairs is the gap minus that overhang.
+                "cm-touch-hide pointer-events-none absolute inset-y-0 right-0 flex items-center gap-3.5 pr-2.5",
                 "group-hover/row:hidden group-focus-within/rail:hidden",
               )}
             >
+              {/* Side by side, processes first: the review badge keeps the slot
+                  it has always had, so the new one arrives beside it rather than
+                  shifting it. `gap-2.5` because each count overhangs its icon to
+                  the right — at the old 1.5 the digits collided with the next
+                  icon. */}
+              {/* Shells FIRST, and in a different colour, because they are the
+                  half nothing reclaims for you: the session count beside them
+                  drops to nothing on its own once the chat has been idle a
+                  while, and a dev server you are still testing against must not
+                  read as the same kind of transient. */}
+              {procs.shells > 0 && (
+                <IconCount
+                  icon={SquareTerminal}
+                  count={procs.shells}
+                  iconClass="text-success"
+                  tone="success"
+                  title={`${procs.shells} background shell${procs.shells === 1 ? "" : "s"}`}
+                />
+              )}
+              {procs.session > 0 && (
+                <IconCount
+                  icon={Cpu}
+                  count={procs.session}
+                  // Blue, and deliberately NOT the runtime figure's violet on
+                  // the line below: these are two different kinds of fact about
+                  // the same chat — one is time already spent and gone, the
+                  // other is memory being held right now and reclaimable. A
+                  // shared colour would invite reading them as one measurement.
+                  iconClass="text-info"
+                  tone="info"
+                  title={`${procs.session} session process${procs.session === 1 ? "" : "es"}`}
+                />
+              )}
               {reviews.length > 0 && !expanded && (
-                <span
+                <IconCount
+                  icon={MessagesSquare}
+                  count={reviews.length}
+                  iconClass={toneText(reviewTone)}
+                  // The GLYPH keeps the full three-way state (muted / working /
+                  // needs-you); the bubble only has to separate "go look at
+                  // this" from the rest, and `Badge` has no muted fill anyway.
+                  tone={reviewTone === "warn" ? "warn" : "accent"}
                   title={reviewsByPr}
-                  className={cn(
-                    "flex items-center gap-0.5 text-2xs tabular-nums [&_svg]:size-3",
-                    toneText(reviewTone),
-                  )}
-                >
-                  <MessagesSquare />
-                  {reviews.length}
-                </span>
+                />
               )}
               {needsInput && <StatusDot tone="warn" pulse size={6} />}
             </span>
@@ -637,6 +726,21 @@ function ChatRow({
                 : "bg-[image:linear-gradient(var(--p-active),var(--p-active))]",
             )}
           >
+            {/* Reap, not evict. Nothing takes a chat's processes away on a
+                timer — idle chats hold their session on purpose, because a chat
+                parked waiting for someone to test something has to still be
+                there when they get back. So the decision is a button, and it
+                only appears on a row that actually has something to give back.
+
+                No confirmation dialog: this is REVERSIBLE in the way
+                `DeleteChatDialog` explains delete is not — the transcript
+                survives and the next message starts a fresh session. What it can
+                cost is a running turn, so the tip says so in as many words. */}
+            {processCount > 0 && (
+              <IconButton size="sm" tip={killTip} disabled={killing} onClick={onKillProcesses}>
+                <Power />
+              </IconButton>
+            )}
             {reviews.length > 0 && (
               <IconButton
                 size="sm"
@@ -665,6 +769,58 @@ function ChatRow({
         onClose={() => setConfirmDelete(false)}
       />
     </div>
+  );
+}
+
+/**
+ * An icon with its count as a corner badge.
+ *
+ * The count used to sit INLINE beside the icon, which was fine while there was
+ * one of them and stopped being fine at two: `[icon]2 [icon]9` in a 40px gutter
+ * reads as one four-character number, and no amount of gap fixes that because
+ * the digits are the same size and weight as each other. Anchoring each count to
+ * its own icon binds them visually — the pair is one glyph, so two pairs are two
+ * glyphs rather than four things in a row.
+ *
+ * No chip behind the digits. The markers live in the right gutter, past where
+ * the title truncates, so there is never anything under them to separate from —
+ * and a filled badge would need the tray's two-layer opaque treatment to survive
+ * the active row's gradient, which is a lot of machinery for 10px of text that
+ * has nothing behind it.
+ */
+function IconCount({
+  icon: Icon,
+  count,
+  iconClass,
+  tone,
+  title,
+}: {
+  icon: LucideIcon;
+  count: number;
+  /** Foreground colour for the GLYPH. A tone via `toneText`, or a palette class. */
+  iconClass: string;
+  /** Fill for the bubble. `Badge` pairs each with its contrast-correct ink. */
+  tone: Tone;
+  title: string;
+}) {
+  return (
+    <span
+      title={title}
+      className={cn("relative inline-flex items-center [&_svg]:size-4", iconClass)}
+    >
+      <Icon />
+      {/* The shared `Badge`, not a hand-rolled chip: it already pairs every fill
+          with its `-fg` ink, and that pairing is the thing a bespoke one gets
+          wrong — a `text-white` badge is legible in exactly one theme. Reusing
+          it also means these read as the same object as the nav's counts.
+
+          The overhang has to stay INSIDE the row's `overflow-hidden`, and the
+          row is clipped at exactly the gutter's padding — so this offset and
+          that padding are one measurement, not two. */}
+      <span className="pointer-events-none absolute -top-2 -right-1.5">
+        <Badge count={count} tone={tone} size="sm" />
+      </span>
+    </span>
   );
 }
 
@@ -865,6 +1021,7 @@ export function Sidebar() {
   const chatCount = branches.reduce((n, b) => n + 1 + b.reviews.length, 0);
   const runtimeByChat = useChatRuntime((s) => s.byChat);
   const refreshRuntime = useChatRuntime((s) => s.refresh);
+  const refreshProcesses = useChatProcesses((s) => s.refresh);
   const activeChatId = useChats((s) => s.activeChatId);
   const runners = useRunners((s) => s.byId);
   const attentionItems = useAttention((s) => s.items);
@@ -915,6 +1072,16 @@ export function Sidebar() {
     const t = setInterval(() => void refreshRuntime(), 30_000);
     return () => clearInterval(t);
   }, [refreshRuntime]);
+
+  // Processes per row, on the same 30s beat and for the same reason: it labels
+  // the same rows as the runtime figure beside it. The server caches the scan
+  // behind its own TTL, so this poll costs one cheap read no matter how many
+  // clients are connected.
+  useEffect(() => {
+    void refreshProcesses();
+    const t = setInterval(() => void refreshProcesses(), 30_000);
+    return () => clearInterval(t);
+  }, [refreshProcesses]);
 
   // Shared clock so every chat row's "age" label ages together. 30s is plenty
   // for m/h/d/w granularity and keeps the sidebar idle-cheap.

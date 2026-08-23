@@ -30,6 +30,8 @@ import { basename, extname, isAbsolute, join, resolve as resolvePath } from "nod
 import { realpath, stat } from "node:fs/promises";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
 import { buildBrowserMcpServers, effectiveSubApps } from "./mcp/browser-mcp.js";
+import { spawnWithPid } from "../harness/claude/spawn.js";
+import { withStderrTail } from "../harness/claude/session.js";
 import { McpPrewarmService } from "./mcp-prewarm.js";
 import { tmpdir } from "node:os";
 import {
@@ -94,6 +96,7 @@ import type {
 import {
   DEFAULT_HARNESS,
   DEFAULT_MAX_ACTIVE_SESSIONS,
+  DEFAULT_IDLE_SESSION_MINUTES,
   EffortSchema,
   applyMcpEnablement,
   classifyWorkflowViolation,
@@ -1128,6 +1131,10 @@ export interface SessionBrokerOptions {
   bus: EventBus;
   /** Max concurrently-active sessions (running + awaiting-input). Default 6. */
   maxActiveSessions?: number;
+  /** Minutes a session may sit idle before its subprocess is retired. 0 = never. */
+  idleSessionMinutes?: number;
+  /** How often the idle sweep runs. Tests pass 0 to drive it by hand. */
+  idleSweepMs?: number;
   /** Persistent-terminal service exposed to sessions as `mcp__dispatch-workspace__terminal`. */
   terminals?: TerminalService;
   /** Per-project agent memory: injected at start + exposed as `mcp__dispatch-memory__remember|recall|forget`. */
@@ -1257,6 +1264,22 @@ const MAIN_THREAD = "__main__";
 
 /** Widest thread-effort map we keep per session (FIFO-trimmed; see `noteToolThread`). */
 const THREAD_MAP_CAP = 2_000;
+
+/**
+ * How often the idle sweep looks for sessions past their window.
+ *
+ * A minute, against a window measured in tens of minutes: the sweep is a cheap
+ * map walk, and the granularity only decides how far past its deadline a session
+ * can linger. Polling faster would buy nothing a 30-minute window cares about.
+ */
+const IDLE_SWEEP_MS = 60_000;
+
+/**
+ * Statuses a session may be RETIRED from — a turn has settled and the runtime is
+ * just sitting there. Also the statuses `idleSince` is stamped on, since a state
+ * the sweep can't act on has no deadline worth keeping.
+ */
+const RETIRABLE_STATUS: ReadonlySet<ChatStatus> = new Set(["idle", "failed"]);
 
 /** Max time `stop()`/`dispose()` waits for a subprocess consume loop to unwind. */
 const STOP_TIMEOUT_MS = 5_000;
@@ -1763,6 +1786,25 @@ interface LiveSession {
   writeChain: Promise<void>;
   turn: number;
   idleAttentionId?: string;
+  /**
+   * When this session last went idle, or undefined while it is doing anything.
+   *
+   * Only the idle sweep reads it. Deliberately NOT `chat.updatedAt`: that moves
+   * for reasons unrelated to the subprocess (a rename, a PR-watch flag), so a
+   * chat could be kept resident by a metadata write nobody would call activity.
+   */
+  idleSince?: number;
+  /**
+   * Pid of this session's Claude Code subprocess, for the chats the broker runs
+   * through the SDK DIRECTLY.
+   *
+   * Two live shapes, two places the pid can come from — see `sessionPids`. This
+   * is the one that covers the DEFAULT: `startQuery` short-circuits for
+   * `harnessKind === "claude"` and never builds a `HarnessSession` at all.
+   */
+  livePid?: number;
+  /** Last stderr of the dead subprocess on that same path. See `withStderrTail`. */
+  lastStderrTail?: string;
   stopping: boolean;
   /** Teardown is a provider migration; settle quietly instead of as session done. */
   switching?: boolean;
@@ -1801,6 +1843,11 @@ export class SessionBroker {
    *  setting you have to restart the server to apply is a restart, not a
    *  setting. */
   private cap: number;
+  /** Boot value for the idle window (env/default), the fallback for a cleared setting. */
+  private readonly defaultIdleMinutes: number;
+  /** Idle window in force, in ms. 0 = the sweep is off. */
+  private idleMs: number;
+  private idleSweep?: ReturnType<typeof setInterval>;
   private readonly terminals?: TerminalService;
   private readonly memory?: MemoryService;
   private readonly memoryHistory?: MemoryHistoryService;
@@ -1902,6 +1949,20 @@ export class SessionBroker {
     this.bus = opts.bus;
     this.defaultCap = Math.max(1, opts.maxActiveSessions ?? DEFAULT_MAX_ACTIVE_SESSIONS);
     this.cap = this.defaultCap;
+    this.defaultIdleMinutes = Math.max(
+      0,
+      opts.idleSessionMinutes ?? DEFAULT_IDLE_SESSION_MINUTES,
+    );
+    this.idleMs = this.defaultIdleMinutes * 60_000;
+    const sweepMs = opts.idleSweepMs ?? IDLE_SWEEP_MS;
+    if (sweepMs > 0) {
+      this.idleSweep = setInterval(() => {
+        this.refreshIdleTimeout();
+        this.sweepIdleSessions();
+      }, sweepMs);
+      // `unref` — a sweep timer must never be the reason the process stays up.
+      this.idleSweep.unref?.();
+    }
     this.terminals = opts.terminals;
     this.memory = opts.memory;
     this.memoryHistory = opts.memoryHistory;
@@ -2759,6 +2820,21 @@ export class SessionBroker {
   async stop(chatId: string): Promise<void> {
     const session = this.sessions.get(chatId);
     if (!session) return;
+    // RE-ARM RESUME, ahead of the terminal early-return because a session that
+    // already ended needs it just as much.
+    //
+    // Without this a stopped chat silently forgets. `stop()` KEEPS the entry in
+    // `sessions` — that is the whole difference from `drop()` — so
+    // `ensureSession`'s `if (!broker.has(chatId))` never fires and never
+    // re-seeds `resumeSessionId` from `chat.sessionId`, and `startTurn` already
+    // consumed whatever was there. The next message then builds options with no
+    // `resume` and starts a FRESH SDK session: the transcript survives, the
+    // model's context does not.
+    //
+    // It only became load-bearing when stopping stopped being rare — a reap
+    // button and an idle sweep both land here. `fork()` does the same thing one
+    // screen down, for the same reason.
+    session.resumeSessionId = session.sessionId;
     // Already terminal — nothing to tear down. Never re-run onDone (that would
     // emit a duplicate "Session ended" attention item, e.g. from dispose()).
     if (session.status === "done" || session.status === "error") {
@@ -2869,6 +2945,29 @@ export class SessionBroker {
     return this.sessions.get(chatId)?.status;
   }
 
+  /**
+   * Root pid of every live session that has one, as `chatId → pid`.
+   *
+   * The whole point is that a chat's cost is its process TREE, not this one
+   * process: the MCP servers hanging off it are most of the weight. Callers walk
+   * down from here (see `ChatProcessService`). A chat whose harness can't name a
+   * per-session process is simply absent rather than reported as zero — see
+   * {@link HarnessSession.pid}.
+   */
+  sessionPids(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const [chatId, session] of this.sessions) {
+      // BOTH shapes. `startQuery` short-circuits at `harnessKind !== "claude"`,
+      // so an ordinary chat — the default harness — runs through the SDK here in
+      // the broker and never has a `HarnessSession`; reading only the adapter's
+      // pid reported an empty map for every normal chat, which took the session
+      // count and the reap button with it.
+      const pid = session.livePid ?? session.harnessSession?.pid?.();
+      if (typeof pid === "number") out.set(chatId, pid);
+    }
+    return out;
+  }
+
   getSession(chatId: string): SessionView | undefined {
     const s = this.sessions.get(chatId);
     return s ? this.view(s) : undefined;
@@ -2919,6 +3018,95 @@ export class SessionBroker {
   /** The cap in force — what a `queued` chat is queued behind. */
   get maxActive(): number {
     return this.cap;
+  }
+
+  /**
+   * Apply the idle-purge window (`AppSettings.idleSessionMinutes`). `undefined`
+   * falls back to the boot value, exactly like {@link setCap}.
+   *
+   * `0` switches the sweep OFF, and is the one value that does not mean "use the
+   * default" — a cap of zero is nonsense, but an idle window of zero is a
+   * coherent request to never purge.
+   */
+  setIdleTimeout(minutes: number | undefined): void {
+    this.idleMs = Math.max(0, Math.floor(minutes ?? this.defaultIdleMinutes)) * 60_000;
+  }
+
+  /** The idle window in force, in minutes. `0` = the sweep is off. */
+  get idleTimeoutMinutes(): number {
+    return this.idleMs / 60_000;
+  }
+
+  /**
+   * Retire the subprocess of every session that has sat idle past the window.
+   *
+   * WHY AUTOMATIC, when the process counter deliberately is not. The counter
+   * exists so a human can see and reap; that stays. But the thing being reaped
+   * here costs nothing to lose: `stop()` re-arms `resumeSessionId`, so the next
+   * message resumes the SDK session and the model's context comes back with it.
+   * What a purge actually costs is the spin-up on that next message — a latency,
+   * not a loss — against ~1.3 GB per chat held indefinitely otherwise.
+   *
+   * SHELLS SURVIVE. `stop()` does not touch `terminals`, and that asymmetry is
+   * the point: a chat parked for someone to test against a dev server it started
+   * has to still have the dev server when they come back. Only `drop()` (the
+   * chat was deleted) and the explicit reap button take those.
+   *
+   * Sessions that never started are skipped rather than stopped — there is no
+   * subprocess behind them, and `stop()` on one would emit a "Session ended"
+   * for a session that never began.
+   */
+  /**
+   * Run the idle sweep NOW.
+   *
+   * Public so the timer isn't the only way to reach it: tests drive it by hand
+   * against a controlled clock, which is the only way to assert the policy
+   * without waiting a real half hour or racing a background interval.
+   */
+  sweep(): void {
+    this.sweepIdleSessions();
+  }
+
+  private sweepIdleSessions(): void {
+    if (this.idleMs <= 0) return;
+    const cutoff = this.now() - this.idleMs;
+    for (const [chatId, session] of this.sessions) {
+      // `started`, not `harnessSession`: the broker has TWO live shapes — a
+      // harness-backed session and the direct-SDK query path — and `started` is
+      // the flag both set, which is exactly why `stop()` branches on it too.
+      // Keying off `harnessSession` alone would silently skip every session on
+      // the other path.
+      if (!RETIRABLE_STATUS.has(session.status) || !session.started) continue;
+      if (session.idleSince === undefined || session.idleSince > cutoff) continue;
+      // `switching` is what makes `onDone` settle back to idle QUIETLY instead
+      // of publishing an `attention-add` of kind `done`. Without it every swept
+      // chat raises "Task done — Session ended", which the notifier and
+      // PushService both fan out: ten chats parked over an evening would be ten
+      // phone buzzes at half-hour offsets, for something that costs nothing but
+      // a slower next message. Retired is not finished.
+      //
+      // Also what keeps the sweep from repeating itself: `onDone` clears
+      // `started`, so the next pass skips this session on the guard above.
+      session.switching = true;
+      void this.stop(chatId).catch(() => {
+        /* best-effort: a chat that refuses to stop is retried next sweep */
+      });
+    }
+  }
+
+  /**
+   * Re-read the idle window from the settings file, alongside the cap.
+   *
+   * Same shared-`config/` reason as {@link refreshCap}: two instances, one
+   * settings file, separate brokers.
+   */
+  private refreshIdleTimeout(): void {
+    void this.store
+      .getSettings()
+      .then((s) => this.setIdleTimeout(s.idleSessionMinutes))
+      .catch(() => {
+        /* unreadable config → keep the window in force */
+      });
   }
 
   /**
@@ -2980,6 +3168,10 @@ export class SessionBroker {
 
   /** Tear down every session (process teardown). */
   async dispose(): Promise<void> {
+    if (this.idleSweep) {
+      clearInterval(this.idleSweep);
+      this.idleSweep = undefined;
+    }
     await Promise.all([...this.sessions.keys()].map((id) => this.stop(id)));
     // `setStatus(done)` is deliberately non-blocking during ordinary event
     // handling. Teardown is the one place it must be durable before exit, or a
@@ -4537,6 +4729,18 @@ export class SessionBroker {
   private setStatus(session: LiveSession, status: ChatStatus, activity?: AgentActivity): void {
     const changed = session.status !== status;
     session.status = status;
+    // Stamped on the TRANSITION into a resting state, not on every write of one,
+    // so a chat that keeps re-reporting the same status doesn't keep pushing its
+    // own deadline out and never get swept.
+    //
+    // `failed` counts as resting. `onTurnFailed` only sets the status — it never
+    // clears `started`, `query` or `harnessSession` — so a chat whose last turn
+    // died on a usage limit or a transport error keeps its whole tree, and is
+    // the case the sweep most wants: nobody is coming back to it tonight.
+    // `waiting` is deliberately NOT here — stopping it would discard a live
+    // permission prompt somebody is about to answer.
+    if (RETIRABLE_STATUS.has(status)) session.idleSince ??= this.now();
+    else session.idleSince = undefined;
     if (changed) {
       // Serialize with transcript writes so rapid running -> waiting -> idle
       // transitions always land in order. Status writes preserve updatedAt:
@@ -4651,7 +4855,13 @@ export class SessionBroker {
     }
     this.cleanupSkills(session);
     this.setStatus(session, "error");
-    const message = err instanceof Error ? err.message : String(err);
+    // Same reason as the harness adapter's `fail()`: taking the spawn over is
+    // what stops the SDK putting the child's stderr into "process exited with
+    // code N", so it has to be put back — and only onto that shape of message.
+    const message = withStderrTail(
+      err instanceof Error ? err.message : String(err),
+      session.lastStderrTail ?? "",
+    );
     this.bus.publish({ type: "error", chatId: session.chatId, message });
     void this.emit(session, {
       kind: "notice",
@@ -5741,6 +5951,25 @@ export class SessionBroker {
     } else if (session.resumeSessionId) {
       options.resume = session.resumeSessionId;
     }
+
+    // The pid seam, on the path `startQuery` actually takes for a Claude chat.
+    // Everything else here configures the SDK; this is the one option whose
+    // purpose is to hand something BACK — see harness/claude/spawn.ts. Providing
+    // it also stops the SDK collecting its own stderr tail, so the tail returns
+    // through the sink and `withStderrTail` staples it onto the exit error.
+    options.spawnClaudeCodeProcess = spawnWithPid({
+      onSpawn: (pid) => {
+        session.livePid = pid;
+      },
+      onExit: (pid, stderrTail) => {
+        // Guarded: a dispose → immediate restart can land the new pid before the
+        // old child's exit fires, and clearing unconditionally would blank the
+        // pid of the session that is actually running.
+        if (session.livePid === pid) session.livePid = undefined;
+        if (stderrTail) session.lastStderrTail = stderrTail;
+      },
+    }) as unknown as Options["spawnClaudeCodeProcess"];
+
     return options;
   }
 

@@ -20,6 +20,21 @@ import { EffortSchema, HarnessKindSchema } from "./common.js";
  */
 export const DEFAULT_MAX_ACTIVE_SESSIONS = 6;
 
+/**
+ * Minutes a chat may sit idle before its subprocess is retired.
+ *
+ * The tree behind an idle chat is ~1.3 GB and nothing used to take it back, so
+ * fifteen chats opened over a morning ran the machine out of commit. Purging is
+ * cheap because `SessionBroker.stop()` re-arms `resumeSessionId`: the next
+ * message resumes the SDK session with its context, so what a purge costs is
+ * that message's spin-up, not the conversation.
+ *
+ * Thirty minutes rather than something aggressive, because the chats worth
+ * keeping warm are the ones you are cycling through, and those are rarely quiet
+ * for half an hour. `0` switches the sweep off entirely.
+ */
+export const DEFAULT_IDLE_SESSION_MINUTES = 30;
+
 /** Defaults that only make sense inside one runtime's model catalogue. */
 export const HarnessDefaultsSchema = z.object({
   /** Omitted means let the runtime choose its current recommended model. */

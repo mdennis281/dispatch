@@ -360,6 +360,202 @@ describe("chat status persistence", () => {
     expect(statusForTool("Read")).toBe("running");
   });
 
+  it("re-arms resume on stop, so a reaped chat does not silently forget", async () => {
+    // The defect this guards: `stop()` KEEPS the entry in `sessions` (that is the
+    // whole difference from `drop()`), so `ensureSession`'s
+    // `if (!broker.has(chatId))` never fires and never re-seeds `resumeSessionId`
+    // from `chat.sessionId` — and `startTurn` already consumed whatever was
+    // there. Without the re-arm the next message builds options with no `resume`
+    // and starts a FRESH SDK session: the transcript survives, the model's
+    // context does not. Silent, and the whole idle sweep rests on it.
+    const resumed: (string | undefined)[] = [];
+    const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
+    const broker = makeBroker((params) => {
+      resumed.push((params.options as { resume?: string } | undefined)?.resume);
+      return fn(params);
+    });
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    let idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hello");
+    await idle;
+    expect(resumed[0]).toBeUndefined(); // a first turn has nothing to resume
+
+    await broker.stop("c1");
+
+    idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "again");
+    await idle;
+
+    // The second turn RESUMED the session the first one established.
+    expect(resumed[1]).toBeTruthy();
+  });
+
+  it("gives the DEFAULT (claude) path a pid seam — the harness adapter is not on it", async () => {
+    // The bug this exists for: `sessionPids()` originally read only
+    // `harnessSession?.pid?.()`, and `startQuery` short-circuits at
+    // `harnessKind !== "claude"` — so an ordinary chat never has a
+    // `HarnessSession` and the map came back EMPTY for every normal chat. The
+    // session count and the reap button were dead for exactly the trees they
+    // were built to reclaim, and nothing caught it because the service's own
+    // tests inject `sessionPids` as a fixture.
+    //
+    // Asserted on the OPTIONS rather than on a real pid, because the fake query
+    // never spawns anything — the seam is what has to be there, and the seam is
+    // what was missing.
+    let opts: Record<string, unknown> | undefined;
+    const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
+    const broker = makeBroker((params) => {
+      opts = params.options as Record<string, unknown>;
+      return fn(params);
+    });
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hello");
+    await idle;
+
+    expect(typeof opts?.spawnClaudeCodeProcess).toBe("function");
+  });
+
+  it("sweeps a session idle past its window, and leaves a fresh one alone", async () => {
+    let clock = 1_000;
+    const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
+    let idc = 0;
+    // Built inline rather than through `makeBroker` because this needs to drive
+    // the clock, and `idleSweepMs: 0` keeps the background interval out of it —
+    // the sweep is invoked by hand so nothing races the assertions.
+    const broker = new SessionBroker({
+      store,
+      bus,
+      maxActiveSessions: 6,
+      idleSessionMinutes: 30,
+      idleSweepMs: 0,
+      deps: { query: fn, genId: () => `id-${++idc}`, now: () => clock },
+    });
+    brokers.push(broker);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hello");
+    await idle;
+
+    expect(broker.idleTimeoutMinutes).toBe(30);
+
+    // Spied rather than inferred from status: retiring the subprocess is
+    // precisely `stop()`, and every downstream signal it produces is shared with
+    // paths that have nothing to do with the sweep.
+    const stop = vi.spyOn(broker, "stop");
+
+    // Freshly idle: nothing to sweep.
+    broker.sweep();
+    expect(stop).not.toHaveBeenCalled();
+
+    // Past the window: the subprocess goes and the chat record stays, which is
+    // the whole bargain — `stop()` re-armed resume, so the next message is a
+    // spin-up, not an amnesia.
+    clock += 31 * 60_000;
+    broker.sweep();
+    expect(stop).toHaveBeenCalledWith("c1");
+    await vi.waitFor(() => expect(broker.has("c1")).toBe(true));
+  });
+
+  it("retires QUIETLY — a swept chat must not raise a 'Session ended' notification", async () => {
+    // `done` is in the notifier's NOTIFY_KINDS and PushService fans out every
+    // attention-add, so without `switching` each swept chat is a webhook and a
+    // phone buzz — ten parked chats is ten of them at half-hour offsets, for
+    // something that costs nothing but a slower next message.
+    let clock = 1_000;
+    let idc = 0;
+    const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
+    const broker = new SessionBroker({
+      store,
+      bus,
+      maxActiveSessions: 6,
+      idleSessionMinutes: 30,
+      idleSweepMs: 0,
+      deps: { query: fn, genId: () => `id-${++idc}`, now: () => clock },
+    });
+    brokers.push(broker);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hello");
+    await idle;
+
+    events.length = 0;
+    clock += 31 * 60_000;
+    broker.sweep();
+    await vi.waitFor(() => expect(broker.getStatus("c1")).toBe("idle"));
+
+    const ended = events.filter(
+      (e) => e.type === "attention-add" && (e as { item?: { kind?: string } }).item?.kind === "done",
+    );
+    expect(ended).toEqual([]);
+  });
+
+  it("sweeps a FAILED session too — a dead turn keeps its whole tree", async () => {
+    // `onTurnFailed` only sets the status; it never clears `started`, `query` or
+    // `harnessSession`. So a chat whose last turn died on a usage limit holds
+    // ~1.3 GB indefinitely, and is the case the sweep most wants.
+    let clock = 1_000;
+    let idc = 0;
+    const { fn } = makeFakeQuery(() => [
+      { ...resultMsg("error"), is_error: true, result: "boom" },
+    ]);
+    const broker = new SessionBroker({
+      store,
+      bus,
+      maxActiveSessions: 6,
+      idleSessionMinutes: 30,
+      idleSweepMs: 0,
+      deps: { query: fn, genId: () => `id-${++idc}`, now: () => clock },
+    });
+    brokers.push(broker);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const failed = broker.waitFor("c1", "failed");
+    await broker.sendMessage("c1", "hello");
+    await failed;
+
+    const stop = vi.spyOn(broker, "stop");
+    broker.sweep();
+    expect(stop).not.toHaveBeenCalled(); // freshly failed, still inside the window
+
+    clock += 31 * 60_000;
+    broker.sweep();
+    expect(stop).toHaveBeenCalledWith("c1");
+  });
+
+  it("never sweeps when the window is 0", async () => {
+    let clock = 1_000;
+    let idc = 0;
+    const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
+    const broker = new SessionBroker({
+      store,
+      bus,
+      maxActiveSessions: 6,
+      // 0 is the one value that does NOT mean "use the default" — it is how the
+      // sweep is switched off, so it has to survive the `?? default` chain.
+      idleSessionMinutes: 0,
+      idleSweepMs: 0,
+      deps: { query: fn, genId: () => `id-${++idc}`, now: () => clock },
+    });
+    brokers.push(broker);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hello");
+    await idle;
+
+    expect(broker.idleTimeoutMinutes).toBe(0);
+    const stop = vi.spyOn(broker, "stop");
+    clock += 10 * 60 * 60_000;
+    broker.sweep();
+    expect(stop).not.toHaveBeenCalled();
+  });
+
   it("persists terminal status changes through the chat record", async () => {
     const { fn } = makeFakeQuery(() => [
       toolUseMsg("Bash", { command: "git status" }),

@@ -208,6 +208,11 @@ async function boot(query: QueryFn, overrides: Partial<ServerConfig> = {}): Prom
     store,
     bus,
     maxActiveSessions: config.maxActiveSessions,
+    idleSessionMinutes: config.idleSessionMinutes,
+    // No sweep timer under test: these suites drive turns by hand, and a
+    // background interval retiring a session mid-assertion is a flake with no
+    // relationship to what is being tested. `broker.sweep` covers it directly.
+    idleSweepMs: 0,
     deps: { query },
   });
   const github = new GitHubService({ bus, store, exec: fakeGhExec });
@@ -244,7 +249,7 @@ describe("routes — server defaults", () => {
 
   it("reports what a CLEARED cap falls back to, not the cap in force", async () => {
     const before = await app.inject({ method: "GET", url: "/api/settings/defaults" });
-    expect(before.json()).toEqual({ maxActiveSessions: 11 });
+    expect(before.json()).toEqual({ maxActiveSessions: 11, idleSessionMinutes: 30 });
 
     await app.inject({
       method: "PUT",
@@ -255,7 +260,7 @@ describe("routes — server defaults", () => {
     // Still 11: this endpoint answers what the FIELD must print beside a blank
     // box, which is not the number currently in force.
     const after = await app.inject({ method: "GET", url: "/api/settings/defaults" });
-    expect(after.json()).toEqual({ maxActiveSessions: 11 });
+    expect(after.json()).toEqual({ maxActiveSessions: 11, idleSessionMinutes: 30 });
 
     // And clearing it lands on the env default rather than the shared constant —
     // the bug this endpoint exists to stop the field from reporting.

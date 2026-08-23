@@ -66,6 +66,7 @@ function normalize(s: AppSettings): AppSettings {
     // server — which the field asks for separately (`/api/settings/defaults`)
     // and shows as a placeholder.
     maxActiveSessions: s.maxActiveSessions,
+    idleSessionMinutes: s.idleSessionMinutes,
     webhook: {
       kind: s.webhook?.kind ?? "ntfy",
       url: s.webhook?.url ?? "",
@@ -183,6 +184,9 @@ export function AppSettingsView() {
       // server rejects as not-positive) clears back to the default rather than
       // failing the save.
       maxActiveSessions: draft.maxActiveSessions || undefined,
+      // `?? undefined`, not `|| undefined`: 0 is MEANINGFUL here (never retire),
+      // and `||` would silently turn it back into "use the default".
+      idleSessionMinutes: draft.idleSessionMinutes ?? undefined,
       webhook: { ...draft.webhook, url: draft.webhook?.url?.trim() || undefined },
       autoCompact: { ...draft.autoCompact, window: draft.autoCompact?.window || undefined },
       harness: {
