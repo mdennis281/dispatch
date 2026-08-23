@@ -359,30 +359,60 @@ export function buildManagerToolsDirective(caps: {
 }
 
 /**
- * The directories a session may act in, in preference order.
+ * One directory a session may act in, and how strictly it may be judged.
  *
- * `cwd` is the bound one — `session.worktreeCwd ?? project.repoPath`, fixed when
- * the session is built — and it is authoritative for exactly as long as it is
- * still a checkout. It can stop being one WHILE THE CHAT IS STILL RUNNING: the
- * worktree reaper removes a chat's landed trees when its turn ends, and on
- * Windows that removal unlinks the tree's `.git` and then fails on
- * `node_modules`, leaving a full directory with no git identity. The session
- * goes on pointing at it forever.
+ * The strictness is per-candidate because the two things that can be wrong with
+ * a directory look IDENTICAL to git, and only provenance tells them apart.
+ * `git rev-parse` walks UP the parent chain, so both of these answer with the
+ * outer repo's `.git` and exit 0:
  *
- * `alternates` is what the session falls back to then, and it is a FUNCTION
- * rather than an array because the answer changes during the chat: the tree that
- * rescues a chat whose bound cwd was just reaped is typically one it cut
- * afterwards, long after these options were built. Most-specific first — the
- * chat's own worktrees, then the project checkout.
+ *   · a REAPED WORKTREE at `<repo>/.worktrees/feat-x` — dead, and every question
+ *     about it is answered by the trunk instead of by the chat's branch;
+ *   · a MONOREPO SUBDIRECTORY at `<repo>/apps/service` — perfectly alive, and a
+ *     supported shape for `project.repoPath`. `ensureRepo` in routes/projects.ts
+ *     returns early on `enclosingRepoRoot` precisely so that `apps/service`
+ *     "has no `.git` of its own but is thoroughly tracked" is never `git init`-ed
+ *     into a nested repo.
+ *
+ * So `requireRoot` cannot be inferred from the path — it is declared by whoever
+ * supplies it, who knows which kind it is. A worktree is a checkout root by
+ * construction; a project checkout is not necessarily one.
  */
-export interface SessionDirs {
-  cwd: string | undefined;
-  alternates?: () => Promise<string[]>;
+export interface DirCandidate {
+  path: string;
+  /**
+   * Demand a checkout ROOT rather than merely somewhere inside one.
+   *
+   * True for `session.worktreeCwd` and `Chat.worktrees[]`. False for
+   * `project.repoPath` — requiring a root there would make `dirFor()` answer
+   * `undefined` for every monorepo-subdirectory project, which takes down not
+   * just `create_pr` but `watch_pr` and `approve_pr` with it. That is a strictly
+   * worse failure than the one this file exists to fix, and it would hit
+   * projects that never had a worktree at all.
+   */
+  requireRoot: boolean;
 }
 
 /**
- * Resolve the directory this session should actually run git in — the bound
- * `cwd` while that is still a checkout, else the first live alternate.
+ * The directories a session may act in, best first.
+ *
+ * A FUNCTION rather than an array because the answer changes during the chat.
+ * The bound directory — `session.worktreeCwd ?? project.repoPath`, fixed when
+ * the session is built — is authoritative for exactly as long as it is still a
+ * checkout, and it can stop being one WHILE THE CHAT IS STILL RUNNING: the
+ * worktree reaper removes a chat's landed trees when its turn ends, and on
+ * Windows that removal unlinks the tree's `.git` and then fails on
+ * `node_modules`, leaving a full directory with no git identity. The session
+ * goes on pointing at it forever. The tree that then rescues the chat is
+ * typically one it cut afterwards, long after these options were built.
+ */
+export interface SessionDirs {
+  candidates: () => Promise<DirCandidate[]>;
+}
+
+/**
+ * Resolve the directory this session should actually run git in — the first
+ * candidate that is still a checkout.
  *
  * `undefined` means nothing survives, which is a real answer and not an error:
  * every caller already degrades on it.
@@ -392,31 +422,31 @@ export interface SessionDirs {
  * would reproduce the bug it exists to fix one layer up. The cost is one
  * `git rev-parse` on a code path that is about to spend a `gh` call anyway.
  *
- * Every candidate is checked, including the ones the chat record supplies: the
+ * EVERY candidate is checked, including the ones the chat record supplies: the
  * reaped path is usually STILL in `Chat.worktrees`, because
  * `WorktreeService.remove` throws on the failed `git worktree remove` before it
  * ever reaches `detachFromChat`. Taking `worktrees[0]` on faith would just pick
  * the husk a second time.
  */
 export function makeDirResolver(
-  github: Pick<GitHubService, "isRepositoryRoot">,
+  github: Pick<GitHubService, "isRepository" | "isRepositoryRoot">,
   dirs: SessionDirs,
 ): () => Promise<string | undefined> {
-  // `isRepositoryRoot`, NOT `isRepository`: `git rev-parse` walks UP, so a husk
-  // that sits inside the repository — `.worktrees/` is the default root for a
-  // new project, and the harness cuts into `<repo>/.claude/worktrees/` — answers
-  // with the MAIN checkout's `.git` and exits 0. It would be judged alive, and
-  // then every question about the chat's branch would be answered by the trunk.
-  // Every candidate this resolver sees is a checkout root by construction
-  // (`session.worktreeCwd`, `Chat.worktrees[]`, `project.repoPath`), so
-  // demanding one costs nothing and rejects exactly the husks.
-  const alive = (dir: string): Promise<boolean> =>
-    github.isRepositoryRoot(dir).catch(() => false);
+  const alive = (c: DirCandidate): Promise<boolean> =>
+    (c.requireRoot ? github.isRepositoryRoot(c.path) : github.isRepository(c.path)).catch(
+      () => false,
+    );
   return async (): Promise<string | undefined> => {
-    if (dirs.cwd && (await alive(dirs.cwd))) return dirs.cwd;
-    const alternates = await dirs.alternates?.().catch(() => []);
-    for (const dir of alternates ?? []) {
-      if (dir && dir !== dirs.cwd && (await alive(dir))) return dir;
+    const candidates = await dirs.candidates().catch(() => []);
+    const seen = new Set<string>();
+    for (const c of candidates) {
+      // Dedupe: the bound cwd is usually also in the chat's worktree list, and
+      // a `git rev-parse` per duplicate is pure waste. First occurrence wins,
+      // which is also the strictest one — the list is ordered most-specific
+      // first.
+      if (!c?.path || seen.has(c.path)) continue;
+      seen.add(c.path);
+      if (await alive(c)) return c.path;
     }
     return undefined;
   };
@@ -453,7 +483,7 @@ export function makeDirResolver(
  * the rest of a chat, all three reporting a repo they could not name.
  */
 export function makeRepoResolver(
-  github: Pick<GitHubService, "resolveRepo" | "isRepositoryRoot">,
+  github: Pick<GitHubService, "resolveRepo" | "isRepository" | "isRepositoryRoot">,
   dirs: SessionDirs,
 ): (override?: string) => Promise<string | null> {
   const dirFor = makeDirResolver(github, dirs);
@@ -721,16 +751,21 @@ export function makePrCreateBinding(
    * check lives in `cwdFor` and still runs first.
    */
   const repoOn = async (where: string | undefined): Promise<string | null> => {
-    const repo = await repoFor();
-    if (repo || !where) return repo;
-    // ONLY when the session has no live directory of its own. If it has one,
-    // `repoFor` already asked `gh` about this very directory, and asking again
-    // here would spend a second call on the same outage — and worse, mask it:
-    // the retry-on-next-call design above exists precisely so a GitHub 503
-    // doesn't get baked in, and a same-turn retry quietly converts that into
-    // "the first attempt succeeded", which is the behaviour it was written to
-    // prevent.
-    if (await dirFor()) return null;
+    // With a live directory of its own, the session names its own repository and
+    // `where` has already been proven to belong to it by `cwdFor`. Ask `repoFor`
+    // and accept its memo: re-resolving here would spend a second `gh` on the
+    // same directory, and on a failure it would mask the outage — the
+    // retry-on-NEXT-call design exists precisely so a GitHub 503 isn't baked in,
+    // and a same-turn retry quietly turns that into "the first attempt worked".
+    if (await dirFor()) return await repoFor();
+    if (!where) return null;
+    // No live directory. `where` is the only evidence left, and the repository
+    // MUST be named from it rather than from the memo — even a successful one.
+    // The memo describes a repository this session can no longer see; `createPr`
+    // pushes `--set-upstream origin <branch>` inside `where`, so naming a
+    // different repo would run `gh pr create --repo <memo>` against a branch
+    // that was only ever pushed to `where`'s origin. Two repositories, one PR,
+    // and a head ref that does not exist on the one being asked.
     return await github.resolveRepo(where).catch(() => null);
   };
 
@@ -4914,16 +4949,29 @@ export class SessionBroker {
     // `gh`/`git` are RUN when that directory has stopped being a checkout.
     // Re-read per call, never snapshotted: the tree that rescues a chat whose
     // bound worktree was reaped is usually one it cuts after this point.
+    //
+    // This is the one place that knows which candidates are worktrees (roots by
+    // construction, so a husk among them is detectable) and which is the project
+    // checkout (which may legitimately be a monorepo subdirectory) — hence
+    // `requireRoot` per entry rather than one rule for the list.
     const dirs: SessionDirs = {
-      cwd,
-      alternates: async () => {
+      candidates: async () => {
         const chat = await this.store.getChat(session.chatId).catch(() => null);
         const repoPath = project?.repoPath;
-        // The chat's own trees first — they carry the branch the work is on.
-        // The project checkout last: it always resolves, but it sits on the
-        // trunk, so preferring it would answer `on-trunk` for a chat whose
-        // commits are one directory over.
-        return [...(chat?.worktrees ?? []), ...(repoPath ? [repoPath] : [])];
+        return [
+          // The bound worktree first. Only when it IS a worktree: with no
+          // `session.worktreeCwd`, `cwd` is the project checkout, which the last
+          // entry covers under the rule that actually applies to it.
+          ...(session.worktreeCwd
+            ? [{ path: session.worktreeCwd, requireRoot: true }]
+            : []),
+          // Then the chat's own trees — they carry the branch the work is on.
+          ...(chat?.worktrees ?? []).map((path) => ({ path, requireRoot: true })),
+          // The project checkout last: it always resolves, but it sits on the
+          // trunk, so preferring it would answer `on-trunk` for a chat whose
+          // commits are one directory over.
+          ...(repoPath ? [{ path: repoPath, requireRoot: false }] : []),
+        ];
       },
     };
 
