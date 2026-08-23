@@ -677,6 +677,26 @@ export const ChatSchema = z.object({
    * they sat at the sidebar's top level as four unrelated rows.
    */
   reviewOf: z.string().optional(),
+  /**
+   * The chat that caused this one to exist — a `spawn_chat` parent, or the chat
+   * that opened the PR a reviewer was spawned to read.
+   *
+   * ONE edge for both, because the sidebar asks one question of them ("whose
+   * row does this belong under?") and answering it two ways is what made
+   * reviewers fragile. Nesting used to join a reviewer to its parent through
+   * {@link reviewOf} → the PR catalog → `PrRecord.chatId`, which fails whenever
+   * the middle term is missing: an unattributed PR, or a catalog that hasn't
+   * loaded. A direct edge is recorded once, at spawn, and cannot come apart.
+   *
+   * It also fixes the multi-round case the `reviewOf` docblock above admits to.
+   * `PrRecord.reviewAgent.chatId` holds only the LATEST round, so on a PR
+   * reviewed four times three reviewers had no way home. Each round now records
+   * its own parent.
+   *
+   * {@link reviewOf} stays, and keeps its job: WHICH PR a reviewer is reading,
+   * which is what its sidebar label says. This is WHO it belongs to.
+   */
+  parentChatId: z.string().optional(),
   /** Last-known live status (authoritative source is the SessionBroker). */
   status: ChatStatusSchema.optional(),
   /** Why this chat exists, when the app spawned it for a job. Display-only. */

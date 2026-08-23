@@ -70,8 +70,17 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * inline in a line of prose, where `Button`'s `h-6` would open the line box
  * (the same reason `InlineChip` exists); and `Section`'s header toggle, which
  * is a disclosure heading rather than an action.
+ *
+ * 87 → 88: `SpawnedRow`, the sidebar sibling of `ReviewRow` — same file, same
+ * shape, same argument as the 83 → 84 entry above. Spawned chats now file under
+ * their parent the way reviewers always have, and they want the opposite row: a
+ * reviewer drops its title for its PR number and verdict, a spawned chat has
+ * nothing BUT its title. Rendering both through `ReviewRow` labelled every
+ * spawned child the literal string "PR". It is a full-width row of a glyph, a
+ * truncating title and an age pinned right, which `Button`'s `h-6
+ * justify-center whitespace-nowrap` would have to override in full.
  */
-const BASELINE = 87;
+const BASELINE = 88;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

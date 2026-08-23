@@ -53,7 +53,7 @@ import { actions } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate, relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
-import { foldedReviewsLabel } from "./reviewLabel.js";
+import { foldedChildrenLabel } from "./reviewLabel.js";
 import { DeleteChatDialog } from "../chat/DeleteChatDialog.js";
 import { useChatRename } from "../chat/useChatRename.js";
 import { BranchWorktreePicker } from "../panels/BranchWorktreePicker.js";
@@ -375,12 +375,12 @@ function ChatBranchRows({
   now: number;
   onSelect: (id: string) => void;
 }) {
-  const { chat, reviews } = branch;
+  const { chat, children } = branch;
   const [expanded, setExpanded] = useState(false);
   // A branch never hides the transcript that's on screen. The PRs panel links
   // straight to a reviewer chat, and landing there with its parent collapsed
   // left the sidebar with no row for what you were looking at.
-  const open = expanded || reviews.some((r) => r.id === activeChatId);
+  const open = expanded || children.some((r) => r.id === activeChatId);
 
   return (
     <div data-flip-id={chat.id}>
@@ -389,31 +389,40 @@ function ChatBranchRows({
         active={chat.id === activeChatId}
         needsInput={attentionByChat.has(chat.id)}
         now={now}
-        runtimeMs={branchRuntimeMs(runtimeByChat, chat.id, reviews)}
-        reviews={reviews}
-        reviewsNeedInput={reviews.some((r) => attentionByChat.has(r.id))}
+        runtimeMs={branchRuntimeMs(runtimeByChat, chat.id, children)}
+        childChats={children}
+        childChatsNeedInput={children.some((r) => attentionByChat.has(r.id))}
         expanded={open}
-        onToggleReviews={() => setExpanded((v) => !v)}
+        onToggleChildren={() => setExpanded((v) => !v)}
         onClick={() => onSelect(chat.id)}
       />
-      {open && reviews.length > 0 && (
+      {open && children.length > 0 && (
         // The thread rail is drawn once, absolutely, rather than as a border on
         // a padded wrapper: the wrapper's padding would inset the rows, and a
         // reviewer row's highlight has to reach both edges exactly like every
         // other row's. Indentation is the row's own left padding instead.
         <div className="relative">
           <span className="pointer-events-none absolute inset-y-0 left-4 w-px bg-line-soft" />
-          {reviews.map((review) => (
-            <ReviewRow
-              key={review.id}
-              chat={review}
-              active={review.id === activeChatId}
-              needsInput={attentionByChat.has(review.id)}
-              now={now}
-              runtimeMs={runtimeByChat[review.id] ?? 0}
-              onClick={() => onSelect(review.id)}
-            />
-          ))}
+          {children.map((child) => {
+            // A reviewer and a spawned chat want OPPOSITE rows. ReviewRow drops
+            // the title on purpose — the parent above it is the change being
+            // reviewed, so the round's PR and verdict are the only new facts. A
+            // spawned chat is its own piece of work with its own title, and
+            // rendering it through ReviewRow labelled it the literal string
+            // "PR": no `reviewOf` to name a number, no review to summarise.
+            const Row = isReviewerChat(child) ? ReviewRow : SpawnedRow;
+            return (
+              <Row
+                key={child.id}
+                chat={child}
+                active={child.id === activeChatId}
+                needsInput={attentionByChat.has(child.id)}
+                now={now}
+                runtimeMs={runtimeByChat[child.id] ?? 0}
+                onClick={() => onSelect(child.id)}
+              />
+            );
+          })}
         </div>
       )}
     </div>
@@ -434,10 +443,10 @@ function ChatRow({
   needsInput,
   now,
   runtimeMs,
-  reviews,
-  reviewsNeedInput,
+  childChats,
+  childChatsNeedInput,
   expanded,
-  onToggleReviews,
+  onToggleChildren,
   onClick,
 }: {
   chat: Chat;
@@ -448,10 +457,13 @@ function ChatRow({
   /** Agent time under this chat — its own, its subagents', its reviewers'. */
   runtimeMs: number;
   /** Reviewer chats folded under this row. Usually empty. */
-  reviews: Chat[];
-  reviewsNeedInput: boolean;
+  /** NOT `children`: that name is React's, and an array of chats under it
+     would be swallowed as this row's JSX content instead of reaching the code
+     below. The branch field it comes from is still `children`. */
+  childChats: Chat[];
+  childChatsNeedInput: boolean;
   expanded: boolean;
-  onToggleReviews: () => void;
+  onToggleChildren: () => void;
   onClick: () => void;
 }) {
   const prSettled = useChats((s) => s.prSettled[chat.id] ?? false);
@@ -466,19 +478,19 @@ function ChatRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const rename = useChatRename(chat);
 
-  // What the folded reviews are up to, in one colour: somebody is stopped on a
+  // What the folded children are up to, in one colour: somebody is stopped on a
   // question, somebody is mid-review, or nothing is moving. Collapsing the rows
   // must not collapse the fact that one of them needs you.
-  const reviewTone: DotTone = reviewsNeedInput
+  const reviewTone: DotTone = childChatsNeedInput
     ? "warn"
-    : reviews.some((r) => r.status === "running" || r.status === "waiting")
+    : childChats.some((r) => r.status === "running" || r.status === "waiting")
       ? "working"
       : "muted";
-  const reviewCount = `${reviews.length} review${reviews.length === 1 ? "" : "s"}`;
-  // Which PRs those reviews belong to, for the two places that stand in for the
-  // expanded rows. The runtime tooltip keeps the plain count — it is about where
-  // the time went, and a per-PR breakdown there is noise.
-  const reviewsByPr = foldedReviewsLabel(reviews);
+  const childCount = `${childChats.length} chat${childChats.length === 1 ? "" : "s"}`;
+  // What those children ARE, for the two places that stand in for the expanded
+  // rows. The runtime tooltip keeps the plain count — it is about where the time
+  // went, and a per-PR breakdown there is noise.
+  const childrenLabel = foldedChildrenLabel(childChats);
 
   return (
     // `overflow-hidden` is what lets the action tray start fully off the row and
@@ -547,9 +559,9 @@ function ChatRow({
                 <span
                   className="text-accent-2"
                   title={
-                    reviews.length
+                    childChats.length
                       ? `${formatDuration(runtimeMs)} of agent time — this chat, its ` +
-                        `subagents, and ${reviewCount}`
+                        `subagents, and ${childCount}`
                       : `${formatDuration(runtimeMs)} of agent time — this chat and its subagents`
                   }
                 >
@@ -597,23 +609,23 @@ function ChatRow({
           them underneath it. */}
       {!rename.editing && (
         <div className="group/rail absolute inset-y-0 right-0">
-          {(needsInput || (reviews.length > 0 && !expanded)) && (
+          {(needsInput || (childChats.length > 0 && !expanded)) && (
             <span
               className={cn(
                 "cm-touch-hide pointer-events-none absolute inset-y-0 right-0 flex items-center gap-1.5 pr-2.5",
                 "group-hover/row:hidden group-focus-within/rail:hidden",
               )}
             >
-              {reviews.length > 0 && !expanded && (
+              {childChats.length > 0 && !expanded && (
                 <span
-                  title={reviewsByPr}
+                  title={childrenLabel}
                   className={cn(
                     "flex items-center gap-0.5 text-2xs tabular-nums [&_svg]:size-3",
                     toneText(reviewTone),
                   )}
                 >
                   <MessagesSquare />
-                  {reviews.length}
+                  {childChats.length}
                 </span>
               )}
               {needsInput && <StatusDot tone="warn" pulse size={6} />}
@@ -637,13 +649,13 @@ function ChatRow({
                 : "bg-[image:linear-gradient(var(--p-active),var(--p-active))]",
             )}
           >
-            {reviews.length > 0 && (
+            {childChats.length > 0 && (
               <IconButton
                 size="sm"
                 active={expanded}
                 aria-expanded={expanded}
-                tip={expanded ? `Hide ${reviewsByPr}` : `Show ${reviewsByPr}`}
-                onClick={onToggleReviews}
+                tip={expanded ? `Hide ${childrenLabel}` : `Show ${childrenLabel}`}
+                onClick={onToggleChildren}
               >
                 <MessagesSquare />
               </IconButton>
@@ -759,6 +771,85 @@ function ReviewRow({
   );
 }
 
+/** Whether a child row is a REVIEWER, and so wants the PR-shaped row. */
+function isReviewerChat(chat: Chat): boolean {
+  return chat.purpose?.kind === "pr:review" || chat.reviewOf !== undefined;
+}
+
+/**
+ * One chat another chat spawned, under its parent.
+ *
+ * The mirror of {@link ReviewRow} and deliberately its opposite: a reviewer is
+ * ABOUT the row above it, so it drops its title and shows the PR instead, while
+ * a spawned chat is separate work that happens to have been started from here.
+ * Its title is the only thing that identifies it, so the title is the row.
+ *
+ * Same indentation, rail and status grammar as its sibling, so an expanded
+ * branch reads as one list rather than two kinds of thing stacked.
+ */
+function SpawnedRow({
+  chat,
+  active,
+  needsInput,
+  now,
+  runtimeMs,
+  onClick,
+}: {
+  chat: Chat;
+  active: boolean;
+  needsInput: boolean;
+  now: number;
+  runtimeMs: number;
+  onClick: () => void;
+}) {
+  const activityAt = useChats(
+    (s) => s.lastActivity[chat.id] ?? chat.updatedAt ?? chat.createdAt,
+  );
+  const meta = statusMeta(chat.status);
+
+  return (
+    <button
+      data-testid="spawned-row"
+      onClick={onClick}
+      title={chat.title}
+      className={cn(
+        "relative flex w-full items-center gap-2 py-1 pl-7 pr-2.5 text-left transition-colors",
+        active ? "bg-accent-ghost/70" : "hover:bg-hover",
+      )}
+    >
+      <ActiveRail active={active} />
+      <span
+        className={cn(
+          "flex size-3.5 shrink-0 items-center justify-center [&_svg]:size-3",
+          toneText(meta.tone),
+          "transition-colors duration-300",
+          meta.pulse && "animate-pulse",
+        )}
+      >
+        <Bot />
+      </span>
+      <span
+        className={cn("min-w-0 flex-1 truncate text-2xs", active ? "text-primary" : "text-secondary")}
+      >
+        {chat.title}
+      </span>
+      {runtimeMs > 0 && (
+        <span
+          className="shrink-0 text-2xs text-accent-2"
+          title={`${formatDuration(runtimeMs)} of agent time`}
+        >
+          {formatDuration(runtimeMs)}
+        </span>
+      )}
+      {needsInput ? (
+        <StatusDot tone="warn" pulse size={5} />
+      ) : (
+        <span className="shrink-0 text-2xs text-muted">{relTimeShort(activityAt, now)}</span>
+      )}
+    </button>
+  );
+}
+
 /**
  * What this reviewer left on the pull request, when the registry still knows.
  *
@@ -862,7 +953,7 @@ export function Sidebar() {
 
   const project = useActiveProject();
   const branches = useProjectChatTree(project?.id ?? null);
-  const chatCount = branches.reduce((n, b) => n + 1 + b.reviews.length, 0);
+  const chatCount = branches.reduce((n, b) => n + 1 + b.children.length, 0);
   const runtimeByChat = useChatRuntime((s) => s.byChat);
   const refreshRuntime = useChatRuntime((s) => s.refresh);
   const activeChatId = useChats((s) => s.activeChatId);

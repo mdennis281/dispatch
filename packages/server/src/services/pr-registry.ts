@@ -667,6 +667,23 @@ export class PrRegistry {
   }
 
   /**
+   * The chat that OPENED this PR — the other bookkeeping field {@link snapshot}
+   * strips.
+   *
+   * A narrow read rather than a wider snapshot, exactly as {@link reviewAgent}
+   * is: `PrSnapshot` is the frozen shape the PR tool cards serialise, so adding
+   * a field to it changes a payload other code has already recorded.
+   *
+   * This is the reviewer's PARENT — the edge `Chat.parentChatId` files a review
+   * under in the sidebar. Undefined means nobody here opened the PR, and the
+   * reviewer correctly has no parent to sit beneath.
+   */
+  async authorChatId(repo: string, number: number): Promise<string | undefined> {
+    const row = await this.store.getPrRecord(prRecordKey(repo, number));
+    return row?.chatId;
+  }
+
+  /**
    * Note that a poll failed, ON the row. A stale row that says why it's stale is
    * honest; one that keeps presenting five-minute-old state as current is not.
    * The row is still re-polled on the hot cadence — a failure is not a reason to

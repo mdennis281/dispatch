@@ -237,7 +237,7 @@ describe("buildChatTree — reviewers file under the chat that opened the PR", (
   });
 
   const shape = (bs: ReturnType<typeof buildChatTree>) =>
-    bs.map((b) => [b.chat.id, ids(b.reviews)] as const);
+    bs.map((b) => [b.chat.id, ids(b.children)] as const);
 
   it("nests every round, not just the one the registry remembers", () => {
     // The bug this exists for: `reviewAgent.chatId` holds ONE round, so three of
@@ -302,6 +302,106 @@ describe("buildChatTree — reviewers file under the chat that opened the PR", (
     const tree = buildChatTree([self], {}, { "o/r#7": pr("o/r#7", 7, "self") });
 
     expect(shape(tree)).toEqual([["self", []]]);
+  });
+});
+
+describe("buildChatTree — spawned children file under their parent", () => {
+  const shape = (bs: ReturnType<typeof buildChatTree>) =>
+    bs.map((b) => [b.chat.id, ids(b.children)] as const);
+  const kid = (id: string, parentChatId: string, updatedAt = 1): Chat => ({
+    ...chat(id, "p1", updatedAt),
+    parentChatId,
+    purpose: { kind: "spawned" },
+  });
+
+  it("nests a spawn_chat child under the chat that spawned it", () => {
+    const tree = buildChatTree([chat("parent", "p1", 100), kid("child", "parent", 50)], {}, {});
+
+    expect(shape(tree)).toEqual([["parent", ["child"]]]);
+  });
+
+  it("reads a pre-`parentChatId` child's parent back out of its purpose label", () => {
+    // 45 chats on the machine this shipped from have the parent only in prose.
+    const legacy: Chat = {
+      ...chat("legacy", "p1", 5),
+      purpose: { kind: "spawned", label: "Spawned by chat parent" },
+    };
+    const tree = buildChatTree([chat("parent", "p1", 100), legacy], {}, {});
+
+    expect(shape(tree)).toEqual([["parent", ["legacy"]]]);
+  });
+
+  it("flattens a grandchild onto the top-most ancestor rather than nesting twice", () => {
+    // The sidebar draws ONE level. A grandchild sits beside its parent.
+    const chats = [
+      chat("root", "p1", 100),
+      kid("child", "root", 60),
+      kid("grandchild", "child", 50),
+    ];
+
+    expect(shape(buildChatTree(chats, {}, {}))).toEqual([["root", ["child", "grandchild"]]]);
+  });
+
+  it("keeps a child at the top level when its parent is not in this list", () => {
+    const tree = buildChatTree([chat("a", "p1", 100), kid("orphan", "gone", 50)], {}, {});
+
+    expect(shape(tree)).toEqual([["a", []], ["orphan", []]]);
+  });
+
+  it("files a reviewer under its parent WITHOUT consulting the PR catalog", () => {
+    // The whole point of the direct edge: no `prsByKey` entry is passed here,
+    // which under the old reviewOf -> PR -> chatId join stranded the reviewer.
+    const reviewerChat: Chat = {
+      ...chat("rev", "p1", 40),
+      parentChatId: "author",
+      reviewOf: "o/r#7",
+      purpose: { kind: "pr:review" },
+    };
+    const tree = buildChatTree([chat("author", "p1", 100), reviewerChat], {}, {});
+
+    expect(shape(tree)).toEqual([["author", ["rev"]]]);
+  });
+
+  it("interleaves reviewers and spawned children by activity, newest first", () => {
+    const reviewerChat: Chat = {
+      ...chat("rev", "p1", 70),
+      parentChatId: "author",
+      reviewOf: "o/r#7",
+      purpose: { kind: "pr:review" },
+    };
+    // `buildChatTree` preserves the order it is given, and the sidebar hands it
+    // chats already sorted newest-first.
+    const tree = buildChatTree(
+      [chat("author", "p1", 100), kid("newer", "author", 80), reviewerChat],
+      {},
+      {},
+    );
+
+    expect(shape(tree)).toEqual([["author", ["newer", "rev"]]]);
+  });
+
+  it("keeps BOTH chats visible when the parent edges form a cycle", () => {
+    // Unreachable by construction, but the naive walk nests each half of an
+    // a -> b -> a pair inside the other, and a branch that is only ever
+    // somebody's child is never drawn — so both rows disappear entirely.
+    const tree = buildChatTree([kid("a", "b", 100), kid("b", "a", 90)], {}, {});
+
+    expect(shape(tree)).toEqual([["a", []], ["b", []]]);
+  });
+
+  it("never files a chat under itself", () => {
+    expect(shape(buildChatTree([kid("solo", "solo", 10)], {}, {}))).toEqual([["solo", []]]);
+  });
+
+  it("prefers the parentChatId field over a stale purpose label", () => {
+    const moved: Chat = {
+      ...chat("kid", "p1", 50),
+      parentChatId: "real",
+      purpose: { kind: "spawned", label: "Spawned by chat wrong" },
+    };
+    const tree = buildChatTree([chat("real", "p1", 100), chat("wrong", "p1", 90), moved], {}, {});
+
+    expect(shape(tree)).toEqual([["real", ["kid"]], ["wrong", []]]);
   });
 });
 

@@ -62,6 +62,8 @@ export interface CreateChatInput {
   purpose?: ChatPurpose;
   /** The PR this chat reviews, `owner/repo#number`. See `Chat.reviewOf`. */
   reviewOf?: string;
+  /** The chat this one was spawned by. See `Chat.parentChatId`. */
+  parentChatId?: string;
 }
 
 /**
@@ -98,6 +100,7 @@ export async function createChat(
     status: "idle",
     ...(input.purpose ? { purpose: input.purpose } : {}),
     ...(input.reviewOf ? { reviewOf: input.reviewOf } : {}),
+    ...(input.parentChatId ? { parentChatId: input.parentChatId } : {}),
     createdAt: now,
     updatedAt: now,
   };

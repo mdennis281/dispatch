@@ -784,6 +784,12 @@ export interface PrReviewContext {
   branch: string;
   baseBranch: string;
   author?: string;
+  /**
+   * The chat that OPENED this PR, when Dispatch knows it — the reviewer's
+   * parent. Absent for a PR nobody here authored, in which case the reviewer
+   * has no parent and stays at the sidebar's top level, which is correct.
+   */
+  authorChatId?: string;
   headRefOid?: string;
   additions?: number;
   deletions?: number;
@@ -997,6 +1003,7 @@ async function readPrReviewContext(
     branch: row?.branch ?? detail?.branch ?? "",
     baseBranch: row?.baseBranch ?? detail?.baseBranch ?? "",
     author: row?.author ?? detail?.author,
+    authorChatId: await services.prRegistry.authorChatId(repo, number).catch(() => undefined),
     headRefOid: row?.headRefOid,
     additions: row?.additions ?? detail?.additions,
     deletions: row?.deletions ?? detail?.deletions,
@@ -1349,6 +1356,10 @@ export async function launchAgentTask(
     // edge the sidebar joins on to file a reviewer under the chat that opened
     // the PR, and it has to survive a label rewording.
     ...(pr ? { reviewOf: prRecordKey(pr.repo, pr.number) } : {}),
+    // Reviewers file under their author the same way a `spawn_chat` child does.
+    // Before this they joined through `reviewOf` → PR catalog → `PrRecord`, and
+    // lost their place whenever that middle term was missing.
+    ...(pr?.authorChatId ? { parentChatId: pr.authorChatId } : {}),
   });
 
   await ensureSession(services, chat.id);

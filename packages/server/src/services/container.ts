@@ -666,6 +666,10 @@ export function createServices(
       effort: request.effort,
       model: request.model,
       purpose: { kind: "spawned", label: `Spawned by chat ${parentChatId}` },
+      // The structural edge the sidebar files this chat under. The label above
+      // says the same thing in a sentence and is kept only because it is what
+      // every chat spawned before this field existed has instead of it.
+      parentChatId,
     });
     await ensureSession(services, chat.id);
     await broker.sendMessage(chat.id, request.prompt);

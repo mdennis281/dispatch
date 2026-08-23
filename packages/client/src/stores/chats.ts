@@ -228,24 +228,66 @@ export function reviewTargetKey(chat: Chat): string | null {
   return m ? `${m[2]}#${m[1]}` : null;
 }
 
-/** A top-level chat plus the reviewer chats filed under it. */
-export interface ChatBranch {
-  chat: Chat;
-  /** Reviewers of this chat's PRs, newest round first. Usually empty. */
-  reviews: Chat[];
+/**
+ * The chat that spawned this one, when it is recorded in prose rather than as a
+ * field.
+ *
+ * Every chat spawned before `parentChatId` existed has its parent only inside
+ * the sentence `container.ts` wrote for the sidebar. On the machine this
+ * shipped from that is 45 chats — dropping them would leave the feature looking
+ * like it did nothing for most of the history it applies to. Same bargain, and
+ * the same shape, as the label parse in {@link reviewTargetKey}.
+ */
+function spawnedParentId(chat: Chat): string | null {
+  if (chat.purpose?.kind !== "spawned") return null;
+  const m = /^Spawned by chat (\S+)$/.exec(chat.purpose.label ?? "");
+  return m ? m[1]! : null;
 }
 
 /**
- * Fold a flat chat list into one level of nesting: every reviewer chat moves
- * under the chat that opened the PR it is reading.
+ * Who this chat belongs under, or null if it stands on its own.
  *
- * One level, never more — a reviewer of a reviewer is not a thing, and a tree
- * that can nest arbitrarily is a tree somebody has to indent-guard.
+ * Three sources, most durable first. The field is what everything spawned from
+ * now on carries; the two parses behind it are history, and both are load
+ * bearing until the chats predating the field age out.
+ */
+export function parentChatId(chat: Chat, prsByKey: Record<string, PrRecord>): string | null {
+  if (chat.parentChatId) return chat.parentChatId;
+  const spawned = spawnedParentId(chat);
+  if (spawned) return spawned;
+  // Legacy reviewers only: joined through the PR catalog, which is exactly the
+  // indirection `parentChatId` exists to retire. New reviewers never reach here.
+  const key = reviewTargetKey(chat);
+  return (key ? prsByKey[key]?.chatId : undefined) ?? null;
+}
+
+/** A top-level chat plus the chats filed under it. */
+export interface ChatBranch {
+  chat: Chat;
+  /**
+   * Everything descended from this chat — spawned children and reviewers alike,
+   * newest first. One list, because the sidebar draws one list; a reviewer is
+   * still recognisable by its own label. Usually empty.
+   */
+  children: Chat[];
+}
+
+/** Depth past which we stop walking and call the chat a root. See `rootOf`. */
+const MAX_LINEAGE_HOPS = 50;
+
+/**
+ * Fold a flat chat list into ONE level of nesting: every chat that something
+ * else spawned moves under it.
  *
- * A reviewer whose parent isn't here (the PR is unattributed, or the chat that
- * opened it was deleted) stays where it was. Nesting hides a row inside another
- * row, and hiding one inside a row that doesn't exist would just delete it from
- * the sidebar.
+ * One level, never more, even though the lineage itself can be arbitrarily
+ * deep — a spawned chat can spawn a chat. A grandchild files under its top-most
+ * ancestor and sits BESIDE its parent rather than inside it. The exact shape of
+ * the chain is lost; nothing hides two levels down, the collapse control keeps
+ * working on a flat list, and no row needs an indent guard.
+ *
+ * A chat whose parent isn't here (deleted, or in another project's list) stays
+ * where it was. Nesting hides a row inside another row, and hiding one inside a
+ * row that doesn't exist would just delete it from the sidebar.
  *
  * A branch ranks by the NEWEST clock in it, its own or a child's. Without that,
  * a review that starts on a week-old chat sinks to wherever its parent sits and
@@ -257,29 +299,56 @@ export function buildChatTree(
   prsByKey: Record<string, PrRecord>,
 ): ChatBranch[] {
   const at = (c: Chat) => lastActivity[c.id] ?? c.updatedAt ?? c.createdAt;
-  const present = new Set(chats.map((c) => c.id));
-  const reviews = new Map<string, Chat[]>();
-  const roots: Chat[] = [];
+  const byId = new Map(chats.map((c) => [c.id, c]));
+  const parentOf = (id: string): string | null => {
+    const chat = byId.get(id);
+    return chat ? parentChatId(chat, prsByKey) : null;
+  };
 
-  for (const chat of chats) {
-    const key = reviewTargetKey(chat);
-    const parent = key ? prsByKey[key]?.chatId : undefined;
-    if (parent && parent !== chat.id && present.has(parent)) {
-      const list = reviews.get(parent);
-      if (list) list.push(chat);
-      else reviews.set(parent, [chat]);
-    } else {
-      roots.push(chat);
+  /**
+   * The top of this chat's lineage, or its own id if it is already there.
+   *
+   * A CYCLE RETURNS THE CHAT ITSELF, which keeps it a root. Returning the node
+   * we happened to stop walking at would nest each half of an `a -> b -> a`
+   * pair inside the other, and a branch that is only ever reached as somebody's
+   * child is a branch the sidebar never draws — both chats would vanish. The
+   * edge is written once at spawn and a chat cannot spawn its own ancestor, so
+   * this should be unreachable; it costs one Set to make the failure "nesting
+   * quietly stops working" instead of "two chats are gone".
+   */
+  const rootOf = (chat: Chat): string => {
+    const seen = new Set<string>([chat.id]);
+    let cur = chat.id;
+    for (let hop = 0; hop < MAX_LINEAGE_HOPS; hop++) {
+      const parent = parentOf(cur);
+      if (!parent || !byId.has(parent)) return cur;
+      if (seen.has(parent)) return chat.id;
+      seen.add(parent);
+      cur = parent;
     }
+    return chat.id;
+  };
+
+  const children = new Map<string, Chat[]>();
+  const roots: Chat[] = [];
+  for (const chat of chats) {
+    const root = rootOf(chat);
+    if (root === chat.id) {
+      roots.push(chat);
+      continue;
+    }
+    const list = children.get(root);
+    if (list) list.push(chat);
+    else children.set(root, [chat]);
   }
 
   return roots
-    .map((chat) => ({ chat, reviews: reviews.get(chat.id) ?? [] }))
+    .map((chat) => ({ chat, children: children.get(chat.id) ?? [] }))
     .sort((a, b) => rankBranch(b, at) - rankBranch(a, at));
 }
 
 const rankBranch = (b: ChatBranch, at: (c: Chat) => number): number =>
-  b.reviews.reduce((max, r) => Math.max(max, at(r)), at(b.chat));
+  b.children.reduce((max, r) => Math.max(max, at(r)), at(b.chat));
 
 /**
  * Selector: this project's chats as branches, newest first.

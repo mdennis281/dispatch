@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { Chat } from "@dispatch/shared";
-import { foldedReviewsLabel } from "./reviewLabel.js";
+import { foldedReviewsLabel, foldedChildrenLabel } from "./reviewLabel.js";
 
 /** A reviewer chat pointed at one PR, the way `launchAgentTask` records it. */
 function reviewer(id: string, reviewOf?: string, label?: string): Chat {
@@ -62,5 +62,47 @@ describe("foldedReviewsLabel — what the collapsed reviewer rows say", () => {
 
   it("handles the empty case the row never renders", () => {
     expect(foldedReviewsLabel([])).toBe("0 reviews");
+  });
+});
+
+describe("foldedChildrenLabel — a branch whose children aren't all reviewers", () => {
+  const spawned = (id: string): Chat => ({
+    ...reviewer(id),
+    reviewOf: undefined,
+    purpose: { kind: "spawned", label: "Spawned by chat p" },
+  });
+
+  it("reads exactly as before when every child is a reviewer", () => {
+    // The common case must not gain a word. "3 chats — 3 reviews of #140" spends
+    // two of them saying what "3 reviews of #140" already said.
+    const all = [reviewer("r1", "o/r#140"), reviewer("r2", "o/r#140")];
+    expect(foldedChildrenLabel(all)).toBe(foldedReviewsLabel(all));
+    expect(foldedChildrenLabel(all)).toBe("2 reviews of #140");
+  });
+
+  it("uses the generic noun once a spawned chat is in the list", () => {
+    expect(foldedChildrenLabel([reviewer("r1", "o/r#140"), spawned("s1")])).toBe(
+      "2 chats — 1 review (1 of #140), 1 spawned",
+    );
+  });
+
+  it("parenthesises the per-PR breakdown instead of nesting a second dash", () => {
+    // "9 chats — 6 reviews — 2 of #148, 2 of #150, 3 spawned" put two dashes at
+    // the same level and left the reader to work out which clause owned the last
+    // one. Seen on a real branch.
+    const children = [
+      reviewer("a", "o/r#148"),
+      reviewer("b", "o/r#148"),
+      reviewer("c", "o/r#150"),
+      spawned("s1"),
+    ];
+    expect(foldedChildrenLabel(children)).toBe(
+      "4 chats — 3 reviews (2 of #148, 1 of #150), 1 spawned",
+    );
+  });
+
+  it("drops the review clause entirely when nothing is a reviewer", () => {
+    expect(foldedChildrenLabel([spawned("s1"), spawned("s2")])).toBe("2 chats — 2 spawned");
+    expect(foldedChildrenLabel([spawned("s1")])).toBe("1 chat — 1 spawned");
   });
 });
