@@ -258,6 +258,23 @@ interface Where {
   params: (string | number)[];
 }
 
+/**
+ * Where a metric row lands when it names a Dispatch tool that no longer exists.
+ *
+ * Not a category: the tool is gone, so it has none. A distinct label keeps those
+ * rows countable without pretending they belong somewhere.
+ */
+export const RETIRED_TOOL_DETAIL = "(retired)";
+
+/**
+ * SQL string literal. Only ever applied to registry constants, never to user
+ * input — but written out rather than interpolated bare so the next person to
+ * reach for this helper doesn't have to work that out.
+ */
+function quote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
 export class MetricsService {
   private readonly db: StateDb;
   private readonly now: () => number;
@@ -508,22 +525,34 @@ export class MetricsService {
    * an existing row's `detail` even if it did run. Rows already on disk need an
    * UPDATE, and this is it.
    *
+   * RETIRED TOOLS MOVE TOO, onto {@link RETIRED_TOOL_DETAIL}. A first version
+   * looped the registry and matched on `identifier`, which left every row for a
+   * tool that has since been deleted — `wait_for_pr`, removed days before this
+   * shipped — sitting under the old server name forever. That is the ninth
+   * bucket this exists to remove, just smaller, and it would never have emptied.
+   * Their real category is genuinely unknown, so they get an honest label rather
+   * than a guessed one.
+   *
    * Idempotent: the WHERE only matches rows still carrying the retired server
    * name, and a migrated row no longer does. Cheap on every boot after the first
    * (it matches nothing, against an index-covered equality). Returns how many
    * rows moved, for the boot log.
    */
   migrateLegacyManagerDetail(): number {
+    // One statement, so a row is classified exactly once: a per-tool loop plus a
+    // catch-all pass would re-read rows the loop had just rewritten.
+    const cases = MANAGER_TOOL_NAMES.map(
+      (tool) => `WHEN ${quote(tool)} THEN ${quote(MANAGER_TOOL_CATEGORY[tool])}`,
+    ).join(" ");
     return this.db.tx(() => {
-      const update = this.db.prepare(
-        `UPDATE metric SET detail = ? WHERE category = 'manager' AND detail = ? AND identifier = ?`,
-      );
-      let moved = 0;
-      for (const tool of MANAGER_TOOL_NAMES) {
-        const res = update.run(MANAGER_TOOL_CATEGORY[tool], LEGACY_MANAGER_SERVER, tool);
-        moved += Number(res.changes ?? 0);
-      }
-      return moved;
+      const res = this.db
+        .prepare(
+          `UPDATE metric
+              SET detail = CASE identifier ${cases} ELSE ${quote(RETIRED_TOOL_DETAIL)} END
+            WHERE category = 'manager' AND detail = ?`,
+        )
+        .run(LEGACY_MANAGER_SERVER);
+      return Number(res.changes ?? 0);
     });
   }
 

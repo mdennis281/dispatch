@@ -13,6 +13,7 @@
  * including comments on sibling servers — untouched.
  */
 import { isMap } from "yaml";
+import { MANAGER_SERVER_NAMES, MANAGER_SERVER_PREFIX } from "@dispatch/shared";
 import {
   ManifestMcpServerSchema,
   ManifestMcpTransportSchema,
@@ -34,13 +35,40 @@ import {
 /** Server names must round-trip as a YAML key and an `mcp__<name>__<tool>` id. */
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
-/** Reject a name the SDK's `mcp__<server>__<tool>` addressing can't express. */
+/** Why a `dispatch-*` name cannot be configured, or null when it's fine. */
+function reservedNameReason(name: string): string | null {
+  if (!name.startsWith(MANAGER_SERVER_PREFIX)) return null;
+  // Dispatch's own servers are merged into a session LAST and win every
+  // collision. A project server with one of these names is therefore never
+  // handed to a session, cannot be switched off (it reads as always-on), and is
+  // dropped from the catalog — so it would sit in project.yaml doing nothing,
+  // with the config file as the only place it appeared to exist. Refusing at
+  // write time is the one moment that failure can be made visible.
+  return (
+    `"${name}" is reserved: the \`${MANAGER_SERVER_PREFIX}\` prefix belongs to Dispatch's own ` +
+    `tool servers (${MANAGER_SERVER_NAMES.join(", ")}), which are merged last and would ` +
+    `silently shadow yours. Pick another name.`
+  );
+}
+
+/**
+ * Reject a name the SDK's `mcp__<server>__<tool>` addressing can't express, or
+ * that belongs to Dispatch.
+ *
+ * Here rather than at either call site because this module is the SINGLE
+ * implementation of every MCP config mutation — the `dispatch mcp` commands and
+ * the agent's `mcp_add` tool both land on it. A guard on only one of them is the
+ * half-implemented validation this file's header warns about, and it shipped
+ * exactly that way once.
+ */
 export function assertValidServerName(name: string): void {
   if (!NAME_RE.test(name)) {
     throw new CmError(
       `Invalid server name "${name}". Use letters, digits, "-" and "_" (must start alphanumeric).`,
     );
   }
+  const reserved = reservedNameReason(name);
+  if (reserved) throw new CmError(reserved);
 }
 
 /* ------------------------------------------------------------------ read */
@@ -229,6 +257,13 @@ export async function importServers(
   for (const [name, value] of Object.entries(raw)) {
     if (!NAME_RE.test(name)) {
       entries.push({ name, status: "invalid", reason: "unusable server name" });
+      continue;
+    }
+    const reserved = reservedNameReason(name);
+    if (reserved) {
+      // Skipped rather than thrown: an import is a batch, and one reserved name
+      // in somebody's `.mcp.json` shouldn't discard the other nine.
+      entries.push({ name, status: "invalid", reason: reserved });
       continue;
     }
     let transport: ManifestMcpTransport;

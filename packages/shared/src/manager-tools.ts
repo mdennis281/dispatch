@@ -199,14 +199,20 @@ export const LEGACY_MANAGER_SERVER_ENTRY = `mcp__${LEGACY_MANAGER_SERVER}`;
  * form, and a `__*` wildcard.
  */
 function isLegacyWholeServerEntry(entry: string): boolean {
-  return (
-    entry === LEGACY_MANAGER_SERVER_ENTRY ||
-    entry === LEGACY_MANAGER_TOOL_PREFIX ||
-    entry === `${LEGACY_MANAGER_TOOL_PREFIX}*`
-  );
+  if (!entry.startsWith(LEGACY_MANAGER_SERVER_ENTRY)) return false;
+  // Whatever follows the server name: "" (bare), "__", "__*", or an argument
+  // scope like "(cd *)". Anything else — `x__foo`, `2`, `-thing` — is a
+  // DIFFERENT server whose name merely starts the same way.
+  const rest = entry.slice(LEGACY_MANAGER_SERVER_ENTRY.length);
+  return rest === "" || rest === "__" || rest === "__*" || rest.startsWith("(");
 }
 
-/** The per-category entries a whole-server permission expands to. */
+/**
+ * The per-category entries a whole-server permission expands to.
+ *
+ * The suffix rides along, so a scoped `…(cd *)` stays scoped on all eight —
+ * dropping it would widen a permission the human deliberately narrowed.
+ */
 function expandWholeServer(entry: string): string[] {
   const suffix = entry.slice(LEGACY_MANAGER_SERVER_ENTRY.length);
   return MANAGER_SERVER_NAMES.map((name) => `mcp__${name}${suffix}`);
@@ -272,18 +278,20 @@ export function migrateToolList(tools: readonly string[]): ToolListMigration {
   const changed: { from: string; to: string }[] = [];
   const unknown: string[] = [];
   const seen = new Set<string>();
-  const push = (value: string): void => {
-    if (seen.has(value)) return;
+  /** Add unless already present. Returns false when it was a duplicate, so a
+   *  second copy of the same entry doesn't get its own line in the boot log. */
+  const push = (value: string): boolean => {
+    if (seen.has(value)) return false;
     seen.add(value);
     out.push(value);
+    return true;
   };
   for (const entry of tools) {
     // Tested BEFORE the per-tool prefix: the bare server entry is not a prefix
     // match, and the `__` form is a whole-server permission AND a prefix at once.
     if (isLegacyWholeServerEntry(entry)) {
       for (const expanded of expandWholeServer(entry)) {
-        changed.push({ from: entry, to: expanded });
-        push(expanded);
+        if (push(expanded)) changed.push({ from: entry, to: expanded });
       }
       continue;
     }
@@ -297,8 +305,7 @@ export function migrateToolList(tools: readonly string[]): ToolListMigration {
       push(entry);
       continue;
     }
-    changed.push({ from: entry, to: renamed });
-    push(renamed);
+    if (push(renamed)) changed.push({ from: entry, to: renamed });
   }
   return { tools: out, changed, unknown };
 }
@@ -316,8 +323,11 @@ export function mentionsLegacyManagerServer(text: string): boolean {
  * Every spelling of the retired server in a config file: the bare server entry
  * on its own, and its per-tool / `__*` / `__` forms.
  *
- * The trailing `(?!\w)` is what stops a LONGER server name — somebody else's
- * `…managerx…` — from being reported as ours. `String.raw` because a plain
+ * The trailing lookahead is what stops a LONGER server name from being reported
+ * as ours. It excludes `-` and `.` as well as word characters: both are legal in
+ * a server name (`dispatch-github` is one), so `\w` alone let a `manager-thing`
+ * or `manager.foo` server match, and the warning then named a bare entry that
+ * appeared nowhere in the file. `String.raw` because a plain
  * template literal eats the backslash: `\w` becomes `w`, the lookahead silently
  * degrades to "not followed by the letter w", and the guard stops guarding.
  *
@@ -325,7 +335,7 @@ export function mentionsLegacyManagerServer(text: string): boolean {
  * true/false on identical input.
  */
 const LEGACY_MENTION_RE = new RegExp(
-  String.raw`${LEGACY_MANAGER_SERVER_ENTRY}(?:__[A-Za-z0-9_*]*)?(?!\w)`,
+  String.raw`${LEGACY_MANAGER_SERVER_ENTRY}(?:__[A-Za-z0-9_*]*)?(?![\w.-])`,
 );
 
 /** Every distinct legacy reference in a blob of config, for a warning that names them. */

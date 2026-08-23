@@ -29,15 +29,32 @@
  */
 import { spawnSync } from "node:child_process";
 
-const NEEDLE = ["mcp", "manager", ""].join("__");
+const SERVER = ["mcp", "manager"].join("__");
+const NEEDLE = `${SERVER}__`;
 
-const res = spawnSync("git", ["grep", "-n", "--untracked", "--fixed-strings", NEEDLE], {
+// Both spellings, because a permission list uses both: `mcp__<server>` means
+// "every tool on this server" and is the likeliest entry in a real allowlist,
+// while `mcp__<server>__<tool>` names one. Catching only the second is how the
+// migration code came to handle a form the CI gate could not see.
+//
+// The trailing class (or end of line) is what stops a LONGER server name —
+// `manager2`, or one with a `-`/`.` — from being reported as ours; both are
+// legal in a server name. Mirrors LEGACY_MENTION_RE in
+// packages/shared/src/manager-tools.ts. Duplicated on purpose: this runs BEFORE
+// the build, so it cannot import from `@dispatch/shared`.
+//
+// POSIX classes, not `\w`: `git grep -E` is ERE, where `\w` is not a class —
+// it reads as a literal `w`, the negated set matches any letter, and the guard
+// silently inverts into matching everything it was meant to exclude.
+const PATTERN = `${SERVER}(__[[:alnum:]_*]*)?([^[:alnum:]_.-]|$)`;
+
+const res = spawnSync("git", ["grep", "-nE", "--untracked", PATTERN], {
   encoding: "utf8",
 });
 
 // git grep exits 1 for "no matches", which is exactly what success looks like.
 if (res.status === 1) {
-  console.log(`ok — nothing names the retired \`${NEEDLE}\` server`);
+  console.log(`ok — nothing names the retired \`${SERVER}\` server`);
   process.exit(0);
 }
 if (res.status !== 0) {

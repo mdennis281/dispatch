@@ -3,8 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateDb } from "../store/db.js";
+import { LEGACY_MANAGER_SERVER, MANAGER_TOOL_CATEGORY } from "@dispatch/shared";
 import {
   MetricsService,
+  RETIRED_TOOL_DETAIL,
   eventKey,
   type MetricInput,
   type MetricSpanInput,
@@ -748,5 +750,75 @@ describe("MetricsService — chatRuntime (the sidebar's per-row figure)", () => 
     expect(metrics.stats().spansBuffered).toBe(1);
 
     expect(metrics.chatRuntime().byChat.c1).toBe(MIN);
+  });
+});
+
+describe("migrateLegacyManagerDetail", () => {
+  /** A row as it was stored BEFORE the servers were split: `detail` held the one
+   *  server name, where it now holds the tool's category. */
+  const legacyRow = (identifier: string, category: MetricInput["category"] = "manager") => ({
+    ts: NOW - HOUR,
+    category,
+    identifier,
+    detail: LEGACY_MANAGER_SERVER,
+    chatId: "c1",
+    toolUseId: `tu-${category}-${identifier}`,
+  });
+
+  const detailsById = () =>
+    new Map(
+      (
+        db.prepare("SELECT identifier, detail FROM metric").all() as {
+          identifier: string;
+          detail: string;
+        }[]
+      ).map((r) => [r.identifier, r.detail]),
+    );
+
+  it("re-files every legacy row, including tools that no longer exist", async () => {
+    metrics.record(legacyRow("create_pr"));
+    metrics.record(legacyRow("terminal"));
+    // A tool deleted from the registry. The first version of this migration
+    // matched on `identifier` against the registry and left these under the old
+    // server name forever — the same legacy bucket it existed to remove, just
+    // smaller, and it would never have emptied.
+    metrics.record(legacyRow("wait_for_pr"));
+    // A DIFFERENT category that happens to carry the same detail is not ours.
+    metrics.record(legacyRow("x/y", "mcp"));
+    await metrics.flush();
+
+    expect(metrics.migrateLegacyManagerDetail()).toBe(3);
+    const detail = detailsById();
+    expect(detail.get("create_pr")).toBe(MANAGER_TOOL_CATEGORY.create_pr);
+    expect(detail.get("terminal")).toBe(MANAGER_TOOL_CATEGORY.terminal);
+    expect(detail.get("wait_for_pr")).toBe(RETIRED_TOOL_DETAIL);
+    expect(detail.get("x/y")).toBe(LEGACY_MANAGER_SERVER);
+
+    // Nothing is left under the retired server name — that was the whole point.
+    const left = db
+      .prepare("SELECT COUNT(*) AS n FROM metric WHERE category = 'manager' AND detail = ?")
+      .get(LEGACY_MANAGER_SERVER) as { n: number };
+    expect(left.n).toBe(0);
+  });
+
+  it("is a no-op on every boot after the first", async () => {
+    metrics.record(legacyRow("create_pr"));
+    await metrics.flush();
+    expect(metrics.migrateLegacyManagerDetail()).toBe(1);
+    expect(metrics.migrateLegacyManagerDetail()).toBe(0);
+  });
+
+  it("does not throw on an empty table", () => {
+    expect(metrics.migrateLegacyManagerDetail()).toBe(0);
+  });
+
+  it("leaves an already-migrated row alone", async () => {
+    metrics.record({
+      ...legacyRow("create_pr"),
+      detail: MANAGER_TOOL_CATEGORY.create_pr,
+    });
+    await metrics.flush();
+    expect(metrics.migrateLegacyManagerDetail()).toBe(0);
+    expect(detailsById().get("create_pr")).toBe(MANAGER_TOOL_CATEGORY.create_pr);
   });
 });

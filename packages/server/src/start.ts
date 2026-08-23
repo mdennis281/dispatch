@@ -9,7 +9,6 @@ import { rm, writeFile } from "node:fs/promises";
 import { buildApp } from "./app.js";
 import { config, envVar } from "./config.js";
 import { seedDefaultsIfEmpty } from "./seed.js";
-import { migrateManagerToolNames } from "./services/manager-tool-migration.js";
 import { installShutdown } from "./shutdown.js";
 import { installCrashNet, attachCrashBus } from "./crash-log.js";
 import { claudeRuntime } from "./services/runtime.js";
@@ -57,24 +56,6 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
     // eslint-disable-next-line no-console
     console.warn("[dispatch] seed skipped:", err);
   });
-  // Carry permission allowlists through the manager-server rename before any
-  // session can be started against a stale one. Cheap after the first boot (it
-  // matches nothing) and never fatal — see manager-tool-migration.ts.
-  await migrateManagerToolNames(
-    app.cm.store,
-    (await app.cm.store.listProjects().catch(() => [])).map((p) => p.repoPath).filter(Boolean),
-  ).catch(() => undefined);
-  // …and re-file the metric rows recorded under the retired server name, so the
-  // Metrics view's `detail` axis shows one series per category rather than a
-  // ninth legacy bucket that never stops growing older. Idempotent; matches
-  // nothing after the first boot.
-  try {
-    const moved = app.services.metrics.migrateLegacyManagerDetail();
-    // eslint-disable-next-line no-console
-    if (moved) console.log(`[dispatch] re-filed ${moved} metric row(s) onto their tool category`);
-  } catch {
-    /* telemetry cosmetics must never stop a boot */
-  }
   // Wire teardown BEFORE listening, so a signal arriving during boot still runs
   // `services.dispose()` instead of orphaning whatever already started.
   installShutdown(app);

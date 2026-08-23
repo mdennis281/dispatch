@@ -127,6 +127,22 @@ describe("migrating an allowlist", () => {
     expect(out.unknown).toEqual([]);
   });
 
+  it("expands a SCOPED whole-server permission, keeping the scope", () => {
+    // A bare whole-server grant narrowed to one command by an argument scope.
+    // Passing it through unchanged left it neither migrated nor reported.
+    const out = migrateToolList([`${LEGACY_MANAGER_SERVER_ENTRY}(cd *)`]);
+    expect(out.tools).toEqual(MANAGER_SERVER_NAMES.map((n) => `mcp__${n}(cd *)`));
+    expect(out.unknown).toEqual([]);
+  });
+
+  it("counts a deduped expansion once, so the boot log matches reality", () => {
+    // The same whole-server entry twice must not print sixteen rewrite lines
+    // for eight entries.
+    const out = migrateToolList([LEGACY_MANAGER_SERVER_ENTRY, LEGACY_MANAGER_SERVER_ENTRY]);
+    expect(out.tools).toHaveLength(MANAGER_SERVER_NAMES.length);
+    expect(out.changed).toHaveLength(MANAGER_SERVER_NAMES.length);
+  });
+
   it("does not mistake a longer server name for the retired one", () => {
     // `mcp__managerx__foo` shares the leading characters and is somebody else's.
     const out = migrateToolList([
@@ -197,6 +213,16 @@ describe("detecting stale config we do not own", () => {
     expect(mentionsLegacyManagerServer(`{"allow":["${LEGACY_MANAGER_SERVER_ENTRY}x__foo"]}`)).toBe(
       false,
     );
+  });
+
+  it("does not flag a server whose name merely STARTS with the retired one", () => {
+    // `-` and `.` are legal in a server name, so a `\w`-only lookahead flagged
+    // `manager-thing` and named a bare entry that was nowhere in the file.
+    for (const other of ["-thing__foo", ".foo", "2", "x__foo"]) {
+      const text = `{"allow":["${LEGACY_MANAGER_SERVER_ENTRY}${other}"]}`;
+      expect(mentionsLegacyManagerServer(text), other).toBe(false);
+      expect(findLegacyManagerMentions(text), other).toEqual([]);
+    }
   });
 
   it("is not stateful across calls", () => {

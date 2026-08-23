@@ -24,6 +24,7 @@
  * `runId` alone.
  */
 import {
+  LEGACY_MANAGER_TOOL_PREFIX,
   isManagerServerOrLegacy,
   managerToolQualifiedName,
   parseMcpToolName,
@@ -166,9 +167,13 @@ export function classifyActivity(name: string, input?: Record<string, unknown>):
   // Codex routes some calls through a generic `functions.exec` carrier, so the
   // real tool is in the payload rather than the name.
   const payload = input ? safeJson(input).toLowerCase() : "";
+  // Both spellings: a payload recorded before the split names the retired
+  // server, and Codex transcripts are re-read for as long as the chat exists.
+  // Fixing `dispatchTool` above and not this line left exactly half the bug.
   const carried =
     n === "functions_exec" &&
     (payload.includes(managerToolQualifiedName("terminal").toLowerCase()) ||
+      payload.includes(`${LEGACY_MANAGER_TOOL_PREFIX}terminal`) ||
       payload.includes("shell_command"));
   // Agent waits are tested BEFORE sleeps, because `wait_for_chat` is a peer it's
   // blocked on, not a nap.

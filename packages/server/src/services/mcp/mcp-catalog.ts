@@ -402,17 +402,35 @@ export async function buildProjectMcpCatalog(
     ];
   });
 
-  // A project can still have a `dispatch-*` entry on disk — written before
-  // `mcp_add` reserved the namespace, or hand-edited into project.yaml. The
-  // broker merges Dispatch's own servers LAST, so that entry is never handed to
-  // a session; listing it would show a row nobody gets, next to a second row of
-  // the same name that they do. Same rule, and the same reason, as the bundled
-  // filter below — only the winner differs.
+  // A project can still have a `dispatch-*` entry on disk — written before the
+  // namespace was reserved, or hand-edited into project.yaml. Dispatch's own
+  // servers merge LAST, so that entry is never handed to a session.
+  //
+  // It is SHADOWED, not hidden. Dropping it silently was worse than the
+  // duplicate row it replaced: `dispatch mcp add` says "sessions pick it up
+  // automatically", the catalog showed nothing, the broker dropped it, and the
+  // only surface that admitted it existed was `dispatch mcp list`. So the row
+  // stays, marked `error`, saying what happened and what to do — which is also
+  // the only way somebody who already has one finds out.
+  const declared = (opts.mcpServers ?? project.mcpServers ?? {}) as Record<
+    string,
+    McpServerConfig
+  >;
+  const shadowedNames = Object.keys(declared).filter((name) => isManagerServer(name));
   const external = Object.fromEntries(
-    Object.entries(
-      (opts.mcpServers ?? project.mcpServers ?? {}) as Record<string, McpServerConfig>,
-    ).filter(([name]) => !isManagerServer(name)),
+    Object.entries(declared).filter(([name]) => !isManagerServer(name)),
   );
+  const shadowed: McpServerCatalogEntry[] = shadowedNames.map((name) => ({
+    name,
+    kind: "external",
+    transport: { type: "sdk" },
+    status: "error",
+    error:
+      `Shadowed by Dispatch's own "${name}" server, which is merged last and wins. ` +
+      `This entry is never given to a session — rename it in .dispatch/project.yaml.`,
+    enablement: resolveMcpEnablement(name, opts.enablement, true),
+    tools: [],
+  }));
   const cwd = opts.cwd ?? project.repoPath;
   // A project may declare a server of the same name as a bundled one, in which
   // case its declaration wins outright in the broker's merge — so listing both
@@ -444,5 +462,5 @@ export async function buildProjectMcpCatalog(
     inputs.map((input) => buildSpawnableEntry(input, opts.enablement, probe, timeoutMs, cwd)),
   );
 
-  return { servers: [...managerEntries, ...entries] };
+  return { servers: [...managerEntries, ...shadowed, ...entries] };
 }

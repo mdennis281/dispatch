@@ -89,10 +89,7 @@ import {
   WorkflowMergeMethodSchema,
   describeExemptionScope,
   prReviewAgentView,
-  MANAGER_SERVER_NAMES,
-  MANAGER_SERVER_PREFIX,
   MANAGER_TOOL_CATEGORY,
-  isManagerServer,
   managerServerName,
   managerToolQualifiedName,
   type ManagerCategory,
@@ -4959,19 +4956,6 @@ ${look}` : "")
       }
       const name = typeof args.name === "string" ? args.name.trim() : "";
       if (!name) return textResult("mcp_add requires a name.", true);
-      // The `dispatch-` namespace is Dispatch's own. Refused rather than allowed
-      // and then shadowed: the manager servers merge LAST, so a project server
-      // with one of these names is silently dropped at session build, cannot be
-      // switched off (it reads as always-on), and shows up as a duplicate row in
-      // the catalog. A refusal here is the only place that failure is visible.
-      if (isManagerServer(name) || name.startsWith(MANAGER_SERVER_PREFIX)) {
-        return textResult(
-          `"${name}" is reserved: the \`${MANAGER_SERVER_PREFIX}\` prefix belongs to Dispatch's ` +
-            `own tool servers (${MANAGER_SERVER_NAMES.join(", ")}), which are merged last and ` +
-            `would silently shadow yours. Pick another name.`,
-          true,
-        );
-      }
 
       // Infer the transport exactly the way the CLI does, so both entry points
       // accept the same loosely-specified input.
