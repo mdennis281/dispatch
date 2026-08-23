@@ -1484,7 +1484,8 @@ export interface ManagerMcpMessaging {
     to: string;
     question: string;
     timeoutMs: number;
-    signal?: AbortSignal;
+    /** Both the per-call and the session abort — see `ChatMessenger.ask`. */
+    signals?: (AbortSignal | undefined)[];
   }): Promise<PeerAskResult>;
   /** Synchronous: answering is just resolving a promise the asker is holding. */
   reply(input: { askId: string; answer: string }): PeerReplyResult;
@@ -5399,7 +5400,10 @@ ${look}` : "")
         to,
         question,
         timeoutMs,
-        signal: extraSignal(extra) ?? ctx.signal,
+        // BOTH, the way `wait_for_chat` passes both to `waitForChatState`. With
+        // `??` the session abort was dropped whenever the MCP call carried one
+        // of its own, so stopping the chat left the ask running.
+        signals: [extraSignal(extra), ctx.signal],
       });
       if (!result.ok) return peerRefusalResult(result);
       if (result.answered) {

@@ -1400,7 +1400,59 @@ interface OutboxItem {
    * when the turn's text matched relevant, not-yet-surfaced memories.
    */
   memoryContext?: string;
+  /**
+   * Who sent this, when another CHAT did — a `<system-reminder>` block prepended
+   * to the SDK message only, exactly like `memoryContext` above.
+   *
+   * Not merely nice-to-have: the receiving session never sees the transcript
+   * row, so without this a peer message arrives as a bare `user` turn that is
+   * indistinguishable from the human's own, and `chat_ask` cannot work at all —
+   * the `askId` would live only on the row, leaving the asked chat nothing to
+   * pass to `chat_reply` and every ask running to its timeout.
+   */
+  peerContext?: string;
   priority: MessagePriority;
+}
+
+/**
+ * The invisible blocks that ride in FRONT of a message's text on the way to the
+ * model, in order. Never on the transcript row: the row carries `peer` for the
+ * human (see UserRow) and the memory block as a collapsed `context` part.
+ *
+ * Peer attribution goes first — it frames who is speaking, which changes how
+ * everything after it should be read.
+ */
+function outboxPrefixes(item: OutboxItem): string[] {
+  const out: string[] = [];
+  if (item.peerContext) out.push(item.peerContext);
+  if (item.memoryContext) out.push(item.memoryContext);
+  return out;
+}
+
+/**
+ * What the RECEIVING model is told about a peer message.
+ *
+ * The same fact the transcript row shows the human, said in the prompt because
+ * that is the only channel the other session has. The `chat_reply` instruction
+ * is load-bearing rather than helpful: answering in its own transcript does not
+ * reach the asking chat, which is blocked inside a tool call until this exact
+ * call is made.
+ */
+export function peerReminder(peer: PeerSender): string {
+  const who = peer.title ? `"${peer.title}" (chatId ${peer.chatId})` : `chatId ${peer.chatId}`;
+  const lines = [
+    `The message below is from ANOTHER CHAT, not from the human: ${who}.`,
+    "Treat it as a message from a colleague, and do not assume the human has " +
+      "seen it or is watching this turn.",
+  ];
+  if (peer.askId) {
+    lines.push(
+      `That chat is BLOCKED waiting on your answer. When you have one, call ` +
+        `chat_reply({ askId: "${peer.askId}", answer: "…" }). That is the only ` +
+        `way to reach it — replying in your own transcript does not.`,
+    );
+  }
+  return `<system-reminder>\n${lines.join("\n")}\n</system-reminder>`;
 }
 
 interface PendingPermission {
@@ -1826,6 +1878,7 @@ export class SessionBroker {
       images: o.images,
       imageSources,
       memoryContext: memory?.block,
+      peerContext: o.peer ? peerReminder(o.peer) : undefined,
       priority: o.priority ?? "next",
     });
     this.schedule(session);
@@ -2769,7 +2822,7 @@ export class SessionBroker {
     if (session.harnessSession) {
       for (const item of session.outbox) {
         session.harnessSession.send({
-          text: item.memoryContext ? `${item.memoryContext}\n\n${item.text}` : item.text,
+          text: [...outboxPrefixes(item), item.text].filter(Boolean).join("\n\n"),
           images: this.resolveHarnessImages(session.chatId, item.images),
           priority: item.priority,
           effort: session.effort,
@@ -5352,13 +5405,13 @@ export class SessionBroker {
           ? {
               send: ({ to, message, delivery }) =>
                 this.messenger!.send({ from: session.chatId, to, message, delivery }),
-              ask: ({ to, question, timeoutMs, signal }) =>
+              ask: ({ to, question, timeoutMs, signals }) =>
                 this.messenger!.ask({
                   from: session.chatId,
                   to,
                   question,
                   timeoutMs,
-                  signal,
+                  signals,
                 }),
               reply: ({ askId, answer }) =>
                 this.messenger!.reply({ from: session.chatId, askId, answer }),
@@ -5508,8 +5561,8 @@ export class SessionBroker {
   private toSdkUserMessage(item: OutboxItem): SDKUserMessage {
     // Auto-surfaced memory rides in front of the user's text (SDK-only; the
     // transcript row keeps just item.text) so the agent sees the fact in context.
-    const prefix = item.memoryContext ? `${item.memoryContext}\n\n` : "";
-    let content: unknown = `${prefix}${item.text}`;
+    const prefixes = outboxPrefixes(item);
+    let content: unknown = [...prefixes, item.text].filter(Boolean).join("\n\n");
     const sources =
       item.imageSources && item.imageSources.length > 0
         ? item.imageSources
@@ -5518,7 +5571,7 @@ export class SessionBroker {
             .filter((s): s is Record<string, unknown> => !!s);
     if (sources.length > 0) {
       const blocks: unknown[] = [];
-      if (item.memoryContext) blocks.push({ type: "text", text: item.memoryContext });
+      for (const p of prefixes) blocks.push({ type: "text", text: p });
       if (item.text) blocks.push({ type: "text", text: item.text });
       for (const source of sources) blocks.push({ type: "image", source });
       content = blocks;

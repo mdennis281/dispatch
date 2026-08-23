@@ -648,6 +648,8 @@ export function createServices(
       // every respect but its attribution — same row, same outbox, same
       // steering semantics as anything the human types.
       send: (chatId, text, { peer }) => broker.sendMessage(chatId, text, { peer }),
+      // Raw usage, not a pre-rounded percentage: the messenger derives one
+      // itself for the harnesses that report only totals.
       getContextUsage: (chatId) => broker.getContextUsage(chatId),
       // `awaiting-input` is the status a chat sits in while a permission card or
       // a question is open in front of the human — the one thing a project

@@ -211,6 +211,29 @@ describe("ChatMessenger delivery mode", () => {
     expect(h.delivered).toHaveLength(0);
   });
 
+  it("holds an INTERRUPT too when the target is blocked on a human", async () => {
+    const h = twoChats();
+    h.setStatus("dev", "awaiting-input");
+
+    const result = await h.messenger.send({
+      from: "lead",
+      to: "dev",
+      message: "stop, wrong branch",
+      delivery: "interrupt",
+    });
+
+    // `interrupt` buys derailing a TURN, not dismissing a card the human is
+    // looking at: the broker reads any incoming message as an implicit decline
+    // of a pending question, so delivering here would resolve somebody's
+    // `ask_user` as denied and attribute the denial to the human.
+    expect(result.held).toBe(true);
+    expect(h.delivered).toHaveLength(0);
+
+    h.settle("dev", "idle");
+    await new Promise((r) => setImmediate(r));
+    expect(h.delivered.map((d) => d.text)).toEqual(["stop, wrong branch"]);
+  });
+
   it("interrupt delivers immediately even mid-turn", async () => {
     const h = twoChats();
     h.setStatus("dev", "running");
@@ -492,6 +515,43 @@ describe("ChatMessenger.ask / reply", () => {
     expect(result.answered).toBe(false);
   });
 
+  it("returns immediately when a signal is ALREADY aborted", async () => {
+    const h = twoChats();
+    const dead = AbortSignal.abort();
+
+    const result = await h.messenger.ask({
+      from: "lead",
+      to: "dev",
+      question: "?",
+      timeoutMs: 3_600_000,
+      signals: [dead],
+    });
+
+    // addEventListener("abort") never fires on an already-aborted signal, so
+    // without the explicit check this parked for the full hour.
+    expect(result.answered).toBe(false);
+    expect(result.reason).toBe("cancelled");
+  });
+
+  it("honours EVERY signal it is given, not just the first", async () => {
+    const h = twoChats();
+    const perCall = new AbortController();
+    const session = new AbortController();
+    const pending = h.messenger.ask({
+      from: "lead",
+      to: "dev",
+      question: "?",
+      timeoutMs: 3_600_000,
+      signals: [perCall.signal, session.signal],
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // The SESSION abort — the one a first-wins `??` used to drop on the floor.
+    session.abort();
+
+    await expect(pending).resolves.toMatchObject({ answered: false, reason: "cancelled" });
+  });
+
   it("releases every waiting asker on dispose", async () => {
     const h = twoChats();
     const pending = h.messenger.ask({
@@ -561,6 +621,27 @@ describe("ChatMessenger.state", () => {
   it("falls back to createdAt when the chat has never been updated", async () => {
     h.chats.set("dev", { ...h.chats.get("dev")!, createdAt: 555, updatedAt: undefined });
     await expect(h.messenger.state("dev")).resolves.toMatchObject({ updatedAt: 555 });
+  });
+
+  it("derives a context percentage when the harness reports only totals", async () => {
+    // The neutral harness branch of `getContextUsage` returns no `percentage`.
+    // `Math.round(undefined)` is NaN, which reached the agent as "NaN% full".
+    const h2 = harness({
+      chats: [{ id: "dev", title: "Dev", projectId: "p1" }],
+      contextUsage: { totalTokens: 40, maxTokens: 200 } as ContextUsage,
+    });
+    h2.setStatus("dev", "idle");
+    await expect(h2.messenger.state("dev")).resolves.toMatchObject({ contextPercent: 20 });
+  });
+
+  it("omits the context percentage rather than reporting NaN", async () => {
+    const h2 = harness({
+      chats: [{ id: "dev", title: "Dev", projectId: "p1" }],
+      contextUsage: { totalTokens: 40, maxTokens: 0 } as ContextUsage,
+    });
+    h2.setStatus("dev", "idle");
+    const state = await h2.messenger.state("dev");
+    expect(state?.contextPercent).toBeUndefined();
   });
 
   it("includes context usage only when a subprocess is live to report it", async () => {

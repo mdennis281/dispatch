@@ -1664,6 +1664,86 @@ describe("SessionBroker — project memory injection", () => {
     expect(controllers[0]!.pushed[1]).not.toContain("run pnpm ship, the bot merges");
     off();
   });
+
+  it("puts the SENDING CHAT and the askId into the SDK message, not just the row", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1", "p1"));
+    broker.create(chatFor("c1", "p1"));
+
+    const userRows: { text?: string; origin?: string; peer?: unknown }[] = [];
+    const off = bus.subscribe((e) => {
+      if (e.type === "chat-message" && e.message.kind === "user") userRows.push(e.message);
+    });
+
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "is it merged?", {
+      peer: { chatId: "lead", title: "Team lead", projectId: "p1", askId: "ask_42" },
+    });
+    await idle;
+
+    // THE POINT OF THIS TEST. The receiving session never sees the transcript
+    // row, so attribution that lives only on the row reaches the human and not
+    // the model — and `chat_ask` then cannot work at all, because the asked
+    // chat has no askId to hand `chat_reply` and every ask runs to its timeout.
+    const prompt = controllers[0]!.pushed[0]!;
+    expect(prompt).toContain("<system-reminder>");
+    expect(prompt).toContain("ANOTHER CHAT");
+    expect(prompt).toContain("Team lead");
+    expect(prompt).toContain("chat_reply");
+    expect(prompt).toContain("ask_42");
+    expect(prompt).toContain("is it merged?");
+
+    // …and the visible row keeps just the text, with the peer as structured
+    // data for the renderer rather than words in the message body.
+    expect(userRows[0]!.text).toBe("is it merged?");
+    expect(userRows[0]!.text).not.toContain("system-reminder");
+    expect(userRows[0]!.origin).toBe("peer");
+    expect(userRows[0]!.peer).toMatchObject({ chatId: "lead", askId: "ask_42" });
+    off();
+  });
+
+  it("omits the reply instruction for a plain send, which has no ask to answer", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1", "p1"));
+    broker.create(chatFor("c1", "p1"));
+
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "rebase first", {
+      peer: { chatId: "lead", title: "Team lead", projectId: "p1" },
+    });
+    await idle;
+
+    const prompt = controllers[0]!.pushed[0]!;
+    expect(prompt).toContain("ANOTHER CHAT");
+    // Nothing is waiting on an answer, so telling it to call `chat_reply` would
+    // send it looking for an askId that does not exist.
+    expect(prompt).not.toContain("chat_reply");
+  });
+
+  it("leaves an ordinary human turn completely unstamped", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1", "p1"));
+    broker.create(chatFor("c1", "p1"));
+
+    const userRows: { origin?: string; peer?: unknown }[] = [];
+    const off = bus.subscribe((e) => {
+      if (e.type === "chat-message" && e.message.kind === "user") userRows.push(e.message);
+    });
+
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hello");
+    await idle;
+
+    // Absence means human. Backfilling `origin: "human"` would be a wide diff
+    // for no behaviour, and every row already on disk omits it.
+    expect(controllers[0]!.pushed[0]).toBe("hello");
+    expect(userRows[0]!.origin).toBeUndefined();
+    expect(userRows[0]!.peer).toBeUndefined();
+    off();
+  });
 });
 
 describe("SessionBroker — config-sourced instructions / agents / modes", () => {

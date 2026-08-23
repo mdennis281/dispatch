@@ -209,7 +209,16 @@ export class ChatMessenger {
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
 
-  /** Send timestamps per ordered pair, keyed `from to`. */
+  /**
+   * Send timestamps per ordered pair, keyed `from\0to`.
+   *
+   * NUL because it cannot occur in a chat id, so the key is unambiguous — `a` +
+   * `bc` and `ab` + `c` must not collide or one pair's budget silently limits
+   * another. Written as the ESCAPE, never as a literal byte: a raw NUL in the
+   * source makes git treat this whole file as binary (no `git grep`, no diff
+   * lines, nothing for a reviewer to read) and renders as nothing in an editor,
+   * so the separator looks like a plain concatenation and gets "tidied" away.
+   */
   private readonly pairSends = new Map<string, number[]>();
   /** Send timestamps per target, keyed by target chatId. */
   private readonly targetSends = new Map<string, number[]>();
@@ -292,7 +301,13 @@ export class ChatMessenger {
     to: string;
     question: string;
     timeoutMs: number;
-    signal?: AbortSignal;
+    /**
+     * Every signal that should cancel the wait — the MCP call's and the
+     * session's are DIFFERENT aborts and both have to be honoured. Taking one
+     * and letting the caller pick meant a session teardown went unnoticed
+     * whenever a per-call signal happened to exist.
+     */
+    signals?: (AbortSignal | undefined)[];
   }): Promise<PeerAskResult> {
     const guard = await this.admit(input.from, input.to);
     if (!guard.ok) return { ...guard, answered: false };
@@ -309,13 +324,15 @@ export class ChatMessenger {
           if (!pending) return;
           this.pendingAsks.delete(askId);
           this.clearTimer(pending.timer);
-          if (onAbort) input.signal?.removeEventListener("abort", onAbort);
+          for (const sig of input.signals ?? []) {
+            sig?.removeEventListener("abort", onAbort);
+          }
           resolve(r);
         };
-        const onAbort = input.signal
-          ? (): void => finish({ answered: false, reason: "cancelled" })
-          : undefined;
-        if (onAbort) input.signal?.addEventListener("abort", onAbort);
+        const onAbort = (): void => finish({ answered: false, reason: "cancelled" });
+        for (const sig of input.signals ?? []) {
+          sig?.addEventListener("abort", onAbort);
+        }
         this.pendingAsks.set(askId, {
           askId,
           from: input.from,
@@ -324,6 +341,11 @@ export class ChatMessenger {
           cancel: (reason) => finish({ answered: false, reason }),
           timer: this.setTimer(() => finish({ answered: false, reason: "timeout" }), input.timeoutMs),
         });
+        // `addEventListener("abort")` on an ALREADY-aborted signal never fires,
+        // so without this the ask would park for the whole timeout — an hour, at
+        // `chat_ask`'s default. Checked after registration so `finish` has a
+        // pending record to tear down. Matches `waitForChatState`.
+        if ((input.signals ?? []).some((sig) => sig?.aborted)) onAbort();
       },
     );
 
@@ -387,7 +409,19 @@ export class ChatMessenger {
     let contextPercent: number | undefined;
     if (live) {
       const usage = await this.getContextUsage?.(chatId).catch(() => null);
-      if (usage) contextPercent = Math.round(usage.percentage);
+      // Not every harness reports `percentage` — the neutral branch of
+      // `getContextUsage` returns totals only. Derive it when we can and leave
+      // it ABSENT when we cannot: `Math.round(undefined)` is NaN, which reaches
+      // the agent as `"contextPercent":null` under a line reading "NaN% full",
+      // and a wrong number is worse than a missing one.
+      const pct =
+        usage &&
+        (Number.isFinite(usage.percentage)
+          ? usage.percentage
+          : usage.maxTokens > 0
+            ? (usage.totalTokens / usage.maxTokens) * 100
+            : undefined);
+      if (typeof pct === "number" && Number.isFinite(pct)) contextPercent = Math.round(pct);
     }
     return {
       chatId,
@@ -434,7 +468,7 @@ export class ChatMessenger {
       };
     }
     const now = this.now();
-    const pairKey = `${from} ${to}`;
+    const pairKey = `${from}\0${to}`;
     const pair = prune(this.pairSends, pairKey, now, PEER_PAIR_WINDOW_MS);
     // The window is a SLIDING one, so the budget frees up when its oldest entry
     // ages out — not `now + window`, which would over-state the wait by the age
@@ -500,11 +534,19 @@ export class ChatMessenger {
     // committed the target to a turn, so not counting it would let a burst park
     // twenty messages under one message's worth of budget.
     const now = this.now();
-    push(this.pairSends, `${from} ${to}`, now);
+    push(this.pairSends, `${from}\0${to}`, now);
     push(this.targetSends, to, now);
 
     const status = this.getStatus(to);
-    if (delivery === "queue" && status !== undefined && MID_TURN.has(status)) {
+    // `awaiting-input` holds regardless of DELIVERY, which is why it is tested
+    // apart from the mid-turn check below. `interrupt` buys the right to derail
+    // a turn; it does not buy the right to dismiss a card the human is looking
+    // at, and `sendMessage` reads any incoming message as an implicit decline of
+    // a pending question — so an interrupt there resolves somebody's
+    // `ask_user` as denied, attributes the denial to the human, and feeds the
+    // peer's text back as the reply they never gave.
+    const blocking = status === "awaiting-input";
+    if (status !== undefined && (blocking || (delivery === "queue" && MID_TURN.has(status)))) {
       const queue = this.held.get(to);
       if (queue) queue.push({ from, text, peer });
       else this.held.set(to, [{ from, text, peer }]);
