@@ -17,6 +17,16 @@ export interface PopoverProps {
   align?: "start" | "end" | "center";
   side?: "top" | "bottom";
   className?: string;
+  /**
+   * Classes for the trigger's WRAPPER, not the trigger itself.
+   *
+   * The wrapper is `inline-flex`, so it shrink-wraps its content and a `w-full`
+   * on the trigger inside it resolves against that shrink-to-fit box — i.e.
+   * against itself, which is a no-op. A trigger that has to fill its container
+   * (the sidebar's project row, which is a full-bleed band) needs the wrapper to
+   * stretch too, and `className` above goes to the portalled menu.
+   */
+  triggerClassName?: string;
   width?: number;
 }
 
@@ -51,6 +61,7 @@ export function Popover({
   align = "end",
   side = "bottom",
   className,
+  triggerClassName,
   width,
 }: PopoverProps) {
   const [open, setOpen] = useState(false);
@@ -164,7 +175,7 @@ export function Popover({
   }, [open, reposition]);
 
   return (
-    <div ref={triggerRef} className="relative inline-flex">
+    <div ref={triggerRef} className={cn("relative inline-flex", triggerClassName)}>
       {trigger({ open, toggle: () => setOpen((v) => !v) })}
       {open &&
         createPortal(

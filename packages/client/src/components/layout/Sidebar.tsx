@@ -150,16 +150,24 @@ function ProjectSelector({
       align="start"
       width={236}
       className="p-1"
+      // Without this the row is only as wide as its own content: the trigger
+      // wrapper is `inline-flex`, so the button's `w-full` measures against
+      // itself. A short project name left the highlight stopping mid-band with
+      // bare `surface` beside it, and the chevron floating mid-row.
+      triggerClassName="w-full"
       trigger={({ open, toggle }) => (
         <button
           onClick={toggle}
           aria-expanded={open}
           className={cn(
-            "flex w-full items-center gap-2 rounded-md border border-line bg-panel-2 px-2 py-1.5 text-left transition-colors hover:border-line-strong",
-            open && "border-line-strong",
+            // Full-bleed and square, like every other row in this column: it
+            // fills the header band rather than sitting in it as a card, so the
+            // sidebar has ONE row shape from the project name to the last chat.
+            "flex h-12 w-full items-center gap-2 px-2.5 text-left transition-colors hover:bg-hover",
+            open && "bg-active",
           )}
         >
-          <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent ring-1 ring-accent-line [&_svg]:size-3.5">
+          <span className="flex size-6 items-center justify-center bg-accent-ghost text-accent ring-1 ring-accent-line [&_svg]:size-3.5">
             <FolderGit2 />
           </span>
           <span className="min-w-0 flex-1">
@@ -260,7 +268,7 @@ function SubAppRow({
   };
 
   return (
-    <div className="group flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-hover">
+    <div className="group flex items-center gap-2 px-2.5 py-1.5 pr-2 transition-colors hover:bg-hover">
       <Icon className={cn("size-3.5 shrink-0", running ? "text-accent-hi" : "text-muted")} />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm text-secondary group-hover:text-primary">
@@ -294,6 +302,42 @@ function SubAppRow({
         </IconButton>
       )}
     </div>
+  );
+}
+
+/**
+ * The 3px bar marking the selected row.
+ *
+ * Always mounted, never conditionally rendered: it has to be here to animate
+ * OUT of, and a rail that only exists while selected can only ever pop. Active
+ * plays `cm-rail-in` (slide from the edge, overshoot, recover — see index.css);
+ * inactive is a plain transition back to nothing, so clicking down the list
+ * reads as one selection travelling rather than two unrelated bars blinking.
+ */
+function ActiveRail({ active }: { active: boolean }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        // `cm-rail` is the hook reduced-motion needs: the retract is a Tailwind
+        // transition on the inactive branch below, which a rule naming only
+        // `cm-rail-in` cannot reach.
+        "cm-rail pointer-events-none absolute inset-y-0 left-0 w-[3px] origin-left bg-accent",
+        active
+          ? "cm-rail-in scale-x-100 opacity-100"
+          // `scale`, NOT `transform`, and the difference is the whole retract.
+          // Tailwind v4 compiles `scale-x-*` to the independent `scale`
+          // property (`scale: var(--tw-scale-x) var(--tw-scale-y)`), so a
+          // hand-written `transition-[transform,opacity]` covers nothing here:
+          // `scale` snapped 100% → 0% on one frame and the fade had a
+          // zero-width bar left to fade. The named `transition-transform` would
+          // work — v4 expands it to `transform, translate, scale, rotate` — but
+          // it can't carry opacity too, so the list stays explicit and names
+          // `scale` itself. The entry keyframes are unaffected: they animate
+          // `transform`, which composes with `scale` independently.
+          : "scale-x-0 opacity-0 transition-[scale,opacity] duration-200 ease-[var(--ease-out)]",
+      )}
+    />
   );
 }
 
@@ -448,7 +492,7 @@ function ChatRow({
           active ? "bg-accent-ghost/70" : "hover:bg-hover",
         )}
       >
-        {active && <span className="absolute inset-y-0 left-0 w-0.5 bg-accent" />}
+        <ActiveRail active={active} />
         {/* A chat the app spawned for a job wears that job's icon instead of the
             status dot — in a sidebar of a dozen rows it's the only way to spot
             the one that's off editing your config. It's a bare glyph in the
@@ -522,7 +566,7 @@ function ChatRow({
           <input
             {...rename.inputProps}
             aria-label="Rename chat"
-            className="w-full rounded-sm border border-accent-line bg-inset px-1.5 py-0.5 text-base font-semibold text-primary outline-none"
+            className="w-full border border-accent-line bg-inset px-1.5 py-0.5 text-base font-semibold text-primary outline-none"
           />
         </div>
       )}
@@ -576,7 +620,17 @@ function ChatRow({
               "cm-touch-reveal absolute inset-y-0 right-0 flex items-center gap-0.5 border-l border-line px-1.5",
               "translate-x-full transition-transform duration-150 ease-[var(--ease-out)]",
               "group-hover/row:translate-x-0 group-focus-within/rail:translate-x-0",
-              active ? "bg-accent-ghost" : "bg-active",
+              // OPAQUE, in two layers. `--p-active` and `--p-accent-ghost` are
+              // translucent OVERLAYS (0.07 and 0.12 alpha) — as a bare
+              // background the tray was 93% see-through and the row's title
+              // read straight through the icons. The sidebar's own `surface`
+              // goes underneath as a solid floor and the highlight is painted
+              // over it as a gradient layer, which keeps it the off-colour of
+              // the row it covers while actually covering it.
+              "bg-surface",
+              active
+                ? "bg-[image:linear-gradient(var(--p-accent-ghost),var(--p-accent-ghost))]"
+                : "bg-[image:linear-gradient(var(--p-active),var(--p-active))]",
             )}
           >
             {reviews.length > 0 && (
@@ -655,7 +709,7 @@ function ReviewRow({
         active ? "bg-accent-ghost/70" : "hover:bg-hover",
       )}
     >
-      {active && <span className="absolute inset-y-0 left-0 w-0.5 bg-accent" />}
+      <ActiveRail active={active} />
       <span
         className={cn(
           "flex size-3.5 shrink-0 items-center justify-center [&_svg]:size-3",
@@ -737,12 +791,13 @@ function NavButton({
     <button
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium transition-colors [&_svg]:size-3.5",
-        active
-          ? "bg-accent-ghost text-primary"
-          : "text-secondary hover:bg-panel-2/60 hover:text-primary",
+        "relative flex w-full items-center gap-2 px-2.5 py-1.5 text-sm font-medium transition-colors [&_svg]:size-3.5",
+        active ? "bg-accent-ghost text-primary" : "text-secondary hover:bg-hover hover:text-primary",
       )}
     >
+      {/* The same rail the selected chat row wears — one marker for "this is
+          what you are looking at", wherever the selection happens to be. */}
+      <ActiveRail active={active} />
       <Icon className={active ? "text-accent" : "text-muted"} />
       <span className="flex-1 text-left">{label}</span>
       {count !== undefined && (
@@ -909,7 +964,7 @@ export function Sidebar() {
         inDrawer ? "h-full w-full" : "w-[260px] shrink-0",
       )}
     >
-      <div className="flex h-12 shrink-0 items-center px-2.5 cm-hairline-b">
+      <div className="flex h-12 shrink-0 items-center cm-hairline-b">
         {/* Adding a project is a full page, not a dialog: it ends by handing
             the repo to an agent, and that hand-off needs the config it's
             handing over visible beside it. See NewProjectView. */}
@@ -921,7 +976,7 @@ export function Sidebar() {
 
       <ScrollArea className="min-h-0 flex-1 py-2">
         {/* top-level nav: chat-independent, project-scoped surfaces */}
-        <div className="space-y-0.5 px-1.5 pb-1">
+        <div className="pb-1">
           <NavButton
             icon={Brain}
             label="Memory"
@@ -987,11 +1042,11 @@ export function Sidebar() {
             </div>
           )}
         </div>
-        <div className="px-1.5">
+        <div>
           {!project ? (
-            <p className="px-2 py-1.5 text-xs text-faint">No project selected.</p>
+            <p className="px-2.5 py-1.5 text-xs text-faint">No project selected.</p>
           ) : project.subApps.length === 0 ? (
-            <p className="px-2 py-1.5 text-xs text-faint">No apps configured.</p>
+            <p className="px-2.5 py-1.5 text-xs text-faint">No apps configured.</p>
           ) : (
             project.subApps.map((app) => (
               <SubAppRow
@@ -1044,11 +1099,14 @@ export function Sidebar() {
       </ScrollArea>
 
       {/* new chat */}
-      <div className="cm-hairline-t p-2.5">
+      <div className="cm-hairline-t pb-2.5">
         <button
           onClick={startNewChat}
           disabled={!project}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-line bg-panel-2 py-1.5 text-sm font-medium text-secondary transition-colors hover:border-line-strong hover:text-primary disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5"
+          // Edge to edge and square, so the one action pinned under the list
+          // belongs to the same column as the list. `bg-panel-2` still lifts it
+          // off `surface` — it is a button, not a row you can land on.
+          className="flex w-full items-center justify-center gap-1.5 bg-panel-2 py-2.5 text-sm font-medium text-secondary transition-colors hover:bg-active hover:text-primary disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5"
         >
           <Plus />
           New chat
