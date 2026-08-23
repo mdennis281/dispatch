@@ -114,9 +114,10 @@ describe("SlashCommandService", () => {
   it("adds the runtime's built-ins once a session has reported them", async () => {
     expect((await service.catalog(cwd, null)).builtinsKnown).toBe(false);
 
-    service.recordRuntimeCommands([
-      { name: "compact", description: "compact the context", source: "builtin", aliases: [] },
-    ]);
+    service.recordRuntimeCommands(
+      [{ name: "compact", description: "compact the context", source: "builtin", aliases: [] }],
+      null,
+    );
     const catalog = await service.catalog(cwd, null);
 
     expect(catalog.builtinsKnown).toBe(true);
@@ -124,7 +125,7 @@ describe("SlashCommandService", () => {
   });
 
   it("ignores an EMPTY runtime report — that's a failed answer, not 'no commands'", async () => {
-    service.recordRuntimeCommands([]);
+    service.recordRuntimeCommands([], null);
     expect((await service.catalog(cwd, null)).builtinsKnown).toBe(false);
   });
 
@@ -132,9 +133,10 @@ describe("SlashCommandService", () => {
     // The runtime reports every skill it discovered, including the ones Dispatch
     // materialized. Presenting one of those as "built-in" would hide the file.
     await write(join(globalRoot, "skills", "mine", "SKILL.md"), "---\nname: mine\n---\nx");
-    service.recordRuntimeCommands([
-      { name: "mine", description: "from the runtime", source: "builtin", aliases: [] },
-    ]);
+    service.recordRuntimeCommands(
+      [{ name: "mine", description: "from the runtime", source: "builtin", aliases: [] }],
+      null,
+    );
     const catalog = await service.catalog(cwd, null);
     expect(catalog.commands.filter((c) => c.name === "mine")).toHaveLength(1);
     expect(catalog.commands.find((c) => c.name === "mine")?.source).toBe("global");
@@ -159,6 +161,40 @@ describe("SlashCommandService", () => {
     expect((await withProject.catalog(cwd, "p1")).commands.map((c) => c.name)).toContain(
       "brand-new",
     );
+  });
+
+  it("never leaks one project's skill into another project's menu", async () => {
+    // `supportedCommands()` reports every skill the runtime DISCOVERED, not just
+    // built-ins — including the ones materialized into that chat's cwd. A
+    // process-wide snapshot would offer project X's `/deploy` in project Y,
+    // labelled "built-in", inserting a command Y's runtime cannot resolve.
+    service.recordRuntimeCommands(
+      [
+        { name: "compact", description: "built in", source: "builtin", aliases: [] },
+        { name: "deploy", description: "X's own skill", source: "builtin", aliases: [] },
+      ],
+      "project-x",
+    );
+
+    const x = await service.catalog(cwd, "project-x");
+    expect(x.builtinsKnown).toBe(true);
+    expect(x.commands.map((c) => c.name)).toEqual(expect.arrayContaining(["compact", "deploy"]));
+
+    const y = await service.catalog(cwd, "project-y");
+    expect(y.builtinsKnown).toBe(false);
+    expect(y.commands.map((c) => c.name)).not.toContain("deploy");
+    expect(y.commands.map((c) => c.name)).not.toContain("compact");
+  });
+
+  it("keeps a projectless session's snapshot out of every project", async () => {
+    service.recordRuntimeCommands(
+      [{ name: "loose", source: "builtin", aliases: [] }],
+      null,
+    );
+    expect((await service.catalog(cwd, "project-x")).commands.map((c) => c.name)).not.toContain(
+      "loose",
+    );
+    expect((await service.catalog(cwd, null)).commands.map((c) => c.name)).toContain("loose");
   });
 
   it("sorts by name and survives a cwd that doesn't exist", async () => {

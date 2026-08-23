@@ -489,7 +489,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     // A mic left open across a switch would type into the chat you just left.
     dictation.stop();
     const saved = loadDraft(chat.id);
-    editor.commands.setContent(saved.html);
+    // `preserveWhitespace: "full"`, because the default DOM parse eats a
+    // TRAILING space — and a draft holding a picked `/command ` depends on that
+    // space: without it, restoring the draft and typing the first argument
+    // character produces `/commandx`. Faithful either way; a draft should come
+    // back as the text that was saved.
+    editor.commands.setContent(saved.html, false, { preserveWhitespace: "full" });
     attachmentsRef.current = saved.images;
     setAttachments(saved.images);
     setEditing(null);
@@ -762,15 +767,23 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
    * parses HTML through the DOM, which collapses the trailing space away — and
    * that space is load-bearing: it is what stops the text matching the token
    * pattern, which is what keeps the menu shut while you type the arguments.
+   *
+   * `emitUpdate: true` (the second argument; it defaults to FALSE) is what makes
+   * this one write go through the same `onUpdate` every keystroke does — which
+   * is the only thing that calls `saveDraft`. Without it, picking `/review` and
+   * then switching chats restores the draft written by the last real keystroke:
+   * `/rev`, the half-typed token, silently replacing the command you chose.
    */
   const pickCommand = (name: string) => {
     slash.close();
-    editor?.commands.setContent({
-      type: "doc",
-      content: [{ type: "paragraph", content: [{ type: "text", text: `/${name} ` }] }],
-    });
+    editor?.commands.setContent(
+      {
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: `/${name} ` }] }],
+      },
+      true,
+    );
     editor?.commands.focus("end");
-    setIsEmpty(false);
   };
 
   slashKeyRef.current = (event: KeyboardEvent) => {

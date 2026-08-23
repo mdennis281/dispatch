@@ -319,24 +319,31 @@ export class AuthoredConfigService {
     return path;
   }
 
-  /** Remove a user-global item. False when it wasn't there. */
+  /**
+   * Remove a user-global item. False when it wasn't there.
+   *
+   * EVERY layout that exists is removed, not the first one found. A skill can
+   * legally be `skills/<name>/SKILL.md` OR a flat `skills/<name>.md`, and both
+   * can exist at once — `write()` always creates the directory form, so one
+   * `config_write` over a hand-authored flat file produces the pair.
+   * `readSkillsDir` dedupes them (the directory sorts first and wins), so reads
+   * look right; a first-match delete would then report success, leave the flat
+   * file behind, and the `/` menu would keep offering the OLD body under the
+   * same name with nothing anywhere reporting a problem.
+   */
   async remove(kind: AuthoredKind, name: string): Promise<boolean> {
     assertName(name);
-    const target =
+    const targets =
       kind === "skill"
-        ? join(this.globalSkillsDir(), name)
-        : join(this.globalInstructionsDir(), `${name}.md`);
-    if (!existsSync(target)) {
-      // A flat `skills/<name>.md` is the other legal skill layout.
-      const flat = join(this.globalSkillsDir(), `${name}.md`);
-      if (kind === "skill" && existsSync(flat)) {
-        await rm(flat, { force: true });
-        return true;
-      }
-      return false;
+        ? [join(this.globalSkillsDir(), name), join(this.globalSkillsDir(), `${name}.md`)]
+        : [join(this.globalInstructionsDir(), `${name}.md`)];
+    let removed = false;
+    for (const target of targets) {
+      if (!existsSync(target)) continue;
+      await rm(target, { recursive: true, force: true });
+      removed = true;
     }
-    await rm(target, { recursive: true, force: true });
-    return true;
+    return removed;
   }
 }
 

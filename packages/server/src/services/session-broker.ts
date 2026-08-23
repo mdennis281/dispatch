@@ -3320,7 +3320,7 @@ export class SessionBroker {
     try {
       const fromHarness = await session.harnessSession?.slashCommands?.();
       if (fromHarness?.length) {
-        this.slashCommands.recordRuntimeCommands(fromHarness);
+        this.slashCommands.recordRuntimeCommands(fromHarness, session.projectId);
         return;
       }
       const raw = await session.query?.supportedCommands?.();
@@ -3335,6 +3335,9 @@ export class SessionBroker {
             aliases: Array.isArray(c?.aliases) ? c.aliases.map(String) : [],
           }))
           .filter((c) => c.name),
+        // Keyed by project: the list includes the skills this session
+        // discovered, which are this project's — see `slash-commands.ts`.
+        session.projectId,
       );
     } catch {
       /* the menu falls back to what Dispatch can derive from disk */

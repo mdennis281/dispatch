@@ -152,12 +152,18 @@ export async function deleteProjectItem(
   const configDir = loaded.paths.configDir;
 
   if (kind === "skill") {
-    const dir = join(configDir, skillsDirName(loaded.doc), name);
-    const flat = join(configDir, skillsDirName(loaded.doc), `${name}.md`);
-    const target = existsSync(dir) ? dir : existsSync(flat) ? flat : null;
-    if (!target) return false;
-    await rm(target, { recursive: true, force: true });
-    return true;
+    // Both layouts, not the first match — see `AuthoredConfigService.remove` for
+    // why a half-delete here is worse than no delete: reads dedupe to the
+    // directory, so the surviving flat file is invisible until it starts
+    // answering for a skill everyone believes was deleted.
+    const base = join(configDir, skillsDirName(loaded.doc));
+    let removed = false;
+    for (const target of [join(base, name), join(base, `${name}.md`)]) {
+      if (!existsSync(target)) continue;
+      await rm(target, { recursive: true, force: true });
+      removed = true;
+    }
+    return removed;
   }
 
   const dirName = instructionsDirName(loaded.doc);

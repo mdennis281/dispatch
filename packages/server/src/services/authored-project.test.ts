@@ -138,6 +138,16 @@ describe("deleteProjectItem", () => {
     expect(await deleteProjectItem(repo, "skill", "nope")).toBe(false);
   });
 
+  it("removes BOTH skill layouts when a name has each", async () => {
+    await mkdir(join(repo, ".dispatch", "skills"), { recursive: true });
+    await writeFile(join(repo, ".dispatch", "skills", "dup.md"), "---\nname: dup\n---\nold", "utf8");
+    await writeProjectItem(repo, "skill", "dup", "new", "d");
+
+    expect(await deleteProjectItem(repo, "skill", "dup")).toBe(true);
+    expect(existsSync(join(repo, ".dispatch", "skills", "dup.md"))).toBe(false);
+    expect(existsSync(join(repo, ".dispatch", "skills", "dup"))).toBe(false);
+  });
+
   it("removes a skill directory whole", async () => {
     await writeProjectItem(repo, "skill", "s", "x", "y");
     expect(await deleteProjectItem(repo, "skill", "s")).toBe(true);

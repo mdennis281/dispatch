@@ -151,6 +151,22 @@ describe("AuthoredConfigService", () => {
     expect(await service.remove("skill", "gone")).toBe(false);
   });
 
+  it("removes BOTH layouts when a name has each, so no stale copy keeps serving", async () => {
+    // `write()` always creates the directory form, so one config_write over a
+    // hand-authored flat file produces the pair. `readSkillsDir` dedupes them
+    // (the directory sorts first and wins), so a first-match delete would report
+    // success while the flat file kept answering under the same name.
+    await writeFileIn(join(root, "skills", "deploy.md"), "---\nname: deploy\n---\nold body");
+    await service.write("skill", "deploy", "new body", "the real one");
+    expect(existsSync(join(root, "skills", "deploy.md"))).toBe(true);
+    expect(existsSync(join(root, "skills", "deploy", "SKILL.md"))).toBe(true);
+
+    expect(await service.remove("skill", "deploy")).toBe(true);
+    expect(existsSync(join(root, "skills", "deploy.md"))).toBe(false);
+    expect(existsSync(join(root, "skills", "deploy"))).toBe(false);
+    expect(readSkillsDir(service.globalSkillsDir())).toEqual([]);
+  });
+
   it("removes a FLAT global skill too, not just a skill directory", async () => {
     await writeFileIn(join(root, "skills", "flat.md"), "---\nname: flat\n---\nbody");
     expect(await service.remove("skill", "flat")).toBe(true);
