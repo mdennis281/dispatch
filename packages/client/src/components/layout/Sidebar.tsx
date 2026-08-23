@@ -13,7 +13,6 @@ import {
   Trash2,
   Pencil,
   MessagesSquare,
-  Cpu,
   Power,
   SquareTerminal,
   BarChart3,
@@ -27,11 +26,17 @@ import type { Chat, PrRecord, SubApp, RunnerInstance, Project } from "@dispatch/
 import { Popover, MenuItem } from "../ui/Popover.js";
 import { IconButton } from "../ui/IconButton.js";
 import { SectionLabel } from "../ui/Panel.js";
-import { StatusDot, statusMeta, toneText, type DotTone } from "../ui/StatusDot.js";
+import { StatusDot, statusMeta, toneText } from "../ui/StatusDot.js";
 import { formatDuration } from "../metrics/duration.js";
 import { TitleText } from "../ui/TitleText.js";
 import { purposeIcon } from "../config/sections.js";
-import { Chip, Badge, type Tone } from "../ui/Chip.js";
+import {
+  childChatTint,
+  childChatTitle,
+  processTint,
+  processTitle,
+} from "./rowMarkers.js";
+import { Chip } from "../ui/Chip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { useProjects, useActiveProject } from "../../stores/projects.js";
@@ -474,14 +479,6 @@ function ChatRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const rename = useChatRename(chat);
 
-  // What the folded reviews are up to, in one colour: somebody is stopped on a
-  // question, somebody is mid-review, or nothing is moving. Collapsing the rows
-  // must not collapse the fact that one of them needs you.
-  const reviewTone: DotTone = reviewsNeedInput
-    ? "warn"
-    : reviews.some((r) => r.status === "running" || r.status === "waiting")
-      ? "working"
-      : "muted";
   const reviewCount = `${reviews.length} review${reviews.length === 1 ? "" : "s"}`;
 
   // OS processes this branch is holding — the session subprocess, every MCP
@@ -568,6 +565,35 @@ function ChatRow({
         ) : (
           <StatusDot tone={meta.tone} pulse={meta.pulse} size={7} />
         )}
+        {/* What this row is holding, stacked in its own gutter between the
+            status marker and the title.
+
+            Always mounted, faint when there is nothing to report, because the
+            alternative is a title that starts at a different x on every other
+            row — and the eye reads a ragged left edge as disorder long before it
+            reads the missing glyph as "nothing here". Faint IS the empty state.
+
+            10px glyphs, no digits: see `rowMarkers`, which owns the colour rules
+            and puts the counts in the tooltips. `gap-px` rather than a real gap
+            so the pair reads as one two-storey marker instead of two markers
+            that happen to be near each other. */}
+        <span className="-ml-1 flex shrink-0 flex-col items-center gap-px [&_svg]:size-2.5">
+          <span
+            title={childChatTitle(reviews, reviewsNeedInput)}
+            className={cn(
+              "transition-colors duration-300",
+              childChatTint(reviews, reviewsNeedInput),
+            )}
+          >
+            <MessagesSquare />
+          </span>
+          <span
+            title={processTitle(procs)}
+            className={cn("transition-colors duration-300", processTint(procs))}
+          >
+            <SquareTerminal />
+          </span>
+        </span>
         <span className="min-w-0 flex-1">
           <span
             className={cn(
@@ -646,66 +672,22 @@ function ChatRow({
           them underneath it. */}
       {!rename.editing && (
         <div className="group/rail absolute inset-y-0 right-0">
-          {(needsInput || processCount > 0 || (reviews.length > 0 && !expanded)) && (
+          {needsInput && (
             <span
               className={cn(
                 // The scroll track shares this surface's background, so gutter
-                // and scrollbar read as one undifferentiated band and the
-                // markers looked like they were floating in it. `pr-2.5` is as
-                // tight as the bubble's 8px overhang allows — any tighter and
-                // the row's `overflow-hidden` takes a bite out of it.
-                // `gap-3.5` because each bubble overhangs to the RIGHT, so the
-                // spacing between the two pairs is the gap minus that overhang.
-                "cm-touch-hide pointer-events-none absolute inset-y-0 right-0 flex items-center gap-3.5 pr-2.5",
+                // and scrollbar read as one undifferentiated band and the dot
+                // looked like it was floating in it.
+                "cm-touch-hide pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2.5",
                 "group-hover/row:hidden group-focus-within/rail:hidden",
               )}
             >
-              {/* Side by side, processes first: the review badge keeps the slot
-                  it has always had, so the new one arrives beside it rather than
-                  shifting it. `gap-2.5` because each count overhangs its icon to
-                  the right — at the old 1.5 the digits collided with the next
-                  icon. */}
-              {/* Shells FIRST, and in a different colour, because they are the
-                  half nothing reclaims for you: the session count beside them
-                  drops to nothing on its own once the chat has been idle a
-                  while, and a dev server you are still testing against must not
-                  read as the same kind of transient. */}
-              {procs.shells > 0 && (
-                <IconCount
-                  icon={SquareTerminal}
-                  count={procs.shells}
-                  iconClass="text-success"
-                  tone="success"
-                  title={`${procs.shells} background shell${procs.shells === 1 ? "" : "s"}`}
-                />
-              )}
-              {procs.session > 0 && (
-                <IconCount
-                  icon={Cpu}
-                  count={procs.session}
-                  // Blue, and deliberately NOT the runtime figure's violet on
-                  // the line below: these are two different kinds of fact about
-                  // the same chat — one is time already spent and gone, the
-                  // other is memory being held right now and reclaimable. A
-                  // shared colour would invite reading them as one measurement.
-                  iconClass="text-info"
-                  tone="info"
-                  title={`${procs.session} session process${procs.session === 1 ? "" : "es"}`}
-                />
-              )}
-              {reviews.length > 0 && !expanded && (
-                <IconCount
-                  icon={MessagesSquare}
-                  count={reviews.length}
-                  iconClass={toneText(reviewTone)}
-                  // The GLYPH keeps the full three-way state (muted / working /
-                  // needs-you); the bubble only has to separate "go look at
-                  // this" from the rest, and `Badge` has no muted fill anyway.
-                  tone={reviewTone === "warn" ? "warn" : "accent"}
-                  title={reviewsByPr}
-                />
-              )}
-              {needsInput && <StatusDot tone="warn" pulse size={6} />}
+              {/* All that is left out here. The counts for child chats and
+                  processes moved to the stacked glyphs beside the title, where
+                  they are visible on EVERY row rather than only at rest — the
+                  gutter's markers vanish the moment the tray slides in, which
+                  is exactly when you are deciding whether to press Power. */}
+              <StatusDot tone="warn" pulse size={6} />
             </span>
           )}
           <div
@@ -769,58 +751,6 @@ function ChatRow({
         onClose={() => setConfirmDelete(false)}
       />
     </div>
-  );
-}
-
-/**
- * An icon with its count as a corner badge.
- *
- * The count used to sit INLINE beside the icon, which was fine while there was
- * one of them and stopped being fine at two: `[icon]2 [icon]9` in a 40px gutter
- * reads as one four-character number, and no amount of gap fixes that because
- * the digits are the same size and weight as each other. Anchoring each count to
- * its own icon binds them visually — the pair is one glyph, so two pairs are two
- * glyphs rather than four things in a row.
- *
- * No chip behind the digits. The markers live in the right gutter, past where
- * the title truncates, so there is never anything under them to separate from —
- * and a filled badge would need the tray's two-layer opaque treatment to survive
- * the active row's gradient, which is a lot of machinery for 10px of text that
- * has nothing behind it.
- */
-function IconCount({
-  icon: Icon,
-  count,
-  iconClass,
-  tone,
-  title,
-}: {
-  icon: LucideIcon;
-  count: number;
-  /** Foreground colour for the GLYPH. A tone via `toneText`, or a palette class. */
-  iconClass: string;
-  /** Fill for the bubble. `Badge` pairs each with its contrast-correct ink. */
-  tone: Tone;
-  title: string;
-}) {
-  return (
-    <span
-      title={title}
-      className={cn("relative inline-flex items-center [&_svg]:size-4", iconClass)}
-    >
-      <Icon />
-      {/* The shared `Badge`, not a hand-rolled chip: it already pairs every fill
-          with its `-fg` ink, and that pairing is the thing a bespoke one gets
-          wrong — a `text-white` badge is legible in exactly one theme. Reusing
-          it also means these read as the same object as the nav's counts.
-
-          The overhang has to stay INSIDE the row's `overflow-hidden`, and the
-          row is clipped at exactly the gutter's padding — so this offset and
-          that padding are one measurement, not two. */}
-      <span className="pointer-events-none absolute -top-2 -right-1.5">
-        <Badge count={count} tone={tone} size="sm" />
-      </span>
-    </span>
   );
 }
 
