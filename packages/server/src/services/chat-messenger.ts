@@ -220,6 +220,21 @@ const MID_TURN: ReadonlySet<ChatStatus> = new Set<ChatStatus>([
   "awaiting-input",
 ]);
 
+/**
+ * Statuses where a turn is GENUINELY IN FLIGHT — narrower than {@link MID_TURN},
+ * and deliberately so.
+ *
+ * `MID_TURN` answers "should a queued delivery wait?", where `queued` belongs:
+ * a chat parked behind the concurrency cap will run shortly and piling messages
+ * on it helps nobody. This set answers a different question — "did this send
+ * interrupt anything?" — and `queued` does NOT belong, because no turn has
+ * started. The broker agrees: `isActive` excludes `queued`, so `sendMessage`
+ * doesn't even treat the delivery as steering. Reporting `interrupted` there
+ * would have `chat_send` tell the model it injected into "the turn it is running
+ * now" about a turn that has not begun.
+ */
+const IN_FLIGHT: ReadonlySet<ChatStatus> = new Set<ChatStatus>(["running", "waiting"]);
+
 export class ChatMessenger {
   private readonly bus: EventBus;
   private readonly getChat: ChatMessengerOpts["getChat"];
@@ -598,8 +613,9 @@ export class ChatMessenger {
       ok: true,
       held: false,
       // Read BEFORE the send: afterwards the target is running either way, so
-      // asking then could never distinguish the two.
-      interrupted: status !== undefined && MID_TURN.has(status),
+      // asking then could never distinguish the two. `IN_FLIGHT`, not
+      // `MID_TURN` — a `queued` chat has no turn to interrupt.
+      interrupted: status !== undefined && IN_FLIGHT.has(status),
       woke,
     };
   }

@@ -251,6 +251,22 @@ describe("ChatMessenger delivery mode", () => {
     expect(result.held).toBe(false);
   });
 
+  it("does not call a delivery to a QUEUED chat an interrupt", async () => {
+    const h = twoChats();
+    // `queued` is inside MID_TURN (a queue delivery rightly waits for it) but no
+    // turn has started, so there is nothing to have interrupted.
+    h.setStatus("dev", "queued");
+
+    const result = await h.messenger.send({
+      from: "lead",
+      to: "dev",
+      message: "now",
+      delivery: "interrupt",
+    });
+
+    expect(result.interrupted).toBe(false);
+  });
+
   it("does not call a plain idle delivery an interrupt", async () => {
     const h = twoChats();
     const result = await h.messenger.send({
@@ -396,15 +412,45 @@ describe("ChatMessenger rate limits", () => {
 
   it("does not charge a refused send against the budget", async () => {
     const h = twoChats();
-    for (let i = 0; i < 3; i++) {
-      await h.messenger.send({ from: "lead", to: "ghost", message: "nowhere" });
-    }
-    // Those three went nowhere, so the real target's budget is untouched.
+    // The refusals have to land on the SAME budget key as the successes, or the
+    // test cannot fail: refusing `lead -> ghost` would charge `lead\0ghost`,
+    // which nothing later consults. So fill `lead -> dev`, take the refusals on
+    // that exact pair, and age out only the successes.
     for (let i = 0; i < PEER_PAIR_LIMIT; i++) {
       expect((await h.messenger.send({ from: "lead", to: "dev", message: `m${i}` })).ok).toBe(
         true,
       );
     }
+    h.advance(60_000);
+    for (let i = 0; i < 5; i++) {
+      const refused = await h.messenger.send({ from: "lead", to: "dev", message: "over" });
+      expect(refused.refusal).toBe("rate-limited-pair");
+    }
+
+    // Past the window for the accepted sends, but NOT for the refusals a minute
+    // later — so if a refusal had been charged, five of the slots below would
+    // still be occupied and the loop would start failing at the sixth.
+    h.advance(PEER_PAIR_WINDOW_MS - 60_000 + 1);
+    for (let i = 0; i < PEER_PAIR_LIMIT; i++) {
+      expect(
+        (await h.messenger.send({ from: "lead", to: "dev", message: `after${i}` })).ok,
+      ).toBe(true);
+    }
+  });
+
+  it("does not charge a send to a chat that does not exist", async () => {
+    const h = twoChats();
+    for (let i = 0; i < 3; i++) {
+      await h.messenger.send({ from: "lead", to: "ghost", message: "nowhere" });
+    }
+    // Asserted on the TARGET budget, which is keyed by target alone — the one
+    // key a `lead -> ghost` refusal could plausibly have touched.
+    for (let i = 0; i < PEER_PAIR_LIMIT; i++) {
+      expect((await h.messenger.send({ from: "lead", to: "dev", message: `m${i}` })).ok).toBe(
+        true,
+      );
+    }
+    expect(h.delivered).toHaveLength(PEER_PAIR_LIMIT);
   });
 });
 

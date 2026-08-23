@@ -68,10 +68,19 @@ export const UserRow = memo(function UserRow({
                 from another chat
               </Chip>
             ))}
-          {/* The sending chat is BLOCKED on `chat_reply` until this is answered
-              — worth saying, because a human reading the question cannot answer
-              it themselves and would otherwise have no idea anyone is waiting. */}
-          {peer?.askId && <Chip tone="accent">awaiting reply</Chip>}
+          {/* Says what this row IS, not what is happening right now.
+              Transcripts are append-only and nothing rewrites `peer.askId` when
+              the ask resolves, so a live claim here ("awaiting reply") would go
+              on insisting somebody is blocked long after they answered — the
+              exact species of lie this row exists to prevent. That a message was
+              sent as a question stays true forever, so that is what it says.
+              `info` rather than `accent` for the same reason: accent is reserved
+              for live-and-yours, and this is settled metadata. */}
+          {peer?.askId && (
+            <Chip tone="info" title="Sent as a question via chat_ask, not a plain message.">
+              question
+            </Chip>
+          )}
           {row.steering && <Chip tone="accent">steering</Chip>}
           {composed?.some((p) => p.kind === "brief") && <Chip tone="muted">composed</Chip>}
           {row.effort && <Chip tone="muted">{row.effort}</Chip>}
