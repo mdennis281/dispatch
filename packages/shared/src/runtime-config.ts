@@ -12,10 +12,11 @@ import { EffortSchema, HarnessKindSchema } from "./common.js";
 /**
  * How many chats may hold an execution slot at once when nothing says otherwise.
  *
- * Shared because three places have to agree on the same number: the server's env
- * fallback, the broker's clamp, and the settings field's placeholder — which has
- * to name the effective default, or a blank box reads as "no cap" rather than
- * "the default one".
+ * Shared because the server's env fallback, the broker's clamp and the settings
+ * field all need the same floor. It is only the floor: `DISPATCH_MAX_ACTIVE_SESSIONS`
+ * moves the effective default above it, which is why the field asks the server
+ * (`GET /api/settings/defaults`) what to print rather than printing this — a blank
+ * box has to name the number actually in force, not the one shipped.
  */
 export const DEFAULT_MAX_ACTIVE_SESSIONS = 6;
 

@@ -156,6 +156,18 @@ export interface AppSettings {
   };
 }
 
+/**
+ * Server-side defaults a settings field has to NAME rather than store.
+ *
+ * Separate from {@link AppSettings} on purpose: these are facts about how the
+ * server was started (env vars), and mixing them into the settings body would
+ * put them in the full-replace PUT as though the client owned them.
+ */
+export interface AppSettingsDefaults {
+  /** Effective cap when `AppSettings.maxActiveSessions` is unset — env, else 6. */
+  maxActiveSessions: number;
+}
+
 export interface HarnessInfo {
   kind: HarnessKind;
   runtime: { path?: string; version?: string; source: string; available: boolean };
@@ -960,6 +972,8 @@ export const api = {
   settings: {
     get: () => get<AppSettings>("/api/settings"),
     update: (body: Partial<AppSettings>) => put<AppSettings>("/api/settings", body),
+    /** What a CLEARED optional setting falls back to on THIS server. */
+    defaults: () => get<AppSettingsDefaults>("/api/settings/defaults"),
   },
 
   /**

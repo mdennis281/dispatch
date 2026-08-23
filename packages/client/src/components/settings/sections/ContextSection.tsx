@@ -13,11 +13,16 @@ function numberField(raw: string): number | undefined {
 }
 
 /** How many chats run at once, and what happens as their context windows fill. */
-export function ContextSection({ draft, patch }: AppPaneProps) {
+export function ContextSection({ draft, patch, serverDefaults }: AppPaneProps) {
   const ac = draft.autoCompact ?? {};
   const harness = draft.harness ?? {};
   const limits = harness.contextLimits ?? {};
   const enabled = ac.enabled ?? true;
+  // What a blank box actually means on THIS server — `DISPATCH_MAX_ACTIVE_SESSIONS`
+  // moves it, so printing the shared constant would misreport the cap in force on
+  // any install that sets the env var. The constant is only the stand-in for the
+  // moment before the answer lands (and if the request failed).
+  const defaultCap = serverDefaults?.maxActiveSessions ?? DEFAULT_MAX_ACTIVE_SESSIONS;
 
   const patchLimits = (p: Partial<typeof limits>) =>
     patch({ harness: { ...harness, contextLimits: { ...limits, ...p } } });
@@ -25,17 +30,13 @@ export function ContextSection({ draft, patch }: AppPaneProps) {
   return (
     <div className="space-y-3">
       <div className="space-y-2 border-b border-line-soft pb-3">
-        <Field
-          label="Max active chats"
-          hint={`blank = ${DEFAULT_MAX_ACTIVE_SESSIONS}`}
-          className="max-w-[12rem]"
-        >
+        <Field label="Max active chats" hint={`blank = ${defaultCap}`} className="max-w-[12rem]">
           <TextInput
             mono
             inputMode="numeric"
             value={draft.maxActiveSessions != null ? String(draft.maxActiveSessions) : ""}
             onChange={(e) => patch({ maxActiveSessions: numberField(e.target.value) })}
-            placeholder={String(DEFAULT_MAX_ACTIVE_SESSIONS)}
+            placeholder={String(defaultCap)}
           />
         </Field>
         <p className="text-xs leading-snug text-faint">

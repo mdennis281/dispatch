@@ -24,7 +24,12 @@ import type { HarnessKind, ModelOption } from "@dispatch/shared";
 import { InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
-import { api, type AppSettings, type HarnessInfo } from "../../lib/api.js";
+import {
+  api,
+  type AppSettings,
+  type AppSettingsDefaults,
+  type HarnessInfo,
+} from "../../lib/api.js";
 import { useNotices } from "../../stores/notices.js";
 import { useSettings } from "../../stores/settings.js";
 import { useTheme } from "../../stores/theme.js";
@@ -58,7 +63,8 @@ function normalize(s: AppSettings): AppSettings {
     // Deliberately NOT filled in with an effective default like the fields
     // below: unset is a meaningful answer here ("whatever this server was
     // started with"), and the only honest number to substitute lives on the
-    // server. The field shows it as a placeholder instead.
+    // server — which the field asks for separately (`/api/settings/defaults`)
+    // and shows as a placeholder.
     maxActiveSessions: s.maxActiveSessions,
     webhook: {
       kind: s.webhook?.kind ?? "ntfy",
@@ -109,6 +115,7 @@ export function AppSettingsView() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [harnesses, setHarnesses] = useState<HarnessInfo[]>([]);
+  const [serverDefaults, setServerDefaults] = useState<AppSettingsDefaults | null>(null);
   const [catalogs, setCatalogs] = useState<Partial<Record<HarnessKind, ModelOption[]>>>({});
 
   // Load once. A draft already in the store means unsaved edits from an earlier
@@ -142,8 +149,13 @@ export function AppSettingsView() {
   }, [hasDraft, setTheme]);
 
   // Catalogs are cheap and can change under us (a provider installed since the
-  // last visit), so unlike the draft they refresh on every mount.
+  // last visit), so unlike the draft they refresh on every mount. The server's
+  // own defaults ride along for the same reason — an env var moves when the
+  // server restarts, and a field that names a stale one is worse than a blank.
+  // Here rather than in the draft effect above, which is SKIPPED when a draft
+  // already exists: unsaved edits must not cost the fields their placeholders.
   useEffect(() => {
+    void api.settings.defaults().then(setServerDefaults).catch(() => setServerDefaults(null));
     void api.harnesses.list().then(setHarnesses).catch(() => setHarnesses([]));
     for (const kind of ["claude", "codex"] as const) {
       void api.models
@@ -198,7 +210,7 @@ export function AppSettingsView() {
 
   const def = APP_SECTION_BY_ID.get(section) ?? APP_SECTIONS[0]!;
   const Icon = def.icon;
-  const paneProps = draft ? { draft, patch, harnesses, catalogs } : null;
+  const paneProps = draft ? { draft, patch, harnesses, catalogs, serverDefaults } : null;
 
   return (
     <SettingsShell<AppSettingsSection>
