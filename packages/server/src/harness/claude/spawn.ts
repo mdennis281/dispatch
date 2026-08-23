@@ -13,7 +13,7 @@
  *
  * Deliberately a thin wrapper over `child_process.spawn` and NOTHING else. Every
  * behaviour the SDK's own launcher has is either reproduced here or consciously
- * given up, and the two that are given up are listed on {@link spawnWithPid}.
+ * given up, and the one that is given up is named on {@link spawnWithPid}.
  */
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
@@ -58,16 +58,24 @@ export interface PidSink {
 const STDERR_TAIL_LIMIT = 8_192;
 
 /**
+ * How long to wait for a dead child's stderr to close before giving up on it.
+ *
+ * The pipe normally closes within a tick of `exit`; this only covers the case
+ * where a grandchild inherited the handle and is holding it open, which would
+ * otherwise strand the pid in the registry for the life of the server.
+ */
+const STDERR_CLOSE_GRACE_MS = 1_000;
+
+/**
  * Build a `spawnClaudeCodeProcess` implementation that reports its pid.
  *
- * TWO DIFFERENCES from the SDK's built-in launcher, both documented by it:
+ * ONE DIFFERENCE from the SDK's built-in launcher: it pre-checks that the
+ * executable exists, and we let `spawn` fail instead — which surfaces as the
+ * `error` event the SDK already listens for.
  *
- *  - It pre-checks that the executable exists; we let `spawn` fail instead,
- *    which surfaces as the `error` event the SDK already listens for.
- *  - It defers `exit` until stderr has also closed, so an exit error carries a
- *    complete tail. A custom spawner emits plain process exit — so the tail is
- *    kept here (see {@link STDERR_TAIL_LIMIT}) and attached to the child for a
- *    caller that wants it, rather than being reconstructed after the fact.
+ * Its other behaviour, deferring the exit report until stderr has ALSO closed so
+ * the tail is complete, is reproduced here rather than given up. See the
+ * `settle` comment below for what happens when it isn't.
  *
  * `signal` is the SDK's FORWARDED signal, not the caller's: it fires only after
  * the stdin-EOF + ~2 s grace window, so handing it to `spawn` is safe and is
@@ -104,15 +112,44 @@ export function spawnWithPid(sink: PidSink) {
       // `error` and no `exit`, which would otherwise leak the pid into the
       // registry until something else swept it.
       let released = false;
+      let grace: NodeJS.Timeout | undefined;
       const release = (): void => {
         if (released) return;
         released = true;
+        if (grace) clearTimeout(grace);
         sink.onExit(pid, tail);
       };
-      // Deferred a tick past `exit`: stderr's last 'data' can still be in flight
-      // when the process ends, and reporting the tail before it lands would drop
-      // the final line — usually the one naming the failure.
-      child.once("exit", () => setImmediate(release));
+
+      // Report the tail only once stderr has CLOSED as well as the process
+      // having exited — which is exactly what the SDK's own launcher does, and
+      // for exactly this reason. `exit` fires while the pipe still holds
+      // whatever hasn't been read: a child that writes 40 KB and exits delivers
+      // its stderr in chunks, so releasing on `exit` (even a tick later) hands
+      // back the FIRST chunk and drops the last line — the one that says why.
+      // Caught by a test that passed on Windows and failed on Linux, which is
+      // the difference between a buffer that happened to drain in one go and
+      // one that didn't.
+      let exited = false;
+      let drained = false;
+      const settle = (): void => {
+        if (exited && drained) release();
+      };
+      const onDrained = (): void => {
+        drained = true;
+        settle();
+      };
+      child.stderr.once("end", onDrained);
+      child.stderr.once("close", onDrained);
+      child.once("exit", () => {
+        exited = true;
+        // BOUNDED, so a stderr that never closes (an inherited handle held open
+        // by a grandchild) can't strand the pid in the registry forever.
+        grace ??= setTimeout(onDrained, STDERR_CLOSE_GRACE_MS);
+        grace.unref?.();
+        settle();
+      });
+      // A child that never starts emits `error` and no `exit`: nothing to drain,
+      // and nothing to wait for.
       child.once("error", release);
     }
 
