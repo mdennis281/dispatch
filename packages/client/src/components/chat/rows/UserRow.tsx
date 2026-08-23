@@ -1,11 +1,14 @@
 import { memo } from "react";
+import { Bot } from "lucide-react";
 import type { UserMessageRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { Chip } from "../../ui/Chip.js";
+import { Button } from "../../ui/Button.js";
 import { MediaGroup } from "./MediaGroup.js";
 import { ComposedParts } from "./ComposedParts.js";
 import { actions } from "../../../lib/actions.js";
 import { useHasCheckpoint } from "../../../stores/checkpoints.js";
+import { selectChat } from "../../../stores/navigation.js";
 
 /**
  * A user turn: avatar initial, text, attached image thumbnails, effort chip.
@@ -15,6 +18,14 @@ import { useHasCheckpoint } from "../../../stores/checkpoints.js";
  * breakdown. Those render instead of the flat text, so the app's words are
  * quoted rather than passed off as typed; see ComposedParts. Rows written before
  * that existed have no `parts` and render exactly as they always did.
+ *
+ * A turn ANOTHER CHAT sent (`chat_send` / `chat_ask`) arrives with
+ * `origin: "peer"`. It has to be a `user` row — that is the only input channel a
+ * session has — so this is the one place the human can ever find out an agent
+ * said it and they did not. That makes the attribution here load-bearing rather
+ * than decorative: `chat_send` deliberately has NO consent prompt, and this row
+ * is what was traded for the prompt. Absent `origin` still means human, which is
+ * every row written before peer messaging existed.
  */
 export const UserRow = memo(function UserRow({
   chatId,
@@ -25,25 +36,60 @@ export const UserRow = memo(function UserRow({
 }) {
   const canRollback = useHasCheckpoint(chatId, row.id);
   const composed = row.parts && row.parts.length > 0 ? row.parts : null;
+  // Keyed on `origin`, not on `peer`: the sender object is optional on the
+  // schema, and a row that says "peer" with no sender must still not be dressed
+  // up as something the human typed.
+  const fromPeer = row.origin === "peer";
+  const peer = row.peer;
   return (
     <RowShell
       tint="user"
       align="right"
-      who="You"
+      who={fromPeer ? (peer?.title ?? "Another chat") : "You"}
       ts={row.ts}
       rollback={canRollback}
       onRollback={() => actions.rollback(chatId, row.id)}
       meta={
         <>
+          {fromPeer &&
+            (peer?.chatId ? (
+              <Button
+                variant="subtle"
+                size="sm"
+                className="gap-1 px-1.5 text-2xs"
+                title={`Sent by another chat, not by you. Open ${peer.title ?? peer.chatId}.`}
+                onClick={() => selectChat(peer.chatId)}
+                leftIcon={<Bot />}
+              >
+                from another chat
+              </Button>
+            ) : (
+              <Chip tone="agent" icon={<Bot />}>
+                from another chat
+              </Chip>
+            ))}
+          {/* The sending chat is BLOCKED on `chat_reply` until this is answered
+              — worth saying, because a human reading the question cannot answer
+              it themselves and would otherwise have no idea anyone is waiting. */}
+          {peer?.askId && <Chip tone="accent">awaiting reply</Chip>}
           {row.steering && <Chip tone="accent">steering</Chip>}
           {composed?.some((p) => p.kind === "brief") && <Chip tone="muted">composed</Chip>}
           {row.effort && <Chip tone="muted">{row.effort}</Chip>}
         </>
       }
       gutter={
-        <span className="flex size-6 items-center justify-center rounded-md bg-bubble text-2xs font-semibold text-primary ring-1 ring-bubble-line">
-          M
-        </span>
+        fromPeer ? (
+          // NOT the human's initial. That avatar is the single strongest "you
+          // typed this" signal in the row, and it is exactly the lie a peer
+          // message would otherwise tell.
+          <span className="flex size-6 items-center justify-center rounded-md bg-accent-2-ghost text-accent-2-hi ring-1 ring-accent-2-line [&_svg]:size-3.5">
+            <Bot />
+          </span>
+        ) : (
+          <span className="flex size-6 items-center justify-center rounded-md bg-bubble text-2xs font-semibold text-primary ring-1 ring-bubble-line">
+            M
+          </span>
+        )
       }
     >
       {composed ? (

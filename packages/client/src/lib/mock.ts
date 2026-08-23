@@ -442,6 +442,34 @@ export const MOCK_MESSAGES: Record<string, ChatMessage[]> = {
       uuid: "u_st2",
       text: "Reading the Steamworks Remote Storage docs and mapping the stash serializer to `FileWrite`/`FileRead`. Setting up the quota check now.",
     },
+    // Two peer turns, because they are the ONLY rows in the app whose whole
+    // point is that they must not look like the row above them: a `user` turn
+    // is the only input channel a session has, so an agent-sent message is
+    // structurally identical to something the human typed and is told apart
+    // purely by how it renders.
+    {
+      kind: "user",
+      id: "st3",
+      chatId: CHAT_STEAM,
+      ts: ago(1),
+      text: "Heads up — I merged the save-format change on #214, so rebase before you touch the serializer.",
+      origin: "peer",
+      peer: { chatId: CHAT_SETTINGS, title: "Save format v3", projectId: "hivebreak" },
+    },
+    {
+      kind: "user",
+      id: "st4",
+      chatId: CHAT_STEAM,
+      ts: ago(1),
+      text: "Is the quota check going to need its own settings toggle, or can I assume it is always on?",
+      origin: "peer",
+      peer: {
+        chatId: CHAT_SETTINGS,
+        title: "Save format v3",
+        projectId: "hivebreak",
+        askId: "ask_7f3a",
+      },
+    },
   ],
 };
 
