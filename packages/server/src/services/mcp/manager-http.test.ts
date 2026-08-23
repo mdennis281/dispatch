@@ -13,6 +13,8 @@
  */
 import { describe, it, expect } from "vitest";
 import { MANAGER_CATEGORIES, managerServerName } from "@dispatch/shared";
+import { EventBus } from "../../bus.js";
+import { createManagerMcpServers, managerMcpContextOf } from "./manager-mcp.js";
 import {
   MANAGER_MCP_PATH,
   MANAGER_MCP_ROUTE,
@@ -78,5 +80,38 @@ describe("the route and the URLs it must serve", () => {
     expect(grant.urlFor("dispatch-session")).toBe(
       `http://127.0.0.1:4319${MANAGER_MCP_PATH}/session`,
     );
+  });
+});
+
+describe("recovering the live context from a session's server map", () => {
+  /** How `session-broker` picks the context to mint a Codex grant against. */
+  const pick = (servers: Record<string, unknown>) =>
+    Object.values(servers).map(managerMcpContextOf).find(Boolean);
+
+  const real = () =>
+    createManagerMcpServers({ chatId: "c1", bus: new EventBus(), broker: {} as never });
+
+  it("finds the context even when a foreign entry sorts first", () => {
+    // `allMcp` is `{ ...externalMcp, ...managerServers }` and the split filters
+    // by NAME, so a project that hand-declared `dispatch-github` keeps that
+    // earlier key position — and its plain `{url}` config sits there whenever
+    // this session doesn't build that category. Taking `[0]` blind yielded
+    // undefined and the Codex session came up with no Dispatch tools, silently.
+    const servers = { "dispatch-github": { url: "https://example.com/mcp" }, ...real() };
+    expect(Object.keys(servers)[0]).toBe("dispatch-github");
+    expect(pick(servers)).toBeDefined();
+  });
+
+  it("is undefined when there is genuinely nothing of ours", () => {
+    expect(pick({ "dispatch-github": { url: "https://example.com/mcp" } })).toBeUndefined();
+    expect(pick({})).toBeUndefined();
+  });
+
+  it("recovers the SAME context from every category server", () => {
+    // The grant is per-chat, not per-category, so any one of them must do.
+    const servers = real();
+    const contexts = Object.values(servers).map(managerMcpContextOf);
+    expect(contexts.length).toBeGreaterThan(1);
+    expect(new Set(contexts).size).toBe(1);
   });
 });

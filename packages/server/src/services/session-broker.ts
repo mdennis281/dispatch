@@ -2803,10 +2803,16 @@ export class SessionBroker {
       ) {
         managerMcp = { transport: "in-process", servers: managerServers };
       } else if (resolved.harness.capabilities.managerTransport === "http") {
-        // Every category server carries the SAME live context, so any one of them
-        // recovers it — the grant is per-session, not per-category, and the
-        // category is chosen by URL path.
-        const context = managerMcpContextOf(Object.values(managerServers)[0]);
+        // The first entry that actually YIELDS a context, not simply the first
+        // entry. `managerServers` is filtered out of `allMcp` by name, and
+        // `allMcp` puts externals first — so a project that declares
+        // `dispatch-<category>` by hand keeps that earlier key position, and its
+        // plain `{url}` config sits there whenever this session doesn't build
+        // that category. Taking `[0]` blind meant `managerMcpContextOf` returned
+        // undefined and the Codex session came up with NO Dispatch tools at all,
+        // silently. Every real category server carries the same live context, so
+        // any one of them will do — the grant is per-chat, not per-category.
+        const context = Object.values(managerServers).map(managerMcpContextOf).find(Boolean);
         if (context && this.managerMcp) {
           session.managerGrant?.revoke();
           const grant = this.managerMcp.mint(session.chatId, () => context);

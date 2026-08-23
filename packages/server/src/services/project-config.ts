@@ -64,6 +64,8 @@ import {
   type McpServerConfig,
   type WorkflowConfig,
   migrateToolList,
+  isManagerServer,
+  MANAGER_SERVER_PREFIX,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
@@ -619,6 +621,25 @@ export class ProjectConfigService {
     // --- mcpServers (array → keyed record; transport flattened + env-expanded) ---
     const mcpServers: Record<string, McpServerConfig> = {};
     for (const server of manifest.mcpServers ?? []) {
+      // A `dispatch-*` name is Dispatch's own. `mcp_add` and `dispatch mcp add`
+      // both refuse to write one, so this can only be a hand-edit or a file
+      // predating that guard — and it can never work: the category servers are
+      // merged LAST and win, so the entry would sit in the manifest describing a
+      // server no session ever gets. DROPPED here, at the one place that reads
+      // the manifest, rather than filtered at each consumer — and reported as a
+      // config error, which is what it is, and where a human already looks for
+      // "why isn't my config doing anything".
+      if (isManagerServer(server.name)) {
+        errors.push({
+          scope: "manifest",
+          file: MANIFEST_FILE,
+          message:
+            `MCP server "${server.name}" uses a name reserved for Dispatch's own tools. ` +
+            `It is ignored — Dispatch's server of that name is merged last and wins. ` +
+            `Rename it to something outside the "${MANAGER_SERVER_PREFIX}" prefix.`,
+        });
+        continue;
+      }
       // A `${VAR}` the manager's environment doesn't define is a config problem
       // worth SHOWING (the server will just fail to authenticate otherwise), but
       // not worth failing the load over — so it lands in `errors`, not a throw.
