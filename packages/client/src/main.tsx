@@ -41,15 +41,30 @@ const isLogWindow = new URLSearchParams(location.search).has("logs");
 const isMissionPreview =
   import.meta.env.DEV && location.pathname.startsWith("/mission-preview");
 
-// The full app shell — the only mode that should open a socket, run auth, or
-// register PWA plumbing. Both the log popup and the preview are standalone
-// renders that would otherwise fight the app for those globals.
+// The full app shell — the only mode that should register PWA plumbing, seed
+// the offline mock, or listen for service-worker messages. Both the log popup
+// and the preview are standalone renders that would otherwise fight the app for
+// those globals.
+//
+// NOTE the deliberately different gate on the live-data block below. These two
+// modes are NOT the same shape: the preview wants everything skipped, while the
+// log popup only ever wanted the PWA half skipped — it has always needed the
+// socket.
 const isShell = !isLogWindow && !isMissionPreview;
 
 // Wire the reactive data spine (active chat → transcript, active project → panels)
 // then open the WS. The backend's `hello` triggers the REST hydrate, so live data
 // flows into the stores the moment we connect; a reconnect resyncs automatically.
-if (isShell) {
+//
+// Gated on `!isMissionPreview` and NOT on `isShell`, because the log popup
+// depends on this block. `startLiveApp` is the only thing that reaches
+// `ws.connect()` at boot — `ws.ts` exports the singleton without self-connecting,
+// and the sole other caller is `AuthGate`, which lives inside `<App />` and is
+// never rendered for `?logs=`. Skip it here and `RunnerLogWindow` loses every
+// live behaviour its own docblock promises: the tail freezes at the one-shot
+// REST backfill, the header falls back to "runner / unknown" with no pid or URL,
+// and the connection badge reads "connecting" forever. Nothing tests this.
+if (!isMissionPreview) {
   void initializeAuth().then(() => {
     const status = useAuth.getState().status;
     if (!status?.enabled || useAuth.getState().user) {

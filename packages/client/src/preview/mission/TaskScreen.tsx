@@ -14,7 +14,25 @@ import { ActorStatusPill, Card, Empty, RowButton, Section, TaskStatusPill, Tunab
 import { actorsForTask, teamColor, type Plan } from "./derive.js";
 import type { Nav } from "./nav.js";
 import type { SectionState } from "./sections.js";
-import { CAPS } from "./types.js";
+import { CAPS, type MissionPolicy } from "./types.js";
+
+/**
+ * What each branching mode actually means for a dependency, keyed by the mode.
+ *
+ * This was one template string interpolating the SELECTED mode in front of a
+ * clause only true for `serialize-on-merge`, so switching Settings to "stacked"
+ * made the board assert the opposite of `MissionPolicy.branching`'s own
+ * docblock. A record rather than a ternary because adding a third mode should
+ * fail to compile here rather than silently reuse a wrong sentence.
+ */
+const BRANCHING_HINT: Record<MissionPolicy["branching"], string> = {
+  "serialize-on-merge":
+    "serialize-on-merge — waits until every PR on each dependency is merged, because a " +
+    "task may open more than one",
+  stacked:
+    "stacked — starts as soon as each dependency opens its PR, branching off that head " +
+    "rather than main",
+};
 
 export function TaskScreen({
   plan,
@@ -119,7 +137,7 @@ export function TaskScreen({
         id="task-graph"
         title="Dependencies"
         state={sections}
-        hint={`${spec.policy.branching} — waits for every PR on each dependency`}
+        hint={BRANCHING_HINT[spec.policy.branching]}
       >
         <div className="grid max-w-4xl gap-4 [grid-template-columns:repeat(auto-fit,minmax(16rem,1fr))]">
           <div>
