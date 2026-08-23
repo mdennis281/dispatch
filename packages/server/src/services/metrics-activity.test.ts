@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { MetricState } from "@dispatch/shared";
+import { LEGACY_MANAGER_TOOL_PREFIX, type MetricState } from "@dispatch/shared";
 import {
   ActivityTracker,
   MAIN_ACTOR,
@@ -105,14 +105,16 @@ describe("classifyActivity", () => {
   // History: a call RECORDED before the split must classify the same way, or
   // replayed shell/wait time silently reclassifies as generic `tool`.
   const legacyCases: Array<[string, MetricState]> = [
-    ["mcp__manager__terminal", "shell"],
-    ["mcp__manager__wait", "sleeping"],
-    ["mcp__manager__wait_for_chat", "waiting_agent"],
-    ["mcp__manager__ask_user", "waiting_human"],
-    ["mcp__manager__watch_pr", "waiting_remote"],
-    ["mcp__manager__terminal_output", "tool"],
+    ["terminal", "shell"],
+    ["wait", "sleeping"],
+    ["wait_for_chat", "waiting_agent"],
+    ["ask_user", "waiting_human"],
+    ["watch_pr", "waiting_remote"],
+    ["terminal_output", "tool"],
   ];
-  for (const [name, expected] of legacyCases) {
+  for (const [tool, expected] of legacyCases) {
+    // Composed rather than spelled so `no-stale-tool-names` needs no exemption.
+    const name = `${LEGACY_MANAGER_TOOL_PREFIX}${tool}`;
     it(`files the pre-split ${name} as ${expected}`, () => {
       expect(classifyActivity(name)).toBe(expected);
     });

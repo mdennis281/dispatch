@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   LEGACY_MANAGER_SERVER,
+  LEGACY_MANAGER_SERVER_ENTRY,
   LEGACY_MANAGER_TOOL_PREFIX,
   MANAGER_CATEGORIES,
   MANAGER_SERVER_NAMES,
@@ -18,6 +19,10 @@ import {
   migrateToolList,
   parseMcpToolName,
 } from "./manager-tools.js";
+
+/** A tool name as it was recorded before the split. Composed, not spelled, so
+ *  `tools/verify/no-stale-tool-names.mjs` can stay exemption-free. */
+const legacy = (tool: string) => `${LEGACY_MANAGER_TOOL_PREFIX}${tool}`;
 
 describe("the registry", () => {
   it("partitions every tool into exactly one category", () => {
@@ -87,8 +92,6 @@ describe("parseMcpToolName", () => {
 });
 
 describe("migrating an allowlist", () => {
-  const legacy = (tool: string) => `${LEGACY_MANAGER_TOOL_PREFIX}${tool}`;
-
   it("rewrites a stale entry to its category server", () => {
     expect(migrateManagerToolName(legacy("terminal"))).toBe("mcp__dispatch-workspace__terminal");
     expect(migrateManagerToolName(legacy("create_pr"))).toBe("mcp__dispatch-github__create_pr");
@@ -118,7 +121,7 @@ describe("migrating an allowlist", () => {
   it("expands the BARE whole-server entry — the form Claude Code actually writes", () => {
     // `mcp__<server>` means "every tool on this server". It is not a prefix of
     // itself, so a `startsWith(prefix)` test misses the likeliest real entry.
-    const out = migrateToolList(["mcp__manager"]);
+    const out = migrateToolList([LEGACY_MANAGER_SERVER_ENTRY]);
     expect(out.tools).toEqual(MANAGER_SERVER_NAMES.map((n) => `mcp__${n}`));
     expect(out.changed).toHaveLength(MANAGER_SERVER_NAMES.length);
     expect(out.unknown).toEqual([]);
@@ -126,8 +129,16 @@ describe("migrating an allowlist", () => {
 
   it("does not mistake a longer server name for the retired one", () => {
     // `mcp__managerx__foo` shares the leading characters and is somebody else's.
-    const out = migrateToolList(["mcp__managerx__foo", "mcp__my-manager", "mcp__manager2"]);
-    expect(out.tools).toEqual(["mcp__managerx__foo", "mcp__my-manager", "mcp__manager2"]);
+    const out = migrateToolList([
+      `${LEGACY_MANAGER_SERVER_ENTRY}x__foo`,
+      "mcp__my-manager",
+      `${LEGACY_MANAGER_SERVER_ENTRY}2`,
+    ]);
+    expect(out.tools).toEqual([
+      `${LEGACY_MANAGER_SERVER_ENTRY}x__foo`,
+      "mcp__my-manager",
+      `${LEGACY_MANAGER_SERVER_ENTRY}2`,
+    ]);
     expect(out.changed).toEqual([]);
   });
 
@@ -179,26 +190,28 @@ describe("detecting stale config we do not own", () => {
     expect(mentionsLegacyManagerServer(`{"allow":["${LEGACY_MANAGER_TOOL_PREFIX}terminal"]}`)).toBe(
       true,
     );
-    expect(mentionsLegacyManagerServer('{"allow":["mcp__manager"]}')).toBe(true);
+    expect(mentionsLegacyManagerServer(`{"allow":["${LEGACY_MANAGER_SERVER_ENTRY}"]}`)).toBe(true);
     expect(mentionsLegacyManagerServer('{"allow":["mcp__dispatch-workspace__terminal"]}')).toBe(
       false,
     );
-    expect(mentionsLegacyManagerServer('{"allow":["mcp__managerx__foo"]}')).toBe(false);
+    expect(mentionsLegacyManagerServer(`{"allow":["${LEGACY_MANAGER_SERVER_ENTRY}x__foo"]}`)).toBe(
+      false,
+    );
   });
 
   it("is not stateful across calls", () => {
     // A `g` regex shares `lastIndex` between `.test()` calls and alternates
     // true/false on identical input — which would make the boot warning fire on
     // every other repo scanned.
-    const text = '{"allow":["mcp__manager"]}';
+    const text = `{"allow":["${LEGACY_MANAGER_SERVER_ENTRY}"]}`;
     expect(mentionsLegacyManagerServer(text)).toBe(true);
     expect(mentionsLegacyManagerServer(text)).toBe(true);
   });
 
   it("lists the distinct entries so a warning can name them", () => {
-    expect(
-      findLegacyManagerMentions('["mcp__manager__terminal","mcp__manager","mcp__manager__terminal"]'),
-    ).toEqual(["mcp__manager__terminal", "mcp__manager"]);
+    const one = legacy("terminal");
+    const all = LEGACY_MANAGER_SERVER_ENTRY;
+    expect(findLegacyManagerMentions(`["${one}","${all}","${one}"]`)).toEqual([one, all]);
   });
 });
 

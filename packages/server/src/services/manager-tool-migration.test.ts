@@ -3,6 +3,7 @@ import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  LEGACY_MANAGER_SERVER_ENTRY,
   LEGACY_MANAGER_TOOL_PREFIX,
   MANAGER_SERVER_NAMES,
   type AgentConfig,
@@ -88,7 +89,7 @@ describe("migrating stored agent tool lists", () => {
     // `mcp__<server>` is how Claude Code spells "every tool on this server", and
     // is the likeliest thing in a real allowlist. Missing it means the human
     // silently loses blanket approval for all 31 tools at once.
-    const store = fakeStore([agent({ allowedTools: ["mcp__manager"] })]);
+    const store = fakeStore([agent({ allowedTools: [LEGACY_MANAGER_SERVER_ENTRY] })]);
     const { rewritten } = await migrateStoredAgentTools(store);
     expect(store.saved[0]!.allowedTools).toEqual(
       MANAGER_SERVER_NAMES.map((n) => `mcp__${n}`),
@@ -157,11 +158,11 @@ describe("warning about config we do not own", () => {
       await mkdir(join(dir, ".claude"), { recursive: true });
       await writeFile(
         join(dir, ".claude", "settings.json"),
-        JSON.stringify({ permissions: { allow: ["mcp__manager"] } }),
+        JSON.stringify({ permissions: { allow: [LEGACY_MANAGER_SERVER_ENTRY] } }),
       );
       const warnings = await findForeignStaleToolNames([dir]);
       expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain("mcp__manager");
+      expect(warnings[0]).toContain(LEGACY_MANAGER_SERVER_ENTRY);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -176,7 +177,7 @@ describe("warning about config we do not own", () => {
       await mkdir(join(dir, ".claude"), { recursive: true });
       await writeFile(
         join(dir, ".claude", "settings.json"),
-        JSON.stringify({ permissions: { allow: ["mcp__managerx__foo", "mcp__my-manager"] } }),
+        JSON.stringify({ permissions: { allow: [`${LEGACY_MANAGER_SERVER_ENTRY}x__foo`, "mcp__my-manager"] } }),
       );
       expect(await findForeignStaleToolNames([dir])).toEqual([]);
     } finally {

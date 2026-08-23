@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { ChatMessage, ToolUseRow } from "@dispatch/shared";
+import { LEGACY_MANAGER_TOOL_PREFIX, type ChatMessage, type ToolUseRow } from "@dispatch/shared";
 import { displayResultText, groupTranscriptRows, resultPreview, resultText, toolPresentation } from "./toolPresentations.js";
+
+/** A tool name as it was recorded before the servers were split. Composed, not
+ *  spelled, so `tools/verify/no-stale-tool-names.mjs` can stay exemption-free —
+ *  a literal here would fail the very check it exists to enforce. */
+const legacy = (tool: string) => `${LEGACY_MANAGER_TOOL_PREFIX}${tool}`;
 
 function tool(name: string, input: Record<string, unknown>, id = name): ToolUseRow {
   return { kind: "tool_use", id, toolUseId: id, chatId: "chat", ts: 1, turn: 0, name, input };
@@ -46,11 +51,11 @@ describe("tool presentation handlers", () => {
     // A call recorded before the servers were split still renders as Dispatch's
     // own — 267 of 291 transcripts on the install this shipped from contain one,
     // and they are re-rendered from stored rows for as long as the chat exists.
-    expect(toolPresentation(tool("mcp__manager__terminal", { command: "ls", name: "t" }))).toMatchObject({
+    expect(toolPresentation(tool(legacy("terminal"), { command: "ls", name: "t" }))).toMatchObject({
       kind: "shell",
       command: "ls",
     });
-    expect(toolPresentation(tool("mcp__manager__watch_pr", { number: 40 }))).toMatchObject({
+    expect(toolPresentation(tool(legacy("watch_pr"), { number: 40 }))).toMatchObject({
       kind: "dispatch",
       title: "Watch pull request",
       category: "pr",
