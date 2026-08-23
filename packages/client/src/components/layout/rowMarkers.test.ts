@@ -23,10 +23,23 @@ describe("childChatTint — the three states the row is asked for", () => {
     expect(childChatTint([child("r1", "idle")], false)).toBe("text-secondary");
   });
 
-  it("takes the brand accent the moment ANY child is running", () => {
+  it("takes the brand accent the moment ANY child is mid-turn", () => {
     expect(childChatTint([child("r1", "idle"), child("r2", "running")], false)).toBe(
       "text-accent",
     );
+  });
+
+  it("counts every mid-turn status, not just the one called `running`", () => {
+    // `waiting` is what the broker assigns a tool blocked on work elsewhere — a
+    // `watch_pr` sitting on a PR for ten minutes. Its own row pulses throughout;
+    // a parent glyph reading "at rest" through that is quiet for exactly the
+    // long block worth knowing about. `queued` has the same shape.
+    for (const status of ["running", "waiting", "queued"] as const) {
+      expect(childChatTint([child("r1", status)], false)).toBe("text-accent");
+    }
+    for (const status of ["idle", "done", "error"] as const) {
+      expect(childChatTint([child("r1", status)], false)).toBe("text-secondary");
+    }
   });
 
   it("lets a child that needs an answer outrank a child that is running", () => {
@@ -43,11 +56,19 @@ describe("childChatTitle — the count the glyph no longer prints", () => {
 
   it("carries the PR breakdown plus what they are doing", () => {
     expect(childChatTitle([child("r1", "running"), child("r2", "idle")], false)).toBe(
-      "2 reviews of #140 — 1 running",
+      "2 reviews of #140 — 1 working",
     );
-    expect(childChatTitle([child("r1", "idle")], false)).toBe("1 review of #140 — none running");
+    expect(childChatTitle([child("r1", "idle")], false)).toBe("1 review of #140 — all idle");
     expect(childChatTitle([child("r1", "awaiting-input")], true)).toBe(
       "1 review of #140 — needs an answer",
+    );
+  });
+
+  it("counts a blocked child as working, exactly as the tint does", () => {
+    // The tooltip and the colour read the same predicate — a glyph that lit up
+    // over a label saying "all idle" would be two answers to one question.
+    expect(childChatTitle([child("r1", "waiting"), child("r2", "queued")], false)).toBe(
+      "2 reviews of #140 — 2 working",
     );
   });
 });

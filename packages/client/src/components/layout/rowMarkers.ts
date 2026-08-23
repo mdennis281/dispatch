@@ -18,6 +18,7 @@
  * `StatusDot`'s tone table is written out longhand.
  */
 import type { Chat } from "@dispatch/shared";
+import { isChatWorking } from "../../stores/chats.js";
 import { foldedReviewsLabel } from "./reviewLabel.js";
 
 /** A branch's process census, as `branchProcessCount` returns it. */
@@ -37,22 +38,23 @@ export interface BranchProcs {
  * one fact the collapsed row cannot afford to swallow: the parent's own
  * attention dot says nothing about its children, so without this the only
  * signal that somebody is waiting on you is behind a click.
+ *
+ * "Mid-turn" is `isChatWorking`, NOT `status === "running"`. A reviewer parked
+ * in `waiting` on a `watch_pr` is working, its own row pulses to say so, and a
+ * parent glyph that read `text-secondary` through that would be claiming
+ * nothing is moving for precisely the long blocks worth knowing about.
  */
 export function childChatTint(reviews: readonly Chat[], needsInput: boolean): string {
   if (needsInput) return "text-warn";
-  if (reviews.some((r) => r.status === "running")) return "text-accent";
+  if (reviews.some((r) => isChatWorking(r.status))) return "text-accent";
   return reviews.length > 0 ? "text-secondary" : "text-faint";
 }
 
 /** What the child-chats glyph says on hover, count included. */
 export function childChatTitle(reviews: readonly Chat[], needsInput: boolean): string {
   if (reviews.length === 0) return "No child chats";
-  const running = reviews.filter((r) => r.status === "running").length;
-  const note = needsInput
-    ? "needs an answer"
-    : running > 0
-      ? `${running} running`
-      : "none running";
+  const working = reviews.filter((r) => isChatWorking(r.status)).length;
+  const note = needsInput ? "needs an answer" : working > 0 ? `${working} working` : "all idle";
   return `${foldedReviewsLabel(reviews)} — ${note}`;
 }
 
