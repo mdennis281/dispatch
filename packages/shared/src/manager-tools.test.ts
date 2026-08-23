@@ -6,7 +6,9 @@ import {
   MANAGER_SERVER_NAMES,
   MANAGER_TOOL_CATEGORY,
   MANAGER_TOOL_NAMES,
+  findLegacyManagerMentions,
   isManagerServer,
+  isManagerServerOrLegacy,
   isManagerToolName,
   managerServerName,
   managerToolQualifiedName,
@@ -44,6 +46,16 @@ describe("the registry", () => {
 
   it("does not recognise the retired server as one of its own", () => {
     expect(isManagerServer(LEGACY_MANAGER_SERVER)).toBe(false);
+  });
+
+  it("DOES recognise it on read paths, so history keeps rendering", () => {
+    // Transcripts are re-rendered from stored rows forever. A renderer keyed on
+    // the strict predicate drops every pre-split call to generic MCP formatting
+    // — no shell card, no PR grouping — and nothing errors to say so.
+    expect(isManagerServerOrLegacy(LEGACY_MANAGER_SERVER)).toBe(true);
+    expect(isManagerServerOrLegacy("dispatch-github")).toBe(true);
+    expect(isManagerServerOrLegacy("playwright")).toBe(false);
+    expect(isManagerServerOrLegacy("my-manager")).toBe(false);
   });
 
   it("builds a qualified name that round-trips through the parser", () => {
@@ -103,6 +115,22 @@ describe("migrating an allowlist", () => {
     );
   });
 
+  it("expands the BARE whole-server entry — the form Claude Code actually writes", () => {
+    // `mcp__<server>` means "every tool on this server". It is not a prefix of
+    // itself, so a `startsWith(prefix)` test misses the likeliest real entry.
+    const out = migrateToolList(["mcp__manager"]);
+    expect(out.tools).toEqual(MANAGER_SERVER_NAMES.map((n) => `mcp__${n}`));
+    expect(out.changed).toHaveLength(MANAGER_SERVER_NAMES.length);
+    expect(out.unknown).toEqual([]);
+  });
+
+  it("does not mistake a longer server name for the retired one", () => {
+    // `mcp__managerx__foo` shares the leading characters and is somebody else's.
+    const out = migrateToolList(["mcp__managerx__foo", "mcp__my-manager", "mcp__manager2"]);
+    expect(out.tools).toEqual(["mcp__managerx__foo", "mcp__my-manager", "mcp__manager2"]);
+    expect(out.changed).toEqual([]);
+  });
+
   it("expands a whole-server wildcard across every category", () => {
     // The eight servers together are what the one server was. Collapsing the
     // wildcard to a single category would REVOKE seven eighths of a granted
@@ -147,20 +175,37 @@ describe("migrating an allowlist", () => {
 });
 
 describe("detecting stale config we do not own", () => {
-  it("spots the retired prefix and nothing else", () => {
+  it("spots every spelling of the retired server, and nothing else", () => {
     expect(mentionsLegacyManagerServer(`{"allow":["${LEGACY_MANAGER_TOOL_PREFIX}terminal"]}`)).toBe(
       true,
     );
+    expect(mentionsLegacyManagerServer('{"allow":["mcp__manager"]}')).toBe(true);
     expect(mentionsLegacyManagerServer('{"allow":["mcp__dispatch-workspace__terminal"]}')).toBe(
       false,
     );
+    expect(mentionsLegacyManagerServer('{"allow":["mcp__managerx__foo"]}')).toBe(false);
+  });
+
+  it("is not stateful across calls", () => {
+    // A `g` regex shares `lastIndex` between `.test()` calls and alternates
+    // true/false on identical input — which would make the boot warning fire on
+    // every other repo scanned.
+    const text = '{"allow":["mcp__manager"]}';
+    expect(mentionsLegacyManagerServer(text)).toBe(true);
+    expect(mentionsLegacyManagerServer(text)).toBe(true);
+  });
+
+  it("lists the distinct entries so a warning can name them", () => {
+    expect(
+      findLegacyManagerMentions('["mcp__manager__terminal","mcp__manager","mcp__manager__terminal"]'),
+    ).toEqual(["mcp__manager__terminal", "mcp__manager"]);
   });
 });
 
 describe("isManagerToolName", () => {
   it("does not claim inherited Object properties as tools", () => {
     // A plain `name in MANAGER_TOOL_CATEGORY` would answer true for `toString`,
-    // which would let a legacy `mcp__manager__toString` migrate to nonsense.
+    // which would let a legacy `toString` entry migrate to nonsense.
     expect(isManagerToolName("toString")).toBe(false);
     expect(isManagerToolName("constructor")).toBe(false);
     expect(isManagerToolName("terminal")).toBe(true);

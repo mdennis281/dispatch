@@ -43,6 +43,18 @@ describe("tool presentation handlers", () => {
       subject: "PR #40",
       category: "pr",
     });
+    // A call recorded before the servers were split still renders as Dispatch's
+    // own — 267 of 291 transcripts on the install this shipped from contain one,
+    // and they are re-rendered from stored rows for as long as the chat exists.
+    expect(toolPresentation(tool("mcp__manager__terminal", { command: "ls", name: "t" }))).toMatchObject({
+      kind: "shell",
+      command: "ls",
+    });
+    expect(toolPresentation(tool("mcp__manager__watch_pr", { number: 40 }))).toMatchObject({
+      kind: "dispatch",
+      title: "Watch pull request",
+      category: "pr",
+    });
     expect(toolPresentation(tool("mcp__dispatch-workspace__brand_new_tool", { name: "demo" }))).toMatchObject({
       kind: "dispatch",
       title: "Brand New Tool",

@@ -102,6 +102,22 @@ describe("classifyActivity", () => {
     ["mcp__playwright__browser_click", undefined, "tool"],
     ["functions.exec", { source: "await tools.mcp__dispatch-workspace__terminal({})" }, "shell"],
   ];
+  // History: a call RECORDED before the split must classify the same way, or
+  // replayed shell/wait time silently reclassifies as generic `tool`.
+  const legacyCases: Array<[string, MetricState]> = [
+    ["mcp__manager__terminal", "shell"],
+    ["mcp__manager__wait", "sleeping"],
+    ["mcp__manager__wait_for_chat", "waiting_agent"],
+    ["mcp__manager__ask_user", "waiting_human"],
+    ["mcp__manager__watch_pr", "waiting_remote"],
+    ["mcp__manager__terminal_output", "tool"],
+  ];
+  for (const [name, expected] of legacyCases) {
+    it(`files the pre-split ${name} as ${expected}`, () => {
+      expect(classifyActivity(name)).toBe(expected);
+    });
+  }
+
   for (const [name, input, expected] of cases) {
     it(`files ${name} as ${expected}`, () => {
       expect(classifyActivity(name, input)).toBe(expected);

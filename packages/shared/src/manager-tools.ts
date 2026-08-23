@@ -2,9 +2,9 @@
  * THE MANAGER TOOL REGISTRY — which category server serves each Dispatch tool.
  *
  * Dispatch's own toolbox used to be ONE MCP server called `manager`, so every
- * tool was `mcp__manager__<tool>` and a name told you nothing: `mcp__manager__forget`
- * and `mcp__manager__approve_pr` read as siblings. The toolbox is now partitioned
- * into eight servers by what a tool is FOR, and a name says which.
+ * tool was qualified with that one name and a name told you nothing: `forget`
+ * and `approve_pr` read as siblings. The toolbox is now partitioned into eight
+ * servers by what a tool is FOR, and a name says which.
  *
  * WHY the names are prefixed. The manager servers are merged into a session's
  * `mcpServers` LAST, so they win every name collision — that is deliberate (a
@@ -17,9 +17,10 @@
  * namespace nobody else claims.
  *
  * THE REGISTRY IS THE MIGRATION. Because it maps bare tool name → category, it
- * is also what rewrites a stale `mcp__manager__terminal` in a permission
- * allowlist, and what forward-maps a metrics row recorded under the old name so
- * `create_pr` stays ONE series instead of splitting in two at the rename.
+ * is also what rewrites a stale `terminal` entry in a permission allowlist that
+ * still carries the retired server's prefix, and what forward-maps a metrics row
+ * recorded under the old name so `create_pr` stays ONE series instead of
+ * splitting in two at the rename.
  *
  * Adding a tool: add it here AND to the factory. `manager-mcp.ts` cross-checks
  * the two at COMPILE time in both directions, so a tool that exists in one and
@@ -62,9 +63,32 @@ const MANAGER_SERVER_SET: ReadonlySet<string> = new Set(MANAGER_SERVER_NAMES);
  */
 export const LEGACY_MANAGER_SERVER = "manager";
 
-/** Is this MCP server one of Dispatch's own? Excludes the retired `manager`. */
+/**
+ * Is this MCP server one of Dispatch's own? Excludes the retired `manager`.
+ *
+ * The right question for anything deciding what to SERVE or REGISTER — nothing
+ * is served under the old name. For anything READING a record that predates the
+ * split, use {@link isManagerServerOrLegacy} instead.
+ */
 export function isManagerServer(server: string | undefined): boolean {
   return server !== undefined && MANAGER_SERVER_SET.has(server);
+}
+
+/**
+ * The same question, for READ paths that must still recognise history.
+ *
+ * Chat transcripts are re-rendered from stored rows, so a call recorded before
+ * the split is re-read for as long as the chat exists — 267 of 291 transcripts
+ * on the install this shipped from. A renderer keyed on {@link isManagerServer}
+ * alone silently drops every one of them to generic MCP wire formatting: no
+ * shell card for a `terminal` call, no PR grouping, no Dispatch icon. Nothing
+ * errors, so nothing reports it.
+ *
+ * Use this wherever a stored name is being INTERPRETED, and the strict form
+ * wherever a name is being produced.
+ */
+export function isManagerServerOrLegacy(server: string | undefined): boolean {
+  return isManagerServer(server) || server === LEGACY_MANAGER_SERVER;
 }
 
 /**
@@ -157,11 +181,40 @@ export function parseMcpToolName(
   return i >= 0 ? { server: rest.slice(0, i), tool: rest.slice(i + 2) } : { server: rest, tool: rest };
 }
 
-/** Prefix a stale allowlist entry can be recognised by. */
+/** Prefix a stale per-TOOL allowlist entry carries. */
 export const LEGACY_MANAGER_TOOL_PREFIX = `mcp__${LEGACY_MANAGER_SERVER}__`;
 
 /**
- * Rewrite one stale `mcp__manager__<tool>` reference to its category server.
+ * The bare whole-server form — Claude Code writes `mcp__<server>` to allow every
+ * tool on a server, and `mcp__<server>__<tool>` to allow one.
+ *
+ * Spelled separately because it is NOT a prefix match: `mcp__managerx__foo`
+ * starts with the same characters and belongs to somebody else entirely.
+ */
+export const LEGACY_MANAGER_SERVER_ENTRY = `mcp__${LEGACY_MANAGER_SERVER}`;
+
+/**
+ * Does this entry name the retired server as a whole? Covers all three spellings
+ * a permission list uses for "every tool here": the bare server name, its `__`
+ * form, and a `__*` wildcard.
+ */
+function isLegacyWholeServerEntry(entry: string): boolean {
+  return (
+    entry === LEGACY_MANAGER_SERVER_ENTRY ||
+    entry === LEGACY_MANAGER_TOOL_PREFIX ||
+    entry === `${LEGACY_MANAGER_TOOL_PREFIX}*`
+  );
+}
+
+/** The per-category entries a whole-server permission expands to. */
+function expandWholeServer(entry: string): string[] {
+  const suffix = entry.slice(LEGACY_MANAGER_SERVER_ENTRY.length);
+  return MANAGER_SERVER_NAMES.map((name) => `mcp__${name}${suffix}`);
+}
+
+/**
+ * Rewrite one reference carrying the retired server's prefix to its category
+ * server.
  * Returns null when `name` is not a legacy manager reference, or names a tool
  * that no longer exists — a dead entry is left ALONE rather than guessed at, so
  * a rename never invents a permission for a tool nobody has.
@@ -170,9 +223,9 @@ export const LEGACY_MANAGER_TOOL_PREFIX = `mcp__${LEGACY_MANAGER_SERVER}__`;
  * legacy prefix, so re-running the migration is a no-op rather than a
  * double-rewrite.
  *
- * Handles the trailing-argument form Claude Code's allowlists use —
- * `mcp__manager__terminal(cd *)` keeps its `(cd *)` suffix — because dropping
- * it would silently WIDEN a scoped permission into a blanket one.
+ * Handles the trailing-argument form Claude Code's allowlists use — a scoped
+ * `terminal(cd *)` entry keeps its `(cd *)` suffix — because dropping it would
+ * silently WIDEN a scoped permission into a blanket one.
  */
 export function migrateManagerToolName(name: string): string | null {
   if (!name.startsWith(LEGACY_MANAGER_TOOL_PREFIX)) return null;
@@ -180,8 +233,8 @@ export function migrateManagerToolName(name: string): string | null {
   const paren = rest.indexOf("(");
   const tool = paren >= 0 ? rest.slice(0, paren) : rest;
   const suffix = paren >= 0 ? rest.slice(paren) : "";
-  // A bare `mcp__manager__` wildcard covered the whole toolbox; it cannot be
-  // expressed as one new name, so the caller expands it (see `migrateToolList`).
+  // A whole-server wildcard covered the whole toolbox; it cannot be expressed as
+  // one new name, so the caller expands it (see `migrateToolList`).
   if (!isManagerToolName(tool)) return null;
   return `mcp__${managerServerName(MANAGER_TOOL_CATEGORY[tool])}__${tool}${suffix}`;
 }
@@ -209,10 +262,10 @@ export interface ToolListMigration {
  * a tool that was approved months ago. Nobody reports that as a regression;
  * they just click through it. So the rename has to carry the allowlists with it.
  *
- * A whole-server wildcard (`mcp__manager__*`, or bare `mcp__manager__`) expands
- * to one wildcard per category, because the eight servers together are what the
- * one server used to be — collapsing it to a single category would REVOKE seven
- * eighths of a permission the human granted.
+ * A whole-server permission — the bare server name, its `__` form, or a `__*`
+ * wildcard — expands to one entry per category, because the eight servers
+ * together are what the one server used to be. Collapsing it to a single
+ * category would REVOKE seven eighths of a permission the human granted.
  */
 export function migrateToolList(tools: readonly string[]): ToolListMigration {
   const out: string[] = [];
@@ -225,17 +278,17 @@ export function migrateToolList(tools: readonly string[]): ToolListMigration {
     out.push(value);
   };
   for (const entry of tools) {
-    if (!entry.startsWith(LEGACY_MANAGER_TOOL_PREFIX)) {
-      push(entry);
+    // Tested BEFORE the per-tool prefix: the bare server entry is not a prefix
+    // match, and the `__` form is a whole-server permission AND a prefix at once.
+    if (isLegacyWholeServerEntry(entry)) {
+      for (const expanded of expandWholeServer(entry)) {
+        changed.push({ from: entry, to: expanded });
+        push(expanded);
+      }
       continue;
     }
-    const rest = entry.slice(LEGACY_MANAGER_TOOL_PREFIX.length);
-    if (rest === "" || rest === "*") {
-      for (const category of MANAGER_CATEGORIES) {
-        const wildcard = `mcp__${managerServerName(category)}__${rest}`;
-        changed.push({ from: entry, to: wildcard });
-        push(wildcard);
-      }
+    if (!entry.startsWith(LEGACY_MANAGER_TOOL_PREFIX)) {
+      push(entry);
       continue;
     }
     const renamed = migrateManagerToolName(entry);
@@ -256,5 +309,26 @@ export function migrateToolList(tools: readonly string[]): ToolListMigration {
  * where the honest move is to tell the human rather than rewrite their file.
  */
 export function mentionsLegacyManagerServer(text: string): boolean {
-  return text.includes(LEGACY_MANAGER_TOOL_PREFIX);
+  return LEGACY_MENTION_RE.test(text);
+}
+
+/**
+ * Every spelling of the retired server in a config file: the bare server entry
+ * on its own, and its per-tool / `__*` / `__` forms.
+ *
+ * The trailing `(?!\w)` is what stops a LONGER server name — somebody else's
+ * `…managerx…` — from being reported as ours. `String.raw` because a plain
+ * template literal eats the backslash: `\w` becomes `w`, the lookahead silently
+ * degrades to "not followed by the letter w", and the guard stops guarding.
+ *
+ * Not a `g` regex either: a shared `lastIndex` makes `.test()` alternate
+ * true/false on identical input.
+ */
+const LEGACY_MENTION_RE = new RegExp(
+  String.raw`${LEGACY_MANAGER_SERVER_ENTRY}(?:__[A-Za-z0-9_*]*)?(?!\w)`,
+);
+
+/** Every distinct legacy reference in a blob of config, for a warning that names them. */
+export function findLegacyManagerMentions(text: string): string[] {
+  return [...new Set(text.match(new RegExp(LEGACY_MENTION_RE, "g")) ?? [])];
 }

@@ -64,6 +64,17 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
     app.cm.store,
     (await app.cm.store.listProjects().catch(() => [])).map((p) => p.repoPath).filter(Boolean),
   ).catch(() => undefined);
+  // …and re-file the metric rows recorded under the retired server name, so the
+  // Metrics view's `detail` axis shows one series per category rather than a
+  // ninth legacy bucket that never stops growing older. Idempotent; matches
+  // nothing after the first boot.
+  try {
+    const moved = app.services.metrics.migrateLegacyManagerDetail();
+    // eslint-disable-next-line no-console
+    if (moved) console.log(`[dispatch] re-filed ${moved} metric row(s) onto their tool category`);
+  } catch {
+    /* telemetry cosmetics must never stop a boot */
+  }
   // Wire teardown BEFORE listening, so a signal arriving during boot still runs
   // `services.dispose()` instead of orphaning whatever already started.
   installShutdown(app);

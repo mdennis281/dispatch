@@ -24,7 +24,7 @@
  * `runId` alone.
  */
 import {
-  isManagerServer,
+  isManagerServerOrLegacy,
   managerToolQualifiedName,
   parseMcpToolName,
   type ChatStatus,
@@ -52,8 +52,12 @@ const LIMIT_ID = "\u0000limit";
 /**
  * The BARE Dispatch tool a name refers to, or undefined when it isn't one.
  *
- * These predicates used to match the substring `manager__terminal`, which was
- * wrong in two directions and only ever half-noticed: `terminal_output` had to be
+ * Legacy-tolerant, like the transcript renderer: this classifies a name that may
+ * have been RECORDED before the split, so answering `tool` for a pre-split
+ * `terminal` call would quietly reclassify historical shell time.
+ *
+ * These predicates used to match the substring for the old server plus a tool
+ * name, which was wrong in two directions and only ever half-noticed: `terminal_output` had to be
  * excluded by hand because it contains `terminal`, and any third-party server
  * whose name ended in `manager` matched too. Parsing the name instead means the
  * split onto `dispatch-*` servers moved these for free — and it is why a
@@ -61,7 +65,7 @@ const LIMIT_ID = "\u0000limit";
  */
 function dispatchTool(name: string): string | undefined {
   const parsed = parseMcpToolName(name);
-  return parsed && isManagerServer(parsed.server) ? parsed.tool : undefined;
+  return parsed && isManagerServerOrLegacy(parsed.server) ? parsed.tool : undefined;
 }
 
 /**

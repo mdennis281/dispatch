@@ -80,10 +80,14 @@ export function classifyTool(name: string, input?: Record<string, unknown>): Cla
     }
     // A call recorded under the single `manager` server everything used to live
     // on. Forward-mapped rather than left alone because the alternative is
-    // `create_pr` appearing as two disjoint series either side of the rename —
-    // and this runs in the BACKFILL too, which re-reads transcripts written
-    // months ago, so the mapping has to live here rather than in a one-time
-    // UPDATE that historical imports would bypass.
+    // `create_pr` appearing as two disjoint series either side of the rename.
+    //
+    // This covers rows classified from HERE ON — a live call replayed by an old
+    // client, and any transcript the backfill imports on an install that hasn't
+    // completed one. Rows ALREADY on disk are not reachable from here: the
+    // backfill is watermarked and does not re-run, and its INSERT is `OR IGNORE`.
+    // `MetricsService.migrateLegacyManagerDetail()` is what moves those, once,
+    // at boot. Both are needed; neither is sufficient.
     if (server === LEGACY_MANAGER_SERVER && isManagerToolName(tool)) {
       return { category: "manager", identifier: tool, detail: MANAGER_TOOL_CATEGORY[tool] };
     }

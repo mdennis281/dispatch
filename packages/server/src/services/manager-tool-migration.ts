@@ -31,7 +31,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  LEGACY_MANAGER_TOOL_PREFIX,
+  findLegacyManagerMentions,
   mentionsLegacyManagerServer,
   migrateToolList,
   type AgentConfig,
@@ -47,7 +47,14 @@ export interface ManagerToolMigrationStore {
 export interface ManagerToolMigrationResult {
   /** `agent-id: old → new` for each rewritten entry. */
   rewritten: string[];
-  /** `file: entry` for each stale mention in a file we do not own. */
+  /**
+   * `agent-id: entry` for each legacy entry naming a tool that no longer exists.
+   * Reported rather than guessed at — but reported LOUDLY, because a permission
+   * that stopped matching is the whole reason this pass runs, and one that can
+   * never match again is the worst case of it.
+   */
+  stranded: string[];
+  /** `file: entries` for each stale mention in a file we do not own. */
   warnings: string[];
 }
 
@@ -69,12 +76,16 @@ const FOREIGN_SETTINGS = [
  */
 export async function migrateStoredAgentTools(
   store: ManagerToolMigrationStore,
-): Promise<string[]> {
+): Promise<{ rewritten: string[]; stranded: string[] }> {
   const rewritten: string[] = [];
+  const stranded: string[] = [];
   const agents = await store.listAgents();
   for (const agent of agents) {
     const allow = agent.allowedTools ? migrateToolList(agent.allowedTools) : undefined;
     const deny = agent.disallowedTools ? migrateToolList(agent.disallowedTools) : undefined;
+    for (const entry of [...(allow?.unknown ?? []), ...(deny?.unknown ?? [])]) {
+      stranded.push(`${agent.id}: ${entry}`);
+    }
     if (!allow?.changed.length && !deny?.changed.length) continue;
     for (const { from, to } of [...(allow?.changed ?? []), ...(deny?.changed ?? [])]) {
       rewritten.push(`${agent.id}: ${from} → ${to}`);
@@ -85,7 +96,7 @@ export async function migrateStoredAgentTools(
       ...(deny ? { disallowedTools: deny.tools } : {}),
     });
   }
-  return rewritten;
+  return { rewritten, stranded };
 }
 
 /**
@@ -108,8 +119,7 @@ export async function findForeignStaleToolNames(repoPaths: readonly string[]): P
       if (!mentionsLegacyManagerServer(text)) continue;
       // Report the actual entries, not just the file: "this file mentions a dead
       // name" sends someone reading 200 lines of JSON.
-      const stale = [...new Set(text.match(/mcp__manager__[A-Za-z0-9_*]*/g) ?? [])];
-      warnings.push(`${file}: ${stale.join(", ") || LEGACY_MANAGER_TOOL_PREFIX}`);
+      warnings.push(`${file}: ${findLegacyManagerMentions(text).join(", ")}`);
     }
   }
   return warnings;
@@ -125,9 +135,11 @@ export async function migrateManagerToolNames(
   repoPaths: readonly string[],
   log: (message: string) => void = (m) => console.warn(m), // eslint-disable-line no-console
 ): Promise<ManagerToolMigrationResult> {
-  const result: ManagerToolMigrationResult = { rewritten: [], warnings: [] };
+  const result: ManagerToolMigrationResult = { rewritten: [], stranded: [], warnings: [] };
   try {
-    result.rewritten = await migrateStoredAgentTools(store);
+    const agents = await migrateStoredAgentTools(store);
+    result.rewritten = agents.rewritten;
+    result.stranded = agents.stranded;
   } catch (err) {
     log(`[dispatch] agent tool-name migration skipped: ${String(err)}`);
   }
@@ -142,6 +154,13 @@ export async function migrateManagerToolNames(
         `${result.rewritten.length === 1 ? "y" : "ies"} off the retired manager server:`,
     );
     for (const line of result.rewritten) log(`[dispatch]   ${line}`);
+  }
+  if (result.stranded.length) {
+    log(
+      "[dispatch] these permission entries name tools that no longer exist, so " +
+        "they were left alone and grant nothing — remove them or replace them:",
+    );
+    for (const line of result.stranded) log(`[dispatch]   ${line}`);
   }
   if (result.warnings.length) {
     log(

@@ -48,6 +48,9 @@ import {
   type MetricSpanTotalsResponse,
   type MetricState,
   type MetricTotalsResponse,
+  LEGACY_MANAGER_SERVER,
+  MANAGER_TOOL_CATEGORY,
+  MANAGER_TOOL_NAMES,
 } from "@dispatch/shared";
 import {
   SPAN_COLUMN,
@@ -485,6 +488,43 @@ export class MetricsService {
         "INSERT INTO metric_meta(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
       )
       .run(key, value);
+  }
+
+  /**
+   * Re-file historical manager rows onto their category.
+   *
+   * Before the split, a Dispatch tool call was stored as
+   * `{category:"manager", identifier:"create_pr", detail:"manager"}` — `detail`
+   * was the SERVER, and there was one. Now it is the CATEGORY. Grouping the
+   * Metrics view by `identifier` was always fine (the bare tool name never
+   * changed), but grouping by `detail` showed a permanent legacy `manager`
+   * bucket sitting alongside the eight real ones: the same `create_pr` calls
+   * split across two series with the rename as the fault line.
+   *
+   * WHY NOT THE BACKFILL. `classifyTool` forward-maps the old NAME, which covers
+   * anything imported from here on — but the transcript import is watermarked by
+   * `BACKFILL_VERSION` and never re-runs on an install that already completed it,
+   * and its INSERT is `OR IGNORE` on `event_key`, so a re-import could not update
+   * an existing row's `detail` even if it did run. Rows already on disk need an
+   * UPDATE, and this is it.
+   *
+   * Idempotent: the WHERE only matches rows still carrying the retired server
+   * name, and a migrated row no longer does. Cheap on every boot after the first
+   * (it matches nothing, against an index-covered equality). Returns how many
+   * rows moved, for the boot log.
+   */
+  migrateLegacyManagerDetail(): number {
+    return this.db.tx(() => {
+      const update = this.db.prepare(
+        `UPDATE metric SET detail = ? WHERE category = 'manager' AND detail = ? AND identifier = ?`,
+      );
+      let moved = 0;
+      for (const tool of MANAGER_TOOL_NAMES) {
+        const res = update.run(MANAGER_TOOL_CATEGORY[tool], LEGACY_MANAGER_SERVER, tool);
+        moved += Number(res.changes ?? 0);
+      }
+      return moved;
+    });
   }
 
   /* ------------------------------------------------------------ query */

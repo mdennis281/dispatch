@@ -43,7 +43,7 @@ import {
   type Project,
 } from "@dispatch/shared";
 import { managerToolDescriptors, type ManagerToolBindings } from "./manager-mcp.js";
-import { MANAGER_CATEGORIES, managerServerName } from "@dispatch/shared";
+import { MANAGER_CATEGORIES, isManagerServer, managerServerName } from "@dispatch/shared";
 
 /** Default per-server probe budget — bounds a hanging/slow external server. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 4_000;
@@ -402,9 +402,17 @@ export async function buildProjectMcpCatalog(
     ];
   });
 
-  const external = (opts.mcpServers ??
-    project.mcpServers ??
-    {}) as Record<string, McpServerConfig>;
+  // A project can still have a `dispatch-*` entry on disk — written before
+  // `mcp_add` reserved the namespace, or hand-edited into project.yaml. The
+  // broker merges Dispatch's own servers LAST, so that entry is never handed to
+  // a session; listing it would show a row nobody gets, next to a second row of
+  // the same name that they do. Same rule, and the same reason, as the bundled
+  // filter below — only the winner differs.
+  const external = Object.fromEntries(
+    Object.entries(
+      (opts.mcpServers ?? project.mcpServers ?? {}) as Record<string, McpServerConfig>,
+    ).filter(([name]) => !isManagerServer(name)),
+  );
   const cwd = opts.cwd ?? project.repoPath;
   // A project may declare a server of the same name as a bundled one, in which
   // case its declaration wins outright in the broker's merge — so listing both

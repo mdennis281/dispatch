@@ -11,10 +11,17 @@
  * every new session, forever. Only a check that runs on every commit keeps
  * that from creeping back.
  *
- * WHY `git grep` and not a directory walk. `.worktrees/` holds a dozen
- * gitignored sibling checkouts of this same repo. A naive walk returns ~15k
- * hits from other agents' branches and can never go green. `git grep` sees
- * tracked files in THIS tree and nothing else.
+ * WHY `git grep` and not a directory walk. A walk descends into `node_modules`
+ * and into any gitignored sibling checkout, returning thousands of hits from
+ * code that is not ours and can never go green. `git grep` applies the repo's
+ * own ignore rules for free.
+ *
+ * WHY `--untracked`. Tracked-only was the first version of this script, and it
+ * reported the very commit that introduced it as clean: the new files were
+ * still unstaged, so `git grep` could not see them, and nine dead names went in
+ * green. `--untracked` adds files that exist but are not committed yet, while
+ * still honouring `.gitignore` — so a stale name is caught while it is being
+ * written rather than one commit later.
  *
  * The token is assembled at runtime rather than written out, so this file does
  * not trip the check it implements — which is what lets the check have zero
@@ -24,7 +31,7 @@ import { spawnSync } from "node:child_process";
 
 const NEEDLE = ["mcp", "manager", ""].join("__");
 
-const res = spawnSync("git", ["grep", "-n", "--fixed-strings", NEEDLE], {
+const res = spawnSync("git", ["grep", "-n", "--untracked", "--fixed-strings", NEEDLE], {
   encoding: "utf8",
 });
 
