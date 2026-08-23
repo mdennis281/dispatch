@@ -666,8 +666,12 @@ export const MOCK_MISSION: MissionSpec = {
       teamId: "assurance",
       title: "Sweep every stale reference",
       brief:
-        "185 occurrences across 49 tracked files: server 152, shared 15, client 13, RUNNING.md " +
-        "3, cli 2. That includes the bundled mcp-setup skill and the workflow rules in " +
+        "~200 occurrences across ~50 tracked files, mostly packages/server. Do not chase the " +
+        "exact number: it was 185/49 when this task was written and 198/51 three commits later, " +
+        "because main keeps adding references while you work. Build the VERIFIER first and let " +
+        "it be the count - a sweep measured against a stale number is finished the moment " +
+        "somebody merges.\n" +
+        "The hits include the bundled mcp-setup skill and the workflow rules in " +
         "shared/workflow.ts, which are INJECTED into every chat - leave those and the app " +
         "keeps teaching the dead names to every new session.\n" +
         "Project memory is a separate surface and the easiest to forget: 49 more occurrences " +
