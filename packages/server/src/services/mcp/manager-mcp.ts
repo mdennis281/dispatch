@@ -3488,9 +3488,19 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         );
       }
       if (!st) {
+        // Two causes, and the remedy differs, so name both rather than the one
+        // that used to be printed alone. "Make sure the chat has a worktree" was
+        // the whole message for a year, and it was the WRONG advice in the case
+        // that produced it most often: the chat had a worktree, and its bound
+        // one had merely been reaped out from under it after a merge. An agent
+        // told to get a worktree it already has has nowhere to go.
         return textResult(
           "Could not resolve this chat's repo or branch, so there's nothing to open a PR " +
-            "from. Make sure the chat has a worktree.",
+            "from.\n" +
+            "  · If you have committed work somewhere, pass `cwd` pointing at that " +
+            "worktree — it is used as long as it belongs to this chat's repository.\n" +
+            "  · Otherwise `gh` could not name the repository at all (not signed in, " +
+            "no `origin`, or GitHub is down). `gh repo view` in your worktree says which.",
           true,
         );
       }

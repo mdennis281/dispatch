@@ -359,6 +359,62 @@ export function buildManagerToolsDirective(caps: {
 }
 
 /**
+ * The directories a session may act in, in preference order.
+ *
+ * `cwd` is the bound one — `session.worktreeCwd ?? project.repoPath`, fixed when
+ * the session is built — and it is authoritative for exactly as long as it is
+ * still a checkout. It can stop being one WHILE THE CHAT IS STILL RUNNING: the
+ * worktree reaper removes a chat's landed trees when its turn ends, and on
+ * Windows that removal unlinks the tree's `.git` and then fails on
+ * `node_modules`, leaving a full directory with no git identity. The session
+ * goes on pointing at it forever.
+ *
+ * `alternates` is what the session falls back to then, and it is a FUNCTION
+ * rather than an array because the answer changes during the chat: the tree that
+ * rescues a chat whose bound cwd was just reaped is typically one it cut
+ * afterwards, long after these options were built. Most-specific first — the
+ * chat's own worktrees, then the project checkout.
+ */
+export interface SessionDirs {
+  cwd: string | undefined;
+  alternates?: () => Promise<string[]>;
+}
+
+/**
+ * Resolve the directory this session should actually run git in — the bound
+ * `cwd` while that is still a checkout, else the first live alternate.
+ *
+ * `undefined` means nothing survives, which is a real answer and not an error:
+ * every caller already degrades on it.
+ *
+ * NOT memoised, deliberately. The value it computes is precisely the one that
+ * changes underneath a live session, and a resolver that answered from a cache
+ * would reproduce the bug it exists to fix one layer up. The cost is one
+ * `git rev-parse` on a code path that is about to spend a `gh` call anyway.
+ *
+ * Every candidate is checked, including the ones the chat record supplies: the
+ * reaped path is usually STILL in `Chat.worktrees`, because
+ * `WorktreeService.remove` throws on the failed `git worktree remove` before it
+ * ever reaches `detachFromChat`. Taking `worktrees[0]` on faith would just pick
+ * the husk a second time.
+ */
+export function makeDirResolver(
+  github: Pick<GitHubService, "isRepository">,
+  dirs: SessionDirs,
+): () => Promise<string | undefined> {
+  const alive = (dir: string): Promise<boolean> =>
+    github.isRepository(dir).catch(() => false);
+  return async (): Promise<string | undefined> => {
+    if (dirs.cwd && (await alive(dirs.cwd))) return dirs.cwd;
+    const alternates = await dirs.alternates?.().catch(() => []);
+    for (const dir of alternates ?? []) {
+      if (dir && dir !== dirs.cwd && (await alive(dir))) return dir;
+    }
+    return undefined;
+  };
+}
+
+/**
  * Resolve this session's `owner/name` once — but only once it has actually
  * resolved.
  *
@@ -380,16 +436,27 @@ export function buildManagerToolsDirective(caps: {
  * next call a retry. One helper rather than three copies because it was three
  * copies, and the two that weren't fixed first would have gone on poisoning
  * `watch_pr` and `approve_pr` in exactly the same way.
+ *
+ * It resolves from {@link makeDirResolver}, not from the bound cwd directly, for
+ * the same reason: `gh repo view` needs a checkout to answer, so a bound cwd
+ * that has been reaped out from under the session fails EVERY attempt — the
+ * retry above spins forever on a directory that will never come back. That is
+ * how one merge took `create_pr`, `watch_pr` and `approve_pr` down together for
+ * the rest of a chat, all three reporting a repo they could not name.
  */
 export function makeRepoResolver(
-  github: GitHubService,
-  cwd: string | undefined,
+  github: Pick<GitHubService, "resolveRepo" | "isRepository">,
+  dirs: SessionDirs,
 ): (override?: string) => Promise<string | null> {
+  const dirFor = makeDirResolver(github, dirs);
   let repoP: Promise<string | null> | undefined;
   return async (override?: string): Promise<string | null> => {
     if (override) return override;
-    if (!cwd) return null; // no launch dir → can't auto-resolve the repo
-    const inflight = (repoP ??= github.resolveRepo(cwd).catch(() => null));
+    const inflight = (repoP ??= (async () => {
+      const dir = await dirFor();
+      if (!dir) return null; // no live directory → can't auto-resolve the repo
+      return await github.resolveRepo(dir).catch(() => null);
+    })());
     const repo = await inflight;
     // Compare against the promise we awaited, not `repoP` as it stands now: a
     // concurrent caller may already have installed a fresh attempt, and clearing
@@ -420,17 +487,21 @@ export function makeRepoResolver(
  */
 function makeGithubBinding(
   github: GitHubService,
-  cwd: string | undefined,
+  dirs: SessionDirs,
   chatId: string,
   reviewers: readonly string[] = [],
   onSnapshot?: (chatId: string, snapshot: PrPollSnapshot) => void,
   reviewAgent?: ReviewAgentBinding,
 ): ManagerMcpGitHub {
-  const repoFor = makeRepoResolver(github, cwd);
+  const repoFor = makeRepoResolver(github, dirs);
+  const dirFor = makeDirResolver(github, dirs);
   return {
     pollPrState: async (n, repo) => {
       const r = await repoFor(repo);
       if (!r) return null;
+      // The LIVE directory, not the bound one: `gh` is run here, and a bound cwd
+      // the reaper removed makes every poll fail on a PR that is perfectly fine.
+      const cwd = await dirFor();
       const snap = await github.pollPrState(r, n, { cwd }).catch(() => null);
       if (!snap) return null;
       onSnapshot?.(chatId, snap);
@@ -564,7 +635,7 @@ interface ReviewAgentBinding {
  */
 export function makePrCreateBinding(
   github: GitHubService,
-  cwd: string | undefined,
+  dirs: SessionDirs,
   chatId: string,
   opts: {
     trunk: string;
@@ -574,11 +645,12 @@ export function makePrCreateBinding(
     arm?: (chatId: string, ref: PRRef) => void;
   },
 ): ManagerMcpPrCreate {
-  const repoFor = makeRepoResolver(github, cwd);
+  const repoFor = makeRepoResolver(github, dirs);
+  const dirFor = makeDirResolver(github, dirs);
 
   /**
    * Which directory to inspect: the caller's, if it is a worktree of the SAME
-   * repository, else the session's.
+   * repository, else the session's own live one.
    *
    * The bound `cwd` is fixed when the session is built, so it is stale for any
    * agent that moved afterwards — notably one the Claude Code harness put in
@@ -589,22 +661,68 @@ export function makePrCreateBinding(
    * `--git-common-dir` rather than a path-prefix test: linked worktrees share one
    * common dir wherever they physically live, and a prefix test would both miss
    * a worktree parked outside the repo and accept an unrelated repo nested
-   * inside it. Anything that fails the check falls back to the bound cwd rather
+   * inside it. Anything that fails the check falls back to the default rather
    * than throwing — a bad hint must not be able to BLOCK a PR that the default
    * would have opened correctly.
+   *
+   * That rule has an INVERSE, and it is the one that actually bit: a bad DEFAULT
+   * must not be able to block a good hint either. The comparison is only
+   * meaningful while the thing being compared against is a repository, and a
+   * reaped worktree is not — `sameRepository` answers a clean, wrong `false` for
+   * every directory on earth once the left-hand side has lost its `.git`, so the
+   * dead default won every time and the caller's perfectly good worktree was
+   * discarded. Hence {@link makeDirResolver}: validate the hint against a LIVE
+   * directory, and when none survives, a hint that is itself a checkout is the
+   * only evidence left — take it rather than insisting on a husk.
    */
   const cwdFor = async (requested?: string): Promise<string | undefined> => {
-    if (!requested || !cwd) return cwd;
-    const ok = await github.sameRepository(requested, cwd).catch(() => false);
-    return ok ? requested : cwd;
+    const live = await dirFor();
+    if (!requested) return live;
+    if (live) {
+      const ok = await github.sameRepository(requested, live).catch(() => false);
+      return ok ? requested : live;
+    }
+    const ok = await github.isRepository(requested).catch(() => false);
+    return ok ? requested : undefined;
+  };
+
+  /**
+   * The repository to open the PR on — the session's, or the one the caller's
+   * directory belongs to when the session can no longer name its own.
+   *
+   * `repoFor` needs a live checkout to run `gh repo view` in, so a chat with no
+   * surviving directory cannot name its repository at all — and then `where`
+   * being valid bought nothing, because the `!repo` check refused first. That is
+   * the last way an explicit, valid `cwd` could still fail to rescue a session,
+   * and it is not hypothetical: the whole point of passing `cwd` is that the
+   * directory the SERVER knows about is the broken one.
+   *
+   * Only ever consulted after `repoFor` has come back empty, so it cannot let a
+   * stray hint redirect a chat that knows perfectly well where it belongs — that
+   * check lives in `cwdFor` and still runs first.
+   */
+  const repoOn = async (where: string | undefined): Promise<string | null> => {
+    const repo = await repoFor();
+    if (repo || !where) return repo;
+    // ONLY when the session has no live directory of its own. If it has one,
+    // `repoFor` already asked `gh` about this very directory, and asking again
+    // here would spend a second call on the same outage — and worse, mask it:
+    // the retry-on-next-call design above exists precisely so a GitHub 503
+    // doesn't get baked in, and a same-turn retry quietly converts that into
+    // "the first attempt succeeded", which is the behaviour it was written to
+    // prevent.
+    if (await dirFor()) return null;
+    return await github.resolveRepo(where).catch(() => null);
   };
 
   return {
     reviewers: opts.reviewers,
     draft: opts.draft,
     preflight: async (base, at) => {
-      const repo = await repoFor();
+      // `where` FIRST: it is an input to naming the repository, not just a place
+      // to run the preflight once the repository is known.
       const where = await cwdFor(at);
+      const repo = await repoOn(where);
       if (!repo || !where) return null;
       const pre = await github.prCreatePreflight(repo, { cwd: where, trunk: opts.trunk, base });
       return {
@@ -625,10 +743,10 @@ export function makePrCreateBinding(
       };
     },
     create: async (input) => {
-      const repo = await repoFor();
       // NOT named `cwd`: shadowing the binding's own parameter is how the next
       // reader convinces themselves the two are the same directory.
       const where = await cwdFor(input.cwd);
+      const repo = await repoOn(where);
       if (!repo || !where) throw new Error("could not resolve this chat's repo");
       const pre = await github.prCreatePreflight(repo, {
         cwd: where,
@@ -738,7 +856,7 @@ export interface SessionPrRegistry {
 function makePrRegistryBinding(
   registry: SessionPrRegistry,
   github: GitHubService,
-  cwd: string | undefined,
+  dirs: SessionDirs,
   /** Whose review this is. The registry ignores a post from a chat holding no lease. */
   chatId: string,
   /**
@@ -752,7 +870,7 @@ function makePrRegistryBinding(
    */
   reviewerLogin: string | undefined,
 ): ManagerMcpPrRegistry {
-  const repoFor = makeRepoResolver(github, cwd);
+  const repoFor = makeRepoResolver(github, dirs);
   // Every method degrades to null rather than throwing: a card is a nicety, and
   // no tool should fail because the catalog could not name a repository.
   return {
@@ -799,7 +917,7 @@ function makePrRegistryBinding(
 
 function makePrApprovalBinding(
   github: GitHubService,
-  cwd: string | undefined,
+  dirs: SessionDirs,
   chatId: string,
   defaultMethod: WorkflowMergeMethod,
   policy: PrLandingPolicy,
@@ -815,7 +933,7 @@ function makePrApprovalBinding(
    */
   reviewRounds?: (repo: string, prNumber: number) => Promise<PrReviewAgentState | null>,
 ): ManagerMcpPrApproval {
-  const repoFor = makeRepoResolver(github, cwd);
+  const repoFor = makeRepoResolver(github, dirs);
   const requireRepo = async (override?: string): Promise<string> => {
     const r = await repoFor(override);
     if (!r) throw new Error("could not resolve this chat's repo — pass `repo` as 'owner/name'");
@@ -4772,6 +4890,23 @@ export class SessionBroker {
         ? await this.store.getProject(session.projectId).catch(() => null)
         : null);
     const cwd = session.worktreeCwd ?? project?.repoPath;
+    // What the GitHub tools resolve git against. `cwd` is the session's real
+    // working directory and stays exactly as it is — this only decides where
+    // `gh`/`git` are RUN when that directory has stopped being a checkout.
+    // Re-read per call, never snapshotted: the tree that rescues a chat whose
+    // bound worktree was reaped is usually one it cuts after this point.
+    const dirs: SessionDirs = {
+      cwd,
+      alternates: async () => {
+        const chat = await this.store.getChat(session.chatId).catch(() => null);
+        const repoPath = project?.repoPath;
+        // The chat's own trees first — they carry the branch the work is on.
+        // The project checkout last: it always resolves, but it sits on the
+        // trunk, so preferring it would answer `on-trunk` for a chat whose
+        // commits are one directory over.
+        return [...(chat?.worktrees ?? []), ...(repoPath ? [repoPath] : [])];
+      },
+    };
 
     const options: Options = {
       permissionMode,
@@ -5257,7 +5392,7 @@ export class SessionBroker {
             ? makePrRegistryBinding(
                 this.prRegistry,
                 github,
-                cwd,
+                dirs,
                 session.chatId,
                 reviewer?.policy.login,
               )
@@ -5265,7 +5400,7 @@ export class SessionBroker {
         github: github
           ? makeGithubBinding(
               github,
-              cwd,
+              dirs,
               session.chatId,
               workflow.pr.reviewers,
               this.onPrSnapshot,
@@ -5303,7 +5438,7 @@ export class SessionBroker {
           github && canApprovePr
             ? makePrApprovalBinding(
                 github,
-                cwd,
+                dirs,
                 session.chatId,
                 workflow.mergeMethod,
                 {
@@ -5338,7 +5473,7 @@ export class SessionBroker {
         // the guard's refusal of a raw `gh pr create` always has a path to name.
         prCreate:
           github && canCreatePr
-            ? makePrCreateBinding(github, cwd, session.chatId, {
+            ? makePrCreateBinding(github, dirs, session.chatId, {
                 trunk: session.trunk ?? "main",
                 reviewers: workflow.pr.reviewers,
                 draft: workflow.pr.draft,

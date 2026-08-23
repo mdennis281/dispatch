@@ -821,6 +821,42 @@ export class GitHubService {
   }
 
   /**
+   * The repository a directory belongs to, as its absolute `--git-common-dir`;
+   * `null` for anything that isn't a checkout.
+   *
+   * The identity primitive behind {@link sameRepository} and
+   * {@link isRepository} — one `git rev-parse`, one place that knows how to read
+   * it. Never throws: an unreadable, missing or non-git directory is `null`.
+   */
+  async gitCommonDir(dir: string): Promise<string | null> {
+    const r = await this.exec(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { cwd: dir, reject: false },
+    ).catch(() => null);
+    if (!r || r.exitCode !== 0) return null;
+    const out = r.stdout.trim();
+    if (!out) return null;
+    // Resolve symlinks: on macOS a temp dir reached two ways is the same repo
+    // but two different strings, and this comparison decides whether a PR opens.
+    return await realpath(out).catch(() => resolve(out));
+  }
+
+  /**
+   * Does this directory still have a git identity?
+   *
+   * Exists because "the directory is there" and "the directory is a checkout"
+   * came apart on Windows: `git worktree remove` unlinks the worktree's `.git`
+   * FIRST and then chokes on `node_modules`, leaving a full directory that no
+   * git command will answer for (see the worktree reaper's notes). Anything
+   * holding such a path — a session's bound cwd, a chat's `worktrees[]` — is
+   * holding a dead pointer, and needs to be able to find that out.
+   */
+  async isRepository(dir: string): Promise<boolean> {
+    return (await this.gitCommonDir(dir)) !== null;
+  }
+
+  /**
    * Are two directories checkouts of the SAME repository (any worktree of it)?
    *
    * `--git-common-dir` rather than a path-prefix test, deliberately: every linked
@@ -831,20 +867,7 @@ export class GitHubService {
    * Never throws — an unreadable or non-git directory is simply "no".
    */
   async sameRepository(a: string, b: string): Promise<boolean> {
-    const commonDir = async (dir: string): Promise<string | null> => {
-      const r = await this.exec(
-        "git",
-        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        { cwd: dir, reject: false },
-      ).catch(() => null);
-      if (!r || r.exitCode !== 0) return null;
-      const out = r.stdout.trim();
-      if (!out) return null;
-      // Resolve symlinks: on macOS a temp dir reached two ways is the same repo
-      // but two different strings, and this comparison decides whether a PR opens.
-      return await realpath(out).catch(() => resolve(out));
-    };
-    const [x, y] = await Promise.all([commonDir(a), commonDir(b)]);
+    const [x, y] = await Promise.all([this.gitCommonDir(a), this.gitCommonDir(b)]);
     return !!x && !!y && x === y;
   }
 

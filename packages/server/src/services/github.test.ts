@@ -994,6 +994,56 @@ describe("sameRepository", () => {
   });
 });
 
+/**
+ * The primitive `sameRepository` is built on, exposed in its own right because
+ * "is this still a checkout?" turned out to be a question several callers need
+ * to ask about a directory they are already holding.
+ *
+ * It exists for one failure: a `git worktree remove` that unlinks the tree's
+ * `.git` and then fails on `node_modules` leaves a full directory that is not a
+ * repository. `existsSync` says yes, git says no, and a session bound to it goes
+ * on believing it has a worktree.
+ */
+describe("isRepository", () => {
+  it("is false for a directory git will not answer for", async () => {
+    const { exec, push } = makeExec();
+    push({ stdout: "", stderr: "not a git repository", exitCode: 128 });
+    const gh = new GitHubService({ bus, exec });
+    expect(await gh.isRepository("/tmp/husk")).toBe(false);
+  });
+
+  it("is true for a checkout, and asks git the absolute question", async () => {
+    const { exec, calls, push } = makeExec();
+    push({ stdout: "/repo/.git\n", exitCode: 0 });
+    const gh = new GitHubService({ bus, exec });
+
+    expect(await gh.isRepository("/repo/wt/x")).toBe(true);
+    expect(calls[0].args).toEqual([
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ]);
+    expect(calls[0].options?.cwd).toBe("/repo/wt/x");
+  });
+
+  it("is false — never throws — when git cannot be run at all", async () => {
+    const gh = new GitHubService({
+      bus,
+      exec: (async () => {
+        throw new Error("ENOENT: git");
+      }) as never,
+    });
+    expect(await gh.isRepository("/repo")).toBe(false);
+  });
+
+  it("treats empty output as no, rather than as an unnamed repository", async () => {
+    const { exec, push } = makeExec();
+    push({ stdout: "   \n", exitCode: 0 });
+    const gh = new GitHubService({ bus, exec });
+    expect(await gh.isRepository("/repo")).toBe(false);
+  });
+});
+
 describe("sameRepository — against real git", () => {
   let root: string;
   let hasGit = true;
