@@ -658,12 +658,13 @@ function ChatRow({
                 <IconCount
                   icon={Cpu}
                   count={processCount}
-                  // `accent-2` is this palette's "something the machine did on
-                  // your behalf" — the same violet the runtime figure on the
-                  // subtext line uses, and this is the other half of that cost:
-                  // one says how long it ran, the other what it is still holding.
-                  iconClass="text-accent-2"
-                  tone="agent"
+                  // Blue, and deliberately NOT the runtime figure's violet on
+                  // the line below: these are two different kinds of fact about
+                  // the same chat — one is time already spent and gone, the
+                  // other is memory being held right now and reclaimable. A
+                  // shared colour would invite reading them as one measurement.
+                  iconClass="text-info"
+                  tone="info"
                   title={`${processCount} OS process${
                     processCount === 1 ? "" : "es"
                   } held by ${processScope} — its runtime subprocess, the MCP servers under it, and any background shell it started`}

@@ -108,6 +108,38 @@ describe("ChatProcessService", () => {
     expect(procTable).toHaveBeenCalledTimes(2);
   });
 
+  it("does not let a scan started BEFORE a kill become the cache after it", async () => {
+    // The race: the 30s poll fires just before the kill lands. Its scan reads a
+    // table in which everything is still alive; `invalidate()` then runs; and
+    // without a generation guard that pre-kill answer is handed to the client's
+    // post-kill refresh AND cached as fresh for a further TTL — the row keeps
+    // its old number and the button reads as broken.
+    let table = TABLE;
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    let call = 0;
+    const svc = new ChatProcessService({
+      procTable: async () => {
+        if (call++ === 0) await gate; // the pre-kill scan, held mid-flight
+        return table;
+      },
+      sessionPids: () => new Map([["chat-a", 10]]),
+      now: () => 1_000,
+    });
+
+    const preKill = svc.counts(); // scan S starts against the live table
+    svc.invalidate(); // the kill lands
+    table = [
+      { pid: 1, ppid: 0, name: "node.exe" },
+      { pid: 10, ppid: 1, name: "claude.exe" },
+    ]; // …and the tree is gone, bar the root
+    release!();
+    await preKill;
+
+    // The post-kill read must see the NEW table, not S's answer.
+    expect((await svc.counts()).byChat).toEqual({ "chat-a": 1 });
+  });
+
   it("re-scans immediately after invalidate, so a kill shows up", async () => {
     const procTable = vi.fn(async () => TABLE);
     const svc = new ChatProcessService({

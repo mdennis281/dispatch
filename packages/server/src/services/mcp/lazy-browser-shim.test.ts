@@ -153,6 +153,33 @@ describe("lazy-browser-shim", () => {
     expect(await spawned()).toBe(true);
   });
 
+  it("shuts the real server down by CLOSING ITS STDIN, not by killing it", async () => {
+    // Why it matters: `kill()` is `TerminateProcess` on Windows — no handler
+    // runs — and Windows does not cascade a kill to children. `@playwright/mcp`
+    // runs Chrome as a child, so a kill here strands the browser holding its
+    // `--isolated` profile dir and its debugging port. Stdin EOF is the shutdown
+    // an MCP stdio server is built around, and the fixture records which one it
+    // got.
+    const graceful = join(dir, "graceful.log");
+    const child = spawn(
+      process.execPath,
+      [SHIM, "--manifest", manifest, "--", process.execPath, FAKE, "--marker", marker, "--graceful", graceful],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    ) as ChildProcessWithoutNullStreams;
+    running.push(child);
+    const client = new Client(child);
+
+    await client.request(1, "initialize", { protocolVersion: "2024-11-05" });
+    client.notify("notifications/initialized");
+    await client.request(2, "tools/call", { name: "look" }); // forces the spawn
+
+    // The client goes away, exactly as the SDK's teardown does it.
+    child.stdin.end();
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+
+    expect(await readFile(graceful, "utf8")).toContain("stdin-eof");
+  });
+
   it("does not leak its own handshake reply to the client", async () => {
     const cold = startShim();
     await cold.request(1, "initialize", { protocolVersion: "2024-11-05" });

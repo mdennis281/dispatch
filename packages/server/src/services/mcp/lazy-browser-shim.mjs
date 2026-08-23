@@ -286,9 +286,44 @@ createLineReader(process.stdin, (line) => {
   spawnReal();
 });
 
-// A closed stdin means the client is gone. Take the real server with us — it is
-// a browser, and an orphaned one holds a profile dir and a debugging port.
+/**
+ * How long to let the real server shut itself down before giving up on it.
+ *
+ * Bounded because this process must not outlive its client either way; long
+ * enough that a browser gets to close its pages and release its profile dir.
+ */
+const GRACEFUL_EXIT_MS = 2_000;
+
+// A closed stdin means the client is gone, and the real server has to go too.
+//
+// By CLOSING ITS STDIN, not by killing it. `kill()` sends SIGTERM, which on
+// Windows is `TerminateProcess` — no handler runs — and Windows does not cascade
+// a kill to children. `@playwright/mcp` runs Chrome as a child, so killing the
+// server here strands the browser holding its `--isolated` profile dir and its
+// debugging port: exactly the orphan this teardown exists to prevent. Stdin EOF
+// is the shutdown an MCP stdio server is built around, and it is what the SDK
+// does to US. The kill stays only as a bounded fallback for a server that
+// ignores it.
 process.stdin.on("end", () => {
-  if (child) child.kill();
-  process.exit(0);
+  if (!child) process.exit(0);
+  try {
+    child.stdin.end();
+  } catch {
+    /* already gone */
+  }
+  const forced = setTimeout(() => {
+    try {
+      child.kill();
+    } catch {
+      /* already gone */
+    }
+    process.exit(0);
+  }, GRACEFUL_EXIT_MS);
+  // `unref` so a server that exits promptly doesn't hold this process open for
+  // the rest of the grace window.
+  forced.unref?.();
+  child.once("exit", () => {
+    clearTimeout(forced);
+    process.exit(0);
+  });
 });

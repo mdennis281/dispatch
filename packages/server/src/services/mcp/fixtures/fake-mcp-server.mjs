@@ -13,6 +13,22 @@ const argv = process.argv.slice(2);
 const marker = argv[argv.indexOf("--marker") + 1];
 if (marker) appendFileSync(marker, "start\n");
 
+/**
+ * Records HOW this process was asked to stop (`--graceful <path>`).
+ *
+ * Stdin EOF is the shutdown an MCP stdio server is built around; a SIGTERM kill
+ * on Windows runs no handler at all, so the file simply stays empty. That
+ * asymmetry is the assertion — "it wrote stdin-eof" can only be true of the
+ * graceful path.
+ */
+const gracefulLog = argv[argv.indexOf("--graceful") + 1];
+if (gracefulLog && argv.includes("--graceful")) {
+  process.stdin.on("end", () => {
+    appendFileSync(gracefulLog, "stdin-eof\n");
+    process.exit(0);
+  });
+}
+
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
 
 let buffer = "";

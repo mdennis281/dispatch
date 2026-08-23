@@ -72,6 +72,20 @@ export class ChatProcessService {
    * same tick misses the cache together and they all scan.
    */
   private inFlight?: Promise<ChatProcessCounts>;
+  /**
+   * Bumped by {@link invalidate}. A scan carries the generation it started in
+   * and refuses to write the cache — or to clear the in-flight slot — if that
+   * generation is no longer current.
+   *
+   * A counter rather than just dropping `inFlight`, because dropping it alone
+   * leaves the OLD scan's `finally` free to clear the NEW scan that replaced it,
+   * and leaves its result free to land in `cached` as if it were fresh. Both
+   * halves matter: a scan that started before a kill saw every process still
+   * alive, and caching that answer afterwards pins the row to its pre-kill
+   * number for a full TTL — which is exactly the "reads as the button not
+   * working" failure `invalidate` exists to prevent.
+   */
+  private generation = 0;
 
   constructor(deps: ChatProcessDeps) {
     this.procTable = deps.procTable;
@@ -85,9 +99,12 @@ export class ChatProcessService {
   async counts(): Promise<ChatProcessCounts> {
     const fresh = this.cached;
     if (fresh && this.now() - fresh.at < this.ttlMs) return fresh;
-    this.inFlight ??= this.scan().finally(() => {
-      this.inFlight = undefined;
-    });
+    if (!this.inFlight) {
+      const generation = this.generation;
+      this.inFlight = this.scan(generation).finally(() => {
+        if (generation === this.generation) this.inFlight = undefined;
+      });
+    }
     return this.inFlight;
   }
 
@@ -99,6 +116,11 @@ export class ChatProcessService {
    */
   invalidate(): void {
     this.cached = undefined;
+    // Retires the in-flight scan as well as the cache. That scan read the
+    // process table BEFORE the kill, so its answer is not merely stale — it is
+    // the exact number the caller is invalidating to get rid of.
+    this.generation += 1;
+    this.inFlight = undefined;
   }
 
   /**
@@ -115,7 +137,7 @@ export class ChatProcessService {
     return [...descendantsOf(roots, table)];
   }
 
-  private async scan(): Promise<ChatProcessCounts> {
+  private async scan(generation: number): Promise<ChatProcessCounts> {
     const table = await this.procTable().catch(() => [] as ProcRow[]);
     // An empty table is a FAILED table, not a machine with no processes on it —
     // the shell-out died, or its output didn't parse. Walking it anyway would
@@ -135,7 +157,10 @@ export class ChatProcessService {
       if (n > 0) byChat[chatId] = n;
     }
     const counts = { byChat, at: this.now() };
-    this.cached = counts;
+    // A scan `invalidate` retired still RESOLVES — callers that asked before the
+    // kill are owed an answer — but it must not become the cache the next
+    // caller reads.
+    if (generation === this.generation) this.cached = counts;
     return counts;
   }
 

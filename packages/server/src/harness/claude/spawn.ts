@@ -31,8 +31,17 @@ export interface HarnessSpawnOptions {
 export interface PidSink {
   /** A session subprocess is live under this pid. */
   onSpawn(pid: number): void;
-  /** It exited. Called at most once per {@link PidSink.onSpawn}. */
-  onExit(pid: number): void;
+  /**
+   * It exited. Called at most once per {@link PidSink.onSpawn}.
+   *
+   * `stderrTail` is the last of what the child wrote to stderr, and it has to
+   * come out THROUGH HERE because providing a custom spawner is what stops the
+   * SDK collecting its own. `SpawnedProcess` declares no `stderr`, so only the
+   * SDK's built-in launcher can populate the tail it puts in
+   * "Claude Code process exited with code N" — the half of that message that
+   * says why. Handing it back lets the session put it back on.
+   */
+  onExit(pid: number, stderrTail: string): void;
 }
 
 /**
@@ -84,7 +93,6 @@ export function spawnWithPid(sink: PidSink) {
     // A stderr stream that errors (the child died mid-write) must not become an
     // unhandled 'error' event on an EventEmitter nobody else is listening to.
     child.stderr.on("error", () => {});
-    Object.defineProperty(child, "stderrTail", { get: () => tail });
 
     // `pid` is undefined when the spawn itself failed synchronously (ENOENT on
     // the executable). There is no process to count or to reap, and the SDK
@@ -99,9 +107,12 @@ export function spawnWithPid(sink: PidSink) {
       const release = (): void => {
         if (released) return;
         released = true;
-        sink.onExit(pid);
+        sink.onExit(pid, tail);
       };
-      child.once("exit", release);
+      // Deferred a tick past `exit`: stderr's last 'data' can still be in flight
+      // when the process ends, and reporting the tail before it lands would drop
+      // the final line — usually the one naming the failure.
+      child.once("exit", () => setImmediate(release));
       child.once("error", release);
     }
 

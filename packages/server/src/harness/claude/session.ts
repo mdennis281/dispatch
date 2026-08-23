@@ -117,6 +117,24 @@ class InputChannel implements AsyncIterable<SDKUserMessage> {
   }
 }
 
+/**
+ * Put the subprocess's stderr back on a bare process-exit error.
+ *
+ * ONLY on that shape. `fail()` also handles transport errors, aborts and
+ * anything the stream threw, and stapling the last subprocess's stderr onto an
+ * unrelated failure would be worse than saying nothing — the tail outlives the
+ * process it came from, so it could describe a run that already ended.
+ *
+ * A message that already carries a tail (the SDK's own launcher ran, because
+ * this session didn't provide a spawner) is left exactly as it was.
+ */
+export function withStderrTail(message: string, tail: string): string {
+  if (!tail.trim()) return message;
+  if (!/process exited with code/i.test(message)) return message;
+  if (message.includes(tail.trim().slice(-80))) return message;
+  return `${message}\n${tail.trimEnd()}`;
+}
+
 export interface ClaudeSessionOpts {
   spec: HarnessSessionSpec;
   query?: QueryFn;
@@ -164,6 +182,16 @@ export class ClaudeSession implements HarnessSession {
    * holding" and "reap them" answerable. See {@link spawnWithPid}.
    */
   private livePid?: number;
+
+  /**
+   * The dead subprocess's last stderr, kept for the error message.
+   *
+   * Providing `spawnClaudeCodeProcess` is what stops the SDK collecting its own
+   * tail (`SpawnedProcess` declares no `stderr`), so without this a session that
+   * dies on a bad flag reports a bare "process exited with code 1" instead of
+   * the CLI's own account of why. See {@link spawnWithPid}.
+   */
+  private lastStderrTail = "";
 
   constructor(opts: ClaudeSessionOpts) {
     this.spec = opts.spec;
@@ -278,7 +306,10 @@ export class ClaudeSession implements HarnessSession {
   }
 
   private fail(err: unknown): void {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = withStderrTail(
+      err instanceof Error ? err.message : String(err),
+      this.lastStderrTail,
+    );
     this.emit({ type: "turn-end", ok: false, subtype: "error", result: message });
     this.end();
   }
@@ -314,11 +345,12 @@ export class ClaudeSession implements HarnessSession {
         onSpawn: (pid) => {
           this.livePid = pid;
         },
-        onExit: (pid) => {
+        onExit: (pid, stderrTail) => {
           // Guarded: a `dispose()` → immediate restart can land the new pid
           // before the old child's `exit` fires, and clearing unconditionally
           // would blank the pid of the session that is actually running.
           if (this.livePid === pid) this.livePid = undefined;
+          if (stderrTail) this.lastStderrTail = stderrTail;
         },
       }) as unknown as Options["spawnClaudeCodeProcess"],
     };
