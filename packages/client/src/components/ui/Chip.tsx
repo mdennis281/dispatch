@@ -96,7 +96,12 @@ export function Badge({
           ? "bg-accent-2 text-accent-2-fg"
           : tone === "info"
             ? "bg-info text-accent-fg"
-            : "bg-accent text-accent-fg";
+            : // `success` used to fall through to the accent fill, which only
+              // showed once a badge was pinned to a green glyph: a green icon
+              // wearing an amber bubble reads as two states, not one thing.
+              tone === "success"
+              ? "bg-success text-accent-fg"
+              : "bg-accent text-accent-fg";
   return (
     <span
       className={cn(

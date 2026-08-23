@@ -29,6 +29,7 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
    */
   app.get("/api/settings/defaults", async () => ({
     maxActiveSessions: config.maxActiveSessions,
+    idleSessionMinutes: config.idleSessionMinutes,
   }));
 
   app.put("/api/settings", async (req, reply) => {
@@ -61,6 +62,8 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
     // saved object rather than `parsed.data` so it can never disagree with what
     // was written (the preserved-field spread above sits between the two).
     broker.setCap(saved.maxActiveSessions);
+    // Same reason: the idle window lives on the live broker's sweep timer.
+    broker.setIdleTimeout(saved.idleSessionMinutes);
     return saved;
   });
 }

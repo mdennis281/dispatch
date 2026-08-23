@@ -310,6 +310,7 @@ export function createServices(
       store,
       bus,
       maxActiveSessions: config.maxActiveSessions,
+      idleSessionMinutes: config.idleSessionMinutes,
       terminals,
       memory,
       memoryHistory,
@@ -751,7 +752,10 @@ export function createServices(
       // admitted against the boot default first.
       await store
         .getSettings()
-        .then((s) => broker.setCap(s.maxActiveSessions))
+        .then((s) => {
+          broker.setCap(s.maxActiveSessions);
+          broker.setIdleTimeout(s.idleSessionMinutes);
+        })
         .catch(() => {
           /* best-effort: an unreadable config leaves the env/default cap in force */
         });

@@ -36,27 +36,29 @@ describe("ChatProcessService", () => {
       sessionPids: () => new Map([["chat-a", 10]]),
     });
     // The claude process itself plus its two MCP children.
-    expect((await svc.counts()).byChat).toEqual({ "chat-a": 3 });
+    expect((await svc.counts()).byChat).toEqual({ "chat-a": { session: 3, shells: 0 } });
   });
 
-  it("adds background shells, which hang off the server rather than the session", async () => {
+  it("counts background shells SEPARATELY — they hang off the server, and nothing sweeps them", async () => {
     const svc = new ChatProcessService({
       procTable: async () => TABLE,
       sessionPids: () => new Map([["chat-a", 10]]),
       terminals: { livePids: () => [shell("chat-a", 30)] },
     });
-    // 10, 11, 12 + 30, 31 — the shell is a second ROOT, not a descendant.
-    expect((await svc.counts()).byChat).toEqual({ "chat-a": 5 });
+    // 10, 11, 12 is the session; 30, 31 is the shell and its dev server. Kept
+    // apart because only the first half is retired by the idle sweep — summed,
+    // a dev server you are still testing against would look transient.
+    expect((await svc.counts()).byChat).toEqual({ "chat-a": { session: 3, shells: 2 } });
   });
 
-  it("never double-counts a pid two roots both reach", async () => {
+  it("attributes a shell UNDER the session to the session, not to both", async () => {
     const svc = new ChatProcessService({
       procTable: async () => TABLE,
       sessionPids: () => new Map([["chat-a", 10]]),
       // A shell that is itself under the session: reachable from both roots.
       terminals: { livePids: () => [shell("chat-a", 11)] },
     });
-    expect((await svc.counts()).byChat).toEqual({ "chat-a": 3 });
+    expect((await svc.counts()).byChat).toEqual({ "chat-a": { session: 3, shells: 0 } });
   });
 
   it("keeps chats apart", async () => {
@@ -68,7 +70,7 @@ describe("ChatProcessService", () => {
           ["chat-b", 20],
         ]),
     });
-    expect((await svc.counts()).byChat).toEqual({ "chat-a": 3, "chat-b": 2 });
+    expect((await svc.counts()).byChat).toEqual({ "chat-a": { session: 3, shells: 0 }, "chat-b": { session: 2, shells: 0 } });
   });
 
   it("omits a chat holding nothing rather than reporting a zero", async () => {
@@ -137,7 +139,7 @@ describe("ChatProcessService", () => {
     await preKill;
 
     // The post-kill read must see the NEW table, not S's answer.
-    expect((await svc.counts()).byChat).toEqual({ "chat-a": 1 });
+    expect((await svc.counts()).byChat).toEqual({ "chat-a": { session: 1, shells: 0 } });
   });
 
   it("re-scans immediately after invalidate, so a kill shows up", async () => {
@@ -175,16 +177,16 @@ describe("ChatProcessService", () => {
       now: () => now,
       ttlMs: 1,
     });
-    expect((await svc.counts()).byChat).toEqual({ "chat-a": 3 });
+    expect((await svc.counts()).byChat).toEqual({ "chat-a": { session: 3, shells: 0 } });
 
     table = [];
     now += 1_000;
-    expect((await svc.counts()).byChat).toEqual({ "chat-a": 3 });
+    expect((await svc.counts()).byChat).toEqual({ "chat-a": { session: 3, shells: 0 } });
 
     // …and it recovers rather than serving the stale reading forever.
     table = TABLE;
     now += 1_000;
-    expect((await svc.counts()).byChat).toEqual({ "chat-a": 3 });
+    expect((await svc.counts()).byChat).toEqual({ "chat-a": { session: 3, shells: 0 } });
   });
 
   it("lists a chat's pids for the kill, roots included", async () => {
@@ -206,6 +208,6 @@ describe("ChatProcessService", () => {
       ],
       sessionPids: () => new Map([["chat-a", 5]]),
     });
-    expect((await svc.counts()).byChat).toEqual({ "chat-a": 2 });
+    expect((await svc.counts()).byChat).toEqual({ "chat-a": { session: 2, shells: 0 } });
   });
 });

@@ -257,7 +257,10 @@ export function registerChatRoutes(app: FastifyInstance): void {
       // The count is a cache with a TTL; without this the row keeps showing the
       // number we just reaped, which reads as the button doing nothing.
       chatProcesses.invalidate();
-      const freed = ids.reduce((n, id) => n + (before.byChat[id] ?? 0), 0);
+      const freed = ids.reduce((n, id) => {
+        const tally = before.byChat[id];
+        return n + (tally ? tally.session + tally.shells : 0);
+      }, 0);
       return { chatIds: ids, freed };
     },
   );

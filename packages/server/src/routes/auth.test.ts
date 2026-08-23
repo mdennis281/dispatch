@@ -18,7 +18,7 @@ async function app() {
   dirs.push(dir);
   const store = new Store(dir);
   const instance = await buildApp({ store, bus: new EventBus(), config: {
-    port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1,
+    port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1, idleSessionMinutes: 30,
   }});
   return { instance, store, dir };
 }
@@ -33,7 +33,7 @@ async function pairedApps() {
   const make = async (dataDir: string) => {
     const store = new Store(dataDir, configDir);
     const instance = await buildApp({ store, bus: new EventBus(), config: {
-      port: 0, host: "127.0.0.1", dataDir, configDir, maxActiveSessions: 1,
+      port: 0, host: "127.0.0.1", dataDir, configDir, maxActiveSessions: 1, idleSessionMinutes: 30,
     }});
     return { store, instance };
   };
@@ -90,7 +90,7 @@ describe("optional authentication", () => {
     await writeFile(join(dir, "config.json"), JSON.stringify({ theme: "dark" }));
     const store = new Store(dir);
     const instance = await buildApp({ store, bus: new EventBus(), config: {
-      port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1,
+      port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1, idleSessionMinutes: 30,
     }});
     expect((await store.getSettings()).auth).toBeUndefined();
     expect((await instance.inject({ url: "/api/projects" })).statusCode).toBe(200);
@@ -113,7 +113,7 @@ describe("optional authentication", () => {
     // learn it happened. The message has to name the script that does it.
     await expect(
       buildApp({ store, bus: new EventBus(), config: {
-        port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1,
+        port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1, idleSessionMinutes: 30,
       }}),
     ).rejects.toThrow(/app:migrate-store/);
   });
@@ -134,7 +134,7 @@ describe("optional authentication", () => {
 
     const store = new Store(dir);
     const instance = await buildApp({ store, bus: new EventBus(), config: {
-      port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1,
+      port: 0, host: "127.0.0.1", dataDir: dir, maxActiveSessions: 1, idleSessionMinutes: 30,
     }});
     expect((await instance.inject({ url: "/api/auth/status" })).json()).toMatchObject({
       enabled: false, firstRunDismissed: true,

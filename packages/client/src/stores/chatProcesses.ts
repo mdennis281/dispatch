@@ -12,15 +12,33 @@
  * chat parked waiting for someone to test something is still there when they
  * come back. The cost of that is invisible until it is displayed — fifteen
  * resident sessions against four in use looks like nothing until the rows say
- * "9" each. Hence a counter and a manual reap, rather than an idle timer that
- * would throw away the parked chats that make the policy worth having.
+ * "9" each.
+ *
+ * TWO NUMBERS, because two things with different lifetimes were being added
+ * together. The SESSION tree is swept automatically once a chat has been idle
+ * past the configured window (`AppSettings.idleSessionMinutes`) — safe, because
+ * `stop()` re-arms resume, so the next message brings the context back and all a
+ * purge costs is that message's spin-up. The SHELLS are not swept by anything:
+ * a chat parked for you to test against a dev server it started has to still
+ * have the dev server. Showing one total would make the half that is about to be
+ * reclaimed indistinguishable from the half that never will be.
  */
 import { create } from "zustand";
 import { api } from "../lib/api.js";
 
+/** What one chat is holding, split by who reaps it. Mirrors the server tally. */
+export interface ChatProcessTally {
+  /** Its runtime subprocess and every MCP server under it. Swept when idle. */
+  session: number;
+  /** Its background shells. Never swept automatically — they are yours. */
+  shells: number;
+}
+
+const NONE: ChatProcessTally = { session: 0, shells: 0 };
+
 interface ChatProcessStore {
-  /** chatId → live process count. A chat holding none is ABSENT. */
-  byChat: Record<string, number>;
+  /** chatId → live counts. A chat holding nothing is ABSENT. */
+  byChat: Record<string, ChatProcessTally>;
   /** When the server measured it; 0 = never loaded. */
   at: number;
   refresh: () => Promise<void>;
@@ -50,21 +68,32 @@ export const useChatProcesses = create<ChatProcessStore>((set, get) => ({
 }));
 
 /**
- * The count for a chat and everything folded under it.
+ * The counts for a chat and everything folded under it.
  *
  * Reviewer chats are separate chats with their own sessions, so their processes
  * are their own — and a collapsed row that hid them would under-report exactly
  * when it matters most, since a branch with four reviewer chats behind it is
  * carrying five trees, not one. Mirrors `branchRuntimeMs`.
+ *
+ * SPLIT, not summed, because the two halves have different lifetimes: the
+ * session tree is swept once the chat has been idle a while, and the shells are
+ * yours until you say otherwise. One number would make a dev server you are
+ * still testing against look like something about to be reclaimed.
  */
 export function branchProcessCount(
-  byChat: Record<string, number>,
+  byChat: Record<string, ChatProcessTally>,
   chatId: string,
   under: readonly { id: string }[],
-): number {
-  let n = byChat[chatId] ?? 0;
-  for (const c of under) n += byChat[c.id] ?? 0;
-  return n;
+): ChatProcessTally {
+  const ids = [chatId, ...under.map((c) => c.id)];
+  let session = 0;
+  let shells = 0;
+  for (const id of ids) {
+    const tally = byChat[id] ?? NONE;
+    session += tally.session;
+    shells += tally.shells;
+  }
+  return { session, shells };
 }
 
 /** Every chat id a branch's count covers — what the kill button must reap. */

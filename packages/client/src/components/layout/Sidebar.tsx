@@ -15,6 +15,7 @@ import {
   MessagesSquare,
   Cpu,
   Power,
+  SquareTerminal,
   BarChart3,
   Brain,
   FolderOpen,
@@ -488,21 +489,31 @@ function ChatRow({
   // reviewer chats folded into the row. Per-row subscription like `activityAt`
   // above: one poll updates every row, and only the rows whose number moved
   // re-render.
-  const processCount = useChatProcesses((s) => branchProcessCount(s.byChat, chat.id, reviews));
+  // `useMemo` over the STORE'S OWN reference, never a selector that computes.
+  // `branchProcessCount` returns a fresh `{session, shells}` every call, and a
+  // zustand selector is compared with `Object.is` — so as a selector this hands
+  // `useSyncExternalStore` a new snapshot on every check, never converges, and
+  // takes the whole app down with `Minified React error #185`. Not theoretical:
+  // it did, the first time this returned an object instead of a number. Same
+  // trap `useProjectChatTree` documents, and `stores/prs.ts` explains at length.
+  const procByChat = useChatProcesses((s) => s.byChat);
+  const procs = useMemo(
+    () => branchProcessCount(procByChat, chat.id, reviews),
+    [procByChat, chat.id, reviews],
+  );
+  const processCount = procs.session + procs.shells;
   const killProcesses = useChatProcesses((s) => s.kill);
   const [killing, setKilling] = useState(false);
-  // Named so the tip can say what will actually end, rather than "kill
-  // processes" — the reviewer chats are the surprising half of the number.
-  const processScope = reviews.length
-    ? `this chat and ${reviewCount}`
-    : "this chat";
   const branchRunning =
     chat.status === "running" || reviews.some((r) => r.status === "running");
-  const killTip =
-    `End ${processCount} process${processCount === 1 ? "" : "es"} held by ${processScope}` +
-    (branchRunning
-      ? " — a turn is RUNNING and will be interrupted"
-      : ". The transcript is kept; the next message starts a fresh session.");
+  // A LABEL, not an explanation. These sit on hover over a 24px button in a
+  // narrow column, and a sentence there is a paragraph floating over the
+  // sidebar — the rationale belongs in Settings → Context, which is where the
+  // policy is actually set. The one thing worth interrupting for is that a turn
+  // is mid-flight, because that is the only part which is not recoverable.
+  const killTip = branchRunning
+    ? `End ${processCount} processes — interrupts a running turn`
+    : `End ${processCount} processes`;
 
   const onKillProcesses = async (): Promise<void> => {
     if (killing) return;
@@ -654,10 +665,24 @@ function ChatRow({
                   shifting it. `gap-2.5` because each count overhangs its icon to
                   the right — at the old 1.5 the digits collided with the next
                   icon. */}
-              {processCount > 0 && (
+              {/* Shells FIRST, and in a different colour, because they are the
+                  half nothing reclaims for you: the session count beside them
+                  drops to nothing on its own once the chat has been idle a
+                  while, and a dev server you are still testing against must not
+                  read as the same kind of transient. */}
+              {procs.shells > 0 && (
+                <IconCount
+                  icon={SquareTerminal}
+                  count={procs.shells}
+                  iconClass="text-success"
+                  tone="success"
+                  title={`${procs.shells} background shell${procs.shells === 1 ? "" : "s"}`}
+                />
+              )}
+              {procs.session > 0 && (
                 <IconCount
                   icon={Cpu}
-                  count={processCount}
+                  count={procs.session}
                   // Blue, and deliberately NOT the runtime figure's violet on
                   // the line below: these are two different kinds of fact about
                   // the same chat — one is time already spent and gone, the
@@ -665,9 +690,7 @@ function ChatRow({
                   // shared colour would invite reading them as one measurement.
                   iconClass="text-info"
                   tone="info"
-                  title={`${processCount} OS process${
-                    processCount === 1 ? "" : "es"
-                  } held by ${processScope} — its runtime subprocess, the MCP servers under it, and any background shell it started`}
+                  title={`${procs.session} session process${procs.session === 1 ? "" : "es"}`}
                 />
               )}
               {reviews.length > 0 && !expanded && (

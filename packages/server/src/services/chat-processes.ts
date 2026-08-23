@@ -28,9 +28,17 @@
  */
 import type { ProcRow, ProcTableFn, TerminalRoots } from "./processes.js";
 
+/** What one chat is holding, split by who reaps it. */
+export interface ChatProcessTally {
+  /** Its runtime subprocess and every MCP server under it. Swept when idle. */
+  session: number;
+  /** Its background shells and their descendants. NEVER swept automatically. */
+  shells: number;
+}
+
 /** Per-chat process totals, and when they were taken. */
 export interface ChatProcessCounts {
-  byChat: Record<string, number>;
+  byChat: Record<string, ChatProcessTally>;
   at: number;
 }
 
@@ -147,14 +155,20 @@ export class ChatProcessService {
     // the next poll retries rather than serving the gap for a full TTL.
     if (table.length === 0) return this.cached ?? { byChat: {}, at: this.now() };
 
-    const byChat: Record<string, number> = {};
+    const byChat: Record<string, ChatProcessTally> = {};
+    const sessionRoots = this.sessionRootsByChat();
     for (const [chatId, roots] of this.rootsByChat()) {
-      const n = descendantsOf(roots, table).size;
-      // Absent rather than 0, matching `MetricsService.chatRuntime`: the row
-      // renders nothing for a chat it has no reading for, and "0" is a claim
-      // that we looked and found none — which is exactly what a failed scan
-      // would also produce.
-      if (n > 0) byChat[chatId] = n;
+      // The session subtree first, so a shell the session itself started is
+      // attributed there and not counted twice on the shells side.
+      const sessionPids = descendantsOf(sessionRoots.get(chatId) ?? [], table);
+      const all = descendantsOf(roots, table);
+      const session = sessionPids.size;
+      const shells = all.size - session;
+      // Absent rather than a pair of zeroes, matching `MetricsService.chatRuntime`:
+      // the row renders nothing for a chat it has no reading for, and "0" is a
+      // claim that we looked and found none — which is exactly what a failed
+      // scan would also produce.
+      if (session > 0 || shells > 0) byChat[chatId] = { session, shells };
     }
     const counts = { byChat, at: this.now() };
     // A scan `invalidate` retired still RESOLVES — callers that asked before the
@@ -162,6 +176,15 @@ export class ChatProcessService {
     // caller reads.
     if (generation === this.generation) this.cached = counts;
     return counts;
+  }
+
+  /** `chatId → session root pid`, the half an idle sweep retires. */
+  private sessionRootsByChat(): Map<string, number[]> {
+    const roots = new Map<string, number[]>();
+    for (const [chatId, pid] of this.sessionPids()) {
+      if (Number.isInteger(pid) && pid > 0) roots.set(chatId, [pid]);
+    }
+    return roots;
   }
 
   /** `chatId → root pids`, from both kinds of root. */
