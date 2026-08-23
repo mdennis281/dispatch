@@ -1125,6 +1125,71 @@ describe("SessionBroker — steering & concurrency", () => {
     await Promise.all(["c1", "c2", "c3"].map((id) => broker.waitFor(id, "idle").catch(() => {})));
     expect(broker.activeCount()).toBe(0);
   });
+
+  it("raising the cap starts the parked chats immediately", async () => {
+    // Why `setCap` pumps rather than waiting for the next turn to settle: the
+    // reason a human raises the cap is that chats are parked RIGHT NOW, and a
+    // control whose effect only lands when some unrelated chat finishes reads
+    // as a control that did nothing.
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2", "c3"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "go");
+    await broker.sendMessage("c2", "go");
+    await broker.sendMessage("c3", "go");
+    await until(() => controllers.length === 1);
+    expect(broker.getStatus("c2")).toBe("queued");
+    expect(broker.getStatus("c3")).toBe("queued");
+
+    const c3running = broker.waitFor("c3", "running");
+    broker.setCap(3);
+    await c3running;
+    expect(broker.maxActive).toBe(3);
+    await until(() => controllers.length === 3);
+    expect(broker.activeCount()).toBe(3);
+
+    gate.resolve();
+    await Promise.all(["c1", "c2", "c3"].map((id) => broker.waitFor(id, "idle").catch(() => {})));
+  });
+
+  it("lowering the cap parks the NEXT turn and never interrupts a running one", async () => {
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 3);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "go");
+    await until(() => broker.getStatus("c1") === "running");
+
+    broker.setCap(1);
+    // A turn already under way keeps its subprocess and its half-done work.
+    expect(broker.getStatus("c1")).toBe("running");
+    await broker.sendMessage("c2", "go");
+    expect(broker.getStatus("c2")).toBe("queued");
+    expect(controllers).toHaveLength(1);
+
+    // A CLEARED setting means "the value this server booted with" — never
+    // "no cap" — and, being a raise, drains the queue on the spot.
+    const c2running = broker.waitFor("c2", "running");
+    broker.setCap(undefined);
+    expect(broker.maxActive).toBe(3);
+    await c2running;
+
+    gate.resolve();
+    await Promise.all(["c1", "c2"].map((id) => broker.waitFor(id, "idle").catch(() => {})));
+  });
 });
 
 describe("SessionBroker — live controls", () => {

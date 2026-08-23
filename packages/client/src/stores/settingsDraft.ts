@@ -78,7 +78,7 @@ const SECTION_SLICE: Record<
     s.harness?.defaultHarness,
     s.harness?.defaults,
   ],
-  context: (s) => [s.autoCompact, s.harness?.contextLimits],
+  context: (s) => [s.autoCompact, s.harness?.contextLimits, s.maxActiveSessions],
   notifications: (s) => s.webhook,
 };
 

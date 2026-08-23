@@ -16,8 +16,9 @@
  *  - Forward stream messages (assistant text/thinking, tool_use, tool_result,
  *    result) as WsServerEvents AND persist them to the Store JSONL transcript.
  *  - Map UI mode/effort → SDK permissionMode / reasoning effort.
- *  - Enforce a configurable cap on concurrently-ACTIVE sessions (default 6); over
- *    the cap, new turns park in a visible `queued` state and drain in FIFO order.
+ *  - Enforce a configurable cap on concurrently-ACTIVE sessions (Settings →
+ *    Context, falling back to `DISPATCH_MAX_ACTIVE_SESSIONS`, then 6); over the
+ *    cap, new turns park in a visible `queued` state and drain in FIFO order.
  *  - Emit AttentionItems when a turn completes (idle) or the session ends (done).
  *
  * The SDK `query` function, id generator, and clock are injectable so tests can
@@ -91,6 +92,7 @@ import type {
 } from "@dispatch/shared";
 import {
   DEFAULT_HARNESS,
+  DEFAULT_MAX_ACTIVE_SESSIONS,
   EffortSchema,
   applyMcpEnablement,
   classifyWorkflowViolation,
@@ -1557,7 +1559,14 @@ interface LiveSession {
 export class SessionBroker {
   private readonly store: Store;
   private readonly bus: EventBus;
-  private readonly cap: number;
+  /** What a cleared setting falls back to: the env var, or the shared default.
+   *  Captured at construction because that is the only place it can be read
+   *  synchronously — see `setCap`. */
+  private readonly defaultCap: number;
+  /** The cap actually in force. Mutable because it is an app SETTING now, and a
+   *  setting you have to restart the server to apply is a restart, not a
+   *  setting. */
+  private cap: number;
   private readonly terminals?: TerminalService;
   private readonly memory?: MemoryService;
   private readonly memoryHistory?: MemoryHistoryService;
@@ -1648,7 +1657,8 @@ export class SessionBroker {
       });
     }
     this.bus = opts.bus;
-    this.cap = Math.max(1, opts.maxActiveSessions ?? 6);
+    this.defaultCap = Math.max(1, opts.maxActiveSessions ?? DEFAULT_MAX_ACTIVE_SESSIONS);
+    this.cap = this.defaultCap;
     this.terminals = opts.terminals;
     this.memory = opts.memory;
     this.memoryHistory = opts.memoryHistory;
@@ -2633,6 +2643,34 @@ export class SessionBroker {
       for (const p of session.pendingPermissions.values()) out.push(p.request);
     }
     return out;
+  }
+
+  /**
+   * Apply the app-level cap (`AppSettings.maxActiveSessions`). `undefined` — a
+   * cleared field — falls back to the boot value, so `DISPATCH_MAX_ACTIVE_SESSIONS`
+   * keeps meaning exactly what it did for installs that set it.
+   *
+   * Raising it drains the queue immediately rather than waiting for the next
+   * turn to settle: the reason you raise the cap is that chats are parked RIGHT
+   * NOW, and a control whose effect only shows up after some unrelated chat
+   * finishes reads as broken.
+   *
+   * Lowering it never preempts. A running turn has a subprocess, injected
+   * context and possibly a half-written file behind it; killing that to satisfy
+   * a number is a worse answer than letting the count drain down to the new cap
+   * as turns finish on their own.
+   */
+  setCap(max: number | undefined): void {
+    const next = Math.max(1, Math.floor(max ?? this.defaultCap));
+    if (!Number.isFinite(next) || next === this.cap) return;
+    const raised = next > this.cap;
+    this.cap = next;
+    if (raised) this.pump();
+  }
+
+  /** The cap in force — what a `queued` chat is queued behind. */
+  get maxActive(): number {
+    return this.cap;
   }
 
   /** Count of sessions holding an active slot (running or awaiting-input). */

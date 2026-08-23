@@ -3,6 +3,7 @@
  * No secrets: auth is the Claude subscription (~/.claude/.credentials.json),
  * never an API key.
  */
+import { DEFAULT_MAX_ACTIVE_SESSIONS } from "@dispatch/shared";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
@@ -28,7 +29,11 @@ export interface ServerConfig {
    * the developer's REAL `.data` while state goes to a temp dir.
    */
   configDir?: string;
-  /** Max concurrently-active SDK sessions (idle chats don't count). */
+  /**
+   * Max concurrently-active SDK sessions (idle chats don't count) — the DEFAULT
+   * only. `AppSettings.maxActiveSessions` overrides it at runtime and does not
+   * need a restart; this is what a cleared setting falls back to.
+   */
   maxActiveSessions: number;
 }
 
@@ -67,7 +72,6 @@ function findAppRoot(): string {
 }
 
 const DEFAULT_DATA_DIR = resolve(findAppRoot(), ".data");
-const DEFAULT_MAX_ACTIVE = 6;
 
 /**
  * Every prefix a manager-owned variable is recognised under, most-preferred
@@ -121,7 +125,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     host: envVar(env, "HOST")?.trim() || DEFAULT_HOST,
     dataDir,
     ...(configDir ? { configDir } : {}),
-    maxActiveSessions: intFromEnv(env, "MAX_ACTIVE_SESSIONS", DEFAULT_MAX_ACTIVE),
+    maxActiveSessions: intFromEnv(env, "MAX_ACTIVE_SESSIONS", DEFAULT_MAX_ACTIVE_SESSIONS),
   };
 }
 

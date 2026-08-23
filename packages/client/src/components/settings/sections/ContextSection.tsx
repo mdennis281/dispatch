@@ -1,17 +1,18 @@
+import { DEFAULT_MAX_ACTIVE_SESSIONS } from "@dispatch/shared";
 import { Field, TextInput } from "../../sidebar/Modal.js";
 import { Switch } from "../../ui/Switch.js";
 import { positiveTokenLimit } from "../../../lib/harness.js";
 import { cn } from "../../../lib/cn.js";
 import type { AppPaneProps } from "./types.js";
 
-/** Digits only, and `undefined` for an empty box — a blank field means "no
- *  limit", which is not the same answer as zero. */
-function tokenField(raw: string): number | undefined {
+/** Digits only, and `undefined` for an empty box — a blank field means "the
+ *  default", which is not the same answer as zero. */
+function numberField(raw: string): number | undefined {
   const n = parseInt(raw.replace(/[^\d]/g, ""), 10);
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** What happens as the context window fills. */
+/** How many chats run at once, and what happens as their context windows fill. */
 export function ContextSection({ draft, patch }: AppPaneProps) {
   const ac = draft.autoCompact ?? {};
   const harness = draft.harness ?? {};
@@ -23,6 +24,31 @@ export function ContextSection({ draft, patch }: AppPaneProps) {
 
   return (
     <div className="space-y-3">
+      <div className="space-y-2 border-b border-line-soft pb-3">
+        <Field
+          label="Max active chats"
+          hint={`blank = ${DEFAULT_MAX_ACTIVE_SESSIONS}`}
+          className="max-w-[12rem]"
+        >
+          <TextInput
+            mono
+            inputMode="numeric"
+            value={draft.maxActiveSessions != null ? String(draft.maxActiveSessions) : ""}
+            onChange={(e) => patch({ maxActiveSessions: numberField(e.target.value) })}
+            placeholder={String(DEFAULT_MAX_ACTIVE_SESSIONS)}
+          />
+        </Field>
+        <p className="text-xs leading-snug text-faint">
+          How many chats may be mid-turn at once. A chat holds a slot while it's running,
+          while it's blocked in a long tool call (watch_pr waiting on CI), and while it's
+          waiting on you for a permission or a question — idle chats cost nothing, and a PR
+          under review usually costs two: the reviewer and the chat that opened it. Past the
+          cap a turn shows as Queued and starts as soon as a slot frees, oldest first.
+          Raising this drains the queue immediately; lowering it never interrupts a chat
+          that's already running.
+        </p>
+      </div>
+
       <div className="flex items-center justify-between gap-3">
         <span className="text-xs font-medium text-secondary">Auto-compaction</span>
         <Switch
@@ -42,7 +68,7 @@ export function ContextSection({ draft, patch }: AppPaneProps) {
             mono
             inputMode="numeric"
             value={limits.perChatTokens != null ? String(limits.perChatTokens) : ""}
-            onChange={(e) => patchLimits({ perChatTokens: tokenField(e.target.value) })}
+            onChange={(e) => patchLimits({ perChatTokens: numberField(e.target.value) })}
             placeholder="e.g. 180000"
           />
         </Field>
@@ -51,7 +77,7 @@ export function ContextSection({ draft, patch }: AppPaneProps) {
             mono
             inputMode="numeric"
             value={limits.overallTokens != null ? String(limits.overallTokens) : ""}
-            onChange={(e) => patchLimits({ overallTokens: tokenField(e.target.value) })}
+            onChange={(e) => patchLimits({ overallTokens: numberField(e.target.value) })}
             placeholder="e.g. 600000"
           />
         </Field>
@@ -64,7 +90,7 @@ export function ContextSection({ draft, patch }: AppPaneProps) {
             inputMode="numeric"
             value={ac.window != null ? String(ac.window) : ""}
             onChange={(e) =>
-              patch({ autoCompact: { ...ac, window: tokenField(e.target.value) } })
+              patch({ autoCompact: { ...ac, window: numberField(e.target.value) } })
             }
             placeholder="e.g. 20000"
           />

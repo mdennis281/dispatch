@@ -19,7 +19,7 @@ import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { SessionBroker, type QueryFn } from "../services/session-broker.js";
 import { GitHubService, type ExecaLike } from "../services/github.js";
-import type { WsServerEvent } from "@dispatch/shared";
+import { DEFAULT_MAX_ACTIVE_SESSIONS, type WsServerEvent } from "@dispatch/shared";
 
 /* --------------------------------------------------------------- scripted SDK */
 
@@ -261,6 +261,39 @@ describe("routes — REST CRUD", () => {
 
     const att = await app.inject({ method: "GET", url: "/api/attention" });
     expect(att.json()).toEqual([]);
+  });
+
+  it("PUT /api/settings hands the concurrency cap to the LIVE broker", async () => {
+    // The cap is held in memory and never re-read per turn, so a save that only
+    // reached config.json would be a setting that does nothing until the next
+    // restart — which is what it was before it became a setting at all.
+    const saved = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      payload: { theme: "dark", maxActiveSessions: 2 },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().maxActiveSessions).toBe(2);
+    expect(app.services.broker.maxActive).toBe(2);
+
+    // Cleared → the value the server booted with, NOT "unlimited".
+    const cleared = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      payload: { theme: "dark" },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(app.services.broker.maxActive).toBe(DEFAULT_MAX_ACTIVE_SESSIONS);
+
+    // Zero is refused rather than silently clamped to one: a cap of nothing is a
+    // typo, and honouring it would wedge every chat in the app.
+    const bad = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      payload: { theme: "dark", maxActiveSessions: 0 },
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(app.services.broker.maxActive).toBe(DEFAULT_MAX_ACTIVE_SESSIONS);
   });
 
   it("GET /messages serves a LEAN window, and /messages/full rehydrates it", async () => {

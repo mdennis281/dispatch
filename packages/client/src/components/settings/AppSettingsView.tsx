@@ -55,6 +55,11 @@ function normalize(s: AppSettings): AppSettings {
   return {
     theme: s.theme ?? "dark",
     defaultModeId: s.defaultModeId,
+    // Deliberately NOT filled in with an effective default like the fields
+    // below: unset is a meaningful answer here ("whatever this server was
+    // started with"), and the only honest number to substitute lives on the
+    // server. The field shows it as a placeholder instead.
+    maxActiveSessions: s.maxActiveSessions,
     webhook: {
       kind: s.webhook?.kind ?? "ntfy",
       url: s.webhook?.url ?? "",
@@ -162,6 +167,10 @@ export function AppSettingsView() {
     const body: AppSettings = {
       ...draft,
       defaultModeId: draft.defaultModeId || undefined,
+      // `|| undefined` so a typed-then-deleted box (and a literal 0, which the
+      // server rejects as not-positive) clears back to the default rather than
+      // failing the save.
+      maxActiveSessions: draft.maxActiveSessions || undefined,
       webhook: { ...draft.webhook, url: draft.webhook?.url?.trim() || undefined },
       autoCompact: { ...draft.autoCompact, window: draft.autoCompact?.window || undefined },
       harness: {

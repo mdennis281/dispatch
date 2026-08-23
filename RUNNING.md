@@ -629,7 +629,7 @@ and is never deleted — it's the only copy of the thing that broke.
 | `DISPATCH_HOST` | `127.0.0.1` | bind address — see [Host mode](#host-mode) |
 | `DISPATCH_DATA_DIR` | `./.data` | state dir — chats, checkpoints, runners |
 | `DISPATCH_CONFIG_DIR` | = `DISPATCH_DATA_DIR` | config dir — settings, projects, agents, modes |
-| `DISPATCH_MAX_ACTIVE_SESSIONS` | `6` | max concurrently-active chats |
+| `DISPATCH_MAX_ACTIVE_SESSIONS` | `6` | max concurrently-active chats — the DEFAULT only; **Settings → Context → Max active chats** overrides it and applies without a restart |
 | `DISPATCH_IPC` | unset | `1` makes the server accept `shutdown` on stdin (the launcher sets it) |
 | `DISPATCH_HOME` | `%LOCALAPPDATA%\claude-manager` | root for the whole installed layout |
 

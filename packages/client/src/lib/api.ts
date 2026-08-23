@@ -143,6 +143,9 @@ export interface AppSettings {
     canonicalUrl?: string;
     rpId?: string;
   };
+  /** How many chats may hold an execution slot at once. Unset = the server's
+   *  own default (`DISPATCH_MAX_ACTIVE_SESSIONS`, else DEFAULT_MAX_ACTIVE_SESSIONS). */
+  maxActiveSessions?: number;
   harness?: {
     defaultHarness?: HarnessKind;
     defaults?: Partial<Record<HarnessKind, { model?: string; effort?: Effort }>>;

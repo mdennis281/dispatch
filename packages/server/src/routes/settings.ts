@@ -8,6 +8,7 @@ import { AppSettingsSchema } from "../store/index.js";
 
 export function registerSettingsRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
+  const { broker } = app.services;
 
   app.get("/api/settings", async () => store.getSettings());
 
@@ -30,10 +31,17 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
     // full-replace save from anywhere else in Settings — picking a theme — would
     // otherwise silently unsubscribe you from unstable back to stable.
     const current = await store.getSettings();
-    return store.saveSettings({
+    const saved = await store.saveSettings({
       ...parsed.data,
       auth: current.auth,
       ...(current.updateChannel ? { updateChannel: current.updateChannel } : {}),
     });
+    // The concurrency cap is held by the LIVE broker, not re-read per turn, so a
+    // save has to hand it over or the new number means nothing until a restart —
+    // and raising it drains whatever is already parked in `queued`. Off the
+    // saved object rather than `parsed.data` so it can never disagree with what
+    // was written (the preserved-field spread above sits between the two).
+    broker.setCap(saved.maxActiveSessions);
+    return saved;
   });
 }
