@@ -47,7 +47,8 @@ import { WorktreeReaper } from "./worktree-reaper.js";
 import { GitService } from "./git.js";
 import { CommitMessageService } from "./commit-message.js";
 import { RunnerService } from "./runner.js";
-import { ProcessService } from "./processes.js";
+import { ProcessService, defaultProcTable } from "./processes.js";
+import { ChatProcessService } from "./chat-processes.js";
 import { GitHubService } from "./github.js";
 import { Notifier } from "./notifier.js";
 import { PushService } from "./push.js";
@@ -93,6 +94,7 @@ export interface ServiceOverrides {
   commitMessage?: CommitMessageService;
   runner?: RunnerService;
   processes?: ProcessService;
+  chatProcesses?: ChatProcessService;
   github?: GitHubService;
   notifier?: Notifier;
   push?: PushService;
@@ -139,6 +141,8 @@ export interface Services extends ServiceBase {
   commitMessage: CommitMessageService;
   runner: RunnerService;
   processes: ProcessService;
+  /** Per-chat process totals for the sidebar, and the manual reap behind them. */
+  chatProcesses: ChatProcessService;
   github: GitHubService;
   notifier: Notifier;
   /** Server-sent Web Push — the only delivery path an iOS home-screen app has. */
@@ -320,6 +324,17 @@ export function createServices(
       inspect,
       metrics,
       deps: brokerDeps,
+    });
+  // What each chat is holding in OS processes, for the count on its sidebar row.
+  // Constructed AFTER the broker because the session roots it walks down from
+  // are the broker's; `terminals` supplies the other kind of root (background
+  // shells, which hang off the SERVER rather than off a session).
+  const chatProcesses =
+    overrides.chatProcesses ??
+    new ChatProcessService({
+      procTable: defaultProcTable,
+      sessionPids: () => broker.sessionPids(),
+      terminals,
     });
   const title =
     overrides.title ??
@@ -705,6 +720,7 @@ export function createServices(
     commitMessage,
     runner,
     processes,
+    chatProcesses,
     github,
     notifier,
     push,

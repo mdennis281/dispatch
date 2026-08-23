@@ -2697,6 +2697,24 @@ export class SessionBroker {
     return this.sessions.get(chatId)?.status;
   }
 
+  /**
+   * Root pid of every live session that has one, as `chatId → pid`.
+   *
+   * The whole point is that a chat's cost is its process TREE, not this one
+   * process: the MCP servers hanging off it are most of the weight. Callers walk
+   * down from here (see `ChatProcessService`). A chat whose harness can't name a
+   * per-session process is simply absent rather than reported as zero — see
+   * {@link HarnessSession.pid}.
+   */
+  sessionPids(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const [chatId, session] of this.sessions) {
+      const pid = session.harnessSession?.pid?.();
+      if (typeof pid === "number") out.set(chatId, pid);
+    }
+    return out;
+  }
+
   getSession(chatId: string): SessionView | undefined {
     const s = this.sessions.get(chatId);
     return s ? this.view(s) : undefined;

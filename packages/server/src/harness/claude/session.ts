@@ -38,6 +38,7 @@ import type {
 import { ClaudeStreamDecoder, QUESTION_TOOL } from "./stream.js";
 import { buildQuestionAnswer, neutralQuestions } from "./questions.js";
 import { claudeExecutableOption } from "../../services/runtime.js";
+import { spawnWithPid } from "./spawn.js";
 
 /** The subset of the SDK `query` signature this session calls. */
 export type QueryFn = (params: {
@@ -155,6 +156,15 @@ export class ClaudeSession implements HarnessSession {
   private waiter?: () => void;
   private ended = false;
 
+  /**
+   * Pid of the live Claude Code subprocess, or undefined between runs.
+   *
+   * The root of this chat's process tree — every MCP server the session spawns
+   * descends from it — which is what makes "how many processes is this chat
+   * holding" and "reap them" answerable. See {@link spawnWithPid}.
+   */
+  private livePid?: number;
+
   constructor(opts: ClaudeSessionOpts) {
     this.spec = opts.spec;
     this.queryFn = opts.query ?? (sdkQuery as unknown as QueryFn);
@@ -212,6 +222,10 @@ export class ClaudeSession implements HarnessSession {
 
   pending(): number {
     return this.input?.pending() ?? this.outbox.length;
+  }
+
+  pid(): number | undefined {
+    return this.livePid;
   }
 
   private async start(): Promise<void> {
@@ -293,6 +307,20 @@ export class ClaudeSession implements HarnessSession {
       // bundled one. MUST match what the model probe uses, or the picker would
       // offer models the session can't run.
       ...claudeExecutableOption(),
+      // Spawn the subprocess ourselves ONLY to learn its pid — see spawn.ts.
+      // The cast is because the SDK types the hook against its own structural
+      // `SpawnedProcess`, which `ChildProcess` satisfies but does not name.
+      spawnClaudeCodeProcess: spawnWithPid({
+        onSpawn: (pid) => {
+          this.livePid = pid;
+        },
+        onExit: (pid) => {
+          // Guarded: a `dispose()` → immediate restart can land the new pid
+          // before the old child's `exit` fires, and clearing unconditionally
+          // would blank the pid of the session that is actually running.
+          if (this.livePid === pid) this.livePid = undefined;
+        },
+      }) as unknown as Options["spawnClaudeCodeProcess"],
     };
     if (this.spec.cwd) options.cwd = this.spec.cwd;
     if (this.modelOverride) options.model = this.modelOverride;

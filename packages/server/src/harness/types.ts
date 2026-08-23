@@ -496,6 +496,17 @@ export interface HarnessSession {
   resolveQuestion(requestId: string, answers: HarnessQuestionAnswer[]): void;
   /** The context window of the model currently running, when knowable. */
   contextWindow(): Promise<number | undefined>;
+  /**
+   * Pid of this session's runtime subprocess, when the harness spawns one it
+   * can name — the ROOT of the chat's process tree, since every MCP server the
+   * session runs descends from it.
+   *
+   * Optional because not every harness has a per-session process to point at:
+   * the Codex adapter borrows ONE process-wide `app-server` connection across
+   * every chat (see `harness/codex/rpc.ts`), so a pid from it would attribute
+   * one shared tree to whichever chat asked last.
+   */
+  pid?(): number | undefined;
   /** Tear the runtime down and end the event stream. */
   dispose(): Promise<void>;
 }

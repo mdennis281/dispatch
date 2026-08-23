@@ -12,6 +12,8 @@
  *   GET    /api/chats/:id/checkpoints → Checkpoint[] (rollback anchors)
  *   GET    /api/chats/:id/exemptions → WorkflowExemption[] (live guard lifts)
  *   DELETE /api/chats/:id/exemptions/:exemptionId → revoke one
+ *   GET    /api/chats/processes     → { byChat, at } — OS processes per chat
+ *   POST   /api/chats/processes/kill → reap a branch's processes
  */
 import type { FastifyInstance } from "fastify";
 import { ChatSchema } from "@dispatch/shared";
@@ -28,7 +30,7 @@ function isTruthyFlag(v: string | undefined): boolean {
 
 export function registerChatRoutes(app: FastifyInstance): void {
   const { store, bus } = app.cm;
-  const { broker, attention } = app.services;
+  const { broker, attention, chatProcesses, terminals } = app.services;
 
   app.get<{ Querystring: { projectId?: string } }>(
     "/api/chats",
@@ -214,5 +216,49 @@ export function registerChatRoutes(app: FastifyInstance): void {
   app.get<{ Params: { id: string } }>(
     "/api/chats/:id/context-usage",
     async (req) => ({ usage: await broker.getContextUsage(req.params.id) }),
+  );
+
+  // Every chat's process total, in one answer. GET with no query, deliberately
+  // shaped like `/api/metrics/chat-runtime`: the sidebar labels every row from
+  // one poll, and a per-chat endpoint would mean one request per row.
+  app.get("/api/chats/processes", async () => chatProcesses.counts());
+
+  /**
+   * Hand a chat's processes back to the OS.
+   *
+   * TAKES A LIST, because the row that shows the number is a BRANCH — a chat
+   * plus the reviewer chats folded under it — and the button has to reap
+   * everything the number counted. Which chats those are is the sidebar's tree,
+   * so it says, rather than this route re-deriving a relationship
+   * (`Chat.reviewOf` is a PR ref, not a parent id) that already exists there.
+   *
+   * `broker.stop()` rather than a raw tree-kill on the session root: it drains
+   * pending permission prompts, closes the activity spans at a known end, and
+   * keeps the chat record so the session simply starts again on the next
+   * message. A tree-kill would leave the broker believing it still had a live
+   * subprocess. Shells are separate roots and are killed as such.
+   */
+  app.post<{ Body: { chatIds?: unknown } }>(
+    "/api/chats/processes/kill",
+    async (req, reply) => {
+      const ids = Array.isArray(req.body?.chatIds)
+        ? [...new Set(req.body.chatIds.filter((v): v is string => typeof v === "string" && !!v))]
+        : [];
+      if (ids.length === 0) return reply.code(400).send({ error: "chatIds required" });
+
+      const before = await chatProcesses.counts();
+      // Settled, not all: one chat failing to stop must not abandon the rest.
+      await Promise.allSettled(
+        ids.map(async (id) => {
+          await broker.stop(id).catch(() => {});
+          terminals.killChat(id);
+        }),
+      );
+      // The count is a cache with a TTL; without this the row keeps showing the
+      // number we just reaped, which reads as the button doing nothing.
+      chatProcesses.invalidate();
+      const freed = ids.reduce((n, id) => n + (before.byChat[id] ?? 0), 0);
+      return { chatIds: ids, freed };
+    },
   );
 }

@@ -150,12 +150,52 @@ describe("buildBrowserMcpServers", () => {
     // that does not list ./cli.js, so resolving the script by name throws. If
     // either package moves its bin, this fails here instead of at the agent's
     // first screenshot.
-    const servers = buildBrowserMcpServers({ subApps: [webApp] });
+    // `eager`, so `args[0]` is the CLI itself. Through the lazy shim it would be
+    // the SHIM's path — which always exists, so this assertion would pass
+    // whatever happened to the package and stop guarding anything.
+    const servers = buildBrowserMcpServers({ subApps: [webApp], eager: true });
     expect(Object.keys(servers)).toEqual(["playwright", "chrome-devtools"]);
     for (const [name, s] of Object.entries(servers)) {
       expect(s.command, name).toBe(process.execPath);
       expect(existsSync(s.args![0]), `${name} entry ${s.args![0]}`).toBe(true);
     }
+  });
+
+  it("fronts each server with the lazy shim, and the shim exists", () => {
+    const servers = buildBrowserMcpServers({ subApps: [webApp] });
+    for (const [name, s] of Object.entries(servers)) {
+      const args = s.args!;
+      expect(existsSync(args[0]!), `${name} shim ${args[0]}`).toBe(true);
+      expect(args[0], name).toMatch(/lazy-browser-shim\.mjs$/);
+      expect(args, name).toContain("--manifest");
+      // The real command follows `--`, and is still node + a CLI that exists.
+      const sep = args.indexOf("--");
+      expect(sep, name).toBeGreaterThan(0);
+      expect(args[sep + 1], name).toBe(process.execPath);
+      expect(existsSync(args[sep + 2]!), `${name} entry ${args[sep + 2]}`).toBe(true);
+    }
+  });
+
+  it("keys the manifest to the argv, so a config change can't reuse a stale tool list", () => {
+    const manifestOf = (s: { args?: string[] }) => s.args![s.args!.indexOf("--manifest") + 1];
+    const a = buildBrowserMcpServers({ config: cfg({ viewport: "800x600" }), subApps: [webApp] });
+    const b = buildBrowserMcpServers({ config: cfg({ viewport: "1280x720" }), subApps: [webApp] });
+    expect(manifestOf(a.playwright)).not.toBe(manifestOf(b.playwright));
+    // …and is stable for the same argv, or nothing would ever be cached at all.
+    const again = buildBrowserMcpServers({ config: cfg({ viewport: "800x600" }), subApps: [webApp] });
+    expect(manifestOf(again.playwright)).toBe(manifestOf(a.playwright));
+  });
+
+  it("shares one manifest across chats — the chat id must not reach the key", () => {
+    // The bug this guards: the output dir is per-chat and rides in the same
+    // argv, so hashing the argv verbatim gave every chat its own cache file and
+    // therefore its own COLD start — the exact eager spawn the shim removes.
+    const manifestOf = (s: { args?: string[] }) => s.args![s.args!.indexOf("--manifest") + 1];
+    const a = buildBrowserMcpServers({ subApps: [webApp], chatId: "chat-a" });
+    const b = buildBrowserMcpServers({ subApps: [webApp], chatId: "chat-b" });
+    expect(manifestOf(a.playwright)).toBe(manifestOf(b.playwright));
+    // The output dir itself still differs — that separation is a real one.
+    expect(a.playwright.args!.join(" ")).not.toBe(b.playwright.args!.join(" "));
   });
 
   it("spawns node directly rather than an npx shim", () => {

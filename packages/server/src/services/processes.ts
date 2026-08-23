@@ -245,7 +245,7 @@ export function parsePsTable(output: string): ProcRow[] {
  * reads. `-NoProfile` because a user profile that prints anything would land in
  * the CSV.
  */
-const defaultProcTable: ProcTableFn = async () => {
+export const defaultProcTable: ProcTableFn = async () => {
   if (process.platform === "win32") {
     const res = await execa(
       "powershell.exe",

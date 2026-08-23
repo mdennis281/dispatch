@@ -454,6 +454,19 @@ export const api = {
       get<ChatMessage[]>(
         `/api/chats/${id}/messages/full${qs({ ids: ids.join(",") })}`,
       ),
+    /**
+     * OS processes held per chat — its runtime subprocess, every MCP server
+     * under it, and its background shells. One answer for every chat, because
+     * the sidebar labels every row from one poll.
+     */
+    processes: () => get<{ byChat: Record<string, number>; at: number }>("/api/chats/processes"),
+    /**
+     * Reap those processes for a BRANCH — a chat plus the reviewer chats folded
+     * under it, which is what the row's number counts. The session records
+     * survive; each chat simply starts a fresh subprocess on its next message.
+     */
+    killProcesses: (chatIds: string[]) =>
+      post<{ chatIds: string[]; freed: number }>("/api/chats/processes/kill", { chatIds }),
     checkpoints: (id: string) => get<Checkpoint[]>(`/api/chats/${id}/checkpoints`),
     /**
      * Human-approved guard lifts live on this chat's session. Live-session
