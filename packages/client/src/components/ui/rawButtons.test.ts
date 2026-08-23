@@ -57,8 +57,21 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * It's a full-width row of a glyph, a fixed `#139`, a summary that truncates and
  * an age pinned right — and `Button` is `h-6 justify-center whitespace-nowrap`
  * with padding of its own, every one of which this row would have to override.
+ *
+ * 84 → 87: the Mission board preview (`preview/mission/`). It arrived with 27
+ * bare elements and pays for 24 of them: the icon-only and text actions became
+ * `IconButton` and `Button` (`danger`, `subtle`, `link`, `default`), and the
+ * fifteen navigation rows — sidebar tree entries, dependency rows, hire rows —
+ * collapsed onto ONE wrapper, `chrome.tsx`'s `RowButton`, which is the same
+ * argument as `ReviewRow` above made once instead of fifteen times.
+ *
+ * The three that remain are all in `chrome.tsx` and are each a shape the kit
+ * does not have: `RowButton` itself; `Tunable`, an editable value that sits
+ * inline in a line of prose, where `Button`'s `h-6` would open the line box
+ * (the same reason `InlineChip` exists); and `Section`'s header toggle, which
+ * is a disclosure heading rather than an action.
  */
-const BASELINE = 84;
+const BASELINE = 87;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

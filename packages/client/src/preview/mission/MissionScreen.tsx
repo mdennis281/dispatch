@@ -1,0 +1,356 @@
+/**
+ * The base screen — the mission, and the phases within it.
+ *
+ * Counts on the phase cards are the whole job here: tasks, waves, and PHASE
+ * acceptance criteria (not the tasks' own, which are a different and much
+ * larger number and would make every card look the same). Everything deeper is
+ * a drill-in, not a tab.
+ *
+ * Every block is a {@link Section}, indexed and collapsible from the left rail,
+ * because the interesting block differs by what you came here to do: mid-run
+ * you want Phases, while tuning you want Settings and nothing else.
+ */
+import { Boxes, TriangleAlert } from "lucide-react";
+import { cn } from "../../lib/cn.js";
+import { Chip } from "../../components/ui/index.js";
+import { ActorStatusPill, Card, ContextBar, Empty, Metric, RowButton, Section } from "./chrome.js";
+import { gatePreviews, leadForTeam, liveHires, phaseCounts, teamColor, type Plan } from "./derive.js";
+import { CAPS } from "./types.js";
+import type { Nav } from "./nav.js";
+import type { SectionState } from "./sections.js";
+import { SettingsSection, type SettingsDraft } from "./SettingsSection.js";
+
+const PHASE_TONE = {
+  pending: "text-faint",
+  running: "text-accent",
+  qa: "text-warn",
+  gating: "text-warn",
+  done: "text-success",
+  blocked: "text-danger",
+} as const;
+
+export function MissionScreen({
+  plan,
+  nav,
+  sections,
+  draft,
+  dirty,
+  onDraft,
+  onReset,
+}: {
+  plan: Plan;
+  nav: Nav;
+  sections: SectionState;
+  draft: SettingsDraft;
+  dirty: boolean;
+  onDraft: (d: SettingsDraft) => void;
+  onReset: () => void;
+}) {
+  const { spec, run } = plan;
+  const threshold = spec.policy.leadRecycle.contextThreshold;
+
+  return (
+    <div className="min-h-0 flex-1 overflow-auto">
+      <Section id="objective" title="Objective" state={sections} hint="what done looks like">
+        <p className="max-w-5xl text-xs leading-relaxed text-secondary">{spec.objective}</p>
+        <Budget plan={plan} />
+      </Section>
+
+      <Section
+        id="settings"
+        title="Settings"
+        state={sections}
+        hint="mission owner — live, every view below re-derives"
+        right={dirty ? <Chip tone="accent">modified</Chip> : undefined}
+      >
+        <SettingsSection
+          spec={spec}
+          draft={draft}
+          dirty={dirty}
+          onChange={onDraft}
+          onReset={onReset}
+        />
+      </Section>
+
+      <Section
+        id="phases"
+        title="Phases"
+        state={sections}
+        hint="sequential gates — drill in for waves, tasks and acceptance"
+      >
+        <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fill,minmax(19rem,1fr))]">
+          {[...spec.phases]
+            .sort((a, b) => a.order - b.order)
+            .map((p) => {
+              const c = phaseCounts(plan, p.id);
+              const status = run?.phases[p.id]?.status ?? "pending";
+              const isCurrent = run?.currentPhaseId === p.id;
+              return (
+                <Card
+                  key={p.id}
+                  onClick={() => nav.go({ at: "phase", phaseId: p.id })}
+                  className={cn("p-2.5", isCurrent && "ring-1 ring-accent-line")}
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className={cn(
+                        "cm-mono flex size-4 items-center justify-center rounded text-2xs",
+                        isCurrent ? "bg-accent text-accent-fg" : "bg-inset text-muted",
+                      )}
+                    >
+                      {p.order}
+                    </span>
+                    <span className="truncate text-xs font-semibold text-primary">{p.title}</span>
+                    <span className={cn("ml-auto text-2xs font-medium", PHASE_TONE[status])}>
+                      {status}
+                    </span>
+                  </div>
+
+                  <p className="mt-1.5 line-clamp-2 text-2xs leading-relaxed text-muted">
+                    {p.description}
+                  </p>
+
+                  <div className="mt-2.5 flex items-end gap-4">
+                    <Metric value={c.tasks} label="tasks" />
+                    <Metric value={c.waves} label="waves" />
+                    <Metric value={c.criteria} label="phase AC" />
+                    <Metric
+                      value={c.done}
+                      label="done"
+                      tone={c.done === c.tasks && c.tasks > 0 ? "success" : "muted"}
+                    />
+                    {c.qaRounds > 0 && (
+                      <Metric
+                        value={c.qaRounds}
+                        label={c.qaRounds === 1 ? "QA round" : "QA rounds"}
+                        tone={c.qaRounds > 1 ? "warn" : "default"}
+                      />
+                    )}
+                  </div>
+
+                  <div className="mt-2 flex items-center gap-1.5">
+                    <span className="flex gap-0.5">
+                      {c.teams.map((tid) => (
+                        <span
+                          key={tid}
+                          title={spec.teams.find((t) => t.id === tid)?.name}
+                          className="size-1.5 rounded-full"
+                          style={{ background: teamColor(spec, tid) }}
+                        />
+                      ))}
+                    </span>
+                    {c.remediation > 0 && <Chip tone="warn">+{c.remediation} from QA</Chip>}
+                    {!p.qa && (
+                      <Chip tone="muted" icon={<TriangleAlert />}>
+                        no QA
+                      </Chip>
+                    )}
+                    <span className="ml-auto text-2xs text-faint">exit: {p.exit}</span>
+                  </div>
+                </Card>
+              );
+            })}
+        </div>
+      </Section>
+
+      <Section
+        id="acceptance"
+        title="Mission acceptance"
+        state={sections}
+        hint="signatories derived from which teams build it"
+      >
+        <div className="flex flex-col gap-1">
+          {gatePreviews(plan)
+            .filter((g) => g.scope === "mission")
+            .map((g) => (
+              <div
+                key={g.criterion.id}
+                className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-panel px-2.5 py-1.5"
+              >
+                <span className="text-2xs font-medium text-primary">{g.criterion.title}</span>
+                <span className="cm-mono text-2xs leading-4 text-faint">{g.criterion.id}</span>
+                <Chip tone={g.criterion.verify === "command" ? "success" : "info"}>
+                  {g.criterion.verify}
+                </Chip>
+                <span className="min-w-[14rem] flex-1 truncate text-2xs text-muted">
+                  {g.criterion.then}
+                </span>
+                <span className="flex items-center gap-1">
+                  {g.signatories.map((tid) => (
+                    <span
+                      key={tid}
+                      title={spec.teams.find((t) => t.id === tid)?.name}
+                      className="size-2 rounded-full"
+                      style={{ background: teamColor(spec, tid) }}
+                    />
+                  ))}
+                  <span className="ml-1 cm-mono text-2xs leading-4 text-faint">
+                    {g.signatories.length} sign
+                  </span>
+                </span>
+              </div>
+            ))}
+        </div>
+      </Section>
+
+      <Section
+        id="teams"
+        title="Teams"
+        state={sections}
+        hint="leads are permanent for the run; workers are hired per task, from the menu"
+      >
+        <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fill,minmax(18rem,1fr))]">
+          {spec.teams.map((team) => {
+            const color = teamColor(spec, team.id);
+            const lead = leadForTeam(plan, team.id);
+            const hires = liveHires(plan, team.id);
+            return (
+              <div
+                key={team.id}
+                className="rounded-lg border border-line bg-panel p-2.5"
+                style={{ borderTopColor: color, borderTopWidth: 2 }}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-semibold text-primary">{team.name}</span>
+                  <span className="ml-auto cm-mono text-2xs text-faint">{team.id}</span>
+                </div>
+                <p className="mt-1 line-clamp-2 text-2xs leading-relaxed text-muted">
+                  {team.charter}
+                </p>
+
+                {lead && (
+                  <RowButton
+                    onClick={() => nav.go({ at: "agent", actorId: lead.id })}
+                    className="mt-2 flex w-full items-center gap-2 rounded-md border border-line-soft bg-panel-2 px-2 py-1.5 text-left hover:border-line-strong"
+                  >
+                    <Boxes className="size-3 shrink-0" style={{ color }} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-2xs font-medium text-primary">
+                        {lead.name}
+                      </span>
+                      <span className="block truncate text-2xs leading-4 text-faint">
+                        {lead.activity}
+                      </span>
+                    </span>
+                    <span className="flex shrink-0 flex-col items-end gap-0.5">
+                      <ActorStatusPill status={lead.status} />
+                      <ContextBar fill={lead.contextFill} threshold={threshold} />
+                    </span>
+                  </RowButton>
+                )}
+
+                <div className="mt-2 flex items-center gap-1.5">
+                  <span className="text-2xs leading-4 text-faint">hires</span>
+                  <span className="cm-mono text-2xs text-secondary">
+                    {hires.length}/{team.hireBudget}
+                  </span>
+                  <span className="flex flex-1 gap-0.5">
+                    {Array.from({ length: team.hireBudget }).map((_, i) => (
+                      <span
+                        key={i}
+                        className={cn("h-1.5 flex-1 rounded-full", i < hires.length ? "" : "bg-inset")}
+                        style={i < hires.length ? { background: color } : undefined}
+                      />
+                    ))}
+                  </span>
+                </div>
+
+                <div className="mt-2">
+                  <span className="text-2xs leading-4 text-faint">can hire</span>
+                  <div className="mt-0.5 flex flex-wrap gap-1">
+                    {team.hireableRoles.map((r) => (
+                      <span
+                        key={r}
+                        className="cm-mono rounded bg-inset px-1 text-2xs leading-4 text-muted"
+                      >
+                        {r}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                {hires.length > 0 ? (
+                  <div className="mt-2 flex flex-col gap-1">
+                    {hires.map((h) => (
+                      <RowButton
+                        key={h.id}
+                        onClick={() => nav.go({ at: "agent", actorId: h.id })}
+                        className="flex items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-hover"
+                      >
+                        <span
+                          className="size-1.5 shrink-0 rounded-full"
+                          style={{ background: color }}
+                        />
+                        <span className="min-w-0 flex-1 truncate text-2xs text-secondary">
+                          {h.name}
+                        </span>
+                        <ActorStatusPill status={h.status} />
+                      </RowButton>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-2">
+                    <Empty>no one hired right now</Empty>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+/**
+ * The authoring budget — how much of each cap this plan spends.
+ *
+ * It lived in the header as four progress bars and was wrong there twice over:
+ * it competed with the breadcrumb for the same row and won, and it is not
+ * navigation. It belongs beside the objective, because that is where you are
+ * when the numbers matter — writing the plan, not moving around a running one.
+ *
+ * Plain text, not bars. A bar implies you should be filling it; a cap is a
+ * ceiling you would rather stay well under.
+ */
+function Budget({ plan }: { plan: Plan }) {
+  const items: Array<[string, number, number]> = [
+    ["objective", plan.spec.objective.length, CAPS.objective],
+    ["criteria", plan.spec.acceptance.length, CAPS.criteria],
+    ["phases", plan.spec.phases.length, CAPS.phases],
+    ["teams", plan.spec.teams.length, CAPS.teams],
+    ["tasks", plan.tasks.length, CAPS.tasks],
+  ];
+  return (
+    <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+      <span className="text-2xs uppercase leading-4 tracking-wide text-faint">budget</span>
+      {items.map(([label, used, cap]) => {
+        // Over and AT the cap are different facts and were sharing one message:
+        // "anything further has to displace something" is advice for a plan
+        // sitting on its limit, not for one that has already broken it.
+        const over = used > cap;
+        const at = used === cap;
+        return (
+          <span key={label} className="flex items-baseline gap-1">
+            <span className="text-2xs leading-4 text-faint">{label}</span>
+            <span
+              className={cn(
+                "cm-mono text-2xs",
+                over ? "text-danger" : at ? "text-warn" : "text-muted",
+              )}
+              title={
+                over
+                  ? `over the cap by ${used - cap} — this plan does not validate`
+                  : at
+                    ? "at the cap — anything further has to displace something"
+                    : undefined
+              }
+            >
+              {used}/{cap}
+            </span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
