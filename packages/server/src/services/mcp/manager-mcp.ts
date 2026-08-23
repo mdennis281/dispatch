@@ -5520,6 +5520,17 @@ export function managerToolDescriptors(
 export function createManagerMcpServers(
   ctx: ManagerMcpContext,
 ): Record<string, McpSdkServerConfigWithInstance> {
+  const servers: Record<string, McpSdkServerConfigWithInstance> = {};
+  for (const [category, categoryTools] of boundToolsByCategory(ctx)) {
+    servers[managerServerName(category)] = buildCategoryServer(ctx, category, categoryTools);
+  }
+  return servers;
+}
+
+/** This session's bound tools, grouped by the category that serves them. */
+function boundToolsByCategory(
+  ctx: ManagerMcpContext,
+): Map<ManagerCategory, ManagerTools[ManagerToolKey][]> {
   const tools = createManagerTools(ctx);
   const bound = boundTools(ctx);
   const byCategory = new Map<ManagerCategory, ManagerTools[ManagerToolKey][]>();
@@ -5531,28 +5542,37 @@ export function createManagerMcpServers(
     if (list) list.push(tools[key]);
     else byCategory.set(category, [tools[key]]);
   }
+  return byCategory;
+}
 
-  const servers: Record<string, McpSdkServerConfigWithInstance> = {};
-  for (const [category, categoryTools] of byCategory) {
-    const server = createSdkMcpServer({
-      name: managerServerName(category),
-      version: "1.0.0",
-      tools: categoryTools,
-    });
-    // Non-enumerable host metadata, on EVERY category server. The Claude SDK only
-    // sees the ordinary MCP config, while the harness broker can recover the SAME
-    // live context and put it behind ManagerMcpBridge for Codex. This avoids
-    // duplicating the manager tool wiring (terminals, memory, GitHub, runners,
-    // spawn consent) per runtime.
-    Object.defineProperty(server, MANAGER_CONTEXT, { value: ctx });
-    servers[managerServerName(category)] = server;
-  }
-  return servers;
+function buildCategoryServer(
+  ctx: ManagerMcpContext,
+  category: ManagerCategory,
+  categoryTools: ManagerTools[ManagerToolKey][],
+): McpSdkServerConfigWithInstance {
+  const server = createSdkMcpServer({
+    name: managerServerName(category),
+    version: "1.0.0",
+    tools: categoryTools,
+  });
+  // Non-enumerable host metadata, on EVERY category server. The Claude SDK only
+  // sees the ordinary MCP config, while the harness broker can recover the SAME
+  // live context and put it behind ManagerMcpBridge for Codex. This avoids
+  // duplicating the manager tool wiring (terminals, memory, GitHub, runners,
+  // spawn consent) per runtime.
+  Object.defineProperty(server, MANAGER_CONTEXT, { value: ctx });
+  return server;
 }
 
 /**
  * Build ONE category server for a session — the Codex bridge's entry point,
  * which serves a single category per HTTP path.
+ *
+ * Constructs ONLY the category asked for. Going through
+ * {@link createManagerMcpServers} and discarding the rest would build eight MCP
+ * `Server` instances per Codex tool call and leak seven of them: the bridge
+ * closes the one it returns when the response closes, and nothing ever closes
+ * the others.
  *
  * Returns undefined when this session has no bound tool in that category, which
  * the bridge answers as a 404 rather than as an empty server that lists nothing.
@@ -5561,7 +5581,8 @@ export function createManagerCategoryServer(
   ctx: ManagerMcpContext,
   category: ManagerCategory,
 ): McpSdkServerConfigWithInstance | undefined {
-  return createManagerMcpServers(ctx)[managerServerName(category)];
+  const categoryTools = boundToolsByCategory(ctx).get(category);
+  return categoryTools?.length ? buildCategoryServer(ctx, category, categoryTools) : undefined;
 }
 
 const MANAGER_CONTEXT = Symbol("dispatch.managerMcpContext");
