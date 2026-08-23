@@ -31,6 +31,7 @@ import type {
   ImageRef,
   Checkpoint,
   ProjectMemory,
+  SlashCommandCatalog,
   MemoryType,
   McpCatalog,
   McpEnablementScope,
@@ -582,6 +583,14 @@ export const api = {
         input,
       ),
   },
+
+  /**
+   * The composer's `/` menu for one chat: every skill it can run plus the
+   * runtime's built-ins. Per-chat because it depends on the chat's working
+   * directory — see `routes/commands.ts`.
+   */
+  commands: (chatId: string) =>
+    get<SlashCommandCatalog>(`/api/chats/${chatId}/commands`),
 
   /* per-project agent memory (durable, cross-chat facts) */
   memory: {

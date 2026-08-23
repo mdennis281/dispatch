@@ -10,8 +10,12 @@ An all-in-one agent CLI harness that replaces how you work with your LLMs. I bui
 ## What it does
 
 - Runs concurrent, steerable agent chats with all the bells and whistles you've grown used to.
-- Supports custom, project-level MCPs, Skills, Modes, Agents & Instructions.
-- Cutting-edge chat interface.
+- Supports custom, project-level MCPs, Skills, Modes, Agents & Instructions —
+  authored by hand, or by the agent itself through `mcp__dispatch-config__*`.
+  Skills and instructions come in three scopes: committed in the repo, global to
+  your machine, or shipped with Dispatch (most specific wins).
+- Cutting-edge chat interface, with a `/` command menu over every skill and
+  built-in the session can actually run.
 - Robust, per-project memory system.
 - Elegant Github integration with various CICD workflow presets (worktrees recommended).
 - AI assisted project-level custom MCP builder

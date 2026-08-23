@@ -33,6 +33,8 @@ import { ChatMessenger } from "./chat-messenger.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
 import { MemoryService } from "./memory.js";
+import { AuthoredConfigService } from "./authored-config.js";
+import { SlashCommandService } from "./slash-commands.js";
 import { MemoryCommitter } from "./memory-committer.js";
 import { MemoryHistoryService } from "./memory-history.js";
 import { ProjectConfigService } from "./project-config.js";
@@ -80,6 +82,8 @@ export interface ServiceOverrides {
   broker?: SessionBroker;
   terminals?: TerminalService;
   memory?: MemoryService;
+  authored?: AuthoredConfigService;
+  slashCommands?: SlashCommandService;
   memoryCommitter?: MemoryCommitter;
   memoryHistory?: MemoryHistoryService;
   projectConfig?: ProjectConfigService;
@@ -121,6 +125,10 @@ export interface Services extends ServiceBase {
   broker: SessionBroker;
   terminals: TerminalService;
   memory: MemoryService;
+  /** App-level (shipped + user-global) instructions and skills. */
+  authored: AuthoredConfigService;
+  /** What the composer's `/` menu offers for a chat. */
+  slashCommands: SlashCommandService;
   /** Lands memory writes as commits on the primary checkout (profile-driven). */
   memoryCommitter: MemoryCommitter;
   /** Reads those commits back — when each fact was written, and what was retired. */
@@ -244,6 +252,20 @@ export function createServices(
   // (source of truth), else the `.data` store (back-compat).
   const memory =
     overrides.memory ?? new MemoryService({ store, bus, projectConfig });
+  // App-level authored guidance: Dispatch's own shipped instructions + skills,
+  // and the operator's machine-wide ones under `<config>/global/`. Also the
+  // write surface behind `mcp__dispatch-config__config_write`. Both scopes are
+  // read on every session launch, so it is constructed once and shared.
+  const authored =
+    overrides.authored ?? new AuthoredConfigService({ globalRoot: store.globalConfigDir() });
+  // The `/` command menu. Holds the process-wide snapshot of the runtime's
+  // built-in commands, so it must be a singleton — see `slash-commands.ts`.
+  const slashCommands =
+    overrides.slashCommands ??
+    new SlashCommandService({
+      authored,
+      projectSkillsDir: (projectId) => projectConfig.getConfig(projectId)?.skillsDir,
+    });
   // `trunkSync` is constructed further down (it needs the broker's chat wiring),
   // but the memory committer needs to reach it. A tiny forwarder keeps the
   // construction order readable instead of shuffling half the container around.
@@ -314,6 +336,8 @@ export function createServices(
       terminals,
       memory,
       memoryHistory,
+      authored,
+      slashCommands,
       github,
       runner,
       worktrees,
@@ -707,6 +731,8 @@ export function createServices(
     broker,
     terminals,
     memory,
+    authored,
+    slashCommands,
     memoryCommitter,
     memoryHistory,
     projectConfig,

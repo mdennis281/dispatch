@@ -33,6 +33,7 @@ export const MANAGER_CATEGORIES = [
   "confirm",
   "chat",
   "memory",
+  "config",
   "workspace",
   "mcp",
   "session",
@@ -135,6 +136,16 @@ export const MANAGER_TOOL_CATEGORY = {
   memory_search: "memory",
   memory_history: "memory",
   memory_similar: "memory",
+
+  /* config — authoring the INSTRUCTIONS and SKILLS a session is given, the same
+     way memory authors durable facts. Separate from `mcp` on purpose: `mcp_*`
+     wires up external SERVERS through the CLI's config core, while these write
+     the prose (`instructions/*.md`) and the procedures (`skills/<name>/SKILL.md`)
+     that shape how an agent works here. */
+  config_list: "config",
+  config_read: "config",
+  config_write: "config",
+  config_delete: "config",
 
   /* workspace — where the work physically happens: trees, shells, running apps. */
   worktree: "workspace",

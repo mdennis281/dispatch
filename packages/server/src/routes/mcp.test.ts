@@ -80,6 +80,7 @@ describe("mcp-catalog — builder", () => {
         runner: true,
         chats: true,
         mcpConfig: true,
+        authoring: true,
         inspect: true,
         messaging: true,
         prewarm: true,
@@ -119,6 +120,10 @@ describe("mcp-catalog — builder", () => {
         "mcp_list",
         "mcp_add",
         "mcp_remove",
+        "config_list",
+        "config_read",
+        "config_write",
+        "config_delete",
         "chat_find",
         "chat_read",
         "chat_send",
@@ -138,6 +143,8 @@ describe("mcp-catalog — builder", () => {
       "mcp_list",
       "prewarm_mcp",
     ]);
+    // `config_list` takes only OPTIONAL narrowings, so it has properties but no
+    // required ones — it is not in NO_ARG_TOOLS and must still declare params.
     for (const server of catalog.servers) {
       for (const tool of server.tools) {
         expect(tool.qualifiedName).toBe(`mcp__${server.name}__${tool.name}`);

@@ -70,8 +70,16 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * inline in a line of prose, where `Button`'s `h-6` would open the line box
  * (the same reason `InlineChip` exists); and `Section`'s header toggle, which
  * is a disclosure heading rather than an action.
+ *
+ * 87 → 88: the composer's `/` command menu (`chat/SlashMenu.tsx`). One row, and
+ * it cannot be `MenuItem`: the rows are `role="option"` in a listbox the EDITOR
+ * drives with the arrow keys, so they must never take focus, and selection has
+ * to happen on `onMouseDown` with `preventDefault` — a click would blur the
+ * contenteditable first and put the caret back at 0, dropping the inserted
+ * command behind the text it replaced. `MenuItem` is an `onClick` control with
+ * no way to express either.
  */
-const BASELINE = 87;
+const BASELINE = 88;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

@@ -534,6 +534,19 @@ export class Store {
   private settingsFile() {
     return join(this.configDir, "config.json");
   }
+  /**
+   * Root for the operator's OWN global skills + instructions — the guidance that
+   * applies to every project on this machine.
+   *
+   * In the CONFIG root for the two reasons that dir exists: it is shared between
+   * the stable and dev instances (author a skill once, both get it), and
+   * install/upgrade never replace it — which is precisely the lifetime this
+   * scope is for. Dispatch's OWN shipped guidance lives in the payload instead
+   * and IS replaced by an upgrade; see `authored-config.ts`.
+   */
+  globalConfigDir() {
+    return join(this.configDir, "global");
+  }
   /** Stable auth identities and their provider credentials share the config root. */
   authFile() {
     return join(this.configDir, "auth.json");

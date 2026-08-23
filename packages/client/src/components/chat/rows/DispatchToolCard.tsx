@@ -1,6 +1,7 @@
 import { memo, useEffect, useState, type ReactNode } from "react";
 import {
   Brain,
+  BookOpen,
   Check,
   Circle,
   Clock3,
@@ -45,6 +46,7 @@ function categoryIcon(category: DispatchToolCategory): ReactNode {
   if (category === "terminal") return <SquareTerminal />;
   if (category === "preview") return <MonitorPlay />;
   if (category === "memory") return <Brain />;
+  if (category === "config") return <BookOpen />;
   if (category === "chat") return <MessageSquare />;
   return <PlugZap />;
 }
@@ -79,6 +81,9 @@ function promptFor(tool: string, category: DispatchToolCategory): string {
   if (tool === "remember") return "remember";
   if (tool === "forget") return "forget";
   if (category === "memory") return "memory";
+  // The prompt names the SUBJECT, not the tool: every one of these edits the
+  // guidance a session runs on, and "skill >" is what the reader is looking for.
+  if (category === "config") return "skill";
   if (category === "pr") return "pr";
   if (category === "preview") return "app";
   if (category === "terminal") return "terminal";
@@ -90,6 +95,7 @@ function promptColor(category: DispatchToolCategory): string {
   if (category === "wait") return "text-warn";
   if (category === "pr") return "text-info-hi";
   if (category === "memory") return "text-accent-2-hi";
+  if (category === "config") return "text-accent-2-hi";
   if (category === "preview") return "text-success";
   if (category === "chat") return "text-accent-hi";
   return "text-secondary";
@@ -99,6 +105,7 @@ function progressColor(category: DispatchToolCategory): string {
   if (category === "wait") return "bg-warn";
   if (category === "pr") return "bg-info";
   if (category === "memory") return "bg-accent-2";
+  if (category === "config") return "bg-accent-2";
   if (category === "preview") return "bg-success";
   if (category === "chat") return "bg-accent";
   return "bg-line-strong";
