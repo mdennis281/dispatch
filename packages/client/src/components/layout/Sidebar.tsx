@@ -167,7 +167,11 @@ function ProjectSelector({
             open && "bg-active",
           )}
         >
-          <span className="flex size-6 items-center justify-center bg-accent-ghost text-accent ring-1 ring-accent-line [&_svg]:size-3.5">
+          {/* Bare glyph, no tile: the accent fill and ring read as a badge on a
+              row that is already the header, and it was the one card left in a
+              column that is otherwise full-bleed rows. The span keeps size-6 so
+              the title's left edge doesn't move. */}
+          <span className="flex size-6 items-center justify-center text-accent [&_svg]:size-4">
             <FolderGit2 />
           </span>
           <span className="min-w-0 flex-1">
