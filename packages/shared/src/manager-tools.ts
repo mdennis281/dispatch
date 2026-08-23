@@ -116,11 +116,16 @@ export const MANAGER_TOOL_CATEGORY = {
   ask_user: "confirm",
   request_exemption: "confirm",
 
-  /* chat — other chats: start one, wait on one, find one, read one. */
+  /* chat — other chats: start one, wait on one, find one, read one, and talk
+     to one. The messaging four are the only WRITE path into another chat. */
   spawn_chat: "chat",
   wait_for_chat: "chat",
   chat_find: "chat",
   chat_read: "chat",
+  chat_send: "chat",
+  chat_ask: "chat",
+  chat_reply: "chat",
+  chat_state: "chat",
 
   /* memory — the durable write surface plus the curation reads. */
   remember: "memory",

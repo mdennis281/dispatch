@@ -29,6 +29,7 @@ import { launchAgentTask } from "./agent-tasks.js";
 import { resolveReviewer } from "./reviewer.js";
 import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
+import { ChatMessenger } from "./chat-messenger.js";
 import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
 import { MemoryService } from "./memory.js";
@@ -106,6 +107,7 @@ export interface ServiceOverrides {
   trunkSync?: TrunkSyncService;
   prReviewWatcher?: PrReviewWatcher;
   prRegistry?: PrRegistry;
+  chatMessenger?: ChatMessenger;
 }
 
 /** Everything the routes/WS layer needs, wired to one bus + store. */
@@ -147,6 +149,8 @@ export interface Services extends ServiceBase {
   release: ReleaseService;
   /** Schedules a chat to continue itself once a usage limit lifts. */
   resume: ResumeScheduler;
+  /** Chat-to-chat messaging behind `chat_send`/`chat_ask`/`chat_reply`/`chat_state`. */
+  chatMessenger: ChatMessenger;
   fileIndex: FileIndexService;
   /** The SQLite usage ledger behind the Metrics view. */
   metrics: MetricsService;
@@ -625,6 +629,34 @@ export function createServices(
     const project = await store.getProject(projectId).catch(() => null);
     return project ? resolveReviewer(store, project) : null;
   };
+  // Chat-to-chat messaging (`chat_send`/`chat_ask`/`chat_reply`/`chat_state`),
+  // and the substrate the Mission layer is meant to be built on. Constructed
+  // here rather than inside the broker for the same reason `spawnChat` is
+  // assigned here: reaching a chat that has FINISHED means rebuilding its
+  // session through the routes' `ensureSession`, which needs the whole
+  // container.
+  const chatMessenger =
+    overrides.chatMessenger ??
+    new ChatMessenger({
+      bus,
+      getChat: (chatId) => store.getChat(chatId).catch(() => null),
+      ensureSession: async (chatId) => {
+        await ensureSession(services, chatId);
+      },
+      getStatus: (chatId) => broker.getStatus(chatId),
+      // The broker's OWN send path, so a peer message is an ordinary turn in
+      // every respect but its attribution — same row, same outbox, same
+      // steering semantics as anything the human types.
+      send: (chatId, text, { peer }) => broker.sendMessage(chatId, text, { peer }),
+      // Raw usage, not a pre-rounded percentage: the messenger derives one
+      // itself for the harnesses that report only totals.
+      getContextUsage: (chatId) => broker.getContextUsage(chatId),
+      // `awaiting-input` is the status a chat sits in while a permission card or
+      // a question is open in front of the human — the one thing a project
+      // manager most needs to know it cannot fix by waiting.
+      isBlockedOnHuman: (chatId) => broker.getStatus(chatId) === "awaiting-input",
+    });
+  broker.messenger = chatMessenger;
   broker.spawnChat = async ({ request, project, parentChatId }) => {
     const chat = await createChat(services, {
       projectId: project.id,
@@ -680,6 +712,7 @@ export function createServices(
     usage,
     release,
     resume,
+    chatMessenger,
     fileIndex,
     fsExplorer,
     metrics,
@@ -888,6 +921,10 @@ export function createServices(
       // before the broker goes away under it.
       resume.dispose();
       await resume.drain().catch(() => {});
+      // Releases every chat blocked in `chat_ask`. Before the broker goes away,
+      // so a waiting session is told the answer is not coming rather than
+      // hanging on a promise nothing is left to resolve.
+      chatMessenger.dispose();
       await runner.stopAll().catch(() => {});
       await broker.dispose().catch(() => {});
       await harnesses.dispose().catch(() => {});

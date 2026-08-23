@@ -127,6 +127,13 @@ import type {
   ReadChatQuery,
   ReadChatResult,
 } from "../inspect.js";
+import type {
+  PeerAskResult,
+  PeerChatState,
+  PeerDelivery,
+  PeerReplyResult,
+  PeerSendResult,
+} from "../chat-messenger.js";
 
 /** Hard ceiling on a single `wait` (also the default `wait_for_chat` timeout). */
 export const WAIT_CAP_SECONDS = 3600;
@@ -1443,6 +1450,52 @@ export interface ManagerMcpInspect {
 }
 
 /**
+ * Chat→chat MESSAGING for this session (omitted → no `chat_send` / `chat_ask` /
+ * `chat_reply` / `chat_state`).
+ *
+ * Unlike {@link ManagerMcpInspect}, which is deliberately read-only, this is a
+ * WRITE PATH INTO ANOTHER CHAT: a message lands in somebody else's transcript
+ * as a `user` turn and starts a turn there. Two properties make that safe
+ * without a consent card, and both are enforced by the service beneath rather
+ * than by the tools:
+ *
+ *   - ATTRIBUTION. The row carries the sending chat, so a human reading the
+ *     target can always tell an agent said it. Without that a peer message is
+ *     indistinguishable from one they typed themselves — a `user` turn is the
+ *     only input channel a session has, so there is nowhere else to put it.
+ *   - RATE LIMITS, per ordered pair and per target. Two chats that can message
+ *     each other can ping-pong forever with nobody watching; subagents cannot
+ *     do this, so it is a new failure mode and gets a real guard.
+ *
+ * A card per message was considered and rejected: a spawn is expensive and
+ * irreversible where a message is neither, and prompting on every message would
+ * make this unusable as the substrate for an agent project-manager layer.
+ *
+ * `from` is bound to the CALLING session on every method — there is no argument
+ * for it, so a chat cannot send mail under another chat's name.
+ */
+export interface ManagerMcpMessaging {
+  send(input: {
+    to: string;
+    message: string;
+    delivery: PeerDelivery;
+  }): Promise<PeerSendResult>;
+  ask(input: {
+    to: string;
+    question: string;
+    timeoutMs: number;
+    /** Both the per-call and the session abort — see `ChatMessenger.ask`. */
+    signals?: (AbortSignal | undefined)[];
+    /** Fired once the ask is admitted and the wait has really begun. */
+    onWaiting?: () => void;
+  }): Promise<PeerAskResult>;
+  /** Synchronous: answering is just resolving a promise the asker is holding. */
+  reply(input: { askId: string; answer: string }): PeerReplyResult;
+  /** Pure read — never wakes the chat it describes. */
+  state(chatId: string): Promise<PeerChatState | null>;
+}
+
+/**
  * The guard-exemption surface for this session (omitted → no
  * `request_exemption` tool).
  *
@@ -1527,6 +1580,8 @@ export interface ManagerMcpContext {
   mcpConfig?: ManagerMcpConfig;
   /** Cross-chat read surface (omitted → no `chat_find`/`chat_read`/`project_info`). */
   inspect?: ManagerMcpInspect;
+  /** Cross-chat WRITE surface (omitted → no `chat_send`/`chat_ask`/`chat_reply`/`chat_state`). */
+  messaging?: ManagerMcpMessaging;
   /**
    * Guard-exemption surface (omitted → no `request_exemption` tool). Bound
    * whenever the workflow guard is actually ENFORCING, which is the same
@@ -1541,6 +1596,13 @@ export interface ManagerMcpContext {
 
 /* ------------------------------------------------------------------ helpers */
 
+/**
+ * Floor for `chat_ask`. Below this the question cannot be answered even in
+ * principle — the target has to wake, read and compose — so a shorter request is
+ * a mistake rather than an instruction.
+ */
+const MIN_ASK_SECONDS = 5;
+
 function clampSeconds(value: unknown, cap: number): number {
   const n = typeof value === "number" && Number.isFinite(value) ? value : 0;
   return Math.min(Math.max(n, 0), cap);
@@ -1554,6 +1616,27 @@ function extraSignal(extra: unknown): AbortSignal | undefined {
 
 function textResult(text: string, isError = false): CallToolResult {
   return { content: [{ type: "text", text }], isError };
+}
+
+/**
+ * A refused peer message.
+ *
+ * `isError: true` here, unlike the timeout path in `chat_ask`, and the two are
+ * genuinely different questions. A timeout says the other chat did not answer —
+ * the call worked. A refusal says this call will not happen, and every one of
+ * them is something the CALLER can act on: fix the id, stop looping, wait for
+ * the window. Reported as a plain result the model reads it as a delivered
+ * message and moves on, which is the one outcome that must not happen.
+ */
+function peerRefusalResult(result: PeerSendResult): CallToolResult {
+  return textResult(
+    `${result.message ?? "The message was refused."}\n${JSON.stringify({
+      ok: false,
+      refusal: result.refusal,
+      ...(result.retryAt ? { retryAt: result.retryAt } : {}),
+    })}`,
+    true,
+  );
 }
 
 /**
@@ -5220,6 +5303,257 @@ ${look}` : "")
     },
   );
 
+  const chatSend = tool(
+    "chat_send",
+    "Send a message to ANOTHER Dispatch chat — hand a task to a chat that is already " +
+      "set up for it, give one new information, or tell one you are done with the thing " +
+      "it was waiting on. It arrives in that chat as a message ATTRIBUTED TO YOU, and it " +
+      "starts a turn there, so write it as a complete instruction: the other chat cannot " +
+      "see this conversation. A chat that has finished is woken up to receive it. This " +
+      "does NOT wait for a response — use chat_ask when you need an answer back. Find " +
+      "ids with chat_find; check what a chat is doing first with chat_state.",
+    {
+      chatId: z.string().describe("The chat to message, as reported by chat_find."),
+      message: z
+        .string()
+        .describe(
+          "What to say — self-contained, since the other chat has none of your context.",
+        ),
+      delivery: z
+        .enum(["queue", "interrupt"])
+        .optional()
+        .describe(
+          "queue (default) waits for the chat's current turn to finish. interrupt " +
+            "injects into the running turn, which can derail what it is in the middle " +
+            "of — and is NOT a guarantee it acts on it, since a chat inside a long " +
+            "tool call routinely finishes what it was doing first. Prefer queue.",
+        ),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.messaging) {
+        return textResult("The chat_send tool is not available in this session.", true);
+      }
+      const to = typeof args.chatId === "string" ? args.chatId.trim() : "";
+      const message = typeof args.message === "string" ? args.message.trim() : "";
+      if (!to) return textResult("chat_send requires a non-empty chatId.", true);
+      if (!message) {
+        return textResult(
+          "chat_send requires a non-empty message — an empty turn tells the other " +
+            "chat nothing and still costs it a turn.",
+          true,
+        );
+      }
+      const result = await ctx.messaging.send({
+        to,
+        message,
+        delivery: args.delivery === "interrupt" ? "interrupt" : "queue",
+      });
+      if (!result.ok) return peerRefusalResult(result);
+      // Every branch has to be true of what actually happened. An `interrupt`
+      // into a live turn used to fall through to "It was idle", which flatly
+      // contradicts the `chat_state` the model may have run a second earlier;
+      // and `woke` says only that there was no live session, which a chat that
+      // has never run and a chat that finished both satisfy.
+      const how = result.held
+        ? "It is mid-turn, so the message is queued and will be delivered the moment " +
+          "that turn ends"
+        : result.interrupted
+          ? "It was mid-turn and you chose interrupt, so the message was injected into " +
+            "the turn it is running now"
+          : result.woke
+            ? "It had no live session, so one was started to receive it"
+            : "It was idle, so it has the message now";
+      return textResult(
+        `Sent to chat ${to}. ${how}.\n` +
+          JSON.stringify({
+            ok: true,
+            chatId: to,
+            held: Boolean(result.held),
+            interrupted: Boolean(result.interrupted),
+            woke: Boolean(result.woke),
+          }),
+      );
+    },
+  );
+
+  const chatAsk = tool(
+    "chat_ask",
+    "Ask ANOTHER Dispatch chat a question and WAIT for its answer. Use when you need " +
+      "something only that chat knows — what it decided, whether it is done, what it " +
+      "found — and cannot continue without it. The question arrives attributed to you " +
+      "and the other chat answers with chat_reply; this call blocks until it does or " +
+      "the timeout expires. A timeout is a normal answer, not an error: it means nobody " +
+      "replied, so carry on without it rather than asking again. Ask ONE clear question " +
+      "— the other chat cannot see your context.",
+    {
+      chatId: z.string().describe("The chat to ask, as reported by chat_find."),
+      question: z
+        .string()
+        .describe("The question — self-contained, and answerable on its own."),
+      timeoutSeconds: z
+        .number()
+        .optional()
+        .describe(`Give up waiting after this long (default/cap ${WAIT_CAP_SECONDS}s).`),
+    },
+    async (args, extra): Promise<CallToolResult> => {
+      if (!ctx.messaging) {
+        return textResult("The chat_ask tool is not available in this session.", true);
+      }
+      const to = typeof args.chatId === "string" ? args.chatId.trim() : "";
+      const question = typeof args.question === "string" ? args.question.trim() : "";
+      if (!to) return textResult("chat_ask requires a non-empty chatId.", true);
+      if (!question) return textResult("chat_ask requires a non-empty question.", true);
+
+      // Floored, not just capped. `clampSeconds` bottoms out at 0 and the schema
+      // has no minimum, so `timeoutSeconds: 0` would deliver the question —
+      // costing the target a whole turn — and then expire before any answer
+      // could physically arrive. Nobody means that.
+      const timeoutMs =
+        Math.max(
+          MIN_ASK_SECONDS,
+          clampSeconds(args.timeoutSeconds ?? WAIT_CAP_SECONDS, WAIT_CAP_SECONDS),
+        ) * 1000;
+
+      const result = await ctx.messaging.ask({
+        to,
+        question,
+        timeoutMs,
+        // BOTH, the way `wait_for_chat` passes both to `waitForChatState`. With
+        // `??` the session abort was dropped whenever the MCP call carried one
+        // of its own, so stopping the chat left the ask running.
+        signals: [extraSignal(extra), ctx.signal],
+        // Advertise the wait the way `wait_for_chat` does, so a chat blocked on a
+        // peer doesn't look like one that has hung — but only once the ask is
+        // actually admitted. Published unconditionally up front, a refused call
+        // (a self-send, an unknown id) flashed a wait that never happened.
+        onWaiting: () =>
+          ctx.bus.publish({
+            type: "chat-status",
+            chatId: ctx.chatId,
+            status: "running",
+            activity: { state: "tool", label: `asking chat ${to}`, toolName: "chat_ask" },
+          }),
+      });
+      if (!result.ok) return peerRefusalResult(result);
+      if (result.answered) {
+        return textResult(
+          `Chat ${to} answered:\n${result.answer}\n` +
+            JSON.stringify({ answered: true, chatId: to }),
+        );
+      }
+      // NOT an error. A timeout means the other chat did not answer, which is a
+      // fact about the world rather than a failed call — flagging it as an error
+      // pushes the model into re-asking, which is the one thing that cannot help.
+      const why =
+        result.reason === "cancelled"
+          ? "the wait was interrupted"
+          : `no answer within ${timeoutMs / 1000}s`;
+      // "Nobody answered" and "it never arrived" call for different next moves,
+      // so say which happened: a withdrawn question was still queued behind that
+      // chat's current turn and has been pulled back rather than left to land on
+      // a chat nobody is waiting for.
+      const fate = result.withdrawn
+        ? " It was still queued behind that chat's current turn, so it was withdrawn " +
+          "and never reached them"
+        : "";
+      return textResult(
+        `No answer from chat ${to} — ${why}.${fate}. Do NOT just ask again; check ` +
+          "what it is doing with chat_state, or carry on without it.\n" +
+          JSON.stringify({
+            answered: false,
+            reason: result.reason,
+            withdrawn: Boolean(result.withdrawn),
+            chatId: to,
+          }),
+      );
+    },
+  );
+
+  const chatReply = tool(
+    "chat_reply",
+    "Answer a question another chat asked you with chat_ask. That chat is BLOCKED " +
+      "waiting on this call, so answer as soon as you can. The askId is in the message " +
+      "that asked you. Answering is the whole response — the asking chat sees your " +
+      "`answer` text and nothing else, so make it stand on its own.",
+    {
+      askId: z.string().describe("The askId carried by the question you were sent."),
+      answer: z.string().describe("Your answer, complete in itself."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.messaging) {
+        return textResult("The chat_reply tool is not available in this session.", true);
+      }
+      const askId = typeof args.askId === "string" ? args.askId.trim() : "";
+      const answer = typeof args.answer === "string" ? args.answer.trim() : "";
+      if (!askId) return textResult("chat_reply requires the askId you were sent.", true);
+      if (!answer) return textResult("chat_reply requires a non-empty answer.", true);
+
+      const result = ctx.messaging.reply({ askId, answer });
+      if (result.ok) {
+        return textResult(
+          `Answer delivered to chat ${result.askerChatId}, which was waiting on it.\n` +
+            JSON.stringify({ ok: true, chatId: result.askerChatId }),
+        );
+      }
+      // A dead askId is reported as a plain result rather than a tool error for
+      // the same reason a declined spawn is: the obvious repair for an error is
+      // to try again, and retrying is guaranteed to fail the same way. Naming the
+      // tool that CAN still get the words there is the useful answer.
+      return textResult(
+        `${result.message}\n${JSON.stringify({ ok: false, reason: result.reason })}`,
+      );
+    },
+  );
+
+  const chatState = tool(
+    "chat_state",
+    "One cheap look at what ANOTHER chat is doing: its status, whether it is blocked " +
+      "waiting on a HUMAN, when it was last active, the PRs it opened, and how full its " +
+      "context window is. This is the tool to poll when you are coordinating several " +
+      "chats — it is a pure read and never wakes or disturbs the chat it describes. Use " +
+      "it before chat_send to see whether a chat is mid-turn, and instead of chat_ask " +
+      "when all you need is whether it is still working.",
+    {
+      chatId: z.string().describe("The chat to describe, as reported by chat_find."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.messaging) {
+        return textResult("The chat_state tool is not available in this session.", true);
+      }
+      const chatId = typeof args.chatId === "string" ? args.chatId.trim() : "";
+      if (!chatId) return textResult("chat_state requires a non-empty chatId.", true);
+      const state = await ctx.messaging.state(chatId);
+      if (!state) {
+        return textResult(
+          `No chat "${chatId}" exists. Find the right id with chat_find.`,
+          true,
+        );
+      }
+      const lines = [
+        `${state.title ?? "(untitled)"} — ${state.chatId}`,
+        `  status: ${state.status}${state.dormant ? " (dormant — no live session)" : ""}`,
+        `  blocked on a human: ${state.blockedOnHuman ? "YES" : "no"}`,
+        `  last user message: ${
+          state.lastUserMessageAt
+            ? new Date(state.lastUserMessageAt).toISOString()
+            : "never"
+        }`,
+        `  last updated: ${new Date(state.updatedAt).toISOString()}`,
+      ];
+      if (state.prs.length) {
+        lines.push(`  PRs: ${state.prs.map((pr) => `${pr.repo}#${pr.number}`).join(", ")}`);
+      }
+      if (state.reviewOf) lines.push(`  reviewing: ${state.reviewOf}`);
+      if (state.contextPercent !== undefined) {
+        lines.push(`  context: ${state.contextPercent}% full`);
+      }
+      if (state.heldMessages) {
+        lines.push(`  peer messages queued for it: ${state.heldMessages}`);
+      }
+      return textResult(`${lines.join("\n")}\n${JSON.stringify(state)}`);
+    },
+  );
+
   return {
     askUser,
     wait,
@@ -5251,6 +5585,10 @@ ${look}` : "")
     mcpRemove,
     chatFind,
     chatRead,
+    chatSend,
+    chatAsk,
+    chatReply,
+    chatState,
     projectInfo,
   };
 }
@@ -5309,6 +5647,10 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   mcpRemove: "mcp_remove",
   chatFind: "chat_find",
   chatRead: "chat_read",
+  chatSend: "chat_send",
+  chatAsk: "chat_ask",
+  chatReply: "chat_reply",
+  chatState: "chat_state",
   projectInfo: "project_info",
 };
 
@@ -5352,6 +5694,10 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   mcp_remove: "mcpConfig",
   chat_find: "inspect",
   chat_read: "inspect",
+  chat_send: "messaging",
+  chat_ask: "messaging",
+  chat_reply: "messaging",
+  chat_state: "messaging",
   project_info: "inspect",
 };
 
@@ -5368,7 +5714,8 @@ export type ManagerToolBinding =
   | "prewarm"
   | "chats"
   | "mcpConfig"
-  | "inspect";
+  | "inspect"
+  | "messaging";
 
 /** Which bindings a session has — decides which tools are offered/available. */
 export type ManagerToolBindings = Partial<Record<ManagerToolBinding, boolean>>;
@@ -5437,6 +5784,13 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_find: Boolean(ctx.inspect),
     chat_read: Boolean(ctx.inspect),
     project_info: Boolean(ctx.inspect),
+    // Cross-chat MESSAGING — the write path. All four together: a chat that can
+    // ask must be able to reply, or the other half of every conversation is a
+    // chat holding an askId with no tool that takes one.
+    chat_send: Boolean(ctx.messaging),
+    chat_ask: Boolean(ctx.messaging),
+    chat_reply: Boolean(ctx.messaging),
+    chat_state: Boolean(ctx.messaging),
   };
 }
 

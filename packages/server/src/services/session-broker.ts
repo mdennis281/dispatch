@@ -71,6 +71,7 @@ import type {
   ChatMessage,
   MessagePart,
   ImageRef,
+  PeerSender,
   AgentConfig,
   ModeConfig,
   McpServerConfig,
@@ -104,6 +105,7 @@ import {
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
+import type { ChatMessenger } from "./chat-messenger.js";
 import type { TerminalService } from "./terminal.js";
 import type { MemoryService } from "./memory.js";
 import type { MetricsService } from "./metrics.js";
@@ -996,6 +998,14 @@ export type MessagePriority = "now" | "next" | "later";
 export interface SendOptions {
   priority?: MessagePriority;
   images?: ImageRef[];
+  /**
+   * The chat that sent this, when the sender is another AGENT (`chat_send` /
+   * `chat_ask`). Stamps the emitted row `origin: "peer"` so the transcript can
+   * say who it came from — a peer message must arrive as a `user` turn, which
+   * is the only input channel a session has, so unattributed it is
+   * indistinguishable from something the human typed.
+   */
+  peer?: PeerSender;
   /** Per-message effort override (also updates the chat's effort going forward). */
   effort?: Effort;
   /**
@@ -1390,7 +1400,59 @@ interface OutboxItem {
    * when the turn's text matched relevant, not-yet-surfaced memories.
    */
   memoryContext?: string;
+  /**
+   * Who sent this, when another CHAT did — a `<system-reminder>` block prepended
+   * to the SDK message only, exactly like `memoryContext` above.
+   *
+   * Not merely nice-to-have: the receiving session never sees the transcript
+   * row, so without this a peer message arrives as a bare `user` turn that is
+   * indistinguishable from the human's own, and `chat_ask` cannot work at all —
+   * the `askId` would live only on the row, leaving the asked chat nothing to
+   * pass to `chat_reply` and every ask running to its timeout.
+   */
+  peerContext?: string;
   priority: MessagePriority;
+}
+
+/**
+ * The invisible blocks that ride in FRONT of a message's text on the way to the
+ * model, in order. Never on the transcript row: the row carries `peer` for the
+ * human (see UserRow) and the memory block as a collapsed `context` part.
+ *
+ * Peer attribution goes first — it frames who is speaking, which changes how
+ * everything after it should be read.
+ */
+function outboxPrefixes(item: OutboxItem): string[] {
+  const out: string[] = [];
+  if (item.peerContext) out.push(item.peerContext);
+  if (item.memoryContext) out.push(item.memoryContext);
+  return out;
+}
+
+/**
+ * What the RECEIVING model is told about a peer message.
+ *
+ * The same fact the transcript row shows the human, said in the prompt because
+ * that is the only channel the other session has. The `chat_reply` instruction
+ * is load-bearing rather than helpful: answering in its own transcript does not
+ * reach the asking chat, which is blocked inside a tool call until this exact
+ * call is made.
+ */
+export function peerReminder(peer: PeerSender): string {
+  const who = peer.title ? `"${peer.title}" (chatId ${peer.chatId})` : `chatId ${peer.chatId}`;
+  const lines = [
+    `The message below is from ANOTHER CHAT, not from the human: ${who}.`,
+    "Treat it as a message from a colleague, and do not assume the human has " +
+      "seen it or is watching this turn.",
+  ];
+  if (peer.askId) {
+    lines.push(
+      `That chat is BLOCKED waiting on your answer. When you have one, call ` +
+        `chat_reply({ askId: "${peer.askId}", answer: "…" }). That is the only ` +
+        `way to reach it — replying in your own transcript does not.`,
+    );
+  }
+  return `<system-reminder>\n${lines.join("\n")}\n</system-reminder>`;
 }
 
 interface PendingPermission {
@@ -1629,6 +1691,15 @@ export class SessionBroker {
     /** The chat that asked, so the new one can be traced back to it. */
     parentChatId: string;
   }) => Promise<SpawnedChat>;
+  /**
+   * Chat-to-chat messaging (`chat_send` / `chat_ask` / `chat_reply` /
+   * `chat_state`). Settable after construction for the same reason as
+   * `spawnChat`: WAKING a dormant target goes through the routes'
+   * `ensureSession`, which needs the whole service container, and the container
+   * is built around the broker rather than before it. Absent -> the four tools
+   * are not offered at all, rather than offered and broken.
+   */
+  messenger?: ChatMessenger;
   private readonly query: QueryFn;
   private readonly genId: () => string;
   private readonly now: () => number;
@@ -1786,6 +1857,10 @@ export class SessionBroker {
       images: o.images,
       effort: session.effort,
       steering: steering || undefined,
+      // Only ever stamped for a turn the human did NOT type. Ordinary sends stay
+      // unstamped: absence already means human on every row ever written, and
+      // backfilling `"human"` would be a wide diff for no behaviour.
+      ...(o.peer ? { origin: "peer" as const, peer: o.peer } : {}),
       ...(parts ? { parts } : {}),
     });
 
@@ -1803,6 +1878,7 @@ export class SessionBroker {
       images: o.images,
       imageSources,
       memoryContext: memory?.block,
+      peerContext: o.peer ? peerReminder(o.peer) : undefined,
       priority: o.priority ?? "next",
     });
     this.schedule(session);
@@ -2746,7 +2822,7 @@ export class SessionBroker {
     if (session.harnessSession) {
       for (const item of session.outbox) {
         session.harnessSession.send({
-          text: item.memoryContext ? `${item.memoryContext}\n\n${item.text}` : item.text,
+          text: [...outboxPrefixes(item), item.text].filter(Boolean).join("\n\n"),
           images: this.resolveHarnessImages(session.chatId, item.images),
           priority: item.priority,
           effort: session.effort,
@@ -5321,6 +5397,28 @@ export class SessionBroker {
               projectInfo: (q) => this.inspect!.projectInfo(q, projectId),
             }
           : undefined,
+        // Cross-chat messaging. `from` is CLOSED OVER rather than passed as an
+        // argument, so there is no way for a tool call to send under another
+        // chat's name — attribution is the thing that makes this write path safe
+        // without a consent card, and an argument would make it forgeable.
+        messaging: this.messenger
+          ? {
+              send: ({ to, message, delivery }) =>
+                this.messenger!.send({ from: session.chatId, to, message, delivery }),
+              ask: ({ to, question, timeoutMs, signals, onWaiting }) =>
+                this.messenger!.ask({
+                  from: session.chatId,
+                  to,
+                  question,
+                  timeoutMs,
+                  signals,
+                  onWaiting,
+                }),
+              reply: ({ askId, answer }) =>
+                this.messenger!.reply({ from: session.chatId, askId, answer }),
+              state: (chatId) => this.messenger!.state(chatId),
+            }
+          : undefined,
         signal: session.abortController?.signal,
         now: this.now,
       }),
@@ -5464,8 +5562,8 @@ export class SessionBroker {
   private toSdkUserMessage(item: OutboxItem): SDKUserMessage {
     // Auto-surfaced memory rides in front of the user's text (SDK-only; the
     // transcript row keeps just item.text) so the agent sees the fact in context.
-    const prefix = item.memoryContext ? `${item.memoryContext}\n\n` : "";
-    let content: unknown = `${prefix}${item.text}`;
+    const prefixes = outboxPrefixes(item);
+    let content: unknown = [...prefixes, item.text].filter(Boolean).join("\n\n");
     const sources =
       item.imageSources && item.imageSources.length > 0
         ? item.imageSources
@@ -5474,7 +5572,7 @@ export class SessionBroker {
             .filter((s): s is Record<string, unknown> => !!s);
     if (sources.length > 0) {
       const blocks: unknown[] = [];
-      if (item.memoryContext) blocks.push({ type: "text", text: item.memoryContext });
+      for (const p of prefixes) blocks.push({ type: "text", text: p });
       if (item.text) blocks.push({ type: "text", text: item.text });
       for (const source of sources) blocks.push({ type: "image", source });
       content = blocks;

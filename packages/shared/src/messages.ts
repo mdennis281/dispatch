@@ -94,13 +94,45 @@ export function composeMessageText(parts: MessagePart[]): string {
     .join("\n\n");
 }
 
+/**
+ * The chat that sent a message, when the sender was another AGENT rather than
+ * the human — see `chat_send` / `chat_ask`.
+ *
+ * Carried on the row because the transcript is the only place the human can
+ * ever see it. A peer message has to arrive as a `user` turn (that is the only
+ * input channel a session has), so without attribution it renders identically
+ * to something the human typed — and on a chat being driven by a team lead,
+ * most of the "user" turns would be lies.
+ *
+ * `title` and `projectId` are DENORMALISED deliberately: the sender may be
+ * archived, renamed or deleted by the time anyone reads this row, and a
+ * transcript is append-only, so a row that only held an id would degrade to an
+ * unresolvable hex string. The id is still there for the click-through.
+ */
+export const PeerSenderSchema = z.object({
+  chatId: z.string(),
+  title: z.string().optional(),
+  projectId: z.string().optional(),
+  /** Set when this message is a `chat_ask` awaiting a `chat_reply`. */
+  askId: z.string().optional(),
+});
+export type PeerSender = z.infer<typeof PeerSenderSchema>;
+
 /** A user turn (or steering injection). */
 export const UserMessageRowSchema = z.object({
   ...MessageBase,
   kind: z.literal("user"),
   text: z.string().optional(),
   images: z.array(ImageRefSchema).optional(),
+  /**
+   * Who produced this turn. ABSENT MEANS HUMAN — every row written before peer
+   * messaging existed omits it, so absence must never be read as "unknown".
+   * Only ever written for a turn the human did NOT type, which is why ordinary
+   * sends are left unstamped rather than backfilled with `"human"`.
+   */
   origin: MessageOriginSchema.optional(),
+  /** The sending chat, when `origin` is `"peer"`. */
+  peer: PeerSenderSchema.optional(),
   effort: EffortSchema.optional(),
   /** True when this was queued mid-run to steer the agent. */
   steering: z.boolean().optional(),
