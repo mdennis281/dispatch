@@ -1,6 +1,6 @@
 /**
  * REST CRUD for per-project agent memory (durable, cross-chat facts). The Memory
- * panel drives these; the agent's `mcp__manager__remember|recall|forget` tools
+ * panel drives these; the agent's `mcp__dispatch-memory__remember|recall|forget` tools
  * hit the same MemoryService, and every mutation publishes a `memory-update` /
  * `memory-deleted` bus event so open UIs live-update.
  *

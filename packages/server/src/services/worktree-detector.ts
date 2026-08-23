@@ -14,7 +14,7 @@
  * agent has torn down are detached.
  *
  * THE REGISTRY OUTRANKS ALL OF THIS. `worktrees.json` records who owns a tree at
- * the moment it is created — by the panel, or by `mcp__manager__worktree`, which
+ * the moment it is created — by the panel, or by `mcp__dispatch-workspace__worktree`, which
  * is now the only path an agent is allowed to take (`git worktree add` in a
  * shell is refused; see shell-guard.ts). For those trees there is nothing to
  * infer, and a recorded `chatId` is treated as fact. What remains below is the

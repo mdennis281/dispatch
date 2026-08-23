@@ -103,9 +103,9 @@ export interface WorkflowDirectiveContext {
   inWorktree: boolean;
   /** The branch the session's cwd is on, when known. */
   branch?: string | null;
-  /** Whether `mcp__manager__watch_pr` is available (GitHub wired up). */
+  /** Whether `mcp__dispatch-github__watch_pr` is available (GitHub wired up). */
   github: boolean;
-  /** Whether `mcp__manager__create_pr` is available (GitHub + a PR workflow). */
+  /** Whether `mcp__dispatch-github__create_pr` is available (GitHub + a PR workflow). */
   prCreate?: boolean;
   /** Whether the memory tools are available for this session. */
   memory: boolean;
@@ -155,7 +155,7 @@ export function buildWorkflowDirective(
     // configured reviewers, links the PR to this chat and arms the watcher — the
     // three things a hand-rolled `gh pr create` silently skipped.
     const shipCmd = ctx.prCreate
-      ? "`mcp__manager__create_pr`"
+      ? "`mcp__dispatch-github__create_pr`"
       : wf.shipCmd
         ? `\`${wf.shipCmd}\``
         : "`gh pr create`";
@@ -181,10 +181,10 @@ export function buildWorkflowDirective(
     );
     if (ctx.github) {
       lines.push(
-        `4. **Review** — then call \`mcp__manager__watch_pr\` **in a loop**: it returns the ` +
+        `4. **Review** — then call \`mcp__dispatch-github__watch_pr\` **in a loop**: it returns the ` +
           `instant a check fails or a review comment lands. Fix what it reports, call ` +
-          `\`mcp__manager__resolve_thread\` on each thread you actually fixed (a reply alone ` +
-          `leaves it outstanding), push, then \`mcp__manager__request_review\` to re-queue ` +
+          `\`mcp__dispatch-github__resolve_thread\` on each thread you actually fixed (a reply alone ` +
+          `leaves it outstanding), push, then \`mcp__dispatch-github__request_review\` to re-queue ` +
           `the reviewer — submitting a review clears their request and your new commits do ` +
           `NOT bring them back. Call \`watch_pr\` again until it returns \`done:true\`. Never ` +
           `hand-roll a \`gh pr checks\` polling loop.`,
@@ -196,7 +196,7 @@ export function buildWorkflowDirective(
     if (autoMerge) {
       lines.push(
         `5. **Land it** — once CI is green and no review thread is open, call ` +
-          `\`mcp__manager__approve_pr\` and the change is in. That is the DEFAULT here: this ` +
+          `\`mcp__dispatch-github__approve_pr\` and the change is in. That is the DEFAULT here: this ` +
           `project has auto-merge on, so finishing a task means the work is merged, not that ` +
           `a PR link is waiting for someone to click.`,
         "",
@@ -253,7 +253,7 @@ export function buildWorkflowDirective(
     // CONTENT (what's already recorded).
     lines.push("", "**Recording what you learn**", "");
     lines.push(
-      `- Record durable facts with \`mcp__manager__remember\` as you learn them — not as an ` +
+      `- Record durable facts with \`mcp__dispatch-memory__remember\` as you learn them — not as an ` +
         `end-of-task chore. Anything a future session would have to re-derive belongs there.`,
     );
     // The correction for the failure this profile work was built to fix: memory
@@ -381,7 +381,7 @@ export function createWorkflowGuardHook(deps: WorkflowGuardDeps): HookCallback {
           (deps.exemptions
             ? `\n\nIf the sanctioned path is genuinely BROKEN — not merely inconvenient — you ` +
               `can ask the human to lift this one guard for THIS CHAT: ` +
-              `mcp__manager__request_exemption({ guard: "${violation.kind}", command: "…", ` +
+              `mcp__dispatch-confirm__request_exemption({ guard: "${violation.kind}", command: "…", ` +
               `reason: "…" }). They decide, not you, and a denial is final.`
             : ""),
       },

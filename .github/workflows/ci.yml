@@ -115,6 +115,13 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # Runs BEFORE the build, because it needs no build and the thing it
+      # catches is a doc/skill/memory regression rather than a compile error —
+      # failing here reports the real cause in seconds instead of after a
+      # four-minute build. See the script for why it is `git grep`.
+      - name: Verify no stale tool names
+        run: node tools/verify/no-stale-tool-names.mjs
+
       # ORDER MATTERS AND IT IS NOT OBVIOUS. `@dispatch/shared` and
       # `@dispatch/cli` expose their types from `dist/` ("types":
       # "./dist/index.d.ts"), so on a CLEAN checkout `typecheck` cannot resolve

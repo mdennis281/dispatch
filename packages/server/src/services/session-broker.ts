@@ -129,7 +129,7 @@ import type { GitHubService, PrPollSnapshot } from "./github.js";
 import type { RunnerService } from "./runner.js";
 import type { WorktreeService } from "./worktree.js";
 import {
-  createManagerMcpServer,
+  createManagerMcpServers,
   exemptionConsentQuestion,
   overrideConsentPrompt,
   readExemptionAnswer,
@@ -165,10 +165,15 @@ import type {
 import type { HarnessRegistry } from "../harness/index.js";
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
 import { managerMcpContextOf } from "./mcp/manager-mcp.js";
+import {
+  isManagerServer,
+  managerToolQualifiedName,
+  type ManagerToolName,
+} from "@dispatch/shared";
 
 /**
  * The always-injected "prefer the manager tools" directive. Lists only the
- * `mcp__manager__*` tools THIS session actually has (gated the same way the MCP
+ * `mcp__dispatch-*__*` tools THIS session actually has (gated the same way the MCP
  * server offers them) and tells the agent to reach for them instead of
  * hand-rolling shell equivalents — the recurring failure mode where an agent
  * re-implements `watch_pr` as a `gh` sleep loop or a background Monitor task.
@@ -194,25 +199,25 @@ export function buildManagerToolsDirective(caps: {
   const lines = [
     "# Manager tools — prefer these over improvising",
     "",
-    "You run inside Dispatch, which gives you first-class `mcp__manager__*` " +
+    "You run inside Dispatch, which gives you first-class `mcp__dispatch-*__*` " +
       "tools. Prefer them over hand-rolled shell equivalents: they are cheaper, they " +
       "cancel cleanly when the chat is stopped, and they surface live status in the UI.",
     "",
-    "- `mcp__manager__wait` — pause yourself for a set time (e.g. let a build settle) " +
+    "- `mcp__dispatch-session__wait` — pause yourself for a set time (e.g. let a build settle) " +
       "instead of a `sleep` loop.",
-    "- `mcp__manager__wait_for_chat` — block until another chat is at rest, instead of polling it.",
-    "- `mcp__manager__context_usage` — check how full your own context window is " +
+    "- `mcp__dispatch-chat__wait_for_chat` — block until another chat is at rest, instead of polling it.",
+    "- `mcp__dispatch-session__context_usage` — check how full your own context window is " +
       "(tokens, window size, percent, per-category breakdown) instead of guessing.",
-    "- `mcp__manager__compact_context` — compact your own context in place when it's " +
+    "- `mcp__dispatch-session__compact_context` — compact your own context in place when it's " +
       "filling up (past ~80%) and you have more work to do; the session continues " +
       "from a summarized, smaller window.",
-    "- `mcp__manager__ask_user` — ask one to three structured questions through " +
+    "- `mcp__dispatch-confirm__ask_user` — ask one to three structured questions through " +
       "Dispatch's radio or multi-select question card. Use it whenever an unanswered " +
       "choice materially changes the work; it is available in every chat mode.",
   ];
   if (caps.github) {
     lines.push(
-      "- `mcp__manager__watch_pr` — wait on AND react to a GitHub PR. It returns the " +
+      "- `mcp__dispatch-github__watch_pr` — wait on AND react to a GitHub PR. It returns the " +
         "instant a CI check fails, a new review comment/thread appears, or the PR " +
         "merges/closes. Call it in a loop: fix what it reports, then call it again, " +
         "until it returns `done:true`. **Never** hand-roll `gh pr view` / `gh pr checks` " +
@@ -227,12 +232,12 @@ export function buildManagerToolsDirective(caps: {
         "requirement, and re-queueing a spent reviewer only hides the reviews it " +
         "already filed (it also tells you `landableOnChecks` when the PR is ready to " +
         "land on green checks alone).",
-      "- `mcp__manager__resolve_thread` — reply in a review thread and mark it RESOLVED. " +
+      "- `mcp__dispatch-github__resolve_thread` — reply in a review thread and mark it RESOLVED. " +
         "Fixing the code and replying is not enough: an unresolved thread still reads as " +
         "outstanding and blocks the merge. Call it for every comment you addressed, " +
         "passing the `thread:` id `watch_pr` printed with the comment. Leave a thread " +
         "open (`resolve: false`) only when you did NOT act on it.",
-      "- `mcp__manager__request_review` — put reviewers back on the hook. GitHub clears a " +
+      "- `mcp__dispatch-github__request_review` — put reviewers back on the hook. GitHub clears a " +
         "reviewer's request the moment they submit, and your fix commits do NOT re-queue " +
         "them — so after you address a round, call this (once your fixes are PUSHED) and " +
         "then go back to `watch_pr`. Without it the PR sits with an empty queue forever." +
@@ -245,7 +250,7 @@ export function buildManagerToolsDirective(caps: {
   }
   if (caps.reviewAgent) {
     lines.push(
-      "- `mcp__manager__post_review` — submit a REVIEW on a PR: a verdict, a summary, and " +
+      "- `mcp__dispatch-github__post_review` — submit a REVIEW on a PR: a verdict, a summary, and " +
         "inline comments on specific lines. Each inline comment becomes a review THREAD, " +
         "which is what makes it visible to `watch_pr`, resolvable with `resolve_thread`, " +
         "and blocking for `approve_pr`. Only for reviewing someone else's change — do not " +
@@ -258,7 +263,7 @@ export function buildManagerToolsDirective(caps: {
     // an agent that reaches for `gh pr create` opens a PR nobody was asked to
     // review, that isn't linked to this chat, and that nothing is watching.
     lines.push(
-      "- `mcp__manager__create_pr` — open the PR for your work. **Never run `gh pr create`** " +
+      "- `mcp__dispatch-github__create_pr` — open the PR for your work. **Never run `gh pr create`** " +
         "(it's refused): `create_pr` pushes the branch with an upstream, opens the PR, " +
         (caps.prReviewers?.length
           ? `requests review from ${caps.prReviewers.join(", ")}, `
@@ -270,7 +275,7 @@ export function buildManagerToolsDirective(caps: {
   }
   if (caps.prApproval) {
     lines.push(
-      "- `mcp__manager__approve_pr` — approve and merge a PR once it's ready. This project " +
+      "- `mcp__dispatch-github__approve_pr` — approve and merge a PR once it's ready. This project " +
         "has auto-merge on: when `watch_pr` reports CI green with no open threads, call " +
         "`approve_pr` and consider the task finished. It re-verifies state, checks, threads " +
         "and the `hold` label before merging, and refuses with reasons if anything's off. " +
@@ -280,11 +285,11 @@ export function buildManagerToolsDirective(caps: {
   }
   if (caps.terminals) {
     lines.push(
-      "- `mcp__manager__terminal` — a NAMED, persistent shell (cwd + env survive between " +
+      "- `mcp__dispatch-workspace__terminal` — a NAMED, persistent shell (cwd + env survive between " +
         "calls) for multi-step command sequences, instead of re-`cd`-ing in Bash each time. " +
         "Pass `background: true` (with its own `name`) for anything that never returns on " +
         "its own — a dev server, a watcher — and read it back with " +
-        "`mcp__manager__terminal_output`. That is the ONLY sanctioned way to start a " +
+        "`mcp__dispatch-workspace__terminal_output`. That is the ONLY sanctioned way to start a " +
         "long-running process: a Bash/PowerShell `run_in_background` spawns outside the " +
         "server's process tree, so Dispatch can neither show it nor stop it, and it is " +
         "left holding its port when this chat ends. The guard refuses that flag.",
@@ -292,8 +297,8 @@ export function buildManagerToolsDirective(caps: {
   }
   if (caps.worktrees) {
     lines.push(
-      "- `mcp__manager__worktree` — create, list and remove git worktrees. **`git worktree " +
-        "add` in a shell is refused**, including through `mcp__manager__terminal`: a tree " +
+      "- `mcp__dispatch-workspace__worktree` — create, list and remove git worktrees. **`git worktree " +
+        "add` in a shell is refused**, including through `mcp__dispatch-workspace__terminal`: a tree " +
         "cut that way carries no record of who owns it, so it lands in the Workspace view " +
         "attributed to nobody and the manager is left guessing. `worktree({ action: " +
         "\"create\", branch })` runs the same git command and records THIS chat as the " +
@@ -305,9 +310,9 @@ export function buildManagerToolsDirective(caps: {
   }
   if (caps.memory) {
     lines.push(
-      "- `mcp__manager__remember` / `recall` / `forget` — durable project memory that " +
+      "- `mcp__dispatch-memory__remember` / `recall` / `forget` — durable project memory that " +
         "carries facts across chats; record anything a future session would need re-told.",
-      "- `mcp__manager__memory_list` / `memory_search` / `memory_history` / " +
+      "- `mcp__dispatch-memory__memory_list` / `memory_search` / `memory_history` / " +
         "`memory_similar` — the CURATION reads over that same memory, for when you need " +
         "an exhaustive answer rather than the most relevant one: the full inventory with " +
         "age and usage, every literal mention of a string, a fact's commit history " +
@@ -316,13 +321,13 @@ export function buildManagerToolsDirective(caps: {
   }
   if (caps.runner) {
     lines.push(
-      "- `mcp__manager__run_subapp` — launch this project's app and get a live localhost " +
+      "- `mcp__dispatch-workspace__run_subapp` — launch this project's app and get a live localhost " +
         "URL to actually SEE your change, instead of asking the user to run it.",
     );
   }
   if (caps.mcpConfig) {
     lines.push(
-      "- `mcp__manager__mcp_list` / `mcp_add` / `mcp_remove` — read and edit the MCP servers " +
+      "- `mcp__dispatch-mcp__mcp_list` / `mcp_add` / `mcp_remove` — read and edit the MCP servers " +
         "configured for this project.",
     );
     // The routing hint. An agent asked to "install the Linear MCP" will otherwise
@@ -339,7 +344,7 @@ export function buildManagerToolsDirective(caps: {
         "actual procedure, and the defaults you'd reach for otherwise are wrong here.",
       "",
       "The short version, so you don't get it wrong before the skill loads: this project's MCP " +
-        "servers live in `.dispatch/project.yaml`, edited via `mcp__manager__mcp_add` or " +
+        "servers live in `.dispatch/project.yaml`, edited via `mcp__dispatch-mcp__mcp_add` or " +
         "the `dispatch mcp add` CLI. **Never** hand-edit `project.yaml`, and never write `.mcp.json`, " +
         "`~/.claude.json`, or `.claude/settings.json` to configure a server — the manager does " +
         "not read those. Secrets go in as `${VAR}` placeholders, never literal keys: the file " +
@@ -947,16 +952,16 @@ export interface SessionBrokerOptions {
   bus: EventBus;
   /** Max concurrently-active sessions (running + awaiting-input). Default 6. */
   maxActiveSessions?: number;
-  /** Persistent-terminal service exposed to sessions as `mcp__manager__terminal`. */
+  /** Persistent-terminal service exposed to sessions as `mcp__dispatch-workspace__terminal`. */
   terminals?: TerminalService;
-  /** Per-project agent memory: injected at start + exposed as `mcp__manager__remember|recall|forget`. */
+  /** Per-project agent memory: injected at start + exposed as `mcp__dispatch-memory__remember|recall|forget`. */
   memory?: MemoryService;
-  /** Git history of the memory dir: backs `mcp__manager__memory_history`. Optional —
+  /** Git history of the memory dir: backs `mcp__dispatch-memory__memory_history`. Optional —
    *  without it that one tool reports itself unavailable and the rest still work. */
   memoryHistory?: MemoryHistoryService;
-  /** GitHub control plane: backs `mcp__manager__watch_pr`'s checks/threads/merge polls. */
+  /** GitHub control plane: backs `mcp__dispatch-github__watch_pr`'s checks/threads/merge polls. */
   github?: GitHubService;
-  /** SubApp runner: backs `mcp__manager__run_subapp` (launch apps + get a URL). */
+  /** SubApp runner: backs `mcp__dispatch-workspace__run_subapp` (launch apps + get a URL). */
   runner?: RunnerService;
   /** Worktrees: resolve/create a launch dir for run_subapp + list branches. */
   worktrees?: WorktreeService;
@@ -1163,17 +1168,21 @@ function questionSummary(input: Record<string, unknown>): string {
  * Tools that run their OWN human gate and must therefore not be prompted for at
  * the `canUseTool` layer as well (see {@link SessionBroker.handlePermission}).
  */
-const SELF_GATED_TOOLS: ReadonlySet<string> = new Set([
-  "mcp__manager__ask_user",
-  "mcp__manager__spawn_chat",
-  // Its gate is UNCONDITIONAL — every call puts the exemption card in front of
-  // the human and waits — so a generic canUseTool prompt would just be a second
-  // dialog asking a weaker version of the same question, and the reflex it
-  // trains ("approve the tool call, then read the real one") is the last habit
-  // this particular gate can afford. Unlike `approve_pr`'s conditional override,
-  // there is no path through this tool that DOESN'T ask.
-  "mcp__manager__request_exemption",
-]);
+const SELF_GATED_TOOLS: ReadonlySet<string> = new Set(
+  (
+    [
+      "ask_user",
+      "spawn_chat",
+      // Its gate is UNCONDITIONAL — every call puts the exemption card in front of
+      // the human and waits — so a generic canUseTool prompt would just be a second
+      // dialog asking a weaker version of the same question, and the reflex it
+      // trains ("approve the tool call, then read the real one") is the last habit
+      // this particular gate can afford. Unlike `approve_pr`'s conditional override,
+      // there is no path through this tool that DOESN'T ask.
+      "request_exemption",
+    ] as const satisfies readonly ManagerToolName[]
+  ).map(managerToolQualifiedName),
+);
 
 /** Shorten text for a prompt card, marking that it was cut. */
 function truncate(text: string, max: number): string {
@@ -1454,7 +1463,7 @@ interface LiveSession {
   inWorktree?: boolean;
   /**
    * Human-approved lifts of the workflow guard, for THIS CHAT (see
-   * `mcp__manager__request_exemption`).
+   * `mcp__dispatch-confirm__request_exemption`).
    *
    * In-memory on the live session, deliberately: it is not on the Chat record,
    * not in project config, and not in app settings, so it cannot leak into
@@ -1608,7 +1617,7 @@ export class SessionBroker {
   prRegistry?: SessionPrRegistry;
   /**
    * Create + start a chat on the agent's behalf, once the human has approved it
-   * (see `mcp__manager__spawn_chat`). Settable after construction for the same
+   * (see `mcp__dispatch-chat__spawn_chat`). Settable after construction for the same
    * reason as `onTurnError`: creating a chat goes through the routes' `createChat`
    * / `ensureSession` pair, which needs the whole service container — and the
    * container is built around the broker, not before it. Absent → the tool isn't
@@ -2777,25 +2786,41 @@ export class SessionBroker {
       }
 
       const allMcp = (options.mcpServers ?? {}) as Record<string, unknown>;
-      const managerConfig = allMcp.manager;
+      // Dispatch's own servers travel to the harness in their own field, so the
+      // adapter can attach them the way its runtime wants (in-process object vs
+      // HTTP URL) without having to recognise them by name in the merged map.
+      const managerServers = Object.fromEntries(
+        Object.entries(allMcp).filter(([name]) => isManagerServer(name)),
+      );
       const mcpServers = Object.fromEntries(
-        Object.entries(allMcp).filter(([name]) => name !== "manager"),
+        Object.entries(allMcp).filter(([name]) => !isManagerServer(name)),
       ) as Record<string, McpServerConfig>;
 
       let managerMcp: HarnessSessionSpec["managerMcp"];
-      if (resolved.harness.capabilities.managerTransport === "in-process" && managerConfig) {
-        managerMcp = { transport: "in-process", server: managerConfig };
+      if (
+        resolved.harness.capabilities.managerTransport === "in-process" &&
+        Object.keys(managerServers).length
+      ) {
+        managerMcp = { transport: "in-process", servers: managerServers };
       } else if (resolved.harness.capabilities.managerTransport === "http") {
-        const context = managerMcpContextOf(managerConfig);
+        // Every category server carries the SAME live context, so any one of them
+        // recovers it — the grant is per-session, not per-category, and the
+        // category is chosen by URL path.
+        const context = managerMcpContextOf(Object.values(managerServers)[0]);
         if (context && this.managerMcp) {
           session.managerGrant?.revoke();
           const grant = this.managerMcp.mint(session.chatId, () => context);
           session.managerGrant = grant;
           managerMcp = {
             transport: "http",
-            url: grant.url,
             token: grant.token,
             tokenEnvVar: grant.tokenEnvVar,
+            // One URL per category the session actually has: a category with no
+            // bound tool is absent here too, so Codex never dials an endpoint
+            // that would answer with an empty tool list.
+            urls: Object.fromEntries(
+              Object.keys(managerServers).map((name) => [name, grant.urlFor(name)]),
+            ),
           };
         }
       }
@@ -4056,7 +4081,7 @@ export class SessionBroker {
 
   /**
    * Ask the human to lift a workflow guard for ONE chat, and record the grant if
-   * they say yes (see `mcp__manager__request_exemption`).
+   * they say yes (see `mcp__dispatch-confirm__request_exemption`).
    *
    * On the QUESTION card rather than the binary approve/deny one `approve_pr`'s
    * override uses, because the LIFETIME is part of the decision and a two-button
@@ -4663,7 +4688,7 @@ export class SessionBroker {
     const handoff = await this.buildHarnessHandoff(session.chatId);
     if (handoff) appends.push(handoff);
     // Lead with the manager-tools directive so EVERY session (any project)
-    // discovers the `mcp__manager__*` tools it has and is steered to prefer them
+    // discovers the `mcp__dispatch-*__*` tools it has and is steered to prefer them
     // over hand-rolled shell equivalents (the #1 way agents waste effort here).
     appends.push(
       buildManagerToolsDirective({
@@ -4740,7 +4765,7 @@ export class SessionBroker {
                     level: "info",
                     text:
                       "Blocked a background shell — redirected to " +
-                      "mcp__manager__terminal({ background: true }), which is tracked.",
+                      "mcp__dispatch-workspace__terminal({ background: true }), which is tracked.",
                   });
                 },
               }),
@@ -4769,7 +4794,7 @@ export class SessionBroker {
                     level: "info",
                     text:
                       "Blocked a shell-created worktree — redirected to " +
-                      "mcp__manager__worktree, which records the owning chat.",
+                      "mcp__dispatch-workspace__worktree, which records the owning chat.",
                   });
                 },
               }),
@@ -4879,9 +4904,10 @@ export class SessionBroker {
         append: appends.join("\n\n"),
       };
     }
-    // Register the in-process "manager" MCP on EVERY session so the agent can
-    // self-pace (mcp__manager__wait / __wait_for_chat) and drive persistent
-    // named shells (mcp__manager__terminal). Merge it alongside any
+    // Register Dispatch's own in-process MCP servers on EVERY session so the
+    // agent can self-pace (mcp__dispatch-session__wait,
+    // mcp__dispatch-chat__wait_for_chat) and drive persistent named shells
+    // (mcp__dispatch-workspace__terminal). Merged alongside any
     // project-configured MCP servers; the session's abort signal cancels any
     // in-flight wait on stop/fork.
     const terminals = this.terminals;
@@ -4894,8 +4920,8 @@ export class SessionBroker {
     // The managed repo's `.dispatch/` config is the SOURCE OF TRUTH for
     // external MCP servers: layer the config-sourced servers OVER the `.data`
     // record (config wins per-name, a `.data`-only server survives), then apply
-    // `manager` LAST so it's never clobbered (even by a config server named
-    // "manager"). Consulting the config directly (not just the store-synced copy)
+    // the `dispatch-*` category servers LAST so they're never clobbered.
+    // Consulting the config directly (not just the store-synced copy)
     // keeps a live watcher edit effective for this session.
     const configMcp =
       this.projectConfig && projectId ? this.projectConfig.getMcpServers(projectId) : {};
@@ -4911,8 +4937,9 @@ export class SessionBroker {
     // manifest edit takes effect on the next session rather than the next sync.
     // The two `mcpEnabled` layers — this install's pins under this repo's. A
     // server switched off at either is never handed to the SDK, so it is not
-    // spawned and its tools cost nothing; `manager` is exempt by rule, which is
-    // why it's applied to the merged record BEFORE `manager` is added below.
+    // spawned and its tools cost nothing; the `dispatch-*` servers are exempt by
+    // rule, which is why enablement is applied to the merged record BEFORE they
+    // are added below.
     const mcpEnablement: McpEnablementLayers = {
       app: appSettings?.mcpEnabled,
       project: projectId ? this.projectConfig?.getMcpEnabled?.(projectId) : undefined,
@@ -4954,7 +4981,12 @@ export class SessionBroker {
         : declaredMcp;
     options.mcpServers = {
       ...(externalMcp as unknown as Record<string, SdkMcpServerConfig>),
-      manager: createManagerMcpServer({
+      // Spread LAST so Dispatch's own servers are never clobbered — including by
+      // a config server that happens to share a name. The `dispatch-` prefix on
+      // every category makes that collision vanishingly unlikely rather than
+      // merely survivable: bare `github` would have silently shadowed the GitHub
+      // MCP server a project had every right to configure.
+      ...createManagerMcpServers({
         chatId: session.chatId,
         bus: this.bus,
         broker: this,

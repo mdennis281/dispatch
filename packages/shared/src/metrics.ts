@@ -22,7 +22,7 @@ import * as z from "zod";
  *
  *   tool        — a built-in harness tool (Read, Bash, Edit, Task, …)
  *   mcp         — a third-party MCP tool (`mcp__<server>__<tool>`)
- *   manager     — a Dispatch manager MCP endpoint (`mcp__manager__<tool>`)
+ *   manager     — a Dispatch category-server endpoint (`mcp__dispatch-<category>__<tool>`)
  *   skill       — a skill invoked through the `Skill` tool
  *   subagent    — a subagent spawned through `Agent`/`Task`
  *   memory      — a durable project memory surfaced or recalled
@@ -70,7 +70,7 @@ export const MetricEventSchema = z.object({
   ts: z.number().int(),
   category: MetricCategorySchema,
   /**
-   * The uid within the category: a tool name, an `mcp__manager__` endpoint
+   * The uid within the category: a tool name, a Dispatch endpoint
    * (prefix stripped), a skill name, a memory name, an instruction source.
    */
   identifier: z.string(),

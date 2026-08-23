@@ -3,7 +3,7 @@
  *
  * Everything the `dispatch mcp …` commands do is exported here so OTHER callers can do
  * exactly the same thing without shelling out. In particular the manager server
- * imports this module to back its `mcp__manager__mcp_add|mcp_list|mcp_remove`
+ * imports this module to back its `mcp__dispatch-mcp__mcp_add|mcp_list|mcp_remove`
  * tools, which is why the core is fs-only and free of any console/`process.exit`
  * coupling — all of that lives in `../commands/`.
  */

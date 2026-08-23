@@ -8,12 +8,18 @@
  * same `Skill` call would count as a skill today and a tool from last week.
  *
  * EXACTLY ONE category per call, always the most specific one that applies. A
- * `Skill` call is `skill`, never `skill` AND `tool`; `mcp__manager__create_pr`
+ * `Skill` call is `skill`, never `skill` AND `tool`; `mcp__dispatch-github__create_pr`
  * is `manager`, never `manager` AND `mcp`. That's what makes summing the
  * categories give the honest total instead of double-counting the interesting
  * calls — which are precisely the ones that would be counted twice.
  */
-import type { MetricCategory } from "@dispatch/shared";
+import {
+  LEGACY_MANAGER_SERVER,
+  MANAGER_TOOL_CATEGORY,
+  isManagerServer,
+  isManagerToolName,
+  type MetricCategory,
+} from "@dispatch/shared";
 
 /** What one tool call contributes to the ledger. */
 export interface ClassifiedTool {
@@ -67,11 +73,23 @@ export function classifyTool(name: string, input?: Record<string, unknown>): Cla
   const mcp = parseMcp(name);
   if (mcp) {
     const [server, tool] = mcp;
-    return server === "manager"
-      ? { category: "manager", identifier: tool, detail: server }
-      : // `server/tool` so grouping by identifier gives per-endpoint counts while
-        // grouping by detail gives per-server ones — both questions, one row.
-        { category: "mcp", identifier: `${server}/${tool}`, detail: server };
+    if (isManagerServer(server)) {
+      // `detail` is the CATEGORY, not the server name, so a row recorded before
+      // the servers were prefixed lands on the same value as one recorded after.
+      return { category: "manager", identifier: tool, detail: server.replace(/^dispatch-/, "") };
+    }
+    // A call recorded under the single `manager` server everything used to live
+    // on. Forward-mapped rather than left alone because the alternative is
+    // `create_pr` appearing as two disjoint series either side of the rename —
+    // and this runs in the BACKFILL too, which re-reads transcripts written
+    // months ago, so the mapping has to live here rather than in a one-time
+    // UPDATE that historical imports would bypass.
+    if (server === LEGACY_MANAGER_SERVER && isManagerToolName(tool)) {
+      return { category: "manager", identifier: tool, detail: MANAGER_TOOL_CATEGORY[tool] };
+    }
+    // `server/tool` so grouping by identifier gives per-endpoint counts while
+    // grouping by detail gives per-server ones — both questions, one row.
+    return { category: "mcp", identifier: `${server}/${tool}`, detail: server };
   }
   if (name === "Skill") {
     return {
@@ -97,7 +115,7 @@ export function classifyTool(name: string, input?: Record<string, unknown>): Cla
  * undefined.
  *
  * The runtime span tracker has to tell a spawn from the other things that block
- * on an agent — `mcp__manager__wait_for_chat` blocks on a PEER chat, whose
+ * on an agent — `mcp__dispatch-chat__wait_for_chat` blocks on a PEER chat, whose
  * tool_use id is nobody's run id — and the answer has to be the one this file
  * already gives the ledger.
  *

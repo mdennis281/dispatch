@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { LEGACY_MANAGER_SERVER } from "@dispatch/shared";
 import { classifyTool } from "./metrics-classify.js";
 
 describe("classifyTool", () => {
@@ -17,13 +18,33 @@ describe("classifyTool", () => {
     });
   });
 
-  it("gives the manager's own endpoints their own category, not `mcp`", () => {
+  it("gives Dispatch's own endpoints their own category, not `mcp`", () => {
     // Counting these as ordinary MCP calls would bury Dispatch's own surface in
     // whatever third-party server happened to be noisiest.
-    expect(classifyTool("mcp__manager__create_pr")).toEqual({
+    expect(classifyTool("mcp__dispatch-github__create_pr")).toEqual({
       category: "manager",
       identifier: "create_pr",
-      detail: "manager",
+      detail: "github",
+    });
+  });
+
+  it("files a pre-split call as the SAME row as its renamed twin", () => {
+    // A row recorded under the retired single `manager` server has to land on
+    // the identifier AND detail its post-rename twin does, or the Metrics view
+    // shows `create_pr` as two disjoint series either side of the split. This
+    // also runs in the transcript BACKFILL, which re-reads months-old sessions
+    // long after any one-time database UPDATE would have finished.
+    const legacy = classifyTool(`mcp__${LEGACY_MANAGER_SERVER}__create_pr`);
+    expect(legacy).toEqual(classifyTool("mcp__dispatch-github__create_pr"));
+  });
+
+  it("does not claim a legacy name for a tool that no longer exists", () => {
+    // Otherwise a third-party server that happened to be called `manager` would
+    // have every one of its calls filed as Dispatch's own.
+    expect(classifyTool(`mcp__${LEGACY_MANAGER_SERVER}__not_a_dispatch_tool`)).toEqual({
+      category: "mcp",
+      identifier: `${LEGACY_MANAGER_SERVER}/not_a_dispatch_tool`,
+      detail: LEGACY_MANAGER_SERVER,
     });
   });
 
@@ -77,7 +98,7 @@ describe("classifyTool", () => {
       classifyTool("Read"),
       classifyTool("Skill", { skill: "s" }),
       classifyTool("Agent", { subagent_type: "a" }),
-      classifyTool("mcp__manager__wait"),
+      classifyTool("mcp__dispatch-session__wait"),
       classifyTool("mcp__other__thing"),
     ];
     expect(new Set(all.map((c) => c.category)).size).toBe(5);

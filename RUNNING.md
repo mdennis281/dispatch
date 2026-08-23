@@ -113,7 +113,7 @@ correctly, and on a real run all four of these went wrong at once:
 On `none` and `commit` the whole block resolves inert, exactly like `autoMerge` — those
 rungs have no PR, so a policy there would be a trap for anything that trusted the field.
 
-**Opening a PR: `mcp__manager__create_pr`.** A raw `gh pr create` is now **refused** on
+**Opening a PR: `mcp__dispatch-github__create_pr`.** A raw `gh pr create` is now **refused** on
 any `review` project, the same way `gh pr merge` always was. In one call `create_pr`
 pushes the branch with an upstream, opens the PR, requests the reviewers above, writes
 the PR onto the chat (`Chat.prs` — the ownership record everything downstream reads), and
@@ -150,7 +150,7 @@ repo blocks pushes to the trunk, exempt memory-only pushes in the hook — Hiveb
 **Auto-merge (a `review` sub-setting).** By default a `review` project ships the PR and
 waits for a human (or the repo's auto-merge job) to land it. Turn **Auto-merge** on — in
 Project config under the profile picker, or `autoMerge: on-green` in the manifest — and
-the session gets one extra tool, `mcp__manager__approve_pr`, plus an instruction to use
+the session gets one extra tool, `mcp__dispatch-github__approve_pr`, plus an instruction to use
 it: once CI is green and no review thread is open, the agent approves and merges its own
 PR, and the task is done. Everything the agent does gets pushed forward without you in
 the loop.
@@ -374,7 +374,7 @@ The manager watches that file, so an edit applies to the next turn — no restar
 
 Three ways to add one, all writing the same file:
 
-- **Ask an agent.** Sessions get `mcp__manager__mcp_add` / `mcp_list` / `mcp_remove`,
+- **Ask an agent.** Sessions get `mcp__dispatch-mcp__mcp_add` / `mcp_list` / `mcp_remove`,
   plus a bundled `mcp-setup` skill that fires whenever the conversation turns to
   installing or debugging an MCP server.
 - **The `cm` CLI**, from anywhere inside the repo.

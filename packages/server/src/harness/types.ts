@@ -95,7 +95,7 @@ export interface HarnessCapabilities {
    */
   preToolGuard: boolean;
   /**
-   * How this runtime wants Dispatch's own `mcp__manager__*` tools attached.
+   * How this runtime wants Dispatch's own `mcp__dispatch-*__*` tools attached.
    *
    * The one place a runtime difference legitimately reaches the broker, because
    * the two answers need different things BUILT: "in-process" needs a live
@@ -218,8 +218,19 @@ export interface HarnessSessionSpec {
    * them (a probe session, or a harness that couldn't be granted).
    */
   managerMcp?:
-    | { transport: "in-process"; server: unknown }
-    | { transport: "http"; url: string; token: string; tokenEnvVar: string };
+    /** Server name (`dispatch-github`, …) → the SDK server object. */
+    | { transport: "in-process"; servers: Record<string, unknown> }
+    /**
+     * One bearer token for the whole session, and one endpoint per category —
+     * the token is scoped to the CHAT, so splitting it per category would buy
+     * nothing and multiply what a session has to keep alive.
+     */
+    | {
+        transport: "http";
+        urls: Record<string, string>;
+        token: string;
+        tokenEnvVar: string;
+      };
   /** Skills to expose. */
   skills: HarnessSkillSpec[];
   /** Resume this prior session id instead of starting fresh. */

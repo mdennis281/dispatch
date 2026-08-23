@@ -1,7 +1,7 @@
 /**
  * mcp-config-editor — bind the `dispatch` CLI's config core to one project's repo.
  *
- * The manager's `mcp__manager__mcp_add|mcp_list|mcp_remove` tools and the `dispatch mcp`
+ * The manager's `mcp__dispatch-mcp__mcp_add|mcp_list|mcp_remove` tools and the `dispatch mcp`
  * terminal commands MUST produce identical config, so both go through the same
  * `@dispatch/cli/core` functions; this module is only the adapter that fixes the "which
  * project" argument and narrows the result to the shape the MCP tools consume.

@@ -116,7 +116,7 @@ function ServerToggle({
   if (enablement.alwaysOn) {
     return (
       <Tooltip
-        label={`${server.name} is how agents create PRs, record memory and write this very setting — it can't be switched off.`}
+        label={`${server.name} is one of Dispatch's own tool servers — between them they create PRs, record memory and write this very setting, so they can't be switched off.`}
       >
         <Chip tone="muted">always on</Chip>
       </Tooltip>

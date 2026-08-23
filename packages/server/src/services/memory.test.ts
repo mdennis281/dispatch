@@ -140,7 +140,7 @@ describe("MemoryService — injection + recall", () => {
     expect(injection).toContain("`two` — second fact");
     // Bounded — the full body is NOT injected.
     expect(injection).not.toContain("body 1");
-    expect(injection).toContain("mcp__manager__recall");
+    expect(injection).toContain("mcp__dispatch-memory__recall");
   });
 
   it("recall returns the index with no query and matching bodies with a query", async () => {
@@ -445,7 +445,7 @@ describe("MemoryService — graded auto-surface", () => {
     // The DESCRIPTION is offered; the body stays out of context entirely.
     expect(out!.block).toContain("how turret aiming works");
     expect(out!.block).not.toContain("turret detail.");
-    expect(out!.block).toContain("mcp__manager__recall");
+    expect(out!.block).toContain("mcp__dispatch-memory__recall");
     expect(out!.block.length).toBeLessThan(700);
   });
 

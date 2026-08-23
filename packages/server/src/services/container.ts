@@ -211,7 +211,7 @@ export function createServices(
   // fires there is usually nothing left for it to find. It exists for the trees
   // whose chat never came back.
   const WORKTREE_SWEEP_MS = 60 * 60_000;
-  // Persistent named shells exposed to sessions as `mcp__manager__terminal`.
+  // Persistent named shells exposed to sessions as `mcp__dispatch-workspace__terminal`.
   // The store makes them durable: the roster and each shell's transcript survive
   // a restart, so "what did that build print?" outlives the process that ran it.
   const terminals = overrides.terminals ?? new TerminalService({ bus, store });
@@ -231,7 +231,7 @@ export function createServices(
   const projectConfig =
     overrides.projectConfig ?? new ProjectConfigService({ store, bus });
   // Per-project durable agent memory: injected at session start + exposed to the
-  // agent as `mcp__manager__remember|recall|forget`, and curated in the UI. Reads
+  // agent as `mcp__dispatch-memory__remember|recall|forget`, and curated in the UI. Reads
   // from the repo `.dispatch/memory/` when the project has a config dir
   // (source of truth), else the `.data` store (back-compat).
   const memory =
@@ -610,7 +610,7 @@ export function createServices(
       await prRegistry.requestReviewAgent(ref.repo, ref.number, chatId).catch(() => {});
     })();
   };
-  // `mcp__manager__spawn_chat`: an agent starting ANOTHER chat, after the human
+  // `mcp__dispatch-chat__spawn_chat`: an agent starting ANOTHER chat, after the human
   // approved it (the broker asks; this only runs once they said yes). Deliberately
   // the SAME `createChat` → `ensureSession` → `sendMessage` path a human's "New
   // chat" takes, so a spawned chat is an ordinary chat in every respect — same

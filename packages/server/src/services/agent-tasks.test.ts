@@ -126,7 +126,7 @@ describe("buildTaskParts — config briefings", () => {
   it("routes MCP work through the tool + skill rather than hand-editing", () => {
     // The recurring failure: an agent writes `.mcp.json`, which nothing reads.
     const out = prompt("config:mcp");
-    expect(out).toContain("mcp__manager__mcp_add");
+    expect(out).toContain("mcp__dispatch-mcp__mcp_add");
     expect(out).toContain("mcp-setup");
     expect(out).toMatch(/do not hand-edit/i);
     expect(out).toContain("${VAR}");

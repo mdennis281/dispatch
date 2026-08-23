@@ -149,7 +149,7 @@ const CONFIG_BRIEFS: Record<string, ConfigBrief> = {
   "config:mcp": {
     location: (d) => `${d.configDir}/${d.manifest}`,
     rules: () => [
-      "**Use the `mcp__manager__mcp_add` tool** — do not hand-edit the manifest, and do not " +
+      "**Use the `mcp__dispatch-mcp__mcp_add` tool** — do not hand-edit the manifest, and do not " +
         "write `.mcp.json`, `~/.claude.json` or `.claude/settings.json`; this harness reads " +
         "none of those.",
       "Load the `mcp-setup` skill before you start: it has the real procedure and the " +
@@ -559,7 +559,7 @@ function memoryConsolidateBriefText(input: {
       "between near-identical candidates on lexical noise, so the WORSE copy of a fact wins " +
       "half the time. A stale fact is worse still — agents act on it.",
     "",
-    "**Your tools** — `mcp__manager__memory_list` (inventory with size, age, retrieval " +
+    "**Your tools** — `mcp__dispatch-memory__memory_list` (inventory with size, age, retrieval " +
       "counts and `[[link]]` neighbours in both directions), `memory_search` (exhaustive " +
       "literal/regex search — use this, not `recall`, when a partial answer would be " +
       "wrong), `memory_similar` (near-duplicate detection), " +
@@ -915,7 +915,7 @@ function prReviewBriefText(input: {
       "",
       "**Posting the review**",
       "",
-      "- Post it with `mcp__manager__post_review`. One inline comment per finding, with " +
+      "- Post it with `mcp__dispatch-github__post_review`. One inline comment per finding, with " +
         "`path` and `line` as they appear in the NEW file — that is what makes each finding " +
         "a review THREAD the author can answer and resolve.",
       blocking

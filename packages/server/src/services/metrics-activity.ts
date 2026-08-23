@@ -23,7 +23,13 @@
  * or "" for the chat's own main loop. One tracker serves one chat, so it keys on
  * `runId` alone.
  */
-import type { ChatStatus, MetricState } from "@dispatch/shared";
+import {
+  isManagerServer,
+  managerToolQualifiedName,
+  parseMcpToolName,
+  type ChatStatus,
+  type MetricState,
+} from "@dispatch/shared";
 import { spawnedSubagent } from "./metrics-classify.js";
 
 /** The main loop's run id. Empty string, matching the NULL-is-"" convention. */
@@ -44,30 +50,45 @@ const LIMIT_ID = "\u0000limit";
 /* ------------------------------------------------------------- classifying */
 
 /**
- * Tools whose name, normalized, means "a shell command is running".
+ * The BARE Dispatch tool a name refers to, or undefined when it isn't one.
  *
- * `manager__terminal` is here and `manager__terminal_output` is not: the first
- * runs a command, the second reads scrollback that already exists.
+ * These predicates used to match the substring `manager__terminal`, which was
+ * wrong in two directions and only ever half-noticed: `terminal_output` had to be
+ * excluded by hand because it contains `terminal`, and any third-party server
+ * whose name ended in `manager` matched too. Parsing the name instead means the
+ * split onto `dispatch-*` servers moved these for free — and it is why a
+ * substring sweep did NOT have to find this file's strings correctly.
  */
-function isShell(n: string): boolean {
+function dispatchTool(name: string): string | undefined {
+  const parsed = parseMcpToolName(name);
+  return parsed && isManagerServer(parsed.server) ? parsed.tool : undefined;
+}
+
+/**
+ * Tools whose name means "a shell command is running".
+ *
+ * `terminal` is here and `terminal_output` is not: the first runs a command, the
+ * second reads scrollback that already exists.
+ */
+function isShell(n: string, tool: string | undefined): boolean {
   return (
     n === "bash" ||
     n === "powershell" ||
     n === "shell_command" ||
     n.endsWith("_shell_command") ||
-    (n.includes("manager__terminal") && !n.includes("terminal_output")) ||
-    n.includes("manager__run_subapp")
+    tool === "terminal" ||
+    tool === "run_subapp"
   );
 }
 
 /** Tools that block on another agent — a spawned subagent or a peer chat. */
-function isAgentWait(n: string): boolean {
+function isAgentWait(n: string, tool: string | undefined): boolean {
   return (
     n === "task" ||
     n === "agent" ||
     n.endsWith("_wait_agent") ||
     n.includes("collaboration_wait_agent") ||
-    n.includes("manager__wait_for_chat")
+    tool === "wait_for_chat"
   );
 }
 
@@ -78,13 +99,13 @@ function isAgentWait(n: string): boolean {
  * (`permission-request`) and is opened by {@link ActivityTracker.blocked}, since
  * it can gate a tool whose own state is something else entirely.
  */
-function isHumanWait(n: string): boolean {
+function isHumanWait(n: string, tool: string | undefined): boolean {
   return (
     n === "askuserquestion" ||
     n === "exitplanmode" ||
-    n.includes("manager__ask_user") ||
-    n.includes("manager__request_exemption") ||
-    n.includes("manager__spawn_chat")
+    tool === "ask_user" ||
+    tool === "request_exemption" ||
+    tool === "spawn_chat"
   );
 }
 
@@ -96,16 +117,19 @@ function isHumanWait(n: string): boolean {
  * this machine is not the network — so calling every `mcp__` tool remote would
  * file most of the working time under blocked.
  */
-function isRemoteWait(n: string): boolean {
+function isRemoteWait(n: string, tool: string | undefined): boolean {
   return (
     n === "webfetch" ||
     n === "websearch" ||
-    n.includes("manager__watch_pr") ||
-    n.includes("manager__create_pr") ||
-    n.includes("manager__approve_pr") ||
-    n.includes("manager__request_review") ||
-    n.includes("manager__post_review") ||
-    n.includes("manager__resolve_thread")
+    // Everything on the GitHub category server blocks on github.com. Named
+    // individually rather than by category so adding a LOCAL tool there later
+    // doesn't silently start counting as network time.
+    tool === "watch_pr" ||
+    tool === "create_pr" ||
+    tool === "approve_pr" ||
+    tool === "request_review" ||
+    tool === "post_review" ||
+    tool === "resolve_thread"
   );
 }
 
@@ -134,19 +158,21 @@ function safeJson(value: unknown): string {
  */
 export function classifyActivity(name: string, input?: Record<string, unknown>): MetricState {
   const n = name.toLowerCase().replace(/[.:/]/g, "_");
+  const tool = dispatchTool(name);
   // Codex routes some calls through a generic `functions.exec` carrier, so the
   // real tool is in the payload rather than the name.
   const payload = input ? safeJson(input).toLowerCase() : "";
   const carried =
     n === "functions_exec" &&
-    (payload.includes("mcp__manager__terminal") || payload.includes("shell_command"));
-  // Agent waits are tested BEFORE sleeps, because `manager__wait_for_chat`
-  // matches both spellings and it is a peer it's blocked on, not a nap.
-  if (isAgentWait(n)) return "waiting_agent";
-  if (n === "functions_wait" || n.includes("manager__wait")) return "sleeping";
-  if (isHumanWait(n)) return "waiting_human";
-  if (isRemoteWait(n)) return "waiting_remote";
-  if (isShell(n) || carried) return "shell";
+    (payload.includes(managerToolQualifiedName("terminal").toLowerCase()) ||
+      payload.includes("shell_command"));
+  // Agent waits are tested BEFORE sleeps, because `wait_for_chat` is a peer it's
+  // blocked on, not a nap.
+  if (isAgentWait(n, tool)) return "waiting_agent";
+  if (n === "functions_wait" || tool === "wait") return "sleeping";
+  if (isHumanWait(n, tool)) return "waiting_human";
+  if (isRemoteWait(n, tool)) return "waiting_remote";
+  if (isShell(n, tool) || carried) return "shell";
   return "tool";
 }
 
@@ -373,7 +399,7 @@ export class ActivityTracker {
    * The tools that block on a human RAISE the very card they are waiting for,
    * and that card registers a permission wait of its own — so one wait arrived
    * twice and production spans showed the pair nested, `spawn_chat` inside
-   * `mcp__manager__spawn_chat`, doubling the `waiting_human` total. Whichever
+   * `spawn_chat`, doubling the `waiting_human` total. Whichever
    * sighting lands first owns the wait; the second is the same wait again.
    *
    * Per ACTOR, and a scan of a set that holds one or two ids: the main loop and

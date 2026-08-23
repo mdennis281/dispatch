@@ -13,7 +13,7 @@
  * do the narration.
  *
  * The write routes exist because the shells were originally agent-only: the only
- * way to get one was `mcp__manager__terminal`, so for anyone who had never had an
+ * way to get one was `mcp__dispatch-workspace__terminal`, so for anyone who had never had an
  * agent open a shell the Terminals tab was empty forever and the feature was
  * indistinguishable from missing. They are a thin wrapper over exactly what the
  * MCP tool calls — same TerminalService, same per-chat cap, same cwd rule (the

@@ -137,10 +137,14 @@ describe("CodexStreamDecoder — tools", () => {
     const out = d.decode(
       note(
         "item/started",
-        item({ type: "mcpToolCall", id: "m1", server: "manager", tool: "wait", arguments: { ms: 5 } }),
+        item({ type: "mcpToolCall", id: "m1", server: "dispatch-session", tool: "wait", arguments: { ms: 5 } }),
       ),
     );
-    expect(out[0]).toMatchObject({ name: "mcp__manager__wait", server: "manager", input: { ms: 5 } });
+    expect(out[0]).toMatchObject({
+      name: "mcp__dispatch-session__wait",
+      server: "dispatch-session",
+      input: { ms: 5 },
+    });
   });
 
   it("marks a failed MCP call as not ok", () => {

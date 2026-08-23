@@ -1,6 +1,6 @@
 ---
 name: mcp-setup
-description: Add, configure, debug, or build an MCP server for this project. Use whenever the conversation turns to installing/adding/connecting an MCP server, wiring up a tool integration (Linear, Sentry, Postgres, Figma, Playwright, a company API…), editing mcpServers config, troubleshooting a server that won't connect or whose tools aren't showing up, giving each git worktree its own MCP instance or fixing MCP port conflicts between parallel chats, returning a screenshot/video/file from a tool, or writing a new MCP server from scratch. Covers Dispatch's `.dispatch/project.yaml` config, the `cm mcp` CLI, the `mcp__manager__mcp_*` tools, and secret handling.
+description: Add, configure, debug, or build an MCP server for this project. Use whenever the conversation turns to installing/adding/connecting an MCP server, wiring up a tool integration (Linear, Sentry, Postgres, Figma, Playwright, a company API…), editing mcpServers config, troubleshooting a server that won't connect or whose tools aren't showing up, giving each git worktree its own MCP instance or fixing MCP port conflicts between parallel chats, returning a screenshot/video/file from a tool, or writing a new MCP server from scratch. Covers Dispatch's `.dispatch/project.yaml` config, the `cm mcp` CLI, the `mcp__dispatch-mcp__*` tools, and secret handling.
 ---
 
 # MCP setup in Dispatch
@@ -35,9 +35,9 @@ rest is split out — read the one you need, not all four.
 **In-session (preferred when you're already in a chat):**
 
 ```
-mcp__manager__mcp_list    → what's already configured (check first, don't duplicate)
-mcp__manager__mcp_add     → add one
-mcp__manager__mcp_remove  → remove one
+mcp__dispatch-mcp__mcp_list    → what's already configured (check first, don't duplicate)
+mcp__dispatch-mcp__mcp_add     → add one
+mcp__dispatch-mcp__mcp_remove  → remove one
 ```
 
 **From a terminal** (identical validation, identical output — same core):
@@ -97,7 +97,7 @@ them which variable to export. Don't write the literal key into `project.yaml`.
 
 ## Verifying it worked
 
-1. `mcp__manager__mcp_list` (or `cm mcp list`) — confirms it's in the config.
+1. `mcp__dispatch-mcp__mcp_list` (or `cm mcp list`) — confirms it's in the config.
 2. **The manager UI's MCP catalog** (top bar, or the command palette) — this is
    the real check. It probes each configured server live and shows connection
    status plus every tool it exposes, with parameters. A server that's configured

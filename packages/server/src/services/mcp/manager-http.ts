@@ -1,7 +1,7 @@
 /**
  * THE MANAGER TOOLS, SERVED OVER HTTP.
  *
- * `mcp__manager__*` is Dispatch's own toolbox — wait, wait_for_chat,
+ * `mcp__dispatch-*__*` is Dispatch's own toolbox — wait, wait_for_chat,
  * context_usage, compact_context, watch_pr, approve_pr, terminal, remember /
  * recall / forget, run_subapp, and the MCP config editors. Every one of them
  * closes over live server objects (the TerminalService, the GitHubService, the
@@ -18,8 +18,14 @@
  * same `createManagerMcpServer` factory produces an MCP `Server`; here we bolt a
  * `StreamableHTTPServerTransport` onto it and expose it on the Fastify server
  * Dispatch already runs. Claude keeps calling in-process; Codex dials
- * `http://127.0.0.1:<port>/api/mcp/manager` with a bearer token. Neither knows
+ * `http://127.0.0.1:<port>/api/mcp/manager/<category>` with a bearer token. Neither knows
  * the other exists, and a change to a tool lands in both at once.
+ *
+ * ONE TOKEN, EIGHT PATHS. Dispatch's tools are partitioned across eight category
+ * servers, and Codex wants each as a separate MCP server — so the bridge mounts
+ * `/api/mcp/manager/<category>` and builds only that category per request. The
+ * grant stays per-CHAT: the token authorises a session, not a category, so
+ * minting eight would multiply what a session has to revoke for no gain.
  *
  * SECURITY. The endpoint drives real side effects (shells, merges, memory), so
  * it is not open just because it is on loopback — anything running as the user
@@ -31,7 +37,12 @@ import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
-import { createManagerMcpServer, type ManagerMcpContext } from "./manager-mcp.js";
+import { createManagerCategoryServer, type ManagerMcpContext } from "./manager-mcp.js";
+import {
+  MANAGER_CATEGORIES,
+  managerServerName,
+  type ManagerCategory,
+} from "@dispatch/shared";
 
 /** A minted grant: which chat's manager tools a token unlocks. */
 interface Grant {
@@ -46,14 +57,22 @@ export interface ManagerMcpGrant {
   token: string;
   /** Name of the env var the token is passed through. */
   tokenEnvVar: string;
-  /** Absolute URL of the streamable HTTP endpoint. */
-  url: string;
+  /** Absolute URL of one category server's streamable HTTP endpoint. */
+  urlFor: (serverName: string) => string;
   /** Drop the grant (called when the session disposes). */
   revoke: () => void;
 }
 
-/** Path the bridge is mounted at. */
+/** Path prefix the bridge is mounted under; one child path per category. */
 export const MANAGER_MCP_PATH = "/api/mcp/manager";
+
+/** The route pattern Fastify registers — the category is the last segment. */
+export const MANAGER_MCP_ROUTE = `${MANAGER_MCP_PATH}/:category`;
+
+/** Recognise a category from a URL segment, or undefined when it isn't one. */
+export function managerCategoryFromPath(segment: string | undefined): ManagerCategory | undefined {
+  return MANAGER_CATEGORIES.find((c) => c === segment);
+}
 /** Env var Codex reads the bearer token from. */
 export const MANAGER_MCP_TOKEN_ENV = "DISPATCH_MANAGER_MCP_TOKEN";
 
@@ -75,10 +94,13 @@ export class ManagerMcpBridge {
   mint(chatId: string, context: () => ManagerMcpContext): ManagerMcpGrant {
     const token = randomBytes(24).toString("base64url");
     this.grants.set(token, { chatId, context });
+    // Captured, not read at call time: a `setOrigin` between mint and use would
+    // otherwise hand out URLs for a port the grant was never issued against.
+    const origin = this.origin;
     return {
       token,
       tokenEnvVar: MANAGER_MCP_TOKEN_ENV,
-      url: `${this.origin}${MANAGER_MCP_PATH}`,
+      urlFor: (serverName) => `${origin}${MANAGER_MCP_PATH}/${serverName.replace(/^dispatch-/, "")}`,
       revoke: () => this.grants.delete(token),
     };
   }
@@ -111,6 +133,7 @@ export class ManagerMcpBridge {
     res: ServerResponse,
     body: unknown,
     authorization: string | undefined,
+    category: string | undefined,
   ): Promise<void> {
     const grant = this.resolve(authorization);
     if (!grant) {
@@ -118,10 +141,23 @@ export class ManagerMcpBridge {
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
+    const resolved = managerCategoryFromPath(category);
+    if (!resolved) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "unknown-category" }));
+      return;
+    }
 
-    const { instance } = createManagerMcpServer(grant.context()) as unknown as {
-      instance: McpServer;
-    };
+    const server = createManagerCategoryServer(grant.context(), resolved);
+    // A category this session has no bound tool in is a 404, not an empty server:
+    // an MCP server that lists nothing reads to Codex as a working integration
+    // with no tools, which is indistinguishable from a broken one.
+    if (!server) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "category-unavailable", category: managerServerName(resolved) }));
+      return;
+    }
+    const { instance } = server as unknown as { instance: McpServer };
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     // Closing the transport must also close the server, or the pair leaks for
     // the lifetime of the process.

@@ -26,6 +26,7 @@
  * `browser:` auto-gate decided (see services/mcp/browser-mcp.ts). Which is why
  * this resolver takes the default as an argument instead of assuming one.
  */
+import { MANAGER_SERVER_NAMES } from "./manager-tools.js";
 
 /** A layer that can pin a server on or off. */
 export type McpEnablementScope = "app" | "project";
@@ -60,11 +61,16 @@ export interface McpEnablement {
 /**
  * Servers that ignore both layers.
  *
- * `manager` is how an agent creates a PR, records memory, drives a terminal —
- * and how this very setting gets written. A UI that offers to switch it off is
- * offering to remove the tool that switches it back on, so it doesn't.
+ * Dispatch's own `dispatch-*` servers are how an agent creates a PR, records
+ * memory, drives a terminal — and how this very setting gets written. A UI that
+ * offers to switch one off is offering to remove the tool that switches it back
+ * on, so it doesn't.
+ *
+ * Derived from the registry rather than listed: a category added later is
+ * always-on the moment it exists, instead of being quietly togglable until
+ * somebody notices this line.
  */
-export const MCP_ALWAYS_ON: readonly string[] = ["manager"];
+export const MCP_ALWAYS_ON: readonly string[] = MANAGER_SERVER_NAMES;
 
 /** True when no toggle may disable this server. */
 export function isAlwaysOnMcpServer(name: string): boolean {

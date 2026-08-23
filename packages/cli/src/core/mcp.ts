@@ -4,7 +4,7 @@
  *
  * This module is the SINGLE implementation of every MCP config mutation in
  * Dispatch. The `dispatch mcp …` commands are a thin arg-parsing shell over it,
- * and the server's `mcp__manager__mcp_add|mcp_list|mcp_remove` tools call the
+ * and the server's `mcp__dispatch-mcp__mcp_add|mcp_list|mcp_remove` tools call the
  * very same functions — so an agent editing config in-session and a human at the
  * terminal can never drift apart or half-implement each other's validation.
  *

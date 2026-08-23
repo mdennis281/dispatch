@@ -274,7 +274,7 @@ export type ManifestDefaults = z.infer<typeof ManifestDefaultsSchema>;
 
 /**
  * Per-project override of the app's spawn-chat consent policy — whether an agent
- * calling `mcp__manager__spawn_chat` here may start a chat WITHOUT stopping for
+ * calling `mcp__dispatch-chat__spawn_chat` here may start a chat WITHOUT stopping for
  * the human's approval. Absent → the global setting decides, which defaults to
  * asking. Committed with the repo because "agents may fan themselves out
  * unattended in this codebase" is a statement about the codebase, not about

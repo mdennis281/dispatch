@@ -19,7 +19,7 @@ export interface McpToolParam {
 
 /** One MCP tool/endpoint exposed by a server. */
 export interface McpToolInfo {
-  /** Fully-qualified name the agent sees, e.g. "mcp__manager__wait". */
+  /** Fully-qualified name the agent sees, e.g. "mcp__dispatch-session__wait". */
   qualifiedName: string;
   /** Bare tool name within its server, e.g. "wait". */
   name: string;

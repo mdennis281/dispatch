@@ -1,7 +1,7 @@
 /**
  * The contract between a PR tool and the card that renders it.
  *
- * WHY this exists. Every `mcp__manager__*_pr` tool answers in prose, because its
+ * WHY this exists. Every `mcp__dispatch-github__*_pr` tool answers in prose, because its
  * first reader is a model. The transcript's second reader is a human, who wants
  * the PR's title, its size, who is reviewing and which job went red — and
  * re-deriving that from prose is exactly the kind of guesswork that goes subtly

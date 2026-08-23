@@ -43,7 +43,7 @@ describe("background shell guard", () => {
     const out = await guard()("Bash", { command: "npm run dev", run_in_background: true });
     expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain(
-      "mcp__manager__terminal",
+      "mcp__dispatch-workspace__terminal",
     );
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain("background: true");
   });
@@ -106,12 +106,12 @@ describe("worktree guard", () => {
     });
     expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain(
-      "mcp__manager__worktree",
+      "mcp__dispatch-workspace__worktree",
     );
   });
 
-  it("denies it through mcp__manager__terminal too — the obvious bypass", async () => {
-    const out = await wtGuard()("mcp__manager__terminal", {
+  it("denies it through mcp__dispatch-workspace__terminal too — the obvious bypass", async () => {
+    const out = await wtGuard()("mcp__dispatch-workspace__terminal", {
       name: "wt",
       command: "cd /repo && git worktree add -b feat/y ../wt/feat-y",
     });

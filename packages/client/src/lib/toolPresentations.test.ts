@@ -14,7 +14,7 @@ describe("tool presentation handlers", () => {
       language: "bash",
     });
     expect(
-      toolPresentation(tool("mcp__manager__terminal", { name: "build", command: "Get-ChildItem src" })),
+      toolPresentation(tool("mcp__dispatch-workspace__terminal", { name: "build", command: "Get-ChildItem src" })),
     ).toEqual({ kind: "shell", command: "Get-ChildItem src", language: "powershell", terminal: "build" });
   });
 
@@ -24,26 +24,26 @@ describe("tool presentation handlers", () => {
   });
 
   it("gives first-party Dispatch MCPs semantic presentations", () => {
-    expect(toolPresentation(tool("mcp__manager__ask_user", { questions: [] }))).toMatchObject({
+    expect(toolPresentation(tool("mcp__dispatch-confirm__ask_user", { questions: [] }))).toMatchObject({
       kind: "dispatch",
       title: "Ask user",
       activity: "Waiting for an answer",
       category: "chat",
     });
-    expect(toolPresentation(tool("mcp__manager__wait", { seconds: 10 }))).toMatchObject({
+    expect(toolPresentation(tool("mcp__dispatch-session__wait", { seconds: 10 }))).toMatchObject({
       kind: "dispatch",
       title: "Wait",
       activity: "Waiting",
       category: "wait",
       countdownSeconds: 10,
     });
-    expect(toolPresentation(tool("mcp__manager__watch_pr", { number: 40 }))).toMatchObject({
+    expect(toolPresentation(tool("mcp__dispatch-github__watch_pr", { number: 40 }))).toMatchObject({
       kind: "dispatch",
       title: "Watch pull request",
       subject: "PR #40",
       category: "pr",
     });
-    expect(toolPresentation(tool("mcp__manager__brand_new_tool", { name: "demo" }))).toMatchObject({
+    expect(toolPresentation(tool("mcp__dispatch-workspace__brand_new_tool", { name: "demo" }))).toMatchObject({
       kind: "dispatch",
       title: "Brand New Tool",
       subject: "demo",
@@ -54,7 +54,7 @@ describe("tool presentation handlers", () => {
 describe("groupTranscriptRows", () => {
   it("groups handled shell calls across their folded results", () => {
     const a = tool("Bash", { command: "pwd" }, "a");
-    const b = tool("mcp__manager__terminal", { command: "Get-Location" }, "b");
+    const b = tool("mcp__dispatch-workspace__terminal", { command: "Get-Location" }, "b");
     const result: ChatMessage = {
       kind: "tool_result", id: "r", toolUseId: "a", chatId: "chat", ts: 2, turn: 0,
       name: "Bash", ok: true, content: "/repo",
@@ -66,8 +66,8 @@ describe("groupTranscriptRows", () => {
 
   it("keeps first-party MCP exchanges inside the same terminal run", () => {
     const shell = tool("Bash", { command: "pwd" }, "shell");
-    const recall = tool("mcp__manager__recall", { query: "terminal UI" }, "recall");
-    const remember = tool("mcp__manager__remember", { name: "terminal-ui" }, "remember");
+    const recall = tool("mcp__dispatch-memory__recall", { query: "terminal UI" }, "recall");
+    const remember = tool("mcp__dispatch-memory__remember", { name: "terminal-ui" }, "remember");
     const grouped = groupTranscriptRows([shell, recall, remember]);
     expect(grouped).toHaveLength(1);
     expect(grouped[0]).toMatchObject({ kind: "shell", rows: [shell, recall, remember] });

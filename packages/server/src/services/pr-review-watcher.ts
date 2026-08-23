@@ -1,7 +1,7 @@
 /**
  * PrReviewWatcher — server-side "a PR this chat owns needs you" surface.
  *
- * WHY this exists, precisely. `mcp__manager__watch_pr` is a PULL api: it only
+ * WHY this exists, precisely. `mcp__dispatch-github__watch_pr` is a PULL api: it only
  * works while an agent keeps calling it in a loop. On the run that motivated
  * this file, the agent called it ONCE, got back "no CI checks configured",
  * concluded there was nothing to wait for, and stopped. Two subsequent rounds of
@@ -699,9 +699,9 @@ export class PrReviewWatcher {
     const prompt =
       `New activity on your PR #${ref.number}${ref.url ? ` (${ref.url})` : ""}: ` +
       `${reasons.join("; ")}.\n\n` +
-      "Work this review round: call `mcp__manager__watch_pr` for the details, address " +
-      "what it reports, call `mcp__manager__resolve_thread` for each thread you actually " +
-      "fixed, and once your fixes are pushed call `mcp__manager__request_review` to put " +
+      "Work this review round: call `mcp__dispatch-github__watch_pr` for the details, address " +
+      "what it reports, call `mcp__dispatch-github__resolve_thread` for each thread you actually " +
+      "fixed, and once your fixes are pushed call `mcp__dispatch-github__request_review` to put " +
       "the reviewer back on the hook (submitting a review clears their request — new " +
       "commits do NOT re-queue them). Keep going until the PR lands.";
     // Sent as a `brief`, not as bare text: nobody typed this. Rendered flat it

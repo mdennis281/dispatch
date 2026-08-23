@@ -2,7 +2,7 @@
  * Tests for the MCP catalog: the pure builder (`buildProjectMcpCatalog`) and the
  * live `GET /api/projects/:projectId/mcp` route.
  *
- * The custom "manager" server must enumerate its full tool set (incl `watch_pr`)
+ * Dispatch's own category servers must enumerate their full tool set (incl `watch_pr`)
  * with non-empty input schemas + flattened params, and an external server that
  * fails to connect must surface as `status:"error"` WITHOUT failing the endpoint
  * (the external probe is injected here, so nothing is ever spawned).
@@ -13,6 +13,7 @@
  * NOT in the repo — a leak in either direction commits somebody's local
  * preference or strands a team decision on one machine.
  */
+import { MANAGER_SERVER_NAMES } from "@dispatch/shared";
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -43,10 +44,31 @@ function makeProject(mcpServers?: Project["mcpServers"]): Project {
   };
 }
 
+/**
+ * One tool from a catalog, found across ALL of Dispatch's category servers.
+ *
+ * The toolbox is partitioned across eight entries now, so `servers[0].tools`
+ * answers a question about `dispatch-github` rather than about the toolbox —
+ * and a lookup that misses returns `undefined` and throws on the next line,
+ * which reads as an unrelated crash rather than as "wrong server".
+ */
+const dispatchTool = (catalog: McpCatalog, name: string) => {
+  const found = catalog.servers
+    .filter((s) => MANAGER_SERVER_NAMES.includes(s.name))
+    .flatMap((s) => s.tools)
+    .find((t) => t.name === name);
+  if (!found) throw new Error(`no Dispatch tool named ${name} in the catalog`);
+  return found;
+};
+
+/** Every tool across Dispatch's own servers. */
+const dispatchTools = (catalog: McpCatalog) =>
+  catalog.servers.filter((s) => MANAGER_SERVER_NAMES.includes(s.name)).flatMap((s) => s.tools);
+
 /* ---------------------------------------------------------------- builder */
 
 describe("mcp-catalog — builder", () => {
-  it("enumerates the manager server with the full tool set + schemas/params", async () => {
+  it("enumerates Dispatch's category servers with the full tool set + schemas/params", async () => {
     const catalog = await buildProjectMcpCatalog(makeProject(), {
       bindings: {
         github: true,
@@ -64,13 +86,19 @@ describe("mcp-catalog — builder", () => {
       },
     });
 
-    expect(catalog.servers).toHaveLength(1);
-    const manager = catalog.servers[0]!;
-    expect(manager.name).toBe("manager");
-    expect(manager.kind).toBe("custom");
-    expect(manager.status).toBe("ok");
-    expect(manager.transport).toEqual({ type: "sdk" });
-
+    // Fully bound → every category is present, and nothing else.
+    expect(catalog.servers.map((s) => s.name)).toEqual([...MANAGER_SERVER_NAMES]);
+    for (const server of catalog.servers) {
+      expect(server.kind).toBe("custom");
+      expect(server.status).toBe("ok");
+      expect(server.transport).toEqual({ type: "sdk" });
+    }
+    // The assertions below are about the toolbox as a whole, not about one
+    // server, so they run over the union — the partition is asserted separately.
+    const manager = {
+      name: "dispatch",
+      tools: catalog.servers.flatMap((s) => s.tools),
+    };
     const names = manager.tools.map((t) => t.name);
     expect(names).toEqual(
       expect.arrayContaining([
@@ -105,8 +133,12 @@ describe("mcp-catalog — builder", () => {
       "mcp_list",
       "prewarm_mcp",
     ]);
+    for (const server of catalog.servers) {
+      for (const tool of server.tools) {
+        expect(tool.qualifiedName).toBe(`mcp__${server.name}__${tool.name}`);
+      }
+    }
     for (const tool of manager.tools) {
-      expect(tool.qualifiedName).toBe(`mcp__manager__${tool.name}`);
       expect(tool.description.length).toBeGreaterThan(0);
       if (!NO_ARG_TOOLS.has(tool.name)) {
         const props = (tool.inputSchema as { properties?: Record<string, unknown> }).properties;
@@ -129,7 +161,7 @@ describe("mcp-catalog — builder", () => {
     const catalog = await buildProjectMcpCatalog(makeProject(), {
       bindings: { github: false, terminals: true, memory: true },
     });
-    const manager = catalog.servers[0]!;
+    const manager = { tools: catalog.servers.flatMap((s) => s.tools) };
     // watch_pr is gated on the github binding → unavailable when unbound…
     expect(manager.tools.find((t) => t.name === "watch_pr")!.available).toBe(false);
     // …as is approve_pr on its own (auto-merge) binding, which this project
@@ -145,22 +177,22 @@ describe("mcp-catalog — builder", () => {
     const off = await buildProjectMcpCatalog(makeProject(), {
       bindings: { github: true, prApproval: false },
     });
-    expect(off.servers[0]!.tools.find((t) => t.name === "approve_pr")!.available).toBe(false);
+    expect(dispatchTool(off, "approve_pr").available).toBe(false);
     const on = await buildProjectMcpCatalog(makeProject(), {
       bindings: { github: true, prApproval: true },
     });
-    expect(on.servers[0]!.tools.find((t) => t.name === "approve_pr")!.available).toBe(true);
+    expect(dispatchTool(on, "approve_pr").available).toBe(true);
   });
 
   it("offers request_exemption only where a guard actually refuses things", async () => {
     // On `warn`/`off` nothing is blocked, so a tool for asking to have a guard
     // lifted would be an invitation to seek permission nobody needed to give.
     const off = await buildProjectMcpCatalog(makeProject(), { bindings: { exemptions: false } });
-    expect(off.servers[0]!.tools.find((t) => t.name === "request_exemption")!.available).toBe(
+    expect(dispatchTool(off, "request_exemption").available).toBe(
       false,
     );
     const on = await buildProjectMcpCatalog(makeProject(), { bindings: { exemptions: true } });
-    expect(on.servers[0]!.tools.find((t) => t.name === "request_exemption")!.available).toBe(true);
+    expect(dispatchTool(on, "request_exemption").available).toBe(true);
   });
 
   it("offers create_pr only where change ships through a PR", async () => {
@@ -169,11 +201,11 @@ describe("mcp-catalog — builder", () => {
     const off = await buildProjectMcpCatalog(makeProject(), {
       bindings: { github: true, prCreate: false },
     });
-    expect(off.servers[0]!.tools.find((t) => t.name === "create_pr")!.available).toBe(false);
+    expect(dispatchTool(off, "create_pr").available).toBe(false);
     const on = await buildProjectMcpCatalog(makeProject(), {
       bindings: { github: true, prCreate: true },
     });
-    expect(on.servers[0]!.tools.find((t) => t.name === "create_pr")!.available).toBe(true);
+    expect(dispatchTool(on, "create_pr").available).toBe(true);
   });
 
   it("reports an external server that fails to connect as status:error (endpoint intact)", async () => {
@@ -185,8 +217,8 @@ describe("mcp-catalog — builder", () => {
       { probe: failingProbe },
     );
 
-    // Manager server still enumerated — one bad external never fails the whole thing.
-    expect(catalog.servers[0]!.name).toBe("manager");
+    // Dispatch's own servers still enumerated — one bad external never fails the whole thing.
+    expect(catalog.servers[0]!.name).toBe(MANAGER_SERVER_NAMES[0]);
     const broken = catalog.servers.find((s) => s.name === "broken")!;
     expect(broken.kind).toBe("external");
     expect(broken.status).toBe("error");
@@ -240,8 +272,8 @@ describe("mcp-catalog — builder", () => {
       mcpServers: { "claude-in-chrome": { type: "sse", url: "http://127.0.0.1:9999/sse" } },
       probe: okProbe,
     });
-    // manager is always first; the config server shows up probed + ok.
-    expect(catalog.servers[0]!.name).toBe("manager");
+    // Dispatch's own come first; the config server shows up probed + ok.
+    expect(catalog.servers[0]!.name).toBe(MANAGER_SERVER_NAMES[0]);
     const chrome = catalog.servers.find((s) => s.name === "claude-in-chrome")!;
     expect(chrome.kind).toBe("external");
     expect(chrome.status).toBe("ok");
@@ -334,13 +366,19 @@ describe("mcp-catalog — builder", () => {
     expect(probed).toBe(false);
   });
 
-  it("reports manager as always-on whatever the layers say", async () => {
+  it("reports EVERY Dispatch server as always-on whatever the layers say", async () => {
+    // Off at BOTH layers and by every name: a category that could be switched
+    // off is a category whose tools vanish with no way to bring them back.
+    const off = Object.fromEntries(MANAGER_SERVER_NAMES.map((n) => [n, false]));
     const catalog = await buildProjectMcpCatalog(makeProject(), {
-      enablement: { app: { manager: false } },
+      enablement: { app: off, project: off },
     });
-    const manager = catalog.servers.find((s) => s.name === "manager")!;
-    expect(manager.enablement).toMatchObject({ effective: true, alwaysOn: true });
-    expect(manager.status).toBe("ok");
+    for (const name of MANAGER_SERVER_NAMES) {
+      const server = catalog.servers.find((s) => s.name === name)!;
+      expect(server, name).toBeDefined();
+      expect(server.enablement).toMatchObject({ effective: true, alwaysOn: true });
+      expect(server.status).toBe("ok");
+    }
   });
 
   it("drops a bundled server the project declares itself, so only one row wins", async () => {
@@ -431,8 +469,10 @@ describe("GET /api/projects/:projectId/mcp", () => {
     const res = await app.inject({ method: "GET", url: `/api/projects/${projectId}/mcp` });
     expect(res.statusCode).toBe(200);
     const catalog = res.json() as McpCatalog;
-    const manager = catalog.servers.find((s) => s.name === "manager")!;
-    expect(manager.kind).toBe("custom");
+    for (const name of MANAGER_SERVER_NAMES) {
+      expect(catalog.servers.find((s) => s.name === name)?.kind, name).toBe("custom");
+    }
+    const manager = { tools: dispatchTools(catalog) };
     expect(manager.tools.map((t) => t.name)).toContain("watch_pr");
     // No-arg tools carry an empty param list: each acts on the calling chat's
     // own state (or the project's config as a whole), so there is nothing to ask for.
@@ -577,11 +617,13 @@ describe("PUT /api/projects/:projectId/mcp/:name/enabled", () => {
     expect(saved.json().mcpEnabled).toEqual({ playwright: false });
   });
 
-  it("refuses to disable manager, and refuses a bad scope", async () => {
+  it("refuses to disable any Dispatch server, and refuses a bad scope", async () => {
     const { projectId } = await setup();
-    const manager = await toggle(projectId, "manager", { scope: "app", enabled: false });
-    expect(manager.statusCode).toBe(400);
-    expect(manager.json().error).toMatch(/cannot be disabled/);
+    for (const name of MANAGER_SERVER_NAMES) {
+      const res = await toggle(projectId, name, { scope: "app", enabled: false });
+      expect(res.statusCode, name).toBe(400);
+      expect(res.json().error).toMatch(/cannot be disabled/);
+    }
 
     const scope = await toggle(projectId, "playwright", { scope: "chat", enabled: false });
     expect(scope.statusCode).toBe(400);

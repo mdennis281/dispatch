@@ -348,7 +348,7 @@ describe("chat status persistence", () => {
     expect(statusForTool("Task")).toBe("waiting");
     expect(statusForTool("collaboration.wait_agent")).toBe("waiting");
     expect(
-      statusForTool("functions.exec", { source: "await tools.mcp__manager__terminal({})" }),
+      statusForTool("functions.exec", { source: "await tools.mcp__dispatch-workspace__terminal({})" }),
     ).toBe("waiting");
     const circular: Record<string, unknown> = {};
     circular.self = circular;
@@ -1844,7 +1844,7 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     expect(append).not.toContain("Project instructions");
   });
 
-  it("merges the config's external MCP servers into the session alongside 'manager'", async () => {
+  it("merges the config's external MCP servers into the session alongside Dispatch's own", async () => {
     const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
     // A managed repo whose `.dispatch/` declares an external MCP server.
     const repoDir = await mkdtemp(join(tmpdir(), "cm-broker-mcp-"));
@@ -1883,8 +1883,9 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
 
     const opts = controllers[0]!.options as { mcpServers?: Record<string, unknown> };
     expect(opts.mcpServers).toBeDefined();
-    // The in-process manager server is always present (never clobbered)…
-    expect(opts.mcpServers!.manager).toBeDefined();
+    // Dispatch's own category servers are always present (never clobbered)…
+    expect(Object.keys(opts.mcpServers!).filter((n) => n.startsWith("dispatch-")).length)
+      .toBeGreaterThan(0);
     // …and the config-declared external server passes through for the agent.
     expect(opts.mcpServers!["claude-in-chrome"]).toMatchObject({
       url: "http://127.0.0.1:9999/sse",
@@ -2002,7 +2003,7 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
 });
 
 describe("SessionBroker — MCP passthrough", () => {
-  it("merges a project's configured MCP servers into the session alongside 'manager'", async () => {
+  it("merges a project's configured MCP servers into the session alongside Dispatch's own", async () => {
     const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
     const broker = makeBroker(fn);
     const project = {
@@ -2026,8 +2027,9 @@ describe("SessionBroker — MCP passthrough", () => {
 
     const opts = controllers[0]!.options as { mcpServers?: Record<string, unknown> };
     expect(opts.mcpServers).toBeDefined();
-    // The in-process manager server is preserved (not clobbered)…
-    expect(opts.mcpServers!.manager).toBeDefined();
+    // Dispatch's own category servers are preserved (not clobbered)…
+    expect(Object.keys(opts.mcpServers!).filter((n) => n.startsWith("dispatch-")).length)
+      .toBeGreaterThan(0);
     // …and the project's MCP server passes through for the agent to use.
     expect(opts.mcpServers!["claude-in-chrome"]).toMatchObject({
       url: "http://127.0.0.1:9999/sse",
@@ -2400,7 +2402,7 @@ describe("SessionBroker — spawn_chat consent", () => {
     // "declined — don't retry" answer entirely.
     let verdict: unknown;
     const { fn } = makeFakeQuery(async (_t, ctl) => {
-      verdict = await ctl.canUseTool!("mcp__manager__spawn_chat", { prompt: "go" }, {});
+      verdict = await ctl.canUseTool!("mcp__dispatch-chat__spawn_chat", { prompt: "go" }, {});
       return [assistantText("hi"), resultMsg()];
     });
     const broker = makeBroker(fn);
@@ -2427,7 +2429,7 @@ describe("SessionBroker — spawn_chat consent", () => {
       ],
     };
     const { fn } = makeFakeQuery(async (_t, ctl) => {
-      verdict = await ctl.canUseTool!("mcp__manager__ask_user", input, {});
+      verdict = await ctl.canUseTool!("mcp__dispatch-confirm__ask_user", input, {});
       return [assistantText("hi"), resultMsg()];
     });
     const broker = makeBroker(fn);
@@ -2813,7 +2815,7 @@ describe("SessionBroker — the usage ledger", () => {
   it("classifies a manager endpoint, a skill and a subagent as themselves", async () => {
     const { fn } = makeFakeQuery(() => [
       initMsg("sess-1"),
-      toolUseMsg("mcp__manager__create_pr", {}, "tu-1"),
+      toolUseMsg("mcp__dispatch-github__create_pr", {}, "tu-1"),
       toolUseMsg("Skill", { skill: "code-review" }, "tu-2"),
       toolUseMsg("Agent", { subagent_type: "Explore" }, "tu-3"),
       resultMsg(),
@@ -2958,7 +2960,7 @@ describe("SessionBroker — the runtime ledger", () => {
   it("separates the token-burning time from the waiting", async () => {
     const { fn } = makeFakeQuery(() => [
       initMsg("sess-1"),
-      toolUseMsg("mcp__manager__wait", { seconds: 30 }, "tu-1"),
+      toolUseMsg("mcp__dispatch-session__wait", { seconds: 30 }, "tu-1"),
       toolResultMsg("tu-1", "waited"),
       resultMsg(),
     ]);

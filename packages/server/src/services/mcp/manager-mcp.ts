@@ -1,27 +1,35 @@
 /**
- * manager-mcp — the in-process "manager" SDK MCP server.
+ * manager-mcp — Dispatch's own in-process SDK MCP tools.
  *
- * Registered on EVERY live session (see `SessionBroker.buildOptions` →
- * `Options.mcpServers.manager`), so its tools appear to the agent as
- * `mcp__manager__<tool>`. It lets a chat pace ITSELF against the manager's own
- * state:
+ * ONE factory, EIGHT servers. `createManagerTools` builds every tool definition
+ * and owns the helpers they share; {@link createManagerMcpServers} partitions
+ * that output by {@link ManagerCategory} and hands the SDK one server per
+ * category. Registered on EVERY live session (see `SessionBroker.buildOptions`),
+ * so the tools appear to the agent as `mcp__dispatch-<category>__<tool>` —
+ * `mcp__dispatch-session__wait`, `mcp__dispatch-github__create_pr`.
  *
- *   - `mcp__manager__wait({ seconds, reason? })` — sleep for up to
+ * They were a single `manager` server until the split, which is why the names
+ * below appear under the retired single-server name in older transcripts; see
+ * `@dispatch/shared`'s manager-tools.ts for the registry and the migration.
+ *
+ * The tools let a chat pace ITSELF against the manager's own state:
+ *
+ *   - `mcp__dispatch-session__wait({ seconds, reason? })` — sleep for up to
  *     {@link WAIT_CAP_SECONDS}. While parked it publishes a `chat-status`
  *     "waiting Ns: <reason>" activity so the UI shows the self-imposed pause
  *     (reusing the working/typing header mechanism).
- *   - `mcp__manager__wait_for_chat({ chatId, timeoutSeconds? })` — block until
+ *   - `mcp__dispatch-chat__wait_for_chat({ chatId, timeoutSeconds? })` — block until
  *     ANOTHER chat's broker state reaches a terminal state (idle/done/error),
  *     or the timeout fires. Returns the final state. An unknown chatId yields an
  *     informative (error-flagged) result rather than throwing.
- *   - `mcp__manager__watch_pr({ number, repo?, timeoutSeconds? })` — watch a
+ *   - `mcp__dispatch-github__watch_pr({ number, repo?, timeoutSeconds? })` — watch a
  *     GitHub PR (via {@link ManagerMcpGitHub}, reusing GitHubService's `gh`) and
  *     RETURN THE INSTANT it needs attention: a CI check fails, a new review
  *     thread/comment appears, or it merges/closes. Per-session dedup state means
  *     each new signal is reported exactly once, so an agent calling it in a loop
  *     (fix → watch again) never misses a later round of review comments and never
  *     hand-rolls a `gh pr view` / `gh pr checks` sleep loop or a background watcher.
- *   - `mcp__manager__create_pr({ title?, body?, base?, draft?, cwd? })` — OPEN the PR
+ *   - `mcp__dispatch-github__create_pr({ title?, body?, base?, draft?, cwd? })` — OPEN the PR
  *     (via {@link ManagerMcpPrCreate}): push with upstream, create, request the
  *     reviewers the project's `workflow.pr.reviewers` declares, write a `PRRef`
  *     onto this chat, and arm the review watcher. Offered whenever the workflow
@@ -29,7 +37,7 @@
  *     REFUSES a raw `gh pr create` — the two are deliberately symmetric with the
  *     long-standing `gh pr merge` → `approve_pr` pair. Its refusals (on the
  *     trunk, no commits, dirty tree, `hold`) each name an override argument.
- *   - `mcp__manager__approve_pr({ number, repo?, method?, note? })` — approve and
+ *   - `mcp__dispatch-github__approve_pr({ number, repo?, method?, note? })` — approve and
  *     MERGE a PR (via {@link ManagerMcpPrApproval}), but only after re-reading its
  *     state/checks/threads/labels and finding nothing blocking ({@link prLandingBlockers}).
  *     Offered ONLY when the project's workflow sets `autoMerge: "on-green"`, which
@@ -38,7 +46,7 @@
  *     `allowNoChecks`/`allowNoReview` escape hatches don't grant themselves: a
  *     load-bearing one goes to the human as a permission card and waits
  *     ({@link ManagerMcpPrApproval.confirmOverride}).
- *   - `mcp__manager__request_exemption({ guard, reason, command? })` — ASK the human
+ *   - `mcp__dispatch-confirm__request_exemption({ guard, reason, command? })` — ASK the human
  *     to lift ONE command guard for THIS CHAT (see {@link ManagerMcpExemptions}).
  *     The escape hatch for the 2026-08-17 shape of failure: the sanctioned path a
  *     guard redirects to breaks, the guard goes on (correctly) refusing the raw
@@ -47,7 +55,7 @@
  *     human picks whether the grant covers one command or the rest of the chat,
  *     a refusal is final, and the grant dies with the live session. Offered only
  *     where the guard is actually enforcing.
- *   - `mcp__manager__spawn_chat({ prompt, projectId?, … })` — start ANOTHER chat
+ *   - `mcp__dispatch-chat__spawn_chat({ prompt, projectId?, … })` — start ANOTHER chat
  *     (via {@link ManagerMcpChats}), but only after the human says yes. The
  *     consent rides the broker's ordinary permission channel, so the request
  *     lands as the same card + Attention Queue entry as any tool prompt rather
@@ -81,6 +89,11 @@ import {
   WorkflowMergeMethodSchema,
   describeExemptionScope,
   prReviewAgentView,
+  MANAGER_TOOL_CATEGORY,
+  managerServerName,
+  managerToolQualifiedName,
+  type ManagerCategory,
+  type ManagerToolName,
   type ChatStatus,
   type CheckRun,
   type ContextUsage,
@@ -1223,7 +1236,7 @@ export function prLandingBlockers(
               // loop it could not win: `create_pr` refuses a branch that already
               // has a PR, so the only advice on offer was impossible to take.
               `This project asks ${policy.reviewers.join(", ")} to review, but nobody is ` +
-              "currently requested on this PR. Call `mcp__manager__request_review` to ask " +
+              "currently requested on this PR. Call `mcp__dispatch-github__request_review` to ask " +
               "them (GitHub clears a reviewer's request once they report, and new commits " +
               "do not re-queue them), then watch_pr until they report."
             : "This project configures NO reviewers (`workflow.pr.reviewers` in " +
@@ -2597,7 +2610,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       const adviceParts: string[] = [];
       if (needsWork) {
         adviceParts.push(
-          "Address these, then call `mcp__manager__resolve_thread` for each comment you " +
+          "Address these, then call `mcp__dispatch-github__resolve_thread` for each comment you " +
             "actually fixed (pass the thread id above, and a `reply` saying what you did) " +
             "— an unresolved thread blocks the merge even after the code is fixed.",
         );
@@ -2616,7 +2629,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       if (spent) {
         adviceParts.push(
           `Dispatch's reviewer is DONE with this PR: the ${spent.maxRounds}-round cap is ` +
-            "spent. Do not call `mcp__manager__request_review` — it refuses on a spent " +
+            "spent. Do not call `mcp__dispatch-github__request_review` — it refuses on a spent " +
             "cap, and if it did go through it would only re-queue the reviewer on GitHub, " +
             "which HIDES the reviews already filed and makes `approve_pr` refuse a PR " +
             "that is ready. Stop waiting for a review here.",
@@ -2626,7 +2639,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             ? (spent.posted
                 ? "CI is green, no review thread is open, and the rounds that ran DID " +
                   "review this PR — so the project's review bar is met and " +
-                  "`mcp__manager__approve_pr` is the next call. Do NOT call watch_pr " +
+                  "`mcp__dispatch-github__approve_pr` is the next call. Do NOT call watch_pr " +
                   "again for a review, there is none coming."
                 : "CI is green and no review thread is open, but none of those rounds " +
                   "actually posted a review — check the reviewer chat. `approve_pr` will " +
@@ -2641,7 +2654,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         // to write. Name the action instead.
         adviceParts.push(
           "Do NOT just call watch_pr again — with an empty queue it will sit until the " +
-            "timeout for nothing. Either call `mcp__manager__request_review` to put a " +
+            "timeout for nothing. Either call `mcp__dispatch-github__request_review` to put a " +
             "reviewer back on the hook (do this once you've pushed your fixes, not before), " +
             "or land the PR if it's already been reviewed and there's nothing outstanding.",
         );
@@ -3104,7 +3117,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
                   "reviewer now would only hide the reviews it already filed (GitHub " +
                   "drops a review from `latestReviews` the moment its author is " +
                   "re-requested) and make `approve_pr` refuse a PR that is ready.\n\n" +
-                  "Address any open threads, then call `mcp__manager__approve_pr`."
+                  "Address any open threads, then call `mcp__dispatch-github__approve_pr`."
                 : " and none of them posted a review — check the reviewer chat. No " +
                   "further round can spawn on its own.") +
               "\n\nIf you genuinely need another round — a reviewer chat died, or the " +
@@ -3144,7 +3157,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
               text:
                 `Not granting an extra round on PR #${number}: round ${roundView.round} is ` +
                 "claimed and its reviewer chat is still running. A second round beside it " +
-                "would put two reviewers on the same diff. Call `mcp__manager__watch_pr` " +
+                "would put two reviewers on the same diff. Call `mcp__dispatch-github__watch_pr` " +
                 "and wait for the one in flight; ask again only if it finishes without " +
                 "posting.\n" +
                 JSON.stringify({ number, requested: [], reviewRunning: true }),
@@ -3198,7 +3211,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           {
             text:
               `Asked Dispatch's own reviewer to look at PR #${number}. ${local.detail}. ` +
-              "Now call `mcp__manager__watch_pr` to wait for it to report.",
+              "Now call `mcp__dispatch-github__watch_pr` to wait for it to report.",
           },
         );
       }
@@ -3271,7 +3284,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       const ok =
         (onHook !== null ? onHook.length > 0 : res.requested.length > 0) || Boolean(local?.ok);
       const advice = ok
-        ? "Now call `mcp__manager__watch_pr` again to wait for their review." +
+        ? "Now call `mcp__dispatch-github__watch_pr` again to wait for their review." +
           (spentNote && roundView?.posted
             ? " Do not wait on Dispatch's own reviewer — its rounds are spent and the " +
               "review bar is already met."
@@ -3410,7 +3423,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         return textResult(
           `PR #${st.existing.number} is already open for \`${st.branch}\` — reusing it ` +
             `rather than opening a second one.\n${st.existing.url}\n` +
-            "Push more commits to update it, and use `mcp__manager__watch_pr` to follow " +
+            "Push more commits to update it, and use `mcp__dispatch-github__watch_pr` to follow " +
             "review.\n" +
             JSON.stringify({
               number: st.existing.number,
@@ -3530,7 +3543,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         res.watching
           ? "  · watching for review activity — a new review, comment or failing check will " +
               "come back to this chat on its own"
-          : "  · ⚠ the review watcher is not running; call `mcp__manager__watch_pr` yourself",
+          : "  · ⚠ the review watcher is not running; call `mcp__dispatch-github__watch_pr` yourself",
       );
       return prToolResult(
         "create_pr",
@@ -3545,7 +3558,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         (await ctx.prRegistry?.refresh(res.number).catch(() => null)) ?? null,
         {
           text:
-            `${lines.join("\n")}\n\nNow call \`mcp__manager__watch_pr\` in a loop to work the ` +
+            `${lines.join("\n")}\n\nNow call \`mcp__dispatch-github__watch_pr\` in a loop to work the ` +
             `review round.\n` +
             JSON.stringify({
               number: res.number,
@@ -5244,12 +5257,72 @@ ${look}` : "")
 
 /* ------------------------------------------------------------- catalog */
 
+/** The complete set of tool definitions the factory builds. */
+type ManagerTools = ReturnType<typeof createManagerTools>;
+
+/** A property name on {@link ManagerTools} — `askUser`, `watchPr`, … */
+type ManagerToolKey = keyof ManagerTools;
+
 /**
- * Which session binding gates a manager tool being OFFERED to the agent (see the
- * `createManagerMcpServer` tools array). `null` = always offered. The catalog
- * view reads this to mark each tool `available` for a given session's bindings.
+ * The wire name of every tool the factory builds, keyed by the factory's own
+ * property name.
+ *
+ * This is the join that makes the partition TOTAL AT COMPILE TIME, in both
+ * directions: `Record<ManagerToolKey, …>` means a tool added to
+ * `createManagerTools` with no line here fails the build, and `ManagerToolName`
+ * means a line naming a tool the shared registry doesn't know fails it too. The
+ * failure being prevented is a tool that compiles, ships, and is served under no
+ * server at all — invisible until an agent reaches for it and it isn't there.
+ *
+ * The literals are checked against the running `tool(...)` definitions by
+ * `manager-mcp.test.ts`, which is what catches a typo that is merely a
+ * *different* valid name.
  */
-const MANAGER_TOOL_GATE: Record<string, ManagerToolBinding | null> = {
+const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
+  askUser: "ask_user",
+  wait: "wait",
+  waitForChat: "wait_for_chat",
+  contextUsage: "context_usage",
+  compactContext: "compact_context",
+  watchPr: "watch_pr",
+  resolveThread: "resolve_thread",
+  postReview: "post_review",
+  requestReview: "request_review",
+  createPr: "create_pr",
+  approvePr: "approve_pr",
+  requestExemption: "request_exemption",
+  terminal: "terminal",
+  terminalOutput: "terminal_output",
+  worktree: "worktree",
+  remember: "remember",
+  recall: "recall",
+  forget: "forget",
+  memoryList: "memory_list",
+  memorySearch: "memory_search",
+  memoryHistory: "memory_history",
+  memorySimilar: "memory_similar",
+  runSubapp: "run_subapp",
+  prewarmMcp: "prewarm_mcp",
+  spawnChat: "spawn_chat",
+  mcpList: "mcp_list",
+  mcpAdd: "mcp_add",
+  mcpRemove: "mcp_remove",
+  chatFind: "chat_find",
+  chatRead: "chat_read",
+  projectInfo: "project_info",
+};
+
+/**
+ * Which session binding gates a manager tool being OFFERED to the agent (see
+ * {@link boundTools}). `null` = always offered. The catalog view reads this to
+ * mark each tool `available` for a given session's bindings.
+ *
+ * Spelled as a COMPLETE record over {@link ManagerToolName}: an omitted tool used
+ * to read as `null`/always-available, so a newly gated tool would quietly report
+ * itself available on a session that could not call it.
+ */
+const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
+  ask_user: null,
   wait: null,
   wait_for_chat: null,
   context_usage: null,
@@ -5300,10 +5373,81 @@ export type ManagerToolBinding =
 /** Which bindings a session has — decides which tools are offered/available. */
 export type ManagerToolBindings = Partial<Record<ManagerToolBinding, boolean>>;
 
+/**
+ * Which tools this session can actually be offered — each is only meaningful
+ * when its backing service is wired in, so a dead one is omitted rather than
+ * offered and then refused.
+ *
+ * FINER than {@link MANAGER_TOOL_GATE} on purpose: the catalog answers "does this
+ * kind of session have GitHub", while registration answers "does THIS GitHub
+ * surface implement `resolveThread`". A total record rather than the array of
+ * conditional spreads it replaces, so a new tool cannot be built by the factory
+ * and then silently left out of every server.
+ */
+function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
+  const github = Boolean(ctx.github);
+  return {
+    ask_user: true,
+    wait: true,
+    wait_for_chat: true,
+    context_usage: true,
+    compact_context: true,
+    watch_pr: github,
+    // Working a review round needs BOTH halves: resolving what you fixed, and
+    // re-queueing the reviewer afterwards. Each is gated on its own binding so a
+    // GitHub surface missing one still offers the other.
+    resolve_thread: Boolean(ctx.github?.resolveThread),
+    request_review: Boolean(ctx.github?.requestReviewers),
+    // Bound only where the project configured a Dispatch reviewer — the same
+    // shape as `approve_pr`'s auto-merge gate, so the ability to speak AS a
+    // reviewer is absent (not merely discouraged) everywhere it wasn't asked for.
+    post_review: Boolean(ctx.github?.submitReview),
+    // Only on a project whose change ships through PRs — which is also the only
+    // place the guard refuses a raw `gh pr create`, so the two stay in step.
+    create_pr: Boolean(ctx.prCreate),
+    // Only when the project opted into auto-merge — no binding, no way to merge.
+    approve_pr: Boolean(ctx.prApproval),
+    // Bound only where a guard is actually ENFORCING — the escape hatch exists
+    // exactly where the wall does, and nowhere else offers it as a thing to try.
+    request_exemption: Boolean(ctx.exemptions),
+    terminal: Boolean(ctx.terminals),
+    terminal_output: Boolean(ctx.terminals),
+    // Bound whenever the session has a project to cut trees in — and the shell
+    // guard's refusal of a raw `git` tree-cut points here, so the two ship together.
+    worktree: Boolean(ctx.worktrees),
+    // The write surface plus the curation reads — all bound to the same project,
+    // so a session either has memory or it doesn't.
+    remember: Boolean(ctx.memory),
+    recall: Boolean(ctx.memory),
+    forget: Boolean(ctx.memory),
+    memory_list: Boolean(ctx.memory),
+    memory_search: Boolean(ctx.memory),
+    memory_history: Boolean(ctx.memory),
+    memory_similar: Boolean(ctx.memory),
+    run_subapp: Boolean(ctx.runner),
+    prewarm_mcp: Boolean(ctx.prewarm),
+    // Spawning a sibling chat needs a project to spawn INTO and a live session to
+    // route the consent prompt through; both are bound together or not at all.
+    spawn_chat: Boolean(ctx.chats),
+    mcp_list: Boolean(ctx.mcpConfig),
+    mcp_add: Boolean(ctx.mcpConfig),
+    mcp_remove: Boolean(ctx.mcpConfig),
+    // Read-only cross-chat inspection. Bound together because they're one
+    // workflow — find the chat, read it, then read its project's config.
+    chat_find: Boolean(ctx.inspect),
+    chat_read: Boolean(ctx.inspect),
+    project_info: Boolean(ctx.inspect),
+  };
+}
+
 /** A catalog descriptor for one manager tool (no live session needed). */
 export interface ManagerToolDescriptor {
   /** Bare tool name, e.g. "wait". */
   name: string;
+  /** Category server serving it, e.g. "session". */
+  category: ManagerCategory;
+  /** Fully-qualified name the agent sees, e.g. "mcp__dispatch-session__wait". */
+  qualifiedName: string;
   description: string;
   /** JSON Schema (draft 2020-12) of the tool's input parameters. */
   inputSchema: Record<string, unknown>;
@@ -5341,123 +5485,88 @@ export function managerToolDescriptors(
   bindings: ManagerToolBindings = {},
 ): ManagerToolDescriptor[] {
   const tools = createManagerTools(NOOP_DESCRIPTOR_CTX);
-  return Object.values(tools).map((t) => {
-    const gate = MANAGER_TOOL_GATE[t.name] ?? null;
-    const available = gate === null ? true : Boolean(bindings[gate]);
+  return (Object.keys(tools) as ManagerToolKey[]).map((key) => {
+    const name = TOOL_WIRE_NAME[key];
+    const gate = MANAGER_TOOL_GATE[name];
     return {
-      name: t.name,
-      description: t.description,
-      inputSchema: z.toJSONSchema(z.object(t.inputSchema as z.ZodRawShape)) as Record<
+      name,
+      category: MANAGER_TOOL_CATEGORY[name],
+      qualifiedName: managerToolQualifiedName(name),
+      description: tools[key].description,
+      inputSchema: z.toJSONSchema(z.object(tools[key].inputSchema as z.ZodRawShape)) as Record<
         string,
         unknown
       >,
-      available,
+      available: gate === null ? true : Boolean(bindings[gate]),
     };
   });
 }
 
 /**
- * Build the in-process "manager" MCP server for one session. Drop the result
- * into `Options.mcpServers.manager` — the SDK exposes its tools to the agent as
- * `mcp__manager__wait` / `mcp__manager__wait_for_chat`.
+ * Build Dispatch's own MCP servers for one session — one per {@link ManagerCategory},
+ * keyed by the server name the SDK should register it under.
+ *
+ * A PARTITION, not eight factories: `createManagerTools` still holds every
+ * definition and every shared helper (`textResult`, the binding checks, the PR
+ * renderers), and this only decides which server each one is handed to. Splitting
+ * the factory itself would let those helpers drift apart file by file.
+ *
+ * Spread the result into `Options.mcpServers` — the SDK exposes the tools as
+ * `mcp__dispatch-session__wait`, `mcp__dispatch-github__create_pr`, and so on.
+ * A category with no bound tool on this session is omitted entirely rather than
+ * registered empty, so a session without GitHub advertises no `dispatch-github`
+ * at all.
  */
-export function createManagerMcpServer(
+export function createManagerMcpServers(
   ctx: ManagerMcpContext,
-): McpSdkServerConfigWithInstance {
-  const {
-    askUser,
-    wait,
-    waitForChat,
-    contextUsage,
-    compactContext,
-    watchPr,
-    resolveThread,
-    postReview,
-    requestReview,
-    createPr,
-    approvePr,
-    requestExemption,
-    terminal,
-    terminalOutput,
-    worktree,
-    remember,
-    recall,
-    forget,
-    memoryList,
-    memorySearch,
-    memoryHistory,
-    memorySimilar,
-    runSubapp,
-    prewarmMcp,
-    spawnChat,
-    mcpList,
-    mcpAdd,
-    mcpRemove,
-    chatFind,
-    chatRead,
-    projectInfo,
-  } = createManagerTools(ctx);
-  // Each tool is only meaningful when its backing service is wired in; omit the
-  // dead ones so the agent isn't offered a tool it can't use.
-  const tools = [
-    askUser,
-    wait,
-    waitForChat,
-    contextUsage,
-    compactContext,
-    ...(ctx.github ? [watchPr] : []),
-    // Working a review round needs BOTH halves: resolving what you fixed, and
-    // re-queueing the reviewer afterwards. Each is gated on its own binding so a
-    // GitHub surface missing one still offers the other.
-    ...(ctx.github?.resolveThread ? [resolveThread] : []),
-    // Bound only where the project configured a Dispatch reviewer — the same
-    // shape as `approve_pr`'s auto-merge gate, so the ability to speak AS a
-    // reviewer is absent (not merely discouraged) everywhere it wasn't asked for.
-    ...(ctx.github?.submitReview ? [postReview] : []),
-    ...(ctx.github?.requestReviewers ? [requestReview] : []),
-    // Only on a project whose change ships through PRs — which is also the only
-    // place the guard refuses a raw `gh pr create`, so the two stay in step.
-    ...(ctx.prCreate ? [createPr] : []),
-    // Only when the project opted into auto-merge — no binding, no way to merge.
-    ...(ctx.prApproval ? [approvePr] : []),
-    // Bound only where a guard is actually ENFORCING — the escape hatch exists
-    // exactly where the wall does, and nowhere else offers it as a thing to try.
-    ...(ctx.exemptions ? [requestExemption] : []),
-    ...(ctx.terminals ? [terminal, terminalOutput] : []),
-    // Bound whenever the session has a project to cut trees in — and the shell
-    // guard's refusal of `git worktree add` points here, so the two ship together.
-    ...(ctx.worktrees ? [worktree] : []),
-    // The write surface plus the curation reads — all bound to the same project,
-    // so a session either has memory or it doesn't.
-    ...(ctx.memory
-      ? [remember, recall, forget, memoryList, memorySearch, memoryHistory, memorySimilar]
-      : []),
-    ...(ctx.runner ? [runSubapp] : []),
-    ...(ctx.prewarm ? [prewarmMcp] : []),
-    // Spawning a sibling chat needs a project to spawn INTO and a live session to
-    // route the consent prompt through; both are bound together or not at all.
-    ...(ctx.chats ? [spawnChat] : []),
-    ...(ctx.mcpConfig ? [mcpList, mcpAdd, mcpRemove] : []),
-    // Read-only cross-chat inspection. Bound together because they're one
-    // workflow — find the chat, read it, then read its project's config.
-    ...(ctx.inspect ? [chatFind, chatRead, projectInfo] : []),
-  ];
-  const server = createSdkMcpServer({
-    name: "manager",
-    version: "1.0.0",
-    tools,
-  });
-  // Non-enumerable host metadata. The Claude SDK only sees the ordinary MCP
-  // config, while the harness broker can recover the SAME live context and put
-  // it behind ManagerMcpBridge for Codex. This avoids duplicating the manager
-  // tool wiring (terminals, memory, GitHub, runners, spawn consent) per runtime.
-  Object.defineProperty(server, MANAGER_CONTEXT, { value: ctx });
-  return server;
+): Record<string, McpSdkServerConfigWithInstance> {
+  const tools = createManagerTools(ctx);
+  const bound = boundTools(ctx);
+  const byCategory = new Map<ManagerCategory, ManagerTools[ManagerToolKey][]>();
+  for (const key of Object.keys(tools) as ManagerToolKey[]) {
+    const name = TOOL_WIRE_NAME[key];
+    if (!bound[name]) continue;
+    const category = MANAGER_TOOL_CATEGORY[name];
+    const list = byCategory.get(category);
+    if (list) list.push(tools[key]);
+    else byCategory.set(category, [tools[key]]);
+  }
+
+  const servers: Record<string, McpSdkServerConfigWithInstance> = {};
+  for (const [category, categoryTools] of byCategory) {
+    const server = createSdkMcpServer({
+      name: managerServerName(category),
+      version: "1.0.0",
+      tools: categoryTools,
+    });
+    // Non-enumerable host metadata, on EVERY category server. The Claude SDK only
+    // sees the ordinary MCP config, while the harness broker can recover the SAME
+    // live context and put it behind ManagerMcpBridge for Codex. This avoids
+    // duplicating the manager tool wiring (terminals, memory, GitHub, runners,
+    // spawn consent) per runtime.
+    Object.defineProperty(server, MANAGER_CONTEXT, { value: ctx });
+    servers[managerServerName(category)] = server;
+  }
+  return servers;
+}
+
+/**
+ * Build ONE category server for a session — the Codex bridge's entry point,
+ * which serves a single category per HTTP path.
+ *
+ * Returns undefined when this session has no bound tool in that category, which
+ * the bridge answers as a 404 rather than as an empty server that lists nothing.
+ */
+export function createManagerCategoryServer(
+  ctx: ManagerMcpContext,
+  category: ManagerCategory,
+): McpSdkServerConfigWithInstance | undefined {
+  return createManagerMcpServers(ctx)[managerServerName(category)];
 }
 
 const MANAGER_CONTEXT = Symbol("dispatch.managerMcpContext");
 
-/** Recover the live context attached by {@link createManagerMcpServer}. */
+/** Recover the live context attached by {@link createManagerMcpServers}. */
 export function managerMcpContextOf(value: unknown): ManagerMcpContext | undefined {
   if (!value || typeof value !== "object") return undefined;
   return (value as { [MANAGER_CONTEXT]?: ManagerMcpContext })[MANAGER_CONTEXT];

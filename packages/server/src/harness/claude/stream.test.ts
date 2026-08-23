@@ -12,7 +12,7 @@ const msg = (o: Record<string, unknown>) => o as unknown as SDKMessage;
 
 describe("parseMcpServer", () => {
   it("pulls the server out of a namespaced tool", () => {
-    expect(parseMcpServer("mcp__manager__wait")).toBe("manager");
+    expect(parseMcpServer("mcp__dispatch-session__wait")).toBe("dispatch-session");
   });
 
   it("keeps hyphens and underscores inside the server name", () => {
@@ -55,7 +55,7 @@ describe("ClaudeStreamDecoder", () => {
         model: "claude-opus-5",
         permissionMode: "default",
         tools: ["Bash"],
-        mcp_servers: [{ name: "manager" }],
+        mcp_servers: [{ name: "dispatch-session" }],
       }),
     );
     expect(out).toEqual([
@@ -65,7 +65,7 @@ describe("ClaudeStreamDecoder", () => {
         model: "claude-opus-5",
         permissionMode: "default",
         tools: ["Bash"],
-        mcpServers: [{ name: "manager" }],
+        mcpServers: [{ name: "dispatch-session" }],
       },
     ]);
     expect(d.sessionId).toBe("sess-1");
@@ -205,11 +205,11 @@ describe("ClaudeStreamDecoder", () => {
         type: "assistant",
         message: {
           id: "m",
-          content: [{ type: "tool_use", id: "tu", name: "mcp__manager__wait", input: {} }],
+          content: [{ type: "tool_use", id: "tu", name: "mcp__dispatch-session__wait", input: {} }],
         },
       }),
     );
-    expect(out[0]).toMatchObject({ server: "manager" });
+    expect(out[0]).toMatchObject({ server: "dispatch-session" });
   });
 
   it("reports each tool call's thread before emitting it", () => {
