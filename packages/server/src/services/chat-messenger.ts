@@ -1,0 +1,593 @@
+/**
+ * CHAT → CHAT MESSAGING.
+ *
+ * One chat sending a message to another, and blocking for a correlated answer.
+ * The MCP tools (`chat_send` / `chat_ask` / `chat_reply` / `chat_state`) are one
+ * consumer; the Mission layer is meant to be another, and the nested PR-review
+ * chats should eventually re-key onto it. So this service knows NOTHING about
+ * MCP: it takes chat ids and strings, and everything it needs from the broker
+ * and the store arrives through injected functions.
+ *
+ * WHY THERE IS NO CONSENT PROMPT. `spawn_chat` puts a card in front of the human
+ * because a spawn is expensive and not reversible. A message is neither, and a
+ * card per message would make this unusable as a substrate for an agent
+ * project-manager. Safety is bought two other ways instead:
+ *
+ *   - ATTRIBUTION. Every message lands as a `user` row stamped `origin: "peer"`
+ *     with the sending chat on it. A peer message has to arrive as a user turn —
+ *     that is the only input channel a session has — so without the stamp it
+ *     would render as something the human typed.
+ *   - RATE LIMITS. Two chats that can message each other can ping-pong forever,
+ *     burning tokens with nobody watching. Subagents structurally cannot do
+ *     this, so it is a genuinely new failure mode and it gets a real guard.
+ */
+import type { Chat, ChatStatus, ContextUsage, PRRef, PeerSender } from "@dispatch/shared";
+import type { EventBus } from "../bus.js";
+
+/* ------------------------------------------------------------ rate limits */
+
+/**
+ * The loop guard, as two sliding windows.
+ *
+ * Rate limits rather than hop counting. Hop counting is the more elegant answer
+ * — it distinguishes a long legitimate conversation from a runaway one, which a
+ * rate limit cannot — but it needs a hop depth threaded through the broker's
+ * turn lifecycle so that a message SENT while handling a peer message inherits
+ * its depth. That is invasive, and it is subtly wrong the moment a chat sends
+ * from a later turn. A window over recent sends needs no lifecycle state at all.
+ *
+ * TUNABLE, and these particular numbers are a judgement about what real work
+ * looks like: a lead handing a developer a task, getting an answer, and
+ * following up is a handful of messages in a burst, so the per-pair budget is
+ * set well above that and well below the hundreds-per-minute a runaway loop
+ * produces. The per-target limit is the backstop for the case the pair limit
+ * cannot see — five chats each politely under their own budget, all aimed at one
+ * victim.
+ */
+export const PEER_PAIR_LIMIT = 10;
+/** Window for {@link PEER_PAIR_LIMIT}, per ordered (sender → target) pair. */
+export const PEER_PAIR_WINDOW_MS = 5 * 60_000;
+/** Inbound cap for ONE target across every sender — the many-to-one backstop. */
+export const PEER_TARGET_LIMIT = 30;
+/** Window for {@link PEER_TARGET_LIMIT}. */
+export const PEER_TARGET_WINDOW_MS = 5 * 60_000;
+
+/* ----------------------------------------------------------------- types */
+
+/** How a message reaches a target that is mid-turn. */
+export type PeerDelivery = "queue" | "interrupt";
+
+/** Why a send was refused. Each maps to one guard, so callers can branch. */
+export type PeerRefusal =
+  | "self"
+  | "unknown-chat"
+  | "rate-limited-pair"
+  | "rate-limited-target";
+
+export interface PeerSendResult {
+  ok: boolean;
+  /** Set when `ok` is false. */
+  refusal?: PeerRefusal;
+  /** Human-readable explanation, always set on a refusal. */
+  message?: string;
+  /** When a rate limit refused it, epoch ms at which the oldest send ages out. */
+  retryAt?: number;
+  /** True when the target was mid-turn and the message is being held. */
+  held?: boolean;
+  /** True when the target had no live session and one was started for it. */
+  woke?: boolean;
+}
+
+export interface PeerAskResult extends PeerSendResult {
+  /** Correlation id the target passes to `reply`. Absent when the send failed. */
+  askId?: string;
+  /** True only when a real answer came back. */
+  answered: boolean;
+  /** Why no answer, when `answered` is false and the send itself succeeded. */
+  reason?: "timeout" | "cancelled";
+  answer?: string;
+}
+
+export type PeerReplyResult =
+  | { ok: true; askerChatId: string }
+  | { ok: false; reason: "unknown-ask" | "wrong-chat"; message: string };
+
+/** A one-shot projection of what another chat is doing. */
+export interface PeerChatState {
+  chatId: string;
+  title?: string;
+  projectId: string;
+  /** Live broker status, or the last persisted one when nothing is running. */
+  status: ChatStatus;
+  /** True when there is no live session at all (the chat is dormant). */
+  dormant: boolean;
+  /**
+   * True when the chat is stuck on a HUMAN — a permission card or a question is
+   * open and nothing will progress until somebody answers it. The single most
+   * useful bit for a project manager deciding where to spend attention.
+   */
+  blockedOnHuman: boolean;
+  /** Last message from the human/a peer, epoch ms. */
+  lastUserMessageAt?: number;
+  /**
+   * Last write of any kind to the chat record, epoch ms. Falls back to creation
+   * time — `updatedAt` is unset on a chat that has never been written since, and
+   * reporting `0` there would date it to 1970 in every "how stale is this" read.
+   */
+  updatedAt: number;
+  /** PRs this chat opened. */
+  prs: PRRef[];
+  /** The PR this chat exists to review, if it is a reviewer. */
+  reviewOf?: string;
+  /** Percent of the context window used; absent unless a subprocess is live. */
+  contextPercent?: number;
+  /** Peer messages held for this chat, waiting for its turn to settle. */
+  heldMessages: number;
+}
+
+/* ------------------------------------------------------------------ deps */
+
+export interface ChatMessengerDeps {
+  now?: () => number;
+  genId?: () => string;
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+}
+
+export interface ChatMessengerOpts {
+  bus: EventBus;
+  /** The chat record, or null when no such chat exists. */
+  getChat: (chatId: string) => Promise<Chat | null>;
+  /**
+   * Give the target a live session, starting one if it is dormant. A chat that
+   * has finished has no subprocess, and a project manager that could not resume
+   * a developer it had already used would be useless.
+   */
+  ensureSession: (chatId: string) => Promise<void>;
+  /** The target's live status; undefined when it has no session. */
+  getStatus: (chatId: string) => ChatStatus | undefined;
+  /**
+   * Deliver. Must emit the `user` row (carrying `peer`) AND queue it for the
+   * subprocess — i.e. the broker's own `sendMessage`, not a bespoke path, so a
+   * peer message is an ordinary turn in every respect but its attribution.
+   */
+  send: (chatId: string, text: string, opts: { peer: PeerSender }) => Promise<void>;
+  /** Live context-window usage, when a subprocess is up. Optional. */
+  getContextUsage?: (chatId: string) => Promise<ContextUsage | null>;
+  /** Is this chat blocked on a human right now (open permission/question)? */
+  isBlockedOnHuman?: (chatId: string) => boolean;
+  deps?: ChatMessengerDeps;
+}
+
+/** A message parked until the target's current turn ends. */
+interface HeldMessage {
+  from: string;
+  text: string;
+  peer: PeerSender;
+}
+
+/** An in-flight `ask` waiting for its `reply`. */
+interface PendingAsk {
+  askId: string;
+  /** The chat that asked — the only one the answer is delivered to. */
+  from: string;
+  /** The chat that was asked — the only one allowed to answer. */
+  to: string;
+  resolve: (answer: string) => void;
+  cancel: (reason: "timeout" | "cancelled") => void;
+  timer: unknown;
+}
+
+/**
+ * Statuses that mean the target is MID-TURN and a `queue` delivery must wait.
+ *
+ * `awaiting-input` is in here even though it is not strictly a turn in flight,
+ * and that is the whole reason this set is spelled out rather than reusing the
+ * broker's `isActive`. A chat in `awaiting-input` has a card open in front of
+ * the human, and `sendMessage` treats any incoming message as an implicit
+ * decline of a pending question — so delivering a peer message there would have
+ * one agent silently dismissing a question somebody else was about to answer.
+ * Holding until the human deals with their card costs nothing and cannot.
+ */
+const MID_TURN: ReadonlySet<ChatStatus> = new Set<ChatStatus>([
+  "running",
+  "waiting",
+  "queued",
+  "awaiting-input",
+]);
+
+export class ChatMessenger {
+  private readonly bus: EventBus;
+  private readonly getChat: ChatMessengerOpts["getChat"];
+  private readonly ensureSession: ChatMessengerOpts["ensureSession"];
+  private readonly getStatus: ChatMessengerOpts["getStatus"];
+  private readonly sendFn: ChatMessengerOpts["send"];
+  private readonly getContextUsage: ChatMessengerOpts["getContextUsage"];
+  private readonly isBlockedOnHuman: (chatId: string) => boolean;
+  private readonly now: () => number;
+  private readonly genId: () => string;
+  private readonly setTimer: (fn: () => void, ms: number) => unknown;
+  private readonly clearTimer: (handle: unknown) => void;
+
+  /** Send timestamps per ordered pair, keyed `from to`. */
+  private readonly pairSends = new Map<string, number[]>();
+  /** Send timestamps per target, keyed by target chatId. */
+  private readonly targetSends = new Map<string, number[]>();
+
+  /**
+   * Messages parked per target while it is mid-turn, in arrival order.
+   *
+   * DURABILITY LIMIT, stated rather than discovered: a held message lives only
+   * in this map and is LOST if the server restarts before it flushes. That is
+   * acceptable and consistent — a restart kills the target's live session too,
+   * so the turn the message was waiting on does not survive either — but a
+   * caller that needs an at-least-once guarantee must not build on this.
+   */
+  private readonly held = new Map<string, HeldMessage[]>();
+  private readonly pendingAsks = new Map<string, PendingAsk>();
+  private offStatus?: () => void;
+  private disposed = false;
+
+  constructor(opts: ChatMessengerOpts) {
+    this.bus = opts.bus;
+    this.getChat = opts.getChat;
+    this.ensureSession = opts.ensureSession;
+    this.getStatus = opts.getStatus;
+    this.sendFn = opts.send;
+    this.getContextUsage = opts.getContextUsage;
+    this.isBlockedOnHuman = opts.isBlockedOnHuman ?? (() => false);
+    this.now = opts.deps?.now ?? (() => Date.now());
+    this.genId =
+      opts.deps?.genId ?? (() => `ask_${Math.random().toString(36).slice(2, 11)}`);
+    this.setTimer =
+      opts.deps?.setTimer ??
+      ((fn, ms) => {
+        const t = setTimeout(fn, ms);
+        // A pending ask must never be the reason the process stays up.
+        (t as unknown as { unref?: () => void }).unref?.();
+        return t;
+      });
+    this.clearTimer =
+      opts.deps?.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+  }
+
+  /* ------------------------------------------------------------- sending */
+
+  /**
+   * Deliver `message` to `to`, attributed to `from`.
+   *
+   * `queue` (the default) waits for a turn in flight to end; `interrupt` injects
+   * mid-thought. Interrupting is the behaviour a HUMAN steering their own agent
+   * wants — for agent→agent it can derail a turn halfway through a thought,
+   * which is exactly why it is not the default.
+   */
+  async send(input: {
+    from: string;
+    to: string;
+    message: string;
+    delivery?: PeerDelivery;
+  }): Promise<PeerSendResult> {
+    const guard = await this.admit(input.from, input.to);
+    if (!guard.ok) return guard;
+
+    const peer: PeerSender = guard.peer;
+    return this.deliver({
+      from: input.from,
+      to: input.to,
+      text: input.message,
+      peer,
+      delivery: input.delivery ?? "queue",
+    });
+  }
+
+  /**
+   * Send a question and block until the target answers, or `timeoutMs` elapses.
+   *
+   * A timeout is a NORMAL outcome, not an error: the caller is told plainly that
+   * nobody answered so it can carry on, rather than being handed a failure it
+   * will try to fix by asking again.
+   */
+  async ask(input: {
+    from: string;
+    to: string;
+    question: string;
+    timeoutMs: number;
+    signal?: AbortSignal;
+  }): Promise<PeerAskResult> {
+    const guard = await this.admit(input.from, input.to);
+    if (!guard.ok) return { ...guard, answered: false };
+
+    const askId = this.genId();
+    const peer: PeerSender = { ...guard.peer, askId };
+
+    // Registered BEFORE the send, not after: `queue` may deliver synchronously,
+    // and a target that answers instantly would otherwise find no pending ask.
+    const answer = new Promise<{ answered: true; answer: string } | { answered: false; reason: "timeout" | "cancelled" }>(
+      (resolve) => {
+        const finish = (r: { answered: true; answer: string } | { answered: false; reason: "timeout" | "cancelled" }): void => {
+          const pending = this.pendingAsks.get(askId);
+          if (!pending) return;
+          this.pendingAsks.delete(askId);
+          this.clearTimer(pending.timer);
+          if (onAbort) input.signal?.removeEventListener("abort", onAbort);
+          resolve(r);
+        };
+        const onAbort = input.signal
+          ? (): void => finish({ answered: false, reason: "cancelled" })
+          : undefined;
+        if (onAbort) input.signal?.addEventListener("abort", onAbort);
+        this.pendingAsks.set(askId, {
+          askId,
+          from: input.from,
+          to: input.to,
+          resolve: (a) => finish({ answered: true, answer: a }),
+          cancel: (reason) => finish({ answered: false, reason }),
+          timer: this.setTimer(() => finish({ answered: false, reason: "timeout" }), input.timeoutMs),
+        });
+      },
+    );
+
+    const sent = await this.deliver({
+      from: input.from,
+      to: input.to,
+      text: input.question,
+      peer,
+      delivery: "queue",
+    });
+    if (!sent.ok) {
+      this.pendingAsks.get(askId)?.cancel("cancelled");
+      return { ...sent, answered: false };
+    }
+
+    const outcome = await answer;
+    return outcome.answered
+      ? { ...sent, askId, answered: true, answer: outcome.answer }
+      : { ...sent, askId, answered: false, reason: outcome.reason };
+  }
+
+  /**
+   * Answer a question raised by {@link ask}. `from` is the chat replying, and it
+   * MUST be the one that was asked — otherwise a third chat that guessed (or
+   * read) an askId could answer on its behalf.
+   */
+  reply(input: { from: string; askId: string; answer: string }): PeerReplyResult {
+    const pending = this.pendingAsks.get(input.askId);
+    if (!pending) {
+      return {
+        ok: false,
+        reason: "unknown-ask",
+        message:
+          `No question is waiting on askId "${input.askId}". Either it was already ` +
+          "answered, or the asking chat gave up waiting. The answer has nowhere to " +
+          "go — send it with chat_send if it still matters.",
+      };
+    }
+    if (pending.to !== input.from) {
+      return {
+        ok: false,
+        reason: "wrong-chat",
+        message:
+          `askId "${input.askId}" was addressed to chat ${pending.to}, not to you. ` +
+          "Only the chat that was asked can answer.",
+      };
+    }
+    pending.resolve(input.answer);
+    return { ok: true, askerChatId: pending.from };
+  }
+
+  /* ---------------------------------------------------------- projection */
+
+  /** A cheap one-shot read of what another chat is doing. Never wakes it. */
+  async state(chatId: string): Promise<PeerChatState | null> {
+    const chat = await this.getChat(chatId);
+    if (!chat) return null;
+    const live = this.getStatus(chatId);
+    // Context usage needs a live subprocess to answer, so it is best-effort and
+    // simply absent on a dormant chat rather than a reason the whole read fails.
+    let contextPercent: number | undefined;
+    if (live) {
+      const usage = await this.getContextUsage?.(chatId).catch(() => null);
+      if (usage) contextPercent = Math.round(usage.percentage);
+    }
+    return {
+      chatId,
+      title: chat.title,
+      projectId: chat.projectId,
+      status: live ?? chat.status ?? "idle",
+      dormant: live === undefined,
+      blockedOnHuman: live === "awaiting-input" || this.isBlockedOnHuman(chatId),
+      lastUserMessageAt: chat.lastUserMessageAt,
+      updatedAt: chat.updatedAt ?? chat.createdAt,
+      prs: chat.prs ?? [],
+      reviewOf: chat.reviewOf,
+      contextPercent,
+      heldMessages: this.held.get(chatId)?.length ?? 0,
+    };
+  }
+
+  /* ------------------------------------------------------------ internals */
+
+  /**
+   * Everything that can refuse a send, in the order that gives the most useful
+   * answer: identity, then existence, then budget. Also resolves the sender's
+   * denormalised attribution, since it needs the sender's record anyway.
+   */
+  private async admit(
+    from: string,
+    to: string,
+  ): Promise<({ ok: true; peer: PeerSender }) | (PeerSendResult & { ok: false })> {
+    if (from === to) {
+      return {
+        ok: false,
+        refusal: "self",
+        message:
+          "A chat cannot message itself — you are already here. Say it in your own " +
+          "turn instead.",
+      };
+    }
+    const target = await this.getChat(to);
+    if (!target) {
+      return {
+        ok: false,
+        refusal: "unknown-chat",
+        message: `No chat "${to}" exists. Find the right id with chat_find.`,
+      };
+    }
+    const now = this.now();
+    const pairKey = `${from} ${to}`;
+    const pair = prune(this.pairSends, pairKey, now, PEER_PAIR_WINDOW_MS);
+    // The window is a SLIDING one, so the budget frees up when its oldest entry
+    // ages out — not `now + window`, which would over-state the wait by the age
+    // of that entry and park a caller far longer than the limit actually asks.
+    const pairOldest = pair[0];
+    if (pairOldest !== undefined && pair.length >= PEER_PAIR_LIMIT) {
+      const retryAt = pairOldest + PEER_PAIR_WINDOW_MS;
+      return {
+        ok: false,
+        refusal: "rate-limited-pair",
+        retryAt,
+        message:
+          `Rate limit: ${PEER_PAIR_LIMIT} messages per ${
+            PEER_PAIR_WINDOW_MS / 60_000
+          } minutes from one chat to another, and you have used them all on ${to}. ` +
+          `The budget frees up at ${new Date(retryAt).toISOString()}. ` +
+          "This limit exists to stop two chats ping-ponging forever — if you are in a " +
+          "loop with that chat, stop and do the work instead.",
+      };
+    }
+    const inbound = prune(this.targetSends, to, now, PEER_TARGET_WINDOW_MS);
+    const inboundOldest = inbound[0];
+    if (inboundOldest !== undefined && inbound.length >= PEER_TARGET_LIMIT) {
+      const retryAt = inboundOldest + PEER_TARGET_WINDOW_MS;
+      return {
+        ok: false,
+        refusal: "rate-limited-target",
+        retryAt,
+        message:
+          `Rate limit: chat ${to} has received ${PEER_TARGET_LIMIT} peer messages in ` +
+          `the last ${PEER_TARGET_WINDOW_MS / 60_000} minutes, from all senders ` +
+          `combined. It frees up at ${new Date(retryAt).toISOString()}.`,
+      };
+    }
+
+    const sender = await this.getChat(from);
+    return {
+      ok: true,
+      peer: {
+        chatId: from,
+        title: sender?.title,
+        projectId: sender?.projectId,
+      },
+    };
+  }
+
+  /** Wake the target if needed, then deliver now or park it. */
+  private async deliver(input: {
+    from: string;
+    to: string;
+    text: string;
+    peer: PeerSender;
+    delivery: PeerDelivery;
+  }): Promise<PeerSendResult> {
+    const { from, to, text, peer, delivery } = input;
+    const woke = this.getStatus(to) === undefined;
+    // Established idiom (ResumeScheduler, PrReviewWatcher): a chat that finished
+    // has no subprocess, and refusing to resume one would make a project manager
+    // unable to reach any developer that had already reported done.
+    await this.ensureSession(to);
+
+    // Budget is spent on ACCEPTANCE, not on delivery: a held message has already
+    // committed the target to a turn, so not counting it would let a burst park
+    // twenty messages under one message's worth of budget.
+    const now = this.now();
+    push(this.pairSends, `${from} ${to}`, now);
+    push(this.targetSends, to, now);
+
+    const status = this.getStatus(to);
+    if (delivery === "queue" && status !== undefined && MID_TURN.has(status)) {
+      const queue = this.held.get(to);
+      if (queue) queue.push({ from, text, peer });
+      else this.held.set(to, [{ from, text, peer }]);
+      this.watchStatus();
+      return { ok: true, held: true, woke };
+    }
+
+    // `interrupt` needs nothing extra here: injecting mid-turn is simply what
+    // the broker already does when a turn is live, so the ONLY difference
+    // between the two deliveries is whether we parked the message first.
+    await this.sendFn(to, text, { peer });
+    return { ok: true, held: false, woke };
+  }
+
+  /**
+   * Subscribe to `chat-status` once, lazily, and only while something is held.
+   *
+   * Lazy because the overwhelming majority of sessions never hold a message, and
+   * a permanent subscriber on a bus every chat publishes to is a cost paid by
+   * everyone for a feature almost nobody used that turn.
+   */
+  private watchStatus(): void {
+    if (this.offStatus || this.disposed) return;
+    this.offStatus = this.bus.on("chat-status", (e) => {
+      if (MID_TURN.has(e.status)) return;
+      void this.flush(e.chatId);
+    });
+  }
+
+  /** Deliver everything parked for `chatId`, oldest first. */
+  private async flush(chatId: string): Promise<void> {
+    const queue = this.held.get(chatId);
+    if (!queue?.length) return;
+    // Detached before the first await: a message delivered here starts a turn,
+    // which republishes `chat-status`, which re-enters this method. Without the
+    // handoff the re-entrant call sees the same queue and double-sends it.
+    this.held.delete(chatId);
+    if (this.held.size === 0) this.unwatch();
+    for (const msg of queue) {
+      try {
+        await this.sendFn(chatId, msg.text, { peer: msg.peer });
+      } catch {
+        // The target died between parking and flushing. Dropping is the honest
+        // outcome — re-parking it would spin against a session that is gone.
+      }
+    }
+  }
+
+  private unwatch(): void {
+    this.offStatus?.();
+    this.offStatus = undefined;
+  }
+
+  /** Release every pending ask and parked message (teardown). */
+  dispose(): void {
+    this.disposed = true;
+    this.unwatch();
+    for (const pending of [...this.pendingAsks.values()]) pending.cancel("cancelled");
+    this.pendingAsks.clear();
+    this.held.clear();
+  }
+}
+
+/* ------------------------------------------------------------- helpers */
+
+/** Drop timestamps older than `windowMs` and return what is left (in place). */
+function prune(
+  map: Map<string, number[]>,
+  key: string,
+  now: number,
+  windowMs: number,
+): number[] {
+  const all = map.get(key);
+  if (!all) return [];
+  const cutoff = now - windowMs;
+  const kept = all.filter((t) => t > cutoff);
+  if (kept.length) map.set(key, kept);
+  else map.delete(key);
+  return kept;
+}
+
+function push(map: Map<string, number[]>, key: string, at: number): void {
+  const all = map.get(key);
+  if (all) all.push(at);
+  else map.set(key, [at]);
+}

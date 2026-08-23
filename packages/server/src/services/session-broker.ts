@@ -71,6 +71,7 @@ import type {
   ChatMessage,
   MessagePart,
   ImageRef,
+  PeerSender,
   AgentConfig,
   ModeConfig,
   McpServerConfig,
@@ -104,6 +105,7 @@ import {
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
+import type { ChatMessenger } from "./chat-messenger.js";
 import type { TerminalService } from "./terminal.js";
 import type { MemoryService } from "./memory.js";
 import type { MetricsService } from "./metrics.js";
@@ -996,6 +998,14 @@ export type MessagePriority = "now" | "next" | "later";
 export interface SendOptions {
   priority?: MessagePriority;
   images?: ImageRef[];
+  /**
+   * The chat that sent this, when the sender is another AGENT (`chat_send` /
+   * `chat_ask`). Stamps the emitted row `origin: "peer"` so the transcript can
+   * say who it came from — a peer message must arrive as a `user` turn, which
+   * is the only input channel a session has, so unattributed it is
+   * indistinguishable from something the human typed.
+   */
+  peer?: PeerSender;
   /** Per-message effort override (also updates the chat's effort going forward). */
   effort?: Effort;
   /**
@@ -1629,6 +1639,15 @@ export class SessionBroker {
     /** The chat that asked, so the new one can be traced back to it. */
     parentChatId: string;
   }) => Promise<SpawnedChat>;
+  /**
+   * Chat-to-chat messaging (`chat_send` / `chat_ask` / `chat_reply` /
+   * `chat_state`). Settable after construction for the same reason as
+   * `spawnChat`: WAKING a dormant target goes through the routes'
+   * `ensureSession`, which needs the whole service container, and the container
+   * is built around the broker rather than before it. Absent -> the four tools
+   * are not offered at all, rather than offered and broken.
+   */
+  messenger?: ChatMessenger;
   private readonly query: QueryFn;
   private readonly genId: () => string;
   private readonly now: () => number;
@@ -1786,6 +1805,10 @@ export class SessionBroker {
       images: o.images,
       effort: session.effort,
       steering: steering || undefined,
+      // Only ever stamped for a turn the human did NOT type. Ordinary sends stay
+      // unstamped: absence already means human on every row ever written, and
+      // backfilling `"human"` would be a wide diff for no behaviour.
+      ...(o.peer ? { origin: "peer" as const, peer: o.peer } : {}),
       ...(parts ? { parts } : {}),
     });
 
@@ -5319,6 +5342,27 @@ export class SessionBroker {
               findChats: (q) => this.inspect!.findChats(q),
               readChat: (q) => this.inspect!.readChat(q),
               projectInfo: (q) => this.inspect!.projectInfo(q, projectId),
+            }
+          : undefined,
+        // Cross-chat messaging. `from` is CLOSED OVER rather than passed as an
+        // argument, so there is no way for a tool call to send under another
+        // chat's name — attribution is the thing that makes this write path safe
+        // without a consent card, and an argument would make it forgeable.
+        messaging: this.messenger
+          ? {
+              send: ({ to, message, delivery }) =>
+                this.messenger!.send({ from: session.chatId, to, message, delivery }),
+              ask: ({ to, question, timeoutMs, signal }) =>
+                this.messenger!.ask({
+                  from: session.chatId,
+                  to,
+                  question,
+                  timeoutMs,
+                  signal,
+                }),
+              reply: ({ askId, answer }) =>
+                this.messenger!.reply({ from: session.chatId, askId, answer }),
+              state: (chatId) => this.messenger!.state(chatId),
             }
           : undefined,
         signal: session.abortController?.signal,

@@ -81,6 +81,7 @@ describe("mcp-catalog — builder", () => {
         chats: true,
         mcpConfig: true,
         inspect: true,
+        messaging: true,
         prewarm: true,
         exemptions: true,
       },
@@ -120,6 +121,10 @@ describe("mcp-catalog — builder", () => {
         "mcp_remove",
         "chat_find",
         "chat_read",
+        "chat_send",
+        "chat_ask",
+        "chat_reply",
+        "chat_state",
         "project_info",
       ]),
     );

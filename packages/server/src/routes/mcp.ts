@@ -140,6 +140,9 @@ export function registerMcpRoutes(app: FastifyInstance): void {
       // are available wherever this catalog is viewable at all.
       worktrees: !!services.worktrees,
       inspect: !!services.inspect,
+      // Same story for cross-chat messaging: one messenger, constructed by the
+      // container and bound by the broker for every session.
+      messaging: !!services.chatMessenger,
       // `approve_pr` exists only where the project opted into auto-merge —
       // the same condition the broker binds on, so the catalog shows the
       // tool as unavailable on every project that hasn't turned it on.
