@@ -29,6 +29,18 @@ import type { Project, SubApp, WorkflowConfig } from "@dispatch/shared";
  * scatters that across the parent folder and breaks the moment two repos share
  * a name. Dispatch resolves a relative worktree root against the repo, so this
  * value stays portable across machines — which an absolute path never is.
+ *
+ * THAT TRADE FLIPS ON A BUSY REPO, and the default does not follow it there.
+ * An in-repo root means the checkout contains N copies of itself, and while
+ * .gitignore hides them from `git status` it hides them from nothing that walks
+ * the filesystem. Measured on this repo at ~100 live worktrees: a plain
+ * `grep -rn` from the repo root ran past a two-minute timeout without
+ * answering, because each search re-read 100 trees. A handful of worktrees
+ * costs nothing and the move-as-a-unit win is real; a repo running many agents
+ * at once wants a parent-relative root instead. Dispatch's own manifest is the
+ * worked example — `.dispatch/project.yaml` sets `../.worktrees/dispatch`,
+ * which keeps one directory per project (no sibling scatter, no name
+ * collisions) while leaving the checkout searchable.
  */
 export const DEFAULT_WORKTREE_ROOT = ".worktrees";
 

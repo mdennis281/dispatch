@@ -443,6 +443,34 @@ describe("WorktreeService on a real temp repo", () => {
       svc.create(project(), "feat/dup", { base: "main", noFetch: true }),
     ).rejects.toThrow(/already exists/);
   });
+
+  // A worktreeRoot starting with `../` is how a busy repo keeps its trees OUT
+  // of its own checkout — at ~100 live worktrees an in-repo root made every
+  // filesystem-walking tool (grep, rg, a watcher) re-read 100 copies of the
+  // repo, and .gitignore does nothing about that. Dispatch's own manifest uses
+  // `../.worktrees/dispatch`, so the escape has to actually escape: resolve()
+  // must climb out of repoPath rather than joining a literal ".." segment
+  // underneath it.
+  it("honors a parent-relative worktreeRoot by creating outside the repo", async () => {
+    const outside = mkProject({ repoPath: repo, worktreeRoot: "../trees/dispatch" });
+    const expected = join(root, "trees", "dispatch", "feat-outside");
+
+    expect(svc.worktreePath(outside, "feat/outside")).toBe(expected);
+
+    const info = await svc.create(outside, "feat/outside", {
+      base: "main",
+      noFetch: true,
+    });
+    expect(info.path).toBe(expected);
+    expect(existsSync(expected)).toBe(true);
+    expect(existsSync(join(repo, ".."))).toBe(true);
+    // The decisive bit: nothing named `..` or `trees` landed inside the repo.
+    expect(existsSync(join(repo, "trees"))).toBe(false);
+
+    // git agrees it is a worktree of THIS repo, not an unrelated checkout.
+    const listed = await svc.list(outside);
+    expect(listed.find((w) => w.branch === "feat/outside")?.path).toBe(expected);
+  });
 });
 
 /* ------------------------------------------------------- attribution registry */

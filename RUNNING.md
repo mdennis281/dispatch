@@ -209,7 +209,12 @@ the file with, so the preview is the file rather than an impression of it.
 - **Worktree root** defaults to `.worktrees` inside the repo — one directory per repo
   holding a subdirectory per branch, which keeps a project one folder you can move or
   delete as a unit. Add it to `.gitignore`. A relative root is resolved against the repo,
-  so it stays portable across machines.
+  so it stays portable across machines — including one starting with `../`, which is
+  what you want on a repo that runs many agents at once. `.gitignore` keeps worktrees out
+  of `git status`, but not out of anything that walks the filesystem: at ~100 live
+  worktrees, an in-repo root made `grep -rn` from this repo's root take over two minutes,
+  because every search re-read 100 copies of the checkout. Dispatch's own manifest
+  therefore uses `../.worktrees/dispatch`.
 - **Finish with AI** saves exactly what the form has — nothing invented — and opens a chat
   briefed to do the rest: read the repo, register the sub-apps with their real dev/build/
   test commands and ports, and write instructions or skills where the repo earns them. An
