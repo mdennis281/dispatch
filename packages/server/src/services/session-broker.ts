@@ -2673,6 +2673,39 @@ export class SessionBroker {
     return this.cap;
   }
 
+  /**
+   * Re-read the cap from the settings file, off the admission path.
+   *
+   * `PUT /api/settings` hands the new cap straight to THIS process's broker, and
+   * for a single instance that is the whole story. But `config.json` lives in the
+   * SHARED config root while `data/` does not (see RUNNING.md): the installed app
+   * on 4318 and a `pnpm dev` on 4319 read the same settings file and run separate
+   * brokers. Without this, saving the cap on one of them leaves the other showing
+   * a number that is not in force on the instance you are looking at, until it is
+   * restarted.
+   *
+   * Fire-and-forget rather than awaited because both callers are synchronous
+   * admission decisions that must not grow an await: the read lands microseconds
+   * later, and `setCap` pumps if it turns out the cap went up — so a chat that
+   * queued against a stale cap is released the moment the fresh one arrives. The
+   * token limits in this same settings section have never had the problem, since
+   * `withinOverallContextBudget` re-reads per turn; this gives the cap the same
+   * property without making `schedule()` async.
+   *
+   * Unthrottled on purpose: it is one small JSON read per admission decision —
+   * the same read `withinOverallContextBudget` already does at every turn start —
+   * and a time-based skip would trade that for a window where the cap you just
+   * saved on the other instance visibly isn't in force yet.
+   */
+  private refreshCap(): void {
+    void this.store
+      .getSettings()
+      .then((s) => this.setCap(s.maxActiveSessions))
+      .catch(() => {
+        /* unreadable config → keep the cap in force; never fall back silently */
+      });
+  }
+
   /** Count of sessions holding an active slot (running or awaiting-input). */
   activeCount(): number {
     let n = 0;
@@ -2717,6 +2750,9 @@ export class SessionBroker {
   }
 
   private schedule(session: LiveSession): void {
+    // Cheap and off the critical path — see refreshCap. A cap raised by the OTHER
+    // instance reaches this one here rather than only at its next restart.
+    this.refreshCap();
     // A turn is already active → inject the buffered message(s) as steering.
     if (session.started && this.isActive(session)) {
       this.flushOutbox(session);
@@ -2940,6 +2976,11 @@ export class SessionBroker {
   }
 
   private pump(): void {
+    // The other half of the reconciliation: a slot just freed, so if the cap moved
+    // under us this is the moment a parked chat should notice. `setCap` re-enters
+    // `pump` on a raise, and a no-change `setCap` returns before it does — so this
+    // cannot recurse.
+    this.refreshCap();
     while (this.activeCount() < this.cap && this.queueOrder.length > 0) {
       const id = this.queueOrder[0]!;
       const session = this.sessions.get(id);

@@ -1148,6 +1148,10 @@ describe("SessionBroker — steering & concurrency", () => {
     expect(broker.getStatus("c2")).toBe("queued");
     expect(broker.getStatus("c3")).toBe("queued");
 
+    // Through the store first, exactly as `PUT /api/settings` does: the file is
+    // what makes a cap stick, since every admission decision re-reads it (a bare
+    // in-memory setCap is undone by the next one — see refreshCap).
+    await store.saveSettings({ theme: "dark", maxActiveSessions: 3 });
     const c3running = broker.waitFor("c3", "running");
     broker.setCap(3);
     await c3running;
@@ -1173,6 +1177,7 @@ describe("SessionBroker — steering & concurrency", () => {
     await broker.sendMessage("c1", "go");
     await until(() => broker.getStatus("c1") === "running");
 
+    await store.saveSettings({ theme: "dark", maxActiveSessions: 1 });
     broker.setCap(1);
     // A turn already under way keeps its subprocess and its half-done work.
     expect(broker.getStatus("c1")).toBe("running");
@@ -1183,9 +1188,42 @@ describe("SessionBroker — steering & concurrency", () => {
     // A CLEARED setting means "the value this server booted with" — never
     // "no cap" — and, being a raise, drains the queue on the spot.
     const c2running = broker.waitFor("c2", "running");
+    await store.saveSettings({ theme: "dark" });
     broker.setCap(undefined);
     expect(broker.maxActive).toBe(3);
     await c2running;
+
+    gate.resolve();
+    await Promise.all(["c1", "c2"].map((id) => broker.waitFor(id, "idle").catch(() => {})));
+  });
+
+  it("adopts a cap ANOTHER instance saved, without a restart", async () => {
+    // `config.json` lives in the shared config root while `data/` does not, so
+    // the two documented instances (the installed app and `pnpm dev`) read one
+    // settings file and run separate brokers. This one never sees the PUT that
+    // retunes the other, so it re-reads on the admission path instead.
+    const gate = deferred();
+    const { fn, controllers } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "go");
+    await until(() => controllers.length === 1);
+
+    // The other instance writes a bigger cap straight to the shared file.
+    await store.saveSettings({ theme: "dark", maxActiveSessions: 2 });
+
+    // This send queues against the stale cap of 1 and is released the moment the
+    // re-read lands — no restart, and no PUT to this process.
+    await broker.sendMessage("c2", "go");
+    await vi.waitFor(() => expect(broker.maxActive).toBe(2));
+    await until(() => controllers.length === 2);
+    expect(broker.getStatus("c2")).toBe("running");
 
     gate.resolve();
     await Promise.all(["c1", "c2"].map((id) => broker.waitFor(id, "idle").catch(() => {})));

@@ -125,7 +125,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     host: envVar(env, "HOST")?.trim() || DEFAULT_HOST,
     dataDir,
     ...(configDir ? { configDir } : {}),
-    maxActiveSessions: intFromEnv(env, "MAX_ACTIVE_SESSIONS", DEFAULT_MAX_ACTIVE_SESSIONS),
+    // Clamped here, not just in the broker: `intFromEnv` accepts any parseable
+    // integer, so `DISPATCH_MAX_ACTIVE_SESSIONS=0` — the obvious typo for someone
+    // reaching for "unlimited" — used to put a cap in `ServerConfig` that the
+    // broker would never honour, and `/api/settings/defaults` would then report
+    // it to the settings field as though it were in force.
+    maxActiveSessions: Math.max(
+      1,
+      intFromEnv(env, "MAX_ACTIVE_SESSIONS", DEFAULT_MAX_ACTIVE_SESSIONS),
+    ),
   };
 }
 
