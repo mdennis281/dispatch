@@ -501,24 +501,49 @@ describe("PrRegistry — Dispatch's own reviewer", () => {
     expect(res.record?.reviewAgent?.requestedAt).toBeUndefined();
   });
 
-  it("raiseReviewRoundCap buys exactly one more claimable round", async () => {
+  it("raiseReviewRoundCap buys a round the SWEEP can actually claim", async () => {
+    // The sweep only ever passes the PROJECT's cap — `maybeSpawnReview` reads
+    // `policy.maxRounds` from config and has no way to produce a raised number.
+    // So the raise is worth nothing unless the claim adds the row's grant to
+    // whatever it was handed, and this test asserts it with the config value
+    // throughout rather than hand-feeding the raised one.
+    const POLICY_CAP = 1;
     const reg = makeRegistry();
     await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
     await reg.requestReviewAgent(REPO, 42, "c1");
-    await reg.claimReviewAgent(REPO, 42, { maxRounds: 1 });
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP });
     await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
     expect(await reg.requestReviewAgent(REPO, 42, "c1")).toMatchObject({ reason: "rounds-spent" });
 
     await reg.raiseReviewRoundCap(REPO, 42, 1);
 
     expect(await reg.requestReviewAgent(REPO, 42, "c1")).toMatchObject({ armed: true });
-    // The cap is read off the ROW, so the raise has to be what lets the claim
-    // through as well — a request nothing can serve is the state we just left.
-    expect(await reg.claimReviewAgent(REPO, 42, { maxRounds: 2 })).not.toBeNull();
-    expect((await store.getPrRecord(KEY))?.reviewAgent).toMatchObject({
-      rounds: 2,
-      maxRounds: 2,
-    });
+    expect(await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP })).not.toBeNull();
+    expect((await store.getPrRecord(KEY))?.reviewAgent).toMatchObject({ rounds: 2 });
+  });
+
+  // `notePolicy` rewrites `maxRounds` from project config on EVERY sweep pass,
+  // for every open PR. A raise written into that field lasted about 90 seconds
+  // — the override bought nothing, and left `requestedAt` armed at a head no
+  // claim would ever serve, which reads as `queued` forever.
+  it("survives the notePolicy pass that rewrites maxRounds every sweep", async () => {
+    const POLICY_CAP = 1;
+    const reg = makeRegistry();
+    await reg.record(snapshot({ headRefOid: "sha-1" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP });
+    await reg.raiseReviewRoundCap(REPO, 42, 1);
+
+    // The sweep, doing exactly what it does every 90 seconds.
+    await reg.notePolicy(REPO, 42, { maxRounds: POLICY_CAP });
+
+    const state = (await store.getPrRecord(KEY))?.reviewAgent;
+    expect(state?.maxRounds).toBe(POLICY_CAP);
+    expect(state?.extraRounds).toBe(1);
+    // And the grant still buys the round it promised.
+    await reg.record(snapshot({ headRefOid: "sha-2" }), { chatId: "c1" });
+    await reg.requestReviewAgent(REPO, 42, "c1");
+    expect(await reg.claimReviewAgent(REPO, 42, { maxRounds: POLICY_CAP })).not.toBeNull();
   });
 
   it("raiseReviewRoundCap invents no cap where the row never recorded one", async () => {

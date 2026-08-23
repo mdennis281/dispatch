@@ -360,7 +360,10 @@ export class PrRegistry {
     // Every allowed round is claimed. Same rule `claimReviewAgent` refuses on —
     // spelled here too because a request the sweep will silently drop reads to
     // the caller exactly like one it is about to serve.
-    if (state?.maxRounds != null && (state.rounds ?? 0) >= state.maxRounds) {
+    if (
+      state?.maxRounds != null &&
+      (state.rounds ?? 0) >= state.maxRounds + (state.extraRounds ?? 0)
+    ) {
       return { armed: false, reason: "rounds-spent", record: prev };
     }
     // Already asked at this head, and nothing has served it yet. A parked
@@ -415,7 +418,10 @@ export class PrRegistry {
     if (state?.maxRounds == null) return null;
     return this.publish(
       await this.store.upsertPrRecord(key, { ...prev }, {
-        reviewAgent: { ...state, maxRounds: state.maxRounds + extra },
+        // `extraRounds`, NOT `maxRounds`. The policy field is rewritten from
+        // project config by `notePolicy` on every sweep pass, so a raise parked
+        // there lasts about 90 seconds — see `PrReviewAgentStateSchema`.
+        reviewAgent: { ...state, extraRounds: (state.extraRounds ?? 0) + extra },
       }),
     );
   }
@@ -444,7 +450,12 @@ export class PrRegistry {
     if (!prev || prev.state !== "open") return null;
     const state: PrReviewAgentState = prev.reviewAgent ?? { rounds: 0 };
     if (!state.requestedAt) return null;
-    if (state.rounds >= opts.maxRounds) return null;
+    // The sweep hands us the PROJECT's cap, which is the only value it has. The
+    // per-PR grant from `request_review`'s `extraRounds` lives on the row, and
+    // adding it here is what makes that override do anything at all: written
+    // into `maxRounds` instead, it was erased by the next `notePolicy` pass and
+    // never reached this comparison.
+    if (state.rounds >= opts.maxRounds + (state.extraRounds ?? 0)) return null;
     // Dedup on the HEAD, not on "has been reviewed": a review is only spent on
     // the code it read, so a push re-arms it and a re-request on unchanged code
     // does not.

@@ -199,6 +199,21 @@ describe("prReviewAgentView — the reviewer's state on one PR", () => {
     ).toMatchObject({ phase: "queued", at: 20 });
   });
 
+  // `extraRounds` is `request_review`'s per-PR override. It is a separate field
+  // because `maxRounds` is rewritten from project config by `notePolicy` on every
+  // sweep pass, so a raise parked there is erased within ~90 seconds.
+  it("counts a per-PR extraRounds grant toward the cap it reports and enforces", () => {
+    expect(
+      prReviewAgentView({ rounds: 2, reviewedAt: 1, postedAt: 2, maxRounds: 2 }),
+    ).toMatchObject({ roundsSpent: true, maxRounds: 2 });
+    // Same row, one round granted: no longer spent, and the denominator every
+    // surface shows is the EFFECTIVE cap — "2 of 3", not the nonsense "2 of 2
+    // but keep going".
+    expect(
+      prReviewAgentView({ rounds: 2, reviewedAt: 1, postedAt: 2, maxRounds: 2, extraRounds: 1 }),
+    ).toMatchObject({ roundsSpent: false, maxRounds: 3 });
+  });
+
   it("reads a stale request over a POSTED round as spent, not as queued forever", () => {
     // The row PR #147 was left holding. Before this it read `queued` in
     // perpetuity: a request nothing can claim, sitting on top of a finished

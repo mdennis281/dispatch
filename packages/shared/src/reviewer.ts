@@ -194,6 +194,7 @@ export function prReviewAgentView(
         findings?: number;
         postedEvent?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
         maxRounds?: number;
+        extraRounds?: number;
         problem?: string;
         requestError?: string;
       }
@@ -201,14 +202,20 @@ export function prReviewAgentView(
 ): PrReviewAgentView | null {
   if (!state) return null;
   const round = state.rounds ?? 0;
+  // The EFFECTIVE cap: the project's policy plus whatever `request_review`'s
+  // `extraRounds` granted on this PR alone. Reported as `maxRounds` because it
+  // is the number every surface means by "of how many" — a chip reading "3 of 2"
+  // would be nonsense, and the policy value on its own is not the limit any more.
+  const cap =
+    state.maxRounds != null ? state.maxRounds + (state.extraRounds ?? 0) : undefined;
   // The cap rule, spelled ONCE. `claimReviewAgent` refuses on exactly this
   // comparison, and every surface that wants to say "the reviewer is done" —
   // the chip, and `watch_pr`, which otherwise blocks for half an hour on a round
   // that can never be claimed — has to mean the same thing by it.
-  const roundsSpent = state.maxRounds != null && round >= state.maxRounds;
+  const roundsSpent = cap != null && round >= cap;
   const base = {
     round,
-    maxRounds: state.maxRounds,
+    maxRounds: cap,
     roundsSpent,
     chatId: state.chatId,
     posted: false,

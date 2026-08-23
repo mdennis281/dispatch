@@ -449,6 +449,17 @@ export interface ManagerMcpGitHub {
    */
   defaultReviewers?: readonly string[];
   /**
+   * The GitHub login Dispatch's OWN reviewer posts as, when the project uses a
+   * dedicated account. Absent in self-review mode, where the reviewer has no
+   * account and is asked through {@link requestReviewAgent} instead.
+   *
+   * `request_review` needs it to tell its own spent reviewer apart from every
+   * other name on the list. Without it the spent-cap refusal aborted the whole
+   * tool, so `request_review({ reviewers: ["alice"] })` on a project whose
+   * Dispatch reviewer was done reported success and never queued alice.
+   */
+  reviewAgentLogin?: string;
+  /**
    * Report that the watched PR has MERGED. Most merges here are performed by the
    * repo's auto-merge job rather than by us, so `watch_pr` observing the terminal
    * state is the only moment the manager learns about them — and it's what lets
@@ -2983,6 +2994,20 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       }
       const repo =
         typeof args.repo === "string" && args.repo.trim() ? args.repo.trim() : undefined;
+      const askedAll = (
+        Array.isArray(args.reviewers) && args.reviewers.length
+          ? args.reviewers
+          : (gh.defaultReviewers ?? [])
+      )
+        .map((r) => String(r).trim())
+        .filter(Boolean);
+      // Everyone on the list who is NOT Dispatch's own reviewer. The spent-cap
+      // refusal below is about that one account, and must not swallow the rest:
+      // on a project asking both a machine account and a human, a spent Dispatch
+      // cap used to abort the whole call, report success, and never queue the
+      // human the agent explicitly named.
+      const mine = gh.reviewAgentLogin?.toLowerCase();
+      const others = mine ? askedAll.filter((r) => r.toLowerCase() !== mine) : askedAll;
 
       // Dispatch's round cap, BEFORE anything is asked of GitHub.
       //
@@ -3002,7 +3027,11 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         typeof args.extraRounds === "number" && Number.isInteger(args.extraRounds)
           ? Math.min(3, Math.max(1, args.extraRounds))
           : 0;
-      if (roundView?.roundsSpent && !extraRounds) {
+      const capSpent = roundView?.roundsSpent === true && !extraRounds;
+      // Refuse the CALL only when there is nobody else left to ask. With others
+      // on the list the request still goes out — minus Dispatch's own reviewer,
+      // whose re-queueing is the destructive part.
+      if (capSpent && others.length === 0) {
         const cap = roundView.maxRounds ?? roundView.round;
         return prToolResult(
           "request_review",
@@ -3046,24 +3075,31 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         await ctx.prRegistry.raiseReviewRoundCap(number, repo, extraRounds).catch(() => {});
       }
 
-      const asked = (
-        Array.isArray(args.reviewers) && args.reviewers.length
-          ? args.reviewers
-          : (gh.defaultReviewers ?? [])
-      )
-        .map((r) => String(r).trim())
-        .filter(Boolean);
+      // With a spent cap we ask everyone EXCEPT Dispatch's own reviewer; that
+      // one name is the whole reason the cap matters.
+      const asked = capSpent ? others : askedAll;
       // Dispatch's own reviewer, where the project configured one with no GitHub
       // account to queue. Asked ALONGSIDE the GitHub reviewers rather than
       // instead of them: a project can genuinely want both, and it is the same
       // verb either way — which is the point of routing it through this tool
       // instead of adding a second one the loop instructions would have to teach.
-      const local = gh.requestReviewAgent
-        ? await gh.requestReviewAgent(number, repo).catch(() => ({
-            ok: false,
-            detail: "Dispatch's reviewer could not be asked",
-          }))
-        : null;
+      const local =
+        gh.requestReviewAgent && !capSpent
+          ? await gh.requestReviewAgent(number, repo).catch(() => ({
+              ok: false,
+              detail: "Dispatch's reviewer could not be asked",
+            }))
+          : null;
+      // Said alongside whatever DID get requested, so a spent cap is never
+      // silent just because somebody else was still askable.
+      const spentNote = capSpent
+        ? ` Dispatch's own reviewer was NOT asked: it has spent all ` +
+          `${roundView?.maxRounds ?? roundView?.round} of its rounds on this PR` +
+          (roundView?.posted
+            ? ", so the review requirement is already met. Pass `extraRounds` if you " +
+              "genuinely need another round from it."
+            : " and none of them posted a review — check the reviewer chat.")
+        : "";
 
       // An empty list is a CONFIG problem, not a call to retry with. Saying so
       // here stops the loop where an agent re-requests nothing and re-watches.
@@ -3119,6 +3155,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         lines.push(`  · ⚠ could not ask ${f.reviewer}: ${f.error}`);
       }
       if (local) lines.push(`  · ${local.ok ? "" : "⚠ "}${local.detail}`);
+      if (spentNote) lines.push(`  ·${spentNote}`);
 
       // VERIFY, don't trust the status code. GitHub answers 200 for this POST and
       // can still queue nobody — observed asking Copilot for a re-review after it
@@ -3153,7 +3190,11 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       const ok =
         (onHook !== null ? onHook.length > 0 : res.requested.length > 0) || Boolean(local?.ok);
       const advice = ok
-        ? "Now call `mcp__manager__watch_pr` again to wait for their review."
+        ? "Now call `mcp__manager__watch_pr` again to wait for their review." +
+          (spentNote && roundView?.posted
+            ? " Do not wait on Dispatch's own reviewer — its rounds are spent and the " +
+              "review bar is already met."
+            : "")
         : onHook !== null && !res.failed.length
           ? "Do NOT go back to watch_pr — it would block on an empty queue. A bot reviewer " +
             "often refuses a re-request on a head it has already reviewed; ask a human, or " +

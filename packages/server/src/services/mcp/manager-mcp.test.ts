@@ -1345,12 +1345,15 @@ describe("manager-mcp — request_review", () => {
      * it requested"; `null` stands for a queue that couldn't be re-read.
      */
     verify?: string[] | null,
+    /** The login Dispatch's own reviewer posts as, when the project has one. */
+    reviewAgentLogin?: string,
   ): ManagerMcpGitHub & { asked: Array<{ n: number; list: readonly string[] }> } => {
     const asked: Array<{ n: number; list: readonly string[] }> = [];
     const queued = verify === undefined ? result.requested : verify;
     return {
       asked,
       defaultReviewers: defaults,
+      reviewAgentLogin,
       pollPrState: async () =>
         snap({ review: queued === null ? null : { requested: queued, reported: [] } }),
       requestReviewers: async (n, list) => {
@@ -1514,7 +1517,12 @@ describe("manager-mcp — request_review", () => {
   // `latestReviews`, so `approve_pr` then refuses a PR that was ready. The
   // cheapest place to break that chain is to not make the request.
   it("refuses to re-request once the rounds are spent, and says the bar is MET", async () => {
-    const gh = ghWith({ requested: ["dispatch-review"], failed: [] });
+    const gh = ghWith(
+      { requested: ["dispatch-review"], failed: [] },
+      ["dispatch-review"],
+      undefined,
+      "dispatch-review",
+    );
     const { requestReview } = createManagerTools({
       chatId: "c1",
       bus,
@@ -1543,7 +1551,12 @@ describe("manager-mcp — request_review", () => {
   });
 
   it("says the rounds died unreviewed rather than claiming the bar is met", async () => {
-    const gh = ghWith({ requested: ["dispatch-review"], failed: [] });
+    const gh = ghWith(
+      { requested: ["dispatch-review"], failed: [] },
+      ["dispatch-review"],
+      undefined,
+      "dispatch-review",
+    );
     const { requestReview } = createManagerTools({
       chatId: "c1",
       bus,
@@ -1575,6 +1588,7 @@ describe("manager-mcp — request_review", () => {
       ),
     });
 
+
     const res = await requestReview.handler(
       { number: 147, extraRounds: 1, reviewers: ["dispatch-review"], repo: undefined },
       {},
@@ -1583,6 +1597,74 @@ describe("manager-mcp — request_review", () => {
     expect(raises).toEqual([1]);
     expect(gh.asked).toEqual([{ n: 147, list: ["dispatch-review"] }]);
     expect(resultText(res)).toContain("dispatch-review");
+  });
+
+  // The refusal is about ONE account. A project can ask both a machine reviewer
+  // and a human, and a spent Dispatch cap says nothing about the human — aborting
+  // the whole call reported success while alice was never queued at all.
+  it("still queues the OTHER reviewers when only Dispatch's own cap is spent", async () => {
+    const gh = ghWith(
+      { requested: ["alice"], failed: [] },
+      ["dispatch-review", "alice"],
+      undefined,
+      "dispatch-review",
+    );
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+      prRegistry: reviewRegistry({
+        rounds: 2,
+        maxRounds: 2,
+        chatId: "r1",
+        reviewedAt: 1_000,
+        postedAt: 2_000,
+      }),
+    });
+
+    const res = await requestReview.handler(
+      { number: 147, extraRounds: undefined, reviewers: ["alice"], repo: undefined },
+      {},
+    );
+
+    // alice is asked; the spent reviewer is dropped from the list, not the call.
+    expect(gh.asked).toEqual([{ n: 147, list: ["alice"] }]);
+    expect(resultText(res)).toContain("alice");
+    // …and the spent cap is still SAID, or it goes silent just because somebody
+    // else happened to be askable.
+    expect(resultText(res)).toContain("was NOT asked");
+  });
+
+  it("drops Dispatch's own reviewer from a spent list but keeps the rest", async () => {
+    const gh = ghWith(
+      { requested: ["alice"], failed: [] },
+      ["dispatch-review", "alice"],
+      undefined,
+      "dispatch-review",
+    );
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+      prRegistry: reviewRegistry({
+        rounds: 2,
+        maxRounds: 2,
+        chatId: "r1",
+        reviewedAt: 1_000,
+        postedAt: 2_000,
+      }),
+    });
+
+    // No explicit list, so it falls back to the project's two configured
+    // reviewers — one of which is the spent one.
+    await requestReview.handler(
+      { number: 147, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    expect(gh.asked).toEqual([{ n: 147, list: ["alice"] }]);
   });
 
   it("leaves an unspent cap alone — this gate must not cost the ordinary path", async () => {

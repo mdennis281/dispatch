@@ -411,6 +411,21 @@ export const PrReviewAgentStateSchema = z.object({
    */
   maxRounds: z.number().int().optional(),
   /**
+   * Rounds granted on THIS PR beyond the project's cap, by `request_review`'s
+   * `extraRounds` override. The effective cap is `maxRounds + extraRounds`.
+   *
+   * A separate field rather than a bigger {@link maxRounds}, because
+   * `maxRounds` is not the row's to keep: `notePolicy` rewrites it from
+   * `workflow.pr.reviewAgent.maxRounds` on EVERY sweep pass, and
+   * `claimReviewAgent` is handed the same config value by the sweep. A raise
+   * written into `maxRounds` was therefore erased within ~90 seconds and could
+   * never permit a claim — the override bought nothing and left the row worse
+   * than a refusal would have, with a request armed at a head no claim would
+   * ever serve. Held apart, the policy and the per-PR grant stop overwriting
+   * each other.
+   */
+  extraRounds: z.number().int().optional(),
+  /**
    * Why Dispatch's reviewer will not run for this PR at all.
    *
    * From `resolveReviewer`'s `problem`: a project that asks to review as a
