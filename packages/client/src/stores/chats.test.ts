@@ -6,6 +6,7 @@ import {
   countProjectAgents,
   buildChatTree,
   reviewTargetKey,
+  statusIsActivity,
 } from "./chats.js";
 
 function chat(id: string, projectId: string, updatedAt = 1): Chat {
@@ -320,5 +321,24 @@ describe("reviewTargetKey", () => {
       purpose: { kind: "pr:review", label: "Reviewing a pull request" },
     };
     expect(reviewTargetKey(odd)).toBeNull();
+  });
+});
+
+describe("statusIsActivity — which status events may move the row's clock", () => {
+  it("refuses the two statuses a teardown produces", () => {
+    // The Power button reaps a whole branch through `broker.stop()`, which
+    // settles each session to `done`/`idle`. Bumping on those reset the age of
+    // every row in the branch to "now" for something the human did TO the chats
+    // rather than in them — and the idle sweep did it again on its own timer.
+    expect(statusIsActivity("done")).toBe(false);
+    expect(statusIsActivity("idle")).toBe(false);
+  });
+
+  it("keeps every status that IS news, message behind it or not", () => {
+    // `awaiting-input` must not sink while it waits for you, and a failure has
+    // to surface even when nothing was written to the transcript.
+    for (const status of ["queued", "running", "waiting", "awaiting-input", "failed", "error"] as const) {
+      expect(statusIsActivity(status)).toBe(true);
+    }
   });
 });

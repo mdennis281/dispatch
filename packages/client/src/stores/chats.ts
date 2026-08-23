@@ -43,6 +43,12 @@ interface ChatsStore {
    * Drives the sidebar's recency order + its "age" label. Seeded from the
    * server's `updatedAt`/`createdAt` at hydrate, then advanced by live events —
    * so a chat floats to the top the instant it starts streaming.
+   *
+   * Advanced only by events that mean the CHAT did something (see
+   * `statusIsActivity`). A status arriving because its session was torn down is
+   * not the chat doing something, and this clock is client-only — the server's
+   * `updatedAt` deliberately survives a status write, so nothing here would ever
+   * put a wrongly-bumped age back.
    */
   lastActivity: Record<string, number>;
 
@@ -306,6 +312,38 @@ export function useProjectChatTree(projectId: string | null): ChatBranch[] {
  * flight even though nothing is streaming yet.
  */
 const WORKING_STATUS: ReadonlySet<ChatStatus> = new Set(["running", "waiting", "queued"]);
+
+/**
+ * Statuses whose arrival counts as the CHAT doing something, for `lastActivity`.
+ *
+ * `idle` and `done` are excluded because they are the two the broker also emits
+ * for reasons that have nothing to do with the chat: `broker.stop()` settles a
+ * session to `done`/`idle`, and it is called by the Power button, the idle
+ * sweep, `setHarness` and dispose alike. Reaping a chat's processes was
+ * therefore resetting its age to "now" and floating it to the top of the
+ * sidebar — for a whole BRANCH at once, since the button reaps the reviewers
+ * too — and the idle sweep was quietly doing the same to every parked chat on
+ * its own timer.
+ *
+ * Nothing is lost at a real turn end: the `chat-message` that ends the turn
+ * bumps the clock a beat before the `done` does, with the message's own
+ * timestamp. What we keep is the other direction — `error`/`failed` and
+ * `awaiting-input` ARE news even with no message behind them, and a chat that
+ * has just blocked on a question must not sink while it waits for you.
+ */
+const ACTIVITY_STATUS: ReadonlySet<ChatStatus> = new Set([
+  "queued",
+  "running",
+  "waiting",
+  "awaiting-input",
+  "failed",
+  "error",
+]);
+
+/** Whether a `chat-status` event should advance the row's activity clock. */
+export function statusIsActivity(status: ChatStatus): boolean {
+  return ACTIVITY_STATUS.has(status);
+}
 
 export interface ProjectAgentCounts {
   /** Chats with an agent mid-turn. */

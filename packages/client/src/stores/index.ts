@@ -25,7 +25,7 @@ import {
 } from "../lib/browserNotify.js";
 import { useConnection } from "./connection.js";
 import { useProjects } from "./projects.js";
-import { useChats } from "./chats.js";
+import { useChats, statusIsActivity } from "./chats.js";
 import { reconcileActiveChat } from "./navigation.js";
 import { useMessages } from "./messages.js";
 import { useAttention } from "./attention.js";
@@ -146,7 +146,11 @@ export function applyServerEvent(evt: WsServerEvent): void {
       useChats
         .getState()
         .setStatus(evt.chatId, evt.status, evt.activity, evt.queued, evt.prSettled);
-      useChats.getState().bumpActivity(evt.chatId);
+      // Not every status is the chat doing something — `broker.stop()` settles a
+      // session to `done`/`idle` on behalf of the Power button and the idle
+      // sweep, and bumping on those reset the row's age to "now" for something
+      // the human did TO the chat rather than in it. See `statusIsActivity`.
+      if (statusIsActivity(evt.status)) useChats.getState().bumpActivity(evt.chatId);
       // Only a `running` turn has an in-flight assistant stream. Any other state
       // — blocked on input, queued, or finished (idle/done/error) — means no live
       // stream, so clear lingering streaming buffers: a partial/aborted message's
