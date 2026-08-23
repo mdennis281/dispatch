@@ -95,11 +95,13 @@ describe("prReviewState — the reviewer queue", () => {
     nodes: Array<{ __typename: string; login?: string; slug?: string }>,
     extra: {
       author?: string;
+      head?: string;
       reviews?: Array<{
         author: string;
         state: string;
         isMinimized?: boolean;
         submittedAt?: string;
+        commit?: string;
       }>;
     } = {},
   ) => ({
@@ -107,12 +109,14 @@ describe("prReviewState — the reviewer queue", () => {
       repository: {
         pullRequest: {
           author: { login: extra.author ?? "author-of-the-pr" },
+          headRefOid: extra.head,
           reviews: {
             nodes: (extra.reviews ?? []).map((r) => ({
               author: { login: r.author },
               state: r.state,
               isMinimized: r.isMinimized ?? false,
               submittedAt: r.submittedAt ?? null,
+              commit: r.commit ? { oid: r.commit } : null,
             })),
           },
           reviewRequests: { nodes: nodes.map((requestedReviewer) => ({ requestedReviewer })) },
@@ -178,6 +182,34 @@ describe("prReviewState — the reviewer queue", () => {
   // `resolve_thread` posts its reply as a `PullRequestReview` BY THE PR'S AUTHOR.
   // `latestReviews` drops those for us; `everReported` has to do it by hand, or a
   // PR clears its own review bar by answering its reviewer.
+  // `reviewDecision` is an aggregate GitHub never clears for a reviewer that
+  // does not submit APPROVE — which is Dispatch's own reviewer. Whether the
+  // verdict is about code that has since been REPLACED is what lets `approve_pr`
+  // tell a spent objection from a live one.
+  it("marks a review stale against the PR head, and says nothing when it can't compare", async () => {
+    const { exec, json } = makeExec();
+    json(
+      queueJson([], {
+        head: "sha-2",
+        reviews: [
+          { author: "a", state: "CHANGES_REQUESTED", commit: "sha-1" },
+          { author: "b", state: "CHANGES_REQUESTED", commit: "sha-2" },
+          { author: "c", state: "COMMENTED" },
+        ],
+      }),
+    );
+    json({ latestReviews: [] });
+
+    const state = await new GitHubService({ bus, exec }).prReviewState(REPO, 42);
+
+    // Newest first, so the order is the reverse of the query's.
+    expect(state!.everReported.map((r) => [r.author, r.stale])).toEqual([
+      ["c", undefined],
+      ["b", false],
+      ["a", true],
+    ]);
+  });
+
   it("excludes the PR author's own reviews, and PENDING and minimized ones", async () => {
     const { exec, json } = makeExec();
     json(

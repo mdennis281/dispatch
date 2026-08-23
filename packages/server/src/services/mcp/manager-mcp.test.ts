@@ -1918,6 +1918,99 @@ describe("prLandingBlockers", () => {
     ).toContain("changes-requested");
   });
 
+  // `reviewDecision` is an aggregate GitHub only clears when the SAME reviewer
+  // submits a fresh APPROVED review. Dispatch's reviewer never submits one and
+  // stops permanently at its round cap, so this blocker had no exit: no override
+  // takes it, no later round clears it. PR #149 hit exactly that with every
+  // finding fixed and every thread resolved.
+  it("stops blocking once the changes-requested verdict is STALE and nothing is open", () => {
+    const b = prLandingBlockers(
+      readyPr({
+        reviewDecision: "changes_requested",
+        threads: [],
+        everSubmittedReviews: [
+          { author: "dispatch-review", state: "CHANGES_REQUESTED", stale: true },
+        ],
+        submittedReviews: [{ author: "dispatch-review", state: "CHANGES_REQUESTED" }],
+      }),
+      { requireReview: true },
+    );
+    expect(b).toEqual([]);
+  });
+
+  // Both halves are required, and each is tested on its own. A stale verdict
+  // with an open thread behind it is still an objection.
+  it("keeps blocking when a stale verdict still has an open thread", () => {
+    const b = prLandingBlockers(
+      readyPr({
+        reviewDecision: "changes_requested",
+        threads: [{ id: "t1", isResolved: false, path: "a.ts", line: 1 }],
+        everSubmittedReviews: [
+          { author: "dispatch-review", state: "CHANGES_REQUESTED", stale: true },
+        ],
+      }),
+    );
+    expect(b.map((x) => x.code)).toContain("changes-requested");
+  });
+
+  it("keeps blocking when the verdict is about the CURRENT head", () => {
+    // They asked for changes to code that is still there. Resolving the thread
+    // does not make that go away.
+    const b = prLandingBlockers(
+      readyPr({
+        reviewDecision: "changes_requested",
+        threads: [],
+        everSubmittedReviews: [
+          { author: "dispatch-review", state: "CHANGES_REQUESTED", stale: false },
+        ],
+      }),
+    );
+    expect(b.map((x) => x.code)).toContain("changes-requested");
+  });
+
+  it("keeps blocking when staleness could not be determined", () => {
+    // `undefined` is "couldn't compare" — it must not read as stale, or an
+    // unreadable commit would forgive a live objection.
+    const b = prLandingBlockers(
+      readyPr({
+        reviewDecision: "changes_requested",
+        threads: [],
+        everSubmittedReviews: [{ author: "dispatch-review", state: "CHANGES_REQUESTED" }],
+      }),
+    );
+    expect(b.map((x) => x.code)).toContain("changes-requested");
+  });
+
+  it("keeps blocking when the threads can't be read at all", () => {
+    // No way to tell whether anything is outstanding, so the verdict stands.
+    const b = prLandingBlockers(
+      readyPr({
+        reviewDecision: "changes_requested",
+        threads: null,
+        everSubmittedReviews: [
+          { author: "dispatch-review", state: "CHANGES_REQUESTED", stale: true },
+        ],
+      }),
+    );
+    expect(b.map((x) => x.code)).toContain("changes-requested");
+  });
+
+  it("keeps blocking when one of two changes-requested verdicts is current", () => {
+    // Every one of them has to be stale. A second reviewer objecting to the
+    // code as it stands is not superseded by the first one's verdict ageing out.
+    const b = prLandingBlockers(
+      readyPr({
+        reviewDecision: "changes_requested",
+        threads: [],
+        everSubmittedReviews: [
+          { author: "dispatch-review", state: "CHANGES_REQUESTED", stale: true },
+          { author: "alice", state: "CHANGES_REQUESTED", stale: false },
+        ],
+      }),
+    );
+    expect(b.map((x) => x.code)).toContain("changes-requested");
+  });
+
   it("says only 'already merged' for a settled PR, without piling on", () => {
     const b = prLandingBlockers(readyPr({ state: "merged", checks: [FAIL_BUILD], threads: null }));
     expect(b.map((x) => x.code)).toEqual(["not-open"]);

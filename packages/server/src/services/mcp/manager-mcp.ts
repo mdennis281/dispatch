@@ -699,7 +699,16 @@ export interface PrReadiness {
    * reviews on it. That disagreement between the two tools is the bug this
    * field exists to end.
    */
-  everSubmittedReviews: Array<{ author: string; state: string }> | null;
+  everSubmittedReviews: Array<{
+    author: string;
+    state: string;
+    /**
+     * They judged a commit that is no longer this PR's head. `undefined` = we
+     * could not compare, which must not read as either — see
+     * {@link PrReviewState.everReported}.
+     */
+    stale?: boolean;
+  }> | null;
   /**
    * Dispatch's OWN reviewer on this PR: has it used every round it is allowed,
    * and did any of them actually file a review.
@@ -1088,6 +1097,12 @@ export function prLandingBlockers(
       detail: "It's still a draft — mark it ready for review before landing it.",
     });
   }
+  /**
+   * Set when GitHub's aggregate says changes were requested. Emitted only after
+   * the thread list is read — a stale verdict with an open thread behind it is
+   * still an objection, and the thread count lives further down.
+   */
+  let changesRequested: { stale: boolean } | null = null;
   if (pr.labels.some((l) => l.toLowerCase() === MERGE_HOLD_LABEL)) {
     blockers.push({
       code: "hold",
@@ -1097,10 +1112,26 @@ export function prLandingBlockers(
     });
   }
   if (pr.reviewDecision === "changes_requested") {
-    blockers.push({
-      code: "changes-requested",
-      detail: "A reviewer requested changes — address them and get a fresh review first.",
-    });
+    // `reviewDecision` is an AGGREGATE GitHub only clears when the same reviewer
+    // submits a fresh APPROVED review. Dispatch's reviewer never submits one —
+    // it posts COMMENT or REQUEST_CHANGES and nothing else — and it stops
+    // permanently at its round cap. So on a PR it asked for changes on, this
+    // blocker had no exit at all: no override takes it, no later round can clear
+    // it, and the change simply cannot be landed. PR #149 hit exactly that,
+    // with every finding fixed and every thread resolved.
+    //
+    // Two facts have to hold together to call it stale, and neither is enough
+    // alone. The verdict must be about code that has since been REPLACED, and
+    // nothing from it may still be open — `open.length` is computed below, so
+    // the emit is deferred rather than the condition being duplicated here.
+    const staleVerdicts =
+      pr.everSubmittedReviews !== null &&
+      pr.everSubmittedReviews.some((r) => r.state === "CHANGES_REQUESTED") &&
+      pr.everSubmittedReviews
+        .filter((r) => r.state === "CHANGES_REQUESTED")
+        // `undefined` is "couldn't compare", which must not read as stale.
+        .every((r) => r.stale === true);
+    changesRequested = { stale: staleVerdicts };
   }
 
   const failing = pr.checks.filter(
@@ -1226,6 +1257,26 @@ export function prLandingBlockers(
           .join(", ")}. Fix them and resolve the ones you actually fixed.`,
       });
     }
+    // Now that the threads are known: a changes-requested verdict is spent only
+    // if the code it judged has been replaced AND it left nothing open. Either
+    // half alone is not enough — a stale verdict with an open thread behind it
+    // is still an objection, and a resolved thread on the CURRENT head means
+    // they asked for changes to code that is still there.
+    if (changesRequested && !(changesRequested.stale && open.length === 0)) {
+      blockers.push({
+        code: "changes-requested",
+        detail: "A reviewer requested changes — address them and get a fresh review first.",
+      });
+    }
+  }
+  // Threads unreadable: no way to tell whether anything is outstanding, so the
+  // verdict stands. `threads-unreadable` is already blocking; this keeps the two
+  // consistent rather than quietly forgiving one of them.
+  if (changesRequested && pr.threads === null) {
+    blockers.push({
+      code: "changes-requested",
+      detail: "A reviewer requested changes — address them and get a fresh review first.",
+    });
   }
 
   if (pr.mergeable === false) {

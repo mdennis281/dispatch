@@ -256,7 +256,17 @@ export interface PrReviewState {
    * answering itself. `latestReviews` drops author reviews for us; this list
    * has to do it by hand.
    */
-  everReported: Array<{ author: string; state: string; submittedAt?: string }>;
+  everReported: Array<{
+    author: string;
+    state: string;
+    submittedAt?: string;
+    /**
+     * They reviewed a commit that is no longer this PR's head, so their verdict
+     * is about code you have since replaced. `undefined` = we could not compare
+     * (an absent head or review commit), which must not read as either.
+     */
+    stale?: boolean;
+  }>;
 }
 
 /** One inline comment on a submitted review — a file, a line, and what's wrong. */
@@ -381,12 +391,14 @@ interface RawGraphqlReviewRequests {
     repository?: {
       pullRequest?: {
         author?: { login?: string } | null;
+        headRefOid?: string;
         reviews?: {
           nodes?: Array<{
             author?: { login?: string } | null;
             state?: string;
             isMinimized?: boolean;
             submittedAt?: string | null;
+            commit?: { oid?: string } | null;
           } | null>;
         };
         reviewRequests?: {
@@ -1622,8 +1634,8 @@ export class GitHubService {
     const query =
       "query($owner:String!,$repo:String!,$number:Int!)" +
       "{repository(owner:$owner,name:$repo){pullRequest(number:$number){" +
-      "author{login} " +
-      "reviews(first:100){nodes{author{login} state isMinimized submittedAt}} " +
+      "author{login} headRefOid " +
+      "reviews(first:100){nodes{author{login} state isMinimized submittedAt commit{oid}}} " +
       "reviewRequests(first:100){nodes{requestedReviewer{__typename " +
       "... on User{login} ... on Bot{login} ... on Mannequin{login} " +
       "... on Team{slug}}}}}}}";
@@ -1669,6 +1681,7 @@ export class GitHubService {
     const prAuthor = (
       reqRaw.data.repository?.pullRequest?.author?.login ?? ""
     ).toLowerCase();
+    const head = reqRaw.data.repository?.pullRequest?.headRefOid;
     const everReported = (reqRaw.data.repository?.pullRequest?.reviews?.nodes ?? [])
       .filter((n): n is NonNullable<typeof n> => Boolean(n?.author?.login))
       // A minimized review has been folded away as outdated on the PR page, and
@@ -1680,6 +1693,10 @@ export class GitHubService {
         author: n.author?.login ?? "",
         state: String(n.state ?? "").toUpperCase(),
         submittedAt: n.submittedAt ?? undefined,
+        // Only claim staleness when we can actually compare — an absent head or
+        // review commit means "don't know", which must not read as "current"
+        // OR as "stale". Same rule `foldReviewers` follows.
+        stale: head && n.commit?.oid ? n.commit.oid !== head : undefined,
       }))
       .reverse();
     return { requested, reported, everReported };
