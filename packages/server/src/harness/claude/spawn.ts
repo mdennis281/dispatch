@@ -71,7 +71,9 @@ const STDERR_CLOSE_GRACE_MS = 1_000;
  *
  * ONE DIFFERENCE from the SDK's built-in launcher: it pre-checks that the
  * executable exists, and we let `spawn` fail instead — which surfaces as the
- * `error` event the SDK already listens for.
+ * `error` event the SDK already listens for. Everything else it does — the
+ * stderr tail, `windowsHide` — is reproduced below rather than inherited,
+ * because providing a spawner opts out of all of it at once.
  *
  * Its other behaviour, deferring the exit report until stderr has ALSO closed so
  * the tail is complete, is reproduced here rather than given up. See the
@@ -91,6 +93,13 @@ export function spawnWithPid(sink: PidSink) {
       // and the buffer hazard is handled by draining it below rather than by
       // refusing to have one.
       stdio: ["pipe", "pipe", "pipe"],
+      // Node defaults this to FALSE, so taking the spawn over drops what the
+      // SDK's own launcher passes. The installed app runs detached with no
+      // console of its own, which is the case every other spawn in this repo
+      // sets it for (`codex/rpc.ts`, `services/terminal.ts`, `services/git.ts`,
+      // `tools/app/build-payload.mjs`) — without it each session's subprocess
+      // pops a console window that was never there before.
+      windowsHide: true,
     }) as ChildProcessWithoutNullStreams;
 
     let tail = "";

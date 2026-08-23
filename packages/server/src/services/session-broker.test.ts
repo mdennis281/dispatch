@@ -389,6 +389,33 @@ describe("chat status persistence", () => {
     expect(resumed[1]).toBeTruthy();
   });
 
+  it("gives the DEFAULT (claude) path a pid seam — the harness adapter is not on it", async () => {
+    // The bug this exists for: `sessionPids()` originally read only
+    // `harnessSession?.pid?.()`, and `startQuery` short-circuits at
+    // `harnessKind !== "claude"` — so an ordinary chat never has a
+    // `HarnessSession` and the map came back EMPTY for every normal chat. The
+    // session count and the reap button were dead for exactly the trees they
+    // were built to reclaim, and nothing caught it because the service's own
+    // tests inject `sessionPids` as a fixture.
+    //
+    // Asserted on the OPTIONS rather than on a real pid, because the fake query
+    // never spawns anything — the seam is what has to be there, and the seam is
+    // what was missing.
+    let opts: Record<string, unknown> | undefined;
+    const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
+    const broker = makeBroker((params) => {
+      opts = params.options as Record<string, unknown>;
+      return fn(params);
+    });
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hello");
+    await idle;
+
+    expect(typeof opts?.spawnClaudeCodeProcess).toBe("function");
+  });
+
   it("sweeps a session idle past its window, and leaves a fresh one alone", async () => {
     let clock = 1_000;
     const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
@@ -429,6 +456,73 @@ describe("chat status persistence", () => {
     broker.sweep();
     expect(stop).toHaveBeenCalledWith("c1");
     await vi.waitFor(() => expect(broker.has("c1")).toBe(true));
+  });
+
+  it("retires QUIETLY — a swept chat must not raise a 'Session ended' notification", async () => {
+    // `done` is in the notifier's NOTIFY_KINDS and PushService fans out every
+    // attention-add, so without `switching` each swept chat is a webhook and a
+    // phone buzz — ten parked chats is ten of them at half-hour offsets, for
+    // something that costs nothing but a slower next message.
+    let clock = 1_000;
+    let idc = 0;
+    const { fn } = makeFakeQuery(() => [assistantText("ok"), resultMsg()]);
+    const broker = new SessionBroker({
+      store,
+      bus,
+      maxActiveSessions: 6,
+      idleSessionMinutes: 30,
+      idleSweepMs: 0,
+      deps: { query: fn, genId: () => `id-${++idc}`, now: () => clock },
+    });
+    brokers.push(broker);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hello");
+    await idle;
+
+    events.length = 0;
+    clock += 31 * 60_000;
+    broker.sweep();
+    await vi.waitFor(() => expect(broker.getStatus("c1")).toBe("idle"));
+
+    const ended = events.filter(
+      (e) => e.type === "attention-add" && (e as { item?: { kind?: string } }).item?.kind === "done",
+    );
+    expect(ended).toEqual([]);
+  });
+
+  it("sweeps a FAILED session too — a dead turn keeps its whole tree", async () => {
+    // `onTurnFailed` only sets the status; it never clears `started`, `query` or
+    // `harnessSession`. So a chat whose last turn died on a usage limit holds
+    // ~1.3 GB indefinitely, and is the case the sweep most wants.
+    let clock = 1_000;
+    let idc = 0;
+    const { fn } = makeFakeQuery(() => [
+      { ...resultMsg("error"), is_error: true, result: "boom" },
+    ]);
+    const broker = new SessionBroker({
+      store,
+      bus,
+      maxActiveSessions: 6,
+      idleSessionMinutes: 30,
+      idleSweepMs: 0,
+      deps: { query: fn, genId: () => `id-${++idc}`, now: () => clock },
+    });
+    brokers.push(broker);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const failed = broker.waitFor("c1", "failed");
+    await broker.sendMessage("c1", "hello");
+    await failed;
+
+    const stop = vi.spyOn(broker, "stop");
+    broker.sweep();
+    expect(stop).not.toHaveBeenCalled(); // freshly failed, still inside the window
+
+    clock += 31 * 60_000;
+    broker.sweep();
+    expect(stop).toHaveBeenCalledWith("c1");
   });
 
   it("never sweeps when the window is 0", async () => {

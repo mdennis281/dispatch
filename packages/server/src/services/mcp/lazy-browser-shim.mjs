@@ -139,7 +139,13 @@ const HANDSHAKE_ID = "dispatch-lazy-init";
 
 function spawnReal() {
   if (child) return;
-  child = spawn(realCommand, realArgs, { stdio: ["pipe", "pipe", "inherit"] });
+  // `windowsHide` because this runs under a server started detached with no
+  // console: without it the browser server — and the Chrome it launches —
+  // each pop a window. Every other spawn in this repo sets it.
+  child = spawn(realCommand, realArgs, {
+    stdio: ["pipe", "pipe", "inherit"],
+    windowsHide: true,
+  });
 
   child.on("error", (err) => {
     // Answer everything outstanding rather than hanging: a client waiting on a

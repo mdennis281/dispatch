@@ -30,6 +30,8 @@ import { basename, extname, isAbsolute, join, resolve as resolvePath } from "nod
 import { realpath, stat } from "node:fs/promises";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
 import { buildBrowserMcpServers, effectiveSubApps } from "./mcp/browser-mcp.js";
+import { spawnWithPid } from "../harness/claude/spawn.js";
+import { withStderrTail } from "../harness/claude/session.js";
 import { McpPrewarmService } from "./mcp-prewarm.js";
 import { tmpdir } from "node:os";
 import {
@@ -1100,6 +1102,13 @@ const THREAD_MAP_CAP = 2_000;
  */
 const IDLE_SWEEP_MS = 60_000;
 
+/**
+ * Statuses a session may be RETIRED from — a turn has settled and the runtime is
+ * just sitting there. Also the statuses `idleSince` is stamped on, since a state
+ * the sweep can't act on has no deadline worth keeping.
+ */
+const RETIRABLE_STATUS: ReadonlySet<ChatStatus> = new Set(["idle", "failed"]);
+
 /** Max time `stop()`/`dispose()` waits for a subprocess consume loop to unwind. */
 const STOP_TIMEOUT_MS = 5_000;
 
@@ -1613,6 +1622,17 @@ interface LiveSession {
    * chat could be kept resident by a metadata write nobody would call activity.
    */
   idleSince?: number;
+  /**
+   * Pid of this session's Claude Code subprocess, for the chats the broker runs
+   * through the SDK DIRECTLY.
+   *
+   * Two live shapes, two places the pid can come from — see `sessionPids`. This
+   * is the one that covers the DEFAULT: `startQuery` short-circuits for
+   * `harnessKind === "claude"` and never builds a `HarnessSession` at all.
+   */
+  livePid?: number;
+  /** Last stderr of the dead subprocess on that same path. See `withStderrTail`. */
+  lastStderrTail?: string;
   stopping: boolean;
   /** Teardown is a provider migration; settle quietly instead of as session done. */
   switching?: boolean;
@@ -2765,7 +2785,12 @@ export class SessionBroker {
   sessionPids(): Map<string, number> {
     const out = new Map<string, number>();
     for (const [chatId, session] of this.sessions) {
-      const pid = session.harnessSession?.pid?.();
+      // BOTH shapes. `startQuery` short-circuits at `harnessKind !== "claude"`,
+      // so an ordinary chat — the default harness — runs through the SDK here in
+      // the broker and never has a `HarnessSession`; reading only the adapter's
+      // pid reported an empty map for every normal chat, which took the session
+      // count and the reap button with it.
+      const pid = session.livePid ?? session.harnessSession?.pid?.();
       if (typeof pid === "number") out.set(chatId, pid);
     }
     return out;
@@ -2879,8 +2904,18 @@ export class SessionBroker {
       // the flag both set, which is exactly why `stop()` branches on it too.
       // Keying off `harnessSession` alone would silently skip every session on
       // the other path.
-      if (session.status !== "idle" || !session.started) continue;
+      if (!RETIRABLE_STATUS.has(session.status) || !session.started) continue;
       if (session.idleSince === undefined || session.idleSince > cutoff) continue;
+      // `switching` is what makes `onDone` settle back to idle QUIETLY instead
+      // of publishing an `attention-add` of kind `done`. Without it every swept
+      // chat raises "Task done — Session ended", which the notifier and
+      // PushService both fan out: ten chats parked over an evening would be ten
+      // phone buzzes at half-hour offsets, for something that costs nothing but
+      // a slower next message. Retired is not finished.
+      //
+      // Also what keeps the sweep from repeating itself: `onDone` clears
+      // `started`, so the next pass skips this session on the guard above.
+      session.switching = true;
       void this.stop(chatId).catch(() => {
         /* best-effort: a chat that refuses to stop is retried next sweep */
       });
@@ -4522,10 +4557,17 @@ export class SessionBroker {
   private setStatus(session: LiveSession, status: ChatStatus, activity?: AgentActivity): void {
     const changed = session.status !== status;
     session.status = status;
-    // Stamped on the TRANSITION into idle, not on every idle status write, so a
-    // chat that keeps re-reporting idle doesn't keep pushing its own deadline
-    // out and never get swept.
-    if (status === "idle") session.idleSince ??= this.now();
+    // Stamped on the TRANSITION into a resting state, not on every write of one,
+    // so a chat that keeps re-reporting the same status doesn't keep pushing its
+    // own deadline out and never get swept.
+    //
+    // `failed` counts as resting. `onTurnFailed` only sets the status — it never
+    // clears `started`, `query` or `harnessSession` — so a chat whose last turn
+    // died on a usage limit or a transport error keeps its whole tree, and is
+    // the case the sweep most wants: nobody is coming back to it tonight.
+    // `waiting` is deliberately NOT here — stopping it would discard a live
+    // permission prompt somebody is about to answer.
+    if (RETIRABLE_STATUS.has(status)) session.idleSince ??= this.now();
     else session.idleSince = undefined;
     if (changed) {
       // Serialize with transcript writes so rapid running -> waiting -> idle
@@ -4641,7 +4683,13 @@ export class SessionBroker {
     }
     this.cleanupSkills(session);
     this.setStatus(session, "error");
-    const message = err instanceof Error ? err.message : String(err);
+    // Same reason as the harness adapter's `fail()`: taking the spawn over is
+    // what stops the SDK putting the child's stderr into "process exited with
+    // code N", so it has to be put back — and only onto that shape of message.
+    const message = withStderrTail(
+      err instanceof Error ? err.message : String(err),
+      session.lastStderrTail ?? "",
+    );
     this.bus.publish({ type: "error", chatId: session.chatId, message });
     void this.emit(session, {
       kind: "notice",
@@ -5701,6 +5749,25 @@ export class SessionBroker {
     } else if (session.resumeSessionId) {
       options.resume = session.resumeSessionId;
     }
+
+    // The pid seam, on the path `startQuery` actually takes for a Claude chat.
+    // Everything else here configures the SDK; this is the one option whose
+    // purpose is to hand something BACK — see harness/claude/spawn.ts. Providing
+    // it also stops the SDK collecting its own stderr tail, so the tail returns
+    // through the sink and `withStderrTail` staples it onto the exit error.
+    options.spawnClaudeCodeProcess = spawnWithPid({
+      onSpawn: (pid) => {
+        session.livePid = pid;
+      },
+      onExit: (pid, stderrTail) => {
+        // Guarded: a dispose → immediate restart can land the new pid before the
+        // old child's exit fires, and clearing unconditionally would blank the
+        // pid of the session that is actually running.
+        if (session.livePid === pid) session.livePid = undefined;
+        if (stderrTail) session.lastStderrTail = stderrTail;
+      },
+    }) as unknown as Options["spawnClaudeCodeProcess"];
+
     return options;
   }
 
