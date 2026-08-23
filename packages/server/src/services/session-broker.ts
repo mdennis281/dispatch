@@ -97,6 +97,7 @@ import {
   describeExemptionScope,
   isPrSettledIdle,
   parseInlineMedia,
+  prReviewAgentView,
   resolveWorkflow,
   type McpEnablementLayers,
   type MetricEvent,
@@ -222,7 +223,9 @@ export function buildManagerToolsDirective(caps: {
         "`reviewsSpent:true` when Dispatch's own reviewer has used up its round cap on " +
         "this PR — so you stop waiting on a review that isn't coming. Those two want " +
         "opposite things: a stalled queue is fixed by `request_review`, a spent cap by " +
-        "nothing at all (it also tells you `landableOnChecks` when the PR is ready to " +
+        "going straight to `approve_pr` — two completed rounds ARE the review " +
+        "requirement, and re-queueing a spent reviewer only hides the reviews it " +
+        "already filed (it also tells you `landableOnChecks` when the PR is ready to " +
         "land on green checks alone).",
       "- `mcp__manager__resolve_thread` — reply in a review thread and mark it RESOLVED. " +
         "Fixing the code and replying is not enough: an unresolved thread still reads as " +
@@ -662,11 +665,17 @@ export interface SessionPrRegistry {
   snapshotByThread(threadId: string): Promise<PrSnapshot | null>;
   /** Dispatch's own reviewer on this PR — round count, cap, and last verdict. */
   reviewAgent(repo: string, prNumber: number): Promise<PrReviewAgentState | null>;
+  /** Raise this PR's review-round cap by `extra` — the agent-side override. */
+  raiseReviewRoundCap(repo: string, prNumber: number, extra: number): Promise<unknown>;
   /**
    * Record a request for Dispatch's own reviewer. Used only in the mode with no
    * GitHub login, where there is no reviewer account to put in GitHub's queue.
    */
-  requestReviewAgent(repo: string, prNumber: number, by: string): Promise<unknown>;
+  requestReviewAgent(
+    repo: string,
+    prNumber: number,
+    by: string,
+  ): Promise<{ armed: boolean } | null>;
   /**
    * Record that this chat's review actually landed — the completion signal the
    * lease cannot be, since it is taken before the reviewer chat exists.
@@ -736,6 +745,10 @@ function makePrRegistryBinding(
       const r = await repoFor(repo);
       return r ? registry.reviewAgent(r, n) : null;
     },
+    raiseReviewRoundCap: async (n, repo, extra) => {
+      const r = await repoFor(repo);
+      if (r) await registry.raiseReviewRoundCap(r, n, extra);
+    },
     // Thread ids are globally unique node ids, so these need no repo at all.
     refreshByThread: (threadId) => registry.refreshByThread(threadId),
     snapshotByThread: (threadId) => registry.snapshotByThread(threadId),
@@ -754,6 +767,11 @@ function makePrApprovalBinding(
    * happens when they say no" path is testable without a live session.
    */
   confirmOverride: ManagerMcpPrApproval["confirmOverride"],
+  /**
+   * Dispatch's own reviewer row for a PR. Optional — a deployment with no PR
+   * catalog lands on GitHub's evidence alone, which is where this started.
+   */
+  reviewRounds?: (repo: string, prNumber: number) => Promise<PrReviewAgentState | null>,
 ): ManagerMcpPrApproval {
   const repoFor = makeRepoResolver(github, cwd);
   const requireRepo = async (override?: string): Promise<string> => {
@@ -794,6 +812,22 @@ function makePrApprovalBinding(
         threads,
         requestedReviewers: reviews?.requested ?? null,
         submittedReviews: reviews?.reported ?? null,
+        everSubmittedReviews: reviews?.everReported ?? null,
+        // Dispatch's own round record — the review evidence GitHub's
+        // `latestReviews` throws away the moment the reviewer is re-queued.
+        // Best-effort: an unreadable row is `null`, which the blocker treats as
+        // "no help here" and falls back to GitHub alone, exactly as before.
+        reviewRounds: await (async () => {
+          const state = await reviewRounds?.(r, n).catch(() => null);
+          const v = prReviewAgentView(state ?? undefined);
+          if (!v) return null;
+          return {
+            roundsSpent: v.roundsSpent,
+            posted: v.posted,
+            round: v.round,
+            maxRounds: v.maxRounds,
+          };
+        })(),
       };
     },
     approve: async (n, repo, body) => github.approve(await requireRepo(repo), n, body, { chatId }),
@@ -5020,9 +5054,12 @@ export class SessionBroker {
                     requestLocal:
                       reviewer.policy.identity === "self" && this.prRegistry
                         ? async (repo, n) =>
-                            Boolean(
-                              await this.prRegistry?.requestReviewAgent(repo, n, session.chatId),
-                            )
+                            // `.armed`, not truthiness of the result: the registry
+                            // answers with a REASON now, and every refusal is an
+                            // object too — so `Boolean(result)` reported a spent
+                            // cap and an in-flight round as a successful request.
+                            (await this.prRegistry?.requestReviewAgent(repo, n, session.chatId))
+                              ?.armed === true
                         : undefined,
                   }
                 : undefined,
@@ -5061,6 +5098,9 @@ export class SessionBroker {
                       overriding: input.blockers.map((b) => b.code),
                     },
                   }),
+                this.prRegistry
+                  ? (repo, n) => this.prRegistry!.reviewAgent(repo, n)
+                  : undefined,
               )
             : undefined,
         // The PR-CREATION surface — bound wherever change ships through a PR, so

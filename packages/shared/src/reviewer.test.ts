@@ -163,4 +163,56 @@ describe("prReviewAgentView — the reviewer's state on one PR", () => {
       prReviewAgentView({ rounds: 1, reviewedAt: 1, postedAt: 2, requestedAt: 9, maxRounds: 4 }),
     ).toMatchObject({ phase: "queued", at: 9 });
   });
+
+  // PR #147, exactly. A `request_review` fired two minutes into a running round
+  // armed `requestedAt` at the SAME head the round had already claimed. That
+  // request can never be served — `claimReviewAgent` dedups on `reviewedSha` —
+  // but it flipped this row to `queued`, and `spentReviewRounds` reads
+  // `phase === "running"` to decide whether a review may still arrive. So
+  // `watch_pr` announced "every round is spent, nothing is coming, go merge"
+  // over a review that posted three minutes later with an open finding.
+  it("does not let a request armed at the RUNNING round's own head mask it", () => {
+    expect(
+      prReviewAgentView({
+        rounds: 2,
+        reviewedSha: "sha-1",
+        reviewedAt: 10,
+        requestedSha: "sha-1",
+        requestedAt: 20,
+        maxRounds: 2,
+      }),
+    ).toMatchObject({ phase: "running", at: 10, roundsSpent: true });
+  });
+
+  it("still ranks a request at a NEW head above the round that read the old one", () => {
+    // The genuine re-arm: a push moved the head, so this request really can be
+    // served and the row really is waiting on the next sweep.
+    expect(
+      prReviewAgentView({
+        rounds: 1,
+        reviewedSha: "sha-1",
+        reviewedAt: 10,
+        requestedSha: "sha-2",
+        requestedAt: 20,
+        maxRounds: 4,
+      }),
+    ).toMatchObject({ phase: "queued", at: 20 });
+  });
+
+  it("reads a stale request over a POSTED round as spent, not as queued forever", () => {
+    // The row PR #147 was left holding. Before this it read `queued` in
+    // perpetuity: a request nothing can claim, sitting on top of a finished
+    // final round, reported as a review that was about to start.
+    expect(
+      prReviewAgentView({
+        rounds: 2,
+        reviewedSha: "sha-1",
+        reviewedAt: 10,
+        postedAt: 30,
+        requestedSha: "sha-1",
+        requestedAt: 20,
+        maxRounds: 2,
+      }),
+    ).toMatchObject({ phase: "spent", posted: true, roundsSpent: true });
+  });
 });

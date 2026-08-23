@@ -677,6 +677,34 @@ export interface PrReadiness {
   requestedReviewers: string[] | null;
   /** Reviews that have actually been SUBMITTED (author + state). `null` as above. */
   submittedReviews: Array<{ author: string; state: string }> | null;
+  /**
+   * Every review ever submitted by someone other than the PR's author — see
+   * {@link PrReviewState.everReported}. `null` as above.
+   *
+   * Separate from {@link submittedReviews} because GitHub empties that list the
+   * moment a reviewer is re-queued, and re-queueing is what the loop DOES:
+   * `watch_pr` reports a finding, the agent fixes it and calls `request_review`,
+   * and `approve_pr` then declared that nobody had ever reviewed a PR with two
+   * reviews on it. That disagreement between the two tools is the bug this
+   * field exists to end.
+   */
+  everSubmittedReviews: Array<{ author: string; state: string }> | null;
+  /**
+   * Dispatch's OWN reviewer on this PR: has it used every round it is allowed,
+   * and did any of them actually file a review.
+   *
+   * The other half of the same disagreement. `watch_pr` reads this row to say
+   * "the reviewer is DONE, go merge"; `approve_pr` read only GitHub and said
+   * "nobody has reviewed". One of them had to start reading the other's
+   * evidence, and the round record is the one that cannot be erased by a
+   * re-request.
+   *
+   * `posted` is required for the bar and deliberately so: a cap spent by rounds
+   * that all died before filing anything is a broken reviewer, not a completed
+   * review, and merging on it would be the silent unreviewed merge this whole
+   * policy exists to prevent. That case still raises `no-review` for the human.
+   */
+  reviewRounds: { roundsSpent: boolean; posted: boolean; round: number; maxRounds?: number } | null;
 }
 
 /**
@@ -754,6 +782,16 @@ export interface ManagerMcpPrRegistry {
    * permanently stopped spawning. Costs no GitHub call — the row already knows.
    */
   reviewAgent(prNumber: number, repo?: string): Promise<PrReviewAgentState | null>;
+  /**
+   * Raise THIS PR's review-round cap by `extra`, for the agent that has a real
+   * reason to want another look after the project's allowance is spent.
+   *
+   * Per-PR rather than a config edit, and additive rather than absolute: the
+   * project's `maxRounds` is standing policy, and one stubborn pull request is
+   * not a reason to rewrite it for every future one. Optional so older fakes
+   * stay valid — absent just means the override isn't offered.
+   */
+  raiseReviewRoundCap?(prNumber: number, repo: string | undefined, extra: number): Promise<void>;
   /**
    * Report that this session just posted a review on a PR, so the catalog can
    * tell a reviewer that FINISHED from one still reading the diff. The lease
@@ -1104,14 +1142,38 @@ export function prLandingBlockers(
       // Someone REPORTING is the bar — an outstanding request is the opposite of
       // a review, and the failure this guards against is a PR called done while
       // the reviewer had said nothing at all.
-      const reported = pr.submittedReviews.filter((r) => r.state !== "PENDING");
-      if (reported.length === 0) {
+      //
+      // Read from `everSubmittedReviews` and NOT from `submittedReviews`, which
+      // is GitHub's `latestReviews` and goes empty the instant a reviewer is
+      // re-queued. Dispatch's own loop re-queues on every round, so the live
+      // list was empty on exactly the PRs that had been reviewed the most: #147
+      // carried two `dispatch-review` reviews and was refused for `no-review`
+      // two minutes after `watch_pr` said its reviewer was finished.
+      const reported = (pr.everSubmittedReviews ?? pr.submittedReviews).filter(
+        (r) => r.state !== "PENDING",
+      );
+      // Dispatch's own round record is the second, independent way the bar is
+      // met — the one `request_review` cannot erase. Spent rounds ALONE are not
+      // enough: a cap burned by rounds that never filed anything is a broken
+      // reviewer, and merging on it is the unreviewed merge this bar exists to
+      // stop. `posted` is what makes it evidence.
+      const rounds = pr.reviewRounds;
+      const roundsMetIt = rounds !== null && rounds.roundsSpent && rounds.posted;
+      if (reported.length === 0 && !roundsMetIt) {
         // Three different problems wear the same "nobody has reviewed" face, and
         // only the first is a matter of waiting. Saying "re-open it through
         // create_pr" for all three is what sent an agent round a loop it could
         // not win on a project whose reviewer list was empty — there was no
         // reviewer for create_pr to ask, so the advice could never come true.
-        const waiting = pr.requestedReviewers.length
+        const waiting = rounds?.roundsSpent
+          ? // Every round claimed and none of them filed. Pointing at watch_pr
+            // here is the dead wait `reviews-spent` was added to prevent: no
+            // round can spawn, so nothing will ever arrive to change this.
+            `Dispatch's reviewer claimed all ${rounds.round} of its ` +
+            `${rounds.maxRounds ?? rounds.round} rounds and none of them posted a review — ` +
+            "check the reviewer chat. No further round can spawn on its own; " +
+            "`request_review` with `extraRounds` can buy one if the reviewer is healthy again."
+          : pr.requestedReviewers.length
           ? `Waiting on: ${pr.requestedReviewers.join(", ")}. Call watch_pr until they report.`
           : policy.reviewers?.length
             ? // An OPEN PR with an empty queue is fixed by asking again, not by
@@ -2256,8 +2318,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "request_review). It watches Dispatch's OWN reviewer too: when that reviewer " +
       "has spent its per-PR round cap it returns reviewsSpent:true, which is a " +
       "DIFFERENT problem with a different answer — no further round can ever spawn, " +
-      "so request_review cannot help, and if CI is green with no open thread it also " +
-      "returns landableOnChecks:true meaning the PR is ready to land on checks alone. " +
+      "so request_review refuses there (and re-queueing a spent reviewer would only " +
+      "hide the reviews it already filed), and if CI is green with no open thread it " +
+      "also returns landableOnChecks:true, meaning go straight to approve_pr. " +
       "It returns done:true only when the PR merges or closes — " +
       "keep calling until then and you'll never miss a late review round.",
     {
@@ -2491,17 +2554,22 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       if (spent) {
         adviceParts.push(
           `Dispatch's reviewer is DONE with this PR: the ${spent.maxRounds}-round cap is ` +
-            "spent, so `mcp__manager__request_review` cannot bring another one — it " +
-            "re-queues a reviewer on GitHub, it does not reset the cap. Stop waiting for " +
-            "a review here.",
+            "spent. Do not call `mcp__manager__request_review` — it refuses on a spent " +
+            "cap, and if it did go through it would only re-queue the reviewer on GitHub, " +
+            "which HIDES the reviews already filed and makes `approve_pr` refuse a PR " +
+            "that is ready. Stop waiting for a review here.",
         );
         adviceParts.push(
           spent.landable
-            ? "CI is green and no review thread is open, so this PR is landable on checks " +
-                "alone — call `mcp__manager__approve_pr`. It re-checks everything and will " +
-                "still refuse if the project's review bar isn't met; that refusal is the " +
-                "human's to waive, not yours. Do NOT call watch_pr again for a review, " +
-                "there is none coming."
+            ? (spent.posted
+                ? "CI is green, no review thread is open, and the rounds that ran DID " +
+                  "review this PR — so the project's review bar is met and " +
+                  "`mcp__manager__approve_pr` is the next call. Do NOT call watch_pr " +
+                  "again for a review, there is none coming."
+                : "CI is green and no review thread is open, but none of those rounds " +
+                  "actually posted a review — check the reviewer chat. `approve_pr` will " +
+                  "refuse this for `no-review`, and that refusal is the human's to waive, " +
+                  "not yours. Do NOT call watch_pr again, there is nothing coming.")
             : "Wait on CI instead — fix whatever is failing above, then call watch_pr " +
                 "again for the checks and land it on those.",
         );
@@ -2871,9 +2939,26 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "Do not call it before your fixes are pushed: you'd be asking for a review of " +
       "the code they already rejected. It RE-READS the queue afterwards and tells " +
       "you who is actually on the hook — GitHub can accept the request and queue " +
-      "nobody, and going back to watch_pr on that is a guaranteed dead wait.",
+      "nobody, and going back to watch_pr on that is a guaranteed dead wait. " +
+      "If Dispatch's reviewer has already spent its rounds on this PR, this REFUSES " +
+      "and says so: the review requirement is met and the next call is approve_pr, " +
+      "not another round. Pass `extraRounds` only if you genuinely need one more.",
     {
       number: z.number().describe("The PR number."),
+      extraRounds: z
+        .number()
+        .int()
+        .min(1)
+        .max(3)
+        .optional()
+        .describe(
+          "Buy N MORE review rounds on this PR after its cap is spent. Only needed " +
+            "when this tool has already told you the rounds are spent — the cap is " +
+            "there because two completed rounds ARE the requirement, so reach for " +
+            "this when a round died without reviewing or the code changed " +
+            "substantially since, not to keep asking until you like the answer. " +
+            "Raises the cap for THIS PR only; the project's policy is untouched.",
+        ),
       reviewers: z
         .array(z.string())
         .optional()
@@ -2898,6 +2983,69 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       }
       const repo =
         typeof args.repo === "string" && args.repo.trim() ? args.repo.trim() : undefined;
+
+      // Dispatch's round cap, BEFORE anything is asked of GitHub.
+      //
+      // Re-queueing a reviewer whose rounds are spent is not merely futile, it
+      // is destructive: the request lands on the row, `prReviewAgentView` reads
+      // it as `queued`, and `watch_pr` then blocks on a round `claimReviewAgent`
+      // will never grant. Worse, GitHub drops the reviews already filed out of
+      // `latestReviews` the moment their author is re-requested — which is how
+      // PR #147 went from "reviewed twice, landable" to `approve_pr` refusing it
+      // for `no-review`. The cheapest fix for all of that is to not make the
+      // request.
+      const roundState = ctx.prRegistry?.reviewAgent
+        ? await ctx.prRegistry.reviewAgent(number, repo).catch(() => null)
+        : null;
+      const roundView = prReviewAgentView(roundState ?? undefined);
+      const extraRounds =
+        typeof args.extraRounds === "number" && Number.isInteger(args.extraRounds)
+          ? Math.min(3, Math.max(1, args.extraRounds))
+          : 0;
+      if (roundView?.roundsSpent && !extraRounds) {
+        const cap = roundView.maxRounds ?? roundView.round;
+        return prToolResult(
+          "request_review",
+          {
+            summary: `PR #${number} has had every review round it gets`,
+            ok: true,
+            details: [
+              `${roundView.round} of ${cap} rounds spent` +
+                (roundView.posted ? "" : " — none of them posted a review"),
+            ],
+          },
+          (await ctx.prRegistry?.snapshot(number, repo).catch(() => null)) ?? null,
+          {
+            text:
+              `Not requesting another review on PR #${number}. Dispatch's reviewer has ` +
+              `spent all ${cap} of its ${cap} rounds` +
+              (roundView.posted
+                ? `, and the review requirement for this PR is MET. Re-queueing the ` +
+                  "reviewer now would only hide the reviews it already filed (GitHub " +
+                  "drops a review from `latestReviews` the moment its author is " +
+                  "re-requested) and make `approve_pr` refuse a PR that is ready.\n\n" +
+                  "Address any open threads, then call `mcp__manager__approve_pr`."
+                : " and none of them posted a review — check the reviewer chat. No " +
+                  "further round can spawn on its own.") +
+              "\n\nIf you genuinely need another round — a reviewer chat died, or the " +
+              "code has changed substantially since — call this again with " +
+              "`extraRounds: 1`. That raises the cap for THIS PR only.\n" +
+              JSON.stringify({
+                number,
+                requested: [],
+                reviewsSpent: true,
+                rounds: roundView.round,
+                maxRounds: cap,
+                posted: roundView.posted,
+                requirementMet: roundView.posted,
+              }),
+          },
+        );
+      }
+      if (extraRounds && ctx.prRegistry?.raiseReviewRoundCap) {
+        await ctx.prRegistry.raiseReviewRoundCap(number, repo, extraRounds).catch(() => {});
+      }
+
       const asked = (
         Array.isArray(args.reviewers) && args.reviewers.length
           ? args.reviewers

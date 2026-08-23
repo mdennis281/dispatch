@@ -768,7 +768,7 @@ describe("manager-mcp — watch_pr", () => {
       // The whole point of the separate signal: `request_review` is the one
       // action that cannot help, and the advice must say so rather than send
       // the agent back round the loop that hung.
-      expect(resultText(res)).toContain("cannot bring another one");
+      expect(resultText(res)).toContain("Do not call `mcp__manager__request_review`");
       expect(resultText(res)).not.toContain("put a reviewer back on the hook");
     });
 
@@ -920,7 +920,7 @@ describe("manager-mcp — watch_pr", () => {
       // …and only one action survives. Telling the agent to re-request here is
       // exactly how it ends up watching a queue entry the sweep can never claim.
       expect(resultText(res)).not.toContain("put a reviewer back on the hook");
-      expect(resultText(res)).toContain("cannot bring another one");
+      expect(resultText(res)).toContain("Do not call `mcp__manager__request_review`");
     });
 
     it("stays quiet while another round can still spawn", async () => {
@@ -1369,7 +1369,7 @@ describe("manager-mcp — request_review", () => {
       github: gh,
     });
 
-    const res = await requestReview.handler({ number: 83, reviewers: undefined, repo: undefined }, {});
+    const res = await requestReview.handler({ number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined }, {});
 
     expect(gh.asked).toEqual([{ n: 83, list: ["copilot-pull-request-reviewer[bot]"] }]);
     expect(res.isError).toBeFalsy();
@@ -1387,7 +1387,7 @@ describe("manager-mcp — request_review", () => {
       github: gh,
     });
 
-    await requestReview.handler({ number: 83, reviewers: ["alice"], repo: undefined }, {});
+    await requestReview.handler({ number: 83, extraRounds: undefined, reviewers: ["alice"], repo: undefined }, {});
 
     expect(gh.asked[0]!.list).toEqual(["alice"]);
   });
@@ -1403,7 +1403,7 @@ describe("manager-mcp — request_review", () => {
       github: gh,
     });
 
-    const res = await requestReview.handler({ number: 83, reviewers: undefined, repo: undefined }, {});
+    const res = await requestReview.handler({ number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined }, {});
 
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("workflow.pr.reviewers");
@@ -1419,7 +1419,7 @@ describe("manager-mcp — request_review", () => {
       github: gh,
     });
 
-    const res = await requestReview.handler({ number: 83, reviewers: ["ghost"], repo: undefined }, {});
+    const res = await requestReview.handler({ number: 83, extraRounds: undefined, reviewers: ["ghost"], repo: undefined }, {});
 
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("Nobody is queued");
@@ -1440,7 +1440,7 @@ describe("manager-mcp — request_review", () => {
       github: gh,
     });
 
-    const res = await requestReview.handler({ number: 83, reviewers: undefined, repo: undefined }, {});
+    const res = await requestReview.handler({ number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined }, {});
 
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("Nobody is queued");
@@ -1460,7 +1460,7 @@ describe("manager-mcp — request_review", () => {
     });
 
     const res = await requestReview.handler(
-      { number: 83, reviewers: ["alice", "bob"], repo: undefined },
+      { number: 83, extraRounds: undefined, reviewers: ["alice", "bob"], repo: undefined },
       {},
     );
 
@@ -1478,11 +1478,129 @@ describe("manager-mcp — request_review", () => {
       github: gh,
     });
 
-    const res = await requestReview.handler({ number: 83, reviewers: ["alice"], repo: undefined }, {});
+    const res = await requestReview.handler({ number: 83, extraRounds: undefined, reviewers: ["alice"], repo: undefined }, {});
 
     expect(res.isError).toBeFalsy();
     expect(resultText(res)).toContain("queue not re-read");
     expect(resultText(res)).toContain('"verified":false');
+  });
+
+  /**
+   * A catalog that answers the reviewer question and records a cap raise —
+   * everything else degrades to null, which is the interface's contract.
+   */
+  function reviewRegistry(
+    state: PrReviewAgentState | null,
+    raises: number[] = [],
+  ): ManagerMcpPrRegistry {
+    return {
+      snapshot: async () => null,
+      refresh: async () => null,
+      noteWatched: async () => {},
+      refreshByThread: async () => null,
+      snapshotByThread: async () => null,
+      reviewAgent: async () => state,
+      raiseReviewRoundCap: async (_n, _repo, extra) => {
+        raises.push(extra);
+      },
+      noteReviewRequestError: async () => {},
+      notePostedReview: async () => {},
+    };
+  }
+
+  // The loop that produced the contradiction on PR #147: `watch_pr` says the
+  // rounds are spent, the agent calls `request_review` anyway, and the request
+  // lands on GitHub — which drops the reviews already filed out of
+  // `latestReviews`, so `approve_pr` then refuses a PR that was ready. The
+  // cheapest place to break that chain is to not make the request.
+  it("refuses to re-request once the rounds are spent, and says the bar is MET", async () => {
+    const gh = ghWith({ requested: ["dispatch-review"], failed: [] });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+      prRegistry: reviewRegistry({
+        rounds: 2,
+        maxRounds: 2,
+        chatId: "reviewer-1",
+        reviewedAt: 1_000,
+        postedAt: 2_000,
+      }),
+    });
+
+    const res = await requestReview.handler(
+      { number: 147, extraRounds: undefined, reviewers: ["dispatch-review"], repo: undefined },
+      {},
+    );
+
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("requirement for this PR is MET");
+    expect(resultText(res)).toContain("approve_pr");
+    expect(resultText(res)).toContain('"requirementMet":true');
+    // The whole point: GitHub is never touched, so nothing gets superseded.
+    expect(gh.asked).toEqual([]);
+  });
+
+  it("says the rounds died unreviewed rather than claiming the bar is met", async () => {
+    const gh = ghWith({ requested: ["dispatch-review"], failed: [] });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+      prRegistry: reviewRegistry({ rounds: 2, maxRounds: 2, chatId: "r1", reviewedAt: 1_000 }),
+    });
+
+    const res = await requestReview.handler(
+      { number: 147, extraRounds: undefined, reviewers: ["dispatch-review"], repo: undefined },
+      {},
+    );
+
+    expect(resultText(res)).toContain("none of them posted a review");
+    expect(resultText(res)).toContain('"requirementMet":false');
+  });
+
+  it("extraRounds raises the cap and lets the request through", async () => {
+    const raises: number[] = [];
+    const gh = ghWith({ requested: ["dispatch-review"], failed: [] });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+      prRegistry: reviewRegistry(
+        { rounds: 2, maxRounds: 2, chatId: "r1", reviewedAt: 1_000, postedAt: 2_000 },
+        raises,
+      ),
+    });
+
+    const res = await requestReview.handler(
+      { number: 147, extraRounds: 1, reviewers: ["dispatch-review"], repo: undefined },
+      {},
+    );
+
+    expect(raises).toEqual([1]);
+    expect(gh.asked).toEqual([{ n: 147, list: ["dispatch-review"] }]);
+    expect(resultText(res)).toContain("dispatch-review");
+  });
+
+  it("leaves an unspent cap alone — this gate must not cost the ordinary path", async () => {
+    const gh = ghWith({ requested: ["dispatch-review"], failed: [] });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+      prRegistry: reviewRegistry({ rounds: 1, maxRounds: 2, chatId: "r1", postedAt: 2_000 }),
+    });
+
+    await requestReview.handler(
+      { number: 147, extraRounds: undefined, reviewers: ["dispatch-review"], repo: undefined },
+      {},
+    );
+
+    expect(gh.asked).toEqual([{ n: 147, list: ["dispatch-review"] }]);
   });
 
   it("validates the PR number and reports an unavailable binding", async () => {
@@ -1493,7 +1611,7 @@ describe("manager-mcp — request_review", () => {
       broker: fakeBroker({}),
       github: gh,
     });
-    const bad = await requestReview.handler({ number: -1, reviewers: undefined, repo: undefined }, {});
+    const bad = await requestReview.handler({ number: -1, extraRounds: undefined, reviewers: undefined, repo: undefined }, {});
     expect(bad.isError).toBe(true);
     expect(resultText(bad)).toContain("positive integer");
 
@@ -1502,7 +1620,7 @@ describe("manager-mcp — request_review", () => {
       bus,
       broker: fakeBroker({}),
     });
-    const res = await unbound.handler({ number: 1, reviewers: undefined, repo: undefined }, {});
+    const res = await unbound.handler({ number: 1, extraRounds: undefined, reviewers: undefined, repo: undefined }, {});
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("not available");
   });
@@ -1528,7 +1646,21 @@ function readyPr(over: Partial<PrReadiness> = {}): PrReadiness {
     // exercising the blocker they were written for, not the new review gate.
     requestedReviewers: [],
     submittedReviews: [{ author: "copilot-pull-request-reviewer", state: "APPROVED" }],
+    // No Dispatch reviewer row by default — these tests are about GitHub's
+    // evidence, and the round record is a SECOND, independent way the bar is met.
+    reviewRounds: null,
     ...over,
+    // Defaulted FROM `submittedReviews` unless a test names it, because the ever-
+    // list is a superset of the live one in reality: a test that says "GitHub
+    // shows no review" means both lists are empty, and having to say so twice
+    // would be a trap rather than coverage. The tests that matter here are the
+    // ones where the two genuinely DIVERGE, and those pass it explicitly.
+    everSubmittedReviews:
+      over.everSubmittedReviews !== undefined
+        ? over.everSubmittedReviews
+        : (over.submittedReviews !== undefined
+            ? over.submittedReviews
+            : [{ author: "copilot-pull-request-reviewer", state: "APPROVED" }]),
   };
 }
 
@@ -1730,6 +1862,61 @@ describe("prLandingBlockers", () => {
       { requireReview: true },
     );
     expect(b.map((x) => x.code)).toEqual(["no-review"]);
+  });
+
+  // The disagreement this whole change is about. `watch_pr` told chat Akn-… that
+  // PR #147 was landable on checks alone; `approve_pr`, called seconds later,
+  // refused it for `no-review` — on a PR carrying two dispatch-review reviews.
+  // The cause is GitHub's supersede-on-re-request: `request_review` had just put
+  // the reviewer back in the queue, which empties `latestReviews`.
+  it("lands a PR whose review only vanished from latestReviews on a re-request", () => {
+    const b = prLandingBlockers(
+      readyPr({
+        // GitHub's live view: nobody has reported, and the reviewer is queued.
+        submittedReviews: [],
+        requestedReviewers: ["dispatch-review"],
+        // The truth: they reviewed it, twice.
+        everSubmittedReviews: [{ author: "dispatch-review", state: "COMMENTED" }],
+      }),
+      { requireReview: true, reviewers: ["dispatch-review"] },
+    );
+    expect(b).toEqual([]);
+  });
+
+  // The second, independent route to the same answer: Dispatch's own round
+  // record. `watch_pr` already reads it to say "the reviewer is DONE"; the merge
+  // gate reading only GitHub is what let the two contradict each other.
+  it("counts two COMPLETED review rounds as the review requirement being met", () => {
+    const b = prLandingBlockers(
+      readyPr({
+        submittedReviews: [],
+        everSubmittedReviews: [],
+        requestedReviewers: ["dispatch-review"],
+        reviewRounds: { roundsSpent: true, posted: true, round: 2, maxRounds: 2 },
+      }),
+      { requireReview: true, reviewers: ["dispatch-review"] },
+    );
+    expect(b).toEqual([]);
+  });
+
+  // Spent is NOT the same as reviewed. A round is claimed before the reviewer
+  // chat exists, so a cap burned by rounds that all died still spends it — and
+  // merging on that is the silent unreviewed merge the whole bar exists to stop.
+  it("does NOT count spent rounds that never posted anything", () => {
+    const b = prLandingBlockers(
+      readyPr({
+        submittedReviews: [],
+        everSubmittedReviews: [],
+        requestedReviewers: ["dispatch-review"],
+        reviewRounds: { roundsSpent: true, posted: false, round: 2, maxRounds: 2 },
+      }),
+      { requireReview: true, reviewers: ["dispatch-review"] },
+    );
+    expect(b.map((x) => x.code)).toEqual(["no-review"]);
+    // And it must not send the agent back to watch_pr: no round can spawn, so
+    // that wait can never end. That dead wait is what `reviews-spent` exists for.
+    expect(b[0].detail).not.toMatch(/Call watch_pr/);
+    expect(b[0].detail).toMatch(/extraRounds/);
   });
 
   it("accepts any SUBMITTED review as 'someone looked'", () => {

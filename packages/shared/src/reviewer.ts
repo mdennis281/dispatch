@@ -185,7 +185,9 @@ export function prReviewAgentView(
   state:
     | {
         requestedAt?: number;
+        requestedSha?: string;
         reviewedAt?: number;
+        reviewedSha?: string;
         postedAt?: number;
         chatId?: string;
         rounds?: number;
@@ -223,9 +225,22 @@ export function prReviewAgentView(
     return { ...base, phase: "blocked", problem: blocked, at: state.requestedAt };
   }
 
-  // A claim clears the request, so an outstanding one always outranks the last
+  // A claim clears the request, so an outstanding one normally outranks the last
   // finished round: the row is waiting on the next sweep, not resting.
-  if (state.requestedAt) return { ...base, phase: "queued", at: state.requestedAt };
+  //
+  // EXCEPT when the request is armed at the same head the current round already
+  // claimed. `claimReviewAgent` dedups on `reviewedSha`, so such a request can
+  // never be served — and letting it read as `queued` masked the round that was
+  // genuinely RUNNING. That is not cosmetic: `spentReviewRounds` derives
+  // `inFlight` from `phase === "running"`, so on PR #147 a `request_review` fired
+  // two minutes into round 2 flipped the row to `queued`, `watch_pr` concluded
+  // "every round is spent and nothing is coming", and the review it had just
+  // declared impossible posted three minutes later with an unresolved finding.
+  const staleRequest =
+    state.requestedSha !== undefined && state.requestedSha === state.reviewedSha;
+  if (state.requestedAt && !staleRequest) {
+    return { ...base, phase: "queued", at: state.requestedAt };
+  }
 
   // Claimed and nothing posted for it. NOT derived from `reviewedAt` alone —
   // that is written at claim time and never cleared, so every reviewed PR would
