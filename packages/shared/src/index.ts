@@ -16,6 +16,7 @@ export * from "./workflow.js";
 export * from "./reviewer.js";
 export * from "./env-expand.js";
 export * from "./usage.js";
+export * from "./resources.js";
 export * from "./user-agent.js";
 export * from "./auth.js";
 export * from "./setup.js";

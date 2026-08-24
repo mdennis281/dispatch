@@ -112,6 +112,52 @@ describe("parseProcCsv", () => {
       { pid: 1, ppid: 0, name: "init" },
     ]);
   });
+
+  it("reads memory and folds the two CPU counters into milliseconds", () => {
+    const rows = parseProcCsv(
+      [
+        '"ProcessId","ParentProcessId","WorkingSetSize","KernelModeTime","UserModeTime","Name"',
+        // 100 ns ticks: 10,000,000 + 5,000,000 = 1.5 s of CPU.
+        '"900","800","1048576","10000000","5000000","node.exe"',
+      ].join("\r\n"),
+    );
+    expect(rows).toEqual([
+      { pid: 900, ppid: 800, name: "node.exe", rssBytes: 1_048_576, cpuMs: 1500 },
+    ]);
+  });
+
+  it("binds columns by NAME, so reordering them cannot shift memory into CPU", () => {
+    const rows = parseProcCsv(
+      [
+        '"Name","UserModeTime","ProcessId","WorkingSetSize","ParentProcessId","KernelModeTime"',
+        '"node.exe","0","900","4096","800","20000"',
+      ].join("\r\n"),
+    );
+    expect(rows).toEqual([{ pid: 900, ppid: 800, name: "node.exe", rssBytes: 4096, cpuMs: 2 }]);
+  });
+
+  it("keeps a comma inside a quoted name out of the numeric columns", () => {
+    // `Foo, Bar.exe` split naively shifts every later cell by one, charging one
+    // process's memory to another column — silently, and only for some rows.
+    const rows = parseProcCsv(
+      [
+        '"ProcessId","ParentProcessId","WorkingSetSize","KernelModeTime","UserModeTime","Name"',
+        '"900","800","2048","0","0","Foo, Bar.exe"',
+      ].join("\r\n"),
+    );
+    expect(rows).toEqual([
+      { pid: 900, ppid: 800, name: "Foo, Bar.exe", rssBytes: 2048, cpuMs: 0 },
+    ]);
+  });
+
+  it("leaves cpuMs absent rather than 0 when the columns weren't asked for", () => {
+    // Absent means "we didn't measure"; 0 means "measured, used nothing". A
+    // delta against a fabricated 0 would bill a process's whole lifetime of
+    // CPU to one window.
+    const [row] = parseProcCsv('"ProcessId","ParentProcessId","Name"\n"1","0","init"');
+    expect(row.cpuMs).toBeUndefined();
+    expect(row.rssBytes).toBeUndefined();
+  });
 });
 
 describe("parsePsTable", () => {
@@ -119,6 +165,29 @@ describe("parsePsTable", () => {
     expect(parsePsTable(["  900   800 node", "  800     1 sh", "garbage"].join("\n"))).toEqual([
       { pid: 900, ppid: 800, name: "node" },
       { pid: 800, ppid: 1, name: "sh" },
+    ]);
+  });
+
+  it("reads the rss and time columns when they are present", () => {
+    // rss is KiB; time is [[dd-]hh:]mm:ss.
+    expect(parsePsTable(["  900   800   2048 01:02:03 node", "  800  1  512 00:30 sh"].join("\n")))
+      .toEqual([
+        { pid: 900, ppid: 800, name: "node", rssBytes: 2_097_152, cpuMs: 3_723_000 },
+        { pid: 800, ppid: 1, name: "sh", rssBytes: 524_288, cpuMs: 30_000 },
+      ]);
+  });
+
+  it("reads a multi-day cpu time", () => {
+    expect(parsePsTable(["1 0 100 2-03:04:05 init"].join("\n"))[0].cpuMs).toBe(
+      ((2 * 24 + 3) * 3600 + 4 * 60 + 5) * 1000,
+    );
+  });
+
+  it("does not mistake a command name for a measurement", () => {
+    // `7z` starts with a digit but is not an rss column, and there is no
+    // clock-shaped field after it — the row must parse as the 3-column form.
+    expect(parsePsTable("  900   800 7z x big.zip")).toEqual([
+      { pid: 900, ppid: 800, name: "7z x big.zip" },
     ]);
   });
 });
