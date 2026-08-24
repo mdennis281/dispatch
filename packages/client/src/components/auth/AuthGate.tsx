@@ -1,7 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { KeyRound, ShieldCheck } from "lucide-react";
 import { startAuthentication } from "@simplewebauthn/browser";
-import type { AuthSessionResponse, AuthStatus } from "@dispatch/shared";
+import type { AuthSessionResponse } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { Field, InlineError, TextInput } from "../sidebar/Modal.js";
 import { authPost, useAuth } from "../../stores/auth.js";
@@ -72,51 +72,21 @@ function Login() {
   </Card>;
 }
 
-function FirstRun({ status }: { status: AuthStatus }) {
-  const [setup, setSetup] = useState(false);
-  const [username, setUsername] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [password, setPassword] = useState("");
-  const [canonicalUrl, setCanonicalUrl] = useState(location.origin);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function dismiss() {
-    setBusy(true); setError(null);
-    try {
-      await authPost("/api/auth/first-run/dismiss");
-      useAuth.getState().applyStatus({ ...status, firstRunDismissed: true });
-    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(false); }
-  }
-  async function submit(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setError(null);
-    try { enter(await authPost<AuthSessionResponse>("/api/auth/bootstrap", { username, displayName, password, canonicalUrl })); }
-    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(false); }
-  }
-
-  return <Card title="Protect Dispatch" description="Authentication is off by default. You can enable it now or configure it later in Settings.">
-    {!setup ? <div className="space-y-3">
-      <div className="rounded-lg border border-line bg-inset p-3 text-sm leading-relaxed text-secondary">Enable login before exposing Dispatch beyond this machine. The first account becomes the owner; all accounts see the same chats and settings.</div>
-      <Button className="w-full" size="md" variant="primary" onClick={() => setSetup(true)}>Set up authentication</Button>
-      <Button className="w-full" size="md" onClick={() => void dismiss()} disabled={busy}>Keep authentication off</Button>
-    </div> : <form className="space-y-3" onSubmit={submit}>
-      <Field label="Owner username" required><TextInput autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} /></Field>
-      <Field label="Display name"><TextInput value={displayName} onChange={(e) => setDisplayName(e.target.value)} /></Field>
-      <Field label="Password" hint="12 characters minimum" required><TextInput type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} /></Field>
-      <Field label="Canonical URL" hint="passkey origin" required><TextInput value={canonicalUrl} onChange={(e) => setCanonicalUrl(e.target.value)} /></Field>
-      <InlineError message={error} />
-      <div className="flex gap-2"><Button type="button" onClick={() => setSetup(false)}>Back</Button><Button className="flex-1" size="md" variant="primary" type="submit" disabled={busy}>Create owner & enable</Button></div>
-    </form>}
-  </Card>;
-}
-
+/**
+ * Sign-in only.
+ *
+ * The "Protect Dispatch" first-run card used to live here as an overlay that
+ * fired on top of the app shell the first time a fresh install loaded. It is now
+ * the FIRST STEP of `setup/SetupWizard.tsx`, because it was never the only thing
+ * a new install needed set up — it was just the only thing that asked. Enabling
+ * auth is still optional, and `firstRunDismissed` still records the answer; the
+ * wizard writes it through the same endpoint.
+ */
 export function AuthGate({ children }: { children: ReactNode }) {
   const ready = useAuth((state) => state.ready);
   const status = useAuth((state) => state.status);
   const user = useAuth((state) => state.user);
   if (!ready || !status) return <div className="grid h-screen place-items-center bg-app text-sm text-muted">Starting Dispatch…</div>;
   if (status.enabled && !user) return <div className="grid min-h-screen place-items-center bg-app p-5"><Login /></div>;
-  return <>{children}{!status.enabled && !status.configured && !status.firstRunDismissed && <div role="dialog" aria-modal="true" aria-label="First-run authentication setup" className="fixed inset-0 z-[500] grid place-items-center bg-scrim backdrop-blur-sm cm-safe-pad [--cm-gutter:1.25rem]"><FirstRun status={status} /></div>}</>;
+  return <>{children}</>;
 }

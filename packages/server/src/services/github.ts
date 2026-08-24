@@ -24,6 +24,7 @@ import { join, resolve } from "node:path";
 import { execa } from "execa";
 import { parse as parseYaml } from "yaml";
 import type {
+  GhCliStatus,
   Project,
   PRInfo,
   PRRef,
@@ -982,6 +983,49 @@ export class GitHubService {
     }
     const login = (res.stdout ?? "").trim();
     return login ? { login } : { error: "GitHub accepted the token but named no account" };
+  }
+
+  /**
+   * Is `gh` installed, and is it logged in? The first-run setup check.
+   *
+   * Two probes rather than one because they are two different problems with two
+   * different fixes, and `gh api user` cannot distinguish them: a missing binary
+   * and a logged-out one both come back as a non-zero exit with a message, and
+   * telling someone to run `gh auth login` when `gh` isn't installed sends them
+   * in a circle. So `--version` establishes presence, and only then does the
+   * authentication question get asked.
+   *
+   * `whoami()`, deliberately, rather than `gh auth status`: it is the same call
+   * the reviewer setup makes, and it answers with the account NAME. "Logged in"
+   * is not the useful fact — "logged in as which account" is, because the PR
+   * workflow acts as whoever this is.
+   *
+   * Never throws. Every failure here is an expected answer about the machine,
+   * not an exception: an install with no `gh` is a supported install.
+   */
+  async cliStatus(): Promise<GhCliStatus> {
+    const probe = await this.exec("gh", ["--version"], { reject: false }).catch((e: unknown) => ({
+      stdout: "",
+      stderr: e instanceof Error ? e.message : String(e),
+      exitCode: 1,
+    }));
+    if (probe.exitCode !== 0) {
+      return {
+        installed: false,
+        authenticated: false,
+        error: (probe.stderr || probe.stdout || "gh is not on PATH").trim().slice(0, 300),
+      };
+    }
+    // `gh version 2.62.0 (2024-11-14)` — first dotted number on the first line.
+    const version = /(\d+\.\d+\.\d+\S*)/.exec((probe.stdout ?? "").split("\n", 1)[0] ?? "")?.[1];
+    const who = await this.whoami();
+    return {
+      installed: true,
+      ...(version ? { version } : {}),
+      authenticated: !!who.login,
+      ...(who.login ? { login: who.login } : {}),
+      ...(who.error ? { error: who.error } : {}),
+    };
   }
 
   /**

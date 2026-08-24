@@ -5,6 +5,8 @@
  * changing call sites.
  */
 import type {
+  GhCliStatus,
+  SetupStatus,
   Project,
   Chat,
   ChatMediaItem,
@@ -1004,6 +1006,17 @@ export const api = {
   },
 
   /* settings */
+  /**
+   * First-run setup (see routes/setup.ts). `github` is a LIVE probe on every
+   * call — the Re-check button exists precisely so that installing gh in another
+   * window and pressing it gives a different answer.
+   */
+  setup: {
+    status: () => get<SetupStatus>("/api/setup"),
+    github: () => get<GhCliStatus>("/api/setup/github"),
+    complete: () => post<SetupStatus>("/api/setup/complete", {}),
+  },
+
   settings: {
     get: () => get<AppSettings>("/api/settings"),
     update: (body: Partial<AppSettings>) => put<AppSettings>("/api/settings", body),

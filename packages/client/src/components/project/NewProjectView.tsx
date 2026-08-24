@@ -192,7 +192,31 @@ const TONE_ICON: Record<ProbeTone, typeof Info> = {
 
 /* -------------------------------------------------------------------- page */
 
-export function NewProjectView() {
+export interface NewProjectViewProps {
+  /**
+   * Rendered as the last step of first-run setup rather than as a view of a
+   * running app (see `setup/SetupWizard.tsx`).
+   *
+   * It changes what the page CLAIMS, not what it does: the same form, the same
+   * manifest preview, the same two ways to finish. What differs is that there is
+   * no app behind it yet — so "New project" is the wrong title, and the back
+   * arrow has to go to the previous STEP instead of to a chat list that would be
+   * empty.
+   */
+  setup?: boolean;
+  /** Where the back arrow goes. Defaults to closing the view. */
+  onBack?: () => void;
+  /**
+   * What "finished" means. Defaults to returning to the chat view.
+   *
+   * Awaited, and allowed to throw: in setup it marks the install configured
+   * server-side, and a failure there must keep the wizard up rather than drop
+   * someone into an app that will ask them to set it up again next load.
+   */
+  onDone?: () => void | Promise<void>;
+}
+
+export function NewProjectView({ setup = false, onBack, onDone }: NewProjectViewProps = {}) {
   const setView = useView((s) => s.setView);
   const pushToast = useNotices((s) => s.push);
 
@@ -370,32 +394,47 @@ export function NewProjectView() {
     }
   }, [draft]);
 
+  /**
+   * Where both exits land. Awaited rather than fired-and-forgotten, so a setup
+   * host whose "mark this install configured" write fails reports it here — in
+   * the error slot under the buttons — instead of navigating away from the only
+   * screen that could have said so.
+   */
+  const finish = useCallback(async () => {
+    if (onDone) await onDone();
+    else setView("chat");
+  }, [onDone, setView]);
+
   const createOnly = useCallback(async () => {
     if (!ready || creating || blocked) return;
     setError(null);
     try {
       await createProject();
       pushToast({ level: "info", text: `Created ${draft.name.trim()}` });
-      setView("chat");
+      await finish();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [ready, creating, blocked, createProject, draft.name, pushToast, setView]);
+  }, [ready, creating, blocked, createProject, draft.name, pushToast, finish]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-app">
       {/* page header — the only chrome on this screen besides the top bar */}
       <div className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
-        <IconButton tip="Back" onClick={() => setView("chat")}>
+        <IconButton tip="Back" onClick={() => (onBack ? onBack() : setView("chat"))}>
           <ArrowLeft />
         </IconButton>
         <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-accent-ghost text-accent ring-1 ring-accent-line [&_svg]:size-3.5">
           <FolderPlus />
         </span>
         <div className="min-w-0">
-          <h1 className="truncate text-base font-semibold text-primary">New project</h1>
+          <h1 className="truncate text-base font-semibold text-primary">
+            {setup ? "Your first project" : "New project"}
+          </h1>
           <p className="mt-px truncate text-xs text-muted">
-            Name it and point it at a directory — an agent finishes the rest.
+            {setup
+              ? "Point Dispatch at a repository you already have, or a directory to create."
+              : "Name it and point it at a directory — an agent finishes the rest."}
           </p>
         </div>
       </div>
@@ -675,7 +714,11 @@ export function NewProjectView() {
                   Create without AI
                 </Button>
               }
-              onLaunched={() => setView("chat")}
+              onLaunched={() => {
+                void finish().catch((e: unknown) =>
+                  setError(e instanceof Error ? e.message : String(e)),
+                );
+              }}
             />
           </div>
         </div>

@@ -30,6 +30,9 @@ import { visibleChat } from "./stores/navigation.js";
 import { useView } from "./stores/view.js";
 import { useLayout } from "./stores/layout.js";
 import { AuthGate } from "./components/auth/AuthGate.js";
+import { useAuth } from "./stores/auth.js";
+import { SetupWizard } from "./components/setup/SetupWizard.js";
+import { useSetup } from "./stores/setup.js";
 import { ViewportDebug } from "./components/layout/ViewportDebug.js";
 import { startViewportTracking } from "./stores/viewport.js";
 import { cn } from "./lib/cn.js";
@@ -82,6 +85,24 @@ export default function App() {
   // Publishes `--cm-kb` (see below) and the raw readings behind `ViewportDebug`.
   useEffect(startViewportTracking, []);
 
+  // Has this INSTALL ever been set up?
+  //
+  // Gated on auth having SETTLED, and re-run when it does. `/api/setup` sits
+  // behind the same bearer gate as every other route, so asking before there is
+  // a session 401s — and the store reads a failed probe as "no wizard needed",
+  // which is the right default for a hiccup and exactly the wrong one here.
+  // The case that forced it: enable auth at step 1, reload, and the probe fires
+  // while `AuthGate` is still showing the sign-in form. It 401s, latches
+  // `pending: false`, and signing in then drops you into an app with no project
+  // and no route back to the screen that makes one.
+  const setupPending = useSetup((s) => s.pending);
+  const hydrateSetup = useSetup((s) => s.hydrate);
+  const authReady = useAuth((s) => s.ready);
+  const authSatisfied = useAuth((s) => !s.status?.enabled || !!s.user);
+  useEffect(() => {
+    if (authReady && authSatisfied) void hydrateSetup();
+  }, [authReady, authSatisfied, hydrateSetup]);
+
   return (
     <>
       {/* OUTSIDE the auth gate, deliberately. An update restarts the server, so
@@ -98,6 +119,22 @@ export default function App() {
           answer — see its guards. */}
       <ConnectingScreen />
       <AuthGate>
+      {/* First run owns the whole window until it is finished — see SetupWizard.
+          Rendered INSTEAD of the shell, not over it: there is no project and
+          possibly no agent runtime behind it, so the shell would be four empty
+          panels around an empty state.
+
+          `null` is "haven't asked yet" and holds the same placeholder AuthGate
+          uses, rather than falling through to the shell. Showing the app for one
+          frame and then replacing it with a setup wizard is a worse first
+          impression than a beat of "Starting Dispatch…", and the store races the
+          probe against a deadline so this can't become a hang. */}
+      {setupPending === null ? (
+        <div className="grid h-screen place-items-center bg-app text-sm text-muted">Starting Dispatch…</div>
+      ) : setupPending ? (
+        <SetupWizard />
+      ) : (
+      <>
       {/* `100dvh`, not `100vh`. On mobile Safari `vh` is pinned to the LARGEST
           viewport (URL bar retracted), so a `h-screen` app column is taller than
           the window whenever the bar is showing — and since this column is
@@ -236,6 +273,8 @@ export default function App() {
           lives outside this tree entirely. */}
       <ShutdownScreen />
       </div>
+      </>
+      )}
     </AuthGate>
     </>
   );

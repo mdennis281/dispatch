@@ -9,6 +9,7 @@ import { rm, writeFile } from "node:fs/promises";
 import { buildApp } from "./app.js";
 import { config, envVar } from "./config.js";
 import { seedDefaultsIfEmpty } from "./seed.js";
+import { ensureSetupState } from "./services/setup.js";
 import { installShutdown } from "./shutdown.js";
 import { installCrashNet, attachCrashBus } from "./crash-log.js";
 import { claudeRuntime } from "./services/runtime.js";
@@ -50,11 +51,20 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
   // exist to bind. Without it the net's publish is a permanent no-op and a
   // survived crash is visible only in crash.log — never in the UI.
   attachCrashBus(app.cm.bus);
-  // Seed default modes/agents + the Hivebreak project on a fresh dataDir so the
-  // live UI has content on first boot. No-op once anything exists.
+  // Seed default modes/agents on a fresh dataDir. No project — a first project
+  // is made through the setup wizard, against a directory that exists on THIS
+  // machine (see seed.ts). No-op once anything exists.
   await seedDefaultsIfEmpty(app.cm.store).catch((err) => {
     // eslint-disable-next-line no-console
     console.warn("[dispatch] seed skipped:", err);
+  });
+  // Decide once, here, whether this install still owes its owner the setup
+  // wizard — and write the answer down. It has to happen at boot and it has to
+  // happen AFTER the seed is attempted but while `isFreshInstall()` still
+  // remembers what the data root looked like before it. See services/setup.ts.
+  await ensureSetupState(app.cm.store).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.warn("[dispatch] setup state unresolved:", err);
   });
   // Wire teardown BEFORE listening, so a signal arriving during boot still runs
   // `services.dispose()` instead of orphaning whatever already started.
