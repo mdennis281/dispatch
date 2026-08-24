@@ -37,6 +37,7 @@ import {
   processTitle,
 } from "./rowMarkers.js";
 import { Chip } from "../ui/Chip.js";
+import { Tooltip } from "../ui/Tooltip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { useProjects, useActiveProject } from "../../stores/projects.js";
@@ -573,26 +574,38 @@ function ChatRow({
             row — and the eye reads a ragged left edge as disorder long before it
             reads the missing glyph as "nothing here". Faint IS the empty state.
 
-            10px glyphs, no digits: see `rowMarkers`, which owns the colour rules
-            and puts the counts in the tooltips. `gap-px` rather than a real gap
-            so the pair reads as one two-storey marker instead of two markers
-            that happen to be near each other. */}
-        <span className="-ml-1 flex shrink-0 flex-col items-center gap-px [&_svg]:size-2.5">
-          <span
-            title={childChatTitle(reviews, reviewsNeedInput)}
-            className={cn(
-              "transition-colors duration-300",
+            10px glyphs, no digits: see `rowMarkers`, which owns the colour
+            rules and puts the counts in the tooltips.
+
+            The shared `Tooltip`, NOT a `title` attribute. A native tooltip is
+            the browser's to schedule — around a second of hover before it
+            appears, if it appears at all — and these glyphs are the ONLY place
+            the counts live now, so "hover and wait and maybe" is not a way to
+            read them. The portal also gets the bubble out from under the row's
+            `overflow-hidden`.
+
+            The padding is the hover TARGET: a 10px glyph is not something you
+            can reliably put a pointer on, and it buys the gap between the two
+            at the same time — they still read as one two-storey marker rather
+            than two markers that happen to be near each other. */}
+        <span className="-ml-1 flex shrink-0 flex-col items-center [&_svg]:size-2.5">
+          <Tooltip
+            side="right"
+            label={childChatTitle(reviews, reviewsNeedInput)}
+            triggerClassName={cn(
+              "px-1.5 py-0.5 transition-colors duration-300",
               childChatTint(reviews, reviewsNeedInput),
             )}
           >
             <MessagesSquare />
-          </span>
-          <span
-            title={processTitle(procs)}
-            className={cn("transition-colors duration-300", processTint(procs))}
+          </Tooltip>
+          <Tooltip
+            side="right"
+            label={processTitle(procs)}
+            triggerClassName={cn("px-1.5 py-0.5 transition-colors duration-300", processTint(procs))}
           >
             <SquareTerminal />
-          </span>
+          </Tooltip>
         </span>
         <span className="min-w-0 flex-1">
           <span
