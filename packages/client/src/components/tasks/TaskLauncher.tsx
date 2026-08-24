@@ -217,13 +217,20 @@ export function TaskLauncher({
 
         {error && <InlineError message={error} />}
 
-        <div className="flex items-center gap-2">
+        {/* `flex-wrap` + `basis-full` below `sm`: the three buttons are all
+            `whitespace-nowrap` and together want ~310px, so on a 390px phone the
+            `flex-1` hint was left about 40px and wrapped one word per line —
+            "Give the project a name and a directory to enable this." became a
+            ten-line ribbon. Below `sm` the hint now takes its own row and the
+            buttons sit under it; `sm:basis-0` puts the single-row layout back,
+            so nothing changes at any width this was designed at. */}
+        <div className="flex flex-wrap items-center gap-2">
           {blockedReason ? (
-            <span className="min-w-0 flex-1 text-2xs leading-snug text-warn">
+            <span className="min-w-0 flex-1 basis-full text-2xs leading-snug text-warn sm:basis-0">
               {blockedReason}
             </span>
           ) : (
-            <span className="min-w-0 flex-1 text-2xs leading-snug text-faint">
+            <span className="min-w-0 flex-1 basis-full text-2xs leading-snug text-faint sm:basis-0">
               Opens a chat here — it reads the repo first and you can steer it.
             </span>
           )}

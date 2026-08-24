@@ -890,3 +890,50 @@ describe("routes — gh-action", () => {
     expect(pr && pr.type === "pr-update" && pr.pr.number).toBe(5);
   });
 });
+
+describe("routes — first-run setup", () => {
+  beforeEach(async () => {
+    await boot(makeFakeQuery(() => [assistantText("hi"), resultMsg()]));
+  });
+
+  it("reports the wizard as owed until it is completed", async () => {
+    // `buildApp` does not run `ensureSetupState` (only the real entrypoint
+    // does), so an untouched store is the "never decided" case.
+    const before = await app.inject({ method: "GET", url: "/api/setup" });
+    expect(before.json()).toEqual({ completed: false });
+
+    const done = await app.inject({ method: "POST", url: "/api/setup/complete" });
+    expect(done.json().completed).toBe(true);
+    expect(done.json().completedAt).toBeGreaterThan(0);
+
+    const after = await app.inject({ method: "GET", url: "/api/setup" });
+    expect(after.json()).toEqual(done.json());
+  });
+
+  /**
+   * PUT /api/settings is a full REPLACE and no client sends `setup`. Without the
+   * hand-preservation in the route, changing your theme would drop the key — and
+   * the next load would put a four-step wizard over a working install that
+   * already has projects in it.
+   */
+  it("survives an unrelated settings save", async () => {
+    await app.inject({ method: "POST", url: "/api/setup/complete" });
+
+    const saved = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      payload: { theme: "light" },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().theme).toBe("light");
+
+    const after = await app.inject({ method: "GET", url: "/api/setup" });
+    expect(after.json().completed).toBe(true);
+  });
+
+  it("is idempotent — completing twice keeps the first timestamp", async () => {
+    const first = await app.inject({ method: "POST", url: "/api/setup/complete" });
+    const second = await app.inject({ method: "POST", url: "/api/setup/complete" });
+    expect(second.json().completedAt).toBe(first.json().completedAt);
+  });
+});

@@ -55,6 +55,12 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
       ...parsed.data,
       auth: current.auth,
       ...(current.updateChannel ? { updateChannel: current.updateChannel } : {}),
+      // And `setup`, for the third time and the same reason. It is owned by
+      // POST /api/setup/complete, and no client sends it — so a full-replace
+      // save from Settings would drop it, which on the next load reads as "this
+      // install has never been set up" and puts the wizard back over a working
+      // app. Changing your theme must not un-install you.
+      ...(current.setup ? { setup: current.setup } : {}),
     });
     // The concurrency cap is held by the LIVE broker, not re-read per turn, so a
     // save has to hand it over or the new number means nothing until a restart —

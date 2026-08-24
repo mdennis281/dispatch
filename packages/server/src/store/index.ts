@@ -248,6 +248,29 @@ export const AppSettingsSchema = z.object({
     })
     .optional(),
   /**
+   * First-run setup wizard state.
+   *
+   * Three states, and the third is the one that needs the nesting: ABSENT means
+   * "nobody has decided yet", which is what every config.json written before the
+   * wizard existed says. `ensureSetupState` resolves that exactly once at boot,
+   * off `Store.isFreshInstall()`, and writes a concrete answer — so an UPGRADE
+   * is marked complete without ever seeing the wizard, and a genuinely new
+   * install is marked pending and keeps showing it until it is finished.
+   *
+   * Resolving it at boot rather than deriving it per request is what makes the
+   * wizard survive a restart. `isFreshInstall()` is a snapshot taken before
+   * seeding, so it flips to false the moment the seeded modes hit disk; a wizard
+   * gated on it directly would vanish if you restarted the server halfway
+   * through setup, leaving an install with no project and no way back to the
+   * screen that makes one.
+   */
+  setup: z
+    .object({
+      completed: z.boolean().default(false),
+      completedAt: z.number().int().positive().optional(),
+    })
+    .optional(),
+  /**
    * Authentication is deliberately optional. Existing config.json files have no
    * auth key, and that absence MUST keep an upgraded installation open.
    */

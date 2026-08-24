@@ -18,6 +18,7 @@ export * from "./env-expand.js";
 export * from "./usage.js";
 export * from "./user-agent.js";
 export * from "./auth.js";
+export * from "./setup.js";
 export * from "./limits.js";
 export * from "./mcp.js";
 export * from "./mcp-enablement.js";

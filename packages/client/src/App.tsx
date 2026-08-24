@@ -30,6 +30,9 @@ import { visibleChat } from "./stores/navigation.js";
 import { useView } from "./stores/view.js";
 import { useLayout } from "./stores/layout.js";
 import { AuthGate } from "./components/auth/AuthGate.js";
+import { useAuth } from "./stores/auth.js";
+import { SetupWizard } from "./components/setup/SetupWizard.js";
+import { useSetup, shouldProbeSetup } from "./stores/setup.js";
 import { ViewportDebug } from "./components/layout/ViewportDebug.js";
 import { startViewportTracking } from "./stores/viewport.js";
 import { cn } from "./lib/cn.js";
@@ -82,6 +85,43 @@ export default function App() {
   // Publishes `--cm-kb` (see below) and the raw readings behind `ViewportDebug`.
   useEffect(startViewportTracking, []);
 
+  // Has this INSTALL ever been set up?
+  //
+  // Asked only once the auth state is both SETTLED and REAL, and re-asked
+  // whenever that changes. Both halves of that guard are load-bearing, because
+  // a failed probe latches `pending: false` (see stores/setup.ts) and this
+  // effect is the only caller:
+  //
+  //   - `authSatisfied` — `/api/setup` sits behind the same bearer gate as
+  //     every other route, so asking before a session exists 401s. Enable auth
+  //     at step 1, reload, and the probe would fire while `AuthGate` is still
+  //     showing the sign-in form; signing in would then drop you into an app
+  //     with no project and no route back to the screen that makes one.
+  //
+  //   - `unreachable` — when `initializeAuth` can't reach the server it applies
+  //     a PLACEHOLDER status and flags it (stores/auth.ts). The placeholder
+  //     reads as "auth off, nobody signed in", which satisfies the check above,
+  //     so without this the probe fires against a server that isn't there,
+  //     fails, and latches. For a fresh install — auth off, the only state it
+  //     can be in — the recovered status is identical to the placeholder in
+  //     every field this effect reads, so `unreachable` flipping back to false
+  //     is the ONLY edge that says "ask again". Boot the installed PWA off its
+  //     cached shell with the server down, start the server, and the wizard
+  //     would otherwise be gone until a manual reload.
+  const setupPending = useSetup((s) => s.pending);
+  const hydrateSetup = useSetup((s) => s.hydrate);
+  const authReady = useAuth((s) => s.ready);
+  const authEnabled = useAuth((s) => !!s.status?.enabled);
+  const signedIn = useAuth((s) => !!s.user);
+  const unreachable = useAuth((s) => s.unreachable);
+  // Selected as four primitives and combined by a pure, TESTED predicate rather
+  // than written inline — see `shouldProbeSetup`. CI does not run the e2e spec,
+  // so a unit test is the only thing standing behind this condition.
+  const canProbe = shouldProbeSetup({ ready: authReady, unreachable, authEnabled, signedIn });
+  useEffect(() => {
+    if (canProbe) void hydrateSetup();
+  }, [canProbe, hydrateSetup]);
+
   return (
     <>
       {/* OUTSIDE the auth gate, deliberately. An update restarts the server, so
@@ -98,6 +138,40 @@ export default function App() {
           answer — see its guards. */}
       <ConnectingScreen />
       <AuthGate>
+      {/* ABOVE the first-run branch, because the setup wizard needs them too.
+          All three render `null` when idle, so the shell path is unchanged.
+
+          `FilePickerHost` is the one that actually broke: step 4 is the real
+          `NewProjectView`, whose Browse button awaits a promise that only ever
+          settles when this host renders the modal. With it mounted inside the
+          shell branch — which the wizard REPLACES rather than covers — Browse
+          did nothing at all, and not even Escape helped, because the component
+          that handles Escape wasn't there. That left typing an absolute
+          server-side path from memory as the only way to fill in the directory
+          on a fresh install, which is the exact thing Browse exists to prevent.
+
+          `Toasts` and `AgentRunHost` are the same bug with a smaller blast
+          radius: "Created <name>" and the agent-task launcher's own toast were
+          being pushed into a store nothing was rendering. */}
+      <FilePickerHost />
+      <AgentRunHost />
+      <Toasts />
+      {/* First run owns the whole window until it is finished — see SetupWizard.
+          Rendered INSTEAD of the shell, not over it: there is no project and
+          possibly no agent runtime behind it, so the shell would be four empty
+          panels around an empty state.
+
+          `null` is "haven't asked yet" and holds the same placeholder AuthGate
+          uses, rather than falling through to the shell. Showing the app for one
+          frame and then replacing it with a setup wizard is a worse first
+          impression than a beat of "Starting Dispatch…", and the store races the
+          probe against a deadline so this can't become a hang. */}
+      {setupPending === null ? (
+        <div className="grid h-screen place-items-center bg-app text-sm text-muted">Starting Dispatch…</div>
+      ) : setupPending ? (
+        <SetupWizard />
+      ) : (
+      <>
       {/* `100dvh`, not `100vh`. On mobile Safari `vh` is pinned to the LARGEST
           viewport (URL bar retracted), so a `h-screen` app column is taller than
           the window whenever the bar is showing — and since this column is
@@ -219,15 +293,15 @@ export default function App() {
           view store (see stores/view.ts) rather than by the three bespoke
           window-event buses and two stray useStates this used to take. */}
       <CodeViewerHost />
-      <AgentRunHost />
-      {/* The file dialog the browser won't give us. Mounted here so `pickPath()`
-          works from anywhere without each call site rendering a modal. */}
-      <FilePickerHost />
+      {/* `AgentRunHost`, `FilePickerHost` and `Toasts` are NOT here — they are
+          mounted above the first-run branch, because the setup wizard replaces
+          this whole subtree and needs all three. The file dialog in particular
+          is the browser's missing one, and `pickPath()` has to work from
+          anywhere without each call site rendering its own modal. */}
       <WorkspaceView />
       <ProcessesOverlay />
       <McpCatalogView />
       <ManageConfigDialog />
-      <Toasts />
       <ViewportDebug />
       {/* An update also stops the server, and "Dispatch has stopped, start it
           from the Start menu" is both wrong and unhelpful halfway through one.
@@ -236,6 +310,8 @@ export default function App() {
           lives outside this tree entirely. */}
       <ShutdownScreen />
       </div>
+      </>
+      )}
     </AuthGate>
     </>
   );

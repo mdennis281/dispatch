@@ -4,10 +4,20 @@
  * Boots the Fastify backend on a temp port + temp DISPATCH_DATA_DIR with DISPATCH_FAKE_SDK=1
  * (a deterministic in-process echo — no `claude` subprocess, no auth/network),
  * serving the built SPA at same origin, then drives the UI:
- *   WS connects (hello) → seeded config hydrates → create a project via the UI →
- *   create a chat → the composer sends a user message that appears in the
- *   transcript (and the fake session echoes it back over the WS) → panels +
- *   attention render. Ends by saving .artifacts/shell-live.png.
+ *   WS connects (hello) → the FIRST-RUN SETUP WIZARD walks auth → gh → harness →
+ *   first project → create a chat → the composer sends a user message that
+ *   appears in the transcript (and the fake session echoes it back over the WS)
+ *   → panels + attention render. Ends by saving .artifacts/shell-live.png.
+ *
+ * The wizard is not an extra step bolted on to this test — it is the only way a
+ * project comes to exist on a fresh dataDir. Nothing is seeded any more (see
+ * server `seed.ts`), so this is exactly what a new install does, end to end.
+ *
+ * It is NOT the safety net for first run, though, and must not be mistaken for
+ * one: this spec is deliberately excluded from CI (`.github/workflows/ci.yml`
+ * says why), so on a pull request nobody runs it. The pieces of first run that
+ * genuinely need a guard — the probe gate and its fail-open store — are covered
+ * in `src/stores/setup.test.ts`, which is in the vitest suite CI does run.
  */
 import { test, expect } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -79,34 +89,49 @@ test.afterAll(async () => {
   }
 });
 
-test("live cockpit: connect → create project → chat → send message → panels", async ({ page }) => {
+test("live cockpit: set up → create project → chat → send message → panels", async ({ page }) => {
   await page.goto(`${BASE}/`);
 
-  // 1) WS handshake: the top bar reflects a live socket.
-  await expect(page.getByText("Connected")).toBeVisible();
+  // 1) First run: the wizard owns the window. Nothing is seeded, so this is
+  //    what a brand-new install actually shows.
+  await expect(page.getByRole("heading", { name: "Protect Dispatch" })).toBeVisible();
 
-  // 2) REST hydrate: the seeded Hivebreak project is present in the sidebar.
-  await expect(page.getByText("Hivebreak")).toBeVisible();
+  // 2) Auth is optional — "keep it off" is an answer, not a skip.
+  await page.getByRole("button", { name: "Keep authentication off" }).click();
 
-  // 3) Create a project via the UI (project selector → "Add project…").
-  await page.getByRole("button").filter({ hasText: "Hivebreak" }).first().click();
-  await page.getByText(/Add project/).click();
+  // 3) gh is PROBED. Whether this machine has it is not this test's business:
+  //    the step is non-blocking either way, so match both labels.
+  await expect(page.getByRole("heading", { name: "GitHub CLI" })).toBeVisible();
+  await page.getByRole("button", { name: /^Continue/ }).click();
+
+  // 4) The agent runtime step BLOCKS on having one. Claude Code always resolves
+  //    (the SDK bundles its own runtime), so it is preselected and Continue is
+  //    live — if that ever stops being true this assertion is the alarm.
+  await expect(page.getByRole("heading", { name: "Agent runtime" })).toBeVisible();
+  const continueHarness = page.getByRole("button", { name: "Continue" });
+  await expect(continueHarness).toBeEnabled();
+  await continueHarness.click();
+
+  // 5) The last step is the real project page, and finishing it is what marks
+  //    the install set up.
+  await expect(page.getByRole("heading", { name: "Your first project" })).toBeVisible();
 
   const projectName = "E2E Project";
-  await page.getByPlaceholder("Hivebreak").fill(projectName);
-  await page.getByPlaceholder("C:/Users/you/projects/app").fill(repoRoot);
-  await page.getByPlaceholder("…/app-worktrees").fill(join(repoRoot, "wt"));
-  await page.getByRole("button", { name: "Create project" }).click();
+  await page.getByPlaceholder("Acme Billing").fill(projectName);
+  await page.getByPlaceholder(/projects\/acme-billing|acme-billing/).fill(repoRoot);
+  await page.getByRole("button", { name: "Create without AI" }).click();
 
-  // The new project becomes active (its name shows in the selector head).
+  // The wizard is gone and the shell is live with the new project active.
+  await expect(page.getByRole("heading", { name: "Your first project" })).toBeHidden();
+  await expect(page.getByText("Connected")).toBeVisible();
   await expect(page.getByText(projectName)).toBeVisible();
 
-  // 4) Create a chat via the UI. "New chat" now instantly creates + auto-selects
+  // 6) Create a chat via the UI. "New chat" now instantly creates + auto-selects
   //    a chat (no dialog) with the default title — the chat view mounts with it.
   await page.getByRole("button", { name: "New chat" }).click();
   await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
 
-  // 5) The composer sends a user message that appears in the transcript.
+  // 7) The composer sends a user message that appears in the transcript.
   const msg = "Hello from the E2E harness";
   const editor = page.locator(".ProseMirror");
   await editor.click();
@@ -119,12 +144,12 @@ test("live cockpit: connect → create project → chat → send message → pan
   // through chat-message events into the messages store, not just optimistic UI).
   await expect(page.getByText(`Echo: ${msg}`, { exact: true })).toBeVisible();
 
-  // 6) Panels + attention render.
+  // 8) Panels + attention render.
   await expect(page.getByRole("tab", { name: "Worktrees" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Apps" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "PRs" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Attention/ })).toBeVisible();
 
-  // 7) Snapshot the live shell.
+  // 9) Snapshot the live shell.
   await page.screenshot({ path: resolve(repoRoot, ".artifacts", "shell-live.png") });
 });

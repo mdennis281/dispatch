@@ -34,9 +34,11 @@ import { registerFsRoutes } from "./fs.js";
 import { registerShutdownRoutes } from "./shutdown.js";
 import { registerUpdateRoutes } from "./update.js";
 import { registerAuthRoutes } from "./auth.js";
+import { registerSetupRoutes } from "./setup.js";
 
 export function registerRoutes(app: FastifyInstance): void {
   registerAuthRoutes(app);
+  registerSetupRoutes(app);
   registerWsRoutes(app);
   registerProjectRoutes(app);
   registerProjectConfigRoutes(app);
