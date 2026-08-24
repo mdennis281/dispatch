@@ -150,7 +150,18 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
         if (e.pointerType !== "touch") setOpen(true);
       }}
       onPointerLeave={() => setOpen(false)}
-      onFocusCapture={() => setOpen(true)}
+      // KEYBOARD focus only. Most triggers wrap a real `<button>` and `focusin`
+      // bubbles, so on a mouse click Chromium runs `pointerdown` (which the
+      // dismissal above acts on) and then focuses the button as the default
+      // action — reopening the bubble a frame after the press closed it, as a
+      // visible blink that replays `cm-anim-rise`. Two native events, so React
+      // does not batch them away. `:focus-visible` is exactly this distinction
+      // and the browser already computes it: false for a click on a button,
+      // true for a Tab. Safari never focuses buttons on click and so never had
+      // the blink; this is correct there too rather than merely inert.
+      onFocusCapture={(e) => {
+        if (e.target instanceof Element && e.target.matches(":focus-visible")) setOpen(true);
+      }}
       onBlurCapture={() => setOpen(false)}
     >
       {children}
