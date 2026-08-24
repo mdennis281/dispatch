@@ -119,9 +119,22 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
     window.addEventListener("resize", onReflow);
     // capture so scrolls in any ancestor container reposition the bubble too.
     window.addEventListener("scroll", onReflow, true);
+    // Any press anywhere dismisses. A tooltip is a HOVER affordance, and the
+    // moment a pointer goes down the user has moved on to acting — but the real
+    // reason is that `mouseleave` is not guaranteed to arrive: a trigger inside
+    // the mobile `Drawer` is still MOUNTED after the drawer slides shut (it
+    // animates `transform` and marks the panel `inert`), so it can never
+    // receive the pointer event that would close its own bubble. The bubble is
+    // `position: fixed` on the body, outside that transform, so it does not
+    // leave with the drawer — and `Drawer`'s synthetic `resize` on transitionend
+    // then repositions it against a trigger that has slid off-screen, where the
+    // cross-axis clamp parks it over the transcript you just opened.
+    const onPress = () => setOpen(false);
+    window.addEventListener("pointerdown", onPress, true);
     return () => {
       window.removeEventListener("resize", onReflow);
       window.removeEventListener("scroll", onReflow, true);
+      window.removeEventListener("pointerdown", onPress, true);
     };
   }, [open, reposition]);
 
@@ -129,9 +142,26 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
     <span
       ref={triggerRef}
       className={cn("relative inline-flex", triggerClassName)}
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-      onFocusCapture={() => setOpen(true)}
+      // `pointerenter`, not `mouseenter`, so the pointer TYPE is available: a
+      // tap fires the mouse-compatibility sequence, and opening on it puts a
+      // hover bubble on a device that has no hover to end it. Pen still opens —
+      // a stylus can hover, and its `pointerleave` is real.
+      onPointerEnter={(e) => {
+        if (e.pointerType !== "touch") setOpen(true);
+      }}
+      onPointerLeave={() => setOpen(false)}
+      // KEYBOARD focus only. Most triggers wrap a real `<button>` and `focusin`
+      // bubbles, so on a mouse click Chromium runs `pointerdown` (which the
+      // dismissal above acts on) and then focuses the button as the default
+      // action — reopening the bubble a frame after the press closed it, as a
+      // visible blink that replays `cm-anim-rise`. Two native events, so React
+      // does not batch them away. `:focus-visible` is exactly this distinction
+      // and the browser already computes it: false for a click on a button,
+      // true for a Tab. Safari never focuses buttons on click and so never had
+      // the blink; this is correct there too rather than merely inert.
+      onFocusCapture={(e) => {
+        if (e.target instanceof Element && e.target.matches(":focus-visible")) setOpen(true);
+      }}
       onBlurCapture={() => setOpen(false)}
     >
       {children}

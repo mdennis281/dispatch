@@ -37,6 +37,7 @@ import {
   processTitle,
 } from "./rowMarkers.js";
 import { Chip } from "../ui/Chip.js";
+import { Tooltip } from "../ui/Tooltip.js";
 import { Spinner } from "../ui/Spinner.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { useProjects, useActiveProject } from "../../stores/projects.js";
@@ -441,6 +442,25 @@ function Dot() {
   return <span className="text-faint/50"> · </span>;
 }
 
+/**
+ * A row marker's count, for assistive tech only.
+ *
+ * The glyphs carry their meaning in COLOUR and their counts in a tooltip, and
+ * neither reaches a screen reader: `Tooltip` portals its bubble to the body
+ * with nothing associating it back, and the trigger is a roleless, unfocusable
+ * span. So the readable form is stated directly, inside the trigger — where it
+ * joins the row button's accessible name, which is where you'd want a count
+ * read out. `ProjectAgentBadge` above solves the identical problem the same way
+ * and for the same reason.
+ *
+ * `when` is what keeps that name usable: "No child chats. No processes." on
+ * every quiet row is noise in front of the title on the one row that matters.
+ * A marker with nothing to report says nothing.
+ */
+function MarkerLabel({ text, when }: { text: string; when: boolean }) {
+  return when ? <span className="sr-only">{text}</span> : null;
+}
+
 function ChatRow({
   chat,
   active,
@@ -573,26 +593,40 @@ function ChatRow({
             row — and the eye reads a ragged left edge as disorder long before it
             reads the missing glyph as "nothing here". Faint IS the empty state.
 
-            10px glyphs, no digits: see `rowMarkers`, which owns the colour rules
-            and puts the counts in the tooltips. `gap-px` rather than a real gap
-            so the pair reads as one two-storey marker instead of two markers
-            that happen to be near each other. */}
-        <span className="-ml-1 flex shrink-0 flex-col items-center gap-px [&_svg]:size-2.5">
-          <span
-            title={childChatTitle(reviews, reviewsNeedInput)}
-            className={cn(
-              "transition-colors duration-300",
+            10px glyphs, no digits: see `rowMarkers`, which owns the colour
+            rules and puts the counts in the tooltips.
+
+            The shared `Tooltip`, NOT a `title` attribute. A native tooltip is
+            the browser's to schedule — around a second of hover before it
+            appears, if it appears at all — and these glyphs are the ONLY place
+            the counts live now, so "hover and wait and maybe" is not a way to
+            read them. The portal also gets the bubble out from under the row's
+            `overflow-hidden`.
+
+            The padding is the hover TARGET: a 10px glyph is not something you
+            can reliably put a pointer on, and it buys the gap between the two
+            at the same time — they still read as one two-storey marker rather
+            than two markers that happen to be near each other. */}
+        <span className="-ml-1 flex shrink-0 flex-col items-center [&_svg]:size-2.5">
+          <Tooltip
+            side="right"
+            label={childChatTitle(reviews, reviewsNeedInput)}
+            triggerClassName={cn(
+              "px-1.5 py-0.5 transition-colors duration-300",
               childChatTint(reviews, reviewsNeedInput),
             )}
           >
-            <MessagesSquare />
-          </span>
-          <span
-            title={processTitle(procs)}
-            className={cn("transition-colors duration-300", processTint(procs))}
+            <MessagesSquare aria-hidden />
+            <MarkerLabel text={childChatTitle(reviews, reviewsNeedInput)} when={reviews.length > 0} />
+          </Tooltip>
+          <Tooltip
+            side="right"
+            label={processTitle(procs)}
+            triggerClassName={cn("px-1.5 py-0.5 transition-colors duration-300", processTint(procs))}
           >
-            <SquareTerminal />
-          </span>
+            <SquareTerminal aria-hidden />
+            <MarkerLabel text={processTitle(procs)} when={processCount > 0} />
+          </Tooltip>
         </span>
         <span className="min-w-0 flex-1">
           <span
