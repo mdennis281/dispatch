@@ -74,7 +74,12 @@ export type AppOverlay = "workspace" | "mcp" | "agents" | "processes";
  * same reason `appSection` is: it survives leaving the page, and it is
  * addressable from outside React.
  */
-export type MetricsSection = "usage" | "runtime";
+/**
+ * Metrics subpages. Usage counts what agents reached for, runtime measures
+ * where the wall clock went, and resources measures what is resident RIGHT NOW
+ * — the only one of the three that is a live reading rather than a ledger.
+ */
+export type MetricsSection = "usage" | "runtime" | "resources";
 
 interface ViewStore {
   view: AppView;

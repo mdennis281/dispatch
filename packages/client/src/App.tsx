@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { startSystemPolling } from "./stores/resources.js";
 import { MessageSquareDashed } from "lucide-react";
 import { TopBar } from "./components/layout/TopBar.js";
 import { Sidebar } from "./components/layout/Sidebar.js";
@@ -84,6 +85,13 @@ export default function App() {
 
   // Publishes `--cm-kb` (see below) and the raw readings behind `ViewportDebug`.
   useEffect(startViewportTracking, []);
+
+  // The header's CPU/memory pill. Runs for the app's whole lifetime because it
+  // has to be THERE when someone glances at it, and it can afford to: the
+  // endpoint behind it is `os.cpus()`/`os.freemem()`, ~0.2 ms with no
+  // subprocess. The expensive per-chat scan is subscribed separately, only
+  // while something is actually showing it.
+  useEffect(startSystemPolling, []);
 
   // Has this INSTALL ever been set up?
   //

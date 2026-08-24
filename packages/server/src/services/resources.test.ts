@@ -205,6 +205,51 @@ describe("ResourceService.snapshot", () => {
     expect((await h.svc.snapshot()).chats[0].cpuPct).toBeCloseTo(50);
   });
 
+  it("does not let a second reader steal the first one's CPU baseline", async () => {
+    // THE REGRESSION. The baseline used to advance on every call, so a reading
+    // was something a caller CONSUMED. With the page polling at 5 s, any second
+    // reader — another browser tab, the header dropdown, a curl — landed just
+    // after it, differenced against a baseline 100 ms old, and got null for
+    // every CPU figure. Two tabs blanked the CPU column for both.
+    const h = harness([row(1, 0), row(10, 1, { cpuMs: 0 })], {
+      sessionPids: new Map([["chat-a", 10]]),
+    });
+    await h.svc.snapshot();
+
+    h.advance(4000);
+    h.setTable([row(1, 0), row(10, 1, { cpuMs: 2000 })]);
+    const pagePoll = await h.svc.snapshot();
+    expect(pagePoll.chats[0].cpuPct).toBeCloseTo(50);
+
+    // A second client 100 ms behind the first must still get a real number,
+    // differenced against the SAME baseline rather than against the poll that
+    // just happened.
+    h.advance(100);
+    const secondTab = await h.svc.snapshot();
+    expect(secondTab.chats[0].cpuPct).not.toBeNull();
+    expect(secondTab.windowMs).toBeGreaterThan(0);
+  });
+
+  it("advances the baseline once it has aged, so windows stay bounded", async () => {
+    const h = harness([row(1, 0), row(10, 1, { cpuMs: 0 })], {
+      sessionPids: new Map([["chat-a", 10]]),
+    });
+    await h.svc.snapshot();
+
+    // Past the refresh age → this reading becomes the new baseline...
+    h.advance(4000);
+    h.setTable([row(1, 0), row(10, 1, { cpuMs: 4000 })]);
+    expect((await h.svc.snapshot()).windowMs).toBe(4000);
+
+    // ...so the next window is measured from HERE, not from the very first
+    // sample. Without that, `windowMs` would grow without bound.
+    h.advance(4000);
+    h.setTable([row(1, 0), row(10, 1, { cpuMs: 6000 })]);
+    const next = await h.svc.snapshot();
+    expect(next.windowMs).toBe(4000);
+    expect(next.chats[0].cpuPct).toBeCloseTo(50);
+  });
+
   it("keeps a tree's CPU when only some of its processes are measurable", async () => {
     const h = harness([row(1, 0), row(10, 1, { cpuMs: 0 }), row(11, 10, { cpuMs: 0 })], {
       sessionPids: new Map([["chat-a", 10]]),

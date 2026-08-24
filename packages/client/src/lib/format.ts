@@ -104,6 +104,35 @@ export function kb(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/**
+ * Byte size for MEMORY figures, which run to gigabytes — `kb()` tops out at MB
+ * and would render a 20 GB process tree as "20805.3 MB".
+ *
+ * Two significant-ish digits below 10 and none above, so a column of these
+ * stays the same width and stays scannable: "962 MB", "1.3 GB", "20 GB".
+ */
+export function bytes(n: number): string {
+  const abs = Math.abs(n);
+  if (abs < 1024) return `${Math.round(n)} B`;
+  if (abs < 1024 ** 2) return `${Math.round(n / 1024)} KB`;
+  if (abs < 1024 ** 3) return `${Math.round(n / 1024 ** 2)} MB`;
+  const gb = n / 1024 ** 3;
+  return `${gb < 10 ? gb.toFixed(1) : Math.round(gb)} GB`;
+}
+
+/**
+ * A CPU percentage, where `null` means NOT MEASURED and must not read as zero.
+ *
+ * The distinction is load-bearing: a rate needs two samples, so a just-opened
+ * page, a brand-new process and a recycled pid all legitimately have no answer.
+ * Rendering those as "0%" on a machine that is pegged is the reading that makes
+ * somebody stop looking.
+ */
+export function pct(n: number | null): string {
+  if (n === null) return "—";
+  return n < 10 ? `${n.toFixed(1)}%` : `${Math.round(n)}%`;
+}
+
 /** JSON pretty-print that never throws. */
 export function safeJson(v: unknown, space = 2): string {
   try {

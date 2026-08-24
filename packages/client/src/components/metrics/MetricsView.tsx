@@ -28,15 +28,17 @@
  * which is a second filter row on a page that already has one, and the thing
  * this layout avoids.
  */
-import { Activity, BarChart3, RefreshCw } from "lucide-react";
+import { Activity, BarChart3, Gauge, RefreshCw } from "lucide-react";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Tabs } from "../ui/Tabs.js";
 import { useMetrics } from "../../stores/metrics.js";
 import { useSpanMetrics } from "../../stores/metrics-spans.js";
+import { useResources } from "../../stores/resources.js";
 import { useView, type MetricsSection } from "../../stores/view.js";
 import { RuntimeMetrics } from "./RuntimeMetrics.js";
 import { UsageMetrics } from "./UsageMetrics.js";
+import { ResourceMetrics } from "./ResourceMetrics.js";
 import { count } from "./chrome.js";
 import { cn } from "../../lib/cn.js";
 
@@ -54,10 +56,18 @@ export function MetricsView() {
   const spanBusy = useSpanMetrics((s) => s.refetching);
   const reloadSpans = useSpanMetrics((s) => s.load);
 
+  // Resources is a LIVE READING rather than a ledger, so its "rows" is the
+  // number of chats currently holding something and its reload is a re-scan,
+  // not a re-query. Same three controls, different meaning per subpage.
+  const resourceChats = useResources((s) => s.snapshot?.chats.length ?? 0);
+  const rescan = useResources((s) => s.refreshSnapshot);
+
   const runtime = section === "runtime";
-  const rows = runtime ? spanRows : usageRows;
-  const busy = runtime ? spanBusy : usageBusy;
-  const reload = runtime ? reloadSpans : reloadUsage;
+  const resources = section === "resources";
+  const rows = resources ? resourceChats : runtime ? spanRows : usageRows;
+  const busy = resources ? false : runtime ? spanBusy : usageBusy;
+  const reload = resources ? rescan : runtime ? reloadSpans : reloadUsage;
+  const unit = resources ? "chats" : runtime ? "spans" : "rows";
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">
@@ -70,10 +80,11 @@ export function MetricsView() {
           tabs={[
             { id: "usage", label: "Usage", icon: <BarChart3 size={13} /> },
             { id: "runtime", label: "Runtime", icon: <Activity size={13} /> },
+            { id: "resources", label: "Resources", icon: <Gauge size={13} /> },
           ]}
         />
         <span className="cm-mono !text-2xs text-faint">
-          {count(rows)} {runtime ? "spans" : "rows"}
+          {count(rows)} {unit}
         </span>
         <div className="flex-1" />
         <IconButton size="sm" tip="Reload" onClick={() => void reload()}>
@@ -86,7 +97,7 @@ export function MetricsView() {
           relative to `Date.now()`, so a "last 7 days" render held from an hour
           ago is quietly answering a different question than its own label. */}
       <ScrollArea className="min-h-0 flex-1">
-        {runtime ? <RuntimeMetrics /> : <UsageMetrics />}
+        {resources ? <ResourceMetrics /> : runtime ? <RuntimeMetrics /> : <UsageMetrics />}
       </ScrollArea>
     </div>
   );

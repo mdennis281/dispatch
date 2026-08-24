@@ -97,6 +97,7 @@ interface CpuSample {
 interface SysSample {
   idle: number;
   total: number;
+  at: number;
 }
 
 /**
@@ -108,6 +109,7 @@ interface SysSample {
  * measured" the first snapshot uses — and let the next poll produce a real one.
  */
 const MIN_WINDOW_MS = 250;
+
 
 export class ResourceService {
   private readonly procTable: ProcTableCache;
@@ -121,6 +123,8 @@ export class ResourceService {
 
   private previous?: CpuSample;
   private sysPrevious?: SysSample;
+  /** The rates computed for one table scan, shared by every reader of it. */
+  private computed?: { tableAt: number; byPid: Map<number, number>; windowMs: number };
 
   constructor(deps: ResourceDeps) {
     this.procTable = deps.procTable;
@@ -149,7 +153,14 @@ export class ResourceService {
     const cores = this.cpus();
     const { idle, total } = sumCpuTicks(cores);
     const prev = this.sysPrevious;
-    this.sysPrevious = { idle, total };
+    // Rolling, for the same reason the per-process baseline is: the header
+    // widget polls this every 2 s AND every `snapshot()` call goes through
+    // here, so a consumed baseline would have the two starving each other.
+    // A 1 s floor because this is the number someone watches tick; the
+    // per-process rates use the coarser per-scan memo in `rates`.
+    if (!prev || this.now() - prev.at >= 1_000) {
+      this.sysPrevious = { idle, total, at: this.now() };
+    }
     // These are tick COUNTS accumulated across every core, so the ratio is the
     // busy fraction of the machine as a whole, not of one core.
     const dIdle = prev ? idle - prev.idle : 0;
@@ -170,40 +181,17 @@ export class ResourceService {
   /**
    * Everything: system, Dispatch's tree, and every chat.
    *
-   * Reads the shared table (cached), differences the CPU counters against the
-   * previous call, then REPLACES the baseline. One baseline serves both this
-   * and {@link system} because both are driven by the same client poll — a
-   * reading always differences against whatever was measured last, whichever
-   * entry point took it, and `windowMs` says which that was.
+   * The CPU delta is computed ONCE PER TABLE SCAN, not once per caller — see
+   * {@link rates}. That is what makes concurrent readers safe.
    */
   async snapshot(): Promise<ResourceSnapshot> {
-    const { rows } = await this.procTable.read();
+    const snap = await this.procTable.read();
+    const rows = snap.rows;
     const at = this.now();
-    const prev = this.previous;
-    const windowMs = prev ? at - prev.at : 0;
-    // A window too short to divide by yields no rates at all rather than
-    // fabricated ones. Note this still records a new baseline below, so the
-    // NEXT call gets a clean window instead of inheriting the bad one.
-    const usable = windowMs >= MIN_WINDOW_MS;
-
     const system = this.system();
+    const { byPid: cpuByPid, windowMs } = this.rates(snap.rows, snap.at, system.logicalCores);
     const byPid = new Map(rows.map((r) => [r.pid, r]));
-
-    /** Cumulative-ms delta for one pid, as a percent of one core. */
-    const cpuOf = (pid: number): number | null => {
-      if (!usable || !prev) return null;
-      const cur = byPid.get(pid)?.cpuMs;
-      const was = prev.byPid.get(pid);
-      // A pid absent from the previous sample is NEW. Its lifetime CPU is not
-      // this window's, and charging it here would show a just-spawned `tsc` at
-      // several thousand percent.
-      if (cur === undefined || was === undefined) return null;
-      // Negative means pid reuse: the number went backwards because this is a
-      // different process wearing a recycled id. Discard rather than report.
-      const delta = cur - was;
-      if (delta < 0) return null;
-      return clampPct((100 * delta) / windowMs, 100 * system.logicalCores);
-    };
+    const cpuOf = (pid: number): number | null => cpuByPid.get(pid) ?? null;
 
     const children = childMap(rows);
     const sessionRoots = this.sessionRootsByChat();
@@ -230,50 +218,104 @@ export class ResourceService {
     }
     chats.sort((a, b) => b.rssBytes - a.rssBytes || b.procs - a.procs);
 
-    // Recorded even when the window was unusable, so the NEXT call differences
-    // against something recent rather than inheriting the too-short gap.
-    this.previous = {
-      byPid: new Map(
-        rows.flatMap((r): [number, number][] => (r.cpuMs === undefined ? [] : [[r.pid, r.cpuMs]])),
-      ),
-      at,
-    };
-
     return {
       system,
       dispatch: this.dispatchTree(rows, byPid, children, cpuOf, chats),
       chats,
       at,
-      windowMs: usable ? windowMs : 0,
+      windowMs,
     };
+  }
+
+  /**
+   * Per-pid CPU rates for one table scan, computed once and memoised.
+   *
+   * ── WHY THIS IS KEYED ON THE SCAN AND NOT ON THE CALLER ─────────────────────
+   *
+   * The delta used to be taken between successive CALLS, which made a reading
+   * something a caller CONSUMED rather than observed. With the Resources page
+   * polling every 5 s, any second reader — a second browser tab, the header
+   * dropdown, a `curl` — landed shortly after it, differenced against a
+   * baseline a hundred milliseconds old, and got `null` for every CPU figure.
+   * Observed exactly that: three reads six seconds apart returned windows of
+   * 4068 ms, 2132 ms and 0 ms. Two tabs on the page blanked each other's CPU
+   * column, and no amount of tuning the refresh interval fixes it, because
+   * whichever call happens to advance the baseline always leaves the next one
+   * with nothing to measure against.
+   *
+   * Now the unit of measurement is the TABLE SCAN. The table is already cached
+   * behind a TTL, so N readers within one TTL see one table — and now they see
+   * one set of rates computed from it, identical for all of them. A reader that
+   * triggers a genuinely new scan computes a fresh delta against the previous
+   * SCAN, which is a full TTL old, so the window is always comfortable.
+   *
+   * Falls back to the previous scan's rates when a window is too short to
+   * divide by, rather than to nothing: the figures are seconds old and honest,
+   * where `null` would read as "not measured" on a machine that plainly is.
+   */
+  private rates(
+    rows: ProcRow[],
+    tableAt: number,
+    cores: number,
+  ): { byPid: Map<number, number>; windowMs: number } {
+    const cached = this.computed;
+    // Same scan as last time — every reader within one cache TTL gets the
+    // identical answer rather than racing to recompute it.
+    if (cached && cached.tableAt === tableAt) {
+      return { byPid: cached.byPid, windowMs: cached.windowMs };
+    }
+
+    const prev = this.previous;
+    const windowMs = prev ? tableAt - prev.at : 0;
+    const byPid = new Map<number, number>();
+
+    if (prev && windowMs >= MIN_WINDOW_MS) {
+      for (const row of rows) {
+        const was = prev.byPid.get(row.pid);
+        // A pid absent from the previous sample is NEW. Its lifetime CPU is not
+        // this window's, and charging it here would show a just-spawned `tsc`
+        // at several thousand percent.
+        if (row.cpuMs === undefined || was === undefined) continue;
+        // Negative means pid reuse: the counter went backwards because this is
+        // a different process wearing a recycled id. Discard rather than report.
+        const delta = row.cpuMs - was;
+        if (delta < 0) continue;
+        byPid.set(row.pid, clampPct((100 * delta) / windowMs, 100 * cores));
+      }
+    } else if (cached) {
+      // Too short to measure, but we HAVE measured recently. Serving the last
+      // real answer beats blanking the column over a scheduling accident.
+      return { byPid: cached.byPid, windowMs: cached.windowMs };
+    }
+
+    this.previous = {
+      byPid: new Map(
+        rows.flatMap((r): [number, number][] => (r.cpuMs === undefined ? [] : [[r.pid, r.cpuMs]])),
+      ),
+      at: tableAt,
+    };
+    this.computed = { tableAt, byPid, windowMs: byPid.size > 0 ? windowMs : 0 };
+    return { byPid, windowMs: this.computed.windowMs };
   }
 
   /** Every process one chat holds, individually. The drill-down. */
   async chatDetail(chatId: string): Promise<ChatProcessDetail> {
-    const { rows } = await this.procTable.read();
+    const snap = await this.procTable.read();
+    const rows = snap.rows;
     const at = this.now();
-    const prev = this.previous;
-    const windowMs = prev ? at - prev.at : 0;
-    const usable = windowMs >= MIN_WINDOW_MS;
-    const byPid = new Map(rows.map((r) => [r.pid, r]));
     const cores = this.cpus().length;
-    const cpuOf = (pid: number): number | null => {
-      if (!usable || !prev) return null;
-      const cur = byPid.get(pid)?.cpuMs;
-      const was = prev.byPid.get(pid);
-      if (cur === undefined || was === undefined) return null;
-      const delta = cur - was;
-      if (delta < 0) return null;
-      return clampPct((100 * delta) / windowMs, 100 * cores);
-    };
+    // The SAME per-scan rates the snapshot uses. A drill-down is opened
+    // alongside the main poll, so computing its own delta here is precisely the
+    // concurrent-reader problem `rates` exists to solve — and it would blank
+    // the main view's CPU column every time somebody expanded a row.
+    const { byPid: cpuByPid, windowMs } = this.rates(rows, snap.at, cores);
+    const byPid = new Map(rows.map((r) => [r.pid, r]));
+    const cpuOf = (pid: number): number | null => cpuByPid.get(pid) ?? null;
 
     const children = childMap(rows);
     const sessionPids = descendantsOf(this.sessionRootsByChat().get(chatId) ?? [], children);
     const allPids = descendantsOf(this.rootsByChat().get(chatId) ?? [], children);
 
-    // Deliberately does NOT advance the baseline. This is a drill-down opened
-    // alongside the snapshot poll; consuming the delta here would leave the
-    // main view with a near-zero window and blank its whole CPU column.
     const procs: ChatProcessSample[] = [...allPids].flatMap((pid) => {
       const row = byPid.get(pid);
       if (!row) return [];
@@ -289,7 +331,7 @@ export class ResourceService {
       ];
     });
     procs.sort((a, b) => b.rssBytes - a.rssBytes || a.pid - b.pid);
-    return { chatId, procs, at, windowMs: usable ? windowMs : 0 };
+    return { chatId, procs, at, windowMs };
   }
 
   /**

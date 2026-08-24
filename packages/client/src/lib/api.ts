@@ -81,6 +81,9 @@ import type {
   FsMutationResult,
   ReviewerStatus,
   ReviewerVerify,
+  ResourceSnapshot,
+  SystemResources,
+  ChatProcessDetail,
 } from "@dispatch/shared";
 import { sessionFetch } from "../stores/auth.js";
 
@@ -1117,6 +1120,22 @@ export const api = {
         limit?: number;
       }) => post<MetricSpan[]>("/api/metrics/spans/recent", scope),
     },
+  },
+
+  /**
+   * What Dispatch is costing this machine.
+   *
+   * THREE ENDPOINTS BECAUSE THEY COST DIFFERENT AMOUNTS. `system` is ~0.2 ms of
+   * in-process `os` reads and is safe to poll on a human cadence; `snapshot`
+   * needs the process table (~800 ms of `powershell.exe`, shared and cached
+   * server-side) and should only run while the Resources page is open;
+   * `chatDetail` is per-row and only when a row is expanded. Folding the cheap
+   * one into the expensive one would make the header widget pay the scan.
+   */
+  resources: {
+    system: () => get<SystemResources>("/api/resources/system"),
+    snapshot: () => get<ResourceSnapshot>("/api/resources"),
+    chatDetail: (chatId: string) => get<ChatProcessDetail>(`/api/resources/chat/${chatId}`),
   },
 };
 
