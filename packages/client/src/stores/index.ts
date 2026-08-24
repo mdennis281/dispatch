@@ -481,9 +481,10 @@ export async function hydrateFromServer(): Promise<boolean> {
   if (prevChat && chats.some((c) => c.id === prevChat)) {
     useChats.getState().setActiveChat(prevChat);
   }
-  // The two hydrates above pick their selections from independent lists
-  // (`projects[0]` and the globally-most-recent chat), so on a first load they
-  // can land in different projects. Snap the chat back into the focused project.
+  // The two hydrates above pick their selections from independent lists (the
+  // remembered-or-first project, and the globally-most-recent chat), so on a
+  // first load they can land in different projects. Snap the chat back into the
+  // focused project.
   reconcileActiveChat();
 
   const activeProject = useProjects.getState().activeProjectId;
