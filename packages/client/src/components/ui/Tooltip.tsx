@@ -119,9 +119,22 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
     window.addEventListener("resize", onReflow);
     // capture so scrolls in any ancestor container reposition the bubble too.
     window.addEventListener("scroll", onReflow, true);
+    // Any press anywhere dismisses. A tooltip is a HOVER affordance, and the
+    // moment a pointer goes down the user has moved on to acting — but the real
+    // reason is that `mouseleave` is not guaranteed to arrive: a trigger inside
+    // the mobile `Drawer` is still MOUNTED after the drawer slides shut (it
+    // animates `transform` and marks the panel `inert`), so it can never
+    // receive the pointer event that would close its own bubble. The bubble is
+    // `position: fixed` on the body, outside that transform, so it does not
+    // leave with the drawer — and `Drawer`'s synthetic `resize` on transitionend
+    // then repositions it against a trigger that has slid off-screen, where the
+    // cross-axis clamp parks it over the transcript you just opened.
+    const onPress = () => setOpen(false);
+    window.addEventListener("pointerdown", onPress, true);
     return () => {
       window.removeEventListener("resize", onReflow);
       window.removeEventListener("scroll", onReflow, true);
+      window.removeEventListener("pointerdown", onPress, true);
     };
   }, [open, reposition]);
 
@@ -129,8 +142,14 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
     <span
       ref={triggerRef}
       className={cn("relative inline-flex", triggerClassName)}
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
+      // `pointerenter`, not `mouseenter`, so the pointer TYPE is available: a
+      // tap fires the mouse-compatibility sequence, and opening on it puts a
+      // hover bubble on a device that has no hover to end it. Pen still opens —
+      // a stylus can hover, and its `pointerleave` is real.
+      onPointerEnter={(e) => {
+        if (e.pointerType !== "touch") setOpen(true);
+      }}
+      onPointerLeave={() => setOpen(false)}
       onFocusCapture={() => setOpen(true)}
       onBlurCapture={() => setOpen(false)}
     >

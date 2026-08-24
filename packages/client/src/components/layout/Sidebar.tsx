@@ -442,6 +442,25 @@ function Dot() {
   return <span className="text-faint/50"> · </span>;
 }
 
+/**
+ * A row marker's count, for assistive tech only.
+ *
+ * The glyphs carry their meaning in COLOUR and their counts in a tooltip, and
+ * neither reaches a screen reader: `Tooltip` portals its bubble to the body
+ * with nothing associating it back, and the trigger is a roleless, unfocusable
+ * span. So the readable form is stated directly, inside the trigger — where it
+ * joins the row button's accessible name, which is where you'd want a count
+ * read out. `ProjectAgentBadge` above solves the identical problem the same way
+ * and for the same reason.
+ *
+ * `when` is what keeps that name usable: "No child chats. No processes." on
+ * every quiet row is noise in front of the title on the one row that matters.
+ * A marker with nothing to report says nothing.
+ */
+function MarkerLabel({ text, when }: { text: string; when: boolean }) {
+  return when ? <span className="sr-only">{text}</span> : null;
+}
+
 function ChatRow({
   chat,
   active,
@@ -597,14 +616,16 @@ function ChatRow({
               childChatTint(reviews, reviewsNeedInput),
             )}
           >
-            <MessagesSquare />
+            <MessagesSquare aria-hidden />
+            <MarkerLabel text={childChatTitle(reviews, reviewsNeedInput)} when={reviews.length > 0} />
           </Tooltip>
           <Tooltip
             side="right"
             label={processTitle(procs)}
             triggerClassName={cn("px-1.5 py-0.5 transition-colors duration-300", processTint(procs))}
           >
-            <SquareTerminal />
+            <SquareTerminal aria-hidden />
+            <MarkerLabel text={processTitle(procs)} when={processCount > 0} />
           </Tooltip>
         </span>
         <span className="min-w-0 flex-1">
