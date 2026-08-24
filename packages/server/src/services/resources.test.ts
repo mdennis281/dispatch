@@ -402,6 +402,37 @@ describe("ProcTableCache", () => {
     expect((await cache.read(true)).rows).toHaveLength(2);
   });
 
+  it("does not let an in-flight scan overwrite a forced read", async () => {
+    // `read(true)` is the kill path's read. If a normal scan was already in
+    // flight when it ran, that scan started BEFORE the kill — letting it
+    // resolve into the cache afterwards puts the pre-kill rows back, which is
+    // the exact hazard `generation` exists for.
+    const c = clock();
+    let release: (rows: ProcRow[]) => void = () => {};
+    let call = 0;
+    const cache = new ProcTableCache({
+      read: () => {
+        call += 1;
+        // First call (the slow, already-running scan) hangs until released.
+        if (call === 1) return new Promise<ProcRow[]>((res) => (release = res));
+        return Promise.resolve([row(1, 0)]);
+      },
+      now: c.now,
+      ttlMs: 60_000,
+    });
+
+    const slow = cache.read();
+    const forced = await cache.read(true);
+    expect(forced.rows).toHaveLength(1);
+
+    // The stale scan lands late, carrying three pre-kill rows.
+    release([row(1, 0), row(2, 1), row(3, 1)]);
+    await slow;
+
+    // The cache must still hold the forced result, not the stale one.
+    expect((await cache.read()).rows).toHaveLength(1);
+  });
+
   it("re-scans after an invalidate", async () => {
     let rows = [row(1, 0), row(2, 1)];
     const c = clock();

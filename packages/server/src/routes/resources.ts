@@ -26,7 +26,15 @@ export function registerResourceRoutes(app: FastifyInstance): void {
   app.get("/api/resources/system", async () => resources.system());
 
   // System + Dispatch's tree + every chat.
-  app.get("/api/resources", async () => resources.snapshot());
+  //
+  // `?fresh=1` forces a new process-table scan rather than serving the shared
+  // cache. The Reload button on the Resources page sends it — without it a
+  // click inside the 10 s TTL returns a byte-identical answer, which reads as
+  // a broken button. The automatic poll deliberately does NOT send it.
+  app.get<{ Querystring: { fresh?: string } }>(
+    "/api/resources",
+    async (req) => resources.snapshot(req.query.fresh === "1"),
+  );
 
   // Every process one chat holds. Separate from the snapshot because it is
   // per-row detail nobody needs until they open a row, and returning it for

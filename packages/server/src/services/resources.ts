@@ -194,9 +194,15 @@ export class ResourceService {
    *
    * The CPU delta is computed ONCE PER TABLE SCAN, not once per caller — see
    * {@link rates}. That is what makes concurrent readers safe.
+   *
+   * @param fresh Force a new scan instead of serving the cached table. For an
+   *   explicit Reload only.
    */
-  async snapshot(): Promise<ResourceSnapshot> {
-    const snap = await this.procTable.read();
+  async snapshot(fresh = false): Promise<ResourceSnapshot> {
+    // `fresh` bypasses the shared table cache. Only an explicit human Reload
+    // sets it: it costs a full ~800 ms scan, which is exactly the price the
+    // automatic poll exists to avoid paying every time.
+    const snap = await this.procTable.read(fresh);
     const rows = snap.rows;
     const at = this.now();
     const system = this.system();

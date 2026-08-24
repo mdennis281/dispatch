@@ -56,9 +56,18 @@ interface ResourceStore {
   details: Record<string, ChatProcessDetail>;
   /** True while the first snapshot is in flight, so the page can say so. */
   loading: boolean;
+  /**
+   * True while a FORCED rescan is in flight, so the Reload button can spin.
+   *
+   * Separate from `loading`, which is only the very first fetch: a reload with
+   * a table already on screen should keep showing it and just say it is
+   * working, not blank the page back to "Scanning…".
+   */
+  refetching: boolean;
 
   refreshSystem: () => Promise<void>;
-  refreshSnapshot: () => Promise<void>;
+  /** `fresh` forces a server-side rescan — for an explicit Reload only. */
+  refreshSnapshot: (fresh?: boolean) => Promise<void>;
   loadDetail: (chatId: string) => Promise<void>;
   /** Start the expensive poll; call the disposer when the view goes away. */
   subscribeSnapshot: () => () => void;
@@ -73,6 +82,7 @@ export const useResources = create<ResourceStore>((set, get) => {
     snapshot: null,
     details: {},
     loading: false,
+    refetching: false,
 
     refreshSystem: async () => {
       // A failed read keeps the last one rather than blanking the widget: a
@@ -82,10 +92,12 @@ export const useResources = create<ResourceStore>((set, get) => {
       if (res) set({ system: res });
     },
 
-    refreshSnapshot: async () => {
-      const res = await api.resources.snapshot().catch(() => null);
-      if (res) set({ snapshot: res, loading: false });
-      else set({ loading: false });
+    refreshSnapshot: async (fresh = false) => {
+      if (fresh) set({ refetching: true });
+      const res = await api.resources.snapshot(fresh).catch(() => null);
+      // `refetching` clears on failure too — a spinner that never stops is a
+      // worse lie than a table that did not change.
+      set(res ? { snapshot: res, loading: false, refetching: false } : { loading: false, refetching: false });
     },
 
     loadDetail: async (chatId) => {

@@ -71,11 +71,19 @@ export class ProcTableCache {
    */
   async read(fresh = false): Promise<ProcTableSnapshot> {
     if (fresh) {
+      // Retire any scan already in flight FIRST. It started before whatever
+      // prompted this call — a kill — so its rows are the stale ones, and
+      // without bumping the generation it would resolve afterwards and write
+      // itself over the fresh table we are about to take. That is the exact
+      // hazard `generation` exists for; a forced read has to participate in it
+      // rather than sit beside it.
+      const generation = ++this.generation;
+      this.inFlight = undefined;
       const rows = await this.source().catch(() => [] as ProcRow[]);
       const snap = { rows, at: this.now() };
-      // A forced read still refreshes the cache when it actually found
-      // something: it is strictly newer than whatever is there.
-      if (rows.length > 0) this.cached = snap;
+      // Refreshes the cache when it actually found something and nothing has
+      // retired it in the meantime: it is strictly newer than whatever is there.
+      if (rows.length > 0 && generation === this.generation) this.cached = snap;
       return snap;
     }
     const hit = this.cached;

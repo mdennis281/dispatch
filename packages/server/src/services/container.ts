@@ -374,6 +374,10 @@ export function createServices(
       procTable: async () => (await procTableCache.read()).rows,
       // Kills read fresh: a cached table can name a pid the OS has recycled.
       procTableFresh: defaultProcTable,
+      // A reap has to drop the SHARED table, not just this service's tally —
+      // otherwise the Resources page reports the killed processes as an
+      // unattributed leak for the rest of the TTL.
+      invalidateSource: () => procTableCache.invalidate(),
       sessionPids: () => broker.sessionPids(),
       terminals,
     });

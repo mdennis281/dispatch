@@ -61,6 +61,22 @@ export interface ChatProcessDeps {
    * with the count poll is a pure win; sharing it with a kill is a footgun.
    */
   procTableFresh?: ProcTableFn;
+  /**
+   * Dropped alongside this service's own cache by {@link
+   * ChatProcessService.invalidate} — the shared `ProcTableCache` behind
+   * `procTable`, when there is one.
+   *
+   * REQUIRED FOR A KILL TO LOOK LIKE A KILL. Invalidating only the tally cache
+   * re-derives it from a TABLE that still lists every process just reaped, so
+   * the reap is invisible for the rest of that table's TTL. Worse than
+   * invisible, on the Resources page: the roots come from the live broker and
+   * update at once, so the dead pids stop belonging to any chat while still
+   * sitting in the server's subtree, and `unattributed = tree − Σ chats`
+   * absorbs them — a successful reap renders as an "N processes belong to no
+   * chat" banner sized exactly to what was just killed, which is the page's
+   * leak warning.
+   */
+  invalidateSource?: () => void;
   /** Live session roots, as `chatId → pid`. Usually `broker.sessionPids()`. */
   sessionPids: () => Map<string, number>;
   /** Live shells and who owns them. Omitted → session roots only. */
@@ -85,6 +101,7 @@ const DEFAULT_TTL_MS = 10_000;
 export class ChatProcessService {
   private readonly procTable: ProcTableFn;
   private readonly procTableFresh: ProcTableFn;
+  private readonly invalidateSource?: () => void;
   private readonly sessionPids: () => Map<string, number>;
   private readonly terminals?: TerminalRoots;
   private readonly now: () => number;
@@ -115,6 +132,7 @@ export class ChatProcessService {
   constructor(deps: ChatProcessDeps) {
     this.procTable = deps.procTable;
     this.procTableFresh = deps.procTableFresh ?? deps.procTable;
+    this.invalidateSource = deps.invalidateSource;
     this.sessionPids = deps.sessionPids;
     this.terminals = deps.terminals;
     this.now = deps.now ?? (() => Date.now());
@@ -141,6 +159,10 @@ export class ChatProcessService {
    * "9" sitting there for another ten seconds reads as the button not working.
    */
   invalidate(): void {
+    // The SHARED table first. Dropping only the tally below would re-derive it
+    // from a table that still lists everything just reaped — see
+    // `invalidateSource`.
+    this.invalidateSource?.();
     this.cached = undefined;
     // Retires the in-flight scan as well as the cache. That scan read the
     // process table BEFORE the kill, so its answer is not merely stale — it is

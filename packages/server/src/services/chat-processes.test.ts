@@ -211,3 +211,32 @@ describe("ChatProcessService", () => {
     expect((await svc.counts()).byChat).toEqual({ "chat-a": { session: 2, shells: 0 } });
   });
 });
+
+describe("ChatProcessService.invalidate cascade", () => {
+  it("drops the SHARED table too, so a reap is not reported as a leak", () => {
+    // Invalidating only the tally re-derives it from a table that still lists
+    // every process just killed. On the Resources page the roots come from the
+    // live broker and update at once, so those pids stop belonging to any chat
+    // while still sitting in the server's subtree — and `unattributed` absorbs
+    // them, rendering a successful reap as the page's "belongs to no chat"
+    // leak banner, sized exactly to what was reaped.
+    let dropped = 0;
+    const svc = new ChatProcessService({
+      procTable: async () => [],
+      invalidateSource: () => {
+        dropped += 1;
+      },
+      sessionPids: () => new Map(),
+    });
+    svc.invalidate();
+    expect(dropped).toBe(1);
+  });
+
+  it("works without one, for a service given an uncached table", () => {
+    const svc = new ChatProcessService({
+      procTable: async () => [],
+      sessionPids: () => new Map(),
+    });
+    expect(() => svc.invalidate()).not.toThrow();
+  });
+});

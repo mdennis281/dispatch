@@ -1134,7 +1134,9 @@ export const api = {
    */
   resources: {
     system: () => get<SystemResources>("/api/resources/system"),
-    snapshot: () => get<ResourceSnapshot>("/api/resources"),
+    /** `fresh` forces a new process-table scan — for an explicit Reload only. */
+    snapshot: (fresh = false) =>
+      get<ResourceSnapshot>(`/api/resources${fresh ? "?fresh=1" : ""}`),
     chatDetail: (chatId: string) => get<ChatProcessDetail>(`/api/resources/chat/${chatId}`),
   },
 };

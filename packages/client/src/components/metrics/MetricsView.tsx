@@ -60,13 +60,17 @@ export function MetricsView() {
   // number of chats currently holding something and its reload is a re-scan,
   // not a re-query. Same three controls, different meaning per subpage.
   const resourceChats = useResources((s) => s.snapshot?.chats.length ?? 0);
+  const resourceBusy = useResources((s) => s.refetching);
   const rescan = useResources((s) => s.refreshSnapshot);
 
   const runtime = section === "runtime";
   const resources = section === "resources";
   const rows = resources ? resourceChats : runtime ? spanRows : usageRows;
-  const busy = resources ? false : runtime ? spanBusy : usageBusy;
-  const reload = resources ? rescan : runtime ? reloadSpans : reloadUsage;
+  const busy = resources ? resourceBusy : runtime ? spanBusy : usageBusy;
+  // FORCED for the resource tab. Its snapshot is served off a 10 s table
+  // cache, so a plain refetch inside that window returns a byte-identical
+  // answer and the button reads as broken.
+  const reload = resources ? () => rescan(true) : runtime ? reloadSpans : reloadUsage;
   const unit = resources ? "chats" : runtime ? "spans" : "rows";
 
   return (
