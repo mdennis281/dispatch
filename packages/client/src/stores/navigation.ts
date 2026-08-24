@@ -80,8 +80,8 @@ export function visibleChat(
 
 /**
  * Re-establish the invariant after a hydrate, which sets the two selections from
- * two independent lists (`projects[0]` and the globally-most-recent chat) and so
- * can land them in different projects.
+ * two independent lists (the remembered-or-first project, and the
+ * globally-most-recent chat) and so can land them in different projects.
  *
  * Unlike a project switch this prefers to KEEP a selection — a boot that opens
  * on the empty state when the project has chats is a worse landing than the

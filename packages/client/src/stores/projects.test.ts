@@ -1,0 +1,154 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import type { Project } from "@dispatch/shared";
+
+/** In-memory Storage stand-in — the node test env has no localStorage. */
+function memoryStorage(): Storage {
+  const map = new Map<string, string>();
+  return {
+    get length() {
+      return map.size;
+    },
+    key: (i: number) => [...map.keys()][i] ?? null,
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, v: string) => void map.set(k, v),
+    removeItem: (k: string) => void map.delete(k),
+    clear: () => map.clear(),
+  } as Storage;
+}
+
+// Installed before the import only for tidiness: the store reads storage lazily,
+// inside `hydrate` / `setActiveProject`, so nothing is captured at module load.
+globalThis.localStorage = memoryStorage();
+
+const { useProjects } = await import("./projects.js");
+
+const KEY = "cm:last-project";
+
+function project(id: string): Project {
+  return {
+    id,
+    name: `Project ${id}`,
+    repoPath: `/repos/${id}`,
+    worktreeRoot: `/repos/${id}/.worktrees`,
+    subApps: [],
+    createdAt: 1,
+  };
+}
+
+function hydrate(projects: Project[]): void {
+  useProjects.getState().hydrate({ projects, agents: [], modes: [] });
+}
+
+const THREE = [project("p1"), project("p2"), project("p3")];
+
+beforeEach(() => {
+  localStorage.clear();
+  useProjects.setState({ projects: [], agents: [], modes: [], activeProjectId: null });
+});
+
+describe("last-project memory", () => {
+  it("opens on the first project when nothing is remembered", () => {
+    hydrate(THREE);
+    expect(useProjects.getState().activeProjectId).toBe("p1");
+    // Landing somewhere is not the same as choosing it — a hydrate writes
+    // nothing. See the mock-hydrate case below for why that matters.
+    expect(localStorage.getItem(KEY)).toBeNull();
+  });
+
+  it("re-opens the remembered project on the next hydrate", () => {
+    hydrate(THREE);
+    useProjects.getState().setActiveProject("p3");
+    expect(localStorage.getItem(KEY)).toBe("p3");
+
+    // A refresh: fresh store, same browser storage.
+    useProjects.setState({ projects: [], agents: [], modes: [], activeProjectId: null });
+    hydrate(THREE);
+    expect(useProjects.getState().activeProjectId).toBe("p3");
+  });
+
+  it("survives the list coming back in a different order", () => {
+    localStorage.setItem(KEY, "p2");
+    hydrate([project("p3"), project("p2"), project("p1")]);
+    expect(useProjects.getState().activeProjectId).toBe("p2");
+  });
+
+  it("falls back to the first project when the remembered one is gone", () => {
+    localStorage.setItem(KEY, "deleted");
+    hydrate(THREE);
+    expect(useProjects.getState().activeProjectId).toBe("p1");
+    // Left alone rather than cleared. Re-checking a dead string every load
+    // costs an array scan; clearing it on a roster we might not trust is how
+    // the mock-hydrate case below destroys a real preference.
+    expect(localStorage.getItem(KEY)).toBe("deleted");
+  });
+
+  /**
+   * The offline fixture runs the SAME `hydrate`. On a dev instance sitting at
+   * the login screen, `main.tsx` seeds it on an unconditional timer before
+   * anyone signs in — so if a hydrate wrote back, the fixture's project id
+   * would land in storage, and the live hydrate that followed would find that
+   * id missing from the real roster and overwrite it with `projects[0]`. The
+   * user's actual project, gone, with nobody having clicked anything.
+   */
+  it("is not clobbered by a mock hydrate that precedes the real one", () => {
+    localStorage.setItem(KEY, "p3");
+
+    hydrate([project("mock-a"), project("mock-b")]);
+    expect(useProjects.getState().activeProjectId).toBe("mock-a");
+    expect(localStorage.getItem(KEY)).toBe("p3");
+
+    hydrate(THREE);
+    expect(useProjects.getState().activeProjectId).toBe("p3");
+  });
+
+  it("keeps the roster empty of side effects — only a selection writes", () => {
+    hydrate(THREE);
+    expect(localStorage.getItem(KEY)).toBeNull();
+    useProjects.getState().setActiveProject("p2");
+    expect(localStorage.getItem(KEY)).toBe("p2");
+  });
+
+  it("keeps the remembered project when the roster comes back empty", () => {
+    localStorage.setItem(KEY, "p2");
+    hydrate([]);
+    expect(useProjects.getState().activeProjectId).toBeNull();
+    // An empty roster is not evidence that p2 is gone.
+    expect(localStorage.getItem(KEY)).toBe("p2");
+    hydrate(THREE);
+    expect(useProjects.getState().activeProjectId).toBe("p2");
+  });
+});
+
+describe("without usable storage", () => {
+  const real = globalThis.localStorage;
+  afterEach(() => {
+    // `defineProperty`, not assignment: the throwing case below installs a
+    // getter-only property, and assigning over one of those throws in strict
+    // mode — which every ESM module is.
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      writable: true,
+      value: real,
+    });
+  });
+
+  it("still hydrates when localStorage is absent", () => {
+    // @ts-expect-error — deleting the global is the point of the test.
+    delete globalThis.localStorage;
+    expect(() => hydrate(THREE)).not.toThrow();
+    expect(useProjects.getState().activeProjectId).toBe("p1");
+    expect(() => useProjects.getState().setActiveProject("p2")).not.toThrow();
+    expect(useProjects.getState().activeProjectId).toBe("p2");
+  });
+
+  it("still hydrates when localStorage throws", () => {
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get() {
+        throw new Error("blocked by cookie policy");
+      },
+    });
+    expect(() => hydrate(THREE)).not.toThrow();
+    expect(useProjects.getState().activeProjectId).toBe("p1");
+  });
+});
