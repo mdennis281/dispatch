@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -223,3 +224,29 @@ test(
     assert.doesNotMatch(result.stderr, /DEP0190/);
   },
 );
+
+test("the installer runs when it is invoked through a symlinked temp directory", () => {
+  // The macOS bootstrap failure: `install.sh` stages the installer under
+  // `$TMPDIR` (`/var/folders/…`), `/var` is a symlink to `/private/var`, and the
+  // entry-point guard compared the typed `process.argv[1]` against the
+  // realpath-resolved `import.meta.url`. It never matched, so `main()` never
+  // ran and `curl … | sh` installed nothing while exiting 0. Reproduced here
+  // with a symlinked directory — a junction on Windows, which needs no
+  // elevation — and `--help`, the one path that returns before any network.
+  const scratch = mkdtempSync(join(tmpdir(), "dispatch-entrypoint-"));
+  try {
+    const real = join(scratch, "real");
+    mkdirSync(real);
+    copyFileSync(new URL("./install.mjs", import.meta.url), join(real, "install.mjs"));
+    const link = join(scratch, "link");
+    symlinkSync(real, link, process.platform === "win32" ? "junction" : "dir");
+
+    const result = spawnSync(process.execPath, [join(link, "install.mjs"), "--help"], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Usage: node install\.mjs/);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
