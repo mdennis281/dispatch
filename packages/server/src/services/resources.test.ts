@@ -86,13 +86,25 @@ describe("ResourceService.system", () => {
     expect(h.svc.system().cpuPct).toBeCloseTo(75);
   });
 
-  it("reports nothing rather than 0 when no ticks elapsed at all", () => {
-    // Two reads in the same scheduler tick have no window to divide by. That
-    // is unmeasurable, not idle — and "0%" on a pegged machine is the reading
-    // that would make somebody stop looking.
+  it("reports nothing rather than 0 before anything has been measured", () => {
+    // Two reads in the same scheduler tick have no window to divide by. With
+    // nothing measured yet that is unmeasurable, not idle — and "0%" on a
+    // pegged machine is the reading that would make somebody stop looking.
     const h = harness([]);
     h.svc.system();
     expect(h.svc.system().cpuPct).toBeNull();
+  });
+
+  it("holds the last reading when two callers land in the same millisecond", () => {
+    // The header widget polls every 2 s and every snapshot() also comes
+    // through here, so they collide occasionally. Without this the page's CPU
+    // tile flickered to "—" while the header beside it read 11%.
+    const h = harness([]);
+    h.svc.system();
+    h.burn(1, 3);
+    expect(h.svc.system().cpuPct).toBeCloseTo(75);
+    // Same instant, no ticks elapsed — serve the last real figure.
+    expect(h.svc.system().cpuPct).toBeCloseTo(75);
   });
 
   it("reports memory without touching the process table", () => {

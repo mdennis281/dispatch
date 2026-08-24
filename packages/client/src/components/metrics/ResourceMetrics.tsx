@@ -28,6 +28,8 @@
  */
 import { useEffect, useState } from "react";
 import { ChevronRight, Cpu, Server, Skull } from "lucide-react";
+import { Button } from "../ui/Button.js";
+import { IconButton } from "../ui/IconButton.js";
 import { SHARED_PAGE_FACTOR, type ChatResources } from "@dispatch/shared";
 import { useResources, share, machinePct } from "../../stores/resources.js";
 import { useChats } from "../../stores/chats.js";
@@ -108,13 +110,13 @@ function ChatRow({
   return (
     <div className="cm-hairline-b">
       <div className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-active/40">
-        <button
+        <IconButton
           onClick={() => setOpen((v) => !v)}
-          aria-label={open ? "Collapse" : "Expand"}
-          className="shrink-0 rounded p-0.5 text-muted transition-colors hover:text-primary"
+          tip={open ? "Collapse" : "Expand"}
+          className="shrink-0"
         >
-          <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} />
-        </button>
+          <ChevronRight className={cn("transition-transform", open && "rotate-90")} />
+        </IconButton>
 
         <div className="min-w-0 flex-1">
           <div className="truncate text-xs font-medium text-primary">
@@ -150,7 +152,7 @@ function ChatRow({
           )}
         </div>
 
-        <button
+        <IconButton
           disabled={killing}
           onClick={async () => {
             setKilling(true);
@@ -161,14 +163,14 @@ function ChatRow({
             await kill([chat.chatId]).catch(() => 0);
             setKilling(false);
           }}
-          title="Stop this chat's session and shells"
-          className={cn(
-            "shrink-0 rounded p-1 text-muted transition-colors",
-            "hover:bg-danger/15 hover:text-danger disabled:opacity-40",
-          )}
+          tip="Stop this chat's session and shells"
+          // Destructive hover on an icon-only control: `IconButton` has no
+          // danger variant, and `Button danger` would carry its ghost
+          // background at rest on every row in the table.
+          className="shrink-0 hover:!bg-danger/15 hover:!text-danger"
         >
-          <Skull className="size-3.5" />
-        </button>
+          <Skull />
+        </IconButton>
       </div>
 
       {open && (
@@ -293,15 +295,9 @@ export function ResourceMetrics() {
             <span className="text-xs font-semibold text-primary">By chat</span>
             <span className="cm-mono text-2xs text-faint">{chats.length}</span>
             <div className="flex-1" />
-            <button
-              onClick={() => setAbsolute((v) => !v)}
-              className={cn(
-                "rounded-[4px] px-1.5 py-0.5 text-2xs transition-colors",
-                "text-secondary hover:bg-active hover:text-primary",
-              )}
-            >
+            <Button variant="link" size="sm" onClick={() => setAbsolute((v) => !v)}>
               {absolute ? "show relative" : "show absolute"}
-            </button>
+            </Button>
           </div>
           {chats.length === 0 ? (
             <div className="px-3 py-4 text-center text-xs text-faint">

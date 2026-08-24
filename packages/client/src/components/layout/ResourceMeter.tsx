@@ -29,6 +29,7 @@ import { setView, useView } from "../../stores/view.js";
 import { bytes, pct } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
 import { LAYER } from "../../lib/layers.js";
+import { Button } from "../ui/Button.js";
 
 /** Escalating tone by utilization — matches `UsageMeter.tone`. */
 function tone(p: number): { text: string; bar: string } {
@@ -218,21 +219,22 @@ export function ResourceMeter() {
               )}
             </div>
 
-            <button
+            <Button
+              variant="ghost"
+              size="sm"
+              rightIcon={<ExternalLink className="size-3" />}
               onClick={() => {
                 setOpen(false);
                 setView("metrics");
                 useView.getState().setMetricsSection("resources");
               }}
               className={cn(
-                "flex w-full items-center justify-between gap-2 border-t border-line px-3 py-1.5",
-                "text-2xs text-secondary transition-colors hover:bg-active hover:text-primary",
+                "w-full justify-between rounded-none border-t border-line px-3",
                 view === "metrics" && "text-primary",
               )}
             >
-              <span>Break down by chat</span>
-              <ExternalLink className="size-3" />
-            </button>
+              Break down by chat
+            </Button>
           </div>,
           document.body,
         )}

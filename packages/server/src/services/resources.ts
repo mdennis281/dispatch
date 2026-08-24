@@ -123,6 +123,8 @@ export class ResourceService {
 
   private previous?: CpuSample;
   private sysPrevious?: SysSample;
+  /** Last real whole-machine CPU reading; survives a zero-tick window. */
+  private lastSysCpu: number | null = null;
   /** The rates computed for one table scan, shared by every reader of it. */
   private computed?: { tableAt: number; byPid: Map<number, number>; windowMs: number };
 
@@ -167,10 +169,19 @@ export class ResourceService {
     const dTotal = prev ? total - prev.total : 0;
     const totalBytes = this.totalmem();
     const freeBytes = this.freemem();
+    // No previous sample (or a suspiciously backwards one, which a counter wrap
+    // would give) means not measured — not idle.
+    if (dTotal > 0 && dIdle >= 0) {
+      this.lastSysCpu = clampPct(100 * (1 - dIdle / dTotal));
+    }
     return {
-      // No previous sample (or a suspiciously backwards one, which a counter
-      // wrap would give) means not measured — not idle.
-      cpuPct: dTotal > 0 && dIdle >= 0 ? clampPct(100 * (1 - dIdle / dTotal)) : null,
+      // Two callers land here on different clocks — the header widget every 2 s
+      // and every `snapshot()` — so they occasionally read in the same
+      // millisecond and the second one finds no ticks to divide. Serving the
+      // last real figure rather than `null` is what stops the page's CPU tile
+      // flickering to "—" while the header beside it reads 11%. Still `null`
+      // until the very first measurement, which is honestly unmeasured.
+      cpuPct: this.lastSysCpu,
       logicalCores: cores.length,
       totalBytes,
       freeBytes,
