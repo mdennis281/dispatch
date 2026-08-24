@@ -595,11 +595,24 @@
 /*
  * Hover affordances that must not be hover-only on touch.
  *
- * `ChatRow`'s rename/delete (`Sidebar.tsx`) and `SubAppRow`'s Run are
- * `opacity-0` until the row is hovered. On a coarse pointer there is no hover
- * to give — and iOS makes it worse by LATCHING `:hover` onto the last-tapped
- * element, so the controls appear on the row you just left and nowhere else.
- * On a touch device they are simply always visible.
+ * `SubAppRow`'s Run is `opacity-0` until the row is hovered. On a coarse
+ * pointer there is no hover to give — and iOS makes it worse by LATCHING
+ * `:hover` onto the last-tapped element, so the control appears on the row you
+ * just left and nowhere else. On a touch device it is simply always visible.
+ *
+ * ONE control, on a row with no other use for the space. `ChatRow`'s tray is
+ * three buttons in a 32px gutter overhanging the title, so it is NOT always-on
+ * here — it opens on a hold instead (`lib/pressHold.ts`).
+ *
+ * It used to claim to be, via a `transform: none` on this class, and that
+ * NEVER WORKED: the tray parks itself with `translate-x-full`, which Tailwind
+ * v4 emits as the standalone `translate` property, and `transform: none` does
+ * not touch `translate`. So on every touch device the tray sat off the row's
+ * right edge, clipped by the row's `overflow-hidden`, at opacity 1 — rename,
+ * delete and reap were unreachable on a phone, and the companion rule that hid
+ * the resting attention dot was hiding it to make room for a tray that never
+ * came. Both are gone; measured at rest on a coarse pointer, the tray's left
+ * edge sat exactly on the row's right edge.
  *
  * DELIBERATELY UNLAYERED. Tailwind's utilities live in `@layer utilities`, and
  * an unlayered rule outranks every layered one regardless of specificity — which
@@ -609,19 +622,6 @@
 @media (pointer: coarse) {
   .cm-touch-reveal {
     opacity: 1;
-    /* ChatRow's action tray also SLIDES in (`translate-x-1.5`). Revealed
-     * without this it sits parked 6px off the row's right edge, half under the
-     * scrollbar. */
-    transform: none;
-  }
-
-  /*
-   * The other half of the same idea: a marker that exists only to say something
-   * while the hover controls are away. `group-hover:hidden` never fires on a
-   * coarse pointer, so it would sit underneath a tray that is permanently out.
-   */
-  .cm-touch-hide {
-    display: none;
   }
 
   /*
@@ -645,39 +645,6 @@
   select,
   [contenteditable="true"] {
     font-size: 16px;
-  }
-
-  /*
-   * A hold target a thumb can find, on a glyph that is 10px across.
-   *
-   * `ChatRow`'s two row markers are the only place in the app where a tooltip
-   * is the ONLY copy of a fact (`rowMarkers.ts` puts the counts nowhere else),
-   * so on touch — where the way to ask is a hold, see `lib/pressHold.ts` — the
-   * trigger has to be findable without aiming. Its own padding gives it 22x14.
-   *
-   * A pseudo-element, not padding: padding would move the title on every
-   * device to fix a thumb on one. And OUTWARD only — the pair is stacked with
-   * no gap, so the top marker takes its bite from the row's upper padding and
-   * the bottom marker from the lower, which is the one direction that cannot
-   * eat its neighbour's target.
-   *
-   * Nothing is taken away: the area either side is the row's own button, and a
-   * TAP there still selects the chat. Only a hold changes hands.
-   */
-  .cm-hold-target-up::after,
-  .cm-hold-target-down::after {
-    content: "";
-    position: absolute;
-    left: -8px;
-    right: 0;
-  }
-  .cm-hold-target-up::after {
-    top: -7px;
-    bottom: 0;
-  }
-  .cm-hold-target-down::after {
-    top: 0;
-    bottom: -7px;
   }
 }
 

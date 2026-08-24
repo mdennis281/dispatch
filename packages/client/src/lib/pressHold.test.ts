@@ -3,7 +3,7 @@ import {
   HOLD_IDLE,
   HOLD_MS,
   HOLD_SLOP,
-  holdOpen,
+  holdCompleted,
   holdSwallowsClick,
   reduceHold,
   type HoldState,
@@ -17,64 +17,61 @@ function play(...events: Parameters<typeof reduceHold>[1][]): HoldState {
 const touch = { kind: "down", pointerType: "touch", x: 100, y: 100 } as const;
 
 describe("reduceHold", () => {
-  it("opens when a touch stays put for the whole delay", () => {
-    const held = play(touch, { kind: "elapsed" });
-    expect(holdOpen(held)).toBe(true);
+  it("fires when a touch stays put for the whole delay", () => {
+    expect(holdCompleted(play(touch, { kind: "elapsed" }))).toBe(true);
   });
 
   it("ignores a mouse or pen press — those have hover", () => {
     for (const pointerType of ["mouse", "pen"]) {
       const state = play({ kind: "down", pointerType, x: 100, y: 100 }, { kind: "elapsed" });
-      expect(holdOpen(state), pointerType).toBe(false);
+      expect(holdCompleted(state), pointerType).toBe(false);
     }
   });
 
   it("cancels when the finger travels far enough to be a scroll", () => {
     const scrolled = play(touch, { kind: "move", x: 100, y: 100 + HOLD_SLOP + 1 }, { kind: "elapsed" });
-    expect(holdOpen(scrolled)).toBe(false);
+    expect(holdCompleted(scrolled)).toBe(false);
   });
 
   it("tolerates the wobble of a finger trying to stay still", () => {
-    const wobbled = play(touch, { kind: "move", x: 103, y: 96 }, { kind: "elapsed" });
-    expect(holdOpen(wobbled)).toBe(true);
+    expect(holdCompleted(play(touch, { kind: "move", x: 103, y: 96 }, { kind: "elapsed" }))).toBe(true);
   });
 
   it("cancels when the browser claims the gesture before the delay", () => {
-    expect(holdOpen(play(touch, { kind: "cancel" }, { kind: "elapsed" }))).toBe(false);
+    expect(holdCompleted(play(touch, { kind: "cancel" }, { kind: "elapsed" }))).toBe(false);
   });
 
   it("survives the pointercancel Android fires for its own long-press", () => {
     // Ours lands at 400ms, Chrome's context-menu gesture at ~500ms — the cancel
-    // arrives AFTER the bubble is already up and must not take it away.
-    const held = play(touch, { kind: "elapsed" }, { kind: "cancel" });
-    expect(holdOpen(held)).toBe(true);
+    // arrives AFTER the tray is already out and must not take its click away.
+    expect(holdCompleted(play(touch, { kind: "elapsed" }, { kind: "cancel" }))).toBe(true);
   });
 
-  it("keeps the bubble up after the finger lifts, until the next press", () => {
+  it("keeps its claim on the click after the finger lifts", () => {
     const lifted = play(touch, { kind: "elapsed" }, { kind: "up" });
-    expect(holdOpen(lifted)).toBe(true);
-    expect(holdOpen(reduceHold(lifted, { kind: "dismiss" }))).toBe(false);
+    expect(holdSwallowsClick(lifted, 1)).toBe(true);
   });
 
   it("leaves a plain tap alone", () => {
     const tapped = play(touch, { kind: "up" });
-    expect(holdOpen(tapped)).toBe(false);
+    expect(holdCompleted(tapped)).toBe(false);
     expect(holdSwallowsClick(tapped, 1)).toBe(false);
   });
 
-  it("swallows only the click that ends a hold", () => {
-    expect(holdSwallowsClick(play(touch, { kind: "elapsed" }, { kind: "up" }), 1)).toBe(true);
-    // A second tap re-arms from scratch, and its click belongs to the row again.
-    const retapped = play(touch, { kind: "elapsed" }, { kind: "up" }, { kind: "dismiss" }, touch, {
-      kind: "up",
-    });
-    expect(holdSwallowsClick(retapped, 1)).toBe(false);
+  it("swallows one click and only one", () => {
+    const held = play(touch, { kind: "elapsed" }, { kind: "up" });
+    expect(holdSwallowsClick(held, 1)).toBe(true);
+    // `release` is what the hook does once it has consumed that click, so the
+    // NEXT press on the row is an ordinary tap into the chat again.
+    const spent = reduceHold(held, { kind: "release" });
+    expect(holdSwallowsClick(spent, 1)).toBe(false);
+    // And the tap after that is an ordinary tap into the chat.
+    expect(holdSwallowsClick(play(touch, { kind: "up" }), 1)).toBe(false);
   });
 
   it("never swallows a click the keyboard synthesized", () => {
-    // Enter on the button a touch left focused, while the bubble is still up.
-    // Only a pointer clears `held`, so swallowing this would latch the button
-    // dead until the user touched the screen again.
+    // Enter on the row a touch left focused. Only a pointer clears the phase,
+    // so swallowing this would latch the row dead until the screen was touched.
     const held = play(touch, { kind: "elapsed" }, { kind: "up" });
     expect(holdSwallowsClick(held, 0)).toBe(false);
   });
@@ -82,7 +79,7 @@ describe("reduceHold", () => {
   it("returns the same object when nothing moved, so the caller can early-out", () => {
     const waiting = reduceHold(HOLD_IDLE, touch);
     expect(reduceHold(waiting, { kind: "move", x: 101, y: 101 })).toBe(waiting);
-    expect(reduceHold(HOLD_IDLE, { kind: "dismiss" })).toBe(HOLD_IDLE);
+    expect(reduceHold(HOLD_IDLE, { kind: "release" })).toBe(HOLD_IDLE);
     expect(reduceHold(HOLD_IDLE, { kind: "elapsed" })).toBe(HOLD_IDLE);
   });
 
@@ -90,7 +87,7 @@ describe("reduceHold", () => {
     // Android's contextmenu is ~500ms and iOS's selection callout later still.
     // A delay at or past those loses the race and the OS menu wins instead.
     expect(HOLD_MS).toBeLessThan(500);
-    // And above a deliberate tap, or the row underneath loses its clicks.
+    // And above a deliberate tap, or rows lose the taps that meant to open them.
     expect(HOLD_MS).toBeGreaterThanOrEqual(300);
   });
 });
