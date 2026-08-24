@@ -16,6 +16,35 @@ import { create } from "zustand";
 import type { SetupStatus } from "@dispatch/shared";
 import { api } from "../lib/api.js";
 
+/** How long `hydrate` waits for `/api/setup` before giving up. */
+export const SETUP_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * Whether it is safe to ask the server about setup state yet.
+ *
+ * A function rather than an inline `&&` in `App`, because the probe FAILS OPEN
+ * — one wrong boolean here is either a permanent "Starting Dispatch…" or a
+ * wizard that never appears on an install that needs it — and CI does not run
+ * the e2e spec that would otherwise be the only thing exercising it. Pulled out
+ * so each clause can be pinned by a test that names the failure it prevents.
+ */
+export function shouldProbeSetup(auth: {
+  /** `/api/auth/status` has answered (or been guessed at). */
+  ready: boolean;
+  /** The answer is a PLACEHOLDER because the server could not be reached. */
+  unreachable: boolean;
+  /** This install requires a login. */
+  authEnabled: boolean;
+  /** Somebody is signed in. */
+  signedIn: boolean;
+}): boolean {
+  // Not `!authEnabled || signedIn` alone: `/api/setup` is behind the same bearer
+  // gate as every other route, so asking without a session 401s — and a 401 is
+  // indistinguishable here from "already set up".
+  if (!auth.ready || auth.unreachable) return false;
+  return !auth.authEnabled || auth.signedIn;
+}
+
 interface SetupStore {
   /** null = not asked yet. true = the wizard is owed. */
   pending: boolean | null;
@@ -36,7 +65,7 @@ export const useSetup = create<SetupStore>((set) => ({
       const status: SetupStatus = await Promise.race([
         api.setup.status(),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("setup status timed out")), 5000),
+          setTimeout(() => reject(new Error("setup status timed out")), SETUP_PROBE_TIMEOUT_MS),
         ),
       ]);
       set({ pending: !status.completed });

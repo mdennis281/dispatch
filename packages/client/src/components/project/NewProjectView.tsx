@@ -725,12 +725,22 @@ export function NewProjectView({ setup = false, onBack, onDone }: NewProjectView
 
         {/* ------------------------------------------------------------- yaml */}
         {/* Sized as a companion, not a co-equal: the file is short, and giving
-            it more than half the window just makes it look mostly empty. */}
+            it more than half the window just makes it look mostly empty.
+
+            And GONE below `lg`, because `min-w-[340px]` beats `w-[44%]` the
+            moment the window is narrower than ~773px: at a 390px phone the
+            preview claimed 340 of 390 and left the form — every field, Browse,
+            and both finish actions — about 50px. The form is the load-bearing
+            half; the preview is a reassurance you can do without. This screen
+            was survivable that way while it was opt-in from the project menu,
+            but it is now also the mandatory, deliberately non-dismissible last
+            step of first run, so a new install first opened on a phone could
+            not get through setup at all. */}
         <ManifestPreview
           yaml={yaml}
           path={manifestPath}
           existing={!!adoptedConfig}
-          className="w-[44%] min-w-[340px] max-w-[760px] shrink-0"
+          className="hidden w-[44%] min-w-[340px] max-w-[760px] shrink-0 lg:flex"
         />
       </div>
     </div>

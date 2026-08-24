@@ -677,6 +677,15 @@ export function SetupWizard() {
     // to be up when the server goes away.
     <div
       className="flex h-[100dvh] flex-col bg-app text-primary antialiased"
+      // `--cm-kb` for the same reason the shell reads it (see App.tsx): `dvh`
+      // tracks the URL bar and deliberately NOT the soft keyboard, which shrinks
+      // the VISUAL viewport and leaves the layout viewport alone. Without this,
+      // tapping "Project directory" on step 4 puts the keyboard over the bottom
+      // of the window — and `NewProjectView`'s hand-off bar sits outside the
+      // step's scroll container, so both buttons that finish setup end up behind
+      // the keyboard with nothing able to scroll them back. `startViewportTracking`
+      // publishes the variable unconditionally; this container just has to read it.
+      style={{ paddingBottom: "var(--cm-kb, 0px)" }}
       aria-label="Set up Dispatch"
     >
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-surface px-4">

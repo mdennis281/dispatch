@@ -32,7 +32,7 @@ import { useLayout } from "./stores/layout.js";
 import { AuthGate } from "./components/auth/AuthGate.js";
 import { useAuth } from "./stores/auth.js";
 import { SetupWizard } from "./components/setup/SetupWizard.js";
-import { useSetup } from "./stores/setup.js";
+import { useSetup, shouldProbeSetup } from "./stores/setup.js";
 import { ViewportDebug } from "./components/layout/ViewportDebug.js";
 import { startViewportTracking } from "./stores/viewport.js";
 import { cn } from "./lib/cn.js";
@@ -111,11 +111,16 @@ export default function App() {
   const setupPending = useSetup((s) => s.pending);
   const hydrateSetup = useSetup((s) => s.hydrate);
   const authReady = useAuth((s) => s.ready);
-  const authSatisfied = useAuth((s) => !s.status?.enabled || !!s.user);
-  const authUnreachable = useAuth((s) => s.unreachable);
+  const authEnabled = useAuth((s) => !!s.status?.enabled);
+  const signedIn = useAuth((s) => !!s.user);
+  const unreachable = useAuth((s) => s.unreachable);
+  // Selected as four primitives and combined by a pure, TESTED predicate rather
+  // than written inline — see `shouldProbeSetup`. CI does not run the e2e spec,
+  // so a unit test is the only thing standing behind this condition.
+  const canProbe = shouldProbeSetup({ ready: authReady, unreachable, authEnabled, signedIn });
   useEffect(() => {
-    if (authReady && authSatisfied && !authUnreachable) void hydrateSetup();
-  }, [authReady, authSatisfied, authUnreachable, hydrateSetup]);
+    if (canProbe) void hydrateSetup();
+  }, [canProbe, hydrateSetup]);
 
   return (
     <>

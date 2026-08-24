@@ -11,8 +11,13 @@
  *
  * The wizard is not an extra step bolted on to this test — it is the only way a
  * project comes to exist on a fresh dataDir. Nothing is seeded any more (see
- * server `seed.ts`), which is the point: this is exactly what a new install
- * does, end to end, and if the wizard breaks, the smoke test cannot pass.
+ * server `seed.ts`), so this is exactly what a new install does, end to end.
+ *
+ * It is NOT the safety net for first run, though, and must not be mistaken for
+ * one: this spec is deliberately excluded from CI (`.github/workflows/ci.yml`
+ * says why), so on a pull request nobody runs it. The pieces of first run that
+ * genuinely need a guard — the probe gate and its fail-open store — are covered
+ * in `src/stores/setup.test.ts`, which is in the vitest suite CI does run.
  */
 import { test, expect } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
