@@ -646,6 +646,39 @@
   [contenteditable="true"] {
     font-size: 16px;
   }
+
+  /*
+   * A hold target a thumb can find, on a glyph that is 10px across.
+   *
+   * `ChatRow`'s two row markers are the only place in the app where a tooltip
+   * is the ONLY copy of a fact (`rowMarkers.ts` puts the counts nowhere else),
+   * so on touch — where the way to ask is a hold, see `lib/pressHold.ts` — the
+   * trigger has to be findable without aiming. Its own padding gives it 22x14.
+   *
+   * A pseudo-element, not padding: padding would move the title on every
+   * device to fix a thumb on one. And OUTWARD only — the pair is stacked with
+   * no gap, so the top marker takes its bite from the row's upper padding and
+   * the bottom marker from the lower, which is the one direction that cannot
+   * eat its neighbour's target.
+   *
+   * Nothing is taken away: the area either side is the row's own button, and a
+   * TAP there still selects the chat. Only a hold changes hands.
+   */
+  .cm-hold-target-up::after,
+  .cm-hold-target-down::after {
+    content: "";
+    position: absolute;
+    left: -8px;
+    right: 0;
+  }
+  .cm-hold-target-up::after {
+    top: -7px;
+    bottom: 0;
+  }
+  .cm-hold-target-down::after {
+    top: 0;
+    bottom: -7px;
+  }
 }
 
 /*
