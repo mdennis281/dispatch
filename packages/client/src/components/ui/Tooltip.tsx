@@ -115,8 +115,19 @@ export function Tooltip({
   // not leave one behind. Only a pointer clears the phase otherwise, and every
   // other way the bubble can close — a mouse leaving a hybrid device's trigger,
   // a blur — would strand it as a latch that eats the trigger's next click.
+  //
+  // Never while a press is IN FLIGHT, though. Holding an open bubble's own
+  // trigger again is one native `pointerdown` doing two things: the window
+  // dismissal below closes the bubble, then this trigger's `onPointerDown`
+  // re-arms. React 18 happens to flush this effect BETWEEN the two (measured:
+  // `dismiss: held->idle` → `effect open=false phase=idle` → `down:
+  // idle->waiting`), so it lands on `idle` and does nothing — but that is
+  // passive-effect scheduling, not a contract. Were it to run a beat later it
+  // would erase the `waiting` the press just established, and the second hold
+  // would silently become a tap into the chat. `waiting` is never a latch, so
+  // skipping it costs nothing and the ordering stops mattering.
   useEffect(() => {
-    if (!open) hold.current = HOLD_IDLE;
+    if (!open && hold.current.phase !== "waiting") hold.current = HOLD_IDLE;
   }, [open]);
 
   const reposition = useCallback(() => {
