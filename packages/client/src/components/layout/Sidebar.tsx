@@ -626,7 +626,10 @@ function ChatRow({
             side="right"
             label={childChatTitle(childChats, childrenNeedInput)}
             triggerClassName={cn(
-              "px-1.5 py-0.5 transition-colors duration-300",
+              // `cm-hold-target-up` (index.css) grows the TOUCH target upward
+              // on a coarse pointer without moving anything — a hold is how
+              // this tooltip is read on a phone, and 22x14 is not a thumb.
+              "cm-hold-target-up px-1.5 py-0.5 transition-colors duration-300",
               childChatTint(childChats, childrenNeedInput),
             )}
           >
@@ -639,7 +642,10 @@ function ChatRow({
           <Tooltip
             side="right"
             label={processTitle(procs)}
-            triggerClassName={cn("px-1.5 py-0.5 transition-colors duration-300", processTint(procs))}
+            triggerClassName={cn(
+              "cm-hold-target-down px-1.5 py-0.5 transition-colors duration-300",
+              processTint(procs),
+            )}
           >
             <SquareTerminal aria-hidden />
             <MarkerLabel text={processTitle(procs)} when={processCount > 0} />

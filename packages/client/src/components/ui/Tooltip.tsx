@@ -9,6 +9,15 @@ import {
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn.js";
 import { LAYER } from "../../lib/layers.js";
+import {
+  HOLD_IDLE,
+  HOLD_MS,
+  holdOpen,
+  holdSwallowsClick,
+  reduceHold,
+  type HoldEvent,
+  type HoldState,
+} from "../../lib/pressHold.js";
 import { usableTop } from "../../lib/windowControls.js";
 
 export interface TooltipProps {
@@ -32,21 +41,57 @@ interface Pos {
 }
 
 /**
- * Hover/focus tooltip. The bubble is rendered in a **portal** to `document.body`
- * and positioned to the trigger with viewport-collision handling — so it is
- * never clipped by an `overflow` ancestor (a header bar, the CodeViewer modal
- * header, a sidebar) or the viewport edge, and always shows in full:
+ * Hover/focus/hold tooltip. The bubble is rendered in a **portal** to
+ * `document.body` and positioned to the trigger with viewport-collision
+ * handling — so it is never clipped by an `overflow` ancestor (a header bar,
+ * the CodeViewer modal header, a sidebar) or the viewport edge, and always
+ * shows in full:
  *   - flips to the opposite side when the preferred one is cramped,
  *   - clamps the cross-axis into the viewport,
  *   - treats the window controls overlay's drag strip as NOT viewport — see
  *     `usableTop`,
  *   - reflows on scroll/resize while open.
+ *
+ * On touch there is no hover to open it with, so a HOLD does instead — see
+ * `lib/pressHold.ts` for the gesture's rules and why each one is there.
  */
 export function Tooltip({ label, side = "top", children, className, triggerClassName }: TooltipProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLSpanElement>(null);
   const tipRef = useRef<HTMLSpanElement>(null);
   const [pos, setPos] = useState<Pos | null>(null);
+
+  // The hold gesture lives in a REF, not state: `pointermove` fires at refresh
+  // rate for the whole of a scroll, and re-rendering a sidebar row on each one
+  // is a cost the row cannot pay. Only crossing into `held` — which is a
+  // visible change — touches React.
+  const hold = useRef<HoldState>(HOLD_IDLE);
+  const holdTimer = useRef<ReturnType<typeof setTimeout>>();
+
+  // Typed explicitly because the body calls itself: an un-annotated recursive
+  // `const` arrow is TS7022 ("implicitly has type any").
+  const dispatchHold = useCallback<(event: HoldEvent) => void>((event) => {
+    const prev = hold.current;
+    const next = reduceHold(prev, event);
+    if (next === prev) return;
+    hold.current = next;
+
+    // The machine says whether the clock should be running; this keeps the one
+    // real timer in step with it, so no path can leave a stray tooltip armed.
+    if (next.phase !== "waiting" && holdTimer.current) {
+      clearTimeout(holdTimer.current);
+      holdTimer.current = undefined;
+    }
+    if (next.phase === "waiting" && !holdTimer.current) {
+      holdTimer.current = setTimeout(() => {
+        holdTimer.current = undefined;
+        dispatchHold({ kind: "elapsed" });
+      }, HOLD_MS);
+    }
+    if (holdOpen(next) !== holdOpen(prev)) setOpen(holdOpen(next));
+  }, []);
+
+  useEffect(() => () => clearTimeout(holdTimer.current), []);
 
   const reposition = useCallback(() => {
     const trigEl = triggerRef.current;
@@ -129,14 +174,23 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
     // leave with the drawer — and `Drawer`'s synthetic `resize` on transitionend
     // then repositions it against a trigger that has slid off-screen, where the
     // cross-axis clamp parks it over the transcript you just opened.
-    const onPress = () => setOpen(false);
+    //
+    // It is also what takes a held bubble away: on touch the finger has long
+    // since lifted, so the next press anywhere is the only signal left. Capture
+    // phase, so this runs BEFORE the trigger's own `pointerdown` — a second
+    // hold on the same trigger dismisses and then re-arms, rather than being
+    // dismissed by the press that started it.
+    const onPress = () => {
+      dispatchHold({ kind: "dismiss" });
+      setOpen(false);
+    };
     window.addEventListener("pointerdown", onPress, true);
     return () => {
       window.removeEventListener("resize", onReflow);
       window.removeEventListener("scroll", onReflow, true);
       window.removeEventListener("pointerdown", onPress, true);
     };
-  }, [open, reposition]);
+  }, [open, reposition, dispatchHold]);
 
   return (
     <span
@@ -149,7 +203,40 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
       onPointerEnter={(e) => {
         if (e.pointerType !== "touch") setOpen(true);
       }}
-      onPointerLeave={() => setOpen(false)}
+      // On touch, NEVER a close. The browser fires `pointerleave` right after
+      // `pointerup` — the touch pointer ceases to exist — so closing here would
+      // take the bubble away the instant the finger lifts, which is the instant
+      // you can finally see it. `cancel` only bites while the hold is still
+      // pending, where the finger sliding off the trigger genuinely aborts it.
+      onPointerLeave={(e) => {
+        if (e.pointerType === "touch") dispatchHold({ kind: "cancel" });
+        else setOpen(false);
+      }}
+      onPointerDown={(e) =>
+        dispatchHold({ kind: "down", pointerType: e.pointerType, x: e.clientX, y: e.clientY })
+      }
+      onPointerMove={(e) => {
+        if (hold.current.phase !== "waiting") return;
+        dispatchHold({ kind: "move", x: e.clientX, y: e.clientY });
+      }}
+      onPointerUp={() => dispatchHold({ kind: "up" })}
+      onPointerCancel={() => dispatchHold({ kind: "cancel" })}
+      // Android raises `contextmenu` from its own long-press at ~500ms, a beat
+      // after ours has opened — the browser's "copy / select" sheet over the
+      // answer the gesture just asked for. Suppressed only while a hold is in
+      // flight, so a right-click still gets its menu.
+      onContextMenu={(e) => {
+        if (hold.current.phase !== "idle") e.preventDefault();
+      }}
+      // The click that ends a hold belongs to the gesture, not to whatever the
+      // trigger sits inside — see `holdSwallowsClick`. Capture phase and both
+      // halves: `stopPropagation` keeps it from the row button's React handler,
+      // `preventDefault` from an anchor's navigation.
+      onClickCapture={(e) => {
+        if (!holdSwallowsClick(hold.current)) return;
+        e.preventDefault();
+        e.stopPropagation();
+      }}
       // KEYBOARD focus only. Most triggers wrap a real `<button>` and `focusin`
       // bubbles, so on a mouse click Chromium runs `pointerdown` (which the
       // dismissal above acts on) and then focuses the button as the default
