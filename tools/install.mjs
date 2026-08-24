@@ -13,6 +13,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -622,7 +623,40 @@ async function main() {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/**
+ * Is this module the process entry point, rather than an import from the tests?
+ *
+ * Compared through `realpathSync`, because the two sides are not the same kind
+ * of path. `import.meta.url` is the entry point's REAL path — Node resolves the
+ * main module's symlinks unless `--preserve-symlinks-main` — while
+ * `process.argv[1]` is the path the caller typed. On macOS those differ for
+ * every bootstrapped install: `install.sh` stages this file under `$TMPDIR`,
+ * which is `/var/folders/…`, and `/var` is a symlink to `/private/var`. The
+ * plain string compare that used to be here therefore never matched, `main()`
+ * never ran, and `curl … | sh` printed "Downloading the Dispatch release
+ * installer..." and exited 0 having installed nothing at all. The server's own
+ * self-update stages into `tmpdir()` too, so it failed the same silent way, and
+ * Windows has the same shape when TEMP is redirected through a junction. NOT
+ * when TEMP is an 8.3 short path: Node expands short names on neither side, so
+ * both stay short and the compare already held.
+ */
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  const entry = resolve(process.argv[1]);
+  const self = fileURLToPath(import.meta.url);
+  return entry === self || realpathOrSelf(entry) === realpathOrSelf(self);
+}
+
+/** `realpathSync`, falling back to the input for a path that does not exist. */
+function realpathOrSelf(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+if (isEntryPoint()) {
   main().catch((error) => {
     console.error(`\nDispatch install failed: ${error.message}`);
     process.exitCode = 1;
