@@ -50,9 +50,9 @@ describe("last-project memory", () => {
   it("opens on the first project when nothing is remembered", () => {
     hydrate(THREE);
     expect(useProjects.getState().activeProjectId).toBe("p1");
-    // …and starts remembering from there, rather than staying blank until the
-    // user's first manual switch.
-    expect(localStorage.getItem(KEY)).toBe("p1");
+    // Landing somewhere is not the same as choosing it — a hydrate writes
+    // nothing. See the mock-hydrate case below for why that matters.
+    expect(localStorage.getItem(KEY)).toBeNull();
   });
 
   it("re-opens the remembered project on the next hydrate", () => {
@@ -76,16 +76,43 @@ describe("last-project memory", () => {
     localStorage.setItem(KEY, "deleted");
     hydrate(THREE);
     expect(useProjects.getState().activeProjectId).toBe("p1");
-    // The stale entry is replaced, not left to be re-checked every load.
-    expect(localStorage.getItem(KEY)).toBe("p1");
+    // Left alone rather than cleared. Re-checking a dead string every load
+    // costs an array scan; clearing it on a roster we might not trust is how
+    // the mock-hydrate case below destroys a real preference.
+    expect(localStorage.getItem(KEY)).toBe("deleted");
+  });
+
+  /**
+   * The offline fixture runs the SAME `hydrate`. On a dev instance sitting at
+   * the login screen, `main.tsx` seeds it on an unconditional timer before
+   * anyone signs in — so if a hydrate wrote back, the fixture's project id
+   * would land in storage, and the live hydrate that followed would find that
+   * id missing from the real roster and overwrite it with `projects[0]`. The
+   * user's actual project, gone, with nobody having clicked anything.
+   */
+  it("is not clobbered by a mock hydrate that precedes the real one", () => {
+    localStorage.setItem(KEY, "p3");
+
+    hydrate([project("mock-a"), project("mock-b")]);
+    expect(useProjects.getState().activeProjectId).toBe("mock-a");
+    expect(localStorage.getItem(KEY)).toBe("p3");
+
+    hydrate(THREE);
+    expect(useProjects.getState().activeProjectId).toBe("p3");
+  });
+
+  it("keeps the roster empty of side effects — only a selection writes", () => {
+    hydrate(THREE);
+    expect(localStorage.getItem(KEY)).toBeNull();
+    useProjects.getState().setActiveProject("p2");
+    expect(localStorage.getItem(KEY)).toBe("p2");
   });
 
   it("keeps the remembered project when the roster comes back empty", () => {
     localStorage.setItem(KEY, "p2");
     hydrate([]);
     expect(useProjects.getState().activeProjectId).toBeNull();
-    // An empty roster is not evidence that p2 is gone — forgetting here would
-    // lose it for good.
+    // An empty roster is not evidence that p2 is gone.
     expect(localStorage.getItem(KEY)).toBe("p2");
     hydrate(THREE);
     expect(useProjects.getState().activeProjectId).toBe("p2");

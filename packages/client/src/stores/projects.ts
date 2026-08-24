@@ -46,6 +46,18 @@ function rememberProject(id: string): void {
  * there renders an empty shell with nothing lit in the rail. Falling back to
  * `projects[0]` is what the hydrate did before, so a stale entry costs exactly
  * the old behaviour and nothing more.
+ *
+ * READ-ONLY, deliberately: a failed match does NOT clear the entry, and a
+ * hydrate never writes one. `setActiveProject` is the sole writer, because the
+ * only thing worth remembering is a project the USER chose.
+ *
+ * That single-writer rule is load-bearing, not tidiness. `hydrateFromMock` runs
+ * this same `hydrate` — on a dev instance sitting at the login screen, an
+ * unconditional timer in `main.tsx` seeds the offline fixture before anyone has
+ * signed in. A hydrate that wrote back would stamp the fixture's project id over
+ * the real preference, and the live hydrate that followed would find that id
+ * missing from the real roster and stamp `projects[0]` over it in turn — losing
+ * the project you were actually in, with no user action anywhere in the story.
  */
 function initialProject(projects: Project[]): string | null {
   let remembered: string | null = null;
@@ -85,16 +97,8 @@ export const useProjects = create<ProjectsStore>((set) => ({
     rememberProject(id);
     set({ activeProjectId: id });
   },
-  hydrate: ({ projects, agents, modes }) => {
-    const activeProjectId = initialProject(projects);
-    // Write back the fallback too, so a first-ever load starts remembering from
-    // where it actually landed instead of staying blank until the first manual
-    // switch. A `null` (no projects exist yet) deliberately does NOT clear the
-    // entry: an empty roster is not evidence that the remembered project is
-    // gone, and forgetting on one would lose it for good.
-    if (activeProjectId) rememberProject(activeProjectId);
-    set({ projects, agents, modes, activeProjectId });
-  },
+  hydrate: ({ projects, agents, modes }) =>
+    set({ projects, agents, modes, activeProjectId: initialProject(projects) }),
   upsertProject: (p) =>
     set((s) => {
       const i = s.projects.findIndex((x) => x.id === p.id);
