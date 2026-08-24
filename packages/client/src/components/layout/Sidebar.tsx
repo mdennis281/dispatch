@@ -624,6 +624,9 @@ function ChatRow({
         <span className="-ml-1 flex shrink-0 flex-col items-center [&_svg]:size-2.5">
           <Tooltip
             side="right"
+            // The only copy of these counts, so on touch they need the one
+            // gesture a hover-less device has — see `lib/pressHold.ts`.
+            holdToOpen
             label={childChatTitle(childChats, childrenNeedInput)}
             triggerClassName={cn(
               // `cm-hold-target-up` (index.css) grows the TOUCH target upward
@@ -641,6 +644,7 @@ function ChatRow({
           </Tooltip>
           <Tooltip
             side="right"
+            holdToOpen
             label={processTitle(procs)}
             triggerClassName={cn(
               "cm-hold-target-down px-1.5 py-0.5 transition-colors duration-300",

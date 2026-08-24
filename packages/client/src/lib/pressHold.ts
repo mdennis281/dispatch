@@ -6,6 +6,14 @@
  * live ONLY in their tooltip) had nothing at all to say. Holding is the gesture
  * every platform already uses for "tell me about this without doing it".
  *
+ * OPT-IN, per `Tooltip` (`holdToOpen`), and currently only those two markers.
+ * The price of the gesture is that the click ending it has to be swallowed
+ * (see `holdSwallowsClick`) — worth paying where the swallowed action is
+ * "select a chat" and the tooltip is the only copy of the fact, not worth it
+ * on a button whose tip merely names what pressing it does. `Composer`'s
+ * phone-only options button is the case that settles it: a press held a beat
+ * too long would show "Composer options" and then not open them.
+ *
  * The component owns the DOM and one `setTimeout`; everything that decides
  * WHETHER a press becomes a tooltip lives here, because the client's vitest
  * runs in the node environment and renders no JSX (see `vitest.config.ts`).
@@ -99,13 +107,19 @@ export function holdOpen(state: HoldState): boolean {
 }
 
 /**
- * Must the click that ends this gesture be swallowed?
+ * Must this click be swallowed as the tail of a hold?
  *
- * These triggers sit INSIDE the thing they describe — the row markers are in
- * the chat row's own button, an `IconButton`'s tip wraps the button itself. So
- * without this, reading a tooltip navigates you away from the row you were
- * reading about, or presses the button you were checking the meaning of.
+ * The trigger sits INSIDE the thing it describes — the row markers are in the
+ * chat row's own button — so without this, reading a tooltip navigates away
+ * from the row you were reading about.
+ *
+ * `detail` is the click's, and it is what keeps the swallow from LATCHING. The
+ * phase stays `held` while the bubble is up, and only a pointer clears it; a
+ * click the keyboard synthesised (Enter on the focused button a touch left
+ * behind) would otherwise be eaten too, and go on being eaten until the user
+ * touched the screen again. A keyboard click reports `detail === 0` where a
+ * pointer-driven one counts its presses.
  */
-export function holdSwallowsClick(state: HoldState): boolean {
-  return state.phase === "held";
+export function holdSwallowsClick(state: HoldState, detail: number): boolean {
+  return state.phase === "held" && detail > 0;
 }

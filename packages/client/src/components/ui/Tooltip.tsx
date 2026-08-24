@@ -26,6 +26,15 @@ export interface TooltipProps {
   children: ReactNode;
   className?: string;
   triggerClassName?: string;
+  /**
+   * Also open on a touch HOLD — the only way to ask for a tooltip on a device
+   * with no hover. Off by default and worth opting in only where the tooltip
+   * is the sole copy of something, because the gesture costs the trigger the
+   * click that ends it (`lib/pressHold.ts`). On a plain button that trade is
+   * the wrong way round: a press held a beat too long would name the button
+   * instead of pressing it.
+   */
+  holdToOpen?: boolean;
 }
 
 type Side = NonNullable<TooltipProps["side"]>;
@@ -52,10 +61,18 @@ interface Pos {
  *     `usableTop`,
  *   - reflows on scroll/resize while open.
  *
- * On touch there is no hover to open it with, so a HOLD does instead — see
- * `lib/pressHold.ts` for the gesture's rules and why each one is there.
+ * On touch there is no hover to open it with, so with `holdToOpen` a HOLD does
+ * instead — see `lib/pressHold.ts` for the gesture's rules, why each one is
+ * there, and why it is opt-in.
  */
-export function Tooltip({ label, side = "top", children, className, triggerClassName }: TooltipProps) {
+export function Tooltip({
+  label,
+  side = "top",
+  children,
+  className,
+  triggerClassName,
+  holdToOpen = false,
+}: TooltipProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLSpanElement>(null);
   const tipRef = useRef<HTMLSpanElement>(null);
@@ -71,6 +88,7 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
   // Typed explicitly because the body calls itself: an un-annotated recursive
   // `const` arrow is TS7022 ("implicitly has type any").
   const dispatchHold = useCallback<(event: HoldEvent) => void>((event) => {
+    if (!holdToOpen) return;
     const prev = hold.current;
     const next = reduceHold(prev, event);
     if (next === prev) return;
@@ -89,9 +107,17 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
       }, HOLD_MS);
     }
     if (holdOpen(next) !== holdOpen(prev)) setOpen(holdOpen(next));
-  }, []);
+  }, [holdToOpen]);
 
   useEffect(() => () => clearTimeout(holdTimer.current), []);
+
+  // `held` means "the bubble is up because of a hold", so a closed bubble must
+  // not leave one behind. Only a pointer clears the phase otherwise, and every
+  // other way the bubble can close — a mouse leaving a hybrid device's trigger,
+  // a blur — would strand it as a latch that eats the trigger's next click.
+  useEffect(() => {
+    if (!open) hold.current = HOLD_IDLE;
+  }, [open]);
 
   const reposition = useCallback(() => {
     const trigEl = triggerRef.current;
@@ -209,7 +235,7 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
       // you can finally see it. `cancel` only bites while the hold is still
       // pending, where the finger sliding off the trigger genuinely aborts it.
       onPointerLeave={(e) => {
-        if (e.pointerType === "touch") dispatchHold({ kind: "cancel" });
+        if (holdToOpen && e.pointerType === "touch") dispatchHold({ kind: "cancel" });
         else setOpen(false);
       }}
       onPointerDown={(e) =>
@@ -233,7 +259,7 @@ export function Tooltip({ label, side = "top", children, className, triggerClass
       // halves: `stopPropagation` keeps it from the row button's React handler,
       // `preventDefault` from an anchor's navigation.
       onClickCapture={(e) => {
-        if (!holdSwallowsClick(hold.current)) return;
+        if (!holdSwallowsClick(hold.current, e.detail)) return;
         e.preventDefault();
         e.stopPropagation();
       }}

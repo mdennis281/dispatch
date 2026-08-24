@@ -59,16 +59,24 @@ describe("reduceHold", () => {
   it("leaves a plain tap alone", () => {
     const tapped = play(touch, { kind: "up" });
     expect(holdOpen(tapped)).toBe(false);
-    expect(holdSwallowsClick(tapped)).toBe(false);
+    expect(holdSwallowsClick(tapped, 1)).toBe(false);
   });
 
   it("swallows only the click that ends a hold", () => {
-    expect(holdSwallowsClick(play(touch, { kind: "elapsed" }, { kind: "up" }))).toBe(true);
+    expect(holdSwallowsClick(play(touch, { kind: "elapsed" }, { kind: "up" }), 1)).toBe(true);
     // A second tap re-arms from scratch, and its click belongs to the row again.
     const retapped = play(touch, { kind: "elapsed" }, { kind: "up" }, { kind: "dismiss" }, touch, {
       kind: "up",
     });
-    expect(holdSwallowsClick(retapped)).toBe(false);
+    expect(holdSwallowsClick(retapped, 1)).toBe(false);
+  });
+
+  it("never swallows a click the keyboard synthesized", () => {
+    // Enter on the button a touch left focused, while the bubble is still up.
+    // Only a pointer clears `held`, so swallowing this would latch the button
+    // dead until the user touched the screen again.
+    const held = play(touch, { kind: "elapsed" }, { kind: "up" });
+    expect(holdSwallowsClick(held, 0)).toBe(false);
   });
 
   it("returns the same object when nothing moved, so the caller can early-out", () => {
