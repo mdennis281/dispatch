@@ -515,6 +515,18 @@ function ChatRow({
   const railRef = useRef<HTMLDivElement>(null);
   const press = useLongPress(useCallback(() => setTrayHeld(true), []));
 
+  // An action taken is the tray's job done, so it goes away with the press that
+  // used it. Rename is where this MATTERS rather than merely tidies: the pencil
+  // is inside the rail, so the dismissal below deliberately ignores it, and
+  // `rename.start()` then unmounts this whole block. Commit the rename from the
+  // on-screen keyboard — OS chrome, which dispatches no pointer event to the
+  // page — and the rail remounts still flagged open, sliding the tray back over
+  // the title you just finished editing, for nobody.
+  const trayAction = (run: () => void) => () => {
+    setTrayHeld(false);
+    run();
+  };
+
   // Any press OUTSIDE the tray puts it away — including elsewhere on this row,
   // and including a press on another row, which is what keeps one tray out at a
   // time without the rows having to know about each other.
@@ -827,7 +839,7 @@ function ChatRow({
                 survives and the next message starts a fresh session. What it can
                 cost is a running turn, so the tip says so in as many words. */}
             {processCount > 0 && (
-              <IconButton size="sm" tip={killTip} disabled={killing} onClick={onKillProcesses}>
+              <IconButton size="sm" tip={killTip} disabled={killing} onClick={trayAction(onKillProcesses)}>
                 <Power />
               </IconButton>
             )}
@@ -837,15 +849,15 @@ function ChatRow({
                 active={expanded}
                 aria-expanded={expanded}
                 tip={expanded ? `Hide ${foldedLabel}` : `Show ${foldedLabel}`}
-                onClick={onToggleChildren}
+                onClick={trayAction(onToggleChildren)}
               >
                 <MessagesSquare />
               </IconButton>
             )}
-            <IconButton size="sm" tip="Rename chat" onClick={rename.start}>
+            <IconButton size="sm" tip="Rename chat" onClick={trayAction(rename.start)}>
               <Pencil />
             </IconButton>
-            <IconButton size="sm" tip="Delete chat" onClick={() => setConfirmDelete(true)}>
+            <IconButton size="sm" tip="Delete chat" onClick={trayAction(() => setConfirmDelete(true))}>
               <Trash2 />
             </IconButton>
           </div>
@@ -1259,17 +1271,23 @@ export function Sidebar() {
     <aside
       className={cn(
         "flex flex-col border-r border-line bg-surface",
-        // NOT SELECTABLE, on purpose, and it has to be the whole column.
+        // NOT SELECTABLE on a coarse pointer, on purpose, and there it has to
+        // be the whole column.
         //
         // `ChatRow`'s tray opens on a press-and-hold, and press-and-hold is
         // already spoken for on a touch device: it is how you select text, and
         // on iOS how you raise the callout over what you selected. Left alone,
         // holding a row hands you a blue selection over the chat's title and a
-        // Copy bubble on top of the tray you asked for. There is nothing here
-        // worth selecting to trade for that — every line in this column is a
-        // button's label, and the one string anyone might want (the repo path)
-        // is `midTruncate`d to an ellipsis anyway.
-        "select-none [-webkit-touch-callout:none]",
+        // Copy bubble on top of the tray you asked for.
+        //
+        // `pointer-coarse:` because that conflict is the WHOLE reason, and it
+        // does not exist for a mouse — dragging is how you select, and nothing
+        // here opens on a slow click. Unconditional, this would cost the build
+        // stamp at the bottom of the column: it renders in full precisely so it
+        // can answer "which bundle am I looking at" in a bug report, and taking
+        // away copy would leave you retyping it by eye off a `!text-2xs` mono
+        // line. Same signal `index.css` uses for its other touch-only rules.
+        "pointer-coarse:select-none pointer-coarse:[-webkit-touch-callout:none]",
         inDrawer ? "h-full w-full" : "w-[260px] shrink-0",
       )}
     >
