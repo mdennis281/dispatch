@@ -15,6 +15,7 @@ import { registerModeRoutes } from "./modes.js";
 import { registerModelRoutes } from "./models.js";
 import { registerManagerMcpRoute } from "./manager-mcp.js";
 import { registerMemoryRoutes } from "./memory.js";
+import { registerCommandRoutes } from "./commands.js";
 import { registerMcpRoutes } from "./mcp.js";
 import { registerWorktreeRoutes } from "./worktrees.js";
 import { registerGitRoutes } from "./git.js";
@@ -47,6 +48,7 @@ export function registerRoutes(app: FastifyInstance): void {
   registerModelRoutes(app);
   registerManagerMcpRoute(app);
   registerMemoryRoutes(app);
+  registerCommandRoutes(app);
   registerMcpRoutes(app);
   registerWorktreeRoutes(app);
   registerGitRoutes(app);

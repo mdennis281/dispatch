@@ -16,7 +16,15 @@ export interface ShellToolPresentation {
   terminal?: string;
 }
 
-export type DispatchToolCategory = "wait" | "pr" | "terminal" | "preview" | "memory" | "chat" | "general";
+export type DispatchToolCategory =
+  | "wait"
+  | "pr"
+  | "terminal"
+  | "preview"
+  | "memory"
+  | "config"
+  | "chat"
+  | "general";
 
 export interface DispatchToolPresentation {
   kind: "dispatch";
@@ -200,6 +208,10 @@ const DISPATCH_COPY: Record<string, { title: string; activity: string; category:
   forget: { title: "Forget", activity: "Removing project memory", category: "memory" },
   memory_list: { title: "Memory index", activity: "Reading project memory", category: "memory" },
   memory_search: { title: "Memory search", activity: "Searching project memory", category: "memory" },
+  config_list: { title: "Config index", activity: "Reading instructions and skills", category: "config" },
+  config_read: { title: "Config read", activity: "Reading a skill", category: "config" },
+  config_write: { title: "Config write", activity: "Authoring a skill", category: "config" },
+  config_delete: { title: "Config delete", activity: "Removing a skill", category: "config" },
   create_worktree: { title: "Create worktree", activity: "Creating worktree", category: "general" },
 };
 

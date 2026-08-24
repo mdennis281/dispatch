@@ -46,6 +46,8 @@ import {
   appendDraftImage,
 } from "../../lib/composerDrafts.js";
 import { pickPath } from "../files/filePicker.js";
+import { SlashMenu } from "./SlashMenu.js";
+import { useSlashCommands, slashKeyAction } from "./useSlashCommands.js";
 import { fsToNative } from "../files/fsMeta.js";
 import { useFsRoots } from "../../stores/fsRoots.js";
 import { useProjects } from "../../stores/projects.js";
@@ -384,6 +386,11 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // Dictated text, reached through a ref because the mic is wired up before the
   // editor exists — see the `useDictation` call just below.
   const insertSpokenRef = useRef<(text: string) => void>(() => {});
+  // The `/` menu, reached from TipTap's once-configured handlers for the same
+  // reason as the others. `keys` returns true when the menu consumed the event,
+  // which is what stops Enter from sending the half-typed command name.
+  const slashKeyRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
+  const slashTextRef = useRef<(text: string) => void>(() => {});
   // The once-configured `onUpdate` closure can't see the current `chat.id`, so it
   // reads it through this ref (kept in sync every render) to key the saved draft.
   const chatIdRef = useRef(chat.id);
@@ -416,6 +423,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     enablePasteRules: false,
     onUpdate: ({ editor }) => {
       setIsEmpty(editor.isEmpty);
+      slashTextRef.current(editor.getText());
       // Persist the live draft so it survives a chat switch, an unmount, and a
       // reload. Attachments ride along: a text-only edit must not drop them.
       saveDraft(chatIdRef.current, {
@@ -426,6 +434,13 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     editorProps: {
       attributes: { class: "cm-scroll max-h-52 overflow-y-auto" },
       handleKeyDown: (_view, event) => {
+        // The menu gets first refusal on the navigation keys. It only claims
+        // them while it is open with matches, so nothing here is swallowed the
+        // rest of the time.
+        if (slashKeyRef.current(event)) {
+          event.preventDefault();
+          return true;
+        }
         if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
           event.preventDefault();
           submitRef.current();
@@ -474,7 +489,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     // A mic left open across a switch would type into the chat you just left.
     dictation.stop();
     const saved = loadDraft(chat.id);
-    editor.commands.setContent(saved.html);
+    // `preserveWhitespace: "full"`, because the default DOM parse eats a
+    // TRAILING space — and a draft holding a picked `/command ` depends on that
+    // space: without it, restoring the draft and typing the first argument
+    // character produces `/commandx`. Faithful either way; a draft should come
+    // back as the text that was saved.
+    editor.commands.setContent(saved.html, false, { preserveWhitespace: "full" });
     attachmentsRef.current = saved.images;
     setAttachments(saved.images);
     setEditing(null);
@@ -720,6 +740,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     // Sending ends the dictation that composed it — otherwise the tail of the
     // sentence you just sent lands at the top of the next message.
     dictation.stop();
+    slash.close();
     editor?.commands.clearContent();
     clearDraft(chat.id);
     attachmentsRef.current = [];
@@ -729,6 +750,59 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     setError(null);
   };
   submitRef.current = submit;
+
+  /* ------------------------------------------------------------ / commands */
+
+  const slash = useSlashCommands(chat.id);
+  slashTextRef.current = slash.onText;
+
+  /**
+   * Replace the whole message with the chosen command and a trailing space.
+   *
+   * Replacement rather than insertion: the menu is only ever open when the
+   * document IS the slash token (see `SLASH_TOKEN_RE`), so replacing it is both
+   * correct and immune to where the caret happens to be.
+   *
+   * The content is a ProseMirror JSON doc, NOT an HTML string. `setContent`
+   * parses HTML through the DOM, which collapses the trailing space away — and
+   * that space is load-bearing: it is what stops the text matching the token
+   * pattern, which is what keeps the menu shut while you type the arguments.
+   *
+   * `emitUpdate: true` (the second argument; it defaults to FALSE) is what makes
+   * this one write go through the same `onUpdate` every keystroke does — which
+   * is the only thing that calls `saveDraft`. Without it, picking `/review` and
+   * then switching chats restores the draft written by the last real keystroke:
+   * `/rev`, the half-typed token, silently replacing the command you chose.
+   */
+  const pickCommand = (name: string) => {
+    slash.close();
+    editor?.commands.setContent(
+      {
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: `/${name} ` }] }],
+      },
+      true,
+    );
+    editor?.commands.focus("end");
+  };
+
+  slashKeyRef.current = (event: KeyboardEvent) => {
+    if (slash.query === null) return false;
+    const action = slashKeyAction(event);
+    if (action === "close") {
+      slash.close();
+      return true;
+    }
+    // Everything below needs a row to act on. Falling through when the list is
+    // empty is what keeps a message that merely STARTS with a slash sendable.
+    if (!action || !slash.matches.length) return false;
+    if (action === "next") return slash.move(1);
+    if (action === "prev") return slash.move(-1);
+    const cmd = slash.current();
+    if (!cmd) return false;
+    pickCommand(cmd.name);
+    return true;
+  };
 
   const setMode = (modeId: string) => {
     upsertChat({ ...chat, modeId });
@@ -1172,6 +1246,18 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           setOver(null);
         }}
       >
+        {/* The `/` menu. Inside the shell because that's the `relative` box it
+            anchors to, and above everything else in it so a drop overlay can't
+            paint over the list. */}
+        {slash.query !== null && (
+          <SlashMenu
+            commands={slash.matches}
+            active={slash.active}
+            onHover={slash.setActive}
+            onPick={(cmd) => pickCommand(cmd.name)}
+            builtinsKnown={slash.builtinsKnown}
+          />
+        )}
         {/* The promise, made before the user commits. `over` wins so the copy
             reflects the box actually under the pointer. */}
         {(over ?? (fileDrag.active ? fileDrag.intent : null)) && (

@@ -92,6 +92,13 @@ import {
   MANAGER_TOOL_CATEGORY,
   managerServerName,
   managerToolQualifiedName,
+  AuthoredKindSchema,
+  AuthoredScopeSchema,
+  isWritableScope,
+  type AuthoredItem,
+  type AuthoredKind,
+  type AuthoredScope,
+  type WritableAuthoredScope,
   type ManagerCategory,
   type ManagerToolName,
   type ChatStatus,
@@ -351,6 +358,41 @@ export interface ManagerMcpMemory {
   /** One memory by exact name — no ranking, no near-misses. */
   read?(name: string): Promise<ProjectMemory | null>;
   history?(opts: { name?: string; limit?: number }): Promise<MemoryHistoryResult>;
+}
+
+/**
+ * The authored-guidance surface behind the `config_*` tools — instructions and
+ * skills, already bound to this session's project by the broker so the agent
+ * just names the item. Omitted when the session has neither a project nor a
+ * global root (then the tools aren't offered at all).
+ *
+ * `scope` is resolved by the IMPLEMENTATION, not the tool: reads search
+ * most-specific-first (project → global → shipped) so a plain name finds the
+ * copy actually in effect, while writes must name a writable scope.
+ */
+export interface ManagerMcpAuthoring {
+  /** Every item of a kind, across every scope, in listing order. */
+  list(kind: AuthoredKind): Promise<AuthoredItem[]>;
+  /** One item's raw file. Without `scope`, the most specific match wins. */
+  read(
+    kind: AuthoredKind,
+    name: string,
+    scope?: AuthoredScope,
+  ): Promise<{ scope: AuthoredScope; path: string; text: string } | null>;
+  write(input: {
+    kind: AuthoredKind;
+    scope: WritableAuthoredScope;
+    name: string;
+    description?: string;
+    body: string;
+  }): Promise<{ path: string; registered: boolean }>;
+  remove(kind: AuthoredKind, name: string, scope: WritableAuthoredScope): Promise<boolean>;
+  /**
+   * Whether this session has a project to write `.dispatch/` config into. Decides
+   * the DEFAULT scope, and lets a `scope:'project'` call be refused with a real
+   * reason instead of writing somewhere surprising.
+   */
+  hasProject: boolean;
 }
 
 /** Merge/close-state view of a PR the `watch_pr` tool polls on. */
@@ -1591,6 +1633,8 @@ export interface ManagerMcpContext {
   chats?: ManagerMcpChats;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
   mcpConfig?: ManagerMcpConfig;
+  /** Instruction/skill authoring for this session (omitted → no `config_*` tools). */
+  authoring?: ManagerMcpAuthoring;
   /** Cross-chat read surface (omitted → no `chat_find`/`chat_read`/`project_info`). */
   inspect?: ManagerMcpInspect;
   /** Cross-chat WRITE surface (omitted → no `chat_send`/`chat_ask`/`chat_reply`/`chat_state`). */
@@ -5144,6 +5188,249 @@ ${look}` : "")
     },
   );
 
+  /* --------------------------------------------------- authored guidance
+   * Memory records what this project KNOWS. These four record how work is DONE
+   * here — the prose in `instructions/` and the procedures in `skills/` — and
+   * they exist because that half was previously read-only to an agent: the
+   * guidance arrived in the system prompt, but writing a new piece of it meant
+   * hand-placing a file AND hand-editing `project.yaml`. See `authored-config.ts`
+   * for the three scopes and why `shipped` is not writable. */
+
+  const kindArg = AuthoredKindSchema.describe(
+    "instruction = always-on prose injected into every session's system prompt " +
+      "(house rules, conventions, gotchas). skill = an on-demand procedure the " +
+      "model loads only when its description matches the task, and which the human " +
+      "can invoke by typing /<name>. Prefer a SKILL for anything task-specific: an " +
+      "instruction costs prompt budget on every single turn, forever.",
+  );
+
+  const scopeArg = AuthoredScopeSchema.optional().describe(
+    "project = committed in this repo's .dispatch/ (the default, and the only one " +
+      "teammates get). global = this machine only, applies to every project here. " +
+      "shipped = built into Dispatch; readable, never writable.",
+  );
+
+  const configList = tool(
+    "config_list",
+    "List the INSTRUCTIONS and SKILLS in effect for this session — the authored " +
+      "guidance shaping how work is done here, across all three scopes (this repo's " +
+      "committed `.dispatch/`, this machine's global config, and what Dispatch ships). " +
+      "Call this before writing one so you extend what exists instead of adding a " +
+      "near-duplicate, and to find the exact name to pass to `config_read`.",
+    {
+      kind: AuthoredKindSchema.optional().describe("Omit to list both kinds."),
+      scope: scopeArg,
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.authoring) {
+        return textResult("Config authoring is not available in this session.", true);
+      }
+      try {
+        const kinds: AuthoredKind[] = args.kind ? [args.kind] : ["instruction", "skill"];
+        const sections: string[] = [];
+        let total = 0;
+        for (const kind of kinds) {
+          const items = (await ctx.authoring.list(kind)).filter(
+            (i) => !args.scope || i.scope === args.scope,
+          );
+          total += items.length;
+          const lines = items.map((i) => {
+            const flags: string[] = [i.scope];
+            if (!i.writable) flags.push("read-only");
+            // An instruction file the manifest doesn't list is never injected.
+            // Saying so is the whole point — nothing else reports it.
+            if (i.kind === "instruction" && !i.active) flags.push("INACTIVE: not listed in project.yaml");
+            return `  • ${i.name} (${flags.join(", ")})${i.description ? ` — ${i.description}` : ""}`;
+          });
+          sections.push(
+            `${kind === "skill" ? "Skills" : "Instructions"} (${items.length}):\n` +
+              (lines.length ? lines.join("\n") : "  (none)"),
+          );
+        }
+        const hint = total
+          ? "\n\nRead one in full with config_read; create or replace one with config_write."
+          : "\n\nNothing authored yet. config_write creates the file (and registers an " +
+            "instruction in project.yaml so it's actually injected).";
+        return textResult(`${sections.join("\n\n")}${hint}`);
+      } catch (err) {
+        return textResult(
+          `Could not list authored config: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const configRead = tool(
+    "config_read",
+    "Read one instruction or skill in full, by name. Use it before editing so a " +
+      "`config_write` extends the existing text rather than silently replacing it — " +
+      "a write REPLACES the whole file.",
+    {
+      kind: kindArg,
+      name: z.string().describe("The item's name, as shown by config_list."),
+      scope: scopeArg,
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.authoring) {
+        return textResult("Config authoring is not available in this session.", true);
+      }
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      if (!name) return textResult("config_read requires a name.", true);
+      try {
+        const found = await ctx.authoring.read(args.kind, name, args.scope);
+        if (!found) {
+          return textResult(
+            `No ${args.kind} named "${name}"${args.scope ? ` in the ${args.scope} scope` : ""}. ` +
+              "Call config_list to see what exists.",
+            true,
+          );
+        }
+        return textResult(
+          `### ${name} (${args.kind}, ${found.scope})\n${found.path}\n\n` +
+            clampBody(found.text, 24000),
+        );
+      } catch (err) {
+        return textResult(
+          `Could not read that ${args.kind}: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const configWrite = tool(
+    "config_write",
+    "Create or REPLACE an instruction or skill. Reach for this when you've worked " +
+      "out a procedure worth keeping — the build-and-verify dance for this repo, the " +
+      "steps to cut a release — so the next session is told instead of rediscovering " +
+      "it. Writing an instruction also REGISTERS it in `project.yaml`, which is the " +
+      "step that makes it actually inject; a file written any other way is inert. " +
+      "This edits COMMITTED config every teammate gets, so write project scope when " +
+      "the user asked for a project rule, and global scope for their personal habits. " +
+      "The whole file is replaced — config_read first if you mean to extend one.",
+    {
+      kind: kindArg,
+      name: z
+        .string()
+        .describe(
+          "Kebab-case identity, e.g. 'release-checklist'. Becomes the filename, and " +
+            "for a skill the /command the human types. Reusing it overwrites.",
+        ),
+      description: z
+        .string()
+        .optional()
+        .describe(
+          "One line. REQUIRED IN PRACTICE for a skill: it is the only thing the model " +
+            "sees before deciding whether to load the skill, so a vague one means the " +
+            "skill is never used. Say when to reach for it, not what it contains.",
+        ),
+      body: z
+        .string()
+        .describe(
+          "The full markdown body (no frontmatter — it's generated). For a skill, " +
+            "write the PROCEDURE: the steps, the commands, the traps.",
+        ),
+      scope: scopeArg,
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.authoring) {
+        return textResult("Config authoring is not available in this session.", true);
+      }
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      if (!name) return textResult("config_write requires a name.", true);
+      const body = typeof args.body === "string" ? args.body : "";
+      if (!body.trim()) return textResult("config_write requires a non-empty body.", true);
+      const scope = args.scope ?? (ctx.authoring.hasProject ? "project" : "global");
+      if (!isWritableScope(scope)) {
+        return textResult(
+          "The `shipped` scope is built into Dispatch and delivered by an app upgrade — " +
+            "a write here would be overwritten by the next publish. Write to `project` " +
+            "(committed in this repo) or `global` (this machine) instead.",
+          true,
+        );
+      }
+      if (scope === "project" && !ctx.authoring.hasProject) {
+        return textResult(
+          "This session has no project, so there is no `.dispatch/` to write to. " +
+            "Use scope:'global' to author for this machine instead.",
+          true,
+        );
+      }
+      if (args.kind === "skill" && !(args.description ?? "").trim()) {
+        return textResult(
+          "A skill needs a `description` — it is the only text the model sees when " +
+            "deciding whether to load the skill, so one without it is never reached for.",
+          true,
+        );
+      }
+      try {
+        const result = await ctx.authoring.write({
+          kind: args.kind,
+          scope,
+          name,
+          description: args.description,
+          body,
+        });
+        const registered = result.registered
+          ? " and registered it in project.yaml, so it injects from the next turn"
+          : args.kind === "instruction"
+            ? " (already listed in project.yaml)"
+            : "";
+        const invoke =
+          args.kind === "skill"
+            ? ` The human can now run it as \`/${name}\`, and it loads automatically when the task matches its description.`
+            : "";
+        return textResult(
+          `Wrote the ${scope} ${args.kind} "${name}" to ${result.path}${registered}.${invoke}`,
+        );
+      } catch (err) {
+        return textResult(
+          `Could not write that ${args.kind}: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const configDelete = tool(
+    "config_delete",
+    "Delete an instruction or skill so it stops being injected/offered. For an " +
+      "instruction this also drops its `project.yaml` entry — leaving one behind " +
+      "makes every later config load report a missing file. This removes COMMITTED " +
+      "config other people rely on; only do it when the user asked.",
+    {
+      kind: kindArg,
+      name: z.string().describe("The item's name, as shown by config_list."),
+      scope: scopeArg,
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.authoring) {
+        return textResult("Config authoring is not available in this session.", true);
+      }
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      if (!name) return textResult("config_delete requires a name.", true);
+      const scope = args.scope ?? (ctx.authoring.hasProject ? "project" : "global");
+      if (!isWritableScope(scope)) {
+        return textResult(
+          "The `shipped` scope is built into Dispatch and cannot be deleted at runtime.",
+          true,
+        );
+      }
+      try {
+        const removed = await ctx.authoring.remove(args.kind, name, scope);
+        return removed
+          ? textResult(`Deleted the ${scope} ${args.kind} "${name}".`)
+          : textResult(`No ${scope} ${args.kind} named "${name}".`, true);
+      } catch (err) {
+        return textResult(
+          `Could not delete that ${args.kind}: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
   /* ------------------------------------------------------------ inspection
    * Acquiring context on work that happened in ANOTHER chat used to mean asking
    * the human to paste it. These three read the store directly: find the chat,
@@ -5610,6 +5897,10 @@ ${look}` : "")
     mcpList,
     mcpAdd,
     mcpRemove,
+    configList,
+    configRead,
+    configWrite,
+    configDelete,
     chatFind,
     chatRead,
     chatSend,
@@ -5672,6 +5963,10 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   mcpList: "mcp_list",
   mcpAdd: "mcp_add",
   mcpRemove: "mcp_remove",
+  configList: "config_list",
+  configRead: "config_read",
+  configWrite: "config_write",
+  configDelete: "config_delete",
   chatFind: "chat_find",
   chatRead: "chat_read",
   chatSend: "chat_send",
@@ -5719,6 +6014,10 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   mcp_list: "mcpConfig",
   mcp_add: "mcpConfig",
   mcp_remove: "mcpConfig",
+  config_list: "authoring",
+  config_read: "authoring",
+  config_write: "authoring",
+  config_delete: "authoring",
   chat_find: "inspect",
   chat_read: "inspect",
   chat_send: "messaging",
@@ -5741,6 +6040,7 @@ export type ManagerToolBinding =
   | "prewarm"
   | "chats"
   | "mcpConfig"
+  | "authoring"
   | "inspect"
   | "messaging";
 
@@ -5806,6 +6106,12 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     mcp_list: Boolean(ctx.mcpConfig),
     mcp_add: Boolean(ctx.mcpConfig),
     mcp_remove: Boolean(ctx.mcpConfig),
+    // Authoring instructions + skills. All four together: listing without
+    // reading, or writing without deleting, is half a curation surface.
+    config_list: Boolean(ctx.authoring),
+    config_read: Boolean(ctx.authoring),
+    config_write: Boolean(ctx.authoring),
+    config_delete: Boolean(ctx.authoring),
     // Read-only cross-chat inspection. Bound together because they're one
     // workflow — find the chat, read it, then read its project's config.
     chat_find: Boolean(ctx.inspect),

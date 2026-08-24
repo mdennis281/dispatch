@@ -25,7 +25,7 @@ import type {
   HookJSONOutput,
   McpServerConfig as SdkMcpServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { Effort, PermissionMode } from "@dispatch/shared";
+import type { Effort, PermissionMode, SlashCommandInfo } from "@dispatch/shared";
 import { EffortSchema } from "@dispatch/shared";
 import type {
   HarnessEvent,
@@ -591,6 +591,35 @@ export class ClaudeSession implements HarnessSession {
       await this.query?.setMaxThinkingTokens(EFFORT_THINKING_TOKENS[effort]);
     } catch {
       /* not supported by this runtime */
+    }
+  }
+
+  /**
+   * The `/` commands this runtime accepts, from the SDK's own list — built-ins,
+   * plugin commands, and every skill it discovered (including the ones Dispatch
+   * materialized into `<cwd>/.claude/skills/`).
+   *
+   * Asked of the SDK rather than derived from disk because only the runtime
+   * knows its own built-ins, and only it knows what discovery actually found.
+   * Returns [] rather than throwing when no query is live or the CLI is too old
+   * to answer — the composer's menu then falls back to what Dispatch can see.
+   */
+  async slashCommands(): Promise<SlashCommandInfo[]> {
+    try {
+      const commands = await this.query?.supportedCommands();
+      if (!Array.isArray(commands)) return [];
+      return commands.map((c) => ({
+        name: String(c.name ?? ""),
+        description: c.description ? String(c.description) : undefined,
+        argumentHint: c.argumentHint ? String(c.argumentHint) : undefined,
+        // Everything the runtime reports is a "builtin" from Dispatch's side —
+        // the catalog re-labels anything it also found on disk, so a project
+        // skill isn't presented as something Claude Code ships.
+        source: "builtin" as const,
+        aliases: Array.isArray(c.aliases) ? c.aliases.map(String) : [],
+      })).filter((c) => c.name);
+    } catch {
+      return [];
     }
   }
 

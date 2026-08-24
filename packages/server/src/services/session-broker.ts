@@ -79,6 +79,7 @@ import type {
   ModeConfig,
   McpServerConfig,
   SkillConfig,
+  ProjectConfig,
   SubApp,
   BrowserMcpConfig,
   ContextUsage,
@@ -153,6 +154,9 @@ import {
   type SpawnedChat,
 } from "./mcp/manager-mcp.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
+import { createAuthoringEditor } from "./mcp/authoring-editor.js";
+import type { AuthoredConfigService } from "./authored-config.js";
+import type { SlashCommandService } from "./slash-commands.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
 import { bundledSkills } from "./bundled-skills.js";
 import { buildWorkflowDirective, createWorkflowGuardHook, inspectCwd } from "./workflow.js";
@@ -192,6 +196,8 @@ export function buildManagerToolsDirective(caps: {
   memory: boolean;
   runner: boolean;
   mcpConfig?: boolean;
+  /** This session can author instructions/skills → the `config_*` tools are bound. */
+  authoring?: boolean;
   /** The project opted into auto-merge → this session can land its own PRs. */
   prApproval?: boolean;
   /** Change ships through a PR here → this session opens PRs with `create_pr`. */
@@ -324,6 +330,18 @@ export function buildManagerToolsDirective(caps: {
         "an exhaustive answer rather than the most relevant one: the full inventory with " +
         "age and usage, every literal mention of a string, a fact's commit history " +
         "(including what was deliberately retired), and its near-duplicates.",
+    );
+  }
+  if (caps.authoring) {
+    lines.push(
+      "- `mcp__dispatch-config__config_list` / `config_read` / `config_write` / `config_delete` — " +
+        "author the INSTRUCTIONS and SKILLS this harness runs on. Memory records what the " +
+        "project knows; these record how work is DONE here. When you work out a procedure " +
+        "worth keeping — the verify dance, the release steps — write it as a SKILL rather " +
+        "than only explaining it: a skill loads on demand and the human can run it as " +
+        "`/<name>`, while an instruction costs prompt budget on every turn forever. " +
+        "`config_write` also registers a new instruction in `project.yaml`, which is the " +
+        "step that makes it actually inject — a file placed by hand is inert.",
     );
   }
   if (caps.runner) {
@@ -1085,6 +1103,10 @@ export interface BrokerProjectConfig {
   getAgent(id: string): AgentConfig | null;
   /** A config-sourced mode by id (mapped to the store shape), or null. */
   getMode(id: string): ModeConfig | null;
+  /** A project's whole loaded config, for the `config_*` tools' project-scope
+   *  listing (which needs `instructions` + `skills` + the resolved dirs together).
+   *  Optional so older fakes stay valid — absent just means an empty listing. */
+  getConfig?(projectId: string): ProjectConfig | null | undefined;
   /** The bounded, delimited system-prompt append for a project's authored
    *  instructions, or null when it has none (inject nothing). */
   buildInstructionsInjection(projectId: string): string | null;
@@ -1142,6 +1164,12 @@ export interface SessionBrokerOptions {
   /** Git history of the memory dir: backs `mcp__dispatch-memory__memory_history`. Optional —
    *  without it that one tool reports itself unavailable and the rest still work. */
   memoryHistory?: MemoryHistoryService;
+  /** App-level (shipped + user-global) instructions and skills, and the write
+   *  surface behind `mcp__dispatch-config__config_write`. Optional — without it
+   *  the `config_*` tools are simply not offered. */
+  authored?: AuthoredConfigService;
+  /** The composer's `/` menu — given each live session's command list to cache. */
+  slashCommands?: SlashCommandService;
   /** GitHub control plane: backs `mcp__dispatch-github__watch_pr`'s checks/threads/merge polls. */
   github?: GitHubService;
   /** SubApp runner: backs `mcp__dispatch-workspace__run_subapp` (launch apps + get a URL). */
@@ -1851,6 +1879,8 @@ export class SessionBroker {
   private readonly terminals?: TerminalService;
   private readonly memory?: MemoryService;
   private readonly memoryHistory?: MemoryHistoryService;
+  private readonly authored?: AuthoredConfigService;
+  private readonly slashCommands?: SlashCommandService;
   private readonly github?: GitHubService;
   private readonly runner?: RunnerService;
   private readonly worktrees?: WorktreeService;
@@ -1966,6 +1996,8 @@ export class SessionBroker {
     this.terminals = opts.terminals;
     this.memory = opts.memory;
     this.memoryHistory = opts.memoryHistory;
+    this.authored = opts.authored;
+    this.slashCommands = opts.slashCommands;
     this.github = opts.github;
     this.runner = opts.runner;
     this.worktrees = opts.worktrees;
@@ -3274,6 +3306,53 @@ export class SessionBroker {
     session.outbox = [];
   }
 
+  /**
+   * Hand the `/`-menu catalog this session's own command list.
+   *
+   * Two live shapes, same as `sessionPids`: a Claude chat holds the SDK `Query`
+   * directly (the broker short-circuits the harness seam for it), while every
+   * other provider goes through a `HarnessSession`. Both are tried; whichever
+   * exists answers.
+   *
+   * CALLED FROM BOTH INIT PATHS for that reason — `handleHarnessEvent` for a
+   * neutral-seam provider and `handleMessage` for the legacy Claude loop. Wiring
+   * only the seam left the `session.query` branch below unreachable, so on a
+   * stock install (every chat `harnessKind: "claude"`) the menu's built-in half
+   * never populated and the UI's "built-in commands appear once this chat has
+   * run a turn" was a promise nothing could keep.
+   *
+   * Never throws and never blocks — a menu one entry short is not worth failing
+   * a turn over.
+   */
+  private async snapshotSlashCommands(session: LiveSession): Promise<void> {
+    if (!this.slashCommands) return;
+    try {
+      const fromHarness = await session.harnessSession?.slashCommands?.();
+      if (fromHarness?.length) {
+        this.slashCommands.recordRuntimeCommands(fromHarness, session.projectId);
+        return;
+      }
+      const raw = await session.query?.supportedCommands?.();
+      if (!Array.isArray(raw)) return;
+      this.slashCommands.recordRuntimeCommands(
+        raw
+          .map((c) => ({
+            name: String(c?.name ?? ""),
+            description: c?.description ? String(c.description) : undefined,
+            argumentHint: c?.argumentHint ? String(c.argumentHint) : undefined,
+            source: "builtin" as const,
+            aliases: Array.isArray(c?.aliases) ? c.aliases.map(String) : [],
+          }))
+          .filter((c) => c.name),
+        // Keyed by project: the list includes the skills this session
+        // discovered, which are this project's — see `slash-commands.ts`.
+        session.projectId,
+      );
+    } catch {
+      /* the menu falls back to what Dispatch can derive from disk */
+    }
+  }
+
   /** Start a non-legacy provider through the neutral harness seam. */
   private async startHarnessSession(session: LiveSession): Promise<void> {
     if (!this.harnesses) {
@@ -3514,6 +3593,11 @@ export class SessionBroker {
             mcpServers: event.mcpServers,
           },
         });
+        // Snapshot the runtime's own `/` command list — the only source for the
+        // built-ins the composer's menu offers, and one a chat that has never
+        // run cannot obtain for itself. Fire-and-forget: this is a menu, and a
+        // slow or unsupported answer must not hold up the turn.
+        void this.snapshotSlashCommands(session);
         return;
       case "delta":
         session.streamAssistantId = event.id;
@@ -3748,6 +3832,12 @@ export class SessionBroker {
           // Learn this model's context window now that the subprocess is live, so
           // the very next result row carries the correct meter denominator.
           void this.refreshContextWindow(session);
+          // …and its `/` command list. This branch, not the neutral-seam one, is
+          // where a CLAUDE chat's init lands — `startQuery` short-circuits the
+          // harness seam for the default runtime — so the snapshot has to be
+          // taken in BOTH places or the menu's built-in half never populates on
+          // a stock install.
+          void this.snapshotSlashCommands(session);
         }
         // A backgrounded task (async `Agent` spawn, backgrounded `Bash`) settled.
         // This is the ONLY per-task completion signal in the stream — the task's
@@ -5271,6 +5361,7 @@ export class SessionBroker {
         memory: Boolean(this.memory && session.projectId),
         runner: Boolean(this.runner && this.worktrees),
         mcpConfig: Boolean(session.projectId),
+        authoring: Boolean(this.authored),
         prApproval: canApprovePr,
         prCreate: canCreatePr,
         prReviewers: workflow.pr.reviewers,
@@ -5420,6 +5511,24 @@ export class SessionBroker {
     }
 
     if (mode?.instructions) appends.push(mode.instructions);
+
+    // App-level instructions (Dispatch-shipped, then this machine's global dir)
+    // go in BEFORE the project's own — broadest first, so a project instruction
+    // is the last word on anything the two disagree about. Best-effort: a read
+    // failure must never block a turn from starting.
+    if (this.authored) {
+      try {
+        const globalInstructions = await this.authored.buildInjection();
+        if (globalInstructions) {
+          appends.push(globalInstructions);
+          for (const id of await this.authored.listInjected()) {
+            this.recordUse(session, { category: "instruction", identifier: id });
+          }
+        }
+      } catch {
+        /* no app-level instructions this turn */
+      }
+    }
 
     // Inject the project's authored custom instructions from its
     // `.dispatch/` config — a clearly-delimited, bounded section alongside
@@ -5866,6 +5975,20 @@ export class SessionBroker {
         // agent adds while working in a throwaway worktree has to land in the
         // real working copy or it vanishes with the worktree.
         mcpConfig: project?.repoPath ? createMcpConfigEditor(project.repoPath) : undefined,
+        // Authoring is offered even without a project: the `global` scope is a
+        // machine-wide dir that exists regardless, and a projectless session
+        // still benefits from reading what's shipped. `hasProject` is what
+        // decides the default scope and refuses a project-scoped write.
+        authoring: this.authored
+          ? createAuthoringEditor({
+              authored: this.authored,
+              repoPath: project?.repoPath ?? null,
+              getConfig: () =>
+                projectId && this.projectConfig?.getConfig
+                  ? (this.projectConfig.getConfig(projectId) ?? null)
+                  : null,
+            })
+          : undefined,
         // The escape hatch for a guard that has stranded this chat. Bound ONLY
         // where the guard actually refuses things (`guard: "deny"`) — on `warn`
         // or `off` nothing is blocked, so a tool for un-blocking it would be an
@@ -5930,7 +6053,13 @@ export class SessionBroker {
     if (cwd) {
       const projectSkills =
         this.projectConfig && projectId ? this.projectConfig.getSkills(projectId) : [];
-      const skills = [...projectSkills, ...bundledSkills()];
+      // Three scopes, most-specific first — materialization skips a target dir
+      // that already exists, so the FIRST writer of a name owns it. That is how
+      // `project > global > shipped` precedence is enforced: not by a comparison
+      // anywhere, just by this order. `appSkills()` supplies the last two.
+      const skills = this.authored
+        ? [...projectSkills, ...this.authored.appSkills()]
+        : [...projectSkills, ...bundledSkills()];
       if (skills.length) {
         try {
           session.materializedSkillDirs = await materializeSkills(

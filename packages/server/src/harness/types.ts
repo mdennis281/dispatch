@@ -45,6 +45,7 @@ import type {
   McpServerConfig,
   ImageRef,
   HarnessKind,
+  SlashCommandInfo,
 } from "@dispatch/shared";
 
 export type { HarnessKind };
@@ -496,6 +497,17 @@ export interface HarnessSession {
   resolveQuestion(requestId: string, answers: HarnessQuestionAnswer[]): void;
   /** The context window of the model currently running, when knowable. */
   contextWindow(): Promise<number | undefined>;
+  /**
+   * Every `/` command this runtime accepts — built-ins, plugin commands and the
+   * skills it discovered — for the composer's command menu.
+   *
+   * Only a LIVE session can answer, which is exactly why the answer is worth
+   * caching: a brand-new chat has no session yet, and the built-in list does not
+   * vary by project. Optional because a harness may have no such concept; a
+   * missing implementation means the menu shows only what Dispatch can derive
+   * from disk (see `slash-commands.ts`).
+   */
+  slashCommands?(): Promise<SlashCommandInfo[]>;
   /**
    * Pid of this session's runtime subprocess, when the harness spawns one it
    * can name — the ROOT of the chat's process tree, since every MCP server the
