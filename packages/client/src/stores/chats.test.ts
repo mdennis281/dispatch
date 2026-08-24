@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { Chat, PrRecord } from "@dispatch/shared";
+import { spawnedPurposeLabel, type Chat, type PrRecord } from "@dispatch/shared";
 import {
   useChats,
   chatsForProject,
   countProjectAgents,
   buildChatTree,
   reviewTargetKey,
+  spawnParentId,
   statusIsActivity,
 } from "./chats.js";
 
@@ -238,7 +239,7 @@ describe("buildChatTree — reviewers file under the chat that opened the PR", (
   });
 
   const shape = (bs: ReturnType<typeof buildChatTree>) =>
-    bs.map((b) => [b.chat.id, ids(b.reviews)] as const);
+    bs.map((b) => [b.chat.id, ids(b.children)] as const);
 
   it("nests every round, not just the one the registry remembers", () => {
     // The bug this exists for: `reviewAgent.chatId` holds ONE round, so three of
@@ -303,6 +304,145 @@ describe("buildChatTree — reviewers file under the chat that opened the PR", (
     const tree = buildChatTree([self], {}, { "o/r#7": pr("o/r#7", 7, "self") });
 
     expect(shape(tree)).toEqual([["self", []]]);
+  });
+});
+
+describe("buildChatTree — spawned chats file under the chat that spawned them", () => {
+  const spawned = (id: string, parentChatId: string, updatedAt = 1): Chat => ({
+    ...chat(id, "p1", updatedAt),
+    parentChatId,
+    purpose: { kind: "spawned", label: spawnedPurposeLabel(parentChatId) },
+  });
+
+  const shape = (bs: ReturnType<typeof buildChatTree>) =>
+    bs.map((b) => [b.chat.id, ids(b.children)] as const);
+
+  it("nests every chat one parent spawned", () => {
+    // The bug this exists for: five chats spawned from one parent sat in the
+    // sidebar as five unrelated top-level rows.
+    const chats = [
+      chat("parent", "p1", 100),
+      spawned("s5", "parent", 50),
+      spawned("s4", "parent", 40),
+      spawned("s3", "parent", 30),
+      spawned("s2", "parent", 20),
+      spawned("s1", "parent", 10),
+    ];
+
+    expect(shape(buildChatTree(chats, {}, {}))).toEqual([
+      ["parent", ["s5", "s4", "s3", "s2", "s1"]],
+    ]);
+  });
+
+  it("reads a pre-`parentChatId` chat's parent back out of its purpose label", () => {
+    // The chats already on disk when this shipped carry the parent only in the
+    // sentence `container.ts` wrote for the sidebar.
+    const legacy: Chat = {
+      ...chat("legacy", "p1", 5),
+      purpose: { kind: "spawned", label: "Spawned by chat parent" },
+    };
+
+    expect(shape(buildChatTree([chat("parent", "p1", 100), legacy], {}, {}))).toEqual([
+      ["parent", ["legacy"]],
+    ]);
+  });
+
+  it("leaves a detached spawn at the top level", () => {
+    // `spawn_chat({ detached: true })` declines to write `parentChatId`, and the
+    // legacy label parse must not put back what the flag took away.
+    //
+    // The label here is the one `container.ts` ACTUALLY writes for a detached
+    // spawn. An earlier version of this test used `{ kind: "spawned" }` with no
+    // label — a shape nothing in the repo produces, since the only writer of
+    // that kind always sets one — and so it passed while the real thing nested
+    // anyway through the legacy parse.
+    const detached: Chat = {
+      ...chat("free", "p1", 50),
+      purpose: { kind: "spawned", label: spawnedPurposeLabel("parent", true) },
+    };
+
+    expect(shape(buildChatTree([chat("parent", "p1", 100), detached], {}, {}))).toEqual([
+      ["parent", []],
+      ["free", []],
+    ]);
+  });
+
+  it("does not read a parent out of a label that only starts like the legacy one", () => {
+    // Guards the anchor directly: the detached label is the legacy sentence plus
+    // a suffix, so an unanchored pattern would match it and silently re-nest
+    // every chat that asked not to be nested.
+    expect(spawnParentId({ ...chat("x", "p1"), purpose: { kind: "spawned" } } as Chat)).toBeNull();
+    expect(
+      spawnParentId({
+        ...chat("x", "p1"),
+        purpose: { kind: "spawned", label: spawnedPurposeLabel("parent", true) },
+      } as Chat),
+    ).toBeNull();
+    expect(
+      spawnParentId({
+        ...chat("x", "p1"),
+        purpose: { kind: "spawned", label: spawnedPurposeLabel("parent") },
+      } as Chat),
+    ).toBe("parent");
+  });
+
+  it("leaves a spawn at the top level when its parent isn't here", () => {
+    // Cross-project, or the parent was deleted. Hiding it inside a row that
+    // doesn't exist would delete it from the sidebar outright.
+    const orphan = spawned("orphan", "elsewhere", 50);
+
+    expect(shape(buildChatTree([chat("a", "p1", 100), orphan], {}, {}))).toEqual([
+      ["a", []],
+      ["orphan", []],
+    ]);
+  });
+
+  it("files a grandchild under the grandparent, beside its own parent", () => {
+    // A folded chat can spawn too. Nesting is ONE level, so filing the grandchild
+    // under a row that is itself hidden would render it nowhere at all.
+    const chats = [
+      chat("root", "p1", 100),
+      spawned("child", "root", 50),
+      spawned("grandchild", "child", 60),
+    ];
+
+    expect(shape(buildChatTree(chats, {}, {}))).toEqual([
+      ["root", ["child", "grandchild"]],
+    ]);
+  });
+
+  it("keeps both rows visible when two chats claim each other", () => {
+    // Corrupt data only, but the failure has no visible symptom: each is the
+    // other's child, so both are hidden and the pair vanishes from the sidebar.
+    const a = spawned("a", "b", 100);
+    const b = spawned("b", "a", 90);
+
+    expect(shape(buildChatTree([a, b], {}, {}))).toEqual([
+      ["a", []],
+      ["b", []],
+    ]);
+  });
+
+  it("ranks a branch by a spawned child's clock, so a live child lifts its parent", () => {
+    const chats = [chat("busy", "p1", 500), chat("stale", "p1", 10), spawned("s", "stale", 900)];
+
+    expect(shape(buildChatTree(chats, {}, {}))).toEqual([["stale", ["s"]], ["busy", []]]);
+  });
+
+  it("folds a reviewer and a spawned chat into the same branch", () => {
+    // The two routes are independent — one joins through the PR, one by id —
+    // and a chat that opened a PR and then spawned a helper has both.
+    const reviewer: Chat = {
+      ...chat("r", "p1", 60),
+      reviewOf: "o/r#7",
+      purpose: { kind: "pr:review" },
+    };
+    const chats = [chat("parent", "p1", 100), reviewer, spawned("s", "parent", 50)];
+    const tree = buildChatTree(chats, {}, {
+      "o/r#7": { key: "o/r#7", number: 7, chatId: "parent" } as PrRecord,
+    });
+
+    expect(shape(tree)).toEqual([["parent", ["r", "s"]]]);
   });
 });
 

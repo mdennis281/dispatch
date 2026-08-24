@@ -624,6 +624,41 @@ export const ChatPurposeSchema = z.object({
 });
 export type ChatPurpose = z.infer<typeof ChatPurposeSchema>;
 
+/**
+ * The `purpose.label` written for a chat another chat spawned, and its inverse.
+ *
+ * The pair lives together, in shared, because the SERVER writes that sentence
+ * and the CLIENT reads a parent id back out of it — and the reading is what
+ * decides whether the row nests. Split across two packages they are two prose
+ * literals that agree by luck; the day they stop agreeing, `detached` silently
+ * stops working and nothing fails except the layout.
+ *
+ * The parse is a LEGACY path. It exists for the chats spawned before
+ * {@link ChatSchema}'s `parentChatId` did, whose only trace of a parent is this
+ * sentence, and a chat written today always carries the field instead.
+ *
+ * A DETACHED chat is why the label has two forms. It arrives with no
+ * `parentChatId` — that is how it says it wants no parent — which is exactly
+ * what a pre-field chat looks like, so writing it the plain sentence would let
+ * the legacy parse put back the edge the flag just removed. It still names its
+ * parent, because losing that trace helps nobody; it just says so in a shape
+ * {@link parseSpawnedParent} refuses.
+ */
+export function spawnedPurposeLabel(parentChatId: string, detached = false): string {
+  return detached
+    ? `Spawned by chat ${parentChatId} (detached)`
+    : `Spawned by chat ${parentChatId}`;
+}
+
+/** The parent id in a {@link spawnedPurposeLabel}, or null if it names none. */
+export function parseSpawnedParent(label: string | undefined): string | null {
+  // Anchored at BOTH ends on purpose: the detached form is the nesting form plus
+  // a suffix, so an open-ended pattern matches it and re-nests every chat that
+  // asked not to be. That is the whole mechanism, not a formatting preference.
+  const m = /^Spawned by chat (\S+)$/.exec(label ?? "");
+  return m?.[1] ?? null;
+}
+
 /** A chat: the crown-jewel session. May own many worktrees/PRs over its life. */
 export const ChatSchema = z.object({
   id: z.string(),
@@ -677,6 +712,24 @@ export const ChatSchema = z.object({
    * they sat at the sidebar's top level as four unrelated rows.
    */
   reviewOf: z.string().optional(),
+  /**
+   * The chat that spawned this one, when an agent created it via
+   * `mcp__dispatch-chat__spawn_chat`.
+   *
+   * The GENERAL parent edge, where {@link reviewOf} is the PR-shaped special
+   * case. A reviewer is joined to its parent THROUGH the pull request
+   * (`reviewOf` → `PrRecord.chatId`) because that is the only edge that
+   * survives a chat being spawned by the registry rather than by another chat.
+   * A spawned chat has no PR to route through, so it needs the direct id — and
+   * without it the sidebar had nowhere to file one, which is why five chats
+   * spawned from one parent sat at the top level as five unrelated rows.
+   *
+   * Absent means top-level, which covers both a human's own chat and a spawn
+   * the agent explicitly asked to detach (`spawn_chat({ detached: true })`).
+   * Display-only: nothing about how a session RUNS reads this, so a stale or
+   * dangling id costs a row its indentation and nothing else.
+   */
+  parentChatId: z.string().optional(),
   /** Last-known live status (authoritative source is the SessionBroker). */
   status: ChatStatusSchema.optional(),
   /** Why this chat exists, when the app spawned it for a job. Display-only. */

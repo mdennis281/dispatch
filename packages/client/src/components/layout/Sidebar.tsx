@@ -45,6 +45,7 @@ import {
   useChats,
   useProjectChatTree,
   useProjectAgentCounts,
+  isReviewerChat,
   reviewTargetKey,
   type ChatBranch,
   type ProjectAgentCounts,
@@ -67,7 +68,7 @@ import { actions } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate, relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
-import { foldedReviewsLabel } from "./reviewLabel.js";
+import { foldedChildrenLabel } from "./reviewLabel.js";
 import { DeleteChatDialog } from "../chat/DeleteChatDialog.js";
 import { useChatRename } from "../chat/useChatRename.js";
 import { BranchWorktreePicker } from "../panels/BranchWorktreePicker.js";
@@ -389,12 +390,12 @@ function ChatBranchRows({
   now: number;
   onSelect: (id: string) => void;
 }) {
-  const { chat, reviews } = branch;
+  const { chat, children } = branch;
   const [expanded, setExpanded] = useState(false);
   // A branch never hides the transcript that's on screen. The PRs panel links
   // straight to a reviewer chat, and landing there with its parent collapsed
   // left the sidebar with no row for what you were looking at.
-  const open = expanded || reviews.some((r) => r.id === activeChatId);
+  const open = expanded || children.some((c) => c.id === activeChatId);
 
   return (
     <div data-flip-id={chat.id}>
@@ -403,31 +404,43 @@ function ChatBranchRows({
         active={chat.id === activeChatId}
         needsInput={attentionByChat.has(chat.id)}
         now={now}
-        runtimeMs={branchRuntimeMs(runtimeByChat, chat.id, reviews)}
-        reviews={reviews}
-        reviewsNeedInput={reviews.some((r) => attentionByChat.has(r.id))}
+        runtimeMs={branchRuntimeMs(runtimeByChat, chat.id, children)}
+        // `childChats`, not `children`: React reads a `children` prop as the
+        // element's body, so passing the list under that name would put it one
+        // typo away from being rendered instead of counted.
+        childChats={children}
+        childrenNeedInput={children.some((c) => attentionByChat.has(c.id))}
         expanded={open}
-        onToggleReviews={() => setExpanded((v) => !v)}
+        onToggleChildren={() => setExpanded((v) => !v)}
         onClick={() => onSelect(chat.id)}
       />
-      {open && reviews.length > 0 && (
+      {open && children.length > 0 && (
         // The thread rail is drawn once, absolutely, rather than as a border on
         // a padded wrapper: the wrapper's padding would inset the rows, and a
-        // reviewer row's highlight has to reach both edges exactly like every
+        // child row's highlight has to reach both edges exactly like every
         // other row's. Indentation is the row's own left padding instead.
         <div className="relative">
           <span className="pointer-events-none absolute inset-y-0 left-4 w-px bg-line-soft" />
-          {reviews.map((review) => (
-            <ReviewRow
-              key={review.id}
-              chat={review}
-              active={review.id === activeChatId}
-              needsInput={attentionByChat.has(review.id)}
-              now={now}
-              runtimeMs={runtimeByChat[review.id] ?? 0}
-              onClick={() => onSelect(review.id)}
-            />
-          ))}
+          {children.map((child) => {
+            const props = {
+              chat: child,
+              active: child.id === activeChatId,
+              needsInput: attentionByChat.has(child.id),
+              now,
+              runtimeMs: runtimeByChat[child.id] ?? 0,
+              onClick: () => onSelect(child.id),
+            };
+            // Two child rows, because they have different things to say. A
+            // reviewer's identity is the PR it read and the verdict it left, and
+            // neither is in its title; a spawned chat's identity IS its title,
+            // and it has no PR to summarise. One row doing both would spend its
+            // width on a `#` column that half the children must leave blank.
+            return isReviewerChat(child) ? (
+              <ReviewRow key={child.id} {...props} />
+            ) : (
+              <SpawnRow key={child.id} {...props} />
+            );
+          })}
         </div>
       )}
     </div>
@@ -467,10 +480,10 @@ function ChatRow({
   needsInput,
   now,
   runtimeMs,
-  reviews,
-  reviewsNeedInput,
+  childChats,
+  childrenNeedInput,
   expanded,
-  onToggleReviews,
+  onToggleChildren,
   onClick,
 }: {
   chat: Chat;
@@ -478,13 +491,13 @@ function ChatRow({
   needsInput: boolean;
   /** Shared "current time" tick so every row ages in lockstep. */
   now: number;
-  /** Agent time under this chat — its own, its subagents', its reviewers'. */
+  /** Agent time under this chat — its own, its subagents', its children's. */
   runtimeMs: number;
-  /** Reviewer chats folded under this row. Usually empty. */
-  reviews: Chat[];
-  reviewsNeedInput: boolean;
+  /** Reviewer and spawned chats folded under this row. Usually empty. */
+  childChats: Chat[];
+  childrenNeedInput: boolean;
   expanded: boolean;
-  onToggleReviews: () => void;
+  onToggleChildren: () => void;
   onClick: () => void;
 }) {
   const prSettled = useChats((s) => s.prSettled[chat.id] ?? false);
@@ -499,11 +512,11 @@ function ChatRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const rename = useChatRename(chat);
 
-  const reviewCount = `${reviews.length} review${reviews.length === 1 ? "" : "s"}`;
+  const childCount = `${childChats.length} chat${childChats.length === 1 ? "" : "s"}`;
 
   // OS processes this branch is holding — the session subprocess, every MCP
   // server under it, and any background shell it started, summed across the
-  // reviewer chats folded into the row. Per-row subscription like `activityAt`
+  // chats folded into the row. Per-row subscription like `activityAt`
   // above: one poll updates every row, and only the rows whose number moved
   // re-render.
   // `useMemo` over the STORE'S OWN reference, never a selector that computes.
@@ -515,14 +528,14 @@ function ChatRow({
   // trap `useProjectChatTree` documents, and `stores/prs.ts` explains at length.
   const procByChat = useChatProcesses((s) => s.byChat);
   const procs = useMemo(
-    () => branchProcessCount(procByChat, chat.id, reviews),
-    [procByChat, chat.id, reviews],
+    () => branchProcessCount(procByChat, chat.id, childChats),
+    [procByChat, chat.id, childChats],
   );
   const processCount = procs.session + procs.shells;
   const killProcesses = useChatProcesses((s) => s.kill);
   const [killing, setKilling] = useState(false);
   const branchRunning =
-    chat.status === "running" || reviews.some((r) => r.status === "running");
+    chat.status === "running" || childChats.some((c) => c.status === "running");
   // A LABEL, not an explanation. These sit on hover over a 24px button in a
   // narrow column, and a sentence there is a paragraph floating over the
   // sidebar — the rationale belongs in Settings → Context, which is where the
@@ -536,15 +549,16 @@ function ChatRow({
     if (killing) return;
     setKilling(true);
     try {
-      await killProcesses(branchChatIds(chat.id, reviews));
+      await killProcesses(branchChatIds(chat.id, childChats));
     } finally {
       setKilling(false);
     }
   };
-  // Which PRs those reviews belong to, for the two places that stand in for the
-  // expanded rows. The runtime tooltip keeps the plain count — it is about where
-  // the time went, and a per-PR breakdown there is noise.
-  const reviewsByPr = foldedReviewsLabel(reviews);
+  // What is folded under here, for the two places that stand in for the expanded
+  // rows: reviewers broken down by PR, spawned chats counted. The runtime tooltip
+  // keeps the plain count — it is about where the time went, and a per-PR
+  // breakdown there is noise.
+  const foldedLabel = foldedChildrenLabel(childChats);
 
   return (
     // `overflow-hidden` is what lets the action tray start fully off the row and
@@ -610,14 +624,17 @@ function ChatRow({
         <span className="-ml-1 flex shrink-0 flex-col items-center [&_svg]:size-2.5">
           <Tooltip
             side="right"
-            label={childChatTitle(reviews, reviewsNeedInput)}
+            label={childChatTitle(childChats, childrenNeedInput)}
             triggerClassName={cn(
               "px-1.5 py-0.5 transition-colors duration-300",
-              childChatTint(reviews, reviewsNeedInput),
+              childChatTint(childChats, childrenNeedInput),
             )}
           >
             <MessagesSquare aria-hidden />
-            <MarkerLabel text={childChatTitle(reviews, reviewsNeedInput)} when={reviews.length > 0} />
+            <MarkerLabel
+              text={childChatTitle(childChats, childrenNeedInput)}
+              when={childChats.length > 0}
+            />
           </Tooltip>
           <Tooltip
             side="right"
@@ -656,9 +673,9 @@ function ChatRow({
                 <span
                   className="text-accent-2"
                   title={
-                    reviews.length
+                    childChats.length
                       ? `${formatDuration(runtimeMs)} of agent time — this chat, its ` +
-                        `subagents, and ${reviewCount}`
+                        `subagents, and ${childCount}`
                       : `${formatDuration(runtimeMs)} of agent time — this chat and its subagents`
                   }
                 >
@@ -757,13 +774,13 @@ function ChatRow({
                 <Power />
               </IconButton>
             )}
-            {reviews.length > 0 && (
+            {childChats.length > 0 && (
               <IconButton
                 size="sm"
                 active={expanded}
                 aria-expanded={expanded}
-                tip={expanded ? `Hide ${reviewsByPr}` : `Show ${reviewsByPr}`}
-                onClick={onToggleReviews}
+                tip={expanded ? `Hide ${foldedLabel}` : `Show ${foldedLabel}`}
+                onClick={onToggleChildren}
               >
                 <MessagesSquare />
               </IconButton>
@@ -894,6 +911,95 @@ function reviewSummary(chat: Chat, record: PrRecord | undefined): string | null 
   return n ? `${n} comment${n === 1 ? "" : "s"}` : "no comments";
 }
 
+/**
+ * A folded row for a chat another chat SPAWNED — title, status, age.
+ *
+ * Deliberately not `ReviewRow` with the PR bits blanked. That row spends its
+ * first column on `#140` and its middle on what the review posted, and a spawned
+ * chat has neither: it would show `PR` over an empty column for every row, which
+ * is the layout claiming a fact it does not have. What identifies a spawned chat
+ * is the title its brief was given, so the title is what gets the width.
+ *
+ * Everything else is `ReviewRow`'s, on purpose — the same left padding so both
+ * kinds line up against the one thread rail, the same full-bleed highlight, the
+ * same status glyph and pulse, the same age-or-attention-dot at the right edge.
+ * A branch holding one of each should read as one list, not two.
+ */
+function SpawnRow({
+  chat,
+  active,
+  needsInput,
+  now,
+  runtimeMs,
+  onClick,
+}: {
+  chat: Chat;
+  active: boolean;
+  needsInput: boolean;
+  now: number;
+  runtimeMs: number;
+  onClick: () => void;
+}) {
+  const activityAt = useChats(
+    (s) => s.lastActivity[chat.id] ?? chat.updatedAt ?? chat.createdAt,
+  );
+  const meta = statusMeta(chat.status);
+
+  return (
+    <button
+      data-testid="spawn-row"
+      onClick={onClick}
+      title={chat.title}
+      className={cn(
+        // Indented by PADDING, not by a margin — the highlight still runs the
+        // full width of the sidebar, exactly like the row it hangs off.
+        "relative flex w-full items-center gap-2 py-1 pl-7 pr-2.5 text-left transition-colors",
+        active ? "bg-accent-ghost/70" : "hover:bg-hover",
+      )}
+    >
+      <ActiveRail active={active} />
+      <span
+        className={cn(
+          "flex size-3.5 shrink-0 items-center justify-center [&_svg]:size-3",
+          toneText(meta.tone),
+          "transition-colors duration-300",
+          meta.pulse && "animate-pulse",
+        )}
+      >
+        <MessagesSquare />
+      </span>
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate text-2xs",
+          active ? "text-primary" : "text-secondary",
+        )}
+      >
+        <TitleText title={chat.title} />
+      </span>
+      {/* The status word, which the reviewer row spends on its verdict instead.
+          Dimmer than the title: on a row whose point is WHICH chat this is, the
+          title has to win, and five children all saying "Idle" in full strength
+          is a column of noise beside five titles that differ. */}
+      <span className={cn("shrink-0 text-2xs", toneText(meta.tone), "opacity-80")}>
+        {meta.label}
+      </span>
+      {runtimeMs > 0 && (
+        <span
+          className="shrink-0 text-2xs text-accent-2"
+          title={`${formatDuration(runtimeMs)} of agent time`}
+        >
+          {formatDuration(runtimeMs)}
+        </span>
+      )}
+      {needsInput ? (
+        <StatusDot tone="warn" pulse size={5} />
+      ) : (
+        <span className="shrink-0 text-2xs text-muted">{relTimeShort(activityAt, now)}</span>
+      )}
+    </button>
+  );
+}
+
 /* -------------------------------------------------------------- top-level nav */
 
 /** A chat-independent, project-scoped surface toggle (Memory, Source Control). */
@@ -982,7 +1088,7 @@ export function Sidebar() {
 
   const project = useActiveProject();
   const branches = useProjectChatTree(project?.id ?? null);
-  const chatCount = branches.reduce((n, b) => n + 1 + b.reviews.length, 0);
+  const chatCount = branches.reduce((n, b) => n + 1 + b.children.length, 0);
   const runtimeByChat = useChatRuntime((s) => s.byChat);
   const refreshRuntime = useChatRuntime((s) => s.refresh);
   const refreshProcesses = useChatProcesses((s) => s.refresh);

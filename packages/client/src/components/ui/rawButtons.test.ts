@@ -78,8 +78,16 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * contenteditable first and put the caret back at 0, dropping the inserted
  * command behind the text it replaced. `MenuItem` is an `onClick` control with
  * no way to express either.
+ *
+ * 88 → 89: the sidebar's `SpawnRow`, the folded row for a chat another chat
+ * spawned. Same argument as `ReviewRow` two entries up and in the same file — a
+ * full-width row of a glyph, a title that truncates, a status word and an age
+ * pinned right, where `Button` is `h-6 justify-center whitespace-nowrap` with
+ * its own padding. It is a second row rather than `ReviewRow` with the PR bits
+ * blanked because the two have different things to say: a reviewer's identity is
+ * the `#140` it read and the verdict it left, and a spawned chat has neither.
  */
-const BASELINE = 88;
+const BASELINE = 89;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

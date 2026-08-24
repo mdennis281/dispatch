@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { isPrSettledIdle, type Chat, type PRRef } from "./domain.js";
+import {
+  isPrSettledIdle,
+  parseSpawnedParent,
+  spawnedPurposeLabel,
+  type Chat,
+  type PRRef,
+} from "./domain.js";
 
 type ChatFacts = Pick<Chat, "status" | "prs" | "updatedAt" | "lastUserMessageAt">;
 
@@ -71,5 +77,32 @@ describe("isPrSettledIdle", () => {
       const c = chat({ prs: [legacy, MERGED] });
       expect(isPrSettledIdle(c)).toBe(true);
     });
+  });
+});
+
+describe("spawnedPurposeLabel / parseSpawnedParent — the legacy parent sentence", () => {
+  it("round-trips a nesting spawn, so the pre-`parentChatId` chats still fold", () => {
+    expect(parseSpawnedParent(spawnedPurposeLabel("BlcITUWMEUcfDNkDb-bkb"))).toBe(
+      "BlcITUWMEUcfDNkDb-bkb",
+    );
+  });
+
+  it("REFUSES to round-trip a detached spawn", () => {
+    // The whole mechanism. A detached chat is persisted with no `parentChatId`,
+    // which is indistinguishable from a chat spawned before that field existed —
+    // so if this parsed, the legacy path would put back the edge `detached: true`
+    // just removed and the flag would change nothing but where the id is read
+    // from. The pair is tested together because they are only correct together.
+    const label = spawnedPurposeLabel("parent", true);
+    expect(label).toContain("parent");
+    expect(parseSpawnedParent(label)).toBeNull();
+  });
+
+  it("names no parent for a label it does not recognise", () => {
+    expect(parseSpawnedParent(undefined)).toBeNull();
+    expect(parseSpawnedParent("")).toBeNull();
+    expect(parseSpawnedParent("Reviewing PR #7 in o/r")).toBeNull();
+    // Anchored at the FRONT too: a sentence that merely ends like one.
+    expect(parseSpawnedParent("Re-spawned by chat parent")).toBeNull();
   });
 });

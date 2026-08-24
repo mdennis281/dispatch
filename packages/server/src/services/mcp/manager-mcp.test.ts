@@ -3796,6 +3796,7 @@ function spawnArgs(over: Partial<SpawnChatRequest> & { prompt: string }) {
     effort: undefined,
     model: undefined,
     reason: undefined,
+    detached: undefined,
     ...over,
   };
 }
@@ -3908,6 +3909,26 @@ describe("manager-mcp — spawn_chat", () => {
     const res = await spawnChat.handler(spawnArgs({ prompt: "go" }), {});
 
     expect(resultText(res)).toContain("auto-approved");
+  });
+
+  it("nests by default, and passes `detached` through when the agent opts out", async () => {
+    // Opt-OUT, not opt-in: a chat spawned BY a chat is a child of it, and
+    // defaulting to detached is what put five spawned chats in the sidebar as
+    // five unrelated top-level rows. The flag has to reach `spawn` verbatim —
+    // it is the only thing that decides whether `parentChatId` gets written.
+    const chats = fakeChats({});
+    const { spawnChat } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      chats: chats.binding,
+    });
+
+    await spawnChat.handler(spawnArgs({ prompt: "go" }), {});
+    await spawnChat.handler(spawnArgs({ prompt: "go", detached: true }), {});
+
+    expect(chats.calls.spawned[0]?.detached).toBe(false);
+    expect(chats.calls.spawned[1]?.detached).toBe(true);
   });
 
   it("exposes no argument that skips the consent gate", () => {
