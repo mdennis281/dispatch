@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronsUpDown,
   Plus,
@@ -68,6 +68,7 @@ import { actions } from "../../lib/actions.js";
 import { cn } from "../../lib/cn.js";
 import { midTruncate, relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
+import { useLongPress } from "../../lib/useLongPress.js";
 import { foldedChildrenLabel } from "./reviewLabel.js";
 import { DeleteChatDialog } from "../chat/DeleteChatDialog.js";
 import { useChatRename } from "../chat/useChatRename.js";
@@ -502,6 +503,36 @@ function ChatRow({
 }) {
   const prSettled = useChats((s) => s.prSettled[chat.id] ?? false);
   const meta = statusMeta(chat.status, prSettled);
+
+  // The action tray, when it was asked for by a HOLD rather than by hovering.
+  //
+  // A touch device has no hover, and the tray used to answer that by being
+  // permanently out on a coarse pointer — a 32px gutter overhanging every title
+  // in the list, on the screen with the least width to spare, and covering the
+  // one part of the row you read. So on touch it now arrives the way a phone
+  // asks for a row's actions anywhere else: press and hold.
+  const [trayHeld, setTrayHeld] = useState(false);
+  const railRef = useRef<HTMLDivElement>(null);
+  const press = useLongPress(useCallback(() => setTrayHeld(true), []));
+
+  // Any press OUTSIDE the tray puts it away — including elsewhere on this row,
+  // and including a press on another row, which is what keeps one tray out at a
+  // time without the rows having to know about each other.
+  //
+  // Outside the TRAY, not outside the row: the tray's own buttons are 24px and
+  // they SLIDE, so dismissing on a press that lands on one would move it out
+  // from under the finger before the click resolves — and a `click` whose down
+  // and up have different targets is dispatched to their common ancestor, i.e.
+  // never to the button that was pressed.
+  useEffect(() => {
+    if (!trayHeld) return;
+    const onPress = (e: PointerEvent) => {
+      if (e.target instanceof Node && railRef.current?.contains(e.target)) return;
+      setTrayHeld(false);
+    };
+    window.addEventListener("pointerdown", onPress, true);
+    return () => window.removeEventListener("pointerdown", onPress, true);
+  }, [trayHeld]);
   // Per-row subscription: re-renders this row (and refreshes its age) the moment
   // its activity clock advances — the recency ordering itself lives in the selector.
   const activityAt = useChats(
@@ -568,7 +599,14 @@ function ChatRow({
     <div className="group/row relative overflow-hidden">
       <button
         data-testid="chat-row"
-        onClick={onClick}
+        {...press.press}
+        // The click that ends a hold belongs to the gesture. Without this,
+        // holding a row to reach its delete button also navigates you into the
+        // chat you were about to act on.
+        onClick={(e) => {
+          if (press.swallowsClick(e)) return;
+          onClick();
+        }}
         className={cn(
           // Square and full-bleed: the highlight is the ROW, so it runs edge to
           // edge and the list reads as a list rather than a stack of cards.
@@ -716,21 +754,32 @@ function ChatRow({
 
           It stays MOUNTED and merely translated, so its buttons keep their tab
           stop — which is why the resting markers are pinned rather than in
-          flow, and why they stand down for EITHER way the tray can arrive
-          (pointer hover, or keyboard focus landing in the rail). On a coarse
-          pointer `cm-touch-reveal` parks the tray permanently out, so
-          `cm-touch-hide` takes the markers away entirely rather than leaving
-          them underneath it. */}
+          flow, and why they stand down for EVERY way the tray can arrive:
+          pointer hover, keyboard focus landing in the rail, or a touch HOLD.
+
+          The hold is the touch answer, and `data-tray` is what carries it —
+          an ATTRIBUTE variant rather than a conditional class, because `cn` is
+          plain clsx with no conflict resolution, so a bare `translate-x-0`
+          would sit beside `translate-x-full` as two same-specificity utilities
+          and win or lose on emit order. `group-data-…` compiles to a class +
+          attribute selector, which is how the hover and focus variants beside
+          it already outrank the resting transform. Same reason `ui/IconButton`
+          reads its selected look off `aria-current`. */}
       {!rename.editing && (
-        <div className="group/rail absolute inset-y-0 right-0">
+        <div
+          ref={railRef}
+          data-tray={trayHeld ? "open" : undefined}
+          className="group/rail absolute inset-y-0 right-0"
+        >
           {needsInput && (
             <span
               className={cn(
                 // The scroll track shares this surface's background, so gutter
                 // and scrollbar read as one undifferentiated band and the dot
                 // looked like it was floating in it.
-                "cm-touch-hide pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2.5",
+                "pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2.5",
                 "group-hover/row:hidden group-focus-within/rail:hidden",
+                "group-data-[tray=open]/rail:hidden",
               )}
             >
               {/* All that is left out here. The counts for child chats and
@@ -743,9 +792,10 @@ function ChatRow({
           )}
           <div
             className={cn(
-              "cm-touch-reveal absolute inset-y-0 right-0 flex items-center gap-0.5 border-l border-line px-1.5",
+              "absolute inset-y-0 right-0 flex items-center gap-0.5 border-l border-line px-1.5",
               "translate-x-full transition-transform duration-150 ease-[var(--ease-out)]",
               "group-hover/row:translate-x-0 group-focus-within/rail:translate-x-0",
+              "group-data-[tray=open]/rail:translate-x-0",
               // OPAQUE, in two layers. `--p-active` and `--p-accent-ghost` are
               // translucent OVERLAYS (0.07 and 0.12 alpha) — as a bare
               // background the tray was 93% see-through and the row's title
@@ -1202,6 +1252,17 @@ export function Sidebar() {
     <aside
       className={cn(
         "flex flex-col border-r border-line bg-surface",
+        // NOT SELECTABLE, on purpose, and it has to be the whole column.
+        //
+        // `ChatRow`'s tray opens on a press-and-hold, and press-and-hold is
+        // already spoken for on a touch device: it is how you select text, and
+        // on iOS how you raise the callout over what you selected. Left alone,
+        // holding a row hands you a blue selection over the chat's title and a
+        // Copy bubble on top of the tray you asked for. There is nothing here
+        // worth selecting to trade for that — every line in this column is a
+        // button's label, and the one string anyone might want (the repo path)
+        // is `midTruncate`d to an ellipsis anyway.
+        "select-none [-webkit-touch-callout:none]",
         inDrawer ? "h-full w-full" : "w-[260px] shrink-0",
       )}
     >
