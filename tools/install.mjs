@@ -636,7 +636,9 @@ async function main() {
  * never ran, and `curl … | sh` printed "Downloading the Dispatch release
  * installer..." and exited 0 having installed nothing at all. The server's own
  * self-update stages into `tmpdir()` too, so it failed the same silent way, and
- * Windows has the same shape whenever TEMP is an 8.3 short path.
+ * Windows has the same shape when TEMP is redirected through a junction. NOT
+ * when TEMP is an 8.3 short path: Node expands short names on neither side, so
+ * both stay short and the compare already held.
  */
 function isEntryPoint() {
   if (!process.argv[1]) return false;
