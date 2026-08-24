@@ -52,6 +52,8 @@ import { CommitMessageService } from "./commit-message.js";
 import { RunnerService } from "./runner.js";
 import { ProcessService, defaultProcTable } from "./processes.js";
 import { ChatProcessService } from "./chat-processes.js";
+import { ProcTableCache } from "./proc-table-cache.js";
+import { ResourceService } from "./resources.js";
 import { GitHubService } from "./github.js";
 import { Notifier } from "./notifier.js";
 import { PushService } from "./push.js";
@@ -100,6 +102,8 @@ export interface ServiceOverrides {
   runner?: RunnerService;
   processes?: ProcessService;
   chatProcesses?: ChatProcessService;
+  procTableCache?: ProcTableCache;
+  resources?: ResourceService;
   github?: GitHubService;
   notifier?: Notifier;
   push?: PushService;
@@ -152,6 +156,8 @@ export interface Services extends ServiceBase {
   processes: ProcessService;
   /** Per-chat process totals for the sidebar, and the manual reap behind them. */
   chatProcesses: ChatProcessService;
+  procTableCache: ProcTableCache;
+  resources: ResourceService;
   github: GitHubService;
   notifier: Notifier;
   /** Server-sent Web Push — the only delivery path an iOS home-screen app has. */
@@ -351,6 +357,13 @@ export function createServices(
       metrics,
       deps: brokerDeps,
     });
+  // ONE process-table read, shared by everything below that needs one. The
+  // sidebar's count poll and the resource snapshot run on different cadences
+  // over identical data; without this they would spawn a `powershell.exe` each,
+  // and the feature whose job is to show a loaded machine would be adding to
+  // the load. See `ProcTableCache`.
+  const procTableCache = overrides.procTableCache ?? new ProcTableCache();
+
   // What each chat is holding in OS processes, for the count on its sidebar row.
   // Constructed AFTER the broker because the session roots it walks down from
   // are the broker's; `terminals` supplies the other kind of root (background
@@ -358,7 +371,22 @@ export function createServices(
   const chatProcesses =
     overrides.chatProcesses ??
     new ChatProcessService({
-      procTable: defaultProcTable,
+      procTable: async () => (await procTableCache.read()).rows,
+      // Kills read fresh: a cached table can name a pid the OS has recycled.
+      procTableFresh: defaultProcTable,
+      // A reap has to drop the SHARED table, not just this service's tally —
+      // otherwise the Resources page reports the killed processes as an
+      // unattributed leak for the rest of the TTL.
+      invalidateSource: () => procTableCache.invalidate(),
+      sessionPids: () => broker.sessionPids(),
+      terminals,
+    });
+
+  // What each chat is COSTING, as opposed to how many processes it holds.
+  const resources =
+    overrides.resources ??
+    new ResourceService({
+      procTable: procTableCache,
       sessionPids: () => broker.sessionPids(),
       terminals,
     });
@@ -757,6 +785,8 @@ export function createServices(
     runner,
     processes,
     chatProcesses,
+    procTableCache,
+    resources,
     github,
     notifier,
     push,

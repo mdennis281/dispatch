@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Search, Settings, GitPullRequest, Blocks, FileCog, FolderGit2 } from "lucide-react";
 import { AttentionPopover } from "../attention/AttentionPopover.js";
 import { UsageMeter } from "./UsageMeter.js";
+import { ResourceMeter } from "./ResourceMeter.js";
 import { CommandPalette } from "../command/CommandPalette.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Kbd } from "../ui/Kbd.js";
@@ -158,6 +159,10 @@ function MainRow({ overlay }: { overlay: boolean }) {
           you visit occasionally, and a sheet is a better place for seven
           occasional destinations than a row of unlabelled 24px icons. */}
       <div className="ml-auto flex items-center gap-1.5">
+        {/* Hidden on a phone with the rest of this row's occasional controls:
+            it is a glance for someone watching a build, and the bottom nav's
+            More sheet is where that reader already goes. */}
+        {!compact && <ResourceMeter />}
         <UsageMeter />
         {!compact && (
           <>

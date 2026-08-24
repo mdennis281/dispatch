@@ -86,8 +86,19 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * its own padding. It is a second row rather than `ReviewRow` with the PR bits
  * blanked because the two have different things to say: a reviewer's identity is
  * the `#140` it read and the verdict it left, and a spawned chat has neither.
+ *
+ * 89 → 90: the header's `ResourceMeter` trigger, the CPU/memory pill. It is a
+ * compound readout rather than a control with a label — an icon, a percentage,
+ * a progress bar and a second percentage on one baseline — and `Button` is
+ * `justify-center whitespace-nowrap` with its own padding and no slot that can
+ * hold a bar. It is deliberately the same bare shape as the `UsageMeter`
+ * trigger it sits directly beside, because the two are read as a pair and any
+ * difference in height or padding between them shows. The rest of that feature
+ * pays its own way: the Resources page's expand and reap controls are
+ * `IconButton`, its absolute/relative switch is `Button link`, and this
+ * dropdown's own footer action is `Button ghost`.
  */
-const BASELINE = 89;
+const BASELINE = 90;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

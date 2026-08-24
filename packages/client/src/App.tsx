@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { startSystemPolling } from "./stores/resources.js";
 import { MessageSquareDashed } from "lucide-react";
 import { TopBar } from "./components/layout/TopBar.js";
 import { Sidebar } from "./components/layout/Sidebar.js";
@@ -121,6 +122,25 @@ export default function App() {
   useEffect(() => {
     if (canProbe) void hydrateSetup();
   }, [canProbe, hydrateSetup]);
+
+  // The header's CPU/memory pill. Runs for as long as the app is open — it has
+  // to be THERE when someone glances at it — and it can afford to: the endpoint
+  // behind it is `os.cpus()`/`os.freemem()`, ~0.2 ms with no subprocess. The
+  // expensive per-chat scan is subscribed separately, only while something is
+  // actually showing it.
+  //
+  // GATED ON A SESSION, for the same reason the setup probe above is and on the
+  // same condition. This is the one poller mounted OUTSIDE `AuthGate`, so
+  // without the guard an auth-enabled install sitting at the sign-in form would
+  // poll a 401 endpoint every 2 s forever — and each tick is three requests,
+  // not one, because `sessionFetch` answers a 401 by trying `/api/auth/refresh`
+  // and retrying. `unreachable` is deliberately NOT part of the condition here:
+  // unlike the probe, which latches on failure, a poller that finds the server
+  // down should simply keep trying until it comes back.
+  const canPoll = authReady && (!authEnabled || signedIn);
+  useEffect(() => {
+    if (canPoll) return startSystemPolling();
+  }, [canPoll]);
 
   return (
     <>

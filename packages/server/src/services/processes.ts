@@ -62,11 +62,23 @@ export interface ProjectProcess {
   terminalId?: string;
 }
 
-/** One row of the OS process table (pid → parent), for ancestry attribution. */
+/**
+ * One row of the OS process table (pid → parent), for ancestry attribution.
+ *
+ * The two measurements are OPTIONAL because not every source carries them: a
+ * test fake, an older capture, or a `ps` without the columns all produce rows
+ * with ancestry and nothing else, and attribution has to keep working on those.
+ * Absent is therefore meaningfully different from zero and must stay so — see
+ * the NaN note in `parseProcCsv`.
+ */
 export interface ProcRow {
   pid: number;
   ppid: number;
   name?: string;
+  /** Resident bytes (Windows working set / POSIX RSS). Counts SHARED pages. */
+  rssBytes?: number;
+  /** CUMULATIVE CPU time since the process started, ms. A rate needs two. */
+  cpuMs?: number;
 }
 
 /** Result of a bulk kill: one entry per requested pid. */
@@ -212,31 +224,142 @@ const defaultDescribe: DescribeFn = async (pids) => {
 };
 
 /**
- * Parse `ProcessId,ParentProcessId,Name` CSV from PowerShell's `ConvertTo-Csv`.
- * Header row and any quoting are tolerated; malformed rows are skipped.
+ * Split one CSV line, honouring quoted fields and `""` escapes.
+ *
+ * A plain `split(",")` was fine while the only text column was last: a comma in
+ * a process name could corrupt nothing after it, because there was nothing
+ * after it. Now that the row carries numbers the caller does arithmetic on, a
+ * name like `Foo, Bar.exe` shifting every later cell by one would silently
+ * charge one process's memory to another column. Cheap to do properly.
+ */
+function splitCsvLine(line: string): string[] {
+  const cells: string[] = [];
+  let cur = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quoted) {
+      // `""` inside a quoted field is one literal quote, not the end of it.
+      if (ch === '"' && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else if (ch === '"') quoted = false;
+      else cur += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ",") {
+      cells.push(cur.trim());
+      cur = "";
+    } else cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+/** Column names this understands, mapped to where they land on a {@link ProcRow}. */
+const PROC_CSV_COLUMNS: Record<string, "pid" | "ppid" | "name" | "rss" | "kernel" | "user"> = {
+  processid: "pid",
+  parentprocessid: "ppid",
+  name: "name",
+  workingsetsize: "rss",
+  kernelmodetime: "kernel",
+  usermodetime: "user",
+};
+
+/**
+ * Parse `ConvertTo-Csv` output from `Get-CimInstance Win32_Process`.
+ *
+ * HEADER-DRIVEN rather than positional. The query asks for six columns now and
+ * asked for three before; binding by name means neither the column ORDER nor a
+ * future addition can silently shift memory into the CPU field. A file with no
+ * recognisable header falls back to the original `pid,ppid,name` positions, so
+ * older captures (and the tests written against them) still parse.
+ *
+ * `KernelModeTime`/`UserModeTime` are CUMULATIVE 100-nanosecond counters, summed
+ * here into `cpuMs`. They are not a rate and cannot be turned into one by a
+ * single reading — see `ResourceService`, which differences two.
  */
 export function parseProcCsv(output: string): ProcRow[] {
   const rows: ProcRow[] = [];
+  let cols: (string | undefined)[] | null = null;
   for (const line of output.split(/\r?\n/)) {
-    const cells = line.split(",").map((c) => c.trim().replace(/^"|"$/g, ""));
-    if (cells.length < 3) continue;
-    const pid = Number(cells[0]);
-    const ppid = Number(cells[1]);
+    if (!line.trim()) continue;
+    const cells = splitCsvLine(line);
+    if (cols === null) {
+      const mapped = cells.map((c) => PROC_CSV_COLUMNS[c.toLowerCase()]);
+      // A real header names at least the two columns everything else needs.
+      if (mapped.includes("pid") && mapped.includes("ppid")) {
+        cols = mapped;
+        continue;
+      }
+      cols = ["pid", "ppid", "name"];
+    }
+    const at = (key: string): string | undefined => {
+      const i = cols!.indexOf(key);
+      return i === -1 ? undefined : cells[i];
+    };
+    const pid = Number(at("pid"));
+    const ppid = Number(at("ppid"));
     if (!Number.isInteger(pid) || !Number.isInteger(ppid) || pid <= 0) continue;
-    rows.push({ pid, ppid, name: cells[2] || undefined });
+    const row: ProcRow = { pid, ppid, name: at("name") || undefined };
+    const rss = Number(at("rss"));
+    if (Number.isFinite(rss) && at("rss") !== undefined) row.rssBytes = rss;
+    // 100 ns ticks → ms. Absent columns give NaN, which must not become a 0:
+    // a real 0 means "this process has used no CPU", and a missing column means
+    // "we did not ask", and a delta against a fabricated 0 would report the
+    // process's ENTIRE lifetime CPU as if it had burned it in one window.
+    const kernel = Number(at("kernel"));
+    const user = Number(at("user"));
+    if (Number.isFinite(kernel) && Number.isFinite(user)) {
+      row.cpuMs = (kernel + user) / 10_000;
+    }
+    rows.push(row);
   }
   return rows;
 }
 
-/** Parse `ps -e -o pid=,ppid=,comm=` into pid → parent rows. */
+/**
+ * Parse `ps -e -o pid=,ppid=,rss=,time=,comm=` into pid → parent rows.
+ *
+ * Tolerates the older three-column `pid,ppid,comm` form: `rss` and `time` are
+ * only read when the line actually carries an integer and a clock-shaped field
+ * in those positions, so a command name is never mistaken for a measurement.
+ * `rss` is KiB on both Linux and macOS.
+ *
+ * THE TIME FIELD HAS TWO SHAPES. GNU `ps` prints `[[dd-]hh:]mm:ss`; BSD (macOS)
+ * prints HUNDREDTHS — `0:00.03`. The fractional part is not optional decoration
+ * there, it is always present, and a pattern without it does not merely lose
+ * the fraction: `0:00` matches, the following `\s+` then has to match `.`, the
+ * whole optional group backtracks away, and the line silently falls through to
+ * the three-column form. Every macOS row would come back with no `rssBytes`, no
+ * `cpuMs`, and a `name` of `"1234   0:00.03 /usr/sbin/syslogd"` — which is the
+ * uniformly-wrong-but-plausible failure the rest of this file works to avoid,
+ * and it would render as a Resources page listing every chat at 0 B and "—".
+ */
 export function parsePsTable(output: string): ProcRow[] {
   const rows: ProcRow[] = [];
   for (const line of output.split(/\r?\n/)) {
-    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    const m = line
+      .trim()
+      .match(/^(\d+)\s+(\d+)\s+(?:(\d+)\s+((?:\d+-)?(?:\d+:)?\d+:\d+(?:\.\d+)?)\s+)?(.*)$/);
     if (!m) continue;
-    rows.push({ pid: Number(m[1]), ppid: Number(m[2]), name: m[3] || undefined });
+    const row: ProcRow = { pid: Number(m[1]), ppid: Number(m[2]), name: m[5] || undefined };
+    if (m[3] !== undefined) row.rssBytes = Number(m[3]) * 1024;
+    if (m[4] !== undefined) row.cpuMs = parsePsTime(m[4]);
+    rows.push(row);
   }
   return rows;
+}
+
+/** `[[dd-]hh:]mm:ss[.ff]` → milliseconds. The BSD fraction is KEPT, not floored. */
+function parsePsTime(t: string): number {
+  const [days, rest] = t.includes("-") ? t.split("-") : ["0", t];
+  // `Number("00.03")` is 0.03, so the seconds field carries its own fraction
+  // through without a separate branch.
+  const parts = rest.split(":").map(Number);
+  // Pad to [h, m, s] — `ps` drops the hours field until it's needed.
+  while (parts.length < 3) parts.unshift(0);
+  const [h, m, s] = parts;
+  return ((Number(days) * 24 + h) * 3600 + m * 60 + s) * 1000;
 }
 
 /**
@@ -244,6 +367,16 @@ export function parsePsTable(output: string): ProcRow[] {
  * Windows 11 images, so this goes through CIM — the same source Task Manager
  * reads. `-NoProfile` because a user profile that prints anything would land in
  * the CSV.
+ *
+ * THE MEMORY AND CPU COLUMNS ARE FREE. Measured against 888 processes on a real
+ * install: `ProcessId,ParentProcessId,Name` took 356 ms and the six-column form
+ * below took 419 ms — and both are dwarfed by the ~400 ms of `powershell.exe`
+ * startup that wraps them, so the difference does not survive spawn jitter. The
+ * expensive things were considered and rejected: `WorkingSetPrivate` (the only
+ * memory figure that doesn't double-count shared pages) lives in
+ * `Win32_PerfRawData_PerfProc_Process` at SEVEN SECONDS, and per-process GPU via
+ * `Get-Counter "\GPU Engine(*)"` costs FOUR, for a figure that measured ≤0.09%
+ * across every process on the box — agent workloads don't touch the GPU.
  */
 export const defaultProcTable: ProcTableFn = async () => {
   if (process.platform === "win32") {
@@ -254,13 +387,15 @@ export const defaultProcTable: ProcTableFn = async () => {
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Csv -NoTypeInformation",
+        "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize,KernelModeTime,UserModeTime,Name | ConvertTo-Csv -NoTypeInformation",
       ],
       { reject: false, buffer: true, windowsHide: true },
     );
     return parseProcCsv(res.stdout ?? "");
   }
-  const res = await execa("ps", ["-e", "-o", "pid=,ppid=,comm="], {
+  // `comm` LAST: it is the only field that can contain a space, so anything
+  // after it would be unparseable.
+  const res = await execa("ps", ["-e", "-o", "pid=,ppid=,rss=,time=,comm="], {
     reject: false,
     buffer: true,
   });
