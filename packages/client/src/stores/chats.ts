@@ -8,7 +8,7 @@ import type {
   PrRecord,
   WorkflowExemption,
 } from "@dispatch/shared";
-import { isPrSettledIdle } from "@dispatch/shared";
+import { isPrSettledIdle, parseSpawnedParent } from "@dispatch/shared";
 import { clearDraft } from "../lib/composerDrafts.js";
 import { usePrs } from "./prs.js";
 
@@ -259,13 +259,15 @@ export function isReviewerChat(chat: Chat): boolean {
  * clutter the nesting exists to clear.
  *
  * Null for a chat a human opened, and for one spawned with `detached: true` —
- * that flag's whole effect is declining to write the field.
+ * which also arrives with no `parentChatId`, so `parseSpawnedParent` is the one
+ * thing that could put back what the flag took away. It declines to, because the
+ * server writes a detached chat a label it refuses; the two halves of that live
+ * together in shared precisely so this can't drift out from under them.
  */
 export function spawnParentId(chat: Chat): string | null {
   if (chat.parentChatId) return chat.parentChatId;
   if (chat.purpose?.kind !== "spawned") return null;
-  const m = /^Spawned by chat (\S+)$/.exec(chat.purpose.label ?? "");
-  return m?.[1] ?? null;
+  return parseSpawnedParent(chat.purpose.label);
 }
 
 /**

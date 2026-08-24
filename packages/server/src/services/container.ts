@@ -21,6 +21,7 @@ import {
   PrSnapshotSchema,
   prRecordKey,
   resolveWorkflow,
+  spawnedPurposeLabel,
   type PRRef,
   type PrRecord,
   type PrSnapshot,
@@ -705,7 +706,10 @@ export function createServices(
       agentId: request.agentId,
       effort: request.effort,
       model: request.model,
-      purpose: { kind: "spawned", label: `Spawned by chat ${parentChatId}` },
+      // Built in shared, beside the parser that reads it back — the detached form
+      // deliberately does NOT match that parser, and two prose literals in two
+      // packages would only agree by luck. See `spawnedPurposeLabel`.
+      purpose: { kind: "spawned", label: spawnedPurposeLabel(parentChatId, request.detached) },
       // The DURABLE parent edge, which the purpose label above is not: that
       // label is a display sentence, and the sidebar reading a parent id back
       // out of prose is a legacy path, not a design. Omitted when the agent

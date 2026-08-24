@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { Chat, PrRecord } from "@dispatch/shared";
+import { spawnedPurposeLabel, type Chat, type PrRecord } from "@dispatch/shared";
 import {
   useChats,
   chatsForProject,
   countProjectAgents,
   buildChatTree,
   reviewTargetKey,
+  spawnParentId,
   statusIsActivity,
 } from "./chats.js";
 
@@ -310,7 +311,7 @@ describe("buildChatTree — spawned chats file under the chat that spawned them"
   const spawned = (id: string, parentChatId: string, updatedAt = 1): Chat => ({
     ...chat(id, "p1", updatedAt),
     parentChatId,
-    purpose: { kind: "spawned", label: `Spawned by chat ${parentChatId}` },
+    purpose: { kind: "spawned", label: spawnedPurposeLabel(parentChatId) },
   });
 
   const shape = (bs: ReturnType<typeof buildChatTree>) =>
@@ -347,14 +348,42 @@ describe("buildChatTree — spawned chats file under the chat that spawned them"
   });
 
   it("leaves a detached spawn at the top level", () => {
-    // `spawn_chat({ detached: true })` declines to write the field, and the
+    // `spawn_chat({ detached: true })` declines to write `parentChatId`, and the
     // legacy label parse must not put back what the flag took away.
-    const detached: Chat = { ...chat("free", "p1", 50), purpose: { kind: "spawned" } };
+    //
+    // The label here is the one `container.ts` ACTUALLY writes for a detached
+    // spawn. An earlier version of this test used `{ kind: "spawned" }` with no
+    // label — a shape nothing in the repo produces, since the only writer of
+    // that kind always sets one — and so it passed while the real thing nested
+    // anyway through the legacy parse.
+    const detached: Chat = {
+      ...chat("free", "p1", 50),
+      purpose: { kind: "spawned", label: spawnedPurposeLabel("parent", true) },
+    };
 
     expect(shape(buildChatTree([chat("parent", "p1", 100), detached], {}, {}))).toEqual([
       ["parent", []],
       ["free", []],
     ]);
+  });
+
+  it("does not read a parent out of a label that only starts like the legacy one", () => {
+    // Guards the anchor directly: the detached label is the legacy sentence plus
+    // a suffix, so an unanchored pattern would match it and silently re-nest
+    // every chat that asked not to be nested.
+    expect(spawnParentId({ ...chat("x", "p1"), purpose: { kind: "spawned" } } as Chat)).toBeNull();
+    expect(
+      spawnParentId({
+        ...chat("x", "p1"),
+        purpose: { kind: "spawned", label: spawnedPurposeLabel("parent", true) },
+      } as Chat),
+    ).toBeNull();
+    expect(
+      spawnParentId({
+        ...chat("x", "p1"),
+        purpose: { kind: "spawned", label: spawnedPurposeLabel("parent") },
+      } as Chat),
+    ).toBe("parent");
   });
 
   it("leaves a spawn at the top level when its parent isn't here", () => {
