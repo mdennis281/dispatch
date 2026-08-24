@@ -177,6 +177,22 @@ describe("parsePsTable", () => {
       ]);
   });
 
+  it("reads the BSD/macOS hundredths form", () => {
+    // `ps -o time=` prints `0:00.03` on macOS. Without the fractional branch
+    // the whole optional group backtracks away and the row falls through to
+    // the three-column form — losing rss AND cpu AND mangling the name, on
+    // every process, silently.
+    expect(parsePsTable("  123     1   1234   0:00.03 /usr/sbin/syslogd")).toEqual([
+      { pid: 123, ppid: 1, name: "/usr/sbin/syslogd", rssBytes: 1_263_616, cpuMs: 30 },
+    ]);
+  });
+
+  it("reads a BSD time that has rolled past an hour", () => {
+    expect(parsePsTable("  9  1  100  3:04:05.50 launchd")).toEqual([
+      { pid: 9, ppid: 1, name: "launchd", rssBytes: 102_400, cpuMs: 11_045_500 },
+    ]);
+  });
+
   it("reads a multi-day cpu time", () => {
     expect(parsePsTable(["1 0 100 2-03:04:05 init"].join("\n"))[0].cpuMs).toBe(
       ((2 * 24 + 3) * 3600 + 4 * 60 + 5) * 1000,

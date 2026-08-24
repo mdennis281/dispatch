@@ -323,14 +323,24 @@ export function parseProcCsv(output: string): ProcRow[] {
  * Tolerates the older three-column `pid,ppid,comm` form: `rss` and `time` are
  * only read when the line actually carries an integer and a clock-shaped field
  * in those positions, so a command name is never mistaken for a measurement.
- * `rss` is KiB on both Linux and macOS; `time` is `[[dd-]hh:]mm:ss`.
+ * `rss` is KiB on both Linux and macOS.
+ *
+ * THE TIME FIELD HAS TWO SHAPES. GNU `ps` prints `[[dd-]hh:]mm:ss`; BSD (macOS)
+ * prints HUNDREDTHS — `0:00.03`. The fractional part is not optional decoration
+ * there, it is always present, and a pattern without it does not merely lose
+ * the fraction: `0:00` matches, the following `\s+` then has to match `.`, the
+ * whole optional group backtracks away, and the line silently falls through to
+ * the three-column form. Every macOS row would come back with no `rssBytes`, no
+ * `cpuMs`, and a `name` of `"1234   0:00.03 /usr/sbin/syslogd"` — which is the
+ * uniformly-wrong-but-plausible failure the rest of this file works to avoid,
+ * and it would render as a Resources page listing every chat at 0 B and "—".
  */
 export function parsePsTable(output: string): ProcRow[] {
   const rows: ProcRow[] = [];
   for (const line of output.split(/\r?\n/)) {
     const m = line
       .trim()
-      .match(/^(\d+)\s+(\d+)\s+(?:(\d+)\s+((?:\d+-)?(?:\d+:)?\d+:\d+)\s+)?(.*)$/);
+      .match(/^(\d+)\s+(\d+)\s+(?:(\d+)\s+((?:\d+-)?(?:\d+:)?\d+:\d+(?:\.\d+)?)\s+)?(.*)$/);
     if (!m) continue;
     const row: ProcRow = { pid: Number(m[1]), ppid: Number(m[2]), name: m[5] || undefined };
     if (m[3] !== undefined) row.rssBytes = Number(m[3]) * 1024;
@@ -340,9 +350,11 @@ export function parsePsTable(output: string): ProcRow[] {
   return rows;
 }
 
-/** `[[dd-]hh:]mm:ss` → milliseconds. */
+/** `[[dd-]hh:]mm:ss[.ff]` → milliseconds. The BSD fraction is KEPT, not floored. */
 function parsePsTime(t: string): number {
   const [days, rest] = t.includes("-") ? t.split("-") : ["0", t];
+  // `Number("00.03")` is 0.03, so the seconds field carries its own fraction
+  // through without a separate branch.
   const parts = rest.split(":").map(Number);
   // Pad to [h, m, s] — `ps` drops the hours field until it's needed.
   while (parts.length < 3) parts.unshift(0);
