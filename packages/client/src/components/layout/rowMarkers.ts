@@ -19,7 +19,7 @@
  */
 import type { Chat } from "@dispatch/shared";
 import { isChatWorking } from "../../stores/chats.js";
-import { foldedReviewsLabel } from "./reviewLabel.js";
+import { foldedChildrenLabel } from "./reviewLabel.js";
 
 /** A branch's process census, as `branchProcessCount` returns it. */
 export interface BranchProcs {
@@ -44,18 +44,18 @@ export interface BranchProcs {
  * parent glyph that read `text-secondary` through that would be claiming
  * nothing is moving for precisely the long blocks worth knowing about.
  */
-export function childChatTint(reviews: readonly Chat[], needsInput: boolean): string {
+export function childChatTint(children: readonly Chat[], needsInput: boolean): string {
   if (needsInput) return "text-warn";
-  if (reviews.some((r) => isChatWorking(r.status))) return "text-accent";
-  return reviews.length > 0 ? "text-secondary" : "text-faint";
+  if (children.some((c) => isChatWorking(c.status))) return "text-accent";
+  return children.length > 0 ? "text-secondary" : "text-faint";
 }
 
 /** What the child-chats glyph says on hover, count included. */
-export function childChatTitle(reviews: readonly Chat[], needsInput: boolean): string {
-  if (reviews.length === 0) return "No child chats";
-  const working = reviews.filter((r) => isChatWorking(r.status)).length;
+export function childChatTitle(children: readonly Chat[], needsInput: boolean): string {
+  if (children.length === 0) return "No child chats";
+  const working = children.filter((c) => isChatWorking(c.status)).length;
   const note = needsInput ? "needs an answer" : working > 0 ? `${working} working` : "all idle";
-  return `${foldedReviewsLabel(reviews)} — ${note}`;
+  return `${foldedChildrenLabel(children)} — ${note}`;
 }
 
 /**

@@ -1435,6 +1435,20 @@ export interface SpawnChatRequest {
   model?: string;
   /** Why the agent wants it — shown on the consent card, not sent to the chat. */
   reason?: string;
+  /**
+   * Leave the new chat at the sidebar's top level instead of filing it under
+   * the caller.
+   *
+   * Opt-OUT rather than opt-in: a chat spawned BY a chat is a child of it, and
+   * defaulting to detached is what put five spawned chats in the sidebar as five
+   * unrelated rows. This is for the genuinely independent second workstream the
+   * tool description talks about — the one whose life has nothing to do with the
+   * caller's once it starts.
+   *
+   * A cross-project spawn detaches on its own regardless: the parent isn't in
+   * the target project's list, so there is no row there to fold under.
+   */
+  detached?: boolean;
 }
 
 /** The project a spawn targets, resolved to a real record. */
@@ -4777,6 +4791,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "explain it in `reason`. On approval the chat is created, started, and handed " +
       "your `prompt` as its first message — write that prompt as a complete, " +
       "standalone brief, because the new chat inherits NONE of this conversation. " +
+      "The new chat is FILED UNDER YOURS in the sidebar, so a handful of them fold " +
+      "into your row instead of scattering across the list — pass detached: true " +
+      "only for work whose life has nothing to do with this chat's. " +
       "Returns the new chatId; pass it to wait_for_chat to sequence behind it.",
     {
       prompt: z
@@ -4801,6 +4818,14 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .string()
         .optional()
         .describe("Why you want this chat — shown to the human on the approval prompt."),
+      detached: z
+        .boolean()
+        .optional()
+        .describe(
+          "Leave the new chat at the sidebar's top level instead of folding it under " +
+            "yours. Default false — a chat you spawned is normally a child of yours. " +
+            "Use it for a genuinely independent workstream.",
+        ),
     },
     async (args): Promise<CallToolResult> => {
       if (!ctx.chats) {
@@ -4824,6 +4849,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         effort: args.effort as Effort | undefined,
         model: typeof args.model === "string" ? args.model.trim() || undefined : undefined,
         reason: typeof args.reason === "string" ? args.reason.trim() || undefined : undefined,
+        detached: args.detached === true,
       };
 
       const project = await ctx.chats.resolveProject(request.projectId);

@@ -1,12 +1,12 @@
 /**
- * How a chat's folded reviewer rows describe themselves while COLLAPSED.
+ * How a chat's folded child rows describe themselves while COLLAPSED.
  *
  * Extracted from the sidebar row so it can be tested without rendering one —
  * the same split `navState` uses next door.
  */
 import { parsePrRecordKey } from "@dispatch/shared";
 import type { Chat } from "@dispatch/shared";
-import { reviewTargetKey } from "../../stores/chats.js";
+import { isReviewerChat, reviewTargetKey } from "../../stores/chats.js";
 
 /**
  * `4 reviews`, plus which pull requests they belong to.
@@ -43,4 +43,25 @@ export function foldedReviewsLabel(reviews: readonly Chat[]): string {
     .map(([number, n]) => `${n} of #${number}`);
   if (unattributed) parts.push(`${unattributed} unattributed`);
   return `${total} — ${parts.join(", ")}`;
+}
+
+/**
+ * The same sentence for a branch whose children are not all reviewers.
+ *
+ * A reviewer-only branch is handed STRAIGHT to {@link foldedReviewsLabel}, so
+ * the string a review row has always produced is the string it still produces —
+ * PR nesting shipped first and its wording was tuned against real data, and
+ * "2 reviews of #140" becoming "2 children — …" would be this change quietly
+ * rewriting a feature it was only supposed to sit beside.
+ *
+ * Spawned chats have nothing to break down by. There is no `#140` for them and
+ * no equivalent — a spawned chat's identity is its title, which is on the row
+ * itself the moment you expand — so they count and stop there.
+ */
+export function foldedChildrenLabel(children: readonly Chat[]): string {
+  const reviews = children.filter(isReviewerChat);
+  const spawned = children.length - reviews.length;
+  if (spawned === 0) return foldedReviewsLabel(reviews);
+  const chats = `${spawned} chat${spawned === 1 ? "" : "s"}`;
+  return reviews.length === 0 ? chats : `${foldedReviewsLabel(reviews)} and ${chats}`;
 }

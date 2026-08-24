@@ -706,6 +706,11 @@ export function createServices(
       effort: request.effort,
       model: request.model,
       purpose: { kind: "spawned", label: `Spawned by chat ${parentChatId}` },
+      // The DURABLE parent edge, which the purpose label above is not: that
+      // label is a display sentence, and the sidebar reading a parent id back
+      // out of prose is a legacy path, not a design. Omitted when the agent
+      // asked to detach — see `SpawnChatRequest.detached`.
+      ...(request.detached ? {} : { parentChatId }),
     });
     await ensureSession(services, chat.id);
     await broker.sendMessage(chat.id, request.prompt);

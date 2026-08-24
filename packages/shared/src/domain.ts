@@ -677,6 +677,24 @@ export const ChatSchema = z.object({
    * they sat at the sidebar's top level as four unrelated rows.
    */
   reviewOf: z.string().optional(),
+  /**
+   * The chat that spawned this one, when an agent created it via
+   * `mcp__dispatch-chat__spawn_chat`.
+   *
+   * The GENERAL parent edge, where {@link reviewOf} is the PR-shaped special
+   * case. A reviewer is joined to its parent THROUGH the pull request
+   * (`reviewOf` → `PrRecord.chatId`) because that is the only edge that
+   * survives a chat being spawned by the registry rather than by another chat.
+   * A spawned chat has no PR to route through, so it needs the direct id — and
+   * without it the sidebar had nowhere to file one, which is why five chats
+   * spawned from one parent sat at the top level as five unrelated rows.
+   *
+   * Absent means top-level, which covers both a human's own chat and a spawn
+   * the agent explicitly asked to detach (`spawn_chat({ detached: true })`).
+   * Display-only: nothing about how a session RUNS reads this, so a stale or
+   * dangling id costs a row its indentation and nothing else.
+   */
+  parentChatId: z.string().optional(),
   /** Last-known live status (authoritative source is the SessionBroker). */
   status: ChatStatusSchema.optional(),
   /** Why this chat exists, when the app spawned it for a job. Display-only. */

@@ -234,24 +234,113 @@ export function reviewTargetKey(chat: Chat): string | null {
   return m ? `${m[2]}#${m[1]}` : null;
 }
 
-/** A top-level chat plus the reviewer chats filed under it. */
-export interface ChatBranch {
-  chat: Chat;
-  /** Reviewers of this chat's PRs, newest round first. Usually empty. */
-  reviews: Chat[];
+/**
+ * Whether this chat is a PR reviewer, which is NOT the same question as whether
+ * {@link reviewTargetKey} can name its pull request.
+ *
+ * A reviewer too old to carry `reviewOf`, whose `purpose.label` no longer
+ * parses, is still a reviewer — it just cannot say of what. Splitting a branch's
+ * children on the key instead would file that chat with the spawned ones and
+ * count it as a plain chat, quietly turning "1 unattributed" (which admits what
+ * it doesn't know) into a wrong answer stated confidently.
+ */
+export function isReviewerChat(chat: Chat): boolean {
+  return chat.reviewOf != null || chat.purpose?.kind === "pr:review";
 }
 
 /**
- * Fold a flat chat list into one level of nesting: every reviewer chat moves
- * under the chat that opened the PR it is reading.
+ * The chat that spawned this one, when another chat did (`spawn_chat`).
  *
- * One level, never more — a reviewer of a reviewer is not a thing, and a tree
- * that can nest arbitrarily is a tree somebody has to indent-guard.
+ * `parentChatId` is the record. The label parse behind it covers the chats
+ * spawned BEFORE that field existed, whose only trace of their parent is the
+ * sentence `container.ts` wrote into `purpose.label` — the same legacy shape,
+ * and there for the same reason, as {@link reviewTargetKey}'s: without it every
+ * chat already on disk stays stranded at the top level, which is exactly the
+ * clutter the nesting exists to clear.
  *
- * A reviewer whose parent isn't here (the PR is unattributed, or the chat that
- * opened it was deleted) stays where it was. Nesting hides a row inside another
- * row, and hiding one inside a row that doesn't exist would just delete it from
- * the sidebar.
+ * Null for a chat a human opened, and for one spawned with `detached: true` —
+ * that flag's whole effect is declining to write the field.
+ */
+export function spawnParentId(chat: Chat): string | null {
+  if (chat.parentChatId) return chat.parentChatId;
+  if (chat.purpose?.kind !== "spawned") return null;
+  const m = /^Spawned by chat (\S+)$/.exec(chat.purpose.label ?? "");
+  return m?.[1] ?? null;
+}
+
+/**
+ * The chat a row files under by EITHER route, or null when it files under none.
+ *
+ * A reviewer joins its parent THROUGH the pull request rather than by a direct
+ * id, because it is spawned by the PR registry and not by the chat that opened
+ * the change — there is no moment at which one chat asks for the other. A
+ * spawned chat has that moment, so it carries the id.
+ */
+function parentOf(chat: Chat, prsByKey: Record<string, PrRecord>): string | null {
+  const key = reviewTargetKey(chat);
+  if (key) return prsByKey[key]?.chatId ?? null;
+  return spawnParentId(chat);
+}
+
+/**
+ * The TOP-LEVEL chat a row files under, or null when the row is top-level itself.
+ *
+ * Walks the chain rather than reading one link, because a child can spawn a
+ * child: `spawn_chat` is offered to every chat, including one that is already
+ * folded. Nesting stays ONE level — a tree that can nest arbitrarily is a tree
+ * somebody has to indent-guard — so a grandchild files under its GRANDPARENT,
+ * beside its own parent, rather than under a row that is itself hidden inside
+ * another. Filed under a hidden row it would render nowhere at all.
+ *
+ * A parent that isn't here (deleted, living in another project, an unattributed
+ * PR) ends the walk and the row keeps the position it had. Nesting hides a row
+ * inside another row, and hiding one inside a row that doesn't exist would just
+ * delete it from the sidebar.
+ *
+ * A cycle returns null for every chat in it. Two chats that each claim the other
+ * are both children and therefore both hidden, so the sidebar would lose the
+ * pair entirely; top-level is the reading that still shows them. Only reachable
+ * from corrupt data, but it is the failure mode with no visible symptom.
+ */
+function topParentOf(
+  chat: Chat,
+  byId: Map<string, Chat>,
+  present: ReadonlySet<string>,
+  prsByKey: Record<string, PrRecord>,
+): string | null {
+  const seen = new Set<string>([chat.id]);
+  let cursor = chat;
+  let top: string | null = null;
+  for (;;) {
+    const parent = parentOf(cursor, prsByKey);
+    if (!parent || !present.has(parent)) return top;
+    if (seen.has(parent)) return null;
+    seen.add(parent);
+    top = parent;
+    const next = byId.get(parent);
+    if (!next) return top;
+    cursor = next;
+  }
+}
+
+/** A top-level chat plus the chats filed under it. */
+export interface ChatBranch {
+  chat: Chat;
+  /**
+   * This chat's reviewers and the chats it spawned, newest first. Usually empty.
+   *
+   * One list rather than one per kind: the row treats them alike for everything
+   * structural — the fold, the process census, the runtime roll-up, the reap —
+   * and only the child row itself cares which it is, because a reviewer has a
+   * pull request to summarise and a spawned chat has only its title.
+   */
+  children: Chat[];
+}
+
+/**
+ * Fold a flat chat list into one level of nesting: a reviewer moves under the
+ * chat that opened the PR it is reading, and a spawned chat under the chat that
+ * spawned it.
  *
  * A branch ranks by the NEWEST clock in it, its own or a child's. Without that,
  * a review that starts on a week-old chat sinks to wherever its parent sits and
@@ -264,28 +353,28 @@ export function buildChatTree(
 ): ChatBranch[] {
   const at = (c: Chat) => lastActivity[c.id] ?? c.updatedAt ?? c.createdAt;
   const present = new Set(chats.map((c) => c.id));
-  const reviews = new Map<string, Chat[]>();
+  const byId = new Map(chats.map((c) => [c.id, c]));
+  const children = new Map<string, Chat[]>();
   const roots: Chat[] = [];
 
   for (const chat of chats) {
-    const key = reviewTargetKey(chat);
-    const parent = key ? prsByKey[key]?.chatId : undefined;
-    if (parent && parent !== chat.id && present.has(parent)) {
-      const list = reviews.get(parent);
+    const parent = topParentOf(chat, byId, present, prsByKey);
+    if (parent && parent !== chat.id) {
+      const list = children.get(parent);
       if (list) list.push(chat);
-      else reviews.set(parent, [chat]);
+      else children.set(parent, [chat]);
     } else {
       roots.push(chat);
     }
   }
 
   return roots
-    .map((chat) => ({ chat, reviews: reviews.get(chat.id) ?? [] }))
+    .map((chat) => ({ chat, children: children.get(chat.id) ?? [] }))
     .sort((a, b) => rankBranch(b, at) - rankBranch(a, at));
 }
 
 const rankBranch = (b: ChatBranch, at: (c: Chat) => number): number =>
-  b.reviews.reduce((max, r) => Math.max(max, at(r)), at(b.chat));
+  b.children.reduce((max, r) => Math.max(max, at(r)), at(b.chat));
 
 /**
  * Selector: this project's chats as branches, newest first.
