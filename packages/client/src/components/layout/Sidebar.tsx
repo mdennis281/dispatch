@@ -734,7 +734,14 @@ function ChatRow({
           <input
             {...rename.inputProps}
             aria-label="Rename chat"
-            className="w-full border border-accent-line bg-inset px-1.5 py-0.5 text-base font-semibold text-primary outline-none"
+            // Selectable again, against the column's blanket `select-none`.
+            // Nothing resets `user-select` for form controls, so the input
+            // INHERITS it — measured `none` here against `auto` for the same
+            // control outside the aside — and this field is the far end of the
+            // very flow the blanket exists for: hold the row, tap the pencil,
+            // land in a title you now cannot select to replace. On iOS the
+            // callout is also how Select All and Paste are reached at all.
+            className="w-full select-text [-webkit-touch-callout:default] border border-accent-line bg-inset px-1.5 py-0.5 text-base font-semibold text-primary outline-none"
           />
         </div>
       )}
