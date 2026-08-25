@@ -2986,6 +2986,10 @@ export class SessionBroker {
         /* ignore */
       }
     }
+    // A timed-out provider is detached below, so its consumer can no longer
+    // reach onDone(). Clear the teardown marker here before the replacement
+    // provider starts; otherwise its real error is misread as this old abort.
+    session.stopping = false;
     session.started = false;
     session.query = undefined;
     session.input = undefined;

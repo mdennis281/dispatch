@@ -112,6 +112,25 @@ describe("CodexConnection request correlation", () => {
     await expect(p).rejects.toThrow("no such thread");
   });
 
+  it("removes an aborted request so a live but unresponsive server cannot retain it", async () => {
+    const { fake, conn } = await connected();
+    const controller = new AbortController();
+    const abandoned = conn.request("turn/interrupt", {}, controller.signal);
+    await fake.settle(3);
+    const abandonedId = fake.written[2]!.id;
+
+    controller.abort(new Error("teardown timed out"));
+    await expect(abandoned).rejects.toThrow("teardown timed out");
+
+    // A response that arrives after cancellation is ignored, and correlation
+    // remains healthy for the next request on the shared connection.
+    fake.push({ jsonrpc: "2.0", id: abandonedId, result: {} });
+    const next = conn.request("model/list", {});
+    await fake.settle(4);
+    fake.push({ jsonrpc: "2.0", id: fake.written[3]!.id, result: { data: [] } });
+    await expect(next).resolves.toEqual({ data: [] });
+  });
+
   it("survives a non-JSON diagnostic line without killing the reader", async () => {
     const { fake, conn } = await connected();
     fake.pushRaw("warning: something happened");

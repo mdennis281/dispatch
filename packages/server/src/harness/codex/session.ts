@@ -52,13 +52,19 @@ interface PendingAsk {
 /** A dead app-server must not make session disposal wait forever. */
 const DISPOSE_RPC_TIMEOUT_MS = 250;
 
-async function settleForDisposal(work: Promise<unknown>): Promise<void> {
+async function settleForDisposal(work: (signal: AbortSignal) => Promise<unknown>): Promise<void> {
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      work.catch(() => undefined),
+      work(controller.signal).catch(() => undefined),
       new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, DISPOSE_RPC_TIMEOUT_MS);
+        timer = setTimeout(() => {
+          // Reaches CodexConnection.pending so the losing request is removed;
+          // the outer race remains as a backstop for injected/older transports.
+          controller.abort(new Error("codex disposal rpc timed out"));
+          resolve();
+        }, DISPOSE_RPC_TIMEOUT_MS);
         timer.unref?.();
       }),
     ]);
@@ -567,10 +573,14 @@ export class CodexSession implements HarnessSession {
 
   /* --------------------------------------------------------- control */
 
-  async interrupt(): Promise<void> {
+  async interrupt(signal?: AbortSignal): Promise<void> {
     if (!this.threadId || !this.turnId) return;
     try {
-      await this.conn.call("turn/interrupt", { threadId: this.threadId, turnId: this.turnId });
+      await this.conn.call(
+        "turn/interrupt",
+        { threadId: this.threadId, turnId: this.turnId },
+        signal,
+      );
     } catch {
       // Already finished — nothing to interrupt.
     }
@@ -688,10 +698,10 @@ export class CodexSession implements HarnessSession {
       // Unsubscribing only stops notifications; it does not stop an active turn
       // or the MCP serving it. Neither RPC may hold teardown hostage if the
       // shared app-server is alive but no longer answering JSON-RPC.
-      await settleForDisposal(this.interrupt());
+      await settleForDisposal((signal) => this.interrupt(signal));
       if (this.threadId) {
         await settleForDisposal(
-          this.conn.call("thread/unsubscribe", { threadId: this.threadId }),
+          (signal) => this.conn.call("thread/unsubscribe", { threadId: this.threadId }, signal),
         );
       }
     } finally {

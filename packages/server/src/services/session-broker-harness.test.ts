@@ -21,6 +21,7 @@ class FakeHarnessSession implements HarnessSession {
   private wake?: () => void;
   private ended = false;
   private initialized = false;
+  private failure?: Error;
   readonly sent: HarnessInput[] = [];
 
   constructor(
@@ -32,9 +33,10 @@ class FakeHarnessSession implements HarnessSession {
     return {
       [Symbol.asyncIterator]: () => ({
         next: async (): Promise<IteratorResult<HarnessEvent>> => {
-          while (!this.queue.length && !this.ended) {
+          while (!this.queue.length && !this.ended && !this.failure) {
             await new Promise<void>((resolve) => (this.wake = resolve));
           }
+          if (this.failure) throw this.failure;
           const value = this.queue.shift();
           return value ? { value, done: false } : { value: undefined as never, done: true };
         },
@@ -59,6 +61,12 @@ class FakeHarnessSession implements HarnessSession {
 
   emit(...events: HarnessEvent[]) {
     this.queue.push(...events);
+    this.wake?.();
+    this.wake = undefined;
+  }
+
+  fail(error: Error) {
+    this.failure = error;
     this.wake?.();
     this.wake = undefined;
   }
@@ -208,6 +216,34 @@ describe("SessionBroker neutral harness path", () => {
 
     expect(first.sent.map((input) => input.text)).toEqual(["first"]);
     expect(second.sent.map((input) => input.text)).toEqual(["second"]);
+  });
+
+  it("does not carry a timed-out fork's stopping flag into the replacement provider", async () => {
+    const first = new FakeHarnessSession(false, false);
+    const second = new FakeHarnessSession(true);
+    session = first;
+    const chat = await store.saveChat({
+      id: "chat-stuck-fork",
+      projectId: "project-1",
+      title: "Stuck fork",
+      modeId: "plan",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "first");
+    await broker.waitFor(chat.id, "idle");
+
+    session = second;
+    await broker.fork(chat.id, "turn-1");
+    await broker.sendMessage(chat.id, "replacement");
+    second.fail(new Error("replacement provider failed"));
+    await broker.waitFor(chat.id, "error");
+
+    expect(broker.getStatus(chat.id)).toBe("error");
   });
 
   it("stamps the producing provider on each row, so a later switch can't relabel it", async () => {

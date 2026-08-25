@@ -79,6 +79,7 @@ export class CodexConnection {
   private readonly pending = new Map<number | string, {
     resolve: (v: unknown) => void;
     reject: (e: Error) => void;
+    cancel?: () => void;
   }>();
   /** Per-thread notification listeners, keyed by threadId. */
   private readonly threadListeners = new Map<string, Set<(f: RpcFrame) => void>>();
@@ -118,28 +119,38 @@ export class CodexConnection {
       this.exitError = new Error(`codex app-server exited (code ${code ?? "null"})`);
       // Nothing in flight can ever be answered now — fail them rather than
       // letting a chat hang on a promise that will never settle.
-      for (const [, p] of this.pending) p.reject(this.exitError);
+      for (const [, p] of this.pending) {
+        p.cancel?.();
+        p.reject(this.exitError);
+      }
       this.pending.clear();
       this.events.emit("close", this.exitError);
     });
 
-    const init = this.request("initialize", {
-      clientInfo: {
-        name: this.opts.clientInfo?.name ?? "dispatch",
-        title: this.opts.clientInfo?.title ?? "Dispatch",
-        version: this.opts.clientInfo?.version ?? "0.0.0",
-      },
-      // `experimentalApi` is what unlocks the v2 surface we depend on:
-      // thread/*, turn/*, item/* notifications, and requestUserInput.
-      capabilities: { experimentalApi: true, requestAttestation: false },
-    });
-    const timed = await Promise.race([
-      init,
-      new Promise<never>((_, rej) =>
-        setTimeout(() => rej(new Error("codex app-server initialize timed out")), INIT_TIMEOUT_MS).unref?.(),
-      ),
-    ]);
-    void timed;
+    const initAbort = new AbortController();
+    const initTimer = setTimeout(
+      () => initAbort.abort(new Error("codex app-server initialize timed out")),
+      INIT_TIMEOUT_MS,
+    );
+    initTimer.unref?.();
+    try {
+      await this.request(
+        "initialize",
+        {
+          clientInfo: {
+            name: this.opts.clientInfo?.name ?? "dispatch",
+            title: this.opts.clientInfo?.title ?? "Dispatch",
+            version: this.opts.clientInfo?.version ?? "0.0.0",
+          },
+          // `experimentalApi` is what unlocks the v2 surface we depend on:
+          // thread/*, turn/*, item/* notifications, and requestUserInput.
+          capabilities: { experimentalApi: true, requestAttestation: false },
+        },
+        initAbort.signal,
+      );
+    } finally {
+      clearTimeout(initTimer);
+    }
     this.notify("initialized", {});
   }
 
@@ -159,6 +170,7 @@ export class CodexConnection {
       const p = this.pending.get(frame.id);
       if (!p) return;
       this.pending.delete(frame.id);
+      p.cancel?.();
       if (frame.error) p.reject(new Error(frame.error.message ?? "codex rpc error"));
       else p.resolve(frame.result);
       return;
@@ -201,19 +213,40 @@ export class CodexConnection {
   }
 
   /** Send a request and await its response. */
-  async request<T = unknown>(method: string, params: unknown): Promise<T> {
+  async request<T = unknown>(method: string, params: unknown, signal?: AbortSignal): Promise<T> {
     if (this.closed) throw this.exitError ?? new Error("codex app-server is closed");
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new Error("codex rpc request aborted");
+    }
     const id = this.nextId++;
     const frame = JSON.stringify({ jsonrpc: "2.0", id, method, params });
-    const p = new Promise<unknown>((resolve, reject) => this.pending.set(id, { resolve, reject }));
-    this.proc?.stdin.write(frame + "\n");
+    const p = new Promise<unknown>((resolve, reject) => {
+      const onAbort = (): void => {
+        if (!this.pending.delete(id)) return;
+        signal?.removeEventListener("abort", onAbort);
+        reject(
+          signal?.reason instanceof Error
+            ? signal.reason
+            : new Error("codex rpc request aborted"),
+        );
+      };
+      this.pending.set(id, {
+        resolve,
+        reject,
+        cancel: signal ? () => signal.removeEventListener("abort", onAbort) : undefined,
+      });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      // Close the race between the initial check and listener registration.
+      if (signal?.aborted) onAbort();
+    });
+    if (this.pending.has(id)) this.proc?.stdin.write(frame + "\n");
     return (await p) as T;
   }
 
   /** Send a request, but only once the handshake has completed. */
-  async call<T = unknown>(method: string, params: unknown): Promise<T> {
+  async call<T = unknown>(method: string, params: unknown, signal?: AbortSignal): Promise<T> {
     await this.ready();
-    return this.request<T>(method, params);
+    return this.request<T>(method, params, signal);
   }
 
   /** Fire a notification. */
@@ -267,6 +300,12 @@ export class CodexConnection {
   /** Kill the process. */
   dispose(): void {
     this.closed = true;
+    const error = new Error("codex app-server connection disposed");
+    for (const [, pending] of this.pending) {
+      pending.cancel?.();
+      pending.reject(error);
+    }
+    this.pending.clear();
     try {
       this.proc?.stdin.end();
     } catch {
