@@ -709,4 +709,35 @@ describe("CodexSession control", () => {
     await session.dispose();
     expect(released).toBe(true);
   });
+
+  it("releases its connection hold when the app-server stops answering during dispose", async () => {
+    let released = false;
+    const fake = fakeConn();
+    const session = new CodexSession({
+      spec: {
+        permissionMode: "default",
+        effort: "medium",
+        systemPromptAppends: [],
+        mcpServers: {},
+        skills: [],
+      },
+      conn: fake.conn,
+      release: () => (released = true),
+      genId: () => "id",
+    });
+    session.send({ text: "go" });
+    await fake.tick();
+    fake.push("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+    fake.reply("turn/interrupt", new Promise(() => {}));
+
+    await session.dispose();
+
+    expect(fake.calls).toContainEqual({
+      method: "turn/interrupt",
+      params: { threadId: "thread-1", turnId: "turn-1" },
+    });
+    expect(released).toBe(true);
+    // The init queued before disposal remains readable, then the stream closes.
+    expect((await take(session, 10)).map((event) => event.type)).toEqual(["init"]);
+  });
 });

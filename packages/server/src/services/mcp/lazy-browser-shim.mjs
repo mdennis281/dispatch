@@ -44,7 +44,10 @@ import { dirname } from "node:path";
 
 /* ------------------------------------------------------------------ argv */
 
-// `--manifest <path> -- <command> <args...>`. The `--` matters: the real
+// `--owner-dir <per-chat path> --manifest <path> -- <command> <args...>`. The
+// owner dir is intentionally unused by the shim: carrying it in THIS process's
+// argv makes ownership recoverable even for a real server with no output flag.
+// The `--` matters: the real
 // server's own args routinely include flags of ours' shape (`--isolated`), and
 // splitting on the first bare `--` is the one rule that can't confuse them.
 const argv = process.argv.slice(2);

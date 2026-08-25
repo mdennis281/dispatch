@@ -6,7 +6,7 @@
  * multiplexed WS event stream, inbound-action dispatch (send-message, permission
  * answer), the global Attention Queue, and a gh-action.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -569,6 +569,30 @@ describe("routes — REST CRUD", () => {
       url: `/api/chats?projectId=${projectId}`,
     });
     expect(list.json().map((c: { id: string }) => c.id)).not.toContain(chatId);
+  });
+
+  it("DELETE reaps residual owned processes before removing the ownership record", async () => {
+    const projectId = await makeProject();
+    const chatId = (
+      await app.inject({
+        method: "POST",
+        url: "/api/chats",
+        payload: { projectId, title: "Junk" },
+      })
+    ).json().id as string;
+    const pidsFor = vi.spyOn(app.services.chatProcesses, "pidsFor").mockImplementation(async (id) => {
+      expect(id).toBe(chatId);
+      expect(await store.getChat(chatId)).toBeDefined();
+      return [43210];
+    });
+    const killPids = vi.spyOn(app.services.processes, "killPids").mockResolvedValue([]);
+
+    const del = await app.inject({ method: "DELETE", url: `/api/chats/${chatId}` });
+
+    expect(del.statusCode).toBe(204);
+    expect(pidsFor).toHaveBeenCalledWith(chatId);
+    expect(killPids).toHaveBeenCalledWith([43210]);
+    expect(await store.getChat(chatId)).toBeNull();
   });
 
   it("DELETE broadcasts chat-deleted + resolves the 'Session ended' attention of an interacted chat", async () => {

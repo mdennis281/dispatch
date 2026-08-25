@@ -161,12 +161,14 @@ describe("buildBrowserMcpServers", () => {
     }
   });
 
-  it("fronts each server with the lazy shim, and the shim exists", () => {
-    const servers = buildBrowserMcpServers({ subApps: [webApp] });
+  it("fronts each server with an attributable lazy shim, and the shim exists", () => {
+    const servers = buildBrowserMcpServers({ subApps: [webApp], chatId: "chat-owner" });
     for (const [name, s] of Object.entries(servers)) {
       const args = s.args!;
       expect(existsSync(args[0]!), `${name} shim ${args[0]}`).toBe(true);
       expect(args[0], name).toMatch(/lazy-browser-shim\.mjs$/);
+      expect(args, name).toContain("--owner-dir");
+      expect(args[args.indexOf("--owner-dir") + 1], name).toContain("chat-owner");
       expect(args, name).toContain("--manifest");
       // The real command follows `--`, and is still node + a CLI that exists.
       const sep = args.indexOf("--");

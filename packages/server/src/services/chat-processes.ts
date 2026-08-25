@@ -230,7 +230,7 @@ export class ChatProcessService {
     for (const [chatId, pid] of this.sessionPids()) add(chatId, pid);
     // Codex owns MCP servers through its shared app-server, so those processes
     // are not descendants of a per-chat runtime pid. The browser shim's output
-    // directory is the ownership boundary; recover that root from the fresh OS
+    // owner directory is the ownership boundary; recover that root from the fresh OS
     // table so a completed/stopped chat can still display and reap its orphan.
     for (const row of table) {
       const chatId = browserMcpOwner(row.commandLine);
@@ -253,7 +253,7 @@ export class ChatProcessService {
   }
 }
 
-/** Chat id embedded by `lazy-browser-shim` in its per-chat output directory. */
+/** Chat id embedded by `lazy-browser-shim` in its per-chat owner directory. */
 function browserMcpOwner(commandLine: string | undefined): string | undefined {
   if (!commandLine) return undefined;
   const normalized = commandLine.replace(/\\/g, "/");

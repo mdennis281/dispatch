@@ -2915,12 +2915,14 @@ export class SessionBroker {
     if (session.started && session.harnessSession) {
       const live = session.harnessSession;
       session.stopping = true;
-      try {
-        await live.dispose();
-      } catch {
-        /* ignore */
-      }
-      await this.awaitLoop(session.runLoop, this.stopTimeoutMs);
+      const teardown = Promise.allSettled([
+        live.dispose(),
+        session.runLoop ?? Promise.resolve(),
+      ]).then(() => undefined);
+      // The ONE grace window bounds disposal itself as well as the iterator it
+      // should close. A provider that stops answering during dispose cannot hold
+      // this route (and a fresh manager grant) forever.
+      await this.awaitLoop(teardown, this.stopTimeoutMs);
       // A provider can acknowledge dispose without closing its event iterator.
       // Retire this exact runtime anyway so the next message mints fresh manager
       // credentials instead of reusing a session whose grant was just revoked.
@@ -2964,8 +2966,11 @@ export class SessionBroker {
     if (session.started && session.harnessSession) {
       const live = session.harnessSession;
       session.stopping = true;
-      await live.dispose().catch(() => {});
-      await this.awaitLoop(session.runLoop, this.stopTimeoutMs);
+      const teardown = Promise.allSettled([
+        live.dispose(),
+        session.runLoop ?? Promise.resolve(),
+      ]).then(() => undefined);
+      await this.awaitLoop(teardown, this.stopTimeoutMs);
       session.managerGrant?.revoke();
       session.managerGrant = undefined;
     } else if (session.started && session.input) {
@@ -4966,7 +4971,7 @@ export class SessionBroker {
 
   private onDone(session: LiveSession): void {
     // Idempotent: a session that already settled must not emit a second "done".
-    if (!session.started && !session.query && !session.harnessSession) return;
+    if (!session.started && !session.query && !session.harnessSession && !session.stopping) return;
     session.started = false;
     session.query = undefined;
     session.input = undefined;
