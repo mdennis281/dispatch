@@ -30,7 +30,7 @@ function isTruthyFlag(v: string | undefined): boolean {
 
 export function registerChatRoutes(app: FastifyInstance): void {
   const { store, bus } = app.cm;
-  const { broker, attention, chatProcesses, terminals } = app.services;
+  const { broker, attention, chatProcesses, terminals, processes } = app.services;
 
   app.get<{ Querystring: { projectId?: string } }>(
     "/api/chats",
@@ -252,6 +252,11 @@ export function registerChatRoutes(app: FastifyInstance): void {
         ids.map(async (id) => {
           await broker.stop(id).catch(() => {});
           terminals.killChat(id);
+          // Codex launches MCPs from its shared app-server, outside the runtime
+          // subtree that `broker.stop()` owns. Re-scan AFTER stopping and reap
+          // roots carrying this chat's browser output marker plus descendants.
+          const residual = await chatProcesses.pidsFor(id);
+          if (residual.length) await processes.killPids(residual);
         }),
       );
       // The count is a cache with a TTL; without this the row keeps showing the

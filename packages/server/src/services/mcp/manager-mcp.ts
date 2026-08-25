@@ -247,6 +247,7 @@ export interface ManagerMcpBroker {
     chatId: string,
     questions: ManagerAskQuestion[],
     timeoutSeconds?: number,
+    signal?: AbortSignal,
   ): Promise<ManagerAskResult>;
 }
 
@@ -1685,6 +1686,13 @@ function extraSignal(extra: unknown): AbortSignal | undefined {
   return sig instanceof AbortSignal ? sig : undefined;
 }
 
+/** One cancellation channel for both the MCP call and the owning chat session. */
+function combinedSignal(...signals: (AbortSignal | undefined)[]): AbortSignal | undefined {
+  const present = signals.filter((signal): signal is AbortSignal => signal instanceof AbortSignal);
+  if (present.length < 2) return present[0];
+  return AbortSignal.any(present);
+}
+
 function textResult(text: string, isError = false): CallToolResult {
   return { content: [{ type: "text", text }], isError };
 }
@@ -2352,8 +2360,13 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           "Optional inactivity timeout in seconds. Typing or selecting an option resets it.",
         ),
     },
-    async ({ questions, timeoutSeconds }): Promise<CallToolResult> => {
-      const result = await ctx.broker.askUser(ctx.chatId, questions, timeoutSeconds);
+    async ({ questions, timeoutSeconds }, extra): Promise<CallToolResult> => {
+      const result = await ctx.broker.askUser(
+        ctx.chatId,
+        questions,
+        timeoutSeconds,
+        combinedSignal(extraSignal(extra), ctx.signal),
+      );
       if (result.status === "unavailable") {
         return textResult(
           `The question could not be shown to the human. ${result.message}\n` +

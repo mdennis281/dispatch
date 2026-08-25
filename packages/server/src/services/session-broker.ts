@@ -1088,6 +1088,8 @@ export interface SessionBrokerDeps {
   query?: QueryFn;
   genId?: () => string;
   now?: () => number;
+  /** Teardown grace period. Production uses 5s; tests can exercise forced retirement quickly. */
+  stopTimeoutMs?: number;
 }
 
 /**
@@ -1692,6 +1694,8 @@ interface PendingPermission {
   /** Manager ask_user inactivity window; native harness questions do not set one. */
   timeoutMs?: number;
   timeoutTimer?: ReturnType<typeof setTimeout>;
+  /** Removes the manager tool-call cancellation listener when the card settles. */
+  abortListener?: () => void;
 }
 
 const questionTimeoutMessage = (timeoutMs: number): string =>
@@ -1726,6 +1730,8 @@ interface LiveSession {
    * back from that to the run whose effort it just reported.
    */
   threadOfTool: Map<string, string>;
+  /** Tool-use id to the turn that opened it; late results must not revive a settled turn. */
+  toolTurn: Map<string, number>;
   /**
    * Where each thread is working on disk, and the guard that keeps a subagent
    * out of another task's worktree. Created on the first turn and kept for the
@@ -1961,6 +1967,7 @@ export class SessionBroker {
   private readonly query: QueryFn;
   private readonly genId: () => string;
   private readonly now: () => number;
+  private readonly stopTimeoutMs: number;
 
   private readonly sessions = new Map<string, LiveSession>();
   /** FIFO of chatIds parked in `queued` waiting for an active slot. */
@@ -2010,6 +2017,7 @@ export class SessionBroker {
     this.query = opts.deps?.query ?? (sdkQuery as unknown as QueryFn);
     this.genId = opts.deps?.genId ?? (() => nanoid());
     this.now = opts.deps?.now ?? (() => Date.now());
+    this.stopTimeoutMs = opts.deps?.stopTimeoutMs ?? STOP_TIMEOUT_MS;
   }
 
   /* --------------------------------------------------------- public API */
@@ -2029,6 +2037,7 @@ export class SessionBroker {
         harnessKind: chat.harness ?? DEFAULT_HARNESS,
         effortByThread: new Map(),
         threadOfTool: new Map(),
+        toolTurn: new Map(),
         sessionId: chat.sessionId,
         model: chat.model,
         modelOverride: chat.model,
@@ -2057,6 +2066,27 @@ export class SessionBroker {
         activity: new ActivityTracker(this.activitySink(chat.id)),
       };
       this.sessions.set(chat.id, session);
+      if (
+        chat.status === "running" ||
+        chat.status === "waiting" ||
+        chat.status === "queued" ||
+        chat.status === "awaiting-input"
+      ) {
+        // There is no live process after a restart. Persist the reconciliation,
+        // not just the in-memory view, or the next list read keeps resurrecting
+        // the stale running state until some unrelated status change occurs.
+        session.writeChain = this.store
+          .patchChat(chat.id, { status: "error" })
+          .then(() => undefined)
+          .catch((err) => {
+            this.bus.publish({
+              type: "error",
+              chatId: chat.id,
+              message: "failed to persist recovered chat status",
+              detail: err instanceof Error ? err.message : String(err),
+            });
+          });
+      }
     }
     return this.view(session);
   }
@@ -2373,6 +2403,7 @@ export class SessionBroker {
       session.pendingPermissions.delete(requestId);
       session.activity.unblocked(requestId, this.now());
       if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
+      pending.abortListener?.();
 
       if (pending.harnessSession) {
         pending.harnessSession.resolvePermission(requestId, resolution);
@@ -2869,7 +2900,7 @@ export class SessionBroker {
     session.resumeSessionId = session.sessionId;
     // Already terminal — nothing to tear down. Never re-run onDone (that would
     // emit a duplicate "Session ended" attention item, e.g. from dispose()).
-    if (session.status === "done" || session.status === "error") {
+    if ((session.status === "done" || session.status === "error") && !session.started) {
       this.queueOrder = this.queueOrder.filter((x) => x !== chatId);
       return;
     }
@@ -2882,16 +2913,22 @@ export class SessionBroker {
     this.queueOrder = this.queueOrder.filter((x) => x !== chatId);
 
     if (session.started && session.harnessSession) {
+      const live = session.harnessSession;
       session.stopping = true;
       try {
-        await session.harnessSession.dispose();
+        await live.dispose();
       } catch {
         /* ignore */
       }
-      await this.awaitLoop(session.runLoop, STOP_TIMEOUT_MS);
+      await this.awaitLoop(session.runLoop, this.stopTimeoutMs);
+      // A provider can acknowledge dispose without closing its event iterator.
+      // Retire this exact runtime anyway so the next message mints fresh manager
+      // credentials instead of reusing a session whose grant was just revoked.
+      if (session.harnessSession === live) this.onDone(session);
       session.managerGrant?.revoke();
       session.managerGrant = undefined;
     } else if (session.started && session.input) {
+      const query = session.query;
       session.stopping = true;
       try {
         session.input.close();
@@ -2906,7 +2943,8 @@ export class SessionBroker {
       // Wait for the consume loop to unwind so onDone fires (status/attention
       // events settle) BEFORE we return — dispose() then never clears the map
       // while a subprocess is still emitting against a removed session.
-      await this.awaitLoop(session.runLoop, STOP_TIMEOUT_MS);
+      await this.awaitLoop(session.runLoop, this.stopTimeoutMs);
+      if (session.query === query) this.onDone(session);
     } else {
       this.onDone(session);
     }
@@ -2924,9 +2962,10 @@ export class SessionBroker {
     this.drainPendingPermissions(session, "Session forked.");
     session.activity.dispose(this.now());
     if (session.started && session.harnessSession) {
+      const live = session.harnessSession;
       session.stopping = true;
-      await session.harnessSession.dispose().catch(() => {});
-      await this.awaitLoop(session.runLoop, STOP_TIMEOUT_MS);
+      await live.dispose().catch(() => {});
+      await this.awaitLoop(session.runLoop, this.stopTimeoutMs);
       session.managerGrant?.revoke();
       session.managerGrant = undefined;
     } else if (session.started && session.input) {
@@ -2945,6 +2984,8 @@ export class SessionBroker {
     session.started = false;
     session.query = undefined;
     session.input = undefined;
+    session.harnessSession = undefined;
+    session.toolTurn.clear();
     session.resumeSessionId = session.sessionId;
     session.forkAtUuid = atMessageUuid;
     session.fork = true;
@@ -3553,10 +3594,13 @@ export class SessionBroker {
     const live = session.harnessSession;
     if (!live) return;
     try {
-      for await (const event of live.events) await this.handleHarnessEvent(session, event);
-      this.onDone(session);
+      for await (const event of live.events) {
+        if (session.harnessSession !== live) break;
+        await this.handleHarnessEvent(session, event);
+      }
+      if (session.harnessSession === live) this.onDone(session);
     } catch (err) {
-      this.onError(session, err);
+      if (session.harnessSession === live) this.onError(session, err);
     }
   }
 
@@ -3626,6 +3670,7 @@ export class SessionBroker {
         });
         return;
       case "tool-use": {
+        session.toolTurn.set(event.toolUseId, session.turn);
         // The ledger row for this call. Classified the same way the transcript
         // import classifies a historical one (see metrics-classify), so a call
         // counts identically whether it was seen live or reconstructed later.
@@ -3668,6 +3713,8 @@ export class SessionBroker {
         return;
       }
       case "tool-result": {
+        const toolTurn = session.toolTurn.get(event.toolUseId);
+        session.toolTurn.delete(event.toolUseId);
         session.activity.toolEnd(event.toolUseId, base.ts, { ok: event.ok });
         const persisted = await this.persistContentImages(session, event.content);
         await this.emit(session, {
@@ -3681,7 +3728,12 @@ export class SessionBroker {
           parentToolUseId: event.parentToolUseId,
           subagentType: event.subagentType,
         });
-        this.setStatus(session, "running", { state: "thinking", label: "thinking." });
+        // Codex may report turn/completed(interrupted) before the final MCP
+        // result. The result still belongs in the transcript, but it must not
+        // overwrite the failed/idle state chosen by that already-ended turn.
+        if (toolTurn === session.turn) {
+          this.setStatus(session, "running", { state: "thinking", label: "thinking." });
+        }
         return;
       }
       case "permission-request":
@@ -3794,11 +3846,12 @@ export class SessionBroker {
     if (!q) return;
     try {
       for await (const msg of q) {
+        if (session.query !== q) break;
         await this.handleMessage(session, msg);
       }
-      this.onDone(session);
+      if (session.query === q) this.onDone(session);
     } catch (err) {
-      this.onError(session, err);
+      if (session.query === q) this.onError(session, err);
     }
   }
 
@@ -4474,6 +4527,7 @@ export class SessionBroker {
       displayName?: string;
       description?: string;
       timeoutMs?: number;
+      signal?: AbortSignal;
     },
   ): Promise<PermissionResult> {
     // A SELF-GATED tool asks for itself, in its own words, with its own card —
@@ -4508,25 +4562,6 @@ export class SessionBroker {
       ? questionSummary(input)
       : (opts?.title ?? `Permission: ${toolName}`);
 
-    this.setStatus(session, "awaiting-input", {
-      state: "awaiting",
-      label: isQuestion ? summary : (opts?.title ?? `Allow ${toolName}?`),
-      toolName,
-    });
-    this.bus.publish({ type: "permission-request", chatId: session.chatId, request });
-    this.bus.publish({
-      type: "attention-add",
-      item: {
-        id: attentionId,
-        chatId: session.chatId,
-        kind: isQuestion ? "question" : "permission",
-        summary,
-        projectId: session.projectId || undefined,
-        permissionRequestId: requestId,
-        createdAt: this.now(),
-      },
-    });
-
     // Attributed to the main loop: `canUseTool` is handed a tool name and its
     // input and nothing else, so this path has no parent run id to offer. A
     // subagent's prompt therefore reads as the chat waiting, which is true of
@@ -4543,7 +4578,42 @@ export class SessionBroker {
         timeoutMs: opts.timeoutMs,
       };
       session.pendingPermissions.set(requestId, pending);
+      if (opts.signal) {
+        const abort = (): void => {
+          this.resolvePermission(requestId, {
+            decision: "deny",
+            message: "Question caller disconnected before an answer was submitted.",
+          });
+        };
+        pending.abortListener = () => opts.signal?.removeEventListener("abort", abort);
+        if (opts.signal.aborted) {
+          abort();
+          return;
+        }
+        opts.signal.addEventListener("abort", abort, { once: true });
+      }
       this.armQuestionTimeout(session, requestId, pending);
+      // Register cancellation and the resolver BEFORE publishing the card. A
+      // caller that disappears during delivery now resolves and removes it,
+      // instead of leaving a clickable question nobody is listening to.
+      this.setStatus(session, "awaiting-input", {
+        state: "awaiting",
+        label: isQuestion ? summary : (opts?.title ?? `Allow ${toolName}?`),
+        toolName,
+      });
+      this.bus.publish({ type: "permission-request", chatId: session.chatId, request });
+      this.bus.publish({
+        type: "attention-add",
+        item: {
+          id: attentionId,
+          chatId: session.chatId,
+          kind: isQuestion ? "question" : "permission",
+          summary,
+          projectId: session.projectId || undefined,
+          permissionRequestId: requestId,
+          createdAt: this.now(),
+        },
+      });
     });
   }
 
@@ -4572,6 +4642,7 @@ export class SessionBroker {
     chatId: string,
     questions: ManagerAskQuestion[],
     timeoutSeconds?: number,
+    signal?: AbortSignal,
   ): Promise<ManagerAskResult> {
     const session = this.sessions.get(chatId);
     if (!session) {
@@ -4584,6 +4655,7 @@ export class SessionBroker {
       {
         displayName: "Question",
         timeoutMs: timeoutSeconds ? timeoutSeconds * 1_000 : undefined,
+        signal,
       },
     );
     if (result.behavior !== "allow") {
@@ -4894,11 +4966,12 @@ export class SessionBroker {
 
   private onDone(session: LiveSession): void {
     // Idempotent: a session that already settled must not emit a second "done".
-    if (session.status === "done" || session.status === "error") return;
+    if (!session.started && !session.query && !session.harnessSession) return;
     session.started = false;
     session.query = undefined;
     session.input = undefined;
     session.harnessSession = undefined;
+    session.toolTurn.clear();
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     session.stopping = false;
@@ -4932,6 +5005,7 @@ export class SessionBroker {
     session.query = undefined;
     session.input = undefined;
     session.harnessSession = undefined;
+    session.toolTurn.clear();
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     // A crash after a completed turn leaves a live "Turn complete" item; clear it.
@@ -4984,6 +5058,7 @@ export class SessionBroker {
   private drainPendingPermissions(session: LiveSession, message: string): void {
     for (const [requestId, p] of session.pendingPermissions) {
       if (p.timeoutTimer) clearTimeout(p.timeoutTimer);
+      p.abortListener?.();
       session.activity.unblocked(requestId, this.now());
       if (p.harnessSession) {
         p.harnessSession.resolvePermission(requestId, { decision: "deny", message });

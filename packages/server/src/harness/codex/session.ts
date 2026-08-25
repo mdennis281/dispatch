@@ -654,6 +654,10 @@ export class CodexSession implements HarnessSession {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    // Unsubscribing only stops notifications; it does not stop an active turn or
+    // the MCP process serving it. Interrupt first so provider-owned tool trees
+    // get their normal shutdown path before this session releases the thread.
+    await this.interrupt();
     // Never abandon an ask — a thread blocked on an unanswered request would
     // survive this session and hold a slot in the shared process.
     for (const [, ask] of this.pendingAsks) {

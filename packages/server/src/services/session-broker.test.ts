@@ -947,6 +947,45 @@ describe("SessionBroker — permissions", () => {
     await expect(answerP).resolves.toEqual({ status: "declined", message: "Not now." });
   });
 
+  it("persists restart reconciliation instead of leaving the record running", async () => {
+    const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+    const chat = await store.saveChat({ ...chatFor("c1"), status: "running" });
+
+    expect(broker.create(chat).status).toBe("error");
+    await vi.waitFor(async () => {
+      expect((await store.getChat("c1"))?.status).toBe("error");
+    });
+  });
+
+  it("removes a manager question card when its tool call is cancelled", async () => {
+    const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const controller = new AbortController();
+    const reqP = nextPermissionId();
+    const answerP = broker.askUser(
+      "c1",
+      [{ header: "Proceed", question: "Should I continue?", options: [{ label: "Yes" }] }],
+      undefined,
+      controller.signal,
+    );
+    const reqId = await reqP;
+
+    controller.abort();
+
+    await expect(answerP).resolves.toEqual({
+      status: "declined",
+      message: "Question caller disconnected before an answer was submitted.",
+    });
+    expect(broker.answerQuestion(reqId, { answers: [] })).toBe(false);
+    expect(
+      events.some((event) => event.type === "permission-resolved" && event.requestId === reqId),
+    ).toBe(true);
+    expect(
+      events.some((event) => event.type === "attention-resolve" && event.chatId === "c1"),
+    ).toBe(true);
+  });
+
   it("times out a manager question after inactivity and resets on card activity", async () => {
     const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
     await store.saveChat(chatFor("c1"));

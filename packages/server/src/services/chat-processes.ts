@@ -180,7 +180,7 @@ export class ChatProcessService {
    */
   async pidsFor(chatId: string): Promise<number[]> {
     const table = await this.procTableFresh().catch(() => [] as ProcRow[]);
-    const roots = this.rootsByChat().get(chatId);
+    const roots = this.rootsByChat(table).get(chatId);
     if (!roots?.length) return [];
     return [...descendantsOf(roots, table)];
   }
@@ -196,8 +196,8 @@ export class ChatProcessService {
     if (table.length === 0) return this.cached ?? { byChat: {}, at: this.now() };
 
     const byChat: Record<string, ChatProcessTally> = {};
-    const sessionRoots = this.sessionRootsByChat();
-    for (const [chatId, roots] of this.rootsByChat()) {
+    const sessionRoots = this.sessionRootsByChat(table);
+    for (const [chatId, roots] of this.rootsByChat(table)) {
       // The session subtree first, so a shell the session itself started is
       // attributed there and not counted twice on the shells side.
       const sessionPids = descendantsOf(sessionRoots.get(chatId) ?? [], table);
@@ -219,16 +219,7 @@ export class ChatProcessService {
   }
 
   /** `chatId → session root pid`, the half an idle sweep retires. */
-  private sessionRootsByChat(): Map<string, number[]> {
-    const roots = new Map<string, number[]>();
-    for (const [chatId, pid] of this.sessionPids()) {
-      if (Number.isInteger(pid) && pid > 0) roots.set(chatId, [pid]);
-    }
-    return roots;
-  }
-
-  /** `chatId → root pids`, from both kinds of root. */
-  private rootsByChat(): Map<string, number[]> {
+  private sessionRootsByChat(table: readonly ProcRow[]): Map<string, number[]> {
     const roots = new Map<string, number[]>();
     const add = (chatId: string, pid: number): void => {
       if (!Number.isInteger(pid) || pid <= 0) return;
@@ -237,9 +228,36 @@ export class ChatProcessService {
       else roots.set(chatId, [pid]);
     };
     for (const [chatId, pid] of this.sessionPids()) add(chatId, pid);
+    // Codex owns MCP servers through its shared app-server, so those processes
+    // are not descendants of a per-chat runtime pid. The browser shim's output
+    // directory is the ownership boundary; recover that root from the fresh OS
+    // table so a completed/stopped chat can still display and reap its orphan.
+    for (const row of table) {
+      const chatId = browserMcpOwner(row.commandLine);
+      if (chatId) add(chatId, row.pid);
+    }
+    return roots;
+  }
+
+  /** `chatId → root pids`, from both kinds of root. */
+  private rootsByChat(table: readonly ProcRow[]): Map<string, number[]> {
+    const roots = this.sessionRootsByChat(table);
+    const add = (chatId: string, pid: number): void => {
+      if (!Number.isInteger(pid) || pid <= 0) return;
+      const list = roots.get(chatId);
+      if (list) list.push(pid);
+      else roots.set(chatId, [pid]);
+    };
     for (const shell of this.terminals?.livePids() ?? []) add(shell.chatId, shell.pid);
     return roots;
   }
+}
+
+/** Chat id embedded by `lazy-browser-shim` in its per-chat output directory. */
+function browserMcpOwner(commandLine: string | undefined): string | undefined {
+  if (!commandLine) return undefined;
+  const normalized = commandLine.replace(/\\/g, "/");
+  return /(?:^|\/)dispatch-browser-mcp\/([^/\s"']+)/i.exec(normalized)?.[1];
 }
 
 /**

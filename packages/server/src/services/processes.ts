@@ -75,6 +75,8 @@ export interface ProcRow {
   pid: number;
   ppid: number;
   name?: string;
+  /** Full invocation when the platform exposes it. Kept internal; used for ownership markers. */
+  commandLine?: string;
   /** Resident bytes (Windows working set / POSIX RSS). Counts SHARED pages. */
   rssBytes?: number;
   /** CUMULATIVE CPU time since the process started, ms. A rate needs two. */
@@ -256,10 +258,14 @@ function splitCsvLine(line: string): string[] {
 }
 
 /** Column names this understands, mapped to where they land on a {@link ProcRow}. */
-const PROC_CSV_COLUMNS: Record<string, "pid" | "ppid" | "name" | "rss" | "kernel" | "user"> = {
+const PROC_CSV_COLUMNS: Record<
+  string,
+  "pid" | "ppid" | "name" | "commandLine" | "rss" | "kernel" | "user"
+> = {
   processid: "pid",
   parentprocessid: "ppid",
   name: "name",
+  commandline: "commandLine",
   workingsetsize: "rss",
   kernelmodetime: "kernel",
   usermodetime: "user",
@@ -301,6 +307,8 @@ export function parseProcCsv(output: string): ProcRow[] {
     const ppid = Number(at("ppid"));
     if (!Number.isInteger(pid) || !Number.isInteger(ppid) || pid <= 0) continue;
     const row: ProcRow = { pid, ppid, name: at("name") || undefined };
+    const commandLine = at("commandLine") || undefined;
+    if (commandLine) row.commandLine = commandLine;
     const rss = Number(at("rss"));
     if (Number.isFinite(rss) && at("rss") !== undefined) row.rssBytes = rss;
     // 100 ns ticks → ms. Absent columns give NaN, which must not become a 0:
@@ -318,7 +326,9 @@ export function parseProcCsv(output: string): ProcRow[] {
 }
 
 /**
- * Parse `ps -e -o pid=,ppid=,rss=,time=,comm=` into pid → parent rows.
+ * Parse `ps -e -o pid=,ppid=,rss=,time=,comm=` into pid → parent rows. When
+ * `includesCommandLine` is true, the tail is `comm,args` and the invocation is
+ * retained separately without turning the process display name into a command.
  *
  * Tolerates the older three-column `pid,ppid,comm` form: `rss` and `time` are
  * only read when the line actually carries an integer and a clock-shaped field
@@ -335,14 +345,21 @@ export function parseProcCsv(output: string): ProcRow[] {
  * uniformly-wrong-but-plausible failure the rest of this file works to avoid,
  * and it would render as a Resources page listing every chat at 0 B and "—".
  */
-export function parsePsTable(output: string): ProcRow[] {
+export function parsePsTable(output: string, includesCommandLine = false): ProcRow[] {
   const rows: ProcRow[] = [];
   for (const line of output.split(/\r?\n/)) {
     const m = line
       .trim()
       .match(/^(\d+)\s+(\d+)\s+(?:(\d+)\s+((?:\d+-)?(?:\d+:)?\d+:\d+(?:\.\d+)?)\s+)?(.*)$/);
     if (!m) continue;
-    const row: ProcRow = { pid: Number(m[1]), ppid: Number(m[2]), name: m[5] || undefined };
+    const tail = m[5] || undefined;
+    const withArgs = includesCommandLine && tail ? /^(\S+)\s+(.*)$/.exec(tail) : null;
+    const row: ProcRow = {
+      pid: Number(m[1]),
+      ppid: Number(m[2]),
+      name: withArgs?.[1] ?? tail,
+    };
+    if (withArgs?.[2]) row.commandLine = withArgs[2];
     if (m[3] !== undefined) row.rssBytes = Number(m[3]) * 1024;
     if (m[4] !== undefined) row.cpuMs = parsePsTime(m[4]);
     rows.push(row);
@@ -387,19 +404,19 @@ export const defaultProcTable: ProcTableFn = async () => {
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize,KernelModeTime,UserModeTime,Name | ConvertTo-Csv -NoTypeInformation",
+        "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize,KernelModeTime,UserModeTime,Name,CommandLine | ConvertTo-Csv -NoTypeInformation",
       ],
       { reject: false, buffer: true, windowsHide: true },
     );
     return parseProcCsv(res.stdout ?? "");
   }
-  // `comm` LAST: it is the only field that can contain a space, so anything
+  // `args` LAST: it is the only field that can contain spaces, so anything
   // after it would be unparseable.
-  const res = await execa("ps", ["-e", "-o", "pid=,ppid=,rss=,time=,comm="], {
+  const res = await execa("ps", ["-ww", "-e", "-o", "pid=,ppid=,rss=,time=,comm=,args="], {
     reject: false,
     buffer: true,
   });
-  return parsePsTable(res.stdout ?? "");
+  return parsePsTable(res.stdout ?? "", true);
 };
 
 /**
