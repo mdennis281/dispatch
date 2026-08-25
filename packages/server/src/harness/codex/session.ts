@@ -347,6 +347,12 @@ export class CodexSession implements HarnessSession {
     if (item.type === "subAgentActivity") {
       const childId = typeof item.agentThreadId === "string" ? item.agentThreadId : undefined;
       if (!childId) return;
+      // App-server also reports the root path as sub-agent activity. Subscribing
+      // the sender to itself installs a second decoder on the same thread, so
+      // every later message/tool is persisted twice (the copy masquerades as a
+      // child of `codex-agent:<root-id>`). Activity describes a child only when
+      // it identifies a DIFFERENT thread.
+      if (childId === senderThreadId || childId === this.threadId) return;
       const toolUseId =
         this.childContexts.get(childId)?.parentToolUseId ??
         this.pendingSpawns.get(senderThreadId) ??

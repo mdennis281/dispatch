@@ -114,6 +114,41 @@ describe("groupTranscriptRows", () => {
       { kind: "shell", rows: [last] },
     ]);
   });
+
+  it("hides empty Codex wait heartbeats but preserves real TaskOutput calls", () => {
+    const heartbeat = tool("TaskOutput", {}, "wait");
+    const emptyResult: ChatMessage = {
+      kind: "tool_result", id: "wait-result", toolUseId: "wait", chatId: "chat",
+      ts: 2, turn: 0, ok: true, content: "",
+    };
+    expect(groupTranscriptRows([heartbeat, emptyResult])).toEqual([]);
+
+    const named = tool("TaskOutput", { task_id: "task-1" }, "named");
+    expect(groupTranscriptRows([named])).toEqual([{ kind: "row", row: named }]);
+    const useful = tool("TaskOutput", {}, "useful");
+    const usefulResult: ChatMessage = {
+      kind: "tool_result", id: "useful-result", toolUseId: "useful", chatId: "chat",
+      ts: 2, turn: 0, ok: true, content: "agent finished",
+    };
+    expect(groupTranscriptRows([useful, usefulResult])).toEqual([{ kind: "row", row: useful }]);
+
+    const failed = tool("TaskOutput", {}, "failed");
+    const failedResult: ChatMessage = {
+      kind: "tool_result", id: "failed-result", toolUseId: "failed", chatId: "chat",
+      ts: 2, turn: 0, ok: false, isError: true, content: "",
+    };
+    expect(groupTranscriptRows([failed, failedResult])).toEqual([{ kind: "row", row: failed }]);
+  });
+
+  it("keeps the first copy of a duplicated Codex root tool event", () => {
+    const root = tool("Bash", { command: "git status" }, "root-row");
+    const duplicate = {
+      ...root,
+      id: "child-copy",
+      parentToolUseId: "codex-agent:root-thread",
+    };
+    expect(groupTranscriptRows([root, duplicate])).toEqual([{ kind: "shell", rows: [root] }]);
+  });
 });
 
 describe("file tool presentations", () => {

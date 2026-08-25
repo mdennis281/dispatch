@@ -19,6 +19,7 @@ import type {
   ToolUseRow,
 } from "@dispatch/shared";
 import { collectWorkRoots, deriveRunLocations, type RunLocation } from "./runLocation.js";
+import { isEmptyTaskOutput } from "./toolPresentations.js";
 
 export type RunStatus = "running" | "done" | "failed" | "stopped";
 
@@ -367,6 +368,7 @@ export function deriveSubagentRuns(
         }
         case "tool_use": {
           const result = resultsByUse.get(row.toolUseId);
+          if (isEmptyTaskOutput(row, result)) break;
           if (row.effort) run.effort = row.effort;
           if (isTaskName(row.name)) {
             // A subagent spawning a subagent: a step here, its own run elsewhere.

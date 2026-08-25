@@ -149,6 +149,14 @@ export class CodexStreamDecoder {
   private onItemStarted(item: Item | undefined): HarnessEvent[] {
     if (!item?.type) return [];
     const id = String(item.id ?? this.genId());
+    // A payload-free collaboration wait is scheduler control flow, not user
+    // work. The Agent cards already own the useful live status and transcript;
+    // persisting this exact heartbeat produces `TaskOutput {}` with nothing
+    // behind it. Waits carrying a target/status/error remain real tool rows.
+    if (this.isEmptyCollaborationWait(item)) {
+      this.sawStructuredCollaboration = true;
+      return [];
+    }
     switch (item.type) {
       // The user's own message is already in the transcript — the broker wrote
       // it when it accepted the send. Echoing it would duplicate the row.
@@ -204,6 +212,11 @@ export class CodexStreamDecoder {
   private onItemCompleted(item: Item | undefined): HarnessEvent[] {
     if (!item?.type) return [];
     const id = String(item.id ?? this.genId());
+    if (this.isEmptyCollaborationWait(item)) {
+      this.sawStructuredCollaboration = true;
+      this.startedTools.delete(id);
+      return [];
+    }
     switch (item.type) {
       case "agentMessage": {
         const text = String(item.text ?? "");
@@ -275,6 +288,17 @@ export class CodexStreamDecoder {
     if (item.type === "collabAgentToolCall") return item.status !== "failed";
     if (item.type === "mcpToolCall" && item.error) return false;
     return true;
+  }
+
+  /** Is this the exact successful wait shape whose normalized call/result are empty? */
+  private isEmptyCollaborationWait(item: Item): boolean {
+    if (item.type !== "collabAgentToolCall" || item.tool !== "wait" || !this.itemOk(item)) {
+      return false;
+    }
+    const call = this.toolCallOf(item);
+    if (!call || Object.keys(call.input).length !== 0) return false;
+    const content = this.resultContentOf(item);
+    return typeof content === "string" && content.trim().length === 0;
   }
 
   /**
