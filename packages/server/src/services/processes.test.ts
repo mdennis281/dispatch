@@ -158,6 +158,14 @@ describe("parseProcCsv", () => {
     expect(row.cpuMs).toBeUndefined();
     expect(row.rssBytes).toBeUndefined();
   });
+
+  it("keeps the full Windows command line when that column is present", () => {
+    const [row] = parseProcCsv(
+      '"ProcessId","ParentProcessId","Name","CommandLine"\n' +
+        '"40","1","node.exe","node lazy-browser-shim.mjs --output-dir C:\\tmp\\dispatch-browser-mcp\\chat-1"',
+    );
+    expect(row.commandLine).toContain("dispatch-browser-mcp\\chat-1");
+  });
 });
 
 describe("parsePsTable", () => {
@@ -205,6 +213,17 @@ describe("parsePsTable", () => {
     expect(parsePsTable("  900   800 7z x big.zip")).toEqual([
       { pid: 900, ppid: 800, name: "7z x big.zip" },
     ]);
+  });
+
+  it("separates POSIX comm from the full args invocation", () => {
+    const [row] = parsePsTable(
+      "40 1 100 00:01 node /usr/bin/node lazy-browser-shim.mjs --output-dir /tmp/dispatch-browser-mcp/chat-1",
+      true,
+    );
+    expect(row).toMatchObject({
+      name: "node",
+      commandLine: "/usr/bin/node lazy-browser-shim.mjs --output-dir /tmp/dispatch-browser-mcp/chat-1",
+    });
   });
 });
 

@@ -30,7 +30,11 @@ function isTruthyFlag(v: string | undefined): boolean {
 
 export function registerChatRoutes(app: FastifyInstance): void {
   const { store, bus } = app.cm;
-  const { broker, attention, chatProcesses, terminals } = app.services;
+  const { broker, attention, chatProcesses, terminals, processes } = app.services;
+  const reapResidual = async (chatId: string): Promise<void> => {
+    const residual = await chatProcesses.pidsFor(chatId);
+    if (residual.length) await processes.killPids(residual);
+  };
 
   app.get<{ Querystring: { projectId?: string } }>(
     "/api/chats",
@@ -100,6 +104,11 @@ export function registerChatRoutes(app: FastifyInstance): void {
       const existing = await store.getChat(id);
       // Tear the subprocess down, THEN forget the session so it can't leak.
       await broker.stop(id).catch(() => {});
+      terminals.killChat(id);
+      // A browser shim can outlive the provider that launched it. Reap while the
+      // chat id still exists as an ownership key; after deletion the UI has no
+      // row from which a human could recover the orphan.
+      await reapResidual(id).catch(() => {});
       broker.drop(id);
       // Authoritatively resolve every attention item this chat published — incl.
       // the "Session ended" one `stop()`→`onDone` just emitted — so no connected
@@ -252,6 +261,10 @@ export function registerChatRoutes(app: FastifyInstance): void {
         ids.map(async (id) => {
           await broker.stop(id).catch(() => {});
           terminals.killChat(id);
+          // Codex launches MCPs from its shared app-server, outside the runtime
+          // subtree that `broker.stop()` owns. Re-scan AFTER stopping and reap
+          // roots carrying this chat's browser output marker plus descendants.
+          await reapResidual(id);
         }),
       );
       // The count is a cache with a TTL; without this the row keeps showing the

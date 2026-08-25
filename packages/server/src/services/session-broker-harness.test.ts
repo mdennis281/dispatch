@@ -21,15 +21,22 @@ class FakeHarnessSession implements HarnessSession {
   private wake?: () => void;
   private ended = false;
   private initialized = false;
+  private failure?: Error;
   readonly sent: HarnessInput[] = [];
+
+  constructor(
+    private readonly manual = false,
+    private readonly endOnDispose = true,
+  ) {}
 
   get events(): AsyncIterable<HarnessEvent> {
     return {
       [Symbol.asyncIterator]: () => ({
         next: async (): Promise<IteratorResult<HarnessEvent>> => {
-          while (!this.queue.length && !this.ended) {
+          while (!this.queue.length && !this.ended && !this.failure) {
             await new Promise<void>((resolve) => (this.wake = resolve));
           }
+          if (this.failure) throw this.failure;
           const value = this.queue.shift();
           return value ? { value, done: false } : { value: undefined as never, done: true };
         },
@@ -39,11 +46,12 @@ class FakeHarnessSession implements HarnessSession {
 
   send(input: HarnessInput): void {
     this.sent.push(input);
+    if (this.manual) return;
     if (!this.initialized) {
       this.initialized = true;
-      this.push({ type: "init", sessionId: "codex-thread-1", model: "gpt-test" });
+      this.emit({ type: "init", sessionId: "codex-thread-1", model: "gpt-test" });
     }
-    this.push(
+    this.emit(
       { type: "delta", id: "assistant-1", channel: "text", delta: "hello" },
       { type: "assistant", id: "assistant-1", text: "hello", model: "gpt-test" },
       { type: "usage", contextTokens: 42, contextWindow: 1_000 },
@@ -51,8 +59,14 @@ class FakeHarnessSession implements HarnessSession {
     );
   }
 
-  private push(...events: HarnessEvent[]) {
+  emit(...events: HarnessEvent[]) {
     this.queue.push(...events);
+    this.wake?.();
+    this.wake = undefined;
+  }
+
+  fail(error: Error) {
+    this.failure = error;
     this.wake?.();
     this.wake = undefined;
   }
@@ -67,6 +81,7 @@ class FakeHarnessSession implements HarnessSession {
   resolveQuestion(_id: string, _answers: HarnessQuestionAnswer[]) {}
   async contextWindow() { return 1_000; }
   async dispose() {
+    if (!this.endOnDispose) return;
     this.ended = true;
     this.wake?.();
   }
@@ -109,6 +124,7 @@ describe("SessionBroker neutral harness path", () => {
       store,
       bus: new EventBus(),
       harnesses: new HarnessRegistry({ harnesses: { codex } }),
+      deps: { stopTimeoutMs: 5 },
     });
   });
 
@@ -142,6 +158,92 @@ describe("SessionBroker neutral harness path", () => {
       "assistant",
       "result",
     ]);
+  });
+
+  it("does not let a late tool result revive a turn that already failed", async () => {
+    session = new FakeHarnessSession(true);
+    const chat = await store.saveChat({
+      id: "chat-late-result",
+      projectId: "project-1",
+      title: "Late result",
+      modeId: "plan",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "run a tool");
+    session.emit(
+      { type: "init", sessionId: "thread-late", model: "gpt-test" },
+      { type: "tool-use", toolUseId: "tool-1", name: "browser", input: {} },
+      { type: "turn-end", ok: false, subtype: "interrupted", result: "interrupted" },
+    );
+    await broker.waitFor(chat.id, "failed");
+
+    session.emit({ type: "tool-result", toolUseId: "tool-1", ok: false, content: "cancelled" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(broker.getStatus(chat.id)).toBe("failed");
+    expect((await store.getChat(chat.id))?.status).toBe("failed");
+    expect((await store.readMessages(chat.id)).map((row) => row.kind)).toContain("tool_result");
+  });
+
+  it("forces a disposed provider out when its event iterator never closes", async () => {
+    const first = new FakeHarnessSession(false, false);
+    const second = new FakeHarnessSession();
+    session = first;
+    const chat = await store.saveChat({
+      id: "chat-stuck-dispose",
+      projectId: "project-1",
+      title: "Stuck dispose",
+      modeId: "plan",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "first");
+    await broker.waitFor(chat.id, "idle");
+
+    session = second;
+    await broker.stop(chat.id);
+    await broker.sendMessage(chat.id, "second");
+    await broker.waitFor(chat.id, "idle");
+
+    expect(first.sent.map((input) => input.text)).toEqual(["first"]);
+    expect(second.sent.map((input) => input.text)).toEqual(["second"]);
+  });
+
+  it("does not carry a timed-out fork's stopping flag into the replacement provider", async () => {
+    const first = new FakeHarnessSession(false, false);
+    const second = new FakeHarnessSession(true);
+    session = first;
+    const chat = await store.saveChat({
+      id: "chat-stuck-fork",
+      projectId: "project-1",
+      title: "Stuck fork",
+      modeId: "plan",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "first");
+    await broker.waitFor(chat.id, "idle");
+
+    session = second;
+    await broker.fork(chat.id, "turn-1");
+    await broker.sendMessage(chat.id, "replacement");
+    second.fail(new Error("replacement provider failed"));
+    await broker.waitFor(chat.id, "error");
+
+    expect(broker.getStatus(chat.id)).toBe("error");
   });
 
   it("stamps the producing provider on each row, so a later switch can't relabel it", async () => {

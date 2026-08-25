@@ -199,6 +199,26 @@ describe("ChatProcessService", () => {
     expect(await svc.pidsFor("nobody")).toEqual([]);
   });
 
+  it("attributes and lists a Codex browser MCP by its per-chat output marker", async () => {
+    const table: ProcRow[] = [
+      { pid: 1, ppid: 0, name: "codex" },
+      {
+        pid: 40,
+        ppid: 1,
+        name: "node",
+        commandLine: "node lazy-browser-shim.mjs --output-dir C:\\tmp\\dispatch-browser-mcp\\chat-codex",
+      },
+      { pid: 41, ppid: 40, name: "chrome" },
+    ];
+    const svc = new ChatProcessService({
+      procTable: async () => table,
+      sessionPids: () => new Map(),
+    });
+
+    expect((await svc.counts()).byChat).toEqual({ "chat-codex": { session: 2, shells: 0 } });
+    expect((await svc.pidsFor("chat-codex")).sort()).toEqual([40, 41]);
+  });
+
   it("does not spin on a self-parented row", async () => {
     // Windows reports pid 0 as its own parent; a naive walk never returns.
     const svc = new ChatProcessService({

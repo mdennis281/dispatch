@@ -49,6 +49,30 @@ interface PendingAsk {
   answerQuestions?: (answers: HarnessQuestionAnswer[]) => void;
 }
 
+/** A dead app-server must not make session disposal wait forever. */
+const DISPOSE_RPC_TIMEOUT_MS = 250;
+
+async function settleForDisposal(work: (signal: AbortSignal) => Promise<unknown>): Promise<void> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      work(controller.signal).catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          // Reaches CodexConnection.pending so the losing request is removed;
+          // the outer race remains as a backstop for injected/older transports.
+          controller.abort(new Error("codex disposal rpc timed out"));
+          resolve();
+        }, DISPOSE_RPC_TIMEOUT_MS);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function sandboxPolicy(sandbox: "read-only" | "workspace-write" | "danger-full-access") {
   if (sandbox === "danger-full-access") return { type: "dangerFullAccess" as const };
   if (sandbox === "read-only") return { type: "readOnly" as const };
@@ -549,10 +573,14 @@ export class CodexSession implements HarnessSession {
 
   /* --------------------------------------------------------- control */
 
-  async interrupt(): Promise<void> {
+  async interrupt(signal?: AbortSignal): Promise<void> {
     if (!this.threadId || !this.turnId) return;
     try {
-      await this.conn.call("turn/interrupt", { threadId: this.threadId, turnId: this.turnId });
+      await this.conn.call(
+        "turn/interrupt",
+        { threadId: this.threadId, turnId: this.turnId },
+        signal,
+      );
     } catch {
       // Already finished — nothing to interrupt.
     }
@@ -666,14 +694,21 @@ export class CodexSession implements HarnessSession {
     this.pendingAsks.clear();
     for (const off of this.unsubscribes) off();
     this.unsubscribes = [];
-    if (this.threadId) {
-      try {
-        await this.conn.call("thread/unsubscribe", { threadId: this.threadId });
-      } catch {
-        /* process may already be down */
+    try {
+      // Unsubscribing only stops notifications; it does not stop an active turn
+      // or the MCP serving it. Neither RPC may hold teardown hostage if the
+      // shared app-server is alive but no longer answering JSON-RPC.
+      await settleForDisposal((signal) => this.interrupt(signal));
+      if (this.threadId) {
+        await settleForDisposal(
+          (signal) => this.conn.call("thread/unsubscribe", { threadId: this.threadId }, signal),
+        );
       }
+    } finally {
+      // These are local ownership operations and must run even when both RPCs
+      // time out; otherwise the shared-process ref and event stream leak.
+      this.end();
+      this.release();
     }
-    this.end();
-    this.release();
   }
 }

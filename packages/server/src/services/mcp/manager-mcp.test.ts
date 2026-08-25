@@ -123,6 +123,23 @@ describe("manager-mcp — ask_user", () => {
     expect(res.isError).toBeFalsy();
   });
 
+  it("passes the MCP tool-call cancellation signal to the question broker", async () => {
+    const controller = new AbortController();
+    let received: AbortSignal | undefined;
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({ c1: "running" }),
+      askUser: async (_chatId, _asked, _timeoutSeconds, signal) => {
+        received = signal;
+        return { status: "declined" };
+      },
+    };
+    const { askUser } = createManagerTools({ chatId: "c1", bus, broker });
+
+    await askUser.handler({ questions, timeoutSeconds: undefined }, { signal: controller.signal });
+
+    expect(received).toBe(controller.signal);
+  });
+
   it("treats a decline as a final non-error response", async () => {
     const broker: ManagerMcpBroker = {
       ...fakeBroker({ c1: "running" }),

@@ -947,6 +947,45 @@ describe("SessionBroker — permissions", () => {
     await expect(answerP).resolves.toEqual({ status: "declined", message: "Not now." });
   });
 
+  it("persists restart reconciliation instead of leaving the record running", async () => {
+    const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+    const chat = await store.saveChat({ ...chatFor("c1"), status: "running" });
+
+    expect(broker.create(chat).status).toBe("error");
+    await vi.waitFor(async () => {
+      expect((await store.getChat("c1"))?.status).toBe("error");
+    });
+  });
+
+  it("removes a manager question card when its tool call is cancelled", async () => {
+    const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    const controller = new AbortController();
+    const reqP = nextPermissionId();
+    const answerP = broker.askUser(
+      "c1",
+      [{ header: "Proceed", question: "Should I continue?", options: [{ label: "Yes" }] }],
+      undefined,
+      controller.signal,
+    );
+    const reqId = await reqP;
+
+    controller.abort();
+
+    await expect(answerP).resolves.toEqual({
+      status: "declined",
+      message: "Question caller disconnected before an answer was submitted.",
+    });
+    expect(broker.answerQuestion(reqId, { answers: [] })).toBe(false);
+    expect(
+      events.some((event) => event.type === "permission-resolved" && event.requestId === reqId),
+    ).toBe(true);
+    expect(
+      events.some((event) => event.type === "attention-resolve" && event.chatId === "c1"),
+    ).toBe(true);
+  });
+
   it("times out a manager question after inactivity and resets on card activity", async () => {
     const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
     await store.saveChat(chatFor("c1"));
@@ -1508,6 +1547,45 @@ describe("SessionBroker — live controls", () => {
 });
 
 describe("SessionBroker — teardown hygiene", () => {
+  it("settles an intentional legacy abort even after onError clears the runtime first", async () => {
+    const entered = deferred();
+    const fn: QueryFn = ({ prompt, options }) => {
+      const controller = (options as { abortController?: AbortController }).abortController!;
+      async function* gen(): AsyncGenerator<unknown, void> {
+        yield initMsg("sess-1");
+        for await (const _ of prompt as AsyncIterable<unknown>) {
+          entered.resolve();
+          await new Promise<void>((_resolve, reject) => {
+            controller.signal.addEventListener(
+              "abort",
+              () => reject(new Error("intentional abort")),
+              { once: true },
+            );
+          });
+        }
+      }
+      const g = gen() as unknown as Record<string, unknown>;
+      g.interrupt = async () => {};
+      g.setPermissionMode = async () => {};
+      g.setModel = async () => {};
+      g.setMaxThinkingTokens = async () => {};
+      g.setMcpPermissionModeOverride = async () => ({});
+      return g as unknown as ReturnType<QueryFn>;
+    };
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    await broker.sendMessage("c1", "go");
+    await entered.promise;
+    await broker.stop("c1");
+
+    expect(broker.getStatus("c1")).toBe("done");
+    expect(
+      events.some((e) => e.type === "attention-add" && e.item.kind === "done"),
+    ).toBe(true);
+  });
+
   it("stop() while awaiting a permission clears the card + attention item (deny)", async () => {
     let permResult: Promise<{ behavior: string }> | undefined;
     const { fn } = makeFakeQuery(async (_t, ctl) => {

@@ -289,7 +289,19 @@ export function buildBrowserMcpServers(
       // server's own answer would be describing the cache.
       args: opts.eager
         ? realArgs
-        : [SHIM_ENTRY, "--manifest", manifestPathFor(name, keyArgs), "--", process.execPath, ...realArgs],
+        : [
+            SHIM_ENTRY,
+            // Ownership belongs to the SHIM, independently of whether the real
+            // server happens to support an output-dir flag (Chrome DevTools does
+            // not). ChatProcessService can therefore recover every browser root.
+            "--owner-dir",
+            outDir,
+            "--manifest",
+            manifestPathFor(name, keyArgs),
+            "--",
+            process.execPath,
+            ...realArgs,
+          ],
       ...(spec.env ? { env: spec.env } : {}),
     };
   }
