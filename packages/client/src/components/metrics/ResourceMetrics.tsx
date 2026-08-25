@@ -44,6 +44,64 @@ function tone(p: number): string {
   return "bg-accent";
 }
 
+/** Which column the table is ranked by. */
+export type SortKey = "mem" | "cpu" | "procs";
+
+/**
+ * A chat is using enough CPU that CPU is the interesting column.
+ *
+ * ONE FULL CORE, expressed the way the server reports it (a share of one core).
+ * Below that a chat is doing ordinary work; above it, something is running hot
+ * and that is what the reader came to find. Deliberately not "the machine is
+ * busy" — a pegged machine with the load spread evenly over nine chats is a
+ * memory story, and this only fires when a single row is the answer.
+ */
+const CPU_INTERESTING_PCT = 100;
+
+/**
+ * ...and the level it has to fall back to before CPU stops being interesting.
+ *
+ * HALF A CORE, not the same number, because a single threshold FLAPS. Caught
+ * live: one chat sitting right on 1.0 core had the automatic choice recomputed
+ * every 5 s poll, so the table re-sorted itself between memory and CPU on
+ * alternate refreshes. With one row that is invisible; with nine it is a table
+ * that reshuffles under the reader twice a poll.
+ */
+const CPU_BORING_PCT = 50;
+
+/**
+ * Which column to rank by when the reader hasn't clicked one.
+ *
+ * The page shipped sorting by memory ALWAYS, and that was the defect: a chat
+ * pinning ten cores sat wherever its memory happened to put it, so the one
+ * ordering cue on the page pointed away from the answer. Now the default
+ * follows the pressure — with hysteresis, so following it does not mean
+ * twitching.
+ *
+ * @param current What the automatic choice settled on last poll.
+ */
+export function nextAutoSort(
+  current: SortKey,
+  chats: readonly ChatResources[],
+): SortKey {
+  const hottest = chats.reduce((max, c) => Math.max(max, c.cpuPct ?? 0), 0);
+  if (hottest >= CPU_INTERESTING_PCT) return "cpu";
+  // Only leave CPU once things have gone properly quiet, and never touch a
+  // "procs" choice — that one can only come from a click, and a click wins.
+  if (current === "cpu" && hottest < CPU_BORING_PCT) return "mem";
+  return current;
+}
+
+/** Rank chats by one column, biggest first, with a stable tiebreak. */
+export function sortChats(chats: readonly ChatResources[], by: SortKey): ChatResources[] {
+  const key = (c: ChatResources): number =>
+    by === "cpu" ? (c.cpuPct ?? -1) : by === "procs" ? c.procs : c.rssBytes;
+  // `chatId` as the final tiebreak, not insertion order: rows that compare
+  // equal must not swap places between polls, which on a 5 s refresh reads as
+  // the table shuffling itself.
+  return [...chats].sort((a, b) => key(b) - key(a) || a.chatId.localeCompare(b.chatId));
+}
+
 /** A labelled figure with a bar under it — the hero tiles across the top. */
 function Tile({
   label,
@@ -70,7 +128,15 @@ function Tile({
       {pctOf !== undefined && (
         <div className="relative mt-1.5 h-1 w-full overflow-hidden rounded-full bg-line">
           <span
-            className={cn("absolute inset-y-0 left-0 rounded-full", barClass ?? "bg-accent")}
+            className={cn(
+              "absolute inset-y-0 left-0 rounded-full",
+              // Animated because these bars are re-rendered every poll with a
+              // new number: a bar that JUMPS reads as a fresh render, one that
+              // slides reads as the same quantity moving, which is what makes
+              // a 5 s poll feel like a live reading rather than a slideshow.
+              "transition-[width] duration-500 ease-[var(--ease-out)]",
+              barClass ?? "bg-accent",
+            )}
             style={{ width: `${pctOf}%` }}
           />
         </div>
@@ -80,18 +146,46 @@ function Tile({
   );
 }
 
+/** One column header in the sort strip. `Button toggle` carries the on-state. */
+function SortTab({
+  id,
+  sort,
+  onPick,
+  children,
+}: {
+  id: SortKey;
+  sort: SortKey;
+  onPick: (k: SortKey) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Button
+      variant="toggle"
+      size="sm"
+      aria-pressed={sort === id}
+      onClick={() => onPick(id)}
+      className={cn("!px-1.5 !text-2xs", sort === id && "text-primary")}
+    >
+      {children}
+    </Button>
+  );
+}
+
 /** One chat's row, expandable into its individual processes. */
 function ChatRow({
   chat,
   denominator,
   absolute,
   cores,
+  sort,
 }: {
   chat: ChatResources;
   /** Bytes that count as "100%" for the bar — the machine's total. */
   denominator: number;
   absolute: boolean;
   cores: number;
+  /** Which column the table is ranked by — the bar tracks it. */
+  sort: SortKey;
 }) {
   const [open, setOpen] = useState(false);
   const detail = useResources((s) => s.details[chat.chatId]);
@@ -106,6 +200,11 @@ function ChatRow({
 
   const corrected = chat.rssBytes / SHARED_PAGE_FACTOR;
   const memShare = share(corrected, denominator);
+  // The bar shows whatever the table is RANKED by. A memory bar under a table
+  // sorted by CPU is the bug this page shipped with: the row that was pinning
+  // ten cores drew a stub of a bar because its memory was unremarkable, so the
+  // one visual cue on the row pointed away from the answer.
+  const barShare = sort === "cpu" ? share(chat.cpuPct ?? 0, 100 * cores) : memShare;
 
   return (
     <div className="cm-hairline-b">
@@ -119,13 +218,29 @@ function ChatRow({
         </IconButton>
 
         <div className="min-w-0 flex-1">
-          <div className="truncate text-xs font-medium text-primary">
-            {title ?? <span className="text-faint">{chat.chatId.slice(0, 8)}</span>}
+          <div className="flex min-w-0 items-baseline gap-1.5">
+            <span className="truncate text-xs font-medium text-primary">
+              {title ?? <span className="text-faint">{chat.chatId.slice(0, 8)}</span>}
+            </span>
+            {/* WHAT is costing this, not just how much. A percentage tells you
+                a chat is expensive; "chrome.exe ×17" tells you what to do about
+                it — and that was the fact buried behind an expand when a
+                leftover headless browser was pinning ten cores. */}
+            {chat.hottest && chat.hottest.count > 0 && (
+              <span className="cm-mono shrink-0 text-2xs text-faint">
+                {chat.hottest.name}
+                {chat.hottest.count > 1 && `×${chat.hottest.count}`}
+              </span>
+            )}
           </div>
           <div className="mt-1 relative h-1 w-full overflow-hidden rounded-full bg-line">
             <span
-              className={cn("absolute inset-y-0 left-0 rounded-full", tone(memShare))}
-              style={{ width: `${memShare}%` }}
+              className={cn(
+                "absolute inset-y-0 left-0 rounded-full",
+                "transition-[width] duration-500 ease-[var(--ease-out)]",
+                tone(barShare),
+              )}
+              style={{ width: `${barShare}%` }}
             />
           </div>
         </div>
@@ -214,11 +329,24 @@ export function ResourceMetrics() {
   const loading = useResources((s) => s.loading);
   const subscribe = useResources((s) => s.subscribeSnapshot);
   const [absolute, setAbsolute] = useState(false);
+  /** `null` = nobody has clicked a column, so follow the pressure. */
+  const [picked, setPicked] = useState<SortKey | null>(null);
+  /** The automatic choice, CARRIED between polls so it can have hysteresis. */
+  const [auto, setAuto] = useState<SortKey>("mem");
 
   // The expensive poll runs exactly while this page is mounted. Reference
   // counted in the store, so the header dropdown wanting the same data at the
   // same time still costs one scan.
   useEffect(() => subscribe(), [subscribe]);
+
+  // Re-evaluated per snapshot, but as a TRANSITION from the last answer rather
+  // than from scratch — that is what `nextAutoSort`'s two thresholds need to
+  // damp. Skipped entirely once the reader has picked a column.
+  const chatsForAuto = snapshot?.chats;
+  useEffect(() => {
+    if (picked !== null || !chatsForAuto) return;
+    setAuto((cur) => nextAutoSort(cur, chatsForAuto));
+  }, [chatsForAuto, picked]);
 
   if (!snapshot) {
     return (
@@ -231,6 +359,11 @@ export function ResourceMetrics() {
   const { system, dispatch, chats } = snapshot;
   const dispatchCorrected = (dispatch?.rssBytes ?? 0) / SHARED_PAGE_FACTOR;
   const cores = system.logicalCores;
+
+  // An explicit click WINS and keeps winning; otherwise follow the damped
+  // automatic choice above.
+  const sort = picked ?? auto;
+  const rows = sortChats(chats, sort);
 
   // No ScrollArea here: `MetricsView` already wraps every subpage in one, and
   // nesting two makes the inner one swallow the wheel events the outer needs.
@@ -280,13 +413,36 @@ export function ResourceMetrics() {
             the signal that something is leaking outside a chat — which no
             per-chat row would ever show. */}
         {dispatch && dispatch.unattributed.procs > 0 && (
-          <div className="rounded-md border border-line bg-panel-2/30 px-3 py-2 text-2xs text-muted">
+          <div
+            className={cn(
+              "rounded-md border px-3 py-2 text-2xs text-muted",
+              // Loud only when the leftovers are actually BURNING something.
+              // A resident server process and a couple of runners is the
+              // normal state and should not look like an alarm.
+              (dispatch.unattributed.cpuPct ?? 0) >= CPU_INTERESTING_PCT
+                ? "border-warn/40 bg-warn/10"
+                : "border-line bg-panel-2/30",
+            )}
+          >
             <span className="font-medium text-secondary">
               {dispatch.unattributed.procs} processes
             </span>{" "}
-            (≈{bytes(dispatch.unattributed.rssBytes / SHARED_PAGE_FACTOR)}) in Dispatch's tree
-            belong to no chat — the server itself, sub-app runners, and anything orphaned
-            mid-teardown. The DB is inside the server process, not separate.
+            (≈{bytes(dispatch.unattributed.rssBytes / SHARED_PAGE_FACTOR)}
+            {dispatch.unattributed.cpuPct !== null && (
+              <>
+                {", "}
+                <span
+                  className={cn(
+                    (dispatch.unattributed.cpuPct ?? 0) >= CPU_INTERESTING_PCT &&
+                      "font-medium text-warn",
+                  )}
+                >
+                  {pct(machinePct(dispatch.unattributed.cpuPct, cores))} CPU
+                </span>
+              </>
+            )}
+            ) in Dispatch's tree belong to no chat — the server itself, sub-app runners, and
+            anything orphaned mid-teardown. The DB is inside the server process, not separate.
           </div>
         )}
 
@@ -298,19 +454,30 @@ export function ResourceMetrics() {
             <Button variant="link" size="sm" onClick={() => setAbsolute((v) => !v)}>
               {absolute ? "show relative" : "show absolute"}
             </Button>
+            <span className="text-2xs text-faint">sort</span>
+            <SortTab id="mem" sort={sort} onPick={setPicked}>
+              memory
+            </SortTab>
+            <SortTab id="cpu" sort={sort} onPick={setPicked}>
+              CPU
+            </SortTab>
+            <SortTab id="procs" sort={sort} onPick={setPicked}>
+              procs
+            </SortTab>
           </div>
-          {chats.length === 0 ? (
+          {rows.length === 0 ? (
             <div className="px-3 py-4 text-center text-xs text-faint">
               No chat is holding any processes.
             </div>
           ) : (
-            chats.map((c) => (
+            rows.map((c) => (
               <ChatRow
                 key={c.chatId}
                 chat={c}
                 denominator={system.totalBytes}
                 absolute={absolute}
                 cores={cores}
+                sort={sort}
               />
             ))
           )}

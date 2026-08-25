@@ -301,7 +301,44 @@ describe("ResourceService dispatch tree", () => {
       serverRssBytes: 300,
     });
     // The server (300) plus the unowned runner (400); the chat's 200 is not.
-    expect(snap.dispatch?.unattributed).toEqual({ procs: 2, rssBytes: 700 });
+    expect(snap.dispatch?.unattributed).toEqual({ procs: 2, rssBytes: 700, cpuPct: null });
+  });
+
+  it("reports CPU for the part of the tree no chat claims", async () => {
+    // Without this a runaway that belongs to no chat — a sub-app runner
+    // spinning, a dev server in a loop — lands in the machine total and on no
+    // row anywhere, which is the one failure a Resources page cannot have.
+    const h = harness(
+      [row(1, 0, { cpuMs: 0 }), row(10, 1, { cpuMs: 0 }), row(50, 1, { cpuMs: 0 })],
+      { sessionPids: new Map([["chat-a", 10]]), serverPid: 1 },
+    );
+    await h.svc.snapshot();
+
+    // pid 50 (no chat owns it) burns half a core; the chat's tree burns nothing.
+    h.advance(1000);
+    h.setTable([row(1, 0, { cpuMs: 0 }), row(10, 1, { cpuMs: 0 }), row(50, 1, { cpuMs: 500 })]);
+    const snap = await h.svc.snapshot();
+    expect(snap.chats[0].cpuPct).toBeCloseTo(0);
+    expect(snap.dispatch?.unattributed.cpuPct).toBeCloseTo(50);
+  });
+
+  it("does not inflate unattributed CPU when a chat's rate is unmeasurable", async () => {
+    // Derived by SUMMING the leftovers, not by subtracting chat rates from the
+    // tree — a subtraction would treat one chat's `null` as "deducted nothing"
+    // and charge its CPU to the leak line.
+    const h = harness([row(1, 0, { cpuMs: 0 })], {
+      sessionPids: new Map([["chat-a", 10]]),
+      serverPid: 1,
+    });
+    await h.svc.snapshot();
+
+    // pid 10 is NEW, so the chat is unmeasurable this window; the server itself
+    // burned a quarter core and is the only thing left over.
+    h.advance(1000);
+    h.setTable([row(1, 0, { cpuMs: 250 }), row(10, 1, { cpuMs: 9999 })]);
+    const snap = await h.svc.snapshot();
+    expect(snap.chats[0].cpuPct).toBeNull();
+    expect(snap.dispatch?.unattributed.cpuPct).toBeCloseTo(25);
   });
 
   it("is absent, not zeroed, when the server pid is missing from the table", async () => {
@@ -319,7 +356,134 @@ describe("ResourceService dispatch tree", () => {
       serverPid: 1,
     });
     const snap = await h.svc.snapshot();
-    expect(snap.dispatch?.unattributed).toEqual({ procs: 1, rssBytes: 300 });
+    expect(snap.dispatch?.unattributed).toEqual({ procs: 1, rssBytes: 300, cpuPct: null });
+  });
+});
+
+describe("ResourceService hottest process", () => {
+  it("names the image burning the most CPU, not the biggest by memory", async () => {
+    // The case this exists for: a chat pinning ten cores whose biggest MEMORY
+    // consumer was the ordinary claude.exe, while the actual culprit was a
+    // headless chrome.exe the browser MCP had left running.
+    const h = harness(
+      [
+        row(1, 0),
+        row(10, 1, { name: "claude.exe", rssBytes: 900, cpuMs: 0 }),
+        row(11, 10, { name: "chrome.exe", rssBytes: 100, cpuMs: 0 }),
+        row(12, 10, { name: "chrome.exe", rssBytes: 100, cpuMs: 0 }),
+      ],
+      { sessionPids: new Map([["chat-a", 10]]) },
+    );
+    await h.svc.snapshot();
+
+    h.advance(1000);
+    h.setTable([
+      row(1, 0),
+      row(10, 1, { name: "claude.exe", rssBytes: 900, cpuMs: 10 }),
+      row(11, 10, { name: "chrome.exe", rssBytes: 100, cpuMs: 600 }),
+      row(12, 10, { name: "chrome.exe", rssBytes: 100, cpuMs: 400 }),
+    ]);
+    const hottest = (await h.svc.snapshot()).chats[0].hottest;
+    // Grouped by NAME: two Chrome processes are one problem, and reporting the
+    // single biggest pid would understate it at 60%.
+    expect(hottest).toMatchObject({ name: "chrome.exe", count: 2 });
+    expect(hottest?.cpuPct).toBeCloseTo(100);
+  });
+
+  it("falls back to memory before any rate exists", async () => {
+    // The first poll has no CPU at all; a row that named nothing until the
+    // second poll would be blank exactly when someone first opens the page.
+    const h = harness(
+      [
+        row(1, 0),
+        row(10, 1, { name: "claude.exe", rssBytes: 100 }),
+        row(11, 10, { name: "node.exe", rssBytes: 900 }),
+      ],
+      { sessionPids: new Map([["chat-a", 10]]) },
+    );
+    expect((await h.svc.snapshot()).chats[0].hottest).toMatchObject({
+      name: "node.exe",
+      count: 1,
+      rssBytes: 900,
+    });
+  });
+
+  it("names the memory-dominant image when everything is measured and IDLE", async () => {
+    // The steady state for most chats, and the case the first cut got wrong:
+    // once every group had a rate, a strict `>` on CPU meant nothing displaced
+    // the incumbent, and the incumbent was whatever the tree walk popped
+    // first — here the 5 MB shell rather than the 2.4 GB of Chrome.
+    const table = (cpu: number) => [
+      row(1, 0),
+      row(10, 1, { name: "claude.exe", rssBytes: 900, cpuMs: cpu }),
+      row(20, 10, { name: "chrome.exe", rssBytes: 1200, cpuMs: cpu }),
+      row(21, 10, { name: "chrome.exe", rssBytes: 1200, cpuMs: cpu }),
+      row(50, 1, { name: "powershell.exe", rssBytes: 5, cpuMs: cpu }),
+    ];
+    const h = harness(table(0), {
+      sessionPids: new Map([["chat-a", 10]]),
+      terminals: [{ chatId: "chat-a", name: "sh", terminalId: "chat-a::sh", pid: 50 }],
+    });
+    await h.svc.snapshot();
+
+    // Second poll: every pid measurable, every one of them at 0%.
+    h.advance(1000);
+    h.setTable(table(0));
+    const hottest = (await h.svc.snapshot()).chats[0].hottest;
+    expect(hottest).toMatchObject({ name: "chrome.exe", count: 2, cpuPct: 0 });
+  });
+
+  it("does not let a measured 0% outrank an unmeasured group that is far bigger", async () => {
+    // A group whose pids are all new this window is UNKNOWN, not idle-er than
+    // idle. Ranking `null` below a measured zero let a 5 MB shell beat
+    // seventeen Chromes that simply hadn't been sampled twice yet.
+    const h = harness([row(1, 0), row(50, 1, { name: "powershell.exe", rssBytes: 5, cpuMs: 0 })], {
+      sessionPids: new Map([["chat-a", 50]]),
+    });
+    await h.svc.snapshot();
+
+    h.advance(1000);
+    h.setTable([
+      row(1, 0),
+      row(50, 1, { name: "powershell.exe", rssBytes: 5, cpuMs: 0 }),
+      // Brand new, so unmeasurable — but 2.4 GB of it.
+      row(60, 50, { name: "chrome.exe", rssBytes: 1200, cpuMs: 90 }),
+      row(61, 50, { name: "chrome.exe", rssBytes: 1200, cpuMs: 90 }),
+    ]);
+    expect((await h.svc.snapshot()).chats[0].hottest).toMatchObject({
+      name: "chrome.exe",
+      count: 2,
+    });
+  });
+
+  it("is stable across polls when nothing about the chat changes", async () => {
+    const table = [
+      row(1, 0),
+      row(10, 1, { name: "a.exe", rssBytes: 100, cpuMs: 0 }),
+      row(11, 10, { name: "b.exe", rssBytes: 100, cpuMs: 0 }),
+    ];
+    const h = harness(table, { sessionPids: new Map([["chat-a", 10]]) });
+    await h.svc.snapshot();
+    const names: (string | undefined)[] = [];
+    for (let i = 0; i < 3; i++) {
+      h.advance(1000);
+      h.setTable(table);
+      names.push((await h.svc.snapshot()).chats[0].hottest?.name);
+    }
+    // Fully tied on CPU and memory — the name tiebreak keeps the label from
+    // flickering between two equally valid answers.
+    expect(new Set(names).size).toBe(1);
+    expect(names[0]).toBe("a.exe");
+  });
+
+  it("groups unnamed rows rather than dropping them", async () => {
+    const h = harness([row(1, 0), row(10, 1, { name: undefined, rssBytes: 500 })], {
+      sessionPids: new Map([["chat-a", 10]]),
+    });
+    expect((await h.svc.snapshot()).chats[0].hottest).toMatchObject({
+      name: "unknown",
+      count: 1,
+    });
   });
 });
 
