@@ -100,6 +100,22 @@ describe("deriveSubagentRuns — identity and status", () => {
     expect(run!.toolCount).toBe(1);
   });
 
+  it("keeps an empty failed Codex wait in the run timeline", () => {
+    const rows = [
+      task("t1"),
+      tool("wait-1", "TaskOutput", "t1", 1100),
+      toolResult("wait-1", { ts: 1200, parent: "t1", ok: false, content: "" }),
+    ];
+    const [run] = deriveSubagentRuns(rows, { chatRunning: true });
+    expect(run!.steps).toHaveLength(1);
+    expect(run!.steps[0]).toMatchObject({
+      kind: "tool",
+      use: { toolUseId: "wait-1" },
+      result: { ok: false, isError: true },
+    });
+    expect(run!.toolCount).toBe(1);
+  });
+
   it("stays running until the spawner's own result lands", () => {
     const rows: ChatMessage[] = [
       task("t1", { ts: 1000 }),

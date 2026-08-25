@@ -412,7 +412,11 @@ export function resultPreview(content: unknown): string {
  * hidden: Claude/background-task `TaskOutput` calls that name a task or return
  * actual output keep their normal card.
  */
-export function isEmptyTaskOutput(use: ToolUseRow, result?: { content?: unknown }): boolean {
+export function isEmptyTaskOutput(
+  use: ToolUseRow,
+  result?: { content?: unknown; ok?: boolean; isError?: boolean },
+): boolean {
   if (use.name !== "TaskOutput" || Object.keys(use.input).length !== 0) return false;
+  if (result?.ok === false || result?.isError) return false;
   return !result || resultText(result.content).trim().length === 0;
 }

@@ -131,6 +131,13 @@ describe("groupTranscriptRows", () => {
       ts: 2, turn: 0, ok: true, content: "agent finished",
     };
     expect(groupTranscriptRows([useful, usefulResult])).toEqual([{ kind: "row", row: useful }]);
+
+    const failed = tool("TaskOutput", {}, "failed");
+    const failedResult: ChatMessage = {
+      kind: "tool_result", id: "failed-result", toolUseId: "failed", chatId: "chat",
+      ts: 2, turn: 0, ok: false, isError: true, content: "",
+    };
+    expect(groupTranscriptRows([failed, failedResult])).toEqual([{ kind: "row", row: failed }]);
   });
 
   it("keeps the first copy of a duplicated Codex root tool event", () => {
