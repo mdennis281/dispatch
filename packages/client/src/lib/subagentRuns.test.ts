@@ -86,6 +86,20 @@ describe("deriveSubagentRuns — identity and status", () => {
     });
   });
 
+  it("omits empty Codex wait heartbeats from the run timeline", () => {
+    const rows = [
+      task("t1"),
+      tool("wait-1", "TaskOutput", "t1", 1100),
+      toolResult("wait-1", { ts: 1200, parent: "t1", content: "" }),
+      tool("read-1", "Read", "t1", 1300, { file_path: "src/a.ts" }),
+      toolResult("read-1", { ts: 1400, parent: "t1", content: "ok" }),
+    ];
+    const [run] = deriveSubagentRuns(rows, { chatRunning: true });
+    expect(run!.steps).toHaveLength(1);
+    expect(run!.steps[0]).toMatchObject({ kind: "tool", use: { toolUseId: "read-1" } });
+    expect(run!.toolCount).toBe(1);
+  });
+
   it("stays running until the spawner's own result lands", () => {
     const rows: ChatMessage[] = [
       task("t1", { ts: 1000 }),

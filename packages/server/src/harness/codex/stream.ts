@@ -149,6 +149,14 @@ export class CodexStreamDecoder {
   private onItemStarted(item: Item | undefined): HarnessEvent[] {
     if (!item?.type) return [];
     const id = String(item.id ?? this.genId());
+    // Collaboration wait is scheduler control flow, not user work. Codex sends
+    // no target or output for it; the Agent cards already own the useful live
+    // status and child transcript. Persisting each polling heartbeat produces
+    // an expandable `TaskOutput {}` card with literally nothing behind it.
+    if (item.type === "collabAgentToolCall" && item.tool === "wait") {
+      this.sawStructuredCollaboration = true;
+      return [];
+    }
     switch (item.type) {
       // The user's own message is already in the transcript — the broker wrote
       // it when it accepted the send. Echoing it would duplicate the row.
@@ -204,6 +212,11 @@ export class CodexStreamDecoder {
   private onItemCompleted(item: Item | undefined): HarnessEvent[] {
     if (!item?.type) return [];
     const id = String(item.id ?? this.genId());
+    if (item.type === "collabAgentToolCall" && item.tool === "wait") {
+      this.sawStructuredCollaboration = true;
+      this.startedTools.delete(id);
+      return [];
+    }
     switch (item.type) {
       case "agentMessage": {
         const text = String(item.text ?? "");

@@ -281,6 +281,67 @@ describe("CodexSession lifecycle", () => {
     });
   });
 
+  it("does not subscribe the root thread as its own child", async () => {
+    const { session, fake } = makeSession();
+    const events = take(session, 3);
+    session.send({ text: "coordinate agents" });
+    await fake.tick();
+
+    // A structured collaboration item suppresses the legacy activity marker;
+    // the marker still reaches observeCollaboration, where it must not install
+    // a child decoder over the root thread's own subscription.
+    fake.push("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        type: "collabAgentToolCall",
+        id: "wait-1",
+        tool: "wait",
+        status: "inProgress",
+        receiverThreadIds: [],
+        agentsStates: {},
+      },
+    });
+    fake.push("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        type: "subAgentActivity",
+        id: "root-activity",
+        kind: "started",
+        agentThreadId: "thread-1",
+        agentPath: "/root",
+      },
+    });
+    fake.push("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { type: "commandExecution", id: "cmd-1", command: "git status", cwd: "/repo" },
+    });
+    fake.push("item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        type: "commandExecution",
+        id: "cmd-1",
+        command: "git status",
+        cwd: "/repo",
+        status: "completed",
+        exitCode: 0,
+        aggregatedOutput: "clean",
+      },
+    });
+
+    const observed = await events;
+    expect(observed).toEqual([
+      expect.objectContaining({ type: "init", sessionId: "thread-1" }),
+      expect.objectContaining({ type: "tool-use", toolUseId: "cmd-1" }),
+      expect.objectContaining({ type: "tool-result", toolUseId: "cmd-1", content: "clean" }),
+    ]);
+    expect(observed[1]).not.toHaveProperty("parentToolUseId");
+    expect(observed[2]).not.toHaveProperty("parentToolUseId");
+  });
+
   it("folds activity-only Codex children into a neutral Agent run", async () => {
     const { session, fake } = makeSession();
     session.send({ text: "delegate this" });

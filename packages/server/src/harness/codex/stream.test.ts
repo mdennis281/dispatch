@@ -210,6 +210,22 @@ describe("CodexStreamDecoder — tools", () => {
     });
   });
 
+  it("drops collaboration wait heartbeats that have no user-facing payload", () => {
+    const d = decoder();
+    const wait = {
+      type: "collabAgentToolCall",
+      id: "wait-1",
+      tool: "wait",
+      status: "inProgress",
+      receiverThreadIds: [],
+      agentsStates: {},
+    };
+    expect(d.decode(note("item/started", item(wait)))).toEqual([]);
+    expect(
+      d.decode(note("item/completed", item({ ...wait, status: "completed" }))),
+    ).toEqual([]);
+  });
+
   it("suppresses low-detail activity notices once run events own the UI", () => {
     const d = decoder();
     d.decode(

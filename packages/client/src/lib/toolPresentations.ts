@@ -309,6 +309,13 @@ export type TranscriptItem =
 export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   let run: { kind: "shell" | "files" | "pr"; rows: ToolUseRow[] } | null = null;
+  const resultsByUse = new Map(
+    rows
+      .filter((row) => row.kind === "tool_result")
+      .map((row) => [row.toolUseId, row] as const),
+  );
+  const seenRowIds = new Set<string>();
+  const seenToolUseIds = new Set<string>();
 
   const flush = () => {
     if (run?.rows.length) items.push({ kind: run.kind, rows: run.rows });
@@ -316,6 +323,18 @@ export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
   };
 
   for (const row of rows) {
+    // A Codex root accidentally subscribed to itself in older transcripts,
+    // producing a second copy of each event. Assistant copies retain their id;
+    // tool copies retain their correlation id even though persistence gives the
+    // duplicate row a fresh id. First wins because the real root event arrives
+    // before the self-decoded copy.
+    if (seenRowIds.has(row.id)) continue;
+    seenRowIds.add(row.id);
+    if (row.kind === "tool_use") {
+      if (seenToolUseIds.has(row.toolUseId)) continue;
+      seenToolUseIds.add(row.toolUseId);
+      if (isEmptyTaskOutput(row, resultsByUse.get(row.toolUseId))) continue;
+    }
     // Results and task statuses are folded into their owning command. They do
     // not interrupt a run of commands, just as they did not create visible rows.
     if (row.kind === "tool_result" || row.kind === "task_status") continue;
@@ -383,4 +402,17 @@ export function resultPreview(content: unknown): string {
   const first = lines[0];
   if (!first) return "No output";
   return first.length > 240 ? `${first.slice(0, 239)}…` : first;
+}
+
+/**
+ * A legacy Codex collaboration wait that contains no information.
+ *
+ * Current server builds discard these scheduler heartbeats before persistence,
+ * but stored chats remain renderable forever. Only the exact empty shape is
+ * hidden: Claude/background-task `TaskOutput` calls that name a task or return
+ * actual output keep their normal card.
+ */
+export function isEmptyTaskOutput(use: ToolUseRow, result?: { content?: unknown }): boolean {
+  if (use.name !== "TaskOutput" || Object.keys(use.input).length !== 0) return false;
+  return !result || resultText(result.content).trim().length === 0;
 }
