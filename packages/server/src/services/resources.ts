@@ -533,18 +533,38 @@ function hottestOf(
     groups.set(name, g);
   }
   let best: HotProcess | null = null;
-  const measured = [...groups.values()].some((g) => g.cpuPct !== null);
   for (const g of groups.values()) {
-    if (!best) {
-      best = g;
-      continue;
-    }
-    const better = measured
-      ? (g.cpuPct ?? -1) > (best.cpuPct ?? -1)
-      : g.rssBytes > best.rssBytes;
-    if (better) best = g;
+    if (!best || hotter(g, best)) best = g;
   }
   return best;
+}
+
+/**
+ * Should `a` displace `b` as the name on the row?
+ *
+ * TOTALLY ORDERED, and that is the point. The first cut compared on CPU alone
+ * whenever any group had a rate, with a strict `>`, so once every group was
+ * measured-and-idle — which is the STEADY STATE for most chats — nothing ever
+ * beat the incumbent and the incumbent was whatever `descendantsOf`'s DFS
+ * happened to pop first. An idle chat named a 5 MB `powershell.exe` instead of
+ * its 2.4 GB of Chrome, and the label changed between polls with nothing having
+ * changed in the world. `sortChats` on the client had already needed a
+ * deterministic tiebreak for exactly this reason.
+ *
+ * UNMEASURED COUNTS AS ZERO rather than as less than zero. A group whose pids
+ * are all new this window is unknown, not idle-er than idle, and ranking it
+ * below a measured 0% let a 5 MB shell outrank seventeen Chromes that simply
+ * hadn't been sampled twice yet. Scoring both at 0 lets memory settle it, which
+ * is the answer the docstring above promises.
+ */
+function hotter(a: HotProcess, b: HotProcess): boolean {
+  const ac = a.cpuPct ?? 0;
+  const bc = b.cpuPct ?? 0;
+  if (ac !== bc) return ac > bc;
+  if (a.rssBytes !== b.rssBytes) return a.rssBytes > b.rssBytes;
+  // Genuinely indistinguishable: order by name so the row is at least stable
+  // across polls rather than reflecting process-table iteration order.
+  return a.name < b.name;
 }
 
 /**
