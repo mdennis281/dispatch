@@ -183,11 +183,13 @@ import {
 } from "@dispatch/shared";
 
 /**
- * The always-injected "prefer the manager tools" directive. Lists only the
- * `mcp__dispatch-*__*` tools THIS session actually has (gated the same way the MCP
- * server offers them) and tells the agent to reach for them instead of
- * hand-rolling shell equivalents — the recurring failure mode where an agent
- * re-implements `watch_pr` as a `gh` sleep loop or a background Monitor task.
+ * A deliberately SMALL map of the MCP servers injected into this session.
+ *
+ * Exact tool descriptions and schemas already live in tool search. Repeating
+ * them here spent thousands of standing tokens, went stale as tools changed,
+ * and still failed to advertise `dispatch-chat` — the category a user explicitly
+ * asked an agent to use. This names capabilities at server granularity and sends
+ * the agent to the live catalog for everything more specific.
  */
 export function buildManagerToolsDirective(caps: {
   github: boolean;
@@ -196,185 +198,44 @@ export function buildManagerToolsDirective(caps: {
   memory: boolean;
   runner: boolean;
   mcpConfig?: boolean;
-  /** This session can author instructions/skills → the `config_*` tools are bound. */
   authoring?: boolean;
-  /** The project opted into auto-merge → this session can land its own PRs. */
-  prApproval?: boolean;
-  /** Change ships through a PR here → this session opens PRs with `create_pr`. */
-  prCreate?: boolean;
-  /** Reviewers `create_pr` will request (`workflow.pr.reviewers`). */
-  prReviewers?: readonly string[];
-  /** The project configured a Dispatch reviewer → `post_review` is bound. */
-  reviewAgent?: boolean;
-  /** …and it has no GitHub login, so `request_review` is what summons it. */
-  reviewAgentLocal?: boolean;
+  inspect?: boolean;
+  bundledServers?: readonly string[];
+  projectServers?: readonly string[];
 }): string {
+  // Server names come from committed project config, but they still cross a
+  // trust boundary into a developer prompt. Keep each one a single bounded
+  // Markdown token so a malformed name cannot grow or restructure the prompt.
+  const serverLabel = (name: string): string =>
+    `\`${name.replace(/[\r\n`]/g, "").slice(0, 80) || "unnamed"}\``;
   const lines = [
-    "# Manager tools — prefer these over improvising",
+    "# Injected MCPs",
     "",
-    "You run inside Dispatch, which gives you first-class `mcp__dispatch-*__*` " +
-      "tools. Prefer them over hand-rolled shell equivalents: they are cheaper, they " +
-      "cancel cleanly when the chat is stopped, and they surface live status in the UI.",
+    "This is a capability map, not a tool reference. Prefer these MCPs over improvised " +
+      "shell/API equivalents. Use tool search for exact tool names, descriptions, input " +
+      "schemas, and current availability before calling one.",
     "",
-    "- `mcp__dispatch-session__wait` — pause yourself for a set time (e.g. let a build settle) " +
-      "instead of a `sleep` loop.",
-    "- `mcp__dispatch-chat__wait_for_chat` — block until another chat is at rest, instead of polling it.",
-    "- `mcp__dispatch-session__context_usage` — check how full your own context window is " +
-      "(tokens, window size, percent, per-category breakdown) instead of guessing.",
-    "- `mcp__dispatch-session__compact_context` — compact your own context in place when it's " +
-      "filling up (past ~80%) and you have more work to do; the session continues " +
-      "from a summarized, smaller window.",
-    "- `mcp__dispatch-confirm__ask_user` — ask one to three structured questions through " +
-      "Dispatch's radio or multi-select question card. Use it whenever an unanswered " +
-      "choice materially changes the work; it is available in every chat mode.",
+    "- `dispatch-session` — wait and manage this chat's context window.",
+    "- `dispatch-chat` — spawn, find, inspect, message, and wait on real Dispatch chats. " +
+      "A Dispatch child chat means this server, not a native in-process subagent.",
+    "- `dispatch-confirm` — structured user questions and explicit approval/exemption cards.",
   ];
-  if (caps.github) {
-    lines.push(
-      "- `mcp__dispatch-github__watch_pr` — wait on AND react to a GitHub PR. It returns the " +
-        "instant a CI check fails, a new review comment/thread appears, or the PR " +
-        "merges/closes. Call it in a loop: fix what it reports, then call it again, " +
-        "until it returns `done:true`. **Never** hand-roll `gh pr view` / `gh pr checks` " +
-        "polling loops or a background Bash/Monitor task to watch a PR — `watch_pr` is " +
-        "the supported way and, unlike a one-shot loop, keeps surfacing each NEW round " +
-        "of review comments so you don't stop watching after the first fix. It also " +
-        "reports `reviewStalled:true` when NO reviewer is actually queued, and " +
-        "`reviewsSpent:true` when Dispatch's own reviewer has used up its round cap on " +
-        "this PR — so you stop waiting on a review that isn't coming. Those two want " +
-        "opposite things: a stalled queue is fixed by `request_review`, a spent cap by " +
-        "going straight to `approve_pr` — two completed rounds ARE the review " +
-        "requirement, and re-queueing a spent reviewer only hides the reviews it " +
-        "already filed (it also tells you `landableOnChecks` when the PR is ready to " +
-        "land on green checks alone).",
-      "- `mcp__dispatch-github__resolve_thread` — reply in a review thread and mark it RESOLVED. " +
-        "Fixing the code and replying is not enough: an unresolved thread still reads as " +
-        "outstanding and blocks the merge. Call it for every comment you addressed, " +
-        "passing the `thread:` id `watch_pr` printed with the comment. Leave a thread " +
-        "open (`resolve: false`) only when you did NOT act on it.",
-      "- `mcp__dispatch-github__request_review` — put reviewers back on the hook. GitHub clears a " +
-        "reviewer's request the moment they submit, and your fix commits do NOT re-queue " +
-        "them — so after you address a round, call this (once your fixes are PUSHED) and " +
-        "then go back to `watch_pr`. Without it the PR sits with an empty queue forever." +
-        (caps.reviewAgentLocal
-          ? " It also summons Dispatch's OWN reviewer, which is what actually reviews here " +
-            "— it never appears in GitHub's reviewer queue, so an empty queue after this " +
-            "call is not a stall."
-          : ""),
-    );
+  if (caps.github) lines.push("- `dispatch-github` — create, review, watch, and land pull requests.");
+  if (caps.terminals || caps.worktrees || caps.runner) {
+    lines.push("- `dispatch-workspace` — managed terminals, worktrees, and live app previews.");
   }
-  if (caps.reviewAgent) {
-    lines.push(
-      "- `mcp__dispatch-github__post_review` — submit a REVIEW on a PR: a verdict, a summary, and " +
-        "inline comments on specific lines. Each inline comment becomes a review THREAD, " +
-        "which is what makes it visible to `watch_pr`, resolvable with `resolve_thread`, " +
-        "and blocking for `approve_pr`. Only for reviewing someone else's change — do not " +
-        "review your own PR to clear its review bar.",
-    );
+  if (caps.memory) lines.push("- `dispatch-memory` — durable project facts and memory curation.");
+  if (caps.authoring) lines.push("- `dispatch-config` — author injected instructions and reusable skills.");
+  if (caps.mcpConfig) lines.push("- `dispatch-mcp` — inspect and configure project MCP servers.");
+  if (caps.inspect) lines.push("- `dispatch-project` — read Dispatch's project-level context.");
+  if (caps.bundledServers?.length) {
+    lines.push(`- Bundled: ${caps.bundledServers.map(serverLabel).join(", ")} — browser/UI automation.`);
   }
-  if (caps.prCreate) {
-    // Named BEFORE approve_pr because it comes first in the loop, and stated as
-    // a prohibition on the raw command because that is the habit being replaced:
-    // an agent that reaches for `gh pr create` opens a PR nobody was asked to
-    // review, that isn't linked to this chat, and that nothing is watching.
-    lines.push(
-      "- `mcp__dispatch-github__create_pr` — open the PR for your work. **Never run `gh pr create`** " +
-        "(it's refused): `create_pr` pushes the branch with an upstream, opens the PR, " +
-        (caps.prReviewers?.length
-          ? `requests review from ${caps.prReviewers.join(", ")}, `
-          : "requests this project's configured reviewers, ") +
-        "records the PR on this chat, and arms the watcher so review activity comes back " +
-        "to you. It refuses on the mistakes that make a PR useless (on the trunk, no " +
-        "commits, dirty tree) and names the override argument for each.",
-    );
-  }
-  if (caps.prApproval) {
-    lines.push(
-      "- `mcp__dispatch-github__approve_pr` — approve and merge a PR once it's ready. This project " +
-        "has auto-merge on: when `watch_pr` reports CI green with no open threads, call " +
-        "`approve_pr` and consider the task finished. It re-verifies state, checks, threads " +
-        "and the `hold` label before merging, and refuses with reasons if anything's off. " +
-        "**Unless the user told you not to merge** — asked to review it first, to leave the " +
-        "PR open, or to just ship it — in which case don't call it; say the PR is ready and stop.",
-    );
-  }
-  if (caps.terminals) {
-    lines.push(
-      "- `mcp__dispatch-workspace__terminal` — a NAMED, persistent shell (cwd + env survive between " +
-        "calls) for multi-step command sequences, instead of re-`cd`-ing in Bash each time. " +
-        "Pass `background: true` (with its own `name`) for anything that never returns on " +
-        "its own — a dev server, a watcher — and read it back with " +
-        "`mcp__dispatch-workspace__terminal_output`. That is the ONLY sanctioned way to start a " +
-        "long-running process: a Bash/PowerShell `run_in_background` spawns outside the " +
-        "server's process tree, so Dispatch can neither show it nor stop it, and it is " +
-        "left holding its port when this chat ends. The guard refuses that flag.",
-    );
-  }
-  if (caps.worktrees) {
-    lines.push(
-      "- `mcp__dispatch-workspace__worktree` — create, list and remove git worktrees. **`git worktree " +
-        "add` in a shell is refused**, including through `mcp__dispatch-workspace__terminal`: a tree " +
-        "cut that way carries no record of who owns it, so it lands in the Workspace view " +
-        "attributed to nobody and the manager is left guessing. `worktree({ action: " +
-        "\"create\", branch })` runs the same git command and records THIS chat as the " +
-        "owner. Prefer it over the harness's own `EnterWorktree` too — that one Dispatch " +
-        "cannot intercept, so its trees have to be reconciled after the fact. " +
-        "`action: \"list\"` shows this chat's trees, or everyone's with `scope: \"project\"` " +
-        "/ `\"all\"`.",
-    );
-  }
-  if (caps.memory) {
-    lines.push(
-      "- `mcp__dispatch-memory__remember` / `recall` / `forget` — durable project memory that " +
-        "carries facts across chats; record anything a future session would need re-told.",
-      "- `mcp__dispatch-memory__memory_list` / `memory_search` / `memory_history` / " +
-        "`memory_similar` — the CURATION reads over that same memory, for when you need " +
-        "an exhaustive answer rather than the most relevant one: the full inventory with " +
-        "age and usage, every literal mention of a string, a fact's commit history " +
-        "(including what was deliberately retired), and its near-duplicates.",
-    );
-  }
-  if (caps.authoring) {
-    lines.push(
-      "- `mcp__dispatch-config__config_list` / `config_read` / `config_write` / `config_delete` — " +
-        "author the INSTRUCTIONS and SKILLS this harness runs on. Memory records what the " +
-        "project knows; these record how work is DONE here. When you work out a procedure " +
-        "worth keeping — the verify dance, the release steps — write it as a SKILL rather " +
-        "than only explaining it: a skill loads on demand and the human can run it as " +
-        "`/<name>`, while an instruction costs prompt budget on every turn forever. " +
-        "`config_write` also registers a new instruction in `project.yaml`, which is the " +
-        "step that makes it actually inject — a file placed by hand is inert.",
-    );
-  }
-  if (caps.runner) {
-    lines.push(
-      "- `mcp__dispatch-workspace__run_subapp` — launch this project's app and get a live localhost " +
-        "URL to actually SEE your change, instead of asking the user to run it.",
-    );
+  if (caps.projectServers?.length) {
+    lines.push(`- Project: ${caps.projectServers.map(serverLabel).join(", ")} — project-specific integrations.`);
   }
   if (caps.mcpConfig) {
-    lines.push(
-      "- `mcp__dispatch-mcp__mcp_list` / `mcp_add` / `mcp_remove` — read and edit the MCP servers " +
-        "configured for this project.",
-    );
-    // The routing hint. An agent asked to "install the Linear MCP" will otherwise
-    // reach for `.mcp.json` or `claude mcp add` from memory — neither of which
-    // this harness reads. Naming the trigger conditions explicitly is what makes
-    // the skill fire before the wrong file gets written, not after.
-    lines.push(
-      "",
-      "## Setting up MCP servers",
-      "",
-      "The moment the conversation turns to MCP — installing or adding a server, connecting a " +
-        "tool integration, a server that won't connect or whose tools aren't appearing, or " +
-        "writing a new MCP server — **load the `mcp-setup` skill first**. It has this harness's " +
-        "actual procedure, and the defaults you'd reach for otherwise are wrong here.",
-      "",
-      "The short version, so you don't get it wrong before the skill loads: this project's MCP " +
-        "servers live in `.dispatch/project.yaml`, edited via `mcp__dispatch-mcp__mcp_add` or " +
-        "the `dispatch mcp add` CLI. **Never** hand-edit `project.yaml`, and never write `.mcp.json`, " +
-        "`~/.claude.json`, or `.claude/settings.json` to configure a server — the manager does " +
-        "not read those. Secrets go in as `${VAR}` placeholders, never literal keys: the file " +
-        "is committed.",
-    );
+    lines.push("Load the `mcp-setup` skill before adding, changing, debugging, or building an MCP server.");
   }
   return lines.join("\n");
 }
@@ -5434,25 +5295,6 @@ export class SessionBroker {
     const appends: string[] = [];
     const handoff = await this.buildHarnessHandoff(session.chatId);
     if (handoff) appends.push(handoff);
-    // Lead with the manager-tools directive so EVERY session (any project)
-    // discovers the `mcp__dispatch-*__*` tools it has and is steered to prefer them
-    // over hand-rolled shell equivalents (the #1 way agents waste effort here).
-    appends.push(
-      buildManagerToolsDirective({
-        github: Boolean(this.github),
-        terminals: Boolean(this.terminals),
-        worktrees: Boolean(this.worktrees && session.projectId),
-        memory: Boolean(this.memory && session.projectId),
-        runner: Boolean(this.runner && this.worktrees),
-        mcpConfig: Boolean(session.projectId),
-        authoring: Boolean(this.authored),
-        prApproval: canApprovePr,
-        prCreate: canCreatePr,
-        prReviewers: workflow.pr.reviewers,
-        reviewAgent: Boolean(reviewer?.policy.enabled),
-        reviewAgentLocal: reviewer?.policy.enabled === true && reviewer.policy.identity === "self",
-      }),
-    );
     // The rendered contract itself comes next — before the project's own
     // instructions, so an authored instruction can still refine it.
     const workflowDirective = buildWorkflowDirective(workflow, {
@@ -5662,13 +5504,6 @@ export class SessionBroker {
       };
       options.agents = { [agent.id]: def };
       options.agent = agent.id;
-    }
-    if (appends.length) {
-      options.systemPrompt = {
-        type: "preset",
-        preset: "claude_code",
-        append: appends.join("\n\n"),
-      };
     }
     // Register Dispatch's own in-process MCP servers on EVERY session so the
     // agent can self-pace (mcp__dispatch-session__wait,
@@ -6120,6 +5955,33 @@ export class SessionBroker {
         signal: session.abortController?.signal,
         now: this.now,
       }),
+    };
+    // Lead with a compact inventory of EVERY MCP server this session actually
+    // receives. Tool search owns exact names/schemas; the standing prompt only
+    // needs enough of a map to route the agent to the right server family.
+    const configuredNames = new Set([
+      ...Object.keys(project?.mcpServers ?? {}),
+      ...Object.keys(configMcp),
+    ]);
+    const activeExternalNames = Object.keys(externalMcp);
+    appends.unshift(
+      buildManagerToolsDirective({
+        github: Boolean(this.github),
+        terminals: Boolean(this.terminals),
+        worktrees: Boolean(this.worktrees && session.projectId),
+        memory: Boolean(this.memory && session.projectId),
+        runner: Boolean(this.runner && this.worktrees),
+        mcpConfig: Boolean(session.projectId),
+        authoring: Boolean(this.authored),
+        inspect: Boolean(this.inspect),
+        bundledServers: activeExternalNames.filter((name) => !configuredNames.has(name)),
+        projectServers: activeExternalNames.filter((name) => configuredNames.has(name)),
+      }),
+    );
+    options.systemPrompt = {
+      type: "preset",
+      preset: "claude_code",
+      append: appends.join("\n\n"),
     };
     // Skills: the managed repo's `.dispatch/skills/` is the SOURCE OF TRUTH,
     // but the SDK only DISCOVERS `<cwd>/.claude/skills/` (there's no option to

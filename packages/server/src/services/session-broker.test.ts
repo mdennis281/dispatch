@@ -9,6 +9,7 @@ import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
 import { isPrSettledIdle } from "@dispatch/shared";
 import { EXEMPTION_ANSWERS } from "./mcp/manager-mcp.js";
 import {
+  buildManagerToolsDirective,
   SessionBroker,
   EFFORT_THINKING_TOKENS,
   makeDirResolver,
@@ -23,6 +24,50 @@ import { MemoryService } from "./memory.js";
 import { MetricsService } from "./metrics.js";
 import { MetricsBackfill } from "./metrics-backfill.js";
 import { ProjectConfigService } from "./project-config.js";
+
+describe("buildManagerToolsDirective", () => {
+  it("injects a bounded server map and delegates tool detail to tool search", () => {
+    const directive = buildManagerToolsDirective({
+      github: true,
+      terminals: true,
+      worktrees: true,
+      memory: true,
+      runner: true,
+      mcpConfig: true,
+      authoring: true,
+      inspect: true,
+      bundledServers: ["playwright", "chrome-devtools"],
+      projectServers: ["linear", "sentry", "bad\n# override`"],
+    });
+
+    expect(directive).toContain("Use tool search for exact tool names");
+    expect(directive).toContain("`dispatch-chat`");
+    expect(directive).toContain("not a native in-process subagent");
+    expect(directive).toContain("`dispatch-github`");
+    expect(directive).toContain("`dispatch-project`");
+    expect(directive).toContain("`playwright`, `chrome-devtools`");
+    expect(directive).toContain("`linear`, `sentry`, `bad# override`");
+    expect(directive).not.toContain("\n# override");
+    expect(directive).not.toContain("mcp__dispatch-github__watch_pr");
+    expect(directive.length).toBeLessThan(2_000);
+  });
+
+  it("omits unavailable optional categories", () => {
+    const directive = buildManagerToolsDirective({
+      github: false,
+      terminals: false,
+      worktrees: false,
+      memory: false,
+      runner: false,
+    });
+
+    expect(directive).toContain("`dispatch-session`");
+    expect(directive).toContain("`dispatch-chat`");
+    expect(directive).not.toContain("`dispatch-github`");
+    expect(directive).not.toContain("Bundled:");
+    expect(directive).not.toContain("Project:");
+  });
+});
 
 /* ------------------------------------------------------------------ fixtures */
 
@@ -1999,10 +2044,10 @@ describe("SessionBroker — project memory injection", () => {
     await idleP;
 
     // No mode instructions + no memories → the append is JUST the always-on
-    // manager-tools directive, with no injected memory section.
+    // MCP capability map, with no injected memory section.
     const opts = controllers[0]!.options as { systemPrompt?: { append?: string } };
     const append = opts.systemPrompt?.append ?? "";
-    expect(append).toContain("# Manager tools");
+    expect(append).toContain("# Injected MCPs");
     expect(append).not.toContain("Project memory");
   });
 
@@ -2296,11 +2341,11 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     await broker.sendMessage("c2", "hi");
     await idleP;
 
-    // The always-on manager-tools directive is still injected; only the
+    // The always-on MCP capability map is still injected; only the
     // config-sourced instructions are absent for a project with no config.
     const opts = controllers[0]!.options as { systemPrompt?: { append?: string } };
     const append = opts.systemPrompt?.append ?? "";
-    expect(append).toContain("# Manager tools");
+    expect(append).toContain("# Injected MCPs");
     expect(append).not.toContain("Project instructions");
   });
 
@@ -2341,7 +2386,10 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     await broker.sendMessage("c1", "hi");
     await idleP;
 
-    const opts = controllers[0]!.options as { mcpServers?: Record<string, unknown> };
+    const opts = controllers[0]!.options as {
+      mcpServers?: Record<string, unknown>;
+      systemPrompt?: { append?: string };
+    };
     expect(opts.mcpServers).toBeDefined();
     // Dispatch's own category servers are always present (never clobbered)…
     expect(Object.keys(opts.mcpServers!).filter((n) => n.startsWith("dispatch-")).length)
@@ -2350,6 +2398,9 @@ describe("SessionBroker — config-sourced instructions / agents / modes", () =>
     expect(opts.mcpServers!["claude-in-chrome"]).toMatchObject({
       url: "http://127.0.0.1:9999/sse",
     });
+    expect(opts.systemPrompt?.append).toContain(
+      "Project: `claude-in-chrome` — project-specific integrations.",
+    );
   });
 
   it("materializes a `.dispatch/skills/` skill into the session cwd + enables skills:'all'", async () => {
