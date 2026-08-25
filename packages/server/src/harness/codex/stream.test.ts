@@ -226,6 +226,36 @@ describe("CodexStreamDecoder — tools", () => {
     ).toEqual([]);
   });
 
+  it("preserves a collaboration wait that reports a child failure", () => {
+    const d = decoder();
+    const out = d.decode(
+      note(
+        "item/completed",
+        item({
+          type: "collabAgentToolCall",
+          id: "wait-failed",
+          tool: "wait",
+          status: "failed",
+          receiverThreadIds: ["child-1"],
+          agentsStates: { "child-1": { status: "errored", message: "boom" } },
+        }),
+      ),
+    );
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatchObject({
+      type: "tool-use",
+      toolUseId: "wait-failed",
+      name: "TaskOutput",
+      input: { agent_ids: ["child-1"] },
+    });
+    expect(out[1]).toMatchObject({
+      type: "tool-result",
+      toolUseId: "wait-failed",
+      ok: false,
+      content: expect.stringContaining("errored — boom"),
+    });
+  });
+
   it("suppresses low-detail activity notices once run events own the UI", () => {
     const d = decoder();
     d.decode(
