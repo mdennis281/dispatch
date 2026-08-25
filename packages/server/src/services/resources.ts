@@ -54,6 +54,7 @@ import type {
   ChatProcessSample,
   ChatResources,
   DispatchResources,
+  HotProcess,
   ResourceSnapshot,
   SystemResources,
 } from "@dispatch/shared";
@@ -231,8 +232,12 @@ export class ResourceService {
         cpuPct: addRates(session.cpuPct, shells.cpuPct),
         session,
         shells,
+        hottest: hottestOf(allPids, byPid, cpuOf),
       });
     }
+    // Memory is the default ORDER on the wire; the client re-sorts by whichever
+    // column the reader picked. Kept here so a client that does nothing still
+    // gets a sensible ranking, and so `[0]` is meaningful to any other caller.
     chats.sort((a, b) => b.rssBytes - a.rssBytes || b.procs - a.procs);
 
     return {
@@ -375,18 +380,25 @@ export class ResourceService {
     const tree = tally(treePids, byPid, cpuOf);
     const server = byPid.get(this.serverPid);
 
-    // Chats can hold processes OUTSIDE the server tree (a session the server
-    // adopted across a restart), so subtract only what the tree actually
-    // contains — otherwise `unattributed` could go negative and read as a bug.
-    const inTree = { procs: 0, rssBytes: 0 };
+    // Which pids in the tree some chat already claims. Chats can also hold
+    // processes OUTSIDE the tree (a session the server adopted across a
+    // restart), so this is an intersection rather than a subtraction —
+    // otherwise `unattributed` could go negative and read as a bug.
+    //
+    // A SET rather than running totals, because the CPU figure below has to be
+    // summed over the leftovers directly. Subtracting rates would inherit every
+    // `null` in the tree: one unmeasurable chat would silently deduct nothing
+    // and inflate what is left, which is the opposite of what this number is
+    // for.
+    const claimed = new Set<number>();
     for (const chat of chats) {
       const roots = this.rootsByChat().get(chat.chatId) ?? [];
       for (const pid of descendantsOf(roots, children)) {
-        if (!treePids.has(pid)) continue;
-        inTree.procs += 1;
-        inTree.rssBytes += byPid.get(pid)?.rssBytes ?? 0;
+        if (treePids.has(pid)) claimed.add(pid);
       }
     }
+    const leftover = [...treePids].filter((pid) => !claimed.has(pid));
+    const unattributed = tally(leftover, byPid, cpuOf);
 
     return {
       pid: this.serverPid,
@@ -395,10 +407,7 @@ export class ResourceService {
       cpuPct: tree.cpuPct,
       serverRssBytes: server?.rssBytes ?? 0,
       serverCpuPct: cpuOf(this.serverPid),
-      unattributed: {
-        procs: Math.max(0, tree.procs - inTree.procs),
-        rssBytes: Math.max(0, tree.rssBytes - inTree.rssBytes),
-      },
+      unattributed,
     };
   }
 
@@ -488,6 +497,54 @@ function tally(
     cpu = addRates(cpu, cpuOf(pid));
   }
   return { procs, rssBytes, cpuPct: cpu };
+}
+
+/**
+ * The image name accounting for most of a tree, grouped by name.
+ *
+ * BY CPU WHEN THERE IS ANY, otherwise by memory. Those are the two ways a chat
+ * can be the problem, and picking the wrong one names the wrong culprit: the
+ * case this exists for was a chat pinning ten cores whose biggest MEMORY
+ * consumer was the ordinary `claude.exe`, while the actual answer was a
+ * headless `chrome.exe` the browser MCP had left running. Falling back to
+ * memory only when nothing is measurable keeps the row useful on the first
+ * poll, before any rate exists.
+ *
+ * Grouped by NAME rather than reported per pid because seventeen Chrome
+ * processes at 60% each are ONE problem — naming the single biggest pid would
+ * both understate it and finger an arbitrary member of the group.
+ */
+function hottestOf(
+  pids: Iterable<number>,
+  byPid: Map<number, ProcRow>,
+  cpuOf: (pid: number) => number | null,
+): HotProcess | null {
+  const groups = new Map<string, HotProcess>();
+  for (const pid of pids) {
+    const row = byPid.get(pid);
+    if (!row) continue;
+    // Unnamed rows are grouped together rather than dropped: they still cost
+    // something, and a tree of them should not report "nothing here".
+    const name = row.name || "unknown";
+    const g = groups.get(name) ?? { name, count: 0, cpuPct: null, rssBytes: 0 };
+    g.count += 1;
+    g.rssBytes += row.rssBytes ?? 0;
+    g.cpuPct = addRates(g.cpuPct, cpuOf(pid));
+    groups.set(name, g);
+  }
+  let best: HotProcess | null = null;
+  const measured = [...groups.values()].some((g) => g.cpuPct !== null);
+  for (const g of groups.values()) {
+    if (!best) {
+      best = g;
+      continue;
+    }
+    const better = measured
+      ? (g.cpuPct ?? -1) > (best.cpuPct ?? -1)
+      : g.rssBytes > best.rssBytes;
+    if (better) best = g;
+  }
+  return best;
 }
 
 /**

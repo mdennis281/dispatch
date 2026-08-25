@@ -74,6 +74,32 @@ export interface ChatProcessSample extends ProcessSample {
   kind: "session" | "shell";
 }
 
+/**
+ * The one image name accounting for most of a chat's cost, and how many of it
+ * there are — "chrome.exe ×17".
+ *
+ * WHY A ROW NEEDS THIS. A percentage tells you a chat is expensive; it does not
+ * tell you what to do about it. The case that motivated it: a chat pinning ten
+ * cores turned out to be a headless Chrome the Playwright MCP had left running,
+ * rendering through swiftshader — software rasterization, so a "GPU process"
+ * burning CPU. The row said "65%" and the actionable fact ("chrome.exe ×17")
+ * was hidden behind an expand nobody had a reason to click.
+ *
+ * AGGREGATED BY NAME, not per pid: seventeen Chrome processes at 60% each are
+ * one problem, and listing the biggest single pid would understate it and name
+ * an arbitrary member of the group.
+ */
+export interface HotProcess {
+  /** Image name, e.g. `chrome.exe`. */
+  name: string;
+  /** How many processes of that name are in this tree. */
+  count: number;
+  /** Their combined share of ONE core, or `null` if unmeasured. */
+  cpuPct: number | null;
+  /** Their combined resident bytes. */
+  rssBytes: number;
+}
+
 /** What one chat's whole tree is costing. */
 export interface ChatResources {
   chatId: string;
@@ -86,6 +112,11 @@ export interface ChatResources {
   session: { procs: number; rssBytes: number; cpuPct: number | null };
   /** Background shells — never swept automatically. */
   shells: { procs: number; rssBytes: number; cpuPct: number | null };
+  /**
+   * The dominant image in this tree — by CPU when anything is measurable,
+   * otherwise by memory. Absent for a tree we could not name anything in.
+   */
+  hottest: HotProcess | null;
 }
 
 /**
@@ -111,8 +142,13 @@ export interface DispatchResources {
    * The part of the tree no chat accounts for — sub-app runners, the server
    * itself, anything orphaned mid-teardown. `tree − Σ chats`, so a number that
    * climbs here is the signal that something is leaking outside a chat.
+   *
+   * CARRIES CPU, not just a process count and bytes. Without it a runaway that
+   * belongs to no chat — a sub-app runner spinning, a dev server in a loop —
+   * appears in the machine total and on no row anywhere, which is the one
+   * failure a page called "Resources" cannot have.
    */
-  unattributed: { procs: number; rssBytes: number };
+  unattributed: { procs: number; rssBytes: number; cpuPct: number | null };
 }
 
 /** The whole machine. Free to collect; see the module note. */
