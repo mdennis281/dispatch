@@ -159,7 +159,12 @@ import type { AuthoredConfigService } from "./authored-config.js";
 import type { SlashCommandService } from "./slash-commands.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
 import { bundledSkills } from "./bundled-skills.js";
-import { buildWorkflowDirective, createWorkflowGuardHook, inspectCwd } from "./workflow.js";
+import {
+  buildWorkflowDirective,
+  createWorkflowGuardHook,
+  inspectCwd,
+  inspectCwdSync,
+} from "./workflow.js";
 import {
   createBackgroundShellGuardHook,
   createWorktreeGuardHook,
@@ -168,11 +173,13 @@ import { AgentCwdTracker } from "./agent-cwd.js";
 import { claudeExecutableOption } from "./runtime.js";
 import type {
   HarnessEvent,
+  HarnessGuardBlockedEvent,
   HarnessQuestion,
   HarnessQuestionAnswer,
   HarnessSession,
   HarnessSessionSpec,
 } from "../harness/types.js";
+import { guardRecoveryInput } from "../harness/guard.js";
 import type { HarnessRegistry } from "../harness/index.js";
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
 import { managerMcpContextOf } from "./mcp/manager-mcp.js";
@@ -1593,6 +1600,12 @@ interface LiveSession {
   threadOfTool: Map<string, string>;
   /** Tool-use id to the turn that opened it; late results must not revive a settled turn. */
   toolTurn: Map<string, number>;
+  /** Guard hits whose runtime had to interrupt; consumed by the matching turn end. */
+  guardRecoveries: HarnessGuardBlockedEvent[];
+  /** A user-facing Stop is awaiting its terminal event and must win over guard recovery. */
+  explicitInterruptPending: boolean;
+  /** True only until this turn's terminal event starts being handled. */
+  turnOpen: boolean;
   /**
    * Where each thread is working on disk, and the guard that keeps a subagent
    * out of another task's worktree. Created on the first turn and kept for the
@@ -1899,6 +1912,9 @@ export class SessionBroker {
         effortByThread: new Map(),
         threadOfTool: new Map(),
         toolTurn: new Map(),
+        guardRecoveries: [],
+        explicitInterruptPending: false,
+        turnOpen: false,
         sessionId: chat.sessionId,
         model: chat.model,
         modelOverride: chat.model,
@@ -2428,7 +2444,11 @@ export class SessionBroker {
   /** Interrupt the running turn (streaming-input only). */
   async interrupt(chatId: string): Promise<boolean> {
     const session = this.sessions.get(chatId);
-    if (!session?.query && !session?.harnessSession) return false;
+    if ((!session?.query && !session?.harnessSession) || !session.turnOpen) return false;
+    // A late Codex guard and the Composer's Stop button both end as
+    // `subtype: "interrupted"`. Remember the user's intent before awaiting the
+    // provider so a queued guard event cannot turn Stop into an automatic resume.
+    session.explicitInterruptPending = true;
     try {
       await (session.harnessSession?.interrupt() ?? session.query!.interrupt());
       // Interrupting abandons any tool blocked on a permission answer; clear the
@@ -2437,6 +2457,9 @@ export class SessionBroker {
       this.bus.publish({ type: "notice", chatId, level: "info", text: "Interrupted." });
       return true;
     } catch (err) {
+      // No terminal event follows a rejected interrupt. Let a separately-owned
+      // guard interrupt recover normally if it still completes afterward.
+      session.explicitInterruptPending = false;
       this.bus.publish({
         type: "error",
         chatId,
@@ -2856,6 +2879,9 @@ export class SessionBroker {
     session.input = undefined;
     session.harnessSession = undefined;
     session.toolTurn.clear();
+    session.guardRecoveries.length = 0;
+    session.explicitInterruptPending = false;
+    session.turnOpen = false;
     session.resumeSessionId = session.sessionId;
     session.forkAtUuid = atMessageUuid;
     session.fork = true;
@@ -3156,6 +3182,8 @@ export class SessionBroker {
 
   private startTurn(session: LiveSession): void {
     this.queueOrder = this.queueOrder.filter((id) => id !== session.chatId);
+    session.turnOpen = true;
+    session.explicitInterruptPending = false;
     if (!session.started) {
       // Lazy-start the SDK subprocess. Sets input/started synchronously before
       // its first await, so concurrent steering pushes land safely.
@@ -3373,21 +3401,31 @@ export class SessionBroker {
         toolGuard: (toolName, input) => {
           if (toolName !== "Bash" || session.workflow?.guard === "off") return null;
           const command = typeof input.command === "string" ? input.command : "";
+          // The call's real cwd outranks the directory the chat started in. This
+          // is especially load-bearing for harness-created worktrees: Dispatch
+          // may not own that cwd, but the runtime reports it on the tool call.
+          const callSite =
+            typeof input.cwd === "string" ? inspectCwdSync(input.cwd) : null;
           const violation = classifyWorkflowViolation(command, {
             defaultBranch: session.trunk ?? "main",
-            currentBranch: session.branch ?? null,
-            inWorktree: Boolean(session.inWorktree),
+            currentBranch: callSite?.branch ?? session.branch ?? null,
+            inWorktree: callSite?.linked ?? Boolean(session.inWorktree),
             autoMerge: session.workflow?.autoMerge === "on-green",
             requirePr: Boolean(session.workflow?.requirePr),
           });
           if (!violation) return null;
           const blocked = session.workflow?.guard === "deny";
-          this.bus.publish({
-            type: "notice",
-            chatId: session.chatId,
-            level: blocked ? "warn" : "info",
-            text: `${blocked ? "Blocked" : "Workflow warning"}: ${violation.reason}`,
-          });
+          // Blocked calls are reported by the adapter as `guard-blocked`, which
+          // gives every harness the same persisted notice and recovery path.
+          // Warn-only policy does not produce that event, so surface it here.
+          if (!blocked) {
+            this.bus.publish({
+              type: "notice",
+              chatId: session.chatId,
+              level: "info",
+              text: `Workflow warning: ${violation.reason}`,
+            });
+          }
           return blocked ? violation.reason : null;
         },
       };
@@ -3672,6 +3710,13 @@ export class SessionBroker {
         });
         await this.emit(session, { ...base, kind: "notice", level: event.level, text: event.text });
         return;
+      case "guard-blocked": {
+        if (event.continuation === "restart-turn") session.guardRecoveries.push(event);
+        const text = `Blocked: ${event.reason}`;
+        this.bus.publish({ type: "notice", chatId: session.chatId, level: "warn", text });
+        await this.emit(session, { ...base, kind: "notice", level: "warn", text });
+        return;
+      }
       case "compacted":
         await this.emit(session, {
           ...base,
@@ -3681,9 +3726,44 @@ export class SessionBroker {
         });
         return;
       case "turn-end":
+        // Close the turn before the first await below. A Stop arriving while
+        // the result row is being persisted is already too late to interrupt
+        // this turn and must not suppress recovery in the next one.
+        session.turnOpen = false;
         session.activity.turnEnd({ limit: !!event.limit }, base.ts);
         session.lastContextTokens = event.contextTokens ?? session.lastContextTokens;
         session.contextWindow = event.contextWindow ?? session.contextWindow;
+        const explicitlyInterrupted = session.explicitInterruptPending;
+        session.explicitInterruptPending = false;
+        if (
+          !explicitlyInterrupted &&
+          !event.ok &&
+          event.subtype === "interrupted" &&
+          session.guardRecoveries.length > 0
+        ) {
+          const recoveries = session.guardRecoveries.splice(0);
+          await this.emit(session, {
+            ...base,
+            kind: "result",
+            subtype: "guard-recovered",
+            isError: false,
+            durationMs: event.durationMs,
+            result: "Dispatch interrupted the provider to enforce a guard and automatically continued the task.",
+            usage: event.usage,
+            contextTokens: session.lastContextTokens,
+            contextWindow: session.contextWindow,
+            costUsd: event.costUsd,
+          });
+          session.turn += 1;
+          session.turnOpen = true;
+          session.activity.turnStart(base.ts);
+          this.setStatus(session, "running", { state: "thinking", label: "recovering from guard" });
+          session.harnessSession?.send({ text: guardRecoveryInput(recoveries), priority: "now" });
+          return;
+        }
+        // A different terminal outcome must not let an old guard marker recover
+        // an unrelated later turn.
+        session.guardRecoveries.length = 0;
         await this.emit(session, {
           ...base,
           kind: "result",
@@ -3700,6 +3780,7 @@ export class SessionBroker {
         session.turn += 1;
         if (!event.ok) this.onTurnError?.(session.chatId, event.result ?? event.limit?.reason);
         if ((session.harnessSession?.pending() ?? 0) > 0 || session.outbox.length > 0) {
+          session.turnOpen = true;
           this.setStatus(session, "running", { state: "thinking" });
           this.flushOutbox(session);
         } else if (!event.ok) {
@@ -4008,6 +4089,10 @@ export class SessionBroker {
         return;
       }
       case "result": {
+        // The provider has already ended this turn; close it synchronously so
+        // a one-frame-late Stop cannot become intent for the following turn.
+        session.turnOpen = false;
+        session.explicitInterruptPending = false;
         // No `limit` on this path — the legacy loop only learns about a usage
         // limit by parsing the error text downstream (see onTurnError), so a
         // pause span is the harness path's to open.
@@ -4054,6 +4139,7 @@ export class SessionBroker {
         }
         // Chained turn buffered? Stay running; otherwise the turn is complete.
         if (session.input && session.input.pending() > 0) {
+          session.turnOpen = true;
           this.setStatus(session, "running", { state: "thinking" });
         } else if (isError) {
           this.onTurnFailed(session);
@@ -4811,6 +4897,11 @@ export class SessionBroker {
   }
 
   private onTurnEnd(session: LiveSession): void {
+    // Stop can arrive while the terminal row is still being persisted but after
+    // turn-end already sampled the marker. Settlement is the final backstop that
+    // keeps that late, provider-no-op Stop from leaking into the next turn.
+    session.explicitInterruptPending = false;
+    session.turnOpen = false;
     this.setStatus(session, "idle", { state: "idle" });
     const id = `att-idle-${session.chatId}-${this.genId()}`;
     session.idleAttentionId = id;
@@ -4830,6 +4921,8 @@ export class SessionBroker {
 
   /** A turn failed but its reusable runtime session is still available. */
   private onTurnFailed(session: LiveSession): void {
+    session.explicitInterruptPending = false;
+    session.turnOpen = false;
     this.setStatus(session, "failed", { state: "idle" });
     this.pump();
   }
@@ -4842,6 +4935,9 @@ export class SessionBroker {
     session.input = undefined;
     session.harnessSession = undefined;
     session.toolTurn.clear();
+    session.guardRecoveries.length = 0;
+    session.explicitInterruptPending = false;
+    session.turnOpen = false;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     session.stopping = false;
@@ -4876,6 +4972,9 @@ export class SessionBroker {
     session.input = undefined;
     session.harnessSession = undefined;
     session.toolTurn.clear();
+    session.guardRecoveries.length = 0;
+    session.explicitInterruptPending = false;
+    session.turnOpen = false;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     // A crash after a completed turn leaves a live "Turn complete" item; clear it.

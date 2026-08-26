@@ -548,15 +548,17 @@ describe("CodexSession approvals", () => {
 
     expect(fake.responses).toContainEqual({ id: 9, result: { decision: "decline" } });
     expect(events).toContainEqual({
-      type: "notice",
-      level: "warn",
-      text: "Blocked: pushes to trunk are not allowed",
+      type: "guard-blocked",
+      toolName: "Bash",
+      input: { command: "git push origin main" },
+      reason: "pushes to trunk are not allowed",
+      continuation: "in-place",
     });
     // The human is never asked about something policy already refused.
     expect(events.some((e) => e.type === "permission-request")).toBe(false);
   });
 
-  it("interrupts a forbidden command that started without an approval prompt", async () => {
+  it("marks an unprompted forbidden command for turn restart before interrupting", async () => {
     // The `never` posture path: nothing is submitted for approval, so the guard
     // can only catch it once the item is already running.
     const { session, fake } = makeSession({
@@ -573,11 +575,22 @@ describe("CodexSession approvals", () => {
     fake.push("item/started", {
       threadId: "thread-1",
       turnId: "turn-1",
-      item: { type: "commandExecution", id: "c1", command: "git push origin main" },
+      item: {
+        type: "commandExecution",
+        id: "c1",
+        command: "git push origin main",
+        cwd: "/repo/worktree",
+      },
     });
     await fake.tick();
 
-    expect(events).toContainEqual({ type: "notice", level: "warn", text: "Blocked: not allowed here" });
+    expect(events).toContainEqual({
+      type: "guard-blocked",
+      toolName: "Bash",
+      input: { command: "git push origin main", cwd: "/repo/worktree" },
+      reason: "not allowed here",
+      continuation: "restart-turn",
+    });
     expect(fake.calls.some((c) => c.method === "turn/interrupt")).toBe(true);
   });
 

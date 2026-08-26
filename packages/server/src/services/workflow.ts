@@ -14,6 +14,7 @@
  * Kept deliberately short. This append rides on every turn of every session.
  */
 import { readFile, stat } from "node:fs/promises";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { HookCallback, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -93,6 +94,46 @@ export async function inspectCwd(
     /* detached or unreadable */
   }
   return { branch, linked: info.linked };
+}
+
+/**
+ * Synchronous call-site inspection for runtimes whose only safety hook fires
+ * after a command has started. Codex must decide whether to interrupt before
+ * returning to its event loop, so awaiting filesystem I/O would let the command
+ * keep running while the guard deliberated. This path is used only for guarded
+ * Bash calls; ordinary session setup keeps using {@link inspectCwd}.
+ */
+export function inspectCwdSync(
+  cwd: string | undefined,
+): { branch: string | null; linked: boolean } | null {
+  if (!cwd) return null;
+  let dir = resolve(cwd);
+  for (;;) {
+    const dotGit = join(dir, ".git");
+    try {
+      const st = statSync(dotGit);
+      let gitDir: string;
+      let linked: boolean;
+      if (st.isDirectory()) {
+        gitDir = dotGit;
+        linked = false;
+      } else if (st.isFile()) {
+        const target = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, "utf8"))?.[1]?.trim();
+        if (!target) return null;
+        gitDir = isAbsolute(target) ? target : resolve(dir, target);
+        linked = true;
+      } else {
+        return null;
+      }
+      const head = readFileSync(join(gitDir, "HEAD"), "utf8");
+      const branch = /^ref:\s*refs\/heads\/(.+)$/m.exec(head)?.[1]?.trim() ?? null;
+      return { branch, linked };
+    } catch {
+      const parent = dirname(dir);
+      if (parent === dir) return null;
+      dir = parent;
+    }
+  }
 }
 
 /** What the directive needs to know about the session it's being built for. */

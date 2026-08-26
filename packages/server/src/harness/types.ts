@@ -409,6 +409,22 @@ export interface HarnessNoticeEvent {
   text: string;
 }
 
+/**
+ * A host policy rejected one tool call.
+ *
+ * Adapters report the runtime consequence rather than implementing product
+ * recovery themselves. A runtime with a real pre-tool veto keeps the current
+ * turn alive; a runtime that can only catch a command after it starts must end
+ * that turn, and the broker immediately resumes it with a recovery directive.
+ */
+export interface HarnessGuardBlockedEvent {
+  type: "guard-blocked";
+  toolName: string;
+  input: Record<string, unknown>;
+  reason: string;
+  continuation: "in-place" | "restart-turn";
+}
+
 /** The session compacted its own context and continued. */
 export interface HarnessCompactedEvent {
   type: "compacted";
@@ -444,6 +460,7 @@ export type HarnessEvent =
   | HarnessTaskNotificationEvent
   | HarnessUsageEvent
   | HarnessNoticeEvent
+  | HarnessGuardBlockedEvent
   | HarnessCompactedEvent
   | HarnessTurnEndEvent;
 

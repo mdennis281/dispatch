@@ -16,6 +16,14 @@ import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { SessionBroker } from "./session-broker.js";
 
+async function waitUntil(check: () => boolean): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("condition did not become true");
+}
+
 class FakeHarnessSession implements HarnessSession {
   private queue: HarnessEvent[] = [];
   private wake?: () => void;
@@ -188,6 +196,159 @@ describe("SessionBroker neutral harness path", () => {
     expect(broker.getStatus(chat.id)).toBe("failed");
     expect((await store.getChat(chat.id))?.status).toBe("failed");
     expect((await store.readMessages(chat.id)).map((row) => row.kind)).toContain("tool_result");
+  });
+
+  it("automatically resumes a turn interrupted by a late guard catch", async () => {
+    session = new FakeHarnessSession(true);
+    const chat = await store.saveChat({
+      id: "chat-guard-restart",
+      projectId: "project-1",
+      title: "Guard restart",
+      modeId: "auto",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "ship it");
+    session.emit(
+      { type: "init", sessionId: "thread-guard", model: "gpt-test" },
+      {
+        type: "guard-blocked",
+        toolName: "Bash",
+        input: { command: "git push origin main" },
+        reason: "use create_pr",
+        continuation: "restart-turn",
+      },
+      { type: "turn-end", ok: false, subtype: "interrupted", result: "interrupted" },
+    );
+
+    await waitUntil(() => session.sent.length === 2);
+    expect(broker.getStatus(chat.id)).toBe("running");
+    expect(session.sent[1]?.text).toContain("Continue the task now");
+    expect(session.sent[1]?.text).toContain("use create_pr");
+
+    session.emit({ type: "turn-end", ok: true, subtype: "success", result: "done" });
+    await broker.waitFor(chat.id, "idle");
+    const rows = await store.readMessages(chat.id);
+    expect(rows.find((row) => row.kind === "result" && row.subtype === "guard-recovered")).toMatchObject({
+      isError: false,
+    });
+  });
+
+  it("does not resume a guard-marked turn after the user explicitly interrupts", async () => {
+    session = new FakeHarnessSession(true);
+    const chat = await store.saveChat({
+      id: "chat-user-interrupt-after-guard",
+      projectId: "project-1",
+      title: "User interrupt after guard",
+      modeId: "auto",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "ship it");
+    await waitUntil(() => session.sent.length === 1);
+    session.emit(
+      { type: "init", sessionId: "thread-user-stop", model: "gpt-test" },
+      {
+        type: "guard-blocked",
+        toolName: "Bash",
+        input: { command: "git push origin main" },
+        reason: "use create_pr",
+        continuation: "restart-turn",
+      },
+    );
+
+    expect(await broker.interrupt(chat.id)).toBe(true);
+    session.emit({ type: "turn-end", ok: false, subtype: "interrupted", result: "interrupted" });
+
+    await broker.waitFor(chat.id, "failed");
+    expect(session.sent).toHaveLength(1);
+    const rows = await store.readMessages(chat.id);
+    expect(rows.some((row) => row.kind === "result" && row.subtype === "guard-recovered")).toBe(false);
+    expect(rows.find((row) => row.kind === "result" && row.subtype === "interrupted")).toMatchObject({
+      isError: true,
+    });
+  });
+
+  it("does not carry a no-op Stop from a settled turn into later guard recovery", async () => {
+    session = new FakeHarnessSession(true);
+    const chat = await store.saveChat({
+      id: "chat-stale-user-interrupt",
+      projectId: "project-1",
+      title: "Stale user interrupt",
+      modeId: "auto",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "first turn");
+    await waitUntil(() => session.sent.length === 1);
+    session.emit(
+      { type: "init", sessionId: "thread-stale-stop", model: "gpt-test" },
+      { type: "turn-end", ok: true, subtype: "success", result: "done" },
+    );
+    await broker.waitFor(chat.id, "idle");
+
+    expect(await broker.interrupt(chat.id)).toBe(false);
+    await broker.sendMessage(chat.id, "second turn");
+    await waitUntil(() => session.sent.length === 2);
+    session.emit(
+      {
+        type: "guard-blocked",
+        toolName: "Bash",
+        input: { command: "git push origin main" },
+        reason: "use create_pr",
+        continuation: "restart-turn",
+      },
+      { type: "turn-end", ok: false, subtype: "interrupted", result: "interrupted" },
+    );
+
+    await waitUntil(() => session.sent.length === 3);
+    expect(session.sent[2]?.text).toContain("Continue the task now");
+    session.emit({ type: "turn-end", ok: true, subtype: "success", result: "done" });
+    await broker.waitFor(chat.id, "idle");
+  });
+
+  it("keeps a native pre-tool guard denial in the current turn", async () => {
+    session = new FakeHarnessSession(true);
+    const chat = await store.saveChat({
+      id: "chat-guard-in-place",
+      projectId: "project-1",
+      title: "Guard in place",
+      modeId: "auto",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "ship it");
+    session.emit(
+      { type: "init", sessionId: "thread-native-guard", model: "gpt-test" },
+      {
+        type: "guard-blocked",
+        toolName: "Bash",
+        input: { command: "git push origin main" },
+        reason: "use create_pr",
+        continuation: "in-place",
+      },
+      { type: "turn-end", ok: true, subtype: "success", result: "continued" },
+    );
+
+    await broker.waitFor(chat.id, "idle");
+    expect(session.sent).toHaveLength(1);
+    expect((await store.readMessages(chat.id)).map((row) => row.kind)).toContain("notice");
   });
 
   it("forces a disposed provider out when its event iterator never closes", async () => {

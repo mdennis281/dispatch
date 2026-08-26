@@ -35,6 +35,7 @@ import type {
   HarnessSession,
   HarnessSessionSpec,
 } from "../types.js";
+import { catchToolGuard } from "../guard.js";
 import { ClaudeStreamDecoder, QUESTION_TOOL } from "./stream.js";
 import { buildQuestionAnswer, neutralQuestions } from "./questions.js";
 import { claudeExecutableOption } from "../../services/runtime.js";
@@ -446,20 +447,20 @@ export class ClaudeSession implements HarnessSession {
   /** Blocks a Bash call the workflow contract forbids. */
   private guardHook(): HookCallback {
     return async (input: HookInput): Promise<HookJSONOutput> => {
-      const guard = this.spec.toolGuard;
-      if (!guard) return {};
       const toolInput = ((input as unknown as { tool_input?: unknown }).tool_input ?? {}) as Record<
         string,
         unknown
       >;
-      const reason = guard("Bash", toolInput);
-      if (!reason) return {};
-      this.emit({ type: "notice", level: "warn", text: `Blocked: ${reason}` });
+      const guardInput =
+        typeof input.cwd === "string" ? { ...toolInput, cwd: input.cwd } : toolInput;
+      const blocked = catchToolGuard(this.spec.toolGuard, "Bash", guardInput, "in-place");
+      if (!blocked) return {};
+      this.emit(blocked);
       return {
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
-          permissionDecisionReason: reason,
+          permissionDecisionReason: blocked.reason,
         },
       } as unknown as HookJSONOutput;
     };

@@ -22,9 +22,11 @@
  *   2. on `item/started`, where a command that was never submitted for approval
  *      (because the posture is `never`) is caught and the turn interrupted.
  * (2) races the command by definition — it may already be running. That is a
- * real, documented reduction versus Claude, surfaced as
- * `capabilities.preToolGuard === false` so the UI can say so rather than imply
- * a guarantee that isn't there.
+ * real, documented reduction versus Claude. The neutral broker recovery layer
+ * immediately starts a continuation turn after that safety interrupt; this
+ * adapter only reports which recovery shape the runtime required. The weaker
+ * enforcement guarantee is still surfaced as `capabilities.preToolGuard ===
+ * false` so the UI can say so rather than imply a guarantee that isn't there.
  */
 import type { Effort, PermissionMode, ImageRef } from "@dispatch/shared";
 import type {
@@ -38,6 +40,7 @@ import type {
 } from "../types.js";
 import { CodexStreamDecoder, legacySubagentToolUseId, questionsOf } from "./stream.js";
 import { toCodexPosture, toDeveloperInstructions, clampEffort } from "./options.js";
+import { catchToolGuard } from "../guard.js";
 import type { CodexConnection, RpcFrame, ServerRequest } from "./rpc.js";
 
 /** A server→client request we owe an answer to. */
@@ -442,14 +445,15 @@ export class CodexSession implements HarnessSession {
 
   /** Interrupt a command that started despite violating the workflow contract. */
   private guardStartedItem(frame: RpcFrame): void {
-    const guard = this.spec.toolGuard;
-    if (!guard) return;
     const item = (frame.params as { item?: Record<string, unknown> } | undefined)?.item;
     if (!item || item.type !== "commandExecution") return;
-    const command = String(item.command ?? "");
-    const reason = guard("Bash", { command });
-    if (!reason) return;
-    this.emit({ type: "notice", level: "warn", text: `Blocked: ${reason}` });
+    const input = {
+      command: String(item.command ?? ""),
+      ...(typeof item.cwd === "string" ? { cwd: item.cwd } : {}),
+    };
+    const blocked = catchToolGuard(this.spec.toolGuard, "Bash", input, "restart-turn");
+    if (!blocked) return;
+    this.emit(blocked);
     void this.interrupt();
   }
 
@@ -495,10 +499,10 @@ export class CodexSession implements HarnessSession {
     parentToolUseId?: string,
   ): void {
     // The guard's first (and reliable) enforcement point.
-    const denial = this.spec.toolGuard?.(toolName, input);
-    if (denial) {
+    const blocked = catchToolGuard(this.spec.toolGuard, toolName, input, "in-place");
+    if (blocked) {
       this.conn.respond(req.id, { decision: "decline" });
-      this.emit({ type: "notice", level: "warn", text: `Blocked: ${denial}` });
+      this.emit(blocked);
       return;
     }
 
