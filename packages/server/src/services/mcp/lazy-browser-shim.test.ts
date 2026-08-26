@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, rm, readFile, access } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -27,7 +27,10 @@ class Client {
   private buffer = "";
   private readonly waiting = new Map<string | number, (msg: Record<string, unknown>) => void>();
 
-  constructor(private readonly child: ChildProcessWithoutNullStreams) {
+  constructor(
+    private readonly child: ChildProcessWithoutNullStreams,
+    private readonly workspaceRoot?: string,
+  ) {
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       this.buffer += chunk;
@@ -38,6 +41,14 @@ class Client {
         this.buffer = this.buffer.slice(nl + 1);
         if (!line) continue;
         const msg = JSON.parse(line) as { id?: string | number };
+        if ((msg as { method?: string }).method === "roots/list") {
+          this.child.stdin.write(JSON.stringify({
+            jsonrpc: "2.0",
+            id: msg.id,
+            result: { roots: [{ uri: pathToFileURL(this.workspaceRoot ?? process.cwd()).href }] },
+          }) + "\n");
+          continue;
+        }
         if (msg.id === undefined) continue;
         this.waiting.get(msg.id)?.(msg as Record<string, unknown>);
         this.waiting.delete(msg.id);
@@ -65,6 +76,7 @@ let dir: string;
 let manifest: string;
 let marker: string;
 let owner: string;
+let workspace: string;
 const running: ChildProcessWithoutNullStreams[] = [];
 
 function startShim(): Client {
@@ -85,7 +97,7 @@ function startShim(): Client {
     { stdio: ["pipe", "pipe", "pipe"] },
   ) as ChildProcessWithoutNullStreams;
   running.push(child);
-  return new Client(child);
+  return new Client(child, workspace);
 }
 
 /** Whether the fixture server ever started. */
@@ -101,6 +113,8 @@ beforeEach(async () => {
   manifest = join(dir, "manifest.json");
   marker = join(dir, "started.log");
   owner = join(dir, "owner");
+  workspace = join(dir, "workspace");
+  await mkdir(workspace);
 });
 
 afterEach(async () => {
@@ -192,9 +206,11 @@ describe("lazy-browser-shim", () => {
         }),
       ]),
     );
-    // Playwright resolves an explicit filename against cwd, ignoring its own
-    // --output-dir. The shim's cwd keeps that file in the per-chat temp root.
+    // Playwright normally resolves this against the advertised workspace root,
+    // ignoring --output-dir and the child cwd. The shim makes the call's path
+    // absolute so the per-chat owner still wins.
     expect(await readFile(join(owner, filename))).toEqual(Buffer.from("89504e470d0a1a0a", "hex"));
+    await expect(access(join(workspace, filename))).rejects.toThrow();
     await expect(access(join(process.cwd(), filename))).rejects.toThrow();
   });
 

@@ -179,11 +179,11 @@ function enrichScreenshotResult(msg) {
   let named = match[1].trim();
   if (named.startsWith("<") && named.endsWith(">")) named = named.slice(1, -1);
   try {
-    const path = named.startsWith("file://")
+    const path = call.outputPath ?? (named.startsWith("file://")
       ? fileURLToPath(named)
       : isAbsolute(named)
         ? named
-        : resolve(ownerDir ?? process.cwd(), named);
+        : resolve(ownerDir ?? process.cwd(), named));
     if (!existsSync(path) || !statSync(path).isFile()) return msg;
     const realPath = realpathSync(path);
     return {
@@ -339,6 +339,39 @@ function failFrame(frame, message) {
   writeOut({ jsonrpc: "2.0", id: frame.id, error: { code: -32000, message } });
 }
 
+/**
+ * Playwright replaces its process cwd with the first client root when one is
+ * advertised, then resolves an explicit relative screenshot filename there.
+ * Make that filename absolute before forwarding so named captures stay in the
+ * per-chat owner directory regardless of the later roots/list handshake.
+ */
+function prepareToolCall(msg) {
+  if (msg.method !== "tools/call" || msg.id === undefined) return msg;
+  const call = { name: msg.params?.name, arguments: msg.params?.arguments };
+  if (call.name !== "browser_take_screenshot") {
+    toolCalls.set(msg.id, call);
+    return msg;
+  }
+
+  const filename = call.arguments?.filename;
+  if (typeof filename !== "string") {
+    toolCalls.set(msg.id, call);
+    return msg;
+  }
+  const outputPath = isAbsolute(filename)
+    ? filename
+    : resolve(ownerDir ?? process.cwd(), basename(filename));
+  toolCalls.set(msg.id, { ...call, outputPath });
+  if (outputPath === filename) return msg;
+  return {
+    ...msg,
+    params: {
+      ...msg.params,
+      arguments: { ...call.arguments, filename: outputPath },
+    },
+  };
+}
+
 createLineReader(process.stdin, (line) => {
   let msg;
   try {
@@ -350,9 +383,7 @@ createLineReader(process.stdin, (line) => {
   // Remember the handshake params whatever else happens — a cold start needs
   // them to spawn with, and a warm one needs them the moment something does.
   if (msg.method === "initialize") clientInitialize = msg.params;
-  if (msg.method === "tools/call" && msg.id !== undefined) {
-    toolCalls.set(msg.id, { name: msg.params?.name, arguments: msg.params?.arguments });
-  }
+  msg = prepareToolCall(msg);
 
   if (child) {
     // Already spawned: pure pipe, except that frames arriving mid-handshake
