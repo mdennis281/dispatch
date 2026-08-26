@@ -12,10 +12,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, rm, readFile, access } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { once } from "node:events";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SHIM = join(HERE, "lazy-browser-shim.mjs");
@@ -26,7 +27,10 @@ class Client {
   private buffer = "";
   private readonly waiting = new Map<string | number, (msg: Record<string, unknown>) => void>();
 
-  constructor(private readonly child: ChildProcessWithoutNullStreams) {
+  constructor(
+    private readonly child: ChildProcessWithoutNullStreams,
+    private readonly workspaceRoot?: string,
+  ) {
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       this.buffer += chunk;
@@ -37,6 +41,14 @@ class Client {
         this.buffer = this.buffer.slice(nl + 1);
         if (!line) continue;
         const msg = JSON.parse(line) as { id?: string | number };
+        if ((msg as { method?: string }).method === "roots/list") {
+          this.child.stdin.write(JSON.stringify({
+            jsonrpc: "2.0",
+            id: msg.id,
+            result: { roots: [{ uri: pathToFileURL(this.workspaceRoot ?? process.cwd()).href }] },
+          }) + "\n");
+          continue;
+        }
         if (msg.id === undefined) continue;
         this.waiting.get(msg.id)?.(msg as Record<string, unknown>);
         this.waiting.delete(msg.id);
@@ -63,16 +75,29 @@ class Client {
 let dir: string;
 let manifest: string;
 let marker: string;
+let owner: string;
+let workspace: string;
 const running: ChildProcessWithoutNullStreams[] = [];
 
 function startShim(): Client {
   const child = spawn(
     process.execPath,
-    [SHIM, "--manifest", manifest, "--", process.execPath, FAKE, "--marker", marker],
+    [
+      SHIM,
+      "--owner-dir",
+      owner,
+      "--manifest",
+      manifest,
+      "--",
+      process.execPath,
+      FAKE,
+      "--marker",
+      marker,
+    ],
     { stdio: ["pipe", "pipe", "pipe"] },
   ) as ChildProcessWithoutNullStreams;
   running.push(child);
-  return new Client(child);
+  return new Client(child, workspace);
 }
 
 /** Whether the fixture server ever started. */
@@ -87,10 +112,17 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "lazy-shim-"));
   manifest = join(dir, "manifest.json");
   marker = join(dir, "started.log");
+  owner = join(dir, "owner");
+  workspace = join(dir, "workspace");
+  await mkdir(workspace);
 });
 
 afterEach(async () => {
-  for (const child of running.splice(0)) child.kill();
+  for (const child of running.splice(0)) {
+    if (child.exitCode !== null) continue;
+    child.stdin.end();
+    await once(child, "exit");
+  }
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -151,6 +183,57 @@ describe("lazy-browser-shim", () => {
     expect((called.result as { content: { text: string }[] }).content[0]!.text).toBe("called look");
     // …and only NOW is there a process.
     expect(await spawned()).toBe(true);
+  });
+
+  it("turns Playwright's Markdown screenshot into a previewable resource_link", async () => {
+    const filename = "lazy-shim-preview-test.png";
+    const client = startShim();
+    await client.request(1, "initialize", { protocolVersion: "2024-11-05" });
+    client.notify("notifications/initialized");
+
+    const called = await client.request(2, "tools/call", {
+      name: "browser_take_screenshot",
+      arguments: { filename },
+    });
+    const content = (called.result as { content: Record<string, unknown>[] }).content;
+    expect(content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "resource_link",
+          name: filename,
+          mimeType: "image/png",
+          uri: pathToFileURL(join(owner, filename)).href,
+        }),
+      ]),
+    );
+    // Playwright normally resolves this against the advertised workspace root,
+    // ignoring --output-dir and the child cwd. The shim makes the call's path
+    // absolute so the per-chat owner still wins.
+    expect(await readFile(join(owner, filename))).toEqual(Buffer.from("89504e470d0a1a0a", "hex"));
+    await expect(access(join(workspace, filename))).rejects.toThrow();
+    await expect(access(join(process.cwd(), filename))).rejects.toThrow();
+  });
+
+  it("uses Playwright's requested screenshot type when it overrides the filename extension", async () => {
+    const filename = "lazy-shim-mismatched-extension.png";
+    const client = startShim();
+    await client.request(1, "initialize", { protocolVersion: "2024-11-05" });
+    client.notify("notifications/initialized");
+
+    const called = await client.request(2, "tools/call", {
+      name: "browser_take_screenshot",
+      arguments: { filename, type: "webp" },
+    });
+    const content = (called.result as { content: Record<string, unknown>[] }).content;
+    expect(content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "resource_link",
+          name: filename,
+          mimeType: "image/webp",
+        }),
+      ]),
+    );
   });
 
   it("shuts the real server down by CLOSING ITS STDIN, not by killing it", async () => {

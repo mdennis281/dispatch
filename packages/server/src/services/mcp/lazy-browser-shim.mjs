@@ -39,22 +39,29 @@
  * into a shim whose whole point is to be cheaper than the thing it stands in for.
  */
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { basename, dirname, extname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /* ------------------------------------------------------------------ argv */
 
 // `--owner-dir <per-chat path> --manifest <path> -- <command> <args...>`. The
-// owner dir is intentionally unused by the shim: carrying it in THIS process's
-// argv makes ownership recoverable even for a real server with no output flag.
-// The `--` matters: the real
+// The owner dir is both the process cwd and the root used to turn Playwright's
+// Markdown-only screenshot answer into a standard MCP resource_link. Keeping
+// it in THIS process's argv also makes ownership recoverable for a real server
+// with no output flag. The `--` matters: the real
 // server's own args routinely include flags of ours' shape (`--isolated`), and
 // splitting on the first bare `--` is the one rule that can't confuse them.
 const argv = process.argv.slice(2);
 const sep = argv.indexOf("--");
 const flags = sep === -1 ? argv : argv.slice(0, sep);
 const real = sep === -1 ? [] : argv.slice(sep + 1);
-const manifestPath = flags[flags.indexOf("--manifest") + 1];
+const flagValue = (name) => {
+  const i = flags.indexOf(name);
+  return i === -1 ? undefined : flags[i + 1];
+};
+const manifestPath = flagValue("--manifest");
+const ownerDir = flagValue("--owner-dir");
 const realCommand = real[0];
 const realArgs = real.slice(1);
 
@@ -114,6 +121,94 @@ function createLineReader(stream, onLine) {
 
 const writeOut = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
 
+/* ------------------------------------------------------ result enrichment */
+
+/** Tool-call ids whose replies may need browser-specific normalization. */
+const toolCalls = new Map();
+
+/** MIME type for the formats accepted by Playwright's screenshot tool. */
+function screenshotMime(path, requestedType) {
+  // Playwright lets `type` override the filename extension, so prefer the
+  // validated call argument over a potentially misleading name.
+  switch (requestedType?.toLowerCase()) {
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "webp":
+      return "image/webp";
+    case "png":
+      return "image/png";
+  }
+  switch (extname(path).toLowerCase()) {
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    default:
+      return "image/png";
+  }
+}
+
+/**
+ * Playwright MCP 0.0.79 returns a screenshot as a Markdown link only:
+ *
+ *   - [Screenshot of viewport](./page.png)
+ *
+ * That is useful to the model, but MCP clients cannot know the link is media.
+ * Add the standard resource_link sibling the broker already knows how to copy
+ * into chat assets. The original text stays byte-for-byte for the model.
+ */
+function enrichScreenshotResult(msg) {
+  const call = toolCalls.get(msg.id);
+  if (msg.id !== undefined) toolCalls.delete(msg.id);
+  if (call?.name !== "browser_take_screenshot" || !msg.result) return msg;
+
+  const content = Array.isArray(msg.result.content) ? msg.result.content : [];
+  // A future Playwright release may finally return the bytes/standard link
+  // itself. In that case the generic broker path already works, and appending
+  // this compatibility reference would show the same screenshot twice.
+  if (content.some((b) => b?.type === "image" || b?.type === "resource_link")) return msg;
+  const text = content
+    .filter((b) => b?.type === "text" && typeof b.text === "string")
+    .map((b) => b.text)
+    .join("\n");
+  const match = text.match(/^\s*-\s*\[Screenshot[^\]]*\]\((.+)\)\s*$/m);
+  if (!match) return msg;
+
+  let named = match[1].trim();
+  if (named.startsWith("<") && named.endsWith(">")) named = named.slice(1, -1);
+  try {
+    const path = call.outputPath ?? (named.startsWith("file://")
+      ? fileURLToPath(named)
+      : isAbsolute(named)
+        ? named
+        : resolve(ownerDir ?? process.cwd(), named));
+    if (!existsSync(path) || !statSync(path).isFile()) return msg;
+    const realPath = realpathSync(path);
+    return {
+      ...msg,
+      result: {
+        ...msg.result,
+        content: [
+          ...content,
+          {
+            type: "resource_link",
+            uri: pathToFileURL(realPath).href,
+            name: basename(realPath),
+            title: "Playwright screenshot",
+            mimeType: screenshotMime(realPath, call.arguments?.type),
+          },
+        ],
+      },
+    };
+  } catch {
+    // The browser's own result is still useful even when the file vanished
+    // before it could be attached, so enrichment must never fail the call.
+    return msg;
+  }
+}
+
 /* ------------------------------------------------------------ real server */
 
 let child = null;
@@ -142,12 +237,17 @@ const HANDSHAKE_ID = "dispatch-lazy-init";
 
 function spawnReal() {
   if (child) return;
+  if (ownerDir) mkdirSync(ownerDir, { recursive: true });
   // `windowsHide` because this runs under a server started detached with no
   // console: without it the browser server — and the Chrome it launches —
   // each pop a window. Every other spawn in this repo sets it.
   child = spawn(realCommand, realArgs, {
     stdio: ["pipe", "pipe", "inherit"],
     windowsHide: true,
+    // Playwright resolves an explicit screenshot `filename` against cwd even
+    // when --output-dir is set. Inheriting Dispatch's cwd leaked captures into
+    // the repo as untracked files; the per-chat owner dir is the intended home.
+    ...(ownerDir ? { cwd: ownerDir } : {}),
   });
 
   child.on("error", (err) => {
@@ -188,7 +288,7 @@ function spawnReal() {
       return;
     }
     if (!manifest) captureTools(msg);
-    writeOut(msg);
+    writeOut(enrichScreenshotResult(msg));
   });
 
   child.stdin.write(
@@ -239,6 +339,39 @@ function failFrame(frame, message) {
   writeOut({ jsonrpc: "2.0", id: frame.id, error: { code: -32000, message } });
 }
 
+/**
+ * Playwright replaces its process cwd with the first client root when one is
+ * advertised, then resolves an explicit relative screenshot filename there.
+ * Make that filename absolute before forwarding so named captures stay in the
+ * per-chat owner directory regardless of the later roots/list handshake.
+ */
+function prepareToolCall(msg) {
+  if (msg.method !== "tools/call" || msg.id === undefined) return msg;
+  const call = { name: msg.params?.name, arguments: msg.params?.arguments };
+  if (call.name !== "browser_take_screenshot") {
+    toolCalls.set(msg.id, call);
+    return msg;
+  }
+
+  const filename = call.arguments?.filename;
+  if (typeof filename !== "string") {
+    toolCalls.set(msg.id, call);
+    return msg;
+  }
+  const outputPath = isAbsolute(filename)
+    ? filename
+    : resolve(ownerDir ?? process.cwd(), basename(filename));
+  toolCalls.set(msg.id, { ...call, outputPath });
+  if (outputPath === filename) return msg;
+  return {
+    ...msg,
+    params: {
+      ...msg.params,
+      arguments: { ...call.arguments, filename: outputPath },
+    },
+  };
+}
+
 createLineReader(process.stdin, (line) => {
   let msg;
   try {
@@ -250,6 +383,7 @@ createLineReader(process.stdin, (line) => {
   // Remember the handshake params whatever else happens — a cold start needs
   // them to spawn with, and a warm one needs them the moment something does.
   if (msg.method === "initialize") clientInitialize = msg.params;
+  msg = prepareToolCall(msg);
 
   if (child) {
     // Already spawned: pure pipe, except that frames arriving mid-handshake
