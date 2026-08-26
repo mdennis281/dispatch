@@ -1187,7 +1187,12 @@ describe("manager-mcp — watch_pr", () => {
 
 /** A GitHub binding that records the thread actions it was asked to perform. */
 function fakeThreadGitHub(
-  opts: { replyThrows?: string; resolveThrows?: string } = {},
+  opts: {
+    replyThrows?: string;
+    resolveThrows?: string;
+    dismissedReviews?: number;
+    dismissalError?: string;
+  } = {},
 ): ManagerMcpGitHub & { replies: Array<[string, string]>; resolved: string[] } {
   const replies: Array<[string, string]> = [];
   const resolved: string[] = [];
@@ -1202,6 +1207,10 @@ function fakeThreadGitHub(
     resolveThread: async (id) => {
       if (opts.resolveThrows) throw new Error(opts.resolveThrows);
       resolved.push(id);
+      return {
+        dismissedReviews: opts.dismissedReviews ?? 0,
+        dismissalError: opts.dismissalError,
+      };
     },
   };
 }
@@ -1245,6 +1254,24 @@ describe("manager-mcp — resolve_thread", () => {
 
     expect(gh.replies).toEqual([]);
     expect(gh.resolved).toEqual(["T_A"]);
+  });
+
+  it("reports when the final internal thread clears changes requested", async () => {
+    const gh = fakeThreadGitHub({ dismissedReviews: 1 });
+    const { resolveThread } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await resolveThread.handler(
+      { threadId: "T_A", reply: "Fixed in 4f2a1c.", resolve: undefined },
+      {},
+    );
+
+    expect(res.isError).toBeFalsy();
+    expect(resultText(res)).toContain("Cleared Dispatch's changes-requested flag");
   });
 
   it("can reply WITHOUT resolving, and says the thread still blocks", async () => {

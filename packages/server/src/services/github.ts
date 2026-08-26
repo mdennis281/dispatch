@@ -83,6 +83,13 @@ const defaultExec: ExecaLike = (file, args = [], options) =>
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 /**
+ * Marks a blocking review whose findings are all represented by inline threads.
+ * Old reviews and degraded reviews without threads intentionally lack it, so
+ * resolving a thread can never erase a body-only blocker it cannot represent.
+ */
+const THREADED_CHANGE_REQUEST_MARKER = "<!-- dispatch:threaded-change-request -->";
+
+/**
  * The reviewer login ship requests (matches ship.mjs / auto-merge.mjs).
  * Re-exported so the existing `from "./github.js"` importers keep working; the
  * definition lives in `@dispatch/shared` because the `review` profile's default
@@ -152,6 +159,14 @@ export interface PRMergeState {
 /** Optional per-call context threaded onto published events. */
 export interface OpCtx {
   chatId?: string;
+}
+
+/** What resolving a thread also cleaned up from Dispatch's own blocking review. */
+export interface ResolveThreadOutcome {
+  /** Number of CHANGES_REQUESTED reviews dismissed after the final internal thread closed. */
+  dismissedReviews: number;
+  /** The thread resolved, but the follow-up review-state cleanup could not finish. */
+  dismissalError?: string;
 }
 
 /**
@@ -1884,7 +1899,11 @@ export class GitHubService {
       body: string,
       inline: readonly ReviewComment[],
     ): Promise<{ ok: boolean; url?: string; detail: string }> => {
-      const payload: Record<string, unknown> = { event, body };
+      const threadedBody =
+        event === "REQUEST_CHANGES" && inline.length
+          ? `${body}\n\n${THREADED_CHANGE_REQUEST_MARKER}`
+          : body;
+      const payload: Record<string, unknown> = { event, body: threadedBody };
       if (input.commitId) payload.commit_id = input.commitId;
       if (inline.length) {
         payload.comments = inline.map((c) => ({
@@ -2050,15 +2069,210 @@ export class GitHubService {
     return failed.length;
   }
 
-  /** Resolve a review thread (global node id) via GraphQL mutation. */
-  async resolveThread(threadId: string, opts: OpCtx = {}): Promise<void> {
+  /**
+   * Resolve a review thread (global node id) via GraphQL mutation.
+   *
+   * A submitted REQUEST_CHANGES review keeps GitHub's PR-level red flag even
+   * after every inline thread is resolved. When the thread belongs to
+   * Dispatch's configured reviewer, closing its final open thread dismisses
+   * that reviewer's remaining CHANGES_REQUESTED reviews as the human account.
+   * The author check is load-bearing: resolving a human review comment must not
+   * silently overrule that human's verdict.
+   */
+  async resolveThread(
+    threadId: string,
+    opts: OpCtx & { reviewAgentLogin?: string } = {},
+  ): Promise<ResolveThreadOutcome> {
     if (!threadId || typeof threadId !== "string") {
       throw new Error("resolveThread: threadId required");
     }
     const mutation =
-      "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}";
-    await this.gh(["api", "graphql", "-f", `query=${mutation}`, "-f", `id=${threadId}`]);
+      "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{" +
+      "id isResolved pullRequest{number repository{nameWithOwner}} " +
+      "comments(first:1){nodes{author{login}}}}}}";
+    const raw = await this.ghJson<{
+      data?: {
+        resolveReviewThread?: {
+          thread?: {
+            pullRequest?: { number?: number; repository?: { nameWithOwner?: string } };
+            comments?: { nodes?: Array<{ author?: { login?: string } }> };
+          };
+        };
+      };
+      errors?: Array<{ message?: string }>;
+    }>(["api", "graphql", "-f", `query=${mutation}`, "-f", `id=${threadId}`]);
     this.emitNotice(`Resolved review thread`, "info", opts.chatId);
+
+    const reviewer = opts.reviewAgentLogin?.trim().toLowerCase();
+    if (!reviewer) return { dismissedReviews: 0 };
+    if (raw?.errors?.length) {
+      return {
+        dismissedReviews: 0,
+        dismissalError: raw.errors.map((e) => e.message ?? "GraphQL error").join("; "),
+      };
+    }
+    const thread = raw?.data?.resolveReviewThread?.thread;
+    const author = thread?.comments?.nodes?.[0]?.author?.login?.toLowerCase();
+    const repo = thread?.pullRequest?.repository?.nameWithOwner;
+    const prNumber = thread?.pullRequest?.number;
+    if (author !== reviewer || !repo || typeof prNumber !== "number") {
+      return { dismissedReviews: 0 };
+    }
+
+    try {
+      const hasOpenInternalThread = await this.hasOpenReviewThread(repo, prNumber, reviewer);
+      if (hasOpenInternalThread) return { dismissedReviews: 0 };
+
+      const reviews = await this.changeRequestReviews(repo, prNumber, reviewer);
+      let dismissedReviews = 0;
+      for (const reviewId of reviews) {
+        const dismiss =
+          "mutation($id:ID!,$message:String!){dismissPullRequestReview(" +
+          "input:{pullRequestReviewId:$id,message:$message}){pullRequestReview{id state}}}";
+        await this.gh([
+          "api", "graphql",
+          "-f", `query=${dismiss}`,
+          "-f", `id=${reviewId}`,
+          "-f", "message=All Dispatch review threads were resolved.",
+        ]);
+        dismissedReviews += 1;
+      }
+      if (dismissedReviews) {
+        this.emitNotice(
+          `Cleared changes requested after Dispatch's final review thread was resolved`,
+          "info",
+          opts.chatId,
+        );
+      }
+      return { dismissedReviews };
+    } catch (err) {
+      return {
+        dismissedReviews: 0,
+        dismissalError: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /** True when Dispatch's reviewer still owns any unresolved inline thread. */
+  private async hasOpenReviewThread(
+    repo: string,
+    prNumber: number,
+    reviewer: string,
+  ): Promise<boolean> {
+    const { owner, name } = this.splitRepo(repo);
+    let after: string | undefined;
+    do {
+      const query =
+        "query($owner:String!,$repo:String!,$number:Int!,$after:String){" +
+        "repository(owner:$owner,name:$repo){pullRequest(number:$number){" +
+        "reviewThreads(first:100,after:$after){nodes{isResolved comments(first:1){" +
+        "nodes{author{login}}}} pageInfo{hasNextPage endCursor}}}}}";
+      const args = [
+        "api", "graphql",
+        "-f", `query=${query}`,
+        "-f", `owner=${owner}`,
+        "-f", `repo=${name}`,
+        "-F", `number=${prNumber}`,
+      ];
+      if (after) args.push("-f", `after=${after}`);
+      const raw = await this.ghJson<{
+        data?: {
+          repository?: {
+            pullRequest?: {
+              reviewThreads?: {
+                nodes?: Array<{
+                  isResolved?: boolean;
+                  comments?: { nodes?: Array<{ author?: { login?: string } }> };
+                }>;
+                pageInfo?: { hasNextPage?: boolean; endCursor?: string };
+              };
+            };
+          };
+        };
+        errors?: Array<{ message?: string }>;
+      }>(args);
+      if (raw?.errors?.length) {
+        throw new Error(raw.errors[0]?.message ?? "Could not read review threads");
+      }
+      const connection = raw?.data?.repository?.pullRequest?.reviewThreads;
+      if (
+        connection?.nodes?.some(
+          (thread) =>
+            !thread.isResolved &&
+            thread.comments?.nodes?.[0]?.author?.login?.toLowerCase() === reviewer,
+        )
+      ) {
+        return true;
+      }
+      after = connection?.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : undefined;
+    } while (after);
+    return false;
+  }
+
+  /**
+   * Active change requests whose blockers are all represented by threads.
+   *
+   * Reviews without the marker may carry a cross-file/body-only blocker. There
+   * is no thread whose resolution can prove that finding was addressed, so the
+   * resolve path must leave that verdict for a later review to supersede.
+   */
+  private async changeRequestReviews(
+    repo: string,
+    prNumber: number,
+    reviewer: string,
+  ): Promise<string[]> {
+    const { owner, name } = this.splitRepo(repo);
+    const ids: string[] = [];
+    let after: string | undefined;
+    do {
+      const query =
+        "query($owner:String!,$repo:String!,$number:Int!,$after:String){" +
+        "repository(owner:$owner,name:$repo){pullRequest(number:$number){" +
+        "reviews(first:100,after:$after){nodes{id state body author{login}} " +
+        "pageInfo{hasNextPage endCursor}}}}}";
+      const args = [
+        "api", "graphql",
+        "-f", `query=${query}`,
+        "-f", `owner=${owner}`,
+        "-f", `repo=${name}`,
+        "-F", `number=${prNumber}`,
+      ];
+      if (after) args.push("-f", `after=${after}`);
+      const raw = await this.ghJson<{
+        data?: {
+          repository?: {
+            pullRequest?: {
+              reviews?: {
+                nodes?: Array<{
+                  id?: string;
+                  state?: string;
+                  body?: string;
+                  author?: { login?: string };
+                }>;
+                pageInfo?: { hasNextPage?: boolean; endCursor?: string };
+              };
+            };
+          };
+        };
+        errors?: Array<{ message?: string }>;
+      }>(args);
+      if (raw?.errors?.length) {
+        throw new Error(raw.errors[0]?.message ?? "Could not read reviews");
+      }
+      const connection = raw?.data?.repository?.pullRequest?.reviews;
+      for (const review of connection?.nodes ?? []) {
+        if (
+          review.id &&
+          review.state === "CHANGES_REQUESTED" &&
+          review.body?.includes(THREADED_CHANGE_REQUEST_MARKER) &&
+          review.author?.login?.toLowerCase() === reviewer
+        ) {
+          ids.push(review.id);
+        }
+      }
+      after = connection?.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : undefined;
+    } while (after);
+    return ids;
   }
 
   /**

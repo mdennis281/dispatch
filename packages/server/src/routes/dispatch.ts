@@ -26,6 +26,7 @@ import {
   type WorktreeInfo,
 } from "@dispatch/shared";
 import { COPILOT_LOGIN } from "../services/github.js";
+import { resolveReviewer } from "../services/reviewer.js";
 import type { Services } from "../services/container.js";
 
 /* ----------------------------------------------------------------- helpers */
@@ -286,7 +287,19 @@ export async function runGhAction(
       if (!action.threadId) {
         throw new Error("resolve-thread op requires a threadId");
       }
-      await github.resolveThread(action.threadId, ctx);
+      {
+        const reviewer = await resolveReviewer(store, project);
+        const outcome = await github.resolveThread(action.threadId, {
+          ...ctx,
+          reviewAgentLogin: reviewer.policy.enabled ? reviewer.policy.login : undefined,
+        });
+        if (outcome.dismissalError) {
+          throw new Error(
+            `Review thread resolved, but Dispatch's changes-requested review could not be ` +
+              `cleared: ${outcome.dismissalError}`,
+          );
+        }
+      }
       // Thread-keyed: this op is the one that never carries a PR number.
       await services.prRegistry
         .findByThread(action.threadId)
