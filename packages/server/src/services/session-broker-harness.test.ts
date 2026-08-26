@@ -277,6 +277,48 @@ describe("SessionBroker neutral harness path", () => {
     });
   });
 
+  it("does not carry a no-op Stop from a settled turn into later guard recovery", async () => {
+    session = new FakeHarnessSession(true);
+    const chat = await store.saveChat({
+      id: "chat-stale-user-interrupt",
+      projectId: "project-1",
+      title: "Stale user interrupt",
+      modeId: "auto",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "first turn");
+    await waitUntil(() => session.sent.length === 1);
+    session.emit(
+      { type: "init", sessionId: "thread-stale-stop", model: "gpt-test" },
+      { type: "turn-end", ok: true, subtype: "success", result: "done" },
+    );
+    await broker.waitFor(chat.id, "idle");
+
+    expect(await broker.interrupt(chat.id)).toBe(false);
+    await broker.sendMessage(chat.id, "second turn");
+    await waitUntil(() => session.sent.length === 2);
+    session.emit(
+      {
+        type: "guard-blocked",
+        toolName: "Bash",
+        input: { command: "git push origin main" },
+        reason: "use create_pr",
+        continuation: "restart-turn",
+      },
+      { type: "turn-end", ok: false, subtype: "interrupted", result: "interrupted" },
+    );
+
+    await waitUntil(() => session.sent.length === 3);
+    expect(session.sent[2]?.text).toContain("Continue the task now");
+    session.emit({ type: "turn-end", ok: true, subtype: "success", result: "done" });
+    await broker.waitFor(chat.id, "idle");
+  });
+
   it("keeps a native pre-tool guard denial in the current turn", async () => {
     session = new FakeHarnessSession(true);
     const chat = await store.saveChat({
