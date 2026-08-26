@@ -7,7 +7,7 @@
  * lines or timing a response would both pass against a shim that spawned eagerly
  * and simply answered fast.
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
 const marker = argv[argv.indexOf("--marker") + 1];
@@ -59,6 +59,20 @@ process.stdin.on("data", (chunk) => {
         result: { tools: [{ name: "look", description: "look at it", inputSchema: { type: "object" } }] },
       });
     } else if (msg.method === "tools/call") {
+      if (msg.params?.name === "browser_take_screenshot") {
+        const filename = msg.params.arguments?.filename ?? "lazy-shim-preview-test.png";
+        writeFileSync(filename, Buffer.from("89504e470d0a1a0a", "hex"));
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: {
+            content: [
+              { type: "text", text: `### Result\n- [Screenshot of viewport](./${filename})` },
+            ],
+          },
+        });
+        continue;
+      }
       send({
         jsonrpc: "2.0",
         id: msg.id,
