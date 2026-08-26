@@ -289,10 +289,16 @@ export async function runGhAction(
       }
       {
         const reviewer = await resolveReviewer(store, project);
-        await github.resolveThread(action.threadId, {
+        const outcome = await github.resolveThread(action.threadId, {
           ...ctx,
           reviewAgentLogin: reviewer.policy.enabled ? reviewer.policy.login : undefined,
         });
+        if (outcome.dismissalError) {
+          throw new Error(
+            `Review thread resolved, but Dispatch's changes-requested review could not be ` +
+              `cleared: ${outcome.dismissalError}`,
+          );
+        }
       }
       // Thread-keyed: this op is the one that never carries a PR number.
       await services.prRegistry

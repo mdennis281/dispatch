@@ -946,6 +946,38 @@ describe("routes — gh-action", () => {
       reviewAgentLogin: "dispatch-review",
     });
   });
+
+  it("reports when a panel resolve closes the thread but cannot clear the verdict", async () => {
+    await boot(makeFakeQuery(() => [resultMsg()]));
+    const projectId = await makeProject();
+    const project = await store.getProject(projectId);
+    await store.saveProject({
+      ...project!,
+      workflow: {
+        profile: "review",
+        pr: { reviewAgent: { enabled: true, identity: "dedicated", post: true } },
+      },
+    });
+    await store.saveReviewer({
+      login: "dispatch-review",
+      token: "github_pat_test",
+      addedAt: Date.now(),
+    });
+    vi.spyOn(app.services.github, "resolveThread").mockResolvedValue({
+      dismissedReviews: 0,
+      dismissalError: "HTTP 403: insufficient permission",
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/github/action",
+      payload: { op: "resolve-thread", projectId, threadId: "PRRT_panel" },
+    });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toContain("thread resolved");
+    expect(res.json().error).toContain("HTTP 403");
+  });
 });
 
 describe("routes — first-run setup", () => {
