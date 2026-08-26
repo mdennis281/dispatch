@@ -18,6 +18,7 @@ import { CodexHarness } from "./codex/index.js";
 import { disposeSharedCodexConnection } from "./codex/rpc.js";
 
 export * from "./types.js";
+export * from "./guard.js";
 export { ClaudeHarness, CLAUDE_CAPABILITIES, parseClaudeLimitHit } from "./claude/index.js";
 export { CodexHarness, CODEX_CAPABILITIES } from "./codex/index.js";
 

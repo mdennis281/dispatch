@@ -20,6 +20,7 @@ import {
   createWorkflowGuardHook,
   findGitDir,
   inspectCwd,
+  inspectCwdSync,
   readCurrentBranch,
 } from "./workflow.js";
 
@@ -62,6 +63,7 @@ describe("git dir inspection", () => {
   it("recognizes a linked worktree and reads its branch", async () => {
     // `.git` is a FILE here — this is how the guard tells a worktree from the checkout.
     expect(await inspectCwd(worktree)).toEqual({ branch: "feat/x", linked: true });
+    expect(inspectCwdSync(worktree)).toEqual({ branch: "feat/x", linked: true });
   });
 
   it("walks up from a subdirectory", async () => {
@@ -73,6 +75,7 @@ describe("git dir inspection", () => {
   it("returns nothing outside a repo", async () => {
     expect(await inspectCwd(root)).toEqual({ branch: null, linked: false });
     expect(await inspectCwd(undefined)).toEqual({ branch: null, linked: false });
+    expect(inspectCwdSync(root)).toBeNull();
   });
 });
 

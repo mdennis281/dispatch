@@ -159,7 +159,12 @@ import type { AuthoredConfigService } from "./authored-config.js";
 import type { SlashCommandService } from "./slash-commands.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
 import { bundledSkills } from "./bundled-skills.js";
-import { buildWorkflowDirective, createWorkflowGuardHook, inspectCwd } from "./workflow.js";
+import {
+  buildWorkflowDirective,
+  createWorkflowGuardHook,
+  inspectCwd,
+  inspectCwdSync,
+} from "./workflow.js";
 import {
   createBackgroundShellGuardHook,
   createWorktreeGuardHook,
@@ -168,11 +173,13 @@ import { AgentCwdTracker } from "./agent-cwd.js";
 import { claudeExecutableOption } from "./runtime.js";
 import type {
   HarnessEvent,
+  HarnessGuardBlockedEvent,
   HarnessQuestion,
   HarnessQuestionAnswer,
   HarnessSession,
   HarnessSessionSpec,
 } from "../harness/types.js";
+import { guardRecoveryInput } from "../harness/guard.js";
 import type { HarnessRegistry } from "../harness/index.js";
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
 import { managerMcpContextOf } from "./mcp/manager-mcp.js";
@@ -1593,6 +1600,8 @@ interface LiveSession {
   threadOfTool: Map<string, string>;
   /** Tool-use id to the turn that opened it; late results must not revive a settled turn. */
   toolTurn: Map<string, number>;
+  /** Guard hits whose runtime had to interrupt; consumed by the matching turn end. */
+  guardRecoveries: HarnessGuardBlockedEvent[];
   /**
    * Where each thread is working on disk, and the guard that keeps a subagent
    * out of another task's worktree. Created on the first turn and kept for the
@@ -1899,6 +1908,7 @@ export class SessionBroker {
         effortByThread: new Map(),
         threadOfTool: new Map(),
         toolTurn: new Map(),
+        guardRecoveries: [],
         sessionId: chat.sessionId,
         model: chat.model,
         modelOverride: chat.model,
@@ -2856,6 +2866,7 @@ export class SessionBroker {
     session.input = undefined;
     session.harnessSession = undefined;
     session.toolTurn.clear();
+    session.guardRecoveries.length = 0;
     session.resumeSessionId = session.sessionId;
     session.forkAtUuid = atMessageUuid;
     session.fork = true;
@@ -3373,21 +3384,31 @@ export class SessionBroker {
         toolGuard: (toolName, input) => {
           if (toolName !== "Bash" || session.workflow?.guard === "off") return null;
           const command = typeof input.command === "string" ? input.command : "";
+          // The call's real cwd outranks the directory the chat started in. This
+          // is especially load-bearing for harness-created worktrees: Dispatch
+          // may not own that cwd, but the runtime reports it on the tool call.
+          const callSite =
+            typeof input.cwd === "string" ? inspectCwdSync(input.cwd) : null;
           const violation = classifyWorkflowViolation(command, {
             defaultBranch: session.trunk ?? "main",
-            currentBranch: session.branch ?? null,
-            inWorktree: Boolean(session.inWorktree),
+            currentBranch: callSite?.branch ?? session.branch ?? null,
+            inWorktree: callSite?.linked ?? Boolean(session.inWorktree),
             autoMerge: session.workflow?.autoMerge === "on-green",
             requirePr: Boolean(session.workflow?.requirePr),
           });
           if (!violation) return null;
           const blocked = session.workflow?.guard === "deny";
-          this.bus.publish({
-            type: "notice",
-            chatId: session.chatId,
-            level: blocked ? "warn" : "info",
-            text: `${blocked ? "Blocked" : "Workflow warning"}: ${violation.reason}`,
-          });
+          // Blocked calls are reported by the adapter as `guard-blocked`, which
+          // gives every harness the same persisted notice and recovery path.
+          // Warn-only policy does not produce that event, so surface it here.
+          if (!blocked) {
+            this.bus.publish({
+              type: "notice",
+              chatId: session.chatId,
+              level: "info",
+              text: `Workflow warning: ${violation.reason}`,
+            });
+          }
           return blocked ? violation.reason : null;
         },
       };
@@ -3672,6 +3693,13 @@ export class SessionBroker {
         });
         await this.emit(session, { ...base, kind: "notice", level: event.level, text: event.text });
         return;
+      case "guard-blocked": {
+        if (event.continuation === "restart-turn") session.guardRecoveries.push(event);
+        const text = `Blocked: ${event.reason}`;
+        this.bus.publish({ type: "notice", chatId: session.chatId, level: "warn", text });
+        await this.emit(session, { ...base, kind: "notice", level: "warn", text });
+        return;
+      }
       case "compacted":
         await this.emit(session, {
           ...base,
@@ -3684,6 +3712,29 @@ export class SessionBroker {
         session.activity.turnEnd({ limit: !!event.limit }, base.ts);
         session.lastContextTokens = event.contextTokens ?? session.lastContextTokens;
         session.contextWindow = event.contextWindow ?? session.contextWindow;
+        if (!event.ok && event.subtype === "interrupted" && session.guardRecoveries.length > 0) {
+          const recoveries = session.guardRecoveries.splice(0);
+          await this.emit(session, {
+            ...base,
+            kind: "result",
+            subtype: "guard-recovered",
+            isError: false,
+            durationMs: event.durationMs,
+            result: "Dispatch interrupted the provider to enforce a guard and automatically continued the task.",
+            usage: event.usage,
+            contextTokens: session.lastContextTokens,
+            contextWindow: session.contextWindow,
+            costUsd: event.costUsd,
+          });
+          session.turn += 1;
+          session.activity.turnStart(base.ts);
+          this.setStatus(session, "running", { state: "thinking", label: "recovering from guard" });
+          session.harnessSession?.send({ text: guardRecoveryInput(recoveries), priority: "now" });
+          return;
+        }
+        // A different terminal outcome must not let an old guard marker recover
+        // an unrelated later turn.
+        session.guardRecoveries.length = 0;
         await this.emit(session, {
           ...base,
           kind: "result",
@@ -4842,6 +4893,7 @@ export class SessionBroker {
     session.input = undefined;
     session.harnessSession = undefined;
     session.toolTurn.clear();
+    session.guardRecoveries.length = 0;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     session.stopping = false;
@@ -4876,6 +4928,7 @@ export class SessionBroker {
     session.input = undefined;
     session.harnessSession = undefined;
     session.toolTurn.clear();
+    session.guardRecoveries.length = 0;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     // A crash after a completed turn leaves a live "Turn complete" item; clear it.
