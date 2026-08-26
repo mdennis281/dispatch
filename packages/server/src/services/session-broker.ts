@@ -1602,6 +1602,8 @@ interface LiveSession {
   toolTurn: Map<string, number>;
   /** Guard hits whose runtime had to interrupt; consumed by the matching turn end. */
   guardRecoveries: HarnessGuardBlockedEvent[];
+  /** A user-facing Stop is awaiting its terminal event and must win over guard recovery. */
+  explicitInterruptPending: boolean;
   /**
    * Where each thread is working on disk, and the guard that keeps a subagent
    * out of another task's worktree. Created on the first turn and kept for the
@@ -1909,6 +1911,7 @@ export class SessionBroker {
         threadOfTool: new Map(),
         toolTurn: new Map(),
         guardRecoveries: [],
+        explicitInterruptPending: false,
         sessionId: chat.sessionId,
         model: chat.model,
         modelOverride: chat.model,
@@ -2439,6 +2442,10 @@ export class SessionBroker {
   async interrupt(chatId: string): Promise<boolean> {
     const session = this.sessions.get(chatId);
     if (!session?.query && !session?.harnessSession) return false;
+    // A late Codex guard and the Composer's Stop button both end as
+    // `subtype: "interrupted"`. Remember the user's intent before awaiting the
+    // provider so a queued guard event cannot turn Stop into an automatic resume.
+    session.explicitInterruptPending = true;
     try {
       await (session.harnessSession?.interrupt() ?? session.query!.interrupt());
       // Interrupting abandons any tool blocked on a permission answer; clear the
@@ -2447,6 +2454,9 @@ export class SessionBroker {
       this.bus.publish({ type: "notice", chatId, level: "info", text: "Interrupted." });
       return true;
     } catch (err) {
+      // No terminal event follows a rejected interrupt. Let a separately-owned
+      // guard interrupt recover normally if it still completes afterward.
+      session.explicitInterruptPending = false;
       this.bus.publish({
         type: "error",
         chatId,
@@ -2867,6 +2877,7 @@ export class SessionBroker {
     session.harnessSession = undefined;
     session.toolTurn.clear();
     session.guardRecoveries.length = 0;
+    session.explicitInterruptPending = false;
     session.resumeSessionId = session.sessionId;
     session.forkAtUuid = atMessageUuid;
     session.fork = true;
@@ -3712,7 +3723,14 @@ export class SessionBroker {
         session.activity.turnEnd({ limit: !!event.limit }, base.ts);
         session.lastContextTokens = event.contextTokens ?? session.lastContextTokens;
         session.contextWindow = event.contextWindow ?? session.contextWindow;
-        if (!event.ok && event.subtype === "interrupted" && session.guardRecoveries.length > 0) {
+        const explicitlyInterrupted = session.explicitInterruptPending;
+        session.explicitInterruptPending = false;
+        if (
+          !explicitlyInterrupted &&
+          !event.ok &&
+          event.subtype === "interrupted" &&
+          session.guardRecoveries.length > 0
+        ) {
           const recoveries = session.guardRecoveries.splice(0);
           await this.emit(session, {
             ...base,
@@ -4894,6 +4912,7 @@ export class SessionBroker {
     session.harnessSession = undefined;
     session.toolTurn.clear();
     session.guardRecoveries.length = 0;
+    session.explicitInterruptPending = false;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     session.stopping = false;
@@ -4929,6 +4948,7 @@ export class SessionBroker {
     session.harnessSession = undefined;
     session.toolTurn.clear();
     session.guardRecoveries.length = 0;
+    session.explicitInterruptPending = false;
     session.managerGrant?.revoke();
     session.managerGrant = undefined;
     // A crash after a completed turn leaves a live "Turn complete" item; clear it.

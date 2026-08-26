@@ -238,6 +238,45 @@ describe("SessionBroker neutral harness path", () => {
     });
   });
 
+  it("does not resume a guard-marked turn after the user explicitly interrupts", async () => {
+    session = new FakeHarnessSession(true);
+    const chat = await store.saveChat({
+      id: "chat-user-interrupt-after-guard",
+      projectId: "project-1",
+      title: "User interrupt after guard",
+      modeId: "auto",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "ship it");
+    await waitUntil(() => session.sent.length === 1);
+    session.emit(
+      { type: "init", sessionId: "thread-user-stop", model: "gpt-test" },
+      {
+        type: "guard-blocked",
+        toolName: "Bash",
+        input: { command: "git push origin main" },
+        reason: "use create_pr",
+        continuation: "restart-turn",
+      },
+    );
+
+    expect(await broker.interrupt(chat.id)).toBe(true);
+    session.emit({ type: "turn-end", ok: false, subtype: "interrupted", result: "interrupted" });
+
+    await broker.waitFor(chat.id, "failed");
+    expect(session.sent).toHaveLength(1);
+    const rows = await store.readMessages(chat.id);
+    expect(rows.some((row) => row.kind === "result" && row.subtype === "guard-recovered")).toBe(false);
+    expect(rows.find((row) => row.kind === "result" && row.subtype === "interrupted")).toMatchObject({
+      isError: true,
+    });
+  });
+
   it("keeps a native pre-tool guard denial in the current turn", async () => {
     session = new FakeHarnessSession(true);
     const chat = await store.saveChat({
