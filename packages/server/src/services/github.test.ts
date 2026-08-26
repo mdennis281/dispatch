@@ -543,14 +543,143 @@ describe("ACT methods — argv + bus events", () => {
   });
 
   it("resolveThread uses a graphql mutation with an id variable", async () => {
-    const { exec, calls } = makeExec();
+    const { exec, calls, json } = makeExec();
+    json({ data: { resolveReviewThread: { thread: { id: "PRRT_xyz=", isResolved: true } } } });
     const gh = new GitHubService({ bus, exec });
-    await gh.resolveThread("PRRT_xyz=");
+    await expect(gh.resolveThread("PRRT_xyz=")).resolves.toEqual({ dismissedReviews: 0 });
     expect(calls[0].args).toEqual([
       "api", "graphql",
-      "-f", "query=mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}",
+      "-f", "query=mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved pullRequest{number repository{nameWithOwner}} comments(first:1){nodes{author{login}}}}}}",
       "-f", "id=PRRT_xyz=",
     ]);
+  });
+
+  it("dismisses Dispatch's change request when its final thread is resolved", async () => {
+    const { exec, calls, json } = makeExec();
+    json({
+      data: {
+        resolveReviewThread: {
+          thread: {
+            pullRequest: { number: 42, repository: { nameWithOwner: REPO } },
+            comments: { nodes: [{ author: { login: "dispatch-review" } }] },
+          },
+        },
+      },
+    });
+    json({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              nodes: [
+                {
+                  isResolved: true,
+                  comments: { nodes: [{ author: { login: "dispatch-review" } }] },
+                },
+              ],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        },
+      },
+    });
+    json({
+      data: {
+        repository: {
+          pullRequest: {
+            reviews: {
+              nodes: [
+                {
+                  id: "PRR_internal",
+                  state: "CHANGES_REQUESTED",
+                  author: { login: "dispatch-review" },
+                },
+                { id: "PRR_human", state: "CHANGES_REQUESTED", author: { login: "alice" } },
+              ],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        },
+      },
+    });
+    json({
+      data: {
+        dismissPullRequestReview: {
+          pullRequestReview: { id: "PRR_internal", state: "DISMISSED" },
+        },
+      },
+    });
+    const gh = new GitHubService({ bus, exec });
+
+    const outcome = await gh.resolveThread("PRRT_internal", {
+      reviewAgentLogin: "Dispatch-Review",
+    });
+
+    expect(outcome).toEqual({ dismissedReviews: 1 });
+    expect(calls).toHaveLength(4);
+    expect(calls[3]!.args).toContain("id=PRR_internal");
+    expect(calls[3]!.args).toContain("message=All Dispatch review threads were resolved.");
+  });
+
+  it("keeps changes requested while another Dispatch review thread is open", async () => {
+    const { exec, calls, json } = makeExec();
+    json({
+      data: {
+        resolveReviewThread: {
+          thread: {
+            pullRequest: { number: 42, repository: { nameWithOwner: REPO } },
+            comments: { nodes: [{ author: { login: "dispatch-review" } }] },
+          },
+        },
+      },
+    });
+    json({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              nodes: [
+                {
+                  isResolved: false,
+                  comments: { nodes: [{ author: { login: "dispatch-review" } }] },
+                },
+              ],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        },
+      },
+    });
+    const gh = new GitHubService({ bus, exec });
+
+    const outcome = await gh.resolveThread("PRRT_internal", {
+      reviewAgentLogin: "dispatch-review",
+    });
+
+    expect(outcome).toEqual({ dismissedReviews: 0 });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("never dismisses a human review when resolving its thread", async () => {
+    const { exec, calls, json } = makeExec();
+    json({
+      data: {
+        resolveReviewThread: {
+          thread: {
+            pullRequest: { number: 42, repository: { nameWithOwner: REPO } },
+            comments: { nodes: [{ author: { login: "alice" } }] },
+          },
+        },
+      },
+    });
+    const gh = new GitHubService({ bus, exec });
+
+    const outcome = await gh.resolveThread("PRRT_human", {
+      reviewAgentLogin: "dispatch-review",
+    });
+
+    expect(outcome).toEqual({ dismissedReviews: 0 });
+    expect(calls).toHaveLength(1);
   });
 
   it("resolveThread rejects an empty id", async () => {

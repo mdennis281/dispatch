@@ -443,7 +443,8 @@ function makeGithubBinding(
       return github.requestReviewers(r, n, list, { chatId });
     },
     replyToThread: (threadId, body) => github.replyToThread(threadId, body, { chatId }),
-    resolveThread: (threadId) => github.resolveThread(threadId, { chatId }),
+    resolveThread: (threadId) =>
+      github.resolveThread(threadId, { chatId, reviewAgentLogin: reviewAgent?.login }),
     submitReview: reviewAgent?.post
       ? async (n, input, repo) => {
           const r = await repoFor(repo);

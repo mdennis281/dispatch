@@ -473,7 +473,10 @@ export interface ManagerMcpGitHub {
   /** Reply in a review thread. Paired with `resolveThread` by `resolve_thread`. */
   replyToThread?(threadId: string, body: string): Promise<void>;
   /** Mark a review thread resolved. Omitted → the `resolve_thread` tool isn't offered. */
-  resolveThread?(threadId: string): Promise<void>;
+  resolveThread?(threadId: string): Promise<{
+    dismissedReviews: number;
+    dismissalError?: string;
+  }>;
   /**
    * Submit a review — verdict, summary, inline comments. Omitted → the
    * `post_review` tool isn't offered, which is how it stays absent on every
@@ -2943,8 +2946,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           },
         );
       }
+      let outcome: { dismissedReviews: number; dismissalError?: string };
       try {
-        await gh.resolveThread(threadId);
+        outcome = await gh.resolveThread(threadId);
       } catch (err) {
         return prToolResult(
           "resolve_thread",
@@ -2962,12 +2966,40 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           },
         );
       }
+      if (outcome.dismissalError) {
+        return prToolResult(
+          "resolve_thread",
+          {
+            summary: "Resolved the thread, but could not clear changes requested",
+            ok: false,
+            details: [outcome.dismissalError],
+          },
+          (await ctx.prRegistry?.refreshByThread(threadId).catch(() => null)) ?? null,
+          {
+            isError: true,
+            text:
+              `Resolved thread ${threadId}${reply ? " (reply posted)" : ""}, but could not ` +
+              `clear Dispatch's changes-requested review: ${outcome.dismissalError}.`,
+          },
+        );
+      }
+      const cleared = outcome.dismissedReviews > 0;
       return prToolResult(
         "resolve_thread",
         {
-          summary: `Resolved a review thread${reply ? " (reply posted)" : ""}`,
+          summary:
+            `Resolved a review thread${reply ? " (reply posted)" : ""}` +
+            (cleared ? " and cleared changes requested" : ""),
           ok: true,
-          details: reply ? [reply] : [],
+          details: [
+            ...(reply ? [reply] : []),
+            ...(cleared
+              ? [
+                  `Dismissed ${outcome.dismissedReviews} internal changes-requested ` +
+                    `review${outcome.dismissedReviews === 1 ? "" : "s"}.`,
+                ]
+              : []),
+          ],
         },
         // Re-poll, not re-read: the resolve just happened, and a card that still
         // shows the thread outstanding is reporting the opposite of what the
@@ -2976,6 +3008,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         {
           text:
             `Resolved thread ${threadId}${reply ? " (reply posted)" : ""}. ` +
+            (cleared ? "Cleared Dispatch's changes-requested flag. " : "") +
             "Resolve every thread you fixed, then call watch_pr again.",
         },
       );
