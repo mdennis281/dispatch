@@ -83,6 +83,13 @@ const defaultExec: ExecaLike = (file, args = [], options) =>
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 /**
+ * Marks a blocking review whose findings are all represented by inline threads.
+ * Old reviews and degraded reviews without threads intentionally lack it, so
+ * resolving a thread can never erase a body-only blocker it cannot represent.
+ */
+const THREADED_CHANGE_REQUEST_MARKER = "<!-- dispatch:threaded-change-request -->";
+
+/**
  * The reviewer login ship requests (matches ship.mjs / auto-merge.mjs).
  * Re-exported so the existing `from "./github.js"` importers keep working; the
  * definition lives in `@dispatch/shared` because the `review` profile's default
@@ -1892,7 +1899,11 @@ export class GitHubService {
       body: string,
       inline: readonly ReviewComment[],
     ): Promise<{ ok: boolean; url?: string; detail: string }> => {
-      const payload: Record<string, unknown> = { event, body };
+      const threadedBody =
+        event === "REQUEST_CHANGES" && inline.length
+          ? `${body}\n\n${THREADED_CHANGE_REQUEST_MARKER}`
+          : body;
+      const payload: Record<string, unknown> = { event, body: threadedBody };
       if (input.commitId) payload.commit_id = input.commitId;
       if (inline.length) {
         payload.comments = inline.map((c) => ({
@@ -2198,7 +2209,13 @@ export class GitHubService {
     return false;
   }
 
-  /** All still-active change-request reviews submitted by Dispatch's reviewer. */
+  /**
+   * Active change requests whose blockers are all represented by threads.
+   *
+   * Reviews without the marker may carry a cross-file/body-only blocker. There
+   * is no thread whose resolution can prove that finding was addressed, so the
+   * resolve path must leave that verdict for a later review to supersede.
+   */
   private async changeRequestReviews(
     repo: string,
     prNumber: number,
@@ -2211,7 +2228,7 @@ export class GitHubService {
       const query =
         "query($owner:String!,$repo:String!,$number:Int!,$after:String){" +
         "repository(owner:$owner,name:$repo){pullRequest(number:$number){" +
-        "reviews(first:100,after:$after){nodes{id state author{login}} " +
+        "reviews(first:100,after:$after){nodes{id state body author{login}} " +
         "pageInfo{hasNextPage endCursor}}}}}";
       const args = [
         "api", "graphql",
@@ -2229,6 +2246,7 @@ export class GitHubService {
                 nodes?: Array<{
                   id?: string;
                   state?: string;
+                  body?: string;
                   author?: { login?: string };
                 }>;
                 pageInfo?: { hasNextPage?: boolean; endCursor?: string };
@@ -2246,6 +2264,7 @@ export class GitHubService {
         if (
           review.id &&
           review.state === "CHANGES_REQUESTED" &&
+          review.body?.includes(THREADED_CHANGE_REQUEST_MARKER) &&
           review.author?.login?.toLowerCase() === reviewer
         ) {
           ids.push(review.id);

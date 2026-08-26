@@ -592,6 +592,7 @@ describe("ACT methods — argv + bus events", () => {
                 {
                   id: "PRR_internal",
                   state: "CHANGES_REQUESTED",
+                  body: "Blocking findings.\n\n<!-- dispatch:threaded-change-request -->",
                   author: { login: "dispatch-review" },
                 },
                 { id: "PRR_human", state: "CHANGES_REQUESTED", author: { login: "alice" } },
@@ -680,6 +681,56 @@ describe("ACT methods — argv + bus events", () => {
 
     expect(outcome).toEqual({ dismissedReviews: 0 });
     expect(calls).toHaveLength(1);
+  });
+
+  it("preserves an unmarked change request that may contain a body-only blocker", async () => {
+    const { exec, calls, json } = makeExec();
+    json({
+      data: {
+        resolveReviewThread: {
+          thread: {
+            pullRequest: { number: 42, repository: { nameWithOwner: REPO } },
+            comments: { nodes: [{ author: { login: "dispatch-review" } }] },
+          },
+        },
+      },
+    });
+    json({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } },
+          },
+        },
+      },
+    });
+    json({
+      data: {
+        repository: {
+          pullRequest: {
+            reviews: {
+              nodes: [
+                {
+                  id: "PRR_body_blocker",
+                  state: "CHANGES_REQUESTED",
+                  body: "Cross-file blocker with no inline thread.",
+                  author: { login: "dispatch-review" },
+                },
+              ],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        },
+      },
+    });
+    const gh = new GitHubService({ bus, exec });
+
+    const outcome = await gh.resolveThread("PRRT_internal", {
+      reviewAgentLogin: "dispatch-review",
+    });
+
+    expect(outcome).toEqual({ dismissedReviews: 0 });
+    expect(calls).toHaveLength(3);
   });
 
   it("resolveThread rejects an empty id", async () => {
@@ -1605,7 +1656,7 @@ describe("submitReview — how Dispatch's reviewer speaks", () => {
     ]);
     expect(bodies[0]).toEqual({
       event: "REQUEST_CHANGES",
-      body: "One real problem.",
+      body: "One real problem.\n\n<!-- dispatch:threaded-change-request -->",
       commit_id: "deadbeef",
       comments: [
         { path: "src/a.ts", line: 12, side: "RIGHT", body: "null on the empty case" },
@@ -1656,7 +1707,7 @@ describe("submitReview — how Dispatch's reviewer speaks", () => {
     const gh = new GitHubService({ bus, exec });
 
     const res = await gh.submitReview(REPO, 7, {
-      event: "COMMENT",
+      event: "REQUEST_CHANGES",
       body: "Summary.",
       comments: [{ path: "src/a.ts", line: 999, body: "null on the empty case" }],
     });
@@ -1667,6 +1718,7 @@ describe("submitReview — how Dispatch's reviewer speaks", () => {
     expect(folded.body).toContain("Summary.");
     expect(folded.body).toContain("src/a.ts:999");
     expect(folded.body).toContain("null on the empty case");
+    expect(folded.body).not.toContain("dispatch:threaded-change-request");
   });
 
   it("reports a refusal rather than throwing", async () => {

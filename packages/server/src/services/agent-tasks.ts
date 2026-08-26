@@ -924,8 +924,11 @@ function prReviewBriefText(input: {
           "approving is not this reviewer's job."
         : "- `event`: always `comment`. This reviewer does not block: raise the findings and " +
           "let the author judge.",
-      "- The summary `body` is for what does not belong on a single line — a problem whose " +
-        "shape spans files, or something you could not check. Keep it short.",
+      "- Every BLOCKING finding must be an inline comment, including cross-file problems: " +
+        "attach it to the most relevant changed line and name the other files in the finding. " +
+        "That thread is what lets the author prove it was addressed and clear your verdict.",
+      "- The summary `body` summarizes the threaded findings and may mention something you " +
+        "could not check, but it must not introduce a blocking finding that has no thread.",
       "- Do NOT resolve any thread. Resolving is the author's half of the loop; a reviewer " +
         "that closes its own comments is talking to itself.",
     );

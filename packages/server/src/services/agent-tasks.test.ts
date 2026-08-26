@@ -712,6 +712,8 @@ describe("buildTaskParts — pr:review", () => {
     // of restated diff and three style nits.
     expect(brief).toContain("An empty review is a real outcome");
     expect(brief).toContain("post_review");
+    expect(brief).toContain("Every BLOCKING finding must be an inline comment");
+    expect(brief).toContain("must not introduce a blocking finding that has no thread");
   });
 
   it("says to post nothing when the launch asked for a dry run", () => {

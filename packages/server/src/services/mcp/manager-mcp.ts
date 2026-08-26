@@ -3041,8 +3041,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .describe(
           "Default 'comment'. Use 'request_changes' only for something that will " +
             "actually break or that you would not want merged as-is. Approving is " +
-            "deliberately not offered: this reviewer raises findings, it does not " +
-            "clear a PR to land.",
+            "deliberately not offered. Every blocking finding must also appear in " +
+            "`comments`; the body may summarize them but must not add an unthreaded blocker.",
         ),
       comments: z
         .array(
@@ -3071,7 +3071,11 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           }),
         )
         .optional()
-        .describe("One entry per finding. Omit entirely when there is nothing to raise."),
+        .describe(
+          "One entry per finding. A request_changes review must put EVERY blocking finding " +
+            "here so resolving its threads can safely clear the verdict. For a cross-file " +
+            "finding, choose the most relevant changed line and name the other files in body.",
+        ),
       commitId: z
         .string()
         .optional()
@@ -3112,6 +3116,14 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       const repo =
         typeof args.repo === "string" && args.repo.trim() ? args.repo.trim() : undefined;
       const event = args.event === "request_changes" ? "REQUEST_CHANGES" : "COMMENT";
+      if (event === "REQUEST_CHANGES" && !comments.length) {
+        return textResult(
+          "A request_changes review needs at least one inline comment, and every blocking " +
+            "finding must be threaded. Attach a cross-file finding to its most relevant " +
+            "changed line and name the other files in that comment.",
+          true,
+        );
+      }
 
       let res: SubmitReviewOutcome;
       try {
