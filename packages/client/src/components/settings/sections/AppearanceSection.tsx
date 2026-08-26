@@ -1,4 +1,4 @@
-import { Moon, Sun, Monitor } from "lucide-react";
+import { Moon, SunMoon, Sun, Monitor } from "lucide-react";
 import { Field } from "../../sidebar/Modal.js";
 import { SegmentedControl } from "../../ui/SegmentedControl.js";
 import { useTheme } from "../../../stores/theme.js";
@@ -24,6 +24,7 @@ export function AppearanceSection({ draft, patch }: AppPaneProps) {
         }}
         segments={[
           { value: "dark", label: "Dark", icon: <Moon /> },
+          { value: "dim", label: "Dim", icon: <SunMoon /> },
           { value: "light", label: "Light", icon: <Sun /> },
           { value: "system", label: "System", icon: <Monitor /> },
         ]}

@@ -10,12 +10,12 @@
  * Two rules keep that promise:
  *   1. This file declares NOTHING but `--p-*` custom properties. The moment a
  *      palette starts writing real CSS rules, themes stop being interchangeable.
- *   2. `light.css` declares the SAME key set, in the same order. A key that
- *      exists here and not there is a token that silently falls back to the
- *      previous theme's value when you switch at runtime.
+ *   2. Every other palette declares the SAME key set, in the same order. A key
+ *      missing from one theme silently falls back to the previous theme's value
+ *      when you switch at runtime.
  *
- * Selector note: `:root[data-theme="dark"]` (not a bare `:root`) so BOTH themes
- * carry equal specificity and neither wins by file order — the attribute alone
+ * Selector note: `:root[data-theme="dark"]` (not a bare `:root`) so ALL themes
+ * carry equal specificity and none wins by file order — the attribute alone
  * decides. See `index.html`'s pre-paint script for who sets it.
  * ═════════════════════════════════════════════════════════════════════════
  */

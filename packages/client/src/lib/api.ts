@@ -95,7 +95,7 @@ import { sessionFetch } from "../stores/auth.js";
  */
 export interface AppSettings {
   /** Kept in the same shape as `ThemePref` in stores/theme.ts. */
-  theme: "dark" | "light" | "system";
+  theme: "dark" | "dim" | "light" | "system";
   defaultModeId?: string;
   webhook?: {
     kind?: "ntfy" | "pushover";

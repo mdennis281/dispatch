@@ -16,11 +16,11 @@
  */
 import { create } from "zustand";
 
-/** `system` defers to the OS; the other two pin it regardless of the OS. */
-export type ThemePref = "dark" | "light" | "system";
+/** `system` defers to the OS; the other three pin it regardless of the OS. */
+export type ThemePref = "dark" | "dim" | "light" | "system";
 
 /** What actually gets written to the document — `system` is resolved away. */
-export type ResolvedTheme = "dark" | "light";
+export type ResolvedTheme = "dark" | "dim" | "light";
 
 /** Mirrored verbatim in the `index.html` pre-paint script. */
 export const THEME_STORAGE_KEY = "dispatch:theme";
@@ -33,7 +33,7 @@ const DARK_QUERY = "(prefers-color-scheme: dark)";
 export const DEFAULT_THEME: ThemePref = "dark";
 
 function isPref(v: unknown): v is ThemePref {
-  return v === "dark" || v === "light" || v === "system";
+  return v === "dark" || v === "dim" || v === "light" || v === "system";
 }
 
 export function resolveTheme(pref: ThemePref): ResolvedTheme {
@@ -83,7 +83,7 @@ export function applyTheme(pref: ThemePref): ResolvedTheme {
   const resolved = resolveTheme(pref);
   const root = document.documentElement;
   root.dataset.theme = resolved;
-  root.style.colorScheme = resolved;
+  root.style.colorScheme = resolved === "light" ? "light" : "dark";
   syncThemeColor();
   return resolved;
 }

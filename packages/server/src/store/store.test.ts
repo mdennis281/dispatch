@@ -296,8 +296,8 @@ describe("Store runners + checkpoints + settings", () => {
 
   it("round-trips settings with defaults", async () => {
     expect(await store.getSettings()).toMatchObject({ theme: "dark" });
-    await store.saveSettings({ theme: "light", defaultModeId: "plan" });
-    expect(await store.getSettings()).toMatchObject({ theme: "light", defaultModeId: "plan" });
+    await store.saveSettings({ theme: "dim", defaultModeId: "plan" });
+    expect(await store.getSettings()).toMatchObject({ theme: "dim", defaultModeId: "plan" });
   });
 
   it("leaves updateChannel unset, which every pre-channel install reads as stable", async () => {
