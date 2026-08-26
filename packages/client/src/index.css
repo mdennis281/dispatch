@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "./theme/dark.css";
+@import "./theme/dim.css";
 @import "./theme/light.css";
 
 /*
@@ -7,7 +8,7 @@
  * than a class — `index.html`'s pre-paint script sets it, and driving both the
  * palette and the variant off ONE attribute means they can never disagree.
  */
-@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *, [data-theme="dim"], [data-theme="dim"] *));
 @custom-variant light (&:where([data-theme="light"], [data-theme="light"] *));
 
 /*
@@ -283,6 +284,9 @@
    * pure `--p-*` declarations and remain copy-pasteable.
    */
   :root[data-theme="dark"] {
+    color-scheme: dark;
+  }
+  :root[data-theme="dim"] {
     color-scheme: dark;
   }
   :root[data-theme="light"] {

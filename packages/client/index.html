@@ -23,7 +23,7 @@
       (function () {
         try {
           var p = localStorage.getItem("dispatch:theme");
-          if (p !== "dark" && p !== "light" && p !== "system") p = "dark";
+          if (p !== "dark" && p !== "dim" && p !== "light" && p !== "system") p = "dark";
           var t =
             p === "system"
               ? matchMedia("(prefers-color-scheme: dark)").matches
@@ -31,7 +31,7 @@
                 : "light"
               : p;
           document.documentElement.dataset.theme = t;
-          document.documentElement.style.colorScheme = t;
+          document.documentElement.style.colorScheme = t === "light" ? "light" : "dark";
         } catch (e) {
           // Storage blocked (private mode, embedded webview). The `data-theme`
           // already on <html> is the dark default, so we simply keep it.

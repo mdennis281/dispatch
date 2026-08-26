@@ -118,7 +118,7 @@ export const AppSettingsSchema = z.object({
   /** `system` defers to the browser's `prefers-color-scheme`; the client
    *  resolves it and caches the result in localStorage so the first paint has
    *  an answer before this endpoint can respond (see client stores/theme.ts). */
-  theme: z.enum(["dark", "light", "system"]).default("dark"),
+  theme: z.enum(["dark", "dim", "light", "system"]).default("dark"),
   defaultModeId: z.string().optional(),
   /** App-wide runtime selection, per-runtime defaults, and context budgets. */
   harness: HarnessSettingsSchema.optional(),

@@ -1,0 +1,130 @@
+/*
+ * DIM PALETTE — a low-glare midpoint between the dark and light palettes.
+ *
+ * This is still a dark-polarity theme: native controls and inherited editor
+ * chrome use their dark variants. Its charcoal surface ladder sits much nearer
+ * the middle of the luminance range, while the text ladder is softened from
+ * dark mode's near-white-on-near-black contrast. Like the other palettes, this
+ * file contains the complete `--p-*` key set and no structural CSS.
+ */
+:root[data-theme="dim"] {
+  /* brand */
+  --p-brand: #e5a33c;
+  --p-brand-plate: #14171b;
+
+  /* surfaces */
+  --p-app: #25292e;
+  --p-surface: #2b3036;
+  --p-panel: #31373e;
+  --p-panel-2: #383f47;
+  --p-elevated: #3e464f;
+  --p-overlay: #464e57;
+  --p-inset: #20242a;
+  --p-scrim: rgba(10, 12, 15, 0.48);
+  --p-scrim-strong: rgba(10, 12, 15, 0.72);
+  --p-bubble: rgba(255, 255, 255, 0.1);
+  --p-bubble-line: rgba(255, 255, 255, 0.13);
+
+  /* hairlines and their solid mixing base */
+  --p-line-soft: rgba(255, 255, 255, 0.07);
+  --p-line: rgba(255, 255, 255, 0.11);
+  --p-line-strong: rgba(255, 255, 255, 0.17);
+  --p-wash: #ffffff;
+
+  /* text — faint remains above 4.5:1 on the lightest opaque surface */
+  --p-text-primary: #f0f2f4;
+  --p-text-secondary: #cbd0d6;
+  --p-text-muted: #c0c6cd;
+  --p-text-faint: #b8c1cb;
+
+  /* primary and secondary accents */
+  --p-accent: #f0b45b;
+  --p-accent-hi: #ffc66d;
+  --p-accent-dim: #d19132;
+  --p-accent-ghost: rgba(240, 180, 91, 0.15);
+  --p-accent-line: rgba(240, 180, 91, 0.42);
+  --p-accent-fg: #211607;
+  --p-accent-2: #c9b8ff;
+  --p-accent-2-hi: #ddd4ff;
+  --p-accent-2-dim: #9f84ee;
+  --p-accent-2-ghost: rgba(201, 184, 255, 0.16);
+  --p-accent-2-line: rgba(201, 184, 255, 0.4);
+  --p-accent-2-fg: #1a1027;
+
+  /* chart series */
+  --p-chart-1: #67a7f2;
+  --p-chart-2: #ff8654;
+  --p-chart-3: #4ed2a2;
+  --p-chart-4: #f0b94b;
+  --p-chart-5: #f07da5;
+  --p-chart-6: #72c86e;
+  --p-chart-7: #b3a6ff;
+  --p-chart-8: #ff8585;
+  --p-chart-other: #aab2bd;
+  --p-chart-grid: rgba(255, 255, 255, 0.12);
+
+  /* semantics */
+  --p-success: #72d680;
+  --p-success-hi: #8be497;
+  --p-success-ghost: rgba(114, 214, 128, 0.15);
+  --p-success-line: rgba(114, 214, 128, 0.38);
+  --p-warn: #ff9e6b;
+  --p-warn-hi: #ffb38d;
+  --p-warn-ghost: rgba(255, 158, 107, 0.15);
+  --p-warn-line: rgba(255, 158, 107, 0.38);
+  --p-danger: #ff8a94;
+  --p-danger-hi: #ffa5ad;
+  --p-danger-ghost: rgba(255, 138, 148, 0.15);
+  --p-danger-line: rgba(255, 138, 148, 0.38);
+  --p-info: #7bbcff;
+  --p-info-hi: #99ccff;
+  --p-info-ghost: rgba(123, 188, 255, 0.15);
+  --p-info-line: rgba(123, 188, 255, 0.38);
+
+  /* interaction and elevation */
+  --p-hover: rgba(255, 255, 255, 0.055);
+  --p-active: rgba(255, 255, 255, 0.1);
+  --p-selected: rgba(255, 255, 255, 0.13);
+  --p-focus-ring: rgba(240, 180, 91, 0.66);
+  --p-disabled: #69717b;
+  --p-sheen: rgba(255, 255, 255, 0.17);
+  --p-sheen-soft: rgba(255, 255, 255, 0.055);
+  --p-shadow-1: rgba(8, 10, 12, 0.48);
+  --p-shadow-2: rgba(8, 10, 12, 0.38);
+
+  /* categorical and ordinal data colours */
+  --p-cat-1: #8bb4ff;
+  --p-cat-2: #afe083;
+  --p-cat-3: #f0c47b;
+  --p-cat-4: #ff98aa;
+  --p-cat-5: #cbb1ff;
+  --p-cat-6: #98dcff;
+  --p-cat-7: #ffad79;
+  --p-cat-8: #72c2ce;
+  --p-gauge-1: #55d986;
+  --p-gauge-2: #b8e66d;
+  --p-gauge-3: #f1c84b;
+  --p-gauge-4: #ff9b55;
+  --p-gauge-5: #ff767d;
+
+  /* diff */
+  --p-diff-add: #72d680;
+  --p-diff-add-ghost: rgba(114, 214, 128, 0.17);
+  --p-diff-remove: #ff8a94;
+  --p-diff-remove-ghost: rgba(255, 138, 148, 0.17);
+  --p-diff-change: #7bbcff;
+  --p-diff-change-ghost: rgba(123, 188, 255, 0.17);
+
+  /* syntax */
+  --p-syn-text: #e1e5e9;
+  --p-syn-comment: #a9b1ba;
+  --p-syn-punct: #bdc4cc;
+  --p-syn-keyword: #d5c8ff;
+  --p-syn-fn: #8dc6ff;
+  --p-syn-string: #9ee7ad;
+  --p-syn-number: #f1c47d;
+  --p-syn-const: #ddb8ff;
+  --p-syn-tag: #ff919a;
+  --p-syn-prop: #c9b8ff;
+  --p-syn-operator: #bdc4cc;
+}

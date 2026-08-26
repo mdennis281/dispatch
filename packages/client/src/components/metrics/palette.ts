@@ -1,7 +1,7 @@
 /**
  * The chart palette, resolved to concrete colours.
  *
- * The values themselves live in `theme/dark.css` and `theme/light.css` as
+ * The values themselves live in the files under `theme/` as
  * `--p-chart-1…8` — that is where every colour in this app is declared, and the
  * validation notes for the set live beside them. This module only READS them.
  *
