@@ -198,6 +198,28 @@ describe("lazy-browser-shim", () => {
     await expect(access(join(process.cwd(), filename))).rejects.toThrow();
   });
 
+  it("uses Playwright's requested screenshot type when it overrides the filename extension", async () => {
+    const filename = "lazy-shim-mismatched-extension.png";
+    const client = startShim();
+    await client.request(1, "initialize", { protocolVersion: "2024-11-05" });
+    client.notify("notifications/initialized");
+
+    const called = await client.request(2, "tools/call", {
+      name: "browser_take_screenshot",
+      arguments: { filename, type: "webp" },
+    });
+    const content = (called.result as { content: Record<string, unknown>[] }).content;
+    expect(content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "resource_link",
+          name: filename,
+          mimeType: "image/webp",
+        }),
+      ]),
+    );
+  });
+
   it("shuts the real server down by CLOSING ITS STDIN, not by killing it", async () => {
     // Why it matters: `kill()` is `TerminateProcess` on Windows — no handler
     // runs — and Windows does not cascade a kill to children. `@playwright/mcp`

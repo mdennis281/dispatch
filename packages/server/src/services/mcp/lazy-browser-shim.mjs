@@ -127,7 +127,18 @@ const writeOut = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
 const toolCalls = new Map();
 
 /** MIME type for the formats accepted by Playwright's screenshot tool. */
-function screenshotMime(path) {
+function screenshotMime(path, requestedType) {
+  // Playwright lets `type` override the filename extension, so prefer the
+  // validated call argument over a potentially misleading name.
+  switch (requestedType?.toLowerCase()) {
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "webp":
+      return "image/webp";
+    case "png":
+      return "image/png";
+  }
   switch (extname(path).toLowerCase()) {
     case ".jpg":
     case ".jpeg":
@@ -186,7 +197,7 @@ function enrichScreenshotResult(msg) {
             uri: pathToFileURL(realPath).href,
             name: basename(realPath),
             title: "Playwright screenshot",
-            mimeType: screenshotMime(realPath),
+            mimeType: screenshotMime(realPath, call.arguments?.type),
           },
         ],
       },
@@ -340,7 +351,7 @@ createLineReader(process.stdin, (line) => {
   // them to spawn with, and a warm one needs them the moment something does.
   if (msg.method === "initialize") clientInitialize = msg.params;
   if (msg.method === "tools/call" && msg.id !== undefined) {
-    toolCalls.set(msg.id, { name: msg.params?.name });
+    toolCalls.set(msg.id, { name: msg.params?.name, arguments: msg.params?.arguments });
   }
 
   if (child) {
