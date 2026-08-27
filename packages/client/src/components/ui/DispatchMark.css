@@ -51,6 +51,7 @@
 
 .dispatch-mark[data-motion="loading"] .dispatch-mark__node {
   animation: dispatch-mark-loading-node 2400ms ease-in-out var(--dispatch-part-delay) infinite;
+  animation-fill-mode: backwards;
 }
 
 @keyframes dispatch-mark-grow {

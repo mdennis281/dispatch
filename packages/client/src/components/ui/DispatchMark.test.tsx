@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { DispatchMark } from "./DispatchMark.js";
+
+const styles = readFileSync(new URL("./DispatchMark.css", import.meta.url), "utf8");
 
 describe("DispatchMark", () => {
   it("renders a transparent graph with stable semantic parts", () => {
@@ -29,5 +32,11 @@ describe("DispatchMark", () => {
     expect(html.match(/--dispatch-part-color:#67b7d1/g)).toHaveLength(2);
     expect(html).toContain('role="presentation"');
     expect(html).toContain('aria-hidden="true"');
+  });
+
+  it("holds loading nodes at their hidden first keyframe during stagger delays", () => {
+    expect(styles).toMatch(
+      /\[data-motion="loading"\] \.dispatch-mark__node\s*\{[^}]*animation-fill-mode:\s*backwards;/s,
+    );
   });
 });
