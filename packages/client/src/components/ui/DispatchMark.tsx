@@ -1,82 +1,114 @@
+import type { CSSProperties } from "react";
+import {
+  DISPATCH_MARK_BRANCHES,
+  DISPATCH_MARK_NODES,
+  DISPATCH_MARK_STROKE_WIDTH,
+  DISPATCH_MARK_VIEW_BOX,
+  dispatchBranchPath,
+  type DispatchMarkPart as DispatchMarkPartName,
+} from "../../brand/dispatchMark.js";
+import "./DispatchMark.css";
+
+export type { DispatchMarkPart } from "../../brand/dispatchMark.js";
+
+const BRAND_AMBER = "#E5A33C";
+
+export type DispatchMarkMotion = "branch" | "loading";
+export type DispatchMarkColors = Partial<Record<DispatchMarkPartName, string>>;
+
+export interface DispatchMarkProps {
+  className?: string;
+  /** Defaults to the brand amber. `currentColor` is useful in tinted controls. */
+  color?: string;
+  /** Per-part overrides keyed by semantic branch/node names. */
+  colors?: DispatchMarkColors;
+  /** Opt-in entrance or looping loading motion; static when omitted. */
+  motion?: DispatchMarkMotion;
+  /** Accessible name; omit for a decorative mark. */
+  title?: string;
+}
+
+const BRANCH_DELAYS: Record<string, number> = {
+  trunk: 0,
+  upper: 180,
+  lower: 300,
+};
+
+const NODE_DELAYS: Record<string, number> = {
+  junction: 320,
+  "upper-tip": 700,
+  "lower-tip": 820,
+};
+
+type MarkStyle = CSSProperties & {
+  "--dispatch-mark-color": string;
+  "--dispatch-mark-stroke-width": number;
+};
+
+type PartStyle = CSSProperties & {
+  "--dispatch-part-color"?: string;
+  "--dispatch-part-delay": string;
+};
+
+function partStyle(color: string | undefined, delay: number): PartStyle {
+  return {
+    "--dispatch-part-color": color,
+    "--dispatch-part-delay": `${delay}ms`,
+  };
+}
+
 /**
- * The Dispatch mark: a trunk splitting into two roads at a switch point.
+ * Transparent, addressable Dispatch mark.
  *
- * THIRD copy of this geometry, and the duplication is deliberate — the other two
- * can't be shared with React. `public/favicon.svg` is a static file the browser
- * fetches before any JS runs, and `scripts/generate-brand.mjs` renders it as a
- * signed-distance field so every PWA icon is a true render at its own size
- * rather than a resample. All three author in the same 64-unit box, so the
- * numbers below are the numbers there. **Change one, change all three**, or the
- * tab icon, the installed app icon and the top bar drift apart.
- *
- * Three forms:
- *   - default — the full app icon (dark rounded square + amber mark), i.e. what
- *     the taskbar and the browser tab show. Use it where the app identifies
- *     ITSELF, so the thing in the top-left is recognizably the thing you
- *     launched.
- *   - `bare` — strokes only, in `currentColor`. For placements that are already
- *     inside a tinted chip and want the surrounding text colour instead.
- *   - `platedTheme` — brand amber strokes, but the plate follows the theme's
- *     elevated surface. For in-app chrome on a LIGHT theme, where the icon's
- *     near-black plate stops reading as an app icon and starts reading as a
- *     hole punched in the header. The amber is untouched, so the mark is still
- *     the mark; only the square it sits on joins the room it's in.
+ * Branches and nodes carry stable `data-part` names in the rendered SVG. Use
+ * the typed `colors` prop for React-owned state; the attributes remain available
+ * to CSS/Web Animations when a richer transition needs to choreograph the mark.
  */
-
-/*
- * Hardcoded on purpose, and exempt from the theme sweep: the mark is the BRAND,
- * so it must be identical in the tab icon, the installed app icon and the top
- * bar — including on a light theme, where a token-driven amber would darken and
- * the top bar would stop matching the taskbar. `theme/dark.css` carries the same
- * two values as `--p-brand` / `--p-brand-plate` so UI chrome can match the mark;
- * that token reads FROM here, never the other way round.
- */
-const BG = "#14171B";
-const FG = "#E5A33C";
-
 export function DispatchMark({
   className,
-  bare,
-  platedTheme,
+  color = BRAND_AMBER,
+  colors = {},
+  motion,
   title,
-}: {
-  className?: string;
-  /** Strokes only, in currentColor — no plate, no brand amber. */
-  bare?: boolean;
-  /** Brand amber strokes on a theme-coloured plate (see the note above). */
-  platedTheme?: boolean;
-  /** Accessible name; omit for a purely decorative mark. */
-  title?: string;
-}) {
-  const stroke = bare ? "currentColor" : FG;
+}: DispatchMarkProps) {
+  const style: MarkStyle = {
+    "--dispatch-mark-color": color,
+    "--dispatch-mark-stroke-width": DISPATCH_MARK_STROKE_WIDTH,
+  };
+
   return (
     <svg
-      viewBox="0 0 64 64"
-      className={className}
+      viewBox={DISPATCH_MARK_VIEW_BOX}
+      className={["dispatch-mark", className].filter(Boolean).join(" ")}
+      data-motion={motion}
+      style={style}
       role={title ? "img" : "presentation"}
       aria-label={title}
       aria-hidden={title ? undefined : true}
     >
-      {!bare && (
-        <rect
-          x="1.9"
-          y="1.9"
-          width="60.2"
-          height="60.2"
-          rx="14.1"
-          fill={platedTheme ? "var(--color-elevated)" : BG}
+      {DISPATCH_MARK_BRANCHES.map((branch) => (
+        <path
+          key={branch.id}
+          className="dispatch-mark__branch"
+          data-kind="branch"
+          data-part={branch.id}
+          d={dispatchBranchPath(branch)}
+          pathLength={1}
+          style={partStyle(colors[branch.id], BRANCH_DELAYS[branch.id] ?? 0)}
         />
-      )}
-      <g fill="none" stroke={stroke} strokeWidth="5" strokeLinecap="round">
-        <path d="M12 32 H28" />
-        <path d="M28 32 C37 32 39 24.08 50 21" />
-        <path d="M28 32 C37 32 39 39.92 50 43" />
-      </g>
-      <g fill={stroke}>
-        <circle cx="28" cy="32" r="2.9" />
-        <circle cx="50" cy="21" r="3.3" />
-        <circle cx="50" cy="43" r="3.3" />
-      </g>
+      ))}
+      {DISPATCH_MARK_NODES.map((node) => (
+        <circle
+          key={node.id}
+          className="dispatch-mark__node"
+          data-kind="node"
+          data-part={node.id}
+          cx={node.cx}
+          cy={node.cy}
+          r={node.radius}
+          style={partStyle(colors[node.id], NODE_DELAYS[node.id] ?? 0)}
+        />
+      ))}
     </svg>
   );
 }

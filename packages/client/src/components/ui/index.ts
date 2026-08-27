@@ -8,6 +8,13 @@ export type { Tone } from "./Chip.js";
 export { StatusDot, statusMeta } from "./StatusDot.js";
 export type { DotTone } from "./StatusDot.js";
 export { Spinner, TypingPulse } from "./Spinner.js";
+export { DispatchMark } from "./DispatchMark.js";
+export type {
+  DispatchMarkColors,
+  DispatchMarkPart,
+  DispatchMarkMotion,
+  DispatchMarkProps,
+} from "./DispatchMark.js";
 export { Kbd } from "./Kbd.js";
 export { ScrollArea } from "./ScrollArea.js";
 export { Tabs } from "./Tabs.js";

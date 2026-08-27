@@ -1,21 +1,13 @@
-<!--
-  The Dispatch mark: a trunk splitting into two roads at a switch point.
-
-  Geometry mirrors packages/client/scripts/generate-brand.mjs exactly — that file
-  authors in a 64-unit box centred on the origin, this one is the same numbers
-  plus 32 on each axis. Change one, change the other, or the tab icon and every
-  generated PWA icon drift apart.
--->
+<!-- Transparent static counterpart to src/brand/dispatchMark.ts. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <rect x="1.9" y="1.9" width="60.2" height="60.2" rx="14.1" fill="#14171B" />
-  <g fill="none" stroke="#E5A33C" stroke-width="5" stroke-linecap="round">
-    <path d="M12 32 H28" />
-    <path d="M28 32 C37 32 39 24.08 50 21" />
-    <path d="M28 32 C37 32 39 39.92 50 43" />
+  <g fill="none" stroke="#E5A33C" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 32 L36 32" />
+    <path d="M36 32 C42 32 43 22 52 20" />
+    <path d="M36 32 C42 32 43 42 52 44" />
   </g>
   <g fill="#E5A33C">
-    <circle cx="28" cy="32" r="2.9" />
-    <circle cx="50" cy="21" r="3.3" />
-    <circle cx="50" cy="43" r="3.3" />
+    <circle cx="36" cy="32" r="3.5" />
+    <circle cx="52" cy="20" r="3.5" />
+    <circle cx="52" cy="44" r="3.5" />
   </g>
 </svg>
