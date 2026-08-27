@@ -28,9 +28,9 @@
  * `brand:generated` markers, so the splash <link> matrix can never drift from
  * the files on disk.
  *
- * Idempotent: a stamp of this file's own contents short-circuits the whole run,
- * so it sits in front of `vite` in both `dev` and `build` for ~1ms when nothing
- * changed. Force with `--force`.
+ * Idempotent: a stamp of this file and the shared mark geometry short-circuits
+ * the whole run, so it sits in front of `vite` in both `dev` and `build` for
+ * ~1ms when nothing changed. Force with `--force`.
  */
 import { deflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
@@ -47,6 +47,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const clientRoot = join(here, "..");
 const outDir = join(clientRoot, "public", "icons");
 const indexHtml = join(clientRoot, "index.html");
+const markGeometryFile = join(clientRoot, "src", "brand", "dispatchMark.ts");
 
 const BG = [20, 23, 27]; // #14171B — the app's dark shell
 const FG = [229, 163, 60]; // #E5A33C — signal amber
@@ -429,9 +430,13 @@ function writeIndexHtml(splashes) {
 
 const force = process.argv.includes("--force");
 const stampFile = join(outDir, ".stamp");
-// Hash this file's own bytes: any change to the geometry, the palette or the
-// device table invalidates every output, which is exactly the intent.
-const stamp = createHash("sha256").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex");
+// The SVG component and generated install assets share dispatchMark.ts. Hashing
+// both inputs prevents a geometry-only edit from leaving cached raster icons stale.
+const stamp = createHash("sha256")
+  .update(readFileSync(fileURLToPath(import.meta.url)))
+  .update("\0")
+  .update(readFileSync(markGeometryFile))
+  .digest("hex");
 
 const splashes = splashTargets();
 const expected = [
