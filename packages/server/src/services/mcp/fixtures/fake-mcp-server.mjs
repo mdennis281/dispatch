@@ -48,6 +48,11 @@ process.stdin.on("data", (chunk) => {
     if (msg.id === "fixture-roots" && msg.result) {
       const firstRoot = msg.result.roots?.[0]?.uri;
       if (typeof firstRoot === "string") workspaceRoot = fileURLToPath(firstRoot);
+      // Let the integration test force the timing that exposed the production
+      // bug: the real server has accepted the client root before the screenshot
+      // call arrives. Without this acknowledgement the test passed or failed
+      // according to which side of the stdio pipe won the race.
+      send({ jsonrpc: "2.0", method: "notifications/fixture-roots-applied" });
     } else if (msg.method === "initialize") {
       send({
         jsonrpc: "2.0",

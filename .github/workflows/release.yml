@@ -25,10 +25,16 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: build and publish release
-    runs-on: ubuntu-latest
+  build:
+    name: build, test, and package release
+    # Release reruns the gate against the exact merge SHA because PR checks
+    # cover the head commit and a later main push may cancel push CI. The repo
+    # is private and this is the same trusted runner as CI and promotion, so the
+    # expensive work belongs here instead of on metered hosted Linux.
+    runs-on: [self-hosted, Linux, X64, dispatch]
     timeout-minutes: 30
+    outputs:
+      release_tag: ${{ steps.version.outputs.release_tag }}
 
     steps:
       - uses: actions/checkout@v4
@@ -44,12 +50,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
+          # No hosted cache: the self-hosted runner's pnpm store persists.
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Set release version
+        id: version
         run: |
           pnpm --filter @dispatch/shared build
           COMMIT_TIME="$(git show -s --format=%cI "$GITHUB_SHA")"
@@ -59,6 +66,7 @@ jobs:
           echo "BUILD_VERSION=$BUILD_VERSION" >> "$GITHUB_ENV"
           echo "DISPATCH_BUILD_VERSION=$BUILD_VERSION" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=v$BUILD_VERSION" >> "$GITHUB_ENV"
+          echo "release_tag=v$BUILD_VERSION" >> "$GITHUB_OUTPUT"
           echo "Publishing Dispatch v$BUILD_VERSION from $GITHUB_SHA"
 
       - name: Build
@@ -83,6 +91,40 @@ jobs:
           tar -czf "release/dispatch-${RELEASE_TAG}.tar.gz" -C release/payload .
           cd release
           sha256sum "dispatch-${RELEASE_TAG}.tar.gz" > SHA256SUMS
+
+      # The hosted job below publishes these exact bytes rather than rebuilding
+      # them on a different machine after the gate has passed.
+      - name: Upload tested release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: |
+            release/dispatch-${{ steps.version.outputs.release_tag }}.tar.gz
+            release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: tag and publish release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+
+    steps:
+      # Keep this tiny job hosted: `gh` is part of the hosted image but is not
+      # guaranteed on a self-hosted runner. Build/test/package consumed nearly
+      # all of the old job's billed time; this only tags and uploads.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download tested release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: release
 
       - name: Tag successful build
         run: |

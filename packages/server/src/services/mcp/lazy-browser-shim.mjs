@@ -389,7 +389,11 @@ createLineReader(process.stdin, (line) => {
     // Already spawned: pure pipe, except that frames arriving mid-handshake
     // have to wait for it rather than racing ahead of `initialize`.
     if (!manifest && msg.method === "tools/list" && msg.id !== undefined) toolsListIds.add(msg.id);
-    if (ready) child.stdin.write(line + "\n");
+    // `prepareToolCall` may have replaced a relative screenshot filename with
+    // the per-chat owner path. Forward the prepared frame, not the original
+    // wire text, or a fast roots/list handshake can redirect the capture into
+    // the advertised workspace before enrichment looks for it under the owner.
+    if (ready) child.stdin.write(JSON.stringify(msg) + "\n");
     else pending.push(msg);
     return;
   }

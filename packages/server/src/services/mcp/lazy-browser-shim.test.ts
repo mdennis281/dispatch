@@ -26,6 +26,10 @@ const FAKE = join(HERE, "fixtures", "fake-mcp-server.mjs");
 class Client {
   private buffer = "";
   private readonly waiting = new Map<string | number, (msg: Record<string, unknown>) => void>();
+  private resolveRootsApplied!: () => void;
+  readonly rootsApplied = new Promise<void>((resolve) => {
+    this.resolveRootsApplied = resolve;
+  });
 
   constructor(
     private readonly child: ChildProcessWithoutNullStreams,
@@ -47,6 +51,10 @@ class Client {
             id: msg.id,
             result: { roots: [{ uri: pathToFileURL(this.workspaceRoot ?? process.cwd()).href }] },
           }) + "\n");
+          continue;
+        }
+        if ((msg as { method?: string }).method === "notifications/fixture-roots-applied") {
+          this.resolveRootsApplied();
           continue;
         }
         if (msg.id === undefined) continue;
@@ -190,6 +198,10 @@ describe("lazy-browser-shim", () => {
     const client = startShim();
     await client.request(1, "initialize", { protocolVersion: "2024-11-05" });
     client.notify("notifications/initialized");
+    // The old ready-path forwarded the original JSON instead of the frame
+    // rewritten by prepareToolCall. Waiting for roots to settle makes that bug
+    // deterministic: the unprepared relative path lands in `workspace`.
+    await client.rootsApplied;
 
     const called = await client.request(2, "tools/call", {
       name: "browser_take_screenshot",
@@ -219,6 +231,7 @@ describe("lazy-browser-shim", () => {
     const client = startShim();
     await client.request(1, "initialize", { protocolVersion: "2024-11-05" });
     client.notify("notifications/initialized");
+    await client.rootsApplied;
 
     const called = await client.request(2, "tools/call", {
       name: "browser_take_screenshot",
