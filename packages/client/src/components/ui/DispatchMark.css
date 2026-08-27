@@ -1,0 +1,85 @@
+.dispatch-mark {
+  display: block;
+  overflow: visible;
+}
+
+.dispatch-mark__branch {
+  fill: none;
+  stroke: var(--dispatch-part-color, var(--dispatch-mark-color));
+  stroke-width: var(--dispatch-mark-stroke-width);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dispatch-mark__node {
+  fill: var(--dispatch-part-color, var(--dispatch-mark-color));
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/*
+ * `pathLength=1` in the component normalizes every branch, so motion timing is
+ * independent of its physical length. New branches can be added to the data
+ * model without retuning magic dash values here.
+ */
+.dispatch-mark[data-motion="branch"] .dispatch-mark__branch,
+.dispatch-mark[data-motion="loading"] .dispatch-mark__branch {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation-delay: var(--dispatch-part-delay);
+}
+
+.dispatch-mark[data-motion="branch"] .dispatch-mark__branch {
+  animation-name: dispatch-mark-grow;
+  animation-duration: 560ms;
+  animation-timing-function: cubic-bezier(.32, .72, .25, 1);
+  animation-fill-mode: forwards;
+}
+
+.dispatch-mark[data-motion="branch"] .dispatch-mark__node {
+  opacity: 0;
+  transform: scale(.25);
+  animation: dispatch-mark-node-in 300ms cubic-bezier(.22, 1.6, .4, 1) var(--dispatch-part-delay) forwards;
+}
+
+.dispatch-mark[data-motion="loading"] .dispatch-mark__branch {
+  animation-name: dispatch-mark-loading-branch;
+  animation-duration: 2400ms;
+  animation-timing-function: cubic-bezier(.32, .72, .25, 1);
+  animation-iteration-count: infinite;
+}
+
+.dispatch-mark[data-motion="loading"] .dispatch-mark__node {
+  animation: dispatch-mark-loading-node 2400ms ease-in-out var(--dispatch-part-delay) infinite;
+}
+
+@keyframes dispatch-mark-grow {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes dispatch-mark-node-in {
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes dispatch-mark-loading-branch {
+  0%, 8% { opacity: 0; stroke-dashoffset: 1; }
+  16% { opacity: 1; }
+  48%, 72% { opacity: 1; stroke-dashoffset: 0; }
+  88%, 100% { opacity: 0; stroke-dashoffset: 0; }
+}
+
+@keyframes dispatch-mark-loading-node {
+  0%, 10% { opacity: 0; transform: scale(.25); }
+  22%, 72% { opacity: 1; transform: scale(1); }
+  88%, 100% { opacity: 0; transform: scale(.7); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dispatch-mark[data-motion] .dispatch-mark__branch,
+  .dispatch-mark[data-motion] .dispatch-mark__node {
+    animation: none;
+    opacity: 1;
+    stroke-dashoffset: 0;
+    transform: none;
+  }
+}

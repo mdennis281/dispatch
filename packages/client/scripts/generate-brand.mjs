@@ -37,6 +37,11 @@ import { createHash } from "node:crypto";
 import { writeFileSync, readFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  DISPATCH_MARK_BRANCHES,
+  DISPATCH_MARK_NODES,
+  DISPATCH_MARK_STROKE_WIDTH,
+} from "../src/brand/dispatchMark.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const clientRoot = join(here, "..");
@@ -122,18 +127,7 @@ const UNITS = 64;
  * icon is not detail, it is INK. A heavy stroke leaves too little dark between
  * the roads and the whole plate flares into one amber smudge.
  */
-const HALF_W = 2.5;
-/** Half the vertical spread between the roads, i.e. how wide the fork opens. */
-const OFFSET = 11;
-/** The switch point, where the trunk splits. */
-const JOINT = [-4, 0];
-/** Nodes are barely wider than the roads they cap — punctuation, not features. */
-const JOINT_R = 2.9;
-const TIPS = [
-  [18, -OFFSET],
-  [18, OFFSET],
-];
-const TIP_R = 3.3;
+const HALF_W = DISPATCH_MARK_STROKE_WIDTH / 2;
 
 /** Sample a cubic Bézier into `steps` segments. */
 function cubic(p0, p1, p2, p3, steps = 14) {
@@ -153,10 +147,16 @@ function cubic(p0, p1, p2, p3, steps = 14) {
  * The trunk, then one road curving off each way. Each road leaves the joint on
  * the trunk's own tangent so the split reads as a switch rather than a corner.
  */
-const STROKES = [
-  [[-20, 0], JOINT],
-  ...TIPS.map((tip) => cubic(JOINT, [5, 0], [7, tip[1] * 0.72], tip)),
-];
+const centered = ([x, y]) => [x - UNITS / 2, y - UNITS / 2];
+const STROKES = DISPATCH_MARK_BRANCHES.map((branch) => {
+  const points = branch.points.map(centered);
+  return branch.kind === "line" ? points : cubic(...points);
+});
+const NODES = DISPATCH_MARK_NODES.map((node) => ({
+  x: node.cx - UNITS / 2,
+  y: node.cy - UNITS / 2,
+  radius: node.radius,
+}));
 
 /** Distance from (px,py) to the segment a→b. */
 function segDist(px, py, ax, ay, bx, by) {
@@ -183,8 +183,9 @@ function markDistance(u, v) {
   let d = Infinity;
   for (const poly of STROKES) d = Math.min(d, polyDist(u, v, poly));
   d -= HALF_W;
-  d = Math.min(d, Math.hypot(u - JOINT[0], v - JOINT[1]) - JOINT_R);
-  for (const [tx, ty] of TIPS) d = Math.min(d, Math.hypot(u - tx, v - ty) - TIP_R);
+  for (const node of NODES) {
+    d = Math.min(d, Math.hypot(u - node.x, v - node.y) - node.radius);
+  }
   return d;
 }
 
@@ -231,8 +232,8 @@ function fill(px, w, h, [r, g, b]) {
 function drawMark(px, w, h, cx, cy, boxPx, clip) {
   const pixelsPerUnit = boxPx / UNITS;
   const unitsPerPixel = UNITS / boxPx;
-  // The mark spans x:[-20,21], y:[-14,14] in units; pad past the AA band.
-  const reach = (Math.max(OFFSET + TIP_R, 21) + HALF_W + 2) * pixelsPerUnit;
+  // Shared geometry fits inside 25 units from center; pad past the AA band.
+  const reach = (25 + HALF_W + 2) * pixelsPerUnit;
   const x0 = Math.max(0, Math.floor(cx - reach));
   const x1 = Math.min(w - 1, Math.ceil(cx + reach));
   const y0 = Math.max(0, Math.floor(cy - reach));

@@ -82,16 +82,10 @@ function MainRow({ overlay }: { overlay: boolean }) {
   // 44px touch row intact.
   return (
     <div className="flex min-h-13 shrink-0 items-center gap-3 px-3 pb-2">
-      {/* mark — the real app icon, not a stand-in glyph: the thing in the
-          top-left should be the thing you launched, matching the tab favicon
-          and the taskbar icon exactly (see ui/DispatchMark).
-
-          No ring. The mark already draws its own rounded plate, so an amber
-          ring around it was a second border on the same edge — at 24px it read
-          as a badge someone had outlined rather than as the app icon, and it
-          didn't appear on the favicon or the installed icon it's supposed to
-          match. Dropping it also frees the 2px it was eating, so the mark goes
-          to 32px: same footprint in the bar, a bigger actual logo.
+      {/* The live SVG stays transparent here. Desktop and mobile launch icons
+          may still need an OS-owned mask or full-bleed canvas, but carrying that
+          plate into the app header made the mark look like a raster tile and
+          prevented the branches from belonging to the surrounding surface.
 
           Gone when there is a drag strip above, because the identity moved up
           into it — the way VS Code and Teams put theirs in the title bar. Two app
@@ -99,7 +93,7 @@ function MainRow({ overlay }: { overlay: boolean }) {
           what would make the taller header read as a mistake. */}
       {!overlay && (
         <div className="flex items-center gap-2 pr-1">
-          <DispatchMark platedTheme className="size-8 shrink-0" title="Dispatch" />
+          <DispatchMark className="size-8 shrink-0" title="Dispatch" />
           {/* No version here. `v0.1` was a hardcoded stand-in that never moved and
               said nothing about the bundle you're running; the sidebar's build
               stamp does, so a second, permanently-wrong number next to the logo is
@@ -228,7 +222,7 @@ function TitleBar() {
           on the strip so the mark lines up with the row below on Windows without
           being pushed off the far side of the controls on a Mac. */}
       <div className="cm-titlebar-area flex items-center gap-2 pl-3">
-        <DispatchMark platedTheme className="size-5 shrink-0" title="Dispatch" />
+        <DispatchMark className="size-5 shrink-0" title="Dispatch" />
         {/* `select-none` is belt and braces — a drag region already suppresses
             selection — but it also covers the moment before the property applies
             and the case where only the prefixed spelling is understood. */}
