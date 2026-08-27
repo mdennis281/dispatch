@@ -671,7 +671,7 @@ function ChatRow({
             can reliably put a pointer on, and it buys the gap between the two
             at the same time — they still read as one two-storey marker rather
             than two markers that happen to be near each other. */}
-        <span className="-ml-1 flex shrink-0 flex-col items-center [&_svg]:size-2.5">
+        <span className="-mx-1.5 flex shrink-0 flex-col items-center [&_svg]:size-2.5">
           <Tooltip
             side="right"
             label={childChatTitle(childChats, childrenNeedInput)}
