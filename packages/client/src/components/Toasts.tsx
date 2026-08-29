@@ -4,9 +4,11 @@ import { useNotices, type NoticeLevel } from "../stores/notices.js";
 import { InstallCard } from "./pwa/InstallCard.js";
 import { EnableNotificationsCard } from "./notify/EnableNotificationsCard.js";
 import { UpdateCard } from "./update/UpdateCard.js";
+import { ResumedCard } from "./update/ResumedCard.js";
 import { useShouldOfferInstall } from "../lib/pwaInstall.js";
 import { useShouldAskToNotify } from "../lib/browserNotify.js";
 import { useShouldNudgeUpdate } from "../stores/update.js";
+import { useShouldShowResumed } from "../stores/restartResume.js";
 import { cn } from "../lib/cn.js";
 import { LAYER } from "../lib/layers.js";
 
@@ -38,7 +40,9 @@ export function Toasts() {
   const offerInstall = useShouldOfferInstall();
   const askNotify = useShouldAskToNotify();
   const nudgeUpdate = useShouldNudgeUpdate();
-  if (toasts.length === 0 && !offerInstall && !askNotify && !nudgeUpdate) return null;
+  const showResumed = useShouldShowResumed();
+  if (toasts.length === 0 && !offerInstall && !askNotify && !nudgeUpdate && !showResumed)
+    return null;
 
   return (
     <div
@@ -76,7 +80,12 @@ export function Toasts() {
       {/* One standing card at a time. An available update outranks both nudges:
           it is the only one that goes stale, and the other two will still be
           true after the restart. */}
-      {nudgeUpdate ? (
+      {/* Outranks all three nudges. It is the only one reporting something that
+          ALREADY happened, unprompted, and whose undo stops being useful the
+          longer the resumed turns run. The others will still be true later. */}
+      {showResumed ? (
+        <ResumedCard />
+      ) : nudgeUpdate ? (
         <UpdateCard />
       ) : offerInstall ? (
         <InstallCard />

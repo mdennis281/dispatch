@@ -4145,3 +4145,62 @@ describe("makeRepoResolver / makeDirResolver — a dead bound cwd", () => {
     expect(await dirFor()).toBeUndefined();
   });
 });
+
+describe("interruptionSnapshot", () => {
+  it("reports mid-flight sessions with their undelivered messages, and nothing else", async () => {
+    const gate = deferred();
+    const { fn } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    // Cap of 1 so the second chat parks as `queued` with its message still in
+    // the outbox — the case that loses a human's words today.
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2", "c3"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+
+    await broker.sendMessage("c1", "the running one");
+    await broker.sendMessage("c2", "the parked one");
+    // `until`, not `waitFor`: waitFor resolves on a future TRANSITION event, and
+    // c1 is already running by the time sendMessage has awaited.
+    await until(() => broker.getStatus("c1") === "running");
+    await until(() => broker.getStatus("c2") === "queued");
+
+    const snap = broker.interruptionSnapshot();
+    const byId = new Map(snap.map((s) => [s.chatId, s]));
+
+    expect(byId.get("c1")?.status).toBe("running");
+    expect(byId.get("c2")).toMatchObject({
+      status: "queued",
+      pending: ["the parked one"],
+    });
+    // c3 has a session but was never sent anything — there is nothing to continue.
+    expect(byId.has("c3")).toBe(false);
+
+    gate.resolve();
+    await Promise.all(["c1", "c2"].map((id) => broker.waitFor(id, "idle").catch(() => {})));
+  });
+
+  it("is EMPTY after dispose — which is why capture must run before it", async () => {
+    const gate = deferred();
+    const { fn } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    const broker = makeBroker(fn, 1);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+    await broker.sendMessage("c1", "go");
+    await until(() => broker.getStatus("c1") === "running");
+    expect(broker.interruptionSnapshot()).toHaveLength(1);
+
+    gate.resolve();
+    await broker.dispose();
+
+    // Teardown overwrote the status with `done` and emptied the outbox. Read
+    // here instead of before, auto-resume is silently a no-op forever.
+    expect(broker.interruptionSnapshot()).toEqual([]);
+  });
+});

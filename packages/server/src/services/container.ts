@@ -61,6 +61,7 @@ import { AttentionQueue } from "./attention.js";
 import { UsageService } from "./usage.js";
 import { ReleaseService } from "./release.js";
 import { ResumeScheduler } from "./resume-scheduler.js";
+import { RestartResumeService } from "./restart-resume.js";
 import { TrunkSyncService } from "./trunk-sync.js";
 import { PrReviewWatcher } from "./pr-review-watcher.js";
 import { PrRegistry } from "./pr-registry.js";
@@ -112,6 +113,7 @@ export interface ServiceOverrides {
   usage?: UsageService;
   release?: ReleaseService;
   resume?: ResumeScheduler;
+  restartResume?: RestartResumeService;
   fileIndex?: FileIndexService;
   metrics?: MetricsService;
   metricsBackfill?: MetricsBackfill;
@@ -169,6 +171,8 @@ export interface Services extends ServiceBase {
   release: ReleaseService;
   /** Schedules a chat to continue itself once a usage limit lifts. */
   resume: ResumeScheduler;
+  /** Continues chats a deliberate restart (usually an update) cut short. */
+  restartResume: RestartResumeService;
   /** Chat-to-chat messaging behind `chat_send`/`chat_ask`/`chat_reply`/`chat_state`. */
   chatMessenger: ChatMessenger;
   fileIndex: FileIndexService;
@@ -504,6 +508,23 @@ export function createServices(
   broker.onTurnError = (chatId, reason) => {
     void resume.onTurnError(chatId, reason).catch(() => {});
   };
+  // Auto-resume across a DELIBERATE restart — an update, `app:stop`, Settings →
+  // Stop. Same lazy-session `send` as above for the same reason. `interrupt`
+  // rather than `stop` backs the undo button: taking back a continuation we sent
+  // must not also tear down a session the human may now want to steer by hand.
+  const restartResume =
+    overrides.restartResume ??
+    new RestartResumeService({
+      store,
+      bus,
+      send: async (chatId, text, parts) => {
+        await ensureSession(services, chatId);
+        await broker.sendMessage(chatId, text, { parts });
+      },
+      interrupt: async (chatId) => {
+        await broker.interrupt(chatId);
+      },
+    });
   // A merged PR means the trunk moved. Under the `review` profile the primary
   // checkout is never worked in, so nothing else would ever advance it — and the
   // next worktree cut from a stale base inherits the drift. Fires both for merges
@@ -815,6 +836,7 @@ export function createServices(
     trunkSync,
     prReviewWatcher,
     prRegistry,
+    restartResume,
 
     async start(): Promise<void> {
       // This runs before clients hydrate. Graceful shutdowns have already
@@ -953,6 +975,12 @@ export function createServices(
       // never strands a chat waiting on a limit that has since lifted.
       await resume.restore().catch(() => {});
 
+      // Continue the chats the last (deliberate) shutdown cut short. Only ARMS a
+      // timer — the resumes themselves must land after `app.listen()`, since
+      // each one spawns an agent process tree and this still runs with the port
+      // closed. See RESUME_START_DELAY_MS.
+      restartResume.restore();
+
       // Boot reconciliation of persisted runners (best-effort).
       try {
         await runner.reconcile();
@@ -1036,6 +1064,18 @@ export function createServices(
       // hanging on a promise nothing is left to resolve.
       chatMessenger.dispose();
       await runner.stopAll().catch(() => {});
+      // ORDER IS LOAD-BEARING: this must read the broker's live sessions BEFORE
+      // `dispose()` tears them down. Teardown overwrites every status with
+      // `done` and empties every outbox, so one line later there is nothing left
+      // to record and auto-resume is silently a no-op.
+      //
+      // Reaching `dispose()` at all is also the entire proof that the stop was
+      // deliberate — a crash runs none of this and therefore, correctly, resumes
+      // nothing. Disarm our own boot timer first: a shutdown seconds after boot
+      // must not fire a resume into a server that is going away.
+      restartResume.dispose();
+      await restartResume.drain().catch(() => {});
+      await restartResume.capture(broker.interruptionSnapshot()).catch(() => {});
       await broker.dispose().catch(() => {});
       await harnesses.dispose().catch(() => {});
       // AFTER the broker: it is the thing still recording, and disarming the

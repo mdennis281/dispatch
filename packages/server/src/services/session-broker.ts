@@ -2963,6 +2963,37 @@ export class SessionBroker {
   }
 
   /**
+   * Every session whose turn is still in flight, with the messages it never got
+   * to deliver — the raw material for auto-resume after a deliberate restart.
+   *
+   * Taken BEFORE `dispose()` runs because both halves of it are destroyed by the
+   * teardown itself: `stop()` overwrites `status` with `done` and clears
+   * `outbox` unconditionally (that clear is why a message you sent seconds
+   * before an update simply vanished). Read afterwards, this returns nothing
+   * interesting and the whole feature is silently a no-op — hence the standalone
+   * method rather than deriving it from {@link list} at the call site.
+   *
+   * `queued` counts: it never started a turn, so its outbox is the entire thing
+   * the human is waiting on. `idle`/`done`/`failed`/`error` deliberately do not —
+   * those chats were not doing anything to continue.
+   */
+  interruptionSnapshot(): Array<{ chatId: string; status: ChatStatus; pending: string[] }> {
+    const out: Array<{ chatId: string; status: ChatStatus; pending: string[] }> = [];
+    for (const session of this.sessions.values()) {
+      if (!this.isActive(session) && session.status !== "queued") continue;
+      out.push({
+        chatId: session.chatId,
+        status: session.status,
+        // Text only. Images live as asset refs on rows already written to the
+        // transcript, and re-resolving them at boot would mean re-inlining
+        // base64 from disk for a message the model may not even need.
+        pending: session.outbox.map((item) => item.text).filter((t) => t.trim().length > 0),
+      });
+    }
+    return out;
+  }
+
+  /**
    * Every still-open permission request across all live sessions. A permission
    * card is synthesized client-side from the transient `permission-request`
    * event and is only persisted once resolved, so a (re)connecting client

@@ -438,6 +438,50 @@ export const UpdateAvailableEventSchema = z.object({
   status: UpdateStatusSchema,
 });
 
+/** One chat the boot pass acted on, as the banner lists it. */
+export const RestartResumeEntrySchema = z.object({
+  chatId: z.string(),
+  title: z.string(),
+  projectId: z.string(),
+  /** What it was doing when the server stopped. */
+  was: z.enum(["running", "waiting", "awaiting-input", "queued"]),
+});
+export type RestartResumeEntry = z.infer<typeof RestartResumeEntrySchema>;
+
+/**
+ * What this boot did about chats a deliberate restart cut short.
+ *
+ * Reports THIS process's startup, so it is deliberately not durable — a banner
+ * that outlived the boot it describes would be claiming something happened just
+ * now that happened two restarts ago. Null once dismissed or once there was
+ * nothing to say.
+ */
+export const RestartResumeStatusSchema = z.object({
+  /** When the boot pass ran, epoch ms. */
+  at: z.number().int(),
+  /**
+   * Whether the build changed across the restart. Derived by comparing the sha
+   * recorded at shutdown against the running payload's, so it is right for
+   * `pnpm app:upgrade` and the in-app installer alike, and honestly says
+   * `restart` on a source checkout that has no sha either side.
+   */
+  cause: z.enum(["update", "restart"]),
+  /** Chats continued automatically — what the undo button takes back. */
+  resumed: z.array(RestartResumeEntrySchema),
+  /** Chats left alone because they were blocked on a human. */
+  needsInput: z.array(RestartResumeEntrySchema),
+});
+export type RestartResumeStatus = z.infer<typeof RestartResumeStatusSchema>;
+
+/**
+ * The boot pass finished, or its banner was dismissed/undone. Global (no
+ * chatId): it is a statement about the restart, not about one chat.
+ */
+export const RestartResumeEventSchema = z.object({
+  type: z.literal("restart-resume"),
+  status: RestartResumeStatusSchema.nullable(),
+});
+
 /** A transient toast/notice. */
 export const NoticeEventSchema = z.object({
   type: z.literal("notice"),
@@ -499,6 +543,7 @@ export const WsServerEventSchema = z.discriminatedUnion("type", [
   MemoryDeletedEventSchema,
   UsageUpdateEventSchema,
   UpdateAvailableEventSchema,
+  RestartResumeEventSchema,
   NoticeEventSchema,
   ErrorEventSchema,
   ServerShutdownEventSchema,
