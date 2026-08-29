@@ -133,6 +133,15 @@ export function registerChatRoutes(app: FastifyInstance): void {
         : null;
       await checkpoints.forget(id, owner?.repoPath).catch(() => {});
       await store.deleteChat(id);
+      // Swept AGAIN, after the rows are gone. `forget` takes the per-chat lock,
+      // so the first call already waited out any auto-checkpoint snapshot that
+      // was mid-flight — but one that acquired the lock only after that call
+      // released it writes its ref into a chat whose rows `deleteChat` has just
+      // dropped, which is exactly the orphan nothing else can ever collect. The
+      // second sweep costs one `for-each-ref` and finds nothing in the normal
+      // case; it works off `repoPath` because the rows that named the worktrees
+      // no longer exist.
+      await checkpoints.forget(id, owner?.repoPath).catch(() => {});
       // Broadcast the deletion so EVERY client drops the chat (a second tab has no
       // other signal; the initiator's local purge only cleans itself).
       bus.publish({ type: "chat-deleted", chatId: id, projectId: existing?.projectId });

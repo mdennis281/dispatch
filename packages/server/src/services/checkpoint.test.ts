@@ -243,6 +243,19 @@ describe("checkpoint ref lifecycle", () => {
     await rm(parked, { recursive: true, force: true });
   });
 
+  it("forget() waits for an in-flight snapshot rather than racing it", async () => {
+    // The auto-checkpoint subscriber fires detached, and deleting a chat right
+    // after its last turn is a supported flow. Unlocked, the sweep reads the
+    // rows before `saveCheckpoint` writes one and lists refs before
+    // `update-ref` creates one, so the snapshot lands a ref immediately after
+    // the sweep passed — orphaned the moment `deleteChat` drops the rows.
+    const snapping = svc.snapshot({ chatId: "racy", messageId: "m1", worktreePath: repo });
+    const forgetting = svc.forget("racy", repo);
+    await Promise.all([snapping, forgetting]);
+
+    expect(await allRefs()).toEqual([]);
+  });
+
   it("forget() survives a worktree that is no longer on disk", async () => {
     // Worktrees get reaped. A chat whose recorded path is gone must still delete
     // its chat record rather than throwing out of the DELETE route.

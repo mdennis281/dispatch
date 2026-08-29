@@ -284,10 +284,18 @@ export class CheckpointService {
    * Retire rollback points past {@link maxPerChat}, oldest first.
    *
    * Driven from the STORE's rows rather than from `for-each-ref`, because the
-   * rows are what the UI offers a human — so this deletes the ref and the row
-   * together and can never leave a rollback button pointing at a ref that is
+   * rows are what the UI offers a human — so the ref and the row go together and
+   * a freshly loaded chat can never show a rollback button for a ref that is
    * gone. A row whose ref git no longer knows about is dropped anyway: it is
    * already dead, and keeping it would make the cap unreachable.
+   *
+   * That holds for the STORE, not for a client that loaded the chat earlier:
+   * `stores/checkpoints.ts` hydrates once and only ever appends, and nothing
+   * publishes a retirement, so an open page keeps rendering an anchor retired
+   * underneath it and clicking it 404s until the chat is reselected. Closing
+   * that needs a `checkpoint-retired` event and a `remove` on the client store —
+   * deliberately not in this change, which is about the refs. It takes a chat at
+   * the 200-turn cap with the page open to reach.
    *
    * Each ref is deleted in the worktree its checkpoint was TAKEN in, FALLING
    * BACK to the worktree of the snapshot that just landed. A chat's rows do not
@@ -338,6 +346,17 @@ export class CheckpointService {
    * deleting the chat.
    */
   async forget(chatId: string, fallbackCwd?: string): Promise<string[]> {
+    // The SAME per-chat lock `snapshot` and `rollback` take. The auto-checkpoint
+    // subscriber fires detached (`void (async () => …)()` in services/container)
+    // and `git add -A` on a real worktree is not instant, so deleting a chat
+    // moments after its last turn can otherwise sweep while a snapshot is still
+    // running — and the ref that snapshot goes on to write would be orphaned by
+    // the `deleteChat` that follows. Waiting here means the sweep sees it.
+    return this.locks.run(`cp:${chatId}`, () => this.sweepRefs(chatId, fallbackCwd));
+  }
+
+  /** {@link forget}'s body, minus the lock — the caller already holds it. */
+  private async sweepRefs(chatId: string, fallbackCwd?: string): Promise<string[]> {
     const all = await this.store.getCheckpoints(chatId).catch(() => []);
     const deleted: string[] = [];
     // One pass per distinct worktree. `update-ref -d` needs SOME checkout of the
@@ -356,8 +375,14 @@ export class CheckpointService {
       // have allocated a ref whose store write never landed (a crash between the
       // two), and those orphans are exactly what nothing else will ever collect.
       for (const ref of await this.listCheckpointRefs(chatId, cwd)) {
-        await this.gitTry(["update-ref", "-d", ref], cwd);
-        deleted.push(ref);
+        // `gitOk`, not `gitTry`: this is the return value's only claim, and
+        // `gitTry` reports "" for a successful `update-ref -d` and a failed one
+        // alike. Counting a ref that survived (a concurrent gc holding
+        // packed-refs.lock, a read-only ref store) as reclaimed would report the
+        // leak as fixed at the exact moment the rows recording where it lives
+        // are about to be dropped. A ref that fails here is simply not claimed —
+        // the next cwd in the loop re-lists and retries it.
+        if (await this.gitOk(["update-ref", "-d", ref], cwd)) deleted.push(ref);
       }
     }
     return deleted;
