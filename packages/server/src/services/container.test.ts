@@ -139,4 +139,69 @@ describe("createServices().start() resilience", () => {
 
     expect(setCap).toHaveBeenCalledWith(9);
   });
+
+  it("captures interruptions BEFORE the broker tears the sessions down", async () => {
+    // The whole feature rests on this ordering, and no unit test of the service
+    // can see it: `broker.dispose()` overwrites every status with `done` and
+    // empties every outbox, so a capture that runs one line later reads an empty
+    // snapshot and auto-resume is silently dead. Assert the sequence itself.
+    const order: string[] = [];
+    const capture = vi.fn(async (_live: unknown) => 1);
+    const services = createServices(
+      {
+        config: { maxActiveSessions: 4 } as unknown as ServerConfig,
+        store: stub<Store>(),
+        bus: new EventBus(),
+      },
+      {
+        broker: stub({
+          interruptionSnapshot: () => {
+            order.push("snapshot");
+            return [{ chatId: "c1", status: "running", pending: [{ text: "keep going" }] }];
+          },
+          dispose: async () => {
+            order.push("broker.dispose");
+          },
+        }),
+        restartResume: stub({
+          dispose: () => order.push("restartResume.dispose"),
+          drain: async () => {},
+          capture: async (live: unknown) => {
+            order.push("capture");
+            return capture(live);
+          },
+        }),
+        terminals: stub(),
+        memory: stub(),
+        projectConfig: stub(),
+        projectConfigArchive: stub(),
+        title: stub(),
+        checkpoints: stub(),
+        worktrees: stub(),
+        worktreeDetector: stub(),
+        worktreeReaper: stub(),
+        runner: stub(),
+        github: stub(),
+        notifier: stub(),
+        push: stub(),
+        attention: stub(),
+        usage: stub(),
+      },
+    );
+
+    await services.dispose();
+
+    expect(order).toEqual([
+      // Our own boot timer is disarmed first: a shutdown seconds after boot must
+      // not fire a resume into a server that is going away.
+      "restartResume.dispose",
+      "snapshot",
+      "capture",
+      "broker.dispose",
+    ]);
+    // And it received the live sessions, not an empty list.
+    expect(capture).toHaveBeenCalledWith([
+      { chatId: "c1", status: "running", pending: [{ text: "keep going" }] },
+    ]);
+  });
 });

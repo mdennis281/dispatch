@@ -40,6 +40,7 @@ import { useCheckpoints } from "./checkpoints.js";
 import { useNotices } from "./notices.js";
 import { useUsage } from "./usage.js";
 import { useUpdate } from "./update.js";
+import { useRestartResume } from "./restartResume.js";
 import { useModels } from "./models.js";
 import { useSettings } from "./settings.js";
 import { useHarnesses } from "./harnesses.js";
@@ -79,6 +80,7 @@ export { useNotices } from "./notices.js";
 export type { Toast, NoticeLevel } from "./notices.js";
 export { useUsage } from "./usage.js";
 export { useUpdate } from "./update.js";
+export { useRestartResume } from "./restartResume.js";
 export { useModels } from "./models.js";
 export { useSettings } from "./settings.js";
 export { useHarnesses } from "./harnesses.js";
@@ -338,6 +340,14 @@ export function applyServerEvent(evt: WsServerEvent): void {
       useUpdate.getState().set(evt.status);
       return;
 
+    case "restart-resume":
+      // The boot pass finished (or its banner was undone elsewhere). Pushed
+      // because a tab that was open across the restart reconnects BEFORE the
+      // resumes land — polling for it would mean either a wasted timer or a
+      // banner that never appears in the tab most likely to be watching.
+      useRestartResume.getState().set(evt.status);
+      return;
+
     case "notice":
       useNotices.getState().push({
         level: evt.level,
@@ -459,6 +469,9 @@ export async function hydrateFromServer(): Promise<boolean> {
   // server has no /api/update at all, and the surfaces all render nothing
   // until a status arrives. Live `update-available` events keep it fresh.
   void useUpdate.getState().load();
+  // What the last restart did to chats that were mid-turn. Same best-effort
+  // shape: an older server has no route and the card simply never renders.
+  void useRestartResume.getState().load();
   useChats.getState().hydrate(chats);
   useAttention.getState().hydrate(attention);
   // The badge is OS state that outlives the page: a launch that found nothing

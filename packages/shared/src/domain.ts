@@ -13,6 +13,7 @@ import {
   ShellTranscriptFilterSchema,
 } from "./common.js";
 import { ResumePlanSchema } from "./limits.js";
+import { PeerSenderSchema } from "./messages.js";
 import { WorkflowConfigSchema } from "./workflow.js";
 
 /* ------------------------------------------------------------------ subApps */
@@ -685,6 +686,66 @@ export function parseReviewingTarget(label: string | undefined): string | null {
   return m ? prRecordKey(m[2]!, Number(m[1])) : null;
 }
 
+/**
+ * A live turn cut short by a DELIBERATE server stop — an update, `app:stop`, or
+ * Settings → Stop.
+ *
+ * Written by the broker during `dispose()`, and that is the whole trick:
+ * `dispose()` runs ONLY on a graceful teardown, so the mere existence of this
+ * record proves the outage was one Dispatch performed on itself. A crash, an OOM
+ * or a `taskkill` runs no shutdown handler and therefore leaves no record —
+ * which is exactly the discrimination auto-resume needs, bought without any
+ * crash detection or heuristic that could misfire. The absent record is the
+ * signal.
+ *
+ * Consumed once at boot and then stamped `settledAt`, so a later restart never
+ * replays a continuation that already happened.
+ */
+export const ChatInterruptionSchema = z.object({
+  /** Epoch ms of the shutdown that cut the turn short. */
+  at: z.number().int(),
+  /** What the chat was doing at that moment (`stop()` then overwrites it with `done`). */
+  status: z.enum(["running", "waiting", "awaiting-input", "queued"]),
+  /**
+   * Build sha the interrupted server was running, when it had one.
+   *
+   * This is how "was it an update?" gets answered WITHOUT the shutdown path
+   * needing to know why it was asked to stop. Boot compares this against the
+   * running payload's own sha: a different one means the code changed under the
+   * chat, i.e. an update — whoever performed it. So it covers `pnpm app:upgrade`,
+   * which never tells the server anything, exactly as well as the in-app
+   * installer that does. Absent on a source checkout (no release manifest);
+   * those report as a plain restart.
+   */
+  sha: z.string().optional(),
+  /**
+   * Messages that were accepted but never reached the runtime. `stop()` clears
+   * the outbox unconditionally, so without capturing them here they are simply
+   * lost. Replayed as the continuation when present — a message somebody
+   * already sent is a better continuation than anything we could compose.
+   *
+   * Objects, not bare strings, because WHO sent it changes what replaying it
+   * means. A peer message re-sent without its {@link PeerSenderSchema} lands in
+   * the human's own speech bubble and reaches the model without the
+   * `<system-reminder>` naming the sending chat — and for a `chat_ask` it also
+   * drops the `askId`, leaving the resumed agent no way to answer.
+   */
+  pending: z
+    .array(
+      z.object({
+        text: z.string(),
+        /** The sending CHAT, when this came from `chat_send` / `chat_ask`. */
+        peer: PeerSenderSchema.optional(),
+      }),
+    )
+    .default([]),
+  /** Set once the boot pass has acted on this record. */
+  settledAt: z.number().int().optional(),
+  /** How the boot pass acted: continued it, or handed it back to the human. */
+  settledAs: z.enum(["resumed", "needs-input", "skipped", "failed"]).optional(),
+});
+export type ChatInterruption = z.infer<typeof ChatInterruptionSchema>;
+
 /** A chat: the crown-jewel session. May own many worktrees/PRs over its life. */
 export const ChatSchema = z.object({
   id: z.string(),
@@ -778,6 +839,12 @@ export const ChatSchema = z.object({
    * server restart re-arms the timer instead of silently dropping the chat.
    */
   resume: ResumePlanSchema.optional(),
+  /**
+   * The turn a deliberate server stop cut short, and how boot settled it.
+   * Absent means this chat has never been interrupted, or its record was
+   * consumed and pruned. See {@link ChatInterruptionSchema}.
+   */
+  interruption: ChatInterruptionSchema.optional(),
   /**
    * When the user last sent a message, epoch ms. Distinct from `updatedAt`,
    * which any bookkeeping write bumps — this one moves ONLY on real user input,

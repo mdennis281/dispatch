@@ -292,7 +292,9 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
 
         {stage !== "failed" && (
           <p className="mt-3.5 text-center text-xs text-faint">
-            Agents that were mid-run are stopped with the server; their transcripts are intact.
+            Agents that were mid-run are stopped with the server and pick themselves
+            back up a few seconds after it returns; their transcripts are intact
+            either way.
           </p>
         )}
       </div>

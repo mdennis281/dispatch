@@ -49,6 +49,7 @@ import {
   formatBytes,
 } from "./media-types.js";
 import { identifyMedia } from "./media-sniff.js";
+import type { ChatInterruption } from "@dispatch/shared";
 import type {
   Options,
   Query,
@@ -1112,6 +1113,13 @@ export interface PermissionResolution {
 }
 
 /** Read-only view of a session for callers/tests. */
+/** One mid-flight session, as {@link SessionBroker.interruptionSnapshot} reports it. */
+export interface InterruptionSnapshot {
+  chatId: string;
+  status: ChatStatus;
+  pending: NonNullable<ChatInterruption["pending"]>;
+}
+
 export interface SessionView {
   chatId: string;
   projectId: string;
@@ -1512,6 +1520,22 @@ interface OutboxItem {
    * pass to `chat_reply` and every ask running to its timeout.
    */
   peerContext?: string;
+  /**
+   * The sending chat, kept alongside `peerContext` so an item that outlives its
+   * live session can be REBUILT rather than replayed as anonymous text.
+   * `peerContext` is a rendered string; this is the structured original.
+   */
+  peer?: PeerSender;
+  /**
+   * Pushed by the BROKER, not by anybody: `/compact` and `/clear` ride the same
+   * outbox as real messages, and sit there for as long as a turn is running.
+   *
+   * Nothing may replay one. They are button presses, not turns — they never
+   * appear in the transcript, and re-sending `/clear` on resume would wipe the
+   * context of the session that resume just rebuilt, which is the one thing the
+   * whole feature exists to preserve.
+   */
+  control?: boolean;
   priority: MessagePriority;
 }
 
@@ -2077,6 +2101,7 @@ export class SessionBroker {
       imageSources,
       memoryContext: memory?.block,
       peerContext: o.peer ? peerReminder(o.peer) : undefined,
+      peer: o.peer,
       priority: o.priority ?? "next",
     });
     this.schedule(session);
@@ -2678,7 +2703,12 @@ export class SessionBroker {
     });
     if (session.harnessSession) void session.harnessSession.compact();
     else {
-      session.outbox.push({ id: this.genId(), text: "/compact", priority: "next" });
+      session.outbox.push({
+        id: this.genId(),
+        text: "/compact",
+        control: true,
+        priority: "next",
+      });
       this.schedule(session);
     }
   }
@@ -2755,7 +2785,12 @@ export class SessionBroker {
       void this.patchChat(chatId, { sessionId: undefined });
       this.onTurnEnd(session);
     } else {
-      session.outbox.push({ id: this.genId(), text: "/clear", priority: "next" });
+      session.outbox.push({
+        id: this.genId(),
+        text: "/clear",
+        control: true,
+        priority: "next",
+      });
       this.schedule(session);
     }
   }
@@ -2960,6 +2995,43 @@ export class SessionBroker {
 
   list(): SessionView[] {
     return [...this.sessions.values()].map((s) => this.view(s));
+  }
+
+  /**
+   * Every session whose turn is still in flight, with the messages it never got
+   * to deliver — the raw material for auto-resume after a deliberate restart.
+   *
+   * Taken BEFORE `dispose()` runs because both halves of it are destroyed by the
+   * teardown itself: `stop()` overwrites `status` with `done` and clears
+   * `outbox` unconditionally (that clear is why a message you sent seconds
+   * before an update simply vanished). Read afterwards, this returns nothing
+   * interesting and the whole feature is silently a no-op — hence the standalone
+   * method rather than deriving it from {@link list} at the call site.
+   *
+   * `queued` counts: it never started a turn, so its outbox is the entire thing
+   * the human is waiting on. `idle`/`done`/`failed`/`error` deliberately do not —
+   * those chats were not doing anything to continue.
+   */
+  interruptionSnapshot(): InterruptionSnapshot[] {
+    const out: InterruptionSnapshot[] = [];
+    for (const session of this.sessions.values()) {
+      if (!this.isActive(session) && session.status !== "queued") continue;
+      out.push({
+        chatId: session.chatId,
+        status: session.status,
+        pending: session.outbox
+          // `control` items are the broker's own `/compact` and `/clear`.
+          // Replaying one is never right, and replaying `/clear` actively
+          // destroys what the resume restored. Filtered HERE because only the
+          // broker knows which outbox entries it authored.
+          .filter((item) => !item.control && item.text.trim().length > 0)
+          // Text and sender only. Images live as asset refs on rows already in
+          // the transcript, and re-resolving them at boot would mean re-inlining
+          // base64 from disk for a message the model may not even need.
+          .map((item) => ({ text: item.text, ...(item.peer ? { peer: item.peer } : {}) })),
+      });
+    }
+    return out;
   }
 
   /**
@@ -4150,7 +4222,12 @@ export class SessionBroker {
           perChatLimit &&
           (session.lastContextTokens ?? 0) >= perChatLimit
         ) {
-          session.outbox.push({ id: this.genId(), text: "/compact", priority: "next" });
+          session.outbox.push({
+            id: this.genId(),
+            text: "/compact",
+            control: true,
+            priority: "next",
+          });
           this.flushOutbox(session);
         }
         // Chained turn buffered? Stay running; otherwise the turn is complete.

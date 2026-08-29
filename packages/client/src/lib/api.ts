@@ -61,6 +61,7 @@ import type {
   MetricSpanTotalsResponse,
   MetricTotalsResponse,
   UpdateStatus,
+  RestartResumeStatus,
   UpdateChannel,
   ContextUsage,
   ModelOption,
@@ -1067,6 +1068,14 @@ export const api = {
         "/api/update/install",
         tag ? { tag } : undefined,
       ),
+  },
+
+  /* what the last (deliberate) restart did to chats that were mid-turn */
+  restartResume: {
+    get: () => get<RestartResumeStatus | null>("/api/restart-resume"),
+    /** The undo: interrupt every turn the server continued on its own. */
+    stop: () => post<{ stopped: string[] }>("/api/restart-resume/stop"),
+    dismiss: () => post<{ ok: boolean }>("/api/restart-resume/dismiss"),
   },
 
   /* subscription usage (5h + weekly) for the header meter */

@@ -80,6 +80,12 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
     await rm(recoveryLock, { force: true });
     throw error;
   }
+  // Continue the chats the last DELIBERATE shutdown cut short. Armed here, not
+  // in `services.start()`, because each resume spawns an agent process tree and
+  // `upgrade.mjs`'s `/api/health` gate reads a boot that forks with the port
+  // closed as an update that hung. `listen` has resolved, so it is answering.
+  app.services.restartResume.restore();
+
   const address = app.server.address();
   const listeningPort = typeof address === "object" && address ? address.port : config.port;
   const managerHost = WILDCARD.has(config.host) ? "127.0.0.1" : config.host;
