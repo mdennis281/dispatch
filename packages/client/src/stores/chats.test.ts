@@ -433,9 +433,11 @@ describe("buildChatTree — spawned chats file under the chat that spawned them"
     const tree = buildChatTree(chats, {}, {});
 
     expect(shape(tree)).toEqual([["root", ["child"]]]);
+    // Ranked, not insertion-ordered: `great` is the newer of the two, and once
+    // it is a sibling rather than a descendant it ranks on its own clock.
     expect(tree[0]!.children[0]!.children.map((c) => c.chat.id)).toEqual([
-      "grandchild",
       "great",
+      "grandchild",
     ]);
   });
 
@@ -490,6 +492,30 @@ describe("buildChatTree — spawned chats file under the chat that spawned them"
     const chats = [chat("busy", "p1", 500), chat("stale", "p1", 10), spawned("s", "stale", 900)];
 
     expect(shape(buildChatTree(chats, {}, {}))).toEqual([["stale", ["s"]], ["busy", []]]);
+  });
+
+  it("ranks a nested branch by its newest clock, exactly like the roots", () => {
+    // The regression this exists for: while children were a flat list they
+    // arrived in the store's recency order, so a live reviewer was near the top
+    // of the fold by construction. Moved under its own chat it inherits that
+    // chat's position — and a reviewer running RIGHT NOW would sit at the bottom
+    // of the fold, under a sibling that has done nothing for a week.
+    const reviewer: Chat = {
+      ...chat("r", "p1", 900),
+      reviewOf: "o/r#7",
+      purpose: { kind: "pr:review" },
+    };
+    const chats = [
+      chat("root", "p1", 1000),
+      spawned("fresh", "root", 500),
+      spawned("stale", "root", 10),
+      reviewer,
+    ];
+    const tree = buildChatTree(chats, {}, {
+      "o/r#7": { key: "o/r#7", number: 7, chatId: "stale" } as PrRecord,
+    });
+
+    expect(shape(tree)).toEqual([["root", ["stale", "fresh"]]]);
   });
 
   it("folds a reviewer and a spawned chat into the same branch", () => {

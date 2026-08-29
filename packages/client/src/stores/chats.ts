@@ -363,13 +363,23 @@ function renderParentOf(
 export interface ChatBranch {
   chat: Chat;
   /**
-   * The chats filed DIRECTLY under this one, newest first, as branches of their
-   * own — a spawned chat's reviewers hang off the spawned chat, not off the
-   * top-level row, which is the whole point of the tree being a tree.
+   * The chats filed DIRECTLY under this one, as branches of their own — a
+   * spawned chat's reviewers hang off the spawned chat, not off the top-level
+   * row, which is the whole point of the tree being a tree.
+   *
+   * Ranked exactly like the roots: by the newest clock ANYWHERE in each branch,
+   * so a live reviewer lifts the chat it is reading to the top of the fold.
    */
   children: ChatBranch[];
   /**
-   * Every chat below this one at ANY depth, flat and newest first. Usually empty.
+   * Every chat below this one at ANY depth, flat. Usually empty.
+   *
+   * Pre-order: each level in the same rank order the rows are drawn in, a
+   * child's own descendants immediately after it. Deliberately NOT resorted
+   * into one global recency run — every reader is order-free (`branchRuntimeMs`,
+   * `branchProcessCount`, `branchChatIds`, `foldedChildrenLabel`,
+   * `childChatTitle`), and a promise nothing keeps is one the next caller
+   * relies on.
    *
    * Kept beside `children` rather than derived at each call site because every
    * roll-up the row does is over the whole branch and not over one level: the
@@ -416,8 +426,18 @@ export function buildChatTree(
   // and `renderParentOf` returns an ANCESTOR, so a child can never also be an
   // ancestor of its own parent — the cycle that would need guarding is already
   // resolved to two roots by `ancestorPath`.
+  //
+  // EVERY level is ranked, not just the roots. While children were a flat list
+  // they arrived in the store's own recency order and a live reviewer was near
+  // the top of the fold by construction; with the reviewer moved under its
+  // chat, that ordering has to be rebuilt the same way the roots' is, or a
+  // reviewer running right now sits at the bottom of the fold under a sibling
+  // that has done nothing for a week. Same failure this function's docblock
+  // names, one level down.
   const branch = (chat: Chat): ChatBranch => {
-    const kids = (children.get(chat.id) ?? []).map(branch);
+    const kids = (children.get(chat.id) ?? [])
+      .map(branch)
+      .sort((a, b) => rankBranch(b, at) - rankBranch(a, at));
     return {
       chat,
       children: kids,
