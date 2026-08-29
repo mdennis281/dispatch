@@ -30,7 +30,8 @@ function isTruthyFlag(v: string | undefined): boolean {
 
 export function registerChatRoutes(app: FastifyInstance): void {
   const { store, bus } = app.cm;
-  const { broker, attention, chatProcesses, terminals, processes } = app.services;
+  const { broker, attention, chatProcesses, terminals, processes, checkpoints } =
+    app.services;
   const reapResidual = async (chatId: string): Promise<void> => {
     const residual = await chatProcesses.pidsFor(chatId);
     if (residual.length) await processes.killPids(residual);
@@ -116,7 +117,31 @@ export function registerChatRoutes(app: FastifyInstance): void {
       for (const attId of attention.clearChat(id)) {
         bus.publish({ type: "attention-resolve", id: attId, chatId: id });
       }
+      // BEFORE `deleteChat`, which drops the checkpoint rows — and those rows are
+      // the only record of which worktrees this chat's refs live in. Without this
+      // the refs (and the commits + trees they pin) stay in the user's repository
+      // permanently: unreachable from any branch, but still referenced, so `git
+      // gc` packs them instead of pruning and nothing ever reports them.
+      //
+      // The project's PRIMARY checkout is passed as the fallback and is not
+      // optional: WorktreeReaper removes the worktree of a chat whose branch has
+      // landed and leaves the chat behind, so for any chat deleted a while after
+      // its work merged, every path its rows name is already gone. Refs are
+      // shared repo-wide, so the primary checkout can always delete them.
+      const owner = existing?.projectId
+        ? await store.getProject(existing.projectId).catch(() => null)
+        : null;
+      await checkpoints.forget(id, owner?.repoPath).catch(() => {});
       await store.deleteChat(id);
+      // Swept AGAIN, after the rows are gone. `forget` takes the per-chat lock,
+      // so the first call already waited out any auto-checkpoint snapshot that
+      // was mid-flight — but one that acquired the lock only after that call
+      // released it writes its ref into a chat whose rows `deleteChat` has just
+      // dropped, which is exactly the orphan nothing else can ever collect. The
+      // second sweep costs one `for-each-ref` and finds nothing in the normal
+      // case; it works off `repoPath` because the rows that named the worktrees
+      // no longer exist.
+      await checkpoints.forget(id, owner?.repoPath).catch(() => {});
       // Broadcast the deletion so EVERY client drops the chat (a second tab has no
       // other signal; the initiator's local purge only cleans itself).
       bus.publish({ type: "chat-deleted", chatId: id, projectId: existing?.projectId });

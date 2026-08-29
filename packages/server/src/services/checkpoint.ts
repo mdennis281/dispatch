@@ -25,6 +25,7 @@
  */
 import { execa } from "execa";
 import { rm, rmdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -36,12 +37,31 @@ import { KeyedMutex } from "../store/fsq.js";
 /** Hidden ref namespace holding per-chat checkpoint commits. */
 export const CHECKPOINT_REF_NS = "refs/cm/checkpoints";
 
+/**
+ * Rollback points kept per chat. Older ones lose their ref and their row.
+ *
+ * A checkpoint ref pins a whole commit — tree included — inside the USER'S
+ * repository, and because the ref stays reachable `git gc` packs those objects
+ * rather than pruning them. So they are permanent, they are invisible to any
+ * accounting of the app's own data dir, and nothing bounded them: one repo here
+ * carried 4,057 refs across 124 chats, and 81 MiB of its 97 MiB pack was objects
+ * reachable from nothing but `refs/cm/checkpoints`.
+ *
+ * 200 is chosen to be far past what a human scrolls back through while still
+ * bounding the tail. It is a per-chat cap rather than a global one because the
+ * refs are namespaced per chat and a busy chat should not evict a quiet one's
+ * history.
+ */
+export const MAX_CHECKPOINTS_PER_CHAT = 200;
+
 /** Dependencies injected into the service (store + bus; `gitBin` for tests). */
 export interface CheckpointServiceDeps {
   store: Store;
   bus: EventBus;
   /** git executable (default "git"). */
   gitBin?: string;
+  /** Rollback points kept per chat. Defaults to {@link MAX_CHECKPOINTS_PER_CHAT}. */
+  maxPerChat?: number;
 }
 
 /** Everything needed to snapshot the worktree for one turn. */
@@ -103,10 +123,15 @@ export class CheckpointService {
   /** Serialize snapshot/rollback per chat so ref numbering never races. */
   private readonly locks = new KeyedMutex();
 
+  private readonly maxPerChat: number;
+
   constructor(deps: CheckpointServiceDeps) {
     this.store = deps.store;
     this.bus = deps.bus;
     this.gitBin = deps.gitBin ?? "git";
+    // Floor of 1: a zero or negative cap would delete the checkpoint the caller
+    // just took, which is never what a misconfiguration should mean.
+    this.maxPerChat = Math.max(1, deps.maxPerChat ?? MAX_CHECKPOINTS_PER_CHAT);
   }
 
   /* --------------------------------------------------------------- git glue */
@@ -133,6 +158,44 @@ export class CheckpointService {
       reject: false,
     });
     return res.exitCode === 0 ? res.stdout : "";
+  }
+
+  /**
+   * Run git, reporting whether it actually RAN and succeeded.
+   *
+   * {@link gitTry} cannot answer that: it returns `""` both for a command that
+   * printed nothing and for one that never started. `update-ref -d` prints
+   * nothing on SUCCESS, so the two are indistinguishable exactly where the
+   * difference decides whether a ref was reclaimed or silently stranded. A
+   * missing cwd doesn't even reach git — execa resolves with no exit code at
+   * all — which this reports as failure along with a non-zero exit.
+   */
+  private async gitOk(args: string[], cwd: string): Promise<boolean> {
+    const res = await execa(this.gitBin, [...GIT_CONFIG_ARGS, ...args], {
+      cwd,
+      env: { ...GIT_ENV },
+      stripFinalNewline: true,
+      reject: false,
+    });
+    return res.exitCode === 0;
+  }
+
+  /**
+   * Delete one ref, trying each candidate checkout until one works.
+   *
+   * Checkpoint refs live in the repository's SHARED ref store, so any live
+   * checkout of the right repo can delete any of them — which is what makes a
+   * fallback meaningful rather than a guess. The recorded worktree is tried
+   * first because it is known to be the right repo; the fallback exists because
+   * that directory is routinely gone (WorktreeReaper removes the worktree of a
+   * chat whose branch has landed and leaves the chat, and its rows, behind).
+   */
+  private async deleteRef(ref: string, cwds: Array<string | undefined>): Promise<boolean> {
+    for (const cwd of cwds) {
+      if (!cwd) continue;
+      if (await this.gitOk(["update-ref", "-d", ref], cwd)) return true;
+    }
+    return false;
   }
 
   /** Allocate a fresh, absolute temp index path (git creates the file). */
@@ -207,9 +270,122 @@ export class CheckpointService {
         createdAt: Date.now(),
       };
       const saved = await this.store.saveCheckpoint(cp);
+      // AFTER the save, so the cap counts the checkpoint we just took and the
+      // window slides by one instead of the newest row racing its own eviction.
+      // Best-effort: a repo that will not let go of an old ref is a disk-space
+      // problem, and it must not fail the snapshot that already landed.
+      await this.enforceCap(chatId, worktreePath).catch(() => {});
       this.bus.publish({ type: "checkpoint", chatId, messageId, ref });
       return saved;
     });
+  }
+
+  /**
+   * Retire rollback points past {@link maxPerChat}, oldest first.
+   *
+   * Driven from the STORE's rows rather than from `for-each-ref`, because the
+   * rows are what the UI offers a human — so the ref and the row go together and
+   * a freshly loaded chat can never show a rollback button for a ref that is
+   * gone. A row whose ref git no longer knows about is dropped anyway: it is
+   * already dead, and keeping it would make the cap unreachable.
+   *
+   * That holds for the STORE, not for a client that loaded the chat earlier:
+   * `stores/checkpoints.ts` hydrates once and only ever appends, and nothing
+   * publishes a retirement, so an open page keeps rendering an anchor retired
+   * underneath it and clicking it 404s until the chat is reselected. Closing
+   * that needs a `checkpoint-retired` event and a `remove` on the client store —
+   * deliberately not in this change, which is about the refs. It takes a chat at
+   * the 200-turn cap with the page open to reach.
+   *
+   * Each ref is deleted in the worktree its checkpoint was TAKEN in, FALLING
+   * BACK to the worktree of the snapshot that just landed. A chat's rows do not
+   * all name the same directory — chats move between checkouts and the reaper
+   * removes the old one underneath them — and testing `cp.worktreePath ||
+   * fallback` only covers an EMPTY path, not a dead one. Without the retry a
+   * retired row whose worktree is gone drops the row and strands the ref, so
+   * the cap would bound the rows and not the refs: the opposite of the point.
+   *
+   * The row goes whether or not the ref did. `fallbackCwd` is the worktree
+   * `snapshot` just ran four git commands in, so a failure of both means the
+   * repository is unreachable — and keeping rows for refs we can never reach
+   * would let the cap stop bounding anything at all.
+   */
+  private async enforceCap(chatId: string, fallbackCwd: string): Promise<void> {
+    const all = await this.store.getCheckpoints(chatId); // ascending, oldest first
+    const excess = all.length - this.maxPerChat;
+    if (excess <= 0) return;
+    for (const cp of all.slice(0, excess)) {
+      await this.deleteRef(cp.ref, [cp.worktreePath, fallbackCwd]);
+      await this.store.deleteCheckpoint(chatId, cp.messageId);
+    }
+  }
+
+  /**
+   * Drop every checkpoint ref a chat owns. Call BEFORE `store.deleteChat`.
+   *
+   * Deleting a chat used to drop its `checkpoint` rows and nothing else, which
+   * left the refs — and so the commits and trees they pin — in the user's
+   * repository forever, with the only record of where they came from gone. They
+   * are unreachable from any branch but not unreferenced, so no amount of
+   * `git gc` reclaims them and no tool reports them.
+   *
+   * Ordering is the whole point: the rows are the only map from a chat to the
+   * worktrees its refs live in, so this must run while they still exist.
+   *
+   * PASS `fallbackCwd` — the project's primary checkout. It is not an optional
+   * nicety: WorktreeReaper removes the worktree of any chat whose branch has
+   * landed while leaving the chat and its rows intact, so for a chat deleted
+   * some time after its work merged, EVERY recorded path is already gone. With
+   * only those to go on this finds nothing, returns empty, and the refs it
+   * exists to reclaim stay in the repository — after which `deleteChat` drops
+   * the rows and the last record of where they were goes too. Refs are shared
+   * repo-wide, so the primary checkout can always delete them.
+   *
+   * Returns the refs actually deleted. Best-effort — a repo that has itself been
+   * moved or removed simply has nothing to clean, and that must not block
+   * deleting the chat.
+   */
+  async forget(chatId: string, fallbackCwd?: string): Promise<string[]> {
+    // The SAME per-chat lock `snapshot` and `rollback` take. The auto-checkpoint
+    // subscriber fires detached (`void (async () => …)()` in services/container)
+    // and `git add -A` on a real worktree is not instant, so deleting a chat
+    // moments after its last turn can otherwise sweep while a snapshot is still
+    // running — and the ref that snapshot goes on to write would be orphaned by
+    // the `deleteChat` that follows. Waiting here means the sweep sees it.
+    return this.locks.run(`cp:${chatId}`, () => this.sweepRefs(chatId, fallbackCwd));
+  }
+
+  /** {@link forget}'s body, minus the lock — the caller already holds it. */
+  private async sweepRefs(chatId: string, fallbackCwd?: string): Promise<string[]> {
+    const all = await this.store.getCheckpoints(chatId).catch(() => []);
+    const deleted: string[] = [];
+    // One pass per distinct worktree. `update-ref -d` needs SOME checkout of the
+    // repo to run in, and a chat that moved worktrees mid-life has refs recorded
+    // against each — deduped so a chat with 200 checkpoints in one worktree
+    // doesn't spawn 200 identical prefix sweeps, and filtered to directories
+    // that still exist so a reaped worktree costs nothing instead of a git spawn
+    // per entry that can only fail.
+    const cwds = new Set<string>();
+    for (const cp of all) {
+      if (cp.worktreePath && existsSync(cp.worktreePath)) cwds.add(cp.worktreePath);
+    }
+    if (fallbackCwd && existsSync(fallbackCwd)) cwds.add(fallbackCwd);
+    for (const cwd of cwds) {
+      // Re-listed per worktree rather than trusting the rows: `nextIndex` can
+      // have allocated a ref whose store write never landed (a crash between the
+      // two), and those orphans are exactly what nothing else will ever collect.
+      for (const ref of await this.listCheckpointRefs(chatId, cwd)) {
+        // `gitOk`, not `gitTry`: this is the return value's only claim, and
+        // `gitTry` reports "" for a successful `update-ref -d` and a failed one
+        // alike. Counting a ref that survived (a concurrent gc holding
+        // packed-refs.lock, a read-only ref store) as reclaimed would report the
+        // leak as fixed at the exact moment the rows recording where it lives
+        // are about to be dropped. A ref that fails here is simply not claimed —
+        // the next cwd in the loop re-lists and retries it.
+        if (await this.gitOk(["update-ref", "-d", ref], cwd)) deleted.push(ref);
+      }
+    }
+    return deleted;
   }
 
   /* ---------------------------------------------------------------- rollback */
