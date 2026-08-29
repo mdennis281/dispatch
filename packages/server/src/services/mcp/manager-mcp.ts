@@ -4948,20 +4948,29 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         // Not flagged as an error, for the same reason the decline below isn't:
         // "no" is a legitimate answer, and an error pushes the model into
         // retrying the exact call it was just refused.
+        // `maxDepth: 0` is a different refusal and must not be told to work
+        // around itself: `detached: true` is the right advice when the cap is
+        // about DEPTH, and exactly the wrong advice for a project that has
+        // asked for no agent-started chats at all.
+        const banned = nesting.maxDepth <= 0;
         return textResult(
-          `Not spawned — this chat is itself ${nesting.depth} level${
-            nesting.depth === 1 ? "" : "s"
-          } deep in ${project.name}'s sidebar, and this project nests spawned chats ` +
-            `at most ${nesting.maxDepth} deep. Do NOT retry it.\n` +
-            "A chat at this depth can still pick up PR reviewers — those are filed " +
-            "underneath it — but it cannot start chats of its own. Carry the work here, " +
-            "or hand it back to the chat that spawned you. If it is genuinely " +
-            "independent of this one, spawn it with detached: true and it starts at the " +
-            "top level instead of under you.\n" +
+          (banned
+            ? `Not spawned — ${project.name} does not allow chats to start other ` +
+              "chats at all. Do NOT retry it, with detached or otherwise.\n" +
+              "Carry the work here, or ask the human to open the chat themselves.\n"
+            : `Not spawned — this chat is itself ${nesting.depth} level${
+                nesting.depth === 1 ? "" : "s"
+              } deep in ${project.name}'s sidebar, and this project nests spawned ` +
+              `chats at most ${nesting.maxDepth} deep. Do NOT retry it.\n` +
+              "A chat at this depth can still pick up PR reviewers — those are filed " +
+              "underneath it — but it cannot start chats of its own. Carry the work " +
+              "here, or hand it back to the chat that spawned you. If it is genuinely " +
+              "independent of this one, spawn it with detached: true and it starts at " +
+              "the top level instead of under you.\n") +
             "(The human sets this per project: spawnChat.maxDepth in .dispatch/project.yaml.)\n" +
             JSON.stringify({
               approved: false,
-              reason: "nesting-depth",
+              reason: banned ? "spawning-disabled" : "nesting-depth",
               depth: nesting.depth,
               maxDepth: nesting.maxDepth,
               projectId: project.id,

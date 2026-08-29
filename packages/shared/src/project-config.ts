@@ -306,7 +306,13 @@ export const ManifestSpawnChatSchema = z.object({
    *
    * A NUMBER rather than a boolean because the constraint is soft on purpose:
    * deeper trees are a thing this project wants later, and raising this is the
-   * whole of the opt-in. `0` forbids spawning here entirely.
+   * whole of the opt-in.
+   *
+   * `0` is the one value that stops being about depth: it forbids `spawn_chat`
+   * here outright, `detached` included. A project setting it is not asking for
+   * flatter trees — it is asking for no agent-started chats — so the exemptions
+   * that make a detached or cross-project spawn free at every other value are
+   * checked BEHIND it (see `checkSpawnNesting`).
    */
   maxDepth: z.number().int().min(0).max(10).optional(),
 });

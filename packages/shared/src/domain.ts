@@ -659,6 +659,32 @@ export function parseSpawnedParent(label: string | undefined): string | null {
   return m?.[1] ?? null;
 }
 
+/**
+ * A reviewer chat's `purpose.label` — the sidebar sentence naming the pull
+ * request it was spawned to read.
+ *
+ * Here, beside the spawned pair above, for the reason that pair documents: the
+ * chats already on disk when `Chat.reviewOf` shipped carry their target ONLY in
+ * this sentence, so a writer and a reader in different packages have to agree
+ * about it forever. Three copies of the pattern (the task label, the sidebar,
+ * the nesting walk) would agree by luck and drift in silence.
+ */
+export function reviewingPurposeLabel(repo: string, number: number): string {
+  return `Reviewing PR #${number} in ${repo}`;
+}
+
+/**
+ * The {@link PrRecordSchema} key in a {@link reviewingPurposeLabel}, or null.
+ *
+ * Null for the label a review with no PR context gets ("Reviewing a pull
+ * request") — a reviewer that cannot name its target is still a reviewer, and
+ * saying so is the honest answer rather than a guess.
+ */
+export function parseReviewingTarget(label: string | undefined): string | null {
+  const m = /^Reviewing PR #(\d+) in (\S+)$/.exec(label ?? "");
+  return m ? prRecordKey(m[2]!, Number(m[1])) : null;
+}
+
 /** A chat: the crown-jewel session. May own many worktrees/PRs over its life. */
 export const ChatSchema = z.object({
   id: z.string(),

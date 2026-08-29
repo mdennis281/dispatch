@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest";
 import type { Chat } from "@dispatch/shared";
-import { spawnedPurposeLabel } from "@dispatch/shared";
+import { reviewingPurposeLabel, spawnedPurposeLabel } from "@dispatch/shared";
 import { chatNestingDepth, type NestingLookup } from "./chat-nesting.js";
 
 const chat = (id: string, extra: Partial<Chat> = {}): Chat =>
   ({
     id,
-    projectId: "p1",
+    projectId: extra.projectId ?? "p1",
     title: id,
     modeId: "default",
     effort: "medium",
@@ -55,8 +55,10 @@ describe("chatNestingDepth", () => {
   });
 
   it("reads a pre-`reviewOf` reviewer's target back out of its purpose label", async () => {
+    // Never spelled out here: the sentence has one writer and one parser, both
+    // in shared, and a third literal in a test is how `detached` broke before.
     const legacy = chat("legacy", {
-      purpose: { kind: "pr:review", label: "Reviewing PR #139 in mdennis281/dispatch" },
+      purpose: { kind: "pr:review", label: reviewingPurposeLabel("mdennis281/dispatch", 139) },
     });
     const depth = await chatNestingDepth(
       "legacy",
@@ -64,6 +66,44 @@ describe("chatNestingDepth", () => {
     );
 
     expect(depth).toBe(1);
+  });
+
+  it("reads a pre-`parentChatId` chat's parent back out of its purpose label", async () => {
+    // The edge the sidebar reads for these chats (`spawnParentId`). Counting
+    // them 0 would let one spawn a chat the sidebar then draws at depth 2 —
+    // exactly what the cap exists to prevent.
+    const legacy = chat("legacy", {
+      purpose: { kind: "spawned", label: spawnedPurposeLabel("root") },
+    });
+
+    expect(await chatNestingDepth("legacy", lookup([chat("root"), legacy]))).toBe(1);
+  });
+
+  it("refuses to read a parent out of a DETACHED chat's label", async () => {
+    // `detached` says it wants no parent by omitting `parentChatId`, which is
+    // indistinguishable from a pre-field chat — so the label it gets is written
+    // in a shape the parser declines. Counting it 1 would make the flag change
+    // nothing but which field the id was read from.
+    const free = chat("free", {
+      purpose: { kind: "spawned", label: spawnedPurposeLabel("root", true) },
+    });
+
+    expect(await chatNestingDepth("free", lookup([chat("root"), free]))).toBe(0);
+  });
+
+  it("stops at a parent in another project, which no sidebar draws", async () => {
+    // A non-detached cross-project spawn still WRITES `parentChatId`, but
+    // `buildChatTree` only sees one project's chats, so that parent fails its
+    // `present` check and the row is a top-level row in the target project.
+    // Following the edge would refuse a spawn from a chat that is visibly a root.
+    const chats = [
+      chat("a-root", { projectId: "pA" }),
+      chat("b-child", { projectId: "pB", parentChatId: "a-root" }),
+      chat("b-grand", { projectId: "pB", parentChatId: "b-child" }),
+    ];
+
+    expect(await chatNestingDepth("b-child", lookup(chats))).toBe(0);
+    expect(await chatNestingDepth("b-grand", lookup(chats))).toBe(1);
   });
 
   it("stops at a parent that is gone rather than failing", async () => {

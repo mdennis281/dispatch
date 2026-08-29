@@ -13,6 +13,7 @@
  * or a running broker — the same split `chat-messenger`'s limits use.
  */
 import type { Chat } from "@dispatch/shared";
+import { parseReviewingTarget, parseSpawnedParent } from "@dispatch/shared";
 
 /** The two edges a parent can be reached by, as this module needs them. */
 export interface NestingLookup {
@@ -35,20 +36,29 @@ const WALK_LIMIT = 32;
 
 /**
  * The pull request a reviewer chat was pointed at, mirroring the client's
- * `reviewTargetKey`.
- *
- * The legacy label parse is here for the same reason it is there: reviewers
- * spawned before `reviewOf` existed carry their target only in the sentence
- * `taskLabel` wrote for the sidebar, and those chats are on disk. The two
- * copies are allowed to be copies — this one only has to agree about which
- * chats have a parent at all, and a reviewer whose label no longer parses is
- * treated as parentless by BOTH, which is the same answer.
+ * `reviewTargetKey` — including its fallback for reviewers spawned before
+ * `Chat.reviewOf` existed, whose only trace of a target is the sentence written
+ * for the sidebar. Those chats are on disk, and a walk that can't see their
+ * edge counts them a level shallower than the sidebar draws them.
  */
 function reviewTargetKey(chat: Chat): string | null {
   if (chat.reviewOf) return chat.reviewOf;
   if (chat.purpose?.kind !== "pr:review") return null;
-  const m = /^Reviewing PR #(\d+) in (\S+)$/.exec(chat.purpose.label ?? "");
-  return m ? `${m[2]}#${m[1]}` : null;
+  return parseReviewingTarget(chat.purpose.label);
+}
+
+/**
+ * The chat that spawned this one, mirroring the client's `spawnParentId`.
+ *
+ * `parentChatId` is the record; the label parse behind it covers the chats
+ * spawned before that field existed, and declines the DETACHED form — which
+ * arrives with no `parentChatId` on purpose, and which `spawnedPurposeLabel`
+ * deliberately writes in a shape the parser refuses.
+ */
+function spawnParentId(chat: Chat): string | null {
+  if (chat.parentChatId) return chat.parentChatId;
+  if (chat.purpose?.kind !== "spawned") return null;
+  return parseSpawnedParent(chat.purpose.label);
 }
 
 /**
@@ -60,6 +70,14 @@ function reviewTargetKey(chat: Chat): string | null {
  * is the one counted from wherever the chain still reaches. A cycle likewise
  * stops, because the alternative is a promise that never settles inside a tool
  * call the human is waiting on.
+ *
+ * A parent in ANOTHER PROJECT ends it too, and that is not a shortcut. The
+ * sidebar's walk only ever sees one project's chats (`buildChatTree` is handed
+ * `useProjectChats`), so a cross-project parent fails its `present` check and
+ * the row draws at the top level — while the edge itself is still written to
+ * the store, because only `detached` omits it. Following it here would count a
+ * depth no sidebar renders and refuse a spawn from a chat that is visibly a
+ * root.
  */
 export async function chatNestingDepth(chatId: string, lookup: NestingLookup): Promise<number> {
   const seen = new Set<string>([chatId]);
@@ -67,11 +85,11 @@ export async function chatNestingDepth(chatId: string, lookup: NestingLookup): P
   let depth = 0;
   while (cursor && depth < WALK_LIMIT) {
     const key = reviewTargetKey(cursor);
-    const parentId = key ? await lookup.prAuthorChatId(key) : (cursor.parentChatId ?? null);
+    const parentId = key ? await lookup.prAuthorChatId(key) : spawnParentId(cursor);
     if (!parentId || seen.has(parentId)) break;
     seen.add(parentId);
     const parent = await lookup.getChat(parentId);
-    if (!parent) break;
+    if (!parent || parent.projectId !== cursor.projectId) break;
     depth += 1;
     cursor = parent;
   }

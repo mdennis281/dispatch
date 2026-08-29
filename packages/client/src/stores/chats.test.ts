@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { spawnedPurposeLabel, type Chat, type PrRecord } from "@dispatch/shared";
+import {
+  reviewingPurposeLabel,
+  spawnedPurposeLabel,
+  type Chat,
+  type PrRecord,
+} from "@dispatch/shared";
 import {
   useChats,
   chatsForProject,
@@ -259,7 +264,7 @@ describe("buildChatTree — reviewers file under the chat that opened the PR", (
   it("reads a pre-`reviewOf` reviewer's target back out of its purpose label", () => {
     const legacy: Chat = {
       ...chat("legacy", "p1", 5),
-      purpose: { kind: "pr:review", label: "Reviewing PR #139 in mdennis281/dispatch" },
+      purpose: { kind: "pr:review", label: reviewingPurposeLabel("mdennis281/dispatch", 139) },
     };
     const tree = buildChatTree(
       [chat("author", "p1", 100), legacy],

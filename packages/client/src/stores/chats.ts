@@ -8,7 +8,7 @@ import type {
   PrRecord,
   WorkflowExemption,
 } from "@dispatch/shared";
-import { isPrSettledIdle, parseSpawnedParent } from "@dispatch/shared";
+import { isPrSettledIdle, parseReviewingTarget, parseSpawnedParent } from "@dispatch/shared";
 import { clearDraft } from "../lib/composerDrafts.js";
 import { usePrs } from "./prs.js";
 
@@ -230,8 +230,7 @@ export function useProjectChats(projectId: string | null): Chat[] {
 export function reviewTargetKey(chat: Chat): string | null {
   if (chat.reviewOf) return chat.reviewOf;
   if (chat.purpose?.kind !== "pr:review") return null;
-  const m = /^Reviewing PR #(\d+) in (\S+)$/.exec(chat.purpose.label ?? "");
-  return m ? `${m[2]}#${m[1]}` : null;
+  return parseReviewingTarget(chat.purpose.label);
 }
 
 /**

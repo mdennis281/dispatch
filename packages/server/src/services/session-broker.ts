@@ -4708,6 +4708,12 @@ export class SessionBroker {
    * - A spawn into ANOTHER project lands in a chat list its parent isn't in, so
    *   there is no row there to fold under — the same reason `SpawnChatRequest`
    *   documents a cross-project spawn as detaching on its own.
+   *
+   * `maxDepth: 0` is checked AHEAD of both, and is the one case where this stops
+   * being about depth. A project that authors it is not asking for flatter
+   * trees, it is asking for no agent-started chats at all — and leaving the two
+   * exemptions in front of it would have made `detached: true` an unlimited way
+   * round the setting, which the refusal message was even about to suggest.
    */
   async checkSpawnNesting(
     chatId: string,
@@ -4716,6 +4722,7 @@ export class SessionBroker {
   ): Promise<SpawnNestingVerdict> {
     const maxDepth =
       this.projectConfig?.getSpawnMaxDepth?.(target.id) ?? DEFAULT_SPAWN_MAX_DEPTH;
+    if (maxDepth <= 0) return { allowed: false, depth: 0, maxDepth: 0 };
     const chat = await this.store.getChat(chatId).catch(() => null);
     if (request.detached || !chat || chat.projectId !== target.id) {
       return { allowed: true, depth: 0, maxDepth };
