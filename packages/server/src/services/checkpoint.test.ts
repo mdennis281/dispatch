@@ -194,6 +194,55 @@ describe("checkpoint ref lifecycle", () => {
     expect(await allRefs()).toEqual([]);
   });
 
+  it("forget() reclaims refs when EVERY recorded worktree has been reaped", async () => {
+    // The production shape, and the one the first version of this PR got wrong.
+    // WorktreeReaper removes the worktree of a chat whose branch has landed and
+    // leaves the chat and its rows behind, so a chat deleted a while after its
+    // work merged names only dead directories. Removing a worktree never touches
+    // refs, and they live in the primary repo's SHARED ref store — so the refs
+    // are still there to reclaim, and only a live fallback can reach them.
+    // Without one this found nothing and the 81 MiB stayed put.
+    const parked = await mkdtemp(join(tmpdir(), "cm-cp-reaped-"));
+    const wt = join(parked, "wt");
+    await git(["worktree", "add", wt, "-b", "landed"]);
+    await svc.snapshot({ chatId: "reapedChat", messageId: "m1", worktreePath: wt });
+    await svc.snapshot({ chatId: "reapedChat", messageId: "m2", worktreePath: wt });
+    await git(["worktree", "remove", "--force", wt]);
+    expect(existsSync(wt)).toBe(false);
+    // The refs outlived the directory, which is the whole problem.
+    expect(await allRefs()).toHaveLength(2);
+
+    // `repo` stands in for the project's primary checkout, as the route passes it.
+    const deleted = await svc.forget("reapedChat", repo);
+
+    expect(deleted).toHaveLength(2);
+    expect(await allRefs()).toEqual([]);
+    await rm(parked, { recursive: true, force: true });
+  });
+
+  it("caps refs whose recorded worktree is gone, instead of stranding them", async () => {
+    // A chat's rows do not all name the same directory. `cp.worktreePath ||
+    // fallback` only falls back on an EMPTY path, so a retired row pointing at a
+    // removed worktree used to drop the row and leave the ref — the cap bounding
+    // rows but not refs, which is the opposite of what it is for.
+    const capped = new CheckpointService({ store, bus, maxPerChat: 1 });
+    const parked = await mkdtemp(join(tmpdir(), "cm-cp-old-"));
+    const oldWt = join(parked, "wt");
+    await git(["worktree", "add", oldWt, "-b", "old-branch"]);
+    await capped.snapshot({ chatId: "mover", messageId: "m1", worktreePath: oldWt });
+    await git(["worktree", "remove", "--force", oldWt]);
+    expect(existsSync(oldWt)).toBe(false);
+
+    // The chat moves on and snapshots in a live checkout, crossing the cap.
+    await write("a.txt", "moved");
+    await capped.snapshot({ chatId: "mover", messageId: "m2", worktreePath: repo });
+
+    // m1's row is retired AND its ref is gone — not stranded in a dead worktree.
+    expect((await store.getCheckpoints("mover")).map((c) => c.messageId)).toEqual(["m2"]);
+    expect(await allRefs()).toEqual([`${CHECKPOINT_REF_NS}/mover/2`]);
+    await rm(parked, { recursive: true, force: true });
+  });
+
   it("forget() survives a worktree that is no longer on disk", async () => {
     // Worktrees get reaped. A chat whose recorded path is gone must still delete
     // its chat record rather than throwing out of the DELETE route.

@@ -25,6 +25,7 @@
  */
 import { execa } from "execa";
 import { rm, rmdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -159,6 +160,44 @@ export class CheckpointService {
     return res.exitCode === 0 ? res.stdout : "";
   }
 
+  /**
+   * Run git, reporting whether it actually RAN and succeeded.
+   *
+   * {@link gitTry} cannot answer that: it returns `""` both for a command that
+   * printed nothing and for one that never started. `update-ref -d` prints
+   * nothing on SUCCESS, so the two are indistinguishable exactly where the
+   * difference decides whether a ref was reclaimed or silently stranded. A
+   * missing cwd doesn't even reach git — execa resolves with no exit code at
+   * all — which this reports as failure along with a non-zero exit.
+   */
+  private async gitOk(args: string[], cwd: string): Promise<boolean> {
+    const res = await execa(this.gitBin, [...GIT_CONFIG_ARGS, ...args], {
+      cwd,
+      env: { ...GIT_ENV },
+      stripFinalNewline: true,
+      reject: false,
+    });
+    return res.exitCode === 0;
+  }
+
+  /**
+   * Delete one ref, trying each candidate checkout until one works.
+   *
+   * Checkpoint refs live in the repository's SHARED ref store, so any live
+   * checkout of the right repo can delete any of them — which is what makes a
+   * fallback meaningful rather than a guess. The recorded worktree is tried
+   * first because it is known to be the right repo; the fallback exists because
+   * that directory is routinely gone (WorktreeReaper removes the worktree of a
+   * chat whose branch has landed and leaves the chat, and its rows, behind).
+   */
+  private async deleteRef(ref: string, cwds: Array<string | undefined>): Promise<boolean> {
+    for (const cwd of cwds) {
+      if (!cwd) continue;
+      if (await this.gitOk(["update-ref", "-d", ref], cwd)) return true;
+    }
+    return false;
+  }
+
   /** Allocate a fresh, absolute temp index path (git creates the file). */
   private tempIndexPath(): string {
     return join(tmpdir(), `cm-idx-${randomBytes(8).toString("hex")}`);
@@ -250,16 +289,25 @@ export class CheckpointService {
    * gone. A row whose ref git no longer knows about is dropped anyway: it is
    * already dead, and keeping it would make the cap unreachable.
    *
-   * Deletes each ref in the worktree the checkpoint was TAKEN in. Refs are
-   * shared across a repository's worktrees, so any live one would do, but the
-   * recorded path is the one known to have been a checkout of the right repo.
+   * Each ref is deleted in the worktree its checkpoint was TAKEN in, FALLING
+   * BACK to the worktree of the snapshot that just landed. A chat's rows do not
+   * all name the same directory — chats move between checkouts and the reaper
+   * removes the old one underneath them — and testing `cp.worktreePath ||
+   * fallback` only covers an EMPTY path, not a dead one. Without the retry a
+   * retired row whose worktree is gone drops the row and strands the ref, so
+   * the cap would bound the rows and not the refs: the opposite of the point.
+   *
+   * The row goes whether or not the ref did. `fallbackCwd` is the worktree
+   * `snapshot` just ran four git commands in, so a failure of both means the
+   * repository is unreachable — and keeping rows for refs we can never reach
+   * would let the cap stop bounding anything at all.
    */
   private async enforceCap(chatId: string, fallbackCwd: string): Promise<void> {
     const all = await this.store.getCheckpoints(chatId); // ascending, oldest first
     const excess = all.length - this.maxPerChat;
     if (excess <= 0) return;
     for (const cp of all.slice(0, excess)) {
-      await this.gitTry(["update-ref", "-d", cp.ref], cp.worktreePath || fallbackCwd);
+      await this.deleteRef(cp.ref, [cp.worktreePath, fallbackCwd]);
       await this.store.deleteCheckpoint(chatId, cp.messageId);
     }
   }
@@ -276,9 +324,18 @@ export class CheckpointService {
    * Ordering is the whole point: the rows are the only map from a chat to the
    * worktrees its refs live in, so this must run while they still exist.
    *
-   * Returns the refs actually deleted. Best-effort — a repo that has been moved
-   * or removed simply has nothing to clean, and that must not block deleting the
-   * chat.
+   * PASS `fallbackCwd` — the project's primary checkout. It is not an optional
+   * nicety: WorktreeReaper removes the worktree of any chat whose branch has
+   * landed while leaving the chat and its rows intact, so for a chat deleted
+   * some time after its work merged, EVERY recorded path is already gone. With
+   * only those to go on this finds nothing, returns empty, and the refs it
+   * exists to reclaim stay in the repository — after which `deleteChat` drops
+   * the rows and the last record of where they were goes too. Refs are shared
+   * repo-wide, so the primary checkout can always delete them.
+   *
+   * Returns the refs actually deleted. Best-effort — a repo that has itself been
+   * moved or removed simply has nothing to clean, and that must not block
+   * deleting the chat.
    */
   async forget(chatId: string, fallbackCwd?: string): Promise<string[]> {
     const all = await this.store.getCheckpoints(chatId).catch(() => []);
@@ -286,10 +343,14 @@ export class CheckpointService {
     // One pass per distinct worktree. `update-ref -d` needs SOME checkout of the
     // repo to run in, and a chat that moved worktrees mid-life has refs recorded
     // against each — deduped so a chat with 200 checkpoints in one worktree
-    // doesn't spawn 200 identical prefix sweeps.
+    // doesn't spawn 200 identical prefix sweeps, and filtered to directories
+    // that still exist so a reaped worktree costs nothing instead of a git spawn
+    // per entry that can only fail.
     const cwds = new Set<string>();
-    for (const cp of all) if (cp.worktreePath) cwds.add(cp.worktreePath);
-    if (fallbackCwd) cwds.add(fallbackCwd);
+    for (const cp of all) {
+      if (cp.worktreePath && existsSync(cp.worktreePath)) cwds.add(cp.worktreePath);
+    }
+    if (fallbackCwd && existsSync(fallbackCwd)) cwds.add(fallbackCwd);
     for (const cwd of cwds) {
       // Re-listed per worktree rather than trusting the rows: `nextIndex` can
       // have allocated a ref whose store write never landed (a crash between the
