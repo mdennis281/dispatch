@@ -97,8 +97,17 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * pays its own way: the Resources page's expand and reap controls are
  * `IconButton`, its absolute/relative switch is `Button link`, and this
  * dropdown's own footer action is `Button ghost`.
+ *
+ * 90 → 91: the sidebar's `ChildDisclosure`, the fold chevron on a nested chat
+ * row. It has to be a SIBLING of the row element (a button inside a button is
+ * invalid and swallows its own clicks) laid over the row's left padding, so it
+ * is `absolute inset-y-0 w-5`: full row height for a touch target, 20px wide to
+ * sit centred on the thread rail without reaching the row's glyph.
+ * `IconButton` is a `size-6` box with a rounded hover fill — it cannot take
+ * `inset-y-0` without fighting its own height, and its fill would draw a chip on
+ * the rail the chevron is meant to be a node on.
  */
-const BASELINE = 90;
+const BASELINE = 91;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

@@ -8,7 +8,7 @@ import type {
   PrRecord,
   WorkflowExemption,
 } from "@dispatch/shared";
-import { isPrSettledIdle, parseSpawnedParent } from "@dispatch/shared";
+import { isPrSettledIdle, parseReviewingTarget, parseSpawnedParent } from "@dispatch/shared";
 import { clearDraft } from "../lib/composerDrafts.js";
 import { usePrs } from "./prs.js";
 
@@ -230,8 +230,7 @@ export function useProjectChats(projectId: string | null): Chat[] {
 export function reviewTargetKey(chat: Chat): string | null {
   if (chat.reviewOf) return chat.reviewOf;
   if (chat.purpose?.kind !== "pr:review") return null;
-  const m = /^Reviewing PR #(\d+) in (\S+)$/.exec(chat.purpose.label ?? "");
-  return m ? `${m[2]}#${m[1]}` : null;
+  return parseReviewingTarget(chat.purpose.label);
 }
 
 /**
@@ -285,68 +284,121 @@ function parentOf(chat: Chat, prsByKey: Record<string, PrRecord>): string | null
 }
 
 /**
- * The TOP-LEVEL chat a row files under, or null when the row is top-level itself.
+ * How deep the sidebar draws chat rows, counting a top-level row as 0.
  *
- * Walks the chain rather than reading one link, because a child can spawn a
- * child: `spawn_chat` is offered to every chat, including one that is already
- * folded. Nesting stays ONE level — a tree that can nest arbitrarily is a tree
- * somebody has to indent-guard — so a grandchild files under its GRANDPARENT,
- * beside its own parent, rather than under a row that is itself hidden inside
- * another. Filed under a hidden row it would render nowhere at all.
+ * 2 is the shape the review workflow produces: a chat, the chats it SPAWNED,
+ * and each of those chats' PR reviewers. This is a RENDER clamp and not the
+ * policy — the server decides how deep chats may actually be spawned (the
+ * manifest's `spawnChat.maxDepth`), and reviewers arrive whatever it says,
+ * because the PR registry spawns them rather than `spawn_chat`. So the tree
+ * still has to cope with a row deeper than it draws, which is what the clamp
+ * below is for rather than an assertion.
+ *
+ * Raising it takes one more entry in `ROW_INDENT` / `RAIL_INSET` /
+ * `DISCLOSURE_INSET` in `Sidebar.tsx` — Tailwind scans for literal class names,
+ * so the geometry cannot be computed from this number.
+ */
+export const MAX_CHAT_NEST_DEPTH = 2;
+
+/**
+ * Every chat between this one and the top of its lineage, TOPMOST FIRST — or
+ * null when the chain loops.
+ *
+ * Walks rather than reads one link because depth is the question: a chat's row
+ * position depends on how many rows are above it, not just on who its parent is.
  *
  * A parent that isn't here (deleted, living in another project, an unattributed
- * PR) ends the walk and the row keeps the position it had. Nesting hides a row
- * inside another row, and hiding one inside a row that doesn't exist would just
- * delete it from the sidebar.
+ * PR) ENDS the walk, and everything below it keeps the position it had. Nesting
+ * hides a row inside another row, and hiding one inside a row that doesn't exist
+ * would just delete it from the sidebar.
  *
  * A cycle returns null for every chat in it. Two chats that each claim the other
  * are both children and therefore both hidden, so the sidebar would lose the
  * pair entirely; top-level is the reading that still shows them. Only reachable
  * from corrupt data, but it is the failure mode with no visible symptom.
  */
-function topParentOf(
+function ancestorPath(
+  chat: Chat,
+  byId: Map<string, Chat>,
+  present: ReadonlySet<string>,
+  prsByKey: Record<string, PrRecord>,
+): string[] | null {
+  const seen = new Set<string>([chat.id]);
+  const upward: string[] = [];
+  let cursor = chat;
+  for (;;) {
+    const parent = parentOf(cursor, prsByKey);
+    if (!parent || !present.has(parent)) break;
+    if (seen.has(parent)) return null;
+    seen.add(parent);
+    upward.push(parent);
+    const next = byId.get(parent);
+    if (!next) break;
+    cursor = next;
+  }
+  return upward.reverse();
+}
+
+/**
+ * The chat this row is DRAWN under, which is its real parent right up until the
+ * tree runs out of indents.
+ *
+ * Past {@link MAX_CHAT_NEST_DEPTH} a row files beside its own parent rather than
+ * under it, so it lands on the deepest level the sidebar actually draws instead
+ * of inside a row that is itself hidden — filed there it would render nowhere at
+ * all. That clamp is why this returns an ancestor rather than `parentOf`.
+ */
+function renderParentOf(
   chat: Chat,
   byId: Map<string, Chat>,
   present: ReadonlySet<string>,
   prsByKey: Record<string, PrRecord>,
 ): string | null {
-  const seen = new Set<string>([chat.id]);
-  let cursor = chat;
-  let top: string | null = null;
-  for (;;) {
-    const parent = parentOf(cursor, prsByKey);
-    if (!parent || !present.has(parent)) return top;
-    if (seen.has(parent)) return null;
-    seen.add(parent);
-    top = parent;
-    const next = byId.get(parent);
-    if (!next) return top;
-    cursor = next;
-  }
+  const path = ancestorPath(chat, byId, present, prsByKey);
+  if (!path || path.length === 0) return null;
+  return path[Math.min(path.length, MAX_CHAT_NEST_DEPTH) - 1] ?? null;
 }
 
-/** A top-level chat plus the chats filed under it. */
+/** A chat row and the rows drawn beneath it. */
 export interface ChatBranch {
   chat: Chat;
   /**
-   * This chat's reviewers and the chats it spawned, newest first. Usually empty.
+   * The chats filed DIRECTLY under this one, as branches of their own — a
+   * spawned chat's reviewers hang off the spawned chat, not off the top-level
+   * row, which is the whole point of the tree being a tree.
    *
-   * One list rather than one per kind: the row treats them alike for everything
-   * structural — the fold, the process census, the runtime roll-up, the reap —
-   * and only the child row itself cares which it is, because a reviewer has a
-   * pull request to summarise and a spawned chat has only its title.
+   * Ranked exactly like the roots: by the newest clock ANYWHERE in each branch,
+   * so a live reviewer lifts the chat it is reading to the top of the fold.
    */
-  children: Chat[];
+  children: ChatBranch[];
+  /**
+   * Every chat below this one at ANY depth, flat. Usually empty.
+   *
+   * Pre-order: each level in the same rank order the rows are drawn in, a
+   * child's own descendants immediately after it. Deliberately NOT resorted
+   * into one global recency run — every reader is order-free (`branchRuntimeMs`,
+   * `branchProcessCount`, `branchChatIds`, `foldedChildrenLabel`,
+   * `childChatTitle`), and a promise nothing keeps is one the next caller
+   * relies on.
+   *
+   * Kept beside `children` rather than derived at each call site because every
+   * roll-up the row does is over the whole branch and not over one level: the
+   * fold label, the process census, the runtime total, the reap, the "does
+   * anything under here need an answer" dot. A row that summarised only its
+   * direct children would quietly stop counting a grandchild's dev server the
+   * moment reviewers moved one level down.
+   */
+  descendants: Chat[];
 }
 
 /**
- * Fold a flat chat list into one level of nesting: a reviewer moves under the
- * chat that opened the PR it is reading, and a spawned chat under the chat that
- * spawned it.
+ * Fold a flat chat list into a tree: a reviewer moves under the chat that opened
+ * the PR it is reading, and a spawned chat under the chat that spawned it — as
+ * deep as {@link MAX_CHAT_NEST_DEPTH} draws.
  *
- * A branch ranks by the NEWEST clock in it, its own or a child's. Without that,
- * a review that starts on a week-old chat sinks to wherever its parent sits and
- * the one row that is actually doing something is off the bottom of the list.
+ * A branch ranks by the NEWEST clock in it, its own or any descendant's. Without
+ * that, a review that starts on a week-old chat sinks to wherever its parent sits
+ * and the one row that is actually doing something is off the bottom of the list.
  */
 export function buildChatTree(
   chats: Chat[],
@@ -360,7 +412,7 @@ export function buildChatTree(
   const roots: Chat[] = [];
 
   for (const chat of chats) {
-    const parent = topParentOf(chat, byId, present, prsByKey);
+    const parent = renderParentOf(chat, byId, present, prsByKey);
     if (parent && parent !== chat.id) {
       const list = children.get(parent);
       if (list) list.push(chat);
@@ -370,13 +422,34 @@ export function buildChatTree(
     }
   }
 
-  return roots
-    .map((chat) => ({ chat, children: children.get(chat.id) ?? [] }))
-    .sort((a, b) => rankBranch(b, at) - rankBranch(a, at));
+  // Terminates without a visited set: every chat lands in exactly one bucket,
+  // and `renderParentOf` returns an ANCESTOR, so a child can never also be an
+  // ancestor of its own parent — the cycle that would need guarding is already
+  // resolved to two roots by `ancestorPath`.
+  //
+  // EVERY level is ranked, not just the roots. While children were a flat list
+  // they arrived in the store's own recency order and a live reviewer was near
+  // the top of the fold by construction; with the reviewer moved under its
+  // chat, that ordering has to be rebuilt the same way the roots' is, or a
+  // reviewer running right now sits at the bottom of the fold under a sibling
+  // that has done nothing for a week. Same failure this function's docblock
+  // names, one level down.
+  const branch = (chat: Chat): ChatBranch => {
+    const kids = (children.get(chat.id) ?? [])
+      .map(branch)
+      .sort((a, b) => rankBranch(b, at) - rankBranch(a, at));
+    return {
+      chat,
+      children: kids,
+      descendants: kids.flatMap((k) => [k.chat, ...k.descendants]),
+    };
+  };
+
+  return roots.map(branch).sort((a, b) => rankBranch(b, at) - rankBranch(a, at));
 }
 
 const rankBranch = (b: ChatBranch, at: (c: Chat) => number): number =>
-  b.children.reduce((max, r) => Math.max(max, at(r)), at(b.chat));
+  b.descendants.reduce((max, r) => Math.max(max, at(r)), at(b.chat));
 
 /**
  * Selector: this project's chats as branches, newest first.

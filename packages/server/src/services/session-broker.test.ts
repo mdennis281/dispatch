@@ -2907,6 +2907,59 @@ describe("SessionBroker — spawn_chat consent", () => {
     await expect(consentP).resolves.toMatchObject({ approved: true, auto: false });
   });
 
+  it("refuses a spawn from a chat already at the project's nesting cap", async () => {
+    const broker = await liveSession();
+    (broker as unknown as { chatNestingDepth?: unknown }).chatNestingDepth = async () => 1;
+
+    // Default cap is 1: a chat one level down may not start another.
+    await expect(
+      broker.checkSpawnNesting("c1", { prompt: "go" }, { id: "p1", name: "Dispatch" }),
+    ).resolves.toEqual({ allowed: false, depth: 1, maxDepth: 1 });
+    // …and the human is never asked about a spawn the project forbids.
+    expect(events.some((e) => e.type === "permission-request")).toBe(false);
+  });
+
+  it("exempts the two spawns that are not nested at all", async () => {
+    const broker = await liveSession();
+    (broker as unknown as { chatNestingDepth?: unknown }).chatNestingDepth = async () => 1;
+
+    // `detached` writes no parent edge, so the new chat is a top-level row.
+    await expect(
+      broker.checkSpawnNesting(
+        "c1",
+        { prompt: "go", detached: true },
+        { id: "p1", name: "Dispatch" },
+      ),
+    ).resolves.toMatchObject({ allowed: true });
+    // A cross-project spawn lands in a chat list its parent isn't in, so no
+    // sidebar folds it under anything either.
+    await expect(
+      broker.checkSpawnNesting("c1", { prompt: "go" }, { id: "p2", name: "Elsewhere" }),
+    ).resolves.toMatchObject({ allowed: true });
+  });
+
+  it("lets `maxDepth: 0` mean no spawning — including detached", async () => {
+    // The one value that stops being about depth. Behind the exemptions above
+    // it would have been unenforceable: `detached: true` is free at every other
+    // cap, so a project asking for no agent-started chats would have got a
+    // setting the refusal message itself told the model how to route around.
+    const broker = await liveSession();
+    (broker as unknown as { projectConfig?: unknown }).projectConfig = {
+      getAgent: () => null,
+      getMode: () => null,
+      buildInstructionsInjection: () => null,
+      getMcpServers: () => ({}),
+      getSkills: () => [],
+      getSpawnMaxDepth: () => 0,
+    };
+
+    for (const request of [{ prompt: "go" }, { prompt: "go", detached: true }]) {
+      await expect(
+        broker.checkSpawnNesting("c1", request, { id: "p1", name: "Dispatch" }),
+      ).resolves.toEqual({ allowed: false, depth: 0, maxDepth: 0 });
+    }
+  });
+
   it("does not ALSO prompt at the canUseTool layer — one decision, one prompt", async () => {
     // The tool gates itself. A second generic prompt would ask twice for one
     // decision, and a deny there would skip the handler that returns the

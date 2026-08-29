@@ -387,6 +387,18 @@ export class ProjectConfigService {
     return this.cache.get(projectId)?.config?.spawnChat?.autoApprove ?? null;
   }
 
+  /**
+   * How deep this project lets `spawn_chat` stack chats, or null when it doesn't
+   * author a cap (then {@link DEFAULT_SPAWN_MAX_DEPTH} applies).
+   *
+   * Null rather than the default so the caller can tell "this repo asked for 1"
+   * from "nobody said" — the two are the same number today and will not be the
+   * moment the default moves.
+   */
+  getSpawnMaxDepth(projectId: string): number | null {
+    return this.cache.get(projectId)?.config?.spawnChat?.maxDepth ?? null;
+  }
+
   /* ----------------------------------------------------- agent/mode registry */
 
   /**

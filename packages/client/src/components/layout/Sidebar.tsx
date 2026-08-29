@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronRight,
   ChevronsUpDown,
   Plus,
   Play,
@@ -19,6 +20,7 @@ import {
   Brain,
   FolderOpen,
   GitBranch,
+  GitPullRequestArrow,
   type LucideIcon,
 } from "lucide-react";
 import { parsePrRecordKey } from "@dispatch/shared";
@@ -364,7 +366,41 @@ function ActiveRail({ active }: { active: boolean }) {
 /* -------------------------------------------------------------------- chat */
 
 /**
- * A chat, and the reviewer chats filed under it.
+ * Left padding for a chat row at each nesting depth, and the geometry that hangs
+ * off it: the thread rail drawn beside a row's children, and the fold chevron a
+ * child row wears when it has children of its own.
+ *
+ * Spelled out as LITERALS, one entry per depth, rather than computed from
+ * `MAX_CHAT_NEST_DEPTH` — Tailwind scans source for literal candidates, so a
+ * `pl-` template compiles to no CSS and the failure mode is a tree with no
+ * indentation at all. Same reason `rowMarkers` writes its tone table longhand.
+ *
+ * The three tables are one measurement in three places, so read them together: a
+ * row at depth n starts at `ROW_INDENT[n]`; the rail for its children runs down
+ * `RAIL_INSET[n]`, which is the centre of that row's own status glyph; and the
+ * chevron of a row at depth n is centred on the rail its PARENT drew,
+ * `DISCLOSURE_INSET[n - 1]`, so a foldable row reads as a node ON the thread
+ * rather than a button beside it.
+ */
+const ROW_INDENT = ["pl-2.5", "pl-7", "pl-12"] as const;
+const RAIL_INSET = ["left-4", "left-[35px]"] as const;
+const DISCLOSURE_INSET = ["left-1.5", "left-[25px]"] as const;
+
+/**
+ * Table lookup that survives `MAX_CHAT_NEST_DEPTH` being raised first: a depth
+ * past the end of a table draws at the deepest indent the table has, which is
+ * the same clamp `buildChatTree` applies to the row's position.
+ */
+const atDepth = <T,>(table: readonly [T, ...T[]], depth: number): T => {
+  const clamped = Math.min(Math.max(depth, 0), table.length - 1);
+  // The fallback is the tuple's own first element, which is what makes this
+  // total — TS cannot see that a clamped index is in range, and a `!` here
+  // would assert exactly what this proves.
+  return table[clamped] ?? table[0];
+};
+
+/**
+ * A chat, and the tree of chats filed under it.
  *
  * Dispatch spawns one reviewer chat PER ROUND, so a PR reviewed four times put
  * four near-identical `review: #135 …` rows in the sidebar — four rows about one
@@ -391,12 +427,14 @@ function ChatBranchRows({
   now: number;
   onSelect: (id: string) => void;
 }) {
-  const { chat, children } = branch;
+  const { chat, children, descendants } = branch;
   const [expanded, setExpanded] = useState(false);
   // A branch never hides the transcript that's on screen. The PRs panel links
   // straight to a reviewer chat, and landing there with its parent collapsed
-  // left the sidebar with no row for what you were looking at.
-  const open = expanded || children.some((c) => c.id === activeChatId);
+  // left the sidebar with no row for what you were looking at. `descendants`,
+  // not `children`: a reviewer now hangs off the spawned chat rather than off
+  // this row, so the one being read can be two levels down.
+  const open = expanded || descendants.some((c) => c.id === activeChatId);
 
   return (
     <div data-flip-id={chat.id}>
@@ -405,46 +443,189 @@ function ChatBranchRows({
         active={chat.id === activeChatId}
         needsInput={attentionByChat.has(chat.id)}
         now={now}
-        runtimeMs={branchRuntimeMs(runtimeByChat, chat.id, children)}
+        runtimeMs={branchRuntimeMs(runtimeByChat, chat.id, descendants)}
         // `childChats`, not `children`: React reads a `children` prop as the
         // element's body, so passing the list under that name would put it one
         // typo away from being rendered instead of counted.
-        childChats={children}
-        childrenNeedInput={children.some((c) => attentionByChat.has(c.id))}
+        childChats={descendants}
+        childrenNeedInput={descendants.some((c) => attentionByChat.has(c.id))}
         expanded={open}
         onToggleChildren={() => setExpanded((v) => !v)}
         onClick={() => onSelect(chat.id)}
       />
       {open && children.length > 0 && (
-        // The thread rail is drawn once, absolutely, rather than as a border on
-        // a padded wrapper: the wrapper's padding would inset the rows, and a
-        // child row's highlight has to reach both edges exactly like every
-        // other row's. Indentation is the row's own left padding instead.
-        <div className="relative">
-          <span className="pointer-events-none absolute inset-y-0 left-4 w-px bg-line-soft" />
-          {children.map((child) => {
-            const props = {
-              chat: child,
-              active: child.id === activeChatId,
-              needsInput: attentionByChat.has(child.id),
-              now,
-              runtimeMs: runtimeByChat[child.id] ?? 0,
-              onClick: () => onSelect(child.id),
-            };
-            // Two child rows, because they have different things to say. A
-            // reviewer's identity is the PR it read and the verdict it left, and
-            // neither is in its title; a spawned chat's identity IS its title,
-            // and it has no PR to summarise. One row doing both would spend its
-            // width on a `#` column that half the children must leave blank.
-            return isReviewerChat(child) ? (
-              <ReviewRow key={child.id} {...props} />
-            ) : (
-              <SpawnRow key={child.id} {...props} />
-            );
-          })}
-        </div>
+        <ChildRows
+          branches={children}
+          depth={1}
+          activeChatId={activeChatId}
+          attentionByChat={attentionByChat}
+          runtimeByChat={runtimeByChat}
+          now={now}
+          onSelect={onSelect}
+        />
       )}
     </div>
+  );
+}
+
+/** What every row in the tree needs, whatever depth it is drawn at. */
+interface RowContext {
+  activeChatId: string | null;
+  attentionByChat: Set<string>;
+  runtimeByChat: Record<string, number>;
+  now: number;
+  onSelect: (id: string) => void;
+}
+
+/**
+ * One level of the tree — the rows at `depth`, and the thread rail they hang off.
+ *
+ * The rail is drawn once, absolutely, rather than as a border on a padded
+ * wrapper: the wrapper's padding would inset the rows, and a child row's
+ * highlight has to reach both edges exactly like every other row's. Indentation
+ * is the row's own left padding instead.
+ */
+function ChildRows({
+  branches,
+  depth,
+  ...ctx
+}: { branches: ChatBranch[]; depth: number } & RowContext) {
+  return (
+    <div className="relative">
+      <span
+        className={cn(
+          "pointer-events-none absolute inset-y-0 w-px bg-line-soft",
+          atDepth(RAIL_INSET, depth - 1),
+        )}
+      />
+      {branches.map((b) => (
+        <ChildBranchRows key={b.chat.id} branch={b} depth={depth} {...ctx} />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * A folded chat and, when it has any, the chats folded under IT.
+ *
+ * Two child rows, because they have different things to say. A reviewer's
+ * identity is the PR it read and the verdict it left, and neither is in its
+ * title; a spawned chat's identity IS its title, and it has no PR to summarise.
+ * One row doing both would spend its width on a `#` column that half the
+ * children must leave blank.
+ *
+ * Split on `isReviewerChat` and deliberately NOT on `reviewTargetKey() != null`,
+ * which would file a reviewer too old to name its PR in with the spawned chats.
+ */
+function ChildBranchRows({
+  branch,
+  depth,
+  activeChatId,
+  attentionByChat,
+  runtimeByChat,
+  now,
+  onSelect,
+}: { branch: ChatBranch; depth: number } & RowContext) {
+  const { chat, children, descendants } = branch;
+  const [expanded, setExpanded] = useState(false);
+  const open = expanded || descendants.some((c) => c.id === activeChatId);
+  const Row = isReviewerChat(chat) ? ReviewRow : SpawnRow;
+
+  return (
+    <>
+      <Row
+        chat={chat}
+        depth={depth}
+        active={chat.id === activeChatId}
+        needsInput={attentionByChat.has(chat.id)}
+        now={now}
+        // The whole sub-branch, like the top-level row: a spawned chat's agent
+        // time now includes the reviewers reading what it wrote, which is time
+        // this chat caused and the only row in a position to say so.
+        runtimeMs={branchRuntimeMs(runtimeByChat, chat.id, descendants)}
+        childChats={descendants}
+        childrenNeedInput={descendants.some((c) => attentionByChat.has(c.id))}
+        expanded={open}
+        onToggleChildren={() => setExpanded((v) => !v)}
+        onClick={() => onSelect(chat.id)}
+      />
+      {open && children.length > 0 && (
+        <ChildRows
+          branches={children}
+          depth={depth + 1}
+          activeChatId={activeChatId}
+          attentionByChat={attentionByChat}
+          runtimeByChat={runtimeByChat}
+          now={now}
+          onSelect={onSelect}
+        />
+      )}
+    </>
+  );
+}
+
+/** Everything a folded row takes, whichever of the two kinds it is. */
+interface ChildRowProps {
+  chat: Chat;
+  /** Nesting level, at least 1 — picks this row's indent and its chevron's x. */
+  depth: number;
+  active: boolean;
+  needsInput: boolean;
+  now: number;
+  runtimeMs: number;
+  /** Everything folded under THIS row, at any depth. Empty means no chevron. */
+  childChats: readonly Chat[];
+  childrenNeedInput: boolean;
+  expanded: boolean;
+  onToggleChildren: () => void;
+  onClick: () => void;
+}
+
+/**
+ * The fold control for a child row that has children of its own.
+ *
+ * A SIBLING of the row button, positioned over the thread rail rather than
+ * inside the row's flex — a button nested inside a button is invalid and
+ * swallows its own clicks, which is the same reason the parent row's action tray
+ * and rename input are siblings too.
+ *
+ * It sits in the row's left padding, so it costs the title no width, and it is
+ * always visible rather than hover-gated: it is the ONLY thing saying this row
+ * has anything under it, and on touch there is no hover to reveal it with. The
+ * hit area is the full row height by 20px for the same reason.
+ */
+function ChildDisclosure({
+  depth,
+  open,
+  label,
+  onToggle,
+}: {
+  depth: number;
+  open: boolean;
+  label: string;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      aria-label={label}
+      title={label}
+      onClick={onToggle}
+      className={cn(
+        "absolute inset-y-0 z-10 flex w-5 items-center justify-center",
+        // `muted`, not `faint`. Faint is this sidebar's "nothing to report" tone
+        // (see the resting row markers), and a chevron only exists on a row that
+        // HAS something to report — it is the one affordance saying so.
+        "text-muted transition-colors hover:text-primary [&_svg]:size-2.5",
+        atDepth(DISCLOSURE_INSET, depth - 1),
+      )}
+    >
+      <ChevronRight
+        aria-hidden
+        className={cn("transition-transform duration-150", open && "rotate-90")}
+      />
+    </button>
   );
 }
 
@@ -885,19 +1066,17 @@ function ChatRow({
  */
 function ReviewRow({
   chat,
+  depth,
   active,
   needsInput,
   now,
   runtimeMs,
+  childChats,
+  childrenNeedInput,
+  expanded,
+  onToggleChildren,
   onClick,
-}: {
-  chat: Chat;
-  active: boolean;
-  needsInput: boolean;
-  now: number;
-  runtimeMs: number;
-  onClick: () => void;
-}) {
+}: ChildRowProps) {
   const key = reviewTargetKey(chat);
   const record = usePrs((s) => (key ? s.byKey[key] : undefined));
   const activityAt = useChats(
@@ -906,62 +1085,87 @@ function ReviewRow({
   const meta = statusMeta(chat.status);
   const number = record?.number ?? (key ? parsePrRecordKey(key)?.number : undefined);
   const posted = reviewSummary(chat, record);
+  const folded = foldedChildrenLabel(childChats);
 
   return (
-    <button
-      data-testid="review-row"
-      onClick={onClick}
-      title={record?.title ?? chat.purpose?.label}
-      className={cn(
-        // Indented by PADDING, not by a margin — the highlight still runs the
-        // full width of the sidebar, exactly like the row it hangs off.
-        "relative flex w-full items-center gap-2 py-1 pl-7 pr-2.5 text-left transition-colors",
-        active ? "bg-accent-ghost/70" : "hover:bg-hover",
+    // The wrapper exists for the disclosure, which cannot live inside the row
+    // button. It is `contents` when there is nothing to fold, so a leaf row is
+    // byte-for-byte the box it always was.
+    <div className={childChats.length > 0 ? "relative" : "contents"}>
+      {childChats.length > 0 && (
+        <ChildDisclosure
+          depth={depth}
+          open={expanded}
+          label={expanded ? `Hide ${folded}` : `Show ${folded}`}
+          onToggle={onToggleChildren}
+        />
       )}
-    >
-      <ActiveRail active={active} />
-      <span
+      <button
+        data-testid="review-row"
+        onClick={onClick}
+        title={record?.title ?? chat.purpose?.label}
         className={cn(
-          "flex size-3.5 shrink-0 items-center justify-center [&_svg]:size-3",
-          toneText(meta.tone),
-          "transition-colors duration-300",
-          meta.pulse && "animate-pulse",
+          // Indented by PADDING, not by a margin — the highlight still runs the
+          // full width of the sidebar, exactly like the row it hangs off.
+          "relative flex w-full items-center gap-2 py-1 pr-2.5 text-left transition-colors",
+          atDepth(ROW_INDENT, depth),
+          active ? "bg-accent-ghost/70" : "hover:bg-hover",
         )}
       >
-        <MessagesSquare />
-      </span>
-      <span
-        className={cn("cm-mono shrink-0 !text-2xs", active ? "text-primary" : "text-secondary")}
-      >
-        {number != null ? `#${number}` : "PR"}
-      </span>
-      {/* What came back, or — when the registry can't say — what the reviewer is
-          doing. Findings take `warn` when the review asked for changes, because
-          "3 comments" and "3 comments that block the merge" are not the same
-          news and the row is the only place that distinction is cheap to make. */}
-      <span
-        className={cn(
-          "min-w-0 flex-1 truncate text-2xs",
-          posted
-            ? record?.reviewAgent?.postedEvent === "REQUEST_CHANGES"
-              ? "text-warn"
-              : "text-info"
-            : toneText(meta.tone),
-        )}
-      >
-        {posted ?? meta.label}
-      </span>
-      {runtimeMs > 0 && (
-        <span className="shrink-0 text-2xs text-accent-2" title={`${formatDuration(runtimeMs)} reviewing`}>
-          {formatDuration(runtimeMs)}
+        <ActiveRail active={active} />
+        {/* A pull request, not speech bubbles. The catalog gives `pr:review` the
+            bubbles it posts, and that was right while a reviewer was the ONLY
+            thing folded under a chat — now a spawned chat sits beside it wearing
+            the same glyph, and two kinds of row that differ only in their text
+            columns is the confusion this nesting exists to end. This is the
+            picture the Attention Queue already draws for a review. */}
+        <span
+          className={cn(
+            "flex size-3.5 shrink-0 items-center justify-center [&_svg]:size-3",
+            toneText(meta.tone),
+            "transition-colors duration-300",
+            meta.pulse && "animate-pulse",
+          )}
+        >
+          <GitPullRequestArrow />
         </span>
-      )}
-      {needsInput ? (
-        <StatusDot tone="warn" pulse size={5} />
-      ) : (
-        <span className="shrink-0 text-2xs text-muted">{relTimeShort(activityAt, now)}</span>
-      )}
-    </button>
+        <span
+          className={cn("cm-mono shrink-0 !text-2xs", active ? "text-primary" : "text-secondary")}
+        >
+          {number != null ? `#${number}` : "PR"}
+        </span>
+        {/* What came back, or — when the registry can't say — what the reviewer
+            is doing. Findings take `warn` when the review asked for changes,
+            because "3 comments" and "3 comments that block the merge" are not
+            the same news and the row is the only place that distinction is cheap
+            to make. */}
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate text-2xs",
+            posted
+              ? record?.reviewAgent?.postedEvent === "REQUEST_CHANGES"
+                ? "text-warn"
+                : "text-info"
+              : toneText(meta.tone),
+          )}
+        >
+          {posted ?? meta.label}
+        </span>
+        {runtimeMs > 0 && (
+          <span
+            className="shrink-0 text-2xs text-accent-2"
+            title={`${formatDuration(runtimeMs)} reviewing`}
+          >
+            {formatDuration(runtimeMs)}
+          </span>
+        )}
+        {needsInput || childrenNeedInput ? (
+          <StatusDot tone="warn" pulse size={5} />
+        ) : (
+          <span className="shrink-0 text-2xs text-muted">{relTimeShort(activityAt, now)}</span>
+        )}
+      </button>
+    </div>
   );
 }
 
@@ -989,83 +1193,102 @@ function reviewSummary(chat: Chat, record: PrRecord | undefined): string | null 
  * is the layout claiming a fact it does not have. What identifies a spawned chat
  * is the title its brief was given, so the title is what gets the width.
  *
- * Everything else is `ReviewRow`'s, on purpose — the same left padding so both
- * kinds line up against the one thread rail, the same full-bleed highlight, the
- * same status glyph and pulse, the same age-or-attention-dot at the right edge.
- * A branch holding one of each should read as one list, not two.
+ * Everything else is `ReviewRow`'s, on purpose — the same indent so both kinds
+ * line up against the one thread rail, the same full-bleed highlight, the same
+ * status tone and pulse, the same age-or-attention-dot at the right edge. A
+ * branch holding one of each should read as one list, not two.
+ *
+ * The one thing deliberately NOT shared is the glyph. It keeps the speech
+ * bubbles the parent row's child-chat marker already uses, so "a chat somebody
+ * spawned" is one picture wherever it appears, and the reviewer beside it wears
+ * a pull request instead — with a reviewer of THIS row now indented beneath it,
+ * the two are adjacent far more often than they used to be.
  */
 function SpawnRow({
   chat,
+  depth,
   active,
   needsInput,
   now,
   runtimeMs,
+  childChats,
+  childrenNeedInput,
+  expanded,
+  onToggleChildren,
   onClick,
-}: {
-  chat: Chat;
-  active: boolean;
-  needsInput: boolean;
-  now: number;
-  runtimeMs: number;
-  onClick: () => void;
-}) {
+}: ChildRowProps) {
   const activityAt = useChats(
     (s) => s.lastActivity[chat.id] ?? chat.updatedAt ?? chat.createdAt,
   );
   const meta = statusMeta(chat.status);
+  const folded = foldedChildrenLabel(childChats);
 
   return (
-    <button
-      data-testid="spawn-row"
-      onClick={onClick}
-      title={chat.title}
-      className={cn(
-        // Indented by PADDING, not by a margin — the highlight still runs the
-        // full width of the sidebar, exactly like the row it hangs off.
-        "relative flex w-full items-center gap-2 py-1 pl-7 pr-2.5 text-left transition-colors",
-        active ? "bg-accent-ghost/70" : "hover:bg-hover",
+    <div className={childChats.length > 0 ? "relative" : "contents"}>
+      {childChats.length > 0 && (
+        <ChildDisclosure
+          depth={depth}
+          open={expanded}
+          label={expanded ? `Hide ${folded}` : `Show ${folded}`}
+          onToggle={onToggleChildren}
+        />
       )}
-    >
-      <ActiveRail active={active} />
-      <span
+      <button
+        data-testid="spawn-row"
+        onClick={onClick}
+        title={chat.title}
         className={cn(
-          "flex size-3.5 shrink-0 items-center justify-center [&_svg]:size-3",
-          toneText(meta.tone),
-          "transition-colors duration-300",
-          meta.pulse && "animate-pulse",
+          // Indented by PADDING, not by a margin — the highlight still runs the
+          // full width of the sidebar, exactly like the row it hangs off.
+          "relative flex w-full items-center gap-2 py-1 pr-2.5 text-left transition-colors",
+          atDepth(ROW_INDENT, depth),
+          active ? "bg-accent-ghost/70" : "hover:bg-hover",
         )}
       >
-        <MessagesSquare />
-      </span>
-      <span
-        className={cn(
-          "min-w-0 flex-1 truncate text-2xs",
-          active ? "text-primary" : "text-secondary",
-        )}
-      >
-        <TitleText title={chat.title} />
-      </span>
-      {/* The status word, which the reviewer row spends on its verdict instead.
-          Dimmer than the title: on a row whose point is WHICH chat this is, the
-          title has to win, and five children all saying "Idle" in full strength
-          is a column of noise beside five titles that differ. */}
-      <span className={cn("shrink-0 text-2xs", toneText(meta.tone), "opacity-80")}>
-        {meta.label}
-      </span>
-      {runtimeMs > 0 && (
+        <ActiveRail active={active} />
         <span
-          className="shrink-0 text-2xs text-accent-2"
-          title={`${formatDuration(runtimeMs)} of agent time`}
+          className={cn(
+            "flex size-3.5 shrink-0 items-center justify-center [&_svg]:size-3",
+            toneText(meta.tone),
+            "transition-colors duration-300",
+            meta.pulse && "animate-pulse",
+          )}
         >
-          {formatDuration(runtimeMs)}
+          <MessagesSquare />
         </span>
-      )}
-      {needsInput ? (
-        <StatusDot tone="warn" pulse size={5} />
-      ) : (
-        <span className="shrink-0 text-2xs text-muted">{relTimeShort(activityAt, now)}</span>
-      )}
-    </button>
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate text-2xs",
+            active ? "text-primary" : "text-secondary",
+          )}
+        >
+          <TitleText title={chat.title} />
+        </span>
+        {/* The status word, which the reviewer row spends on its verdict instead.
+            Dimmer than the title: on a row whose point is WHICH chat this is, the
+            title has to win, and five children all saying "Idle" in full strength
+            is a column of noise beside five titles that differ. */}
+        <span className={cn("shrink-0 text-2xs", toneText(meta.tone), "opacity-80")}>
+          {meta.label}
+        </span>
+        {runtimeMs > 0 && (
+          <span
+            className="shrink-0 text-2xs text-accent-2"
+            title={`${formatDuration(runtimeMs)} of agent time`}
+          >
+            {formatDuration(runtimeMs)}
+          </span>
+        )}
+        {/* A question anywhere under here surfaces on THIS row too: a collapsed
+            reviewer's attention dot is behind a click, and the whole point of
+            the dot is that it is not. */}
+        {needsInput || childrenNeedInput ? (
+          <StatusDot tone="warn" pulse size={5} />
+        ) : (
+          <span className="shrink-0 text-2xs text-muted">{relTimeShort(activityAt, now)}</span>
+        )}
+      </button>
+    </div>
   );
 }
 
@@ -1157,7 +1380,7 @@ export function Sidebar() {
 
   const project = useActiveProject();
   const branches = useProjectChatTree(project?.id ?? null);
-  const chatCount = branches.reduce((n, b) => n + 1 + b.children.length, 0);
+  const chatCount = branches.reduce((n, b) => n + 1 + b.descendants.length, 0);
   const runtimeByChat = useChatRuntime((s) => s.byChat);
   const refreshRuntime = useChatRuntime((s) => s.refresh);
   const refreshProcesses = useChatProcesses((s) => s.refresh);

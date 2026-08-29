@@ -38,6 +38,7 @@ import {
   MANIFEST_FILE,
   composeMessageText,
   prRecordKey,
+  reviewingPurposeLabel,
   projectToManifest,
   renderManifestYaml,
   resolveWorkflow,
@@ -1369,7 +1370,9 @@ function taskLabel(
 ): string {
   const meta = AGENT_TASKS[taskId];
   if (taskId === "pr:review") {
-    return pr ? `Reviewing PR #${pr.number} in ${pr.repo}` : "Reviewing a pull request";
+    // Built in shared, beside the parser that reads it back — see
+    // `reviewingPurposeLabel`. Two prose literals in two packages agree by luck.
+    return pr ? reviewingPurposeLabel(pr.repo, pr.number) : "Reviewing a pull request";
   }
   if (taskId === "project:setup") {
     return project ? `Setting up ${project.name}` : "Setting this project up";
