@@ -154,3 +154,113 @@ describe("CheckpointService.rollback", () => {
     await expect(svc.rollback("chatA", "nope")).rejects.toThrow(/No checkpoint/);
   });
 });
+
+describe("checkpoint ref lifecycle", () => {
+  /** Every checkpoint ref in the temp repo, whatever chat owns it. */
+  async function allRefs(): Promise<string[]> {
+    const out = await git(["for-each-ref", "--format=%(refname)", CHECKPOINT_REF_NS]);
+    return out.split("\n").map((l) => l.trim()).filter(Boolean);
+  }
+
+  it("forget() deletes a chat's refs so git can finally reclaim the objects", async () => {
+    // The 81 MiB: deleting a chat dropped its rows and left the refs behind.
+    // They are unreachable from any branch but still REFERENCED, so `git gc`
+    // packs the commits and trees they pin instead of pruning them, and nothing
+    // ever reports them again.
+    for (const m of ["m1", "m2", "m3"]) {
+      await write("a.txt", `v-${m}`);
+      await svc.snapshot({ chatId: "doomed", messageId: m, worktreePath: repo });
+    }
+    await svc.snapshot({ chatId: "keeper", messageId: "k1", worktreePath: repo });
+    expect(await allRefs()).toHaveLength(4);
+
+    const deleted = await svc.forget("doomed");
+
+    expect(deleted).toHaveLength(3);
+    // The other chat's history is untouched — the namespace is per chat.
+    expect(await allRefs()).toEqual([`${CHECKPOINT_REF_NS}/keeper/1`]);
+  });
+
+  it("forget() also collects a ref whose store row never landed", async () => {
+    // `nextIndex` allocates and `update-ref` writes before `saveCheckpoint`, so a
+    // crash between them leaves a ref no row points at. Driving deletion purely
+    // off the rows would strand exactly the orphans nothing else collects.
+    await svc.snapshot({ chatId: "crashy", messageId: "m1", worktreePath: repo });
+    await git(["update-ref", `${CHECKPOINT_REF_NS}/crashy/99`, "HEAD"]);
+    expect(await allRefs()).toHaveLength(2);
+
+    await svc.forget("crashy", repo);
+
+    expect(await allRefs()).toEqual([]);
+  });
+
+  it("forget() survives a worktree that is no longer on disk", async () => {
+    // Worktrees get reaped. A chat whose recorded path is gone must still delete
+    // its chat record rather than throwing out of the DELETE route.
+    await svc.snapshot({ chatId: "moved", messageId: "m1", worktreePath: repo });
+    const gone = join(tmpdir(), "cm-cp-not-here-at-all");
+    await store.saveCheckpoint({
+      messageId: "m2",
+      chatId: "moved",
+      ref: `${CHECKPOINT_REF_NS}/moved/2`,
+      worktreePath: gone,
+      createdAt: Date.now(),
+    });
+
+    // The live repo is still reachable via the fallback, so the real ref goes.
+    await expect(svc.forget("moved", repo)).resolves.toBeDefined();
+    expect(await allRefs()).toEqual([]);
+  });
+
+  it("caps refs per chat, dropping the oldest ref AND its row together", async () => {
+    // Nothing bounded these: one repo carried 4,057 refs across 124 chats.
+    const capped = new CheckpointService({ store, bus, maxPerChat: 3 });
+    for (const m of ["m1", "m2", "m3", "m4", "m5"]) {
+      await write("a.txt", `v-${m}`);
+      await capped.snapshot({ chatId: "busy", messageId: m, worktreePath: repo });
+    }
+
+    expect(await allRefs()).toEqual([
+      `${CHECKPOINT_REF_NS}/busy/3`,
+      `${CHECKPOINT_REF_NS}/busy/4`,
+      `${CHECKPOINT_REF_NS}/busy/5`,
+    ]);
+    // The rows track the refs exactly — a surviving row whose ref was deleted
+    // would render a rollback button that cannot work.
+    const rows = await store.getCheckpoints("busy");
+    expect(rows.map((c) => c.messageId)).toEqual(["m3", "m4", "m5"]);
+  });
+
+  it("keeps the checkpoint it just took, even at the smallest cap", async () => {
+    // The window must slide by one, not evict the newest row as it is written.
+    const capped = new CheckpointService({ store, bus, maxPerChat: 1 });
+    await write("a.txt", "first");
+    await capped.snapshot({ chatId: "tight", messageId: "m1", worktreePath: repo });
+    await write("a.txt", "second");
+    const latest = await capped.snapshot({
+      chatId: "tight",
+      messageId: "m2",
+      worktreePath: repo,
+    });
+
+    const rows = await store.getCheckpoints("tight");
+    expect(rows.map((c) => c.messageId)).toEqual(["m2"]);
+    // And it is still restorable — the ref the newest row names really exists.
+    expect(await allRefs()).toEqual([latest.ref]);
+  });
+
+  it("rolls back to a capped-survivor ref, proving the kept ones still work", async () => {
+    const capped = new CheckpointService({ store, bus, maxPerChat: 2 });
+    await write("a.txt", "one");
+    await capped.snapshot({ chatId: "roll", messageId: "m1", worktreePath: repo });
+    await write("a.txt", "two");
+    await capped.snapshot({ chatId: "roll", messageId: "m2", worktreePath: repo });
+    await write("a.txt", "three");
+    await capped.snapshot({ chatId: "roll", messageId: "m3", worktreePath: repo });
+
+    await write("a.txt", "dirty");
+    await capped.rollback("roll", "m2");
+
+    expect(await read("a.txt")).toBe("two");
+  });
+});

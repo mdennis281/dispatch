@@ -36,12 +36,31 @@ import { KeyedMutex } from "../store/fsq.js";
 /** Hidden ref namespace holding per-chat checkpoint commits. */
 export const CHECKPOINT_REF_NS = "refs/cm/checkpoints";
 
+/**
+ * Rollback points kept per chat. Older ones lose their ref and their row.
+ *
+ * A checkpoint ref pins a whole commit — tree included — inside the USER'S
+ * repository, and because the ref stays reachable `git gc` packs those objects
+ * rather than pruning them. So they are permanent, they are invisible to any
+ * accounting of the app's own data dir, and nothing bounded them: one repo here
+ * carried 4,057 refs across 124 chats, and 81 MiB of its 97 MiB pack was objects
+ * reachable from nothing but `refs/cm/checkpoints`.
+ *
+ * 200 is chosen to be far past what a human scrolls back through while still
+ * bounding the tail. It is a per-chat cap rather than a global one because the
+ * refs are namespaced per chat and a busy chat should not evict a quiet one's
+ * history.
+ */
+export const MAX_CHECKPOINTS_PER_CHAT = 200;
+
 /** Dependencies injected into the service (store + bus; `gitBin` for tests). */
 export interface CheckpointServiceDeps {
   store: Store;
   bus: EventBus;
   /** git executable (default "git"). */
   gitBin?: string;
+  /** Rollback points kept per chat. Defaults to {@link MAX_CHECKPOINTS_PER_CHAT}. */
+  maxPerChat?: number;
 }
 
 /** Everything needed to snapshot the worktree for one turn. */
@@ -103,10 +122,15 @@ export class CheckpointService {
   /** Serialize snapshot/rollback per chat so ref numbering never races. */
   private readonly locks = new KeyedMutex();
 
+  private readonly maxPerChat: number;
+
   constructor(deps: CheckpointServiceDeps) {
     this.store = deps.store;
     this.bus = deps.bus;
     this.gitBin = deps.gitBin ?? "git";
+    // Floor of 1: a zero or negative cap would delete the checkpoint the caller
+    // just took, which is never what a misconfiguration should mean.
+    this.maxPerChat = Math.max(1, deps.maxPerChat ?? MAX_CHECKPOINTS_PER_CHAT);
   }
 
   /* --------------------------------------------------------------- git glue */
@@ -207,9 +231,75 @@ export class CheckpointService {
         createdAt: Date.now(),
       };
       const saved = await this.store.saveCheckpoint(cp);
+      // AFTER the save, so the cap counts the checkpoint we just took and the
+      // window slides by one instead of the newest row racing its own eviction.
+      // Best-effort: a repo that will not let go of an old ref is a disk-space
+      // problem, and it must not fail the snapshot that already landed.
+      await this.enforceCap(chatId, worktreePath).catch(() => {});
       this.bus.publish({ type: "checkpoint", chatId, messageId, ref });
       return saved;
     });
+  }
+
+  /**
+   * Retire rollback points past {@link maxPerChat}, oldest first.
+   *
+   * Driven from the STORE's rows rather than from `for-each-ref`, because the
+   * rows are what the UI offers a human — so this deletes the ref and the row
+   * together and can never leave a rollback button pointing at a ref that is
+   * gone. A row whose ref git no longer knows about is dropped anyway: it is
+   * already dead, and keeping it would make the cap unreachable.
+   *
+   * Deletes each ref in the worktree the checkpoint was TAKEN in. Refs are
+   * shared across a repository's worktrees, so any live one would do, but the
+   * recorded path is the one known to have been a checkout of the right repo.
+   */
+  private async enforceCap(chatId: string, fallbackCwd: string): Promise<void> {
+    const all = await this.store.getCheckpoints(chatId); // ascending, oldest first
+    const excess = all.length - this.maxPerChat;
+    if (excess <= 0) return;
+    for (const cp of all.slice(0, excess)) {
+      await this.gitTry(["update-ref", "-d", cp.ref], cp.worktreePath || fallbackCwd);
+      await this.store.deleteCheckpoint(chatId, cp.messageId);
+    }
+  }
+
+  /**
+   * Drop every checkpoint ref a chat owns. Call BEFORE `store.deleteChat`.
+   *
+   * Deleting a chat used to drop its `checkpoint` rows and nothing else, which
+   * left the refs — and so the commits and trees they pin — in the user's
+   * repository forever, with the only record of where they came from gone. They
+   * are unreachable from any branch but not unreferenced, so no amount of
+   * `git gc` reclaims them and no tool reports them.
+   *
+   * Ordering is the whole point: the rows are the only map from a chat to the
+   * worktrees its refs live in, so this must run while they still exist.
+   *
+   * Returns the refs actually deleted. Best-effort — a repo that has been moved
+   * or removed simply has nothing to clean, and that must not block deleting the
+   * chat.
+   */
+  async forget(chatId: string, fallbackCwd?: string): Promise<string[]> {
+    const all = await this.store.getCheckpoints(chatId).catch(() => []);
+    const deleted: string[] = [];
+    // One pass per distinct worktree. `update-ref -d` needs SOME checkout of the
+    // repo to run in, and a chat that moved worktrees mid-life has refs recorded
+    // against each — deduped so a chat with 200 checkpoints in one worktree
+    // doesn't spawn 200 identical prefix sweeps.
+    const cwds = new Set<string>();
+    for (const cp of all) if (cp.worktreePath) cwds.add(cp.worktreePath);
+    if (fallbackCwd) cwds.add(fallbackCwd);
+    for (const cwd of cwds) {
+      // Re-listed per worktree rather than trusting the rows: `nextIndex` can
+      // have allocated a ref whose store write never landed (a crash between the
+      // two), and those orphans are exactly what nothing else will ever collect.
+      for (const ref of await this.listCheckpointRefs(chatId, cwd)) {
+        await this.gitTry(["update-ref", "-d", ref], cwd);
+        deleted.push(ref);
+      }
+    }
+    return deleted;
   }
 
   /* ---------------------------------------------------------------- rollback */

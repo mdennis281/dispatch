@@ -30,7 +30,8 @@ function isTruthyFlag(v: string | undefined): boolean {
 
 export function registerChatRoutes(app: FastifyInstance): void {
   const { store, bus } = app.cm;
-  const { broker, attention, chatProcesses, terminals, processes } = app.services;
+  const { broker, attention, chatProcesses, terminals, processes, checkpoints } =
+    app.services;
   const reapResidual = async (chatId: string): Promise<void> => {
     const residual = await chatProcesses.pidsFor(chatId);
     if (residual.length) await processes.killPids(residual);
@@ -116,6 +117,12 @@ export function registerChatRoutes(app: FastifyInstance): void {
       for (const attId of attention.clearChat(id)) {
         bus.publish({ type: "attention-resolve", id: attId, chatId: id });
       }
+      // BEFORE `deleteChat`, which drops the checkpoint rows — and those rows are
+      // the only record of which worktrees this chat's refs live in. Without this
+      // the refs (and the commits + trees they pin) stay in the user's repository
+      // permanently: unreachable from any branch, but still referenced, so `git
+      // gc` packs them instead of pruning and nothing ever reports them.
+      await checkpoints.forget(id).catch(() => {});
       await store.deleteChat(id);
       // Broadcast the deletion so EVERY client drops the chat (a second tab has no
       // other signal; the initiator's local purge only cleans itself).

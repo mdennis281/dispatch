@@ -1564,6 +1564,18 @@ export class Store {
       .run(validated.chatId, validated.messageId, JSON.stringify(validated));
     return validated;
   }
+  /**
+   * Drop ONE rollback point.
+   *
+   * Exists for the per-chat cap in CheckpointService: retiring a checkpoint
+   * means deleting its git ref, and leaving the row behind would put a rollback
+   * button in the UI whose ref resolves to nothing.
+   */
+  async deleteCheckpoint(chatId: string, messageId: string): Promise<void> {
+    this.db
+      .prepare("DELETE FROM checkpoint WHERE chat_id = ? AND message_id = ?")
+      .run(chatId, messageId);
+  }
   async deleteCheckpoints(chatId: string): Promise<void> {
     this.db.prepare("DELETE FROM checkpoint WHERE chat_id = ?").run(chatId);
   }
