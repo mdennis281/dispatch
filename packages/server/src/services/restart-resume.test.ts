@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Chat, MessagePart, WsServerEvent } from "@dispatch/shared";
+import type { Chat, MessagePart, PeerSender, WsServerEvent } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { RestartResumeService, RESUME_MAX_AGE_MS } from "./restart-resume.js";
@@ -13,10 +13,17 @@ describe("RestartResumeService", () => {
   let bus: EventBus;
   let timers: { id: number; fn: () => void; ms: number }[];
   let clock: number;
-  let sent: { chatId: string; text: string; parts?: MessagePart[] }[];
+  let sent: {
+    chatId: string;
+    text: string;
+    opts?: { parts?: MessagePart[]; peer?: PeerSender };
+  }[];
   let interrupted: string[];
   let events: WsServerEvent[];
   let sendFails: string | null;
+  let sendGate: Promise<void> | null;
+  /** Fired the moment `send` is entered, before it blocks on the gate. */
+  let onSendEnter: (() => void) | null;
   let sha: string | undefined;
 
   const NOW = Date.parse("2026-08-01T18:00:00.000Z");
@@ -26,9 +33,11 @@ describe("RestartResumeService", () => {
     return new RestartResumeService({
       store,
       bus,
-      send: async (chatId, text, parts) => {
+      send: async (chatId, text, opts) => {
         if (sendFails) throw new Error(sendFails);
-        sent.push({ chatId, text, parts });
+        onSendEnter?.();
+        if (sendGate) await sendGate;
+        sent.push({ chatId, text, opts });
       },
       interrupt: async (chatId) => {
         interrupted.push(chatId);
@@ -82,6 +91,8 @@ describe("RestartResumeService", () => {
     interrupted = [];
     events = [];
     sendFails = null;
+    sendGate = null;
+    onSendEnter = null;
     sha = "aaaaaaa";
     bus.subscribe((e) => events.push(e));
   });
@@ -100,21 +111,23 @@ describe("RestartResumeService", () => {
     const svc = makeService();
 
     await svc.capture([
-      { chatId: "a", status: "running", pending: ["finish the migration"] },
+      { chatId: "a", status: "running", pending: [{ text: "finish the migration" }] },
       { chatId: "b", status: "idle", pending: [] },
-      { chatId: "c", status: "queued", pending: ["start on the docs"] },
+      { chatId: "c", status: "queued", pending: [{ text: "start on the docs" }] },
     ]);
 
     expect((await store.getChat("a"))?.interruption).toMatchObject({
       at: NOW,
       status: "running",
-      pending: ["finish the migration"],
+      pending: [{ text: "finish the migration" }],
       sha: "aaaaaaa",
     });
     // `idle` was not doing anything to continue.
     expect((await store.getChat("b"))?.interruption).toBeUndefined();
     // `queued` never started a turn, so its outbox is the whole ask.
-    expect((await store.getChat("c"))?.interruption?.pending).toEqual(["start on the docs"]);
+    expect((await store.getChat("c"))?.interruption?.pending).toEqual([
+      { text: "start on the docs" },
+    ]);
   });
 
   it("skips archived chats — somebody already decided that work is over", async () => {
@@ -153,7 +166,7 @@ describe("RestartResumeService", () => {
     expect(sent[0]!.chatId).toBe("a");
     expect(sent[0]!.text).toContain("Dispatch was updated");
     // Authored by Dispatch, not by the human: a lone `brief`, never bare text.
-    expect(sent[0]!.parts?.[0]).toMatchObject({ kind: "brief" });
+    expect(sent[0]!.opts?.parts?.[0]).toMatchObject({ kind: "brief" });
 
     const rec = (await store.getChat("a"))?.interruption;
     expect(rec?.settledAt).toBe(NOW);
@@ -182,7 +195,7 @@ describe("RestartResumeService", () => {
     await store.saveChat(chat("a"));
     const capture = makeService();
     await capture.capture([
-      { chatId: "a", status: "running", pending: ["actually, use the other branch"] },
+      { chatId: "a", status: "running", pending: [{ text: "actually, use the other branch" }] },
     ]);
 
     const svc = makeService();
@@ -193,7 +206,7 @@ describe("RestartResumeService", () => {
     expect(sent[0]!.text).toBe("actually, use the other branch");
     // No `brief` — attributing the human's own words to Dispatch would put them
     // in the wrong speech bubble.
-    expect(sent[0]!.parts).toBeUndefined();
+    expect(sent[0]!.opts).toBeUndefined();
   });
 
   it("does NOT resume a chat that was blocked on a human, and raises attention", async () => {
@@ -233,7 +246,7 @@ describe("RestartResumeService", () => {
   it("leaves a stale interruption alone rather than resuming a day-old turn", async () => {
     await store.saveChat(chat("a"));
     const capture = makeService();
-    await capture.capture([{ chatId: "a", status: "running", pending: ["hi"] }]);
+    await capture.capture([{ chatId: "a", status: "running", pending: [{ text: "hi" }] }]);
 
     clock = NOW + RESUME_MAX_AGE_MS + 1;
     const svc = makeService();
@@ -261,7 +274,7 @@ describe("RestartResumeService", () => {
   it("still delivers a pending message when there is no session id", async () => {
     await store.saveChat(chat("a", { sessionId: undefined }));
     const capture = makeService();
-    await capture.capture([{ chatId: "a", status: "queued", pending: ["do the thing"] }]);
+    await capture.capture([{ chatId: "a", status: "queued", pending: [{ text: "do the thing" }] }]);
 
     const svc = makeService();
     svc.restore();
@@ -359,7 +372,7 @@ describe("RestartResumeService", () => {
   it("says a replayed message is a RE-SEND — the transcript already has it", async () => {
     await store.saveChat(chat("a"));
     const capture = makeService();
-    await capture.capture([{ chatId: "a", status: "queued", pending: ["the parked one"] }]);
+    await capture.capture([{ chatId: "a", status: "queued", pending: [{ text: "the parked one" }] }]);
 
     const svc = makeService();
     svc.restore();
@@ -372,6 +385,63 @@ describe("RestartResumeService", () => {
       .map((e) => (e as { message: { text?: string } }).message.text ?? "");
     expect(notices.some((t) => t.includes("never reached the agent"))).toBe(true);
     expect(notices.some((t) => t.includes("being sent again"))).toBe(true);
+  });
+
+  it("replays a peer message WITH its sender, not as the human's own words", async () => {
+    await store.saveChat(chat("a"));
+    const capture = makeService();
+    await capture.capture([
+      {
+        chatId: "a",
+        status: "queued",
+        pending: [
+          { text: "can you take this one?", peer: { chatId: "b", title: "Chat b", askId: "k1" } },
+        ],
+      },
+    ]);
+
+    const svc = makeService();
+    svc.restore();
+    await tick(svc);
+
+    // Dropping `peer` would put another chat's words in the human's own bubble
+    // and strip the reminder naming the sender — and with it the `askId`, so a
+    // captured `chat_ask` could never be answered.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.opts?.peer).toEqual({ chatId: "b", title: "Chat b", askId: "k1" });
+  });
+
+  it("spends the ticket BEFORE the send, so a death mid-send cannot replay it", async () => {
+    await store.saveChat(chat("a"));
+    const capture = makeService();
+    await capture.capture([{ chatId: "a", status: "running", pending: [] }]);
+
+    // Hold the send open. This is the window a crash lands in: the tickets were
+    // written by an earlier graceful shutdown, so "a crash cannot mint one" says
+    // nothing here — only stamping first does.
+    let release!: () => void;
+    sendGate = new Promise<void>((r) => {
+      release = r;
+    });
+    const entered = new Promise<void>((r) => {
+      onSendEnter = r;
+    });
+
+    const svc = makeService();
+    svc.restore();
+    const due = timers;
+    timers = [];
+    for (const t of due) t.fn();
+    await entered;
+
+    // We are INSIDE the send and the ticket is already spent. Stamped after,
+    // a death here would leave the record unsettled with its original `at`,
+    // and the next boot would resume the chat again — every boot, for 24h.
+    expect(sent).toHaveLength(0);
+    expect((await store.getChat("a"))?.interruption?.settledAs).toBe("resumed");
+
+    release();
+    await svc.drain();
   });
 
   /* -------------------------------------------------------------- undo */

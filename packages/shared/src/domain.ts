@@ -13,6 +13,7 @@ import {
   ShellTranscriptFilterSchema,
 } from "./common.js";
 import { ResumePlanSchema } from "./limits.js";
+import { PeerSenderSchema } from "./messages.js";
 import { WorkflowConfigSchema } from "./workflow.js";
 
 /* ------------------------------------------------------------------ subApps */
@@ -718,12 +719,26 @@ export const ChatInterruptionSchema = z.object({
    */
   sha: z.string().optional(),
   /**
-   * Messages the human sent that the runtime never received. `stop()` clears the
-   * outbox unconditionally, so without capturing them here they are simply lost.
-   * Replayed verbatim as the continuation when present — a message the human
-   * already typed is a better continuation than anything we could compose.
+   * Messages that were accepted but never reached the runtime. `stop()` clears
+   * the outbox unconditionally, so without capturing them here they are simply
+   * lost. Replayed as the continuation when present — a message somebody
+   * already sent is a better continuation than anything we could compose.
+   *
+   * Objects, not bare strings, because WHO sent it changes what replaying it
+   * means. A peer message re-sent without its {@link PeerSenderSchema} lands in
+   * the human's own speech bubble and reaches the model without the
+   * `<system-reminder>` naming the sending chat — and for a `chat_ask` it also
+   * drops the `askId`, leaving the resumed agent no way to answer.
    */
-  pending: z.array(z.string()).default([]),
+  pending: z
+    .array(
+      z.object({
+        text: z.string(),
+        /** The sending CHAT, when this came from `chat_send` / `chat_ask`. */
+        peer: PeerSenderSchema.optional(),
+      }),
+    )
+    .default([]),
   /** Set once the boot pass has acted on this record. */
   settledAt: z.number().int().optional(),
   /** How the boot pass acted: continued it, or handed it back to the human. */

@@ -15,9 +15,15 @@
  * which ONLY executes on a graceful teardown, so writing a record at all is the
  * proof. A crash, an OOM or a `taskkill /F` runs no shutdown handler and leaves
  * no record, and {@link restore} then finds nothing to do — those chats keep
- * today's behaviour and come back red. No uptime heuristic, no crash counter,
- * and structurally no way to get into a resume→crash→resume loop, because the
- * crash half can never write the ticket for the next round.
+ * today's behaviour and come back red. No uptime heuristic and no crash counter.
+ *
+ * That alone does NOT rule out a replay loop, and it is worth being exact about
+ * why. It rules out a crash MINTING a ticket. It does not rule out a crash while
+ * we are SPENDING tickets a graceful shutdown already wrote — an OOM partway
+ * through the boot pass would otherwise leave the rest unsettled, to be resumed
+ * again on the next boot, and the next, for a whole day. What closes that is
+ * {@link RestartResumeService.settle} stamping the record BEFORE the send: a
+ * ticket is spent when it is issued to a chat, not when the chat replies.
  *
  * "Was it an UPDATE specifically?" is answered separately and after the fact, by
  * comparing the build sha recorded at shutdown against the one now running. That
@@ -36,6 +42,7 @@ import {
   type Chat,
   type ChatInterruption,
   type MessagePart,
+  type PeerSender,
   type RestartResumeStatus,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
@@ -106,7 +113,11 @@ export interface RestartResumeOpts {
    * reason as `ResumeScheduler`: the subprocess is long gone by now, and how a
    * session gets rebuilt belongs to the route layer's `ensureSession`.
    */
-  send: (chatId: string, text: string, parts?: MessagePart[]) => Promise<void>;
+  send: (
+    chatId: string,
+    text: string,
+    opts?: { parts?: MessagePart[]; peer?: PeerSender },
+  ) => Promise<void>;
   /** Stop a resumed turn without tearing the session down (the undo button). */
   interrupt: (chatId: string) => Promise<void>;
   deps?: RestartResumeDeps;
@@ -196,7 +207,11 @@ export class RestartResumeService {
    * 20s grace window that also has to tree-kill subApps and flush transcripts.
    */
   async capture(
-    live: Array<{ chatId: string; status: string; pending: string[] }>,
+    live: Array<{
+      chatId: string;
+      status: string;
+      pending: NonNullable<ChatInterruption["pending"]>;
+    }>,
   ): Promise<number> {
     const sha = safely(() => this.readSha());
     const at = this.now();
@@ -371,9 +386,18 @@ export class RestartResumeService {
       return;
     }
 
+    // Stamp BEFORE the send, not after. The module docstring's safety claim —
+    // a crash can never write the ticket for the next round — covers a crash on
+    // a boot with NO pre-existing record. It does not cover this: the tickets
+    // were written by the graceful shutdown at T0, and a non-graceful death
+    // while we are spending them (an OOM partway through a sequential run of
+    // ~1.3 GB process trees is the realistic one) leaves them unsettled with
+    // their original `at`. The next boot would find the same records, still
+    // inside RESUME_MAX_AGE_MS, and resume every one of them again — including
+    // the chat whose turn had already started — once per boot for 24h.
+    await this.mark(chat.id, record, "resumed");
     try {
       await this.resume(chat, record);
-      await this.mark(chat.id, record, "resumed");
       this.remember(chat, record, "resumed");
     } catch (err) {
       await this.mark(chat.id, record, "failed");
@@ -428,7 +452,15 @@ export class RestartResumeService {
     // and as THEIRS. Sending it as a `brief` would file their own words under
     // Dispatch's name in the transcript.
     if (record.pending.length > 0) {
-      for (const text of record.pending) await this.send(chat.id, text);
+      for (const item of record.pending) {
+        // `peer` carried through, not dropped. Without it a `chat_send` from
+        // another chat lands in the human's own speech bubble and reaches the
+        // model with no `<system-reminder>` naming the sender — and a captured
+        // `chat_ask` loses the `askId`, so the resumed agent cannot reply even
+        // if the asker is still waiting. Same misattribution the `brief` below
+        // exists to avoid, in the other direction.
+        await this.send(chat.id, item.text, item.peer ? { peer: item.peer } : undefined);
+      }
       return;
     }
 
@@ -437,13 +469,15 @@ export class RestartResumeService {
     // human's speech bubble and the chat reads as though they came back and
     // asked it to carry on. A lone brief composes to its own text, so the model
     // receives exactly the prompt above.
-    await this.send(chat.id, prompt, [
-      {
-        kind: "brief",
-        label: cause === "update" ? "Resumed after update" : "Resumed after restart",
-        text: prompt,
-      },
-    ]);
+    await this.send(chat.id, prompt, {
+      parts: [
+        {
+          kind: "brief",
+          label: cause === "update" ? "Resumed after update" : "Resumed after restart",
+          text: prompt,
+        },
+      ],
+    });
   }
 
   /**

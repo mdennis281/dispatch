@@ -157,7 +157,7 @@ describe("createServices().start() resilience", () => {
         broker: stub({
           interruptionSnapshot: () => {
             order.push("snapshot");
-            return [{ chatId: "c1", status: "running", pending: ["keep going"] }];
+            return [{ chatId: "c1", status: "running", pending: [{ text: "keep going" }] }];
           },
           dispose: async () => {
             order.push("broker.dispose");
@@ -201,7 +201,7 @@ describe("createServices().start() resilience", () => {
     ]);
     // And it received the live sessions, not an empty list.
     expect(capture).toHaveBeenCalledWith([
-      { chatId: "c1", status: "running", pending: ["keep going"] },
+      { chatId: "c1", status: "running", pending: [{ text: "keep going" }] },
     ]);
   });
 });

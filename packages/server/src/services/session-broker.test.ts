@@ -4174,10 +4174,41 @@ describe("interruptionSnapshot", () => {
     expect(byId.get("c1")?.status).toBe("running");
     expect(byId.get("c2")).toMatchObject({
       status: "queued",
-      pending: ["the parked one"],
+      pending: [{ text: "the parked one" }],
     });
     // c3 has a session but was never sent anything — there is nothing to continue.
     expect(byId.has("c3")).toBe(false);
+
+    gate.resolve();
+    await Promise.all(["c1", "c2"].map((id) => broker.waitFor(id, "idle").catch(() => {})));
+  });
+
+  it("never reports the broker's own /clear — replaying it would wipe the resumed context", async () => {
+    const gate = deferred();
+    const { fn } = makeFakeQuery(async () => {
+      await gate.promise;
+      return [assistantText("done"), resultMsg()];
+    });
+    // Cap of 1: c2 parks as `queued`, and a queued session's outbox is NOT
+    // flushed (a running one's is, immediately) — so this is the path on which
+    // a control message actually survives to be captured.
+    const broker = makeBroker(fn, 1);
+    for (const id of ["c1", "c2"]) {
+      await store.saveChat(chatFor(id));
+      broker.create(chatFor(id));
+    }
+    await broker.sendMessage("c1", "the running one");
+    await broker.sendMessage("c2", "the parked one");
+    await until(() => broker.getStatus("c2") === "queued");
+
+    // The human hits Clear context on the parked chat.
+    broker.clearContext("c2");
+
+    const c2 = broker.interruptionSnapshot().find((e) => e.chatId === "c2")!;
+    // Their sentence, and ONLY their sentence. Captured and replayed, the
+    // `/clear` would wipe the context of the session the resume just rebuilt
+    // and leave a `/clear` row in the transcript that nobody typed.
+    expect(c2.pending).toEqual([{ text: "the parked one" }]);
 
     gate.resolve();
     await Promise.all(["c1", "c2"].map((id) => broker.waitFor(id, "idle").catch(() => {})));

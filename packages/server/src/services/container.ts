@@ -517,9 +517,9 @@ export function createServices(
     new RestartResumeService({
       store,
       bus,
-      send: async (chatId, text, parts) => {
+      send: async (chatId, text, opts) => {
         await ensureSession(services, chatId);
-        await broker.sendMessage(chatId, text, { parts });
+        await broker.sendMessage(chatId, text, opts ?? {});
       },
       interrupt: async (chatId) => {
         await broker.interrupt(chatId);
