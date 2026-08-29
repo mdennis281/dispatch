@@ -54,15 +54,20 @@ import { readInstalledRelease } from "./release.js";
 export const RESUME_MAX_AGE_MS = 24 * 60 * 60_000;
 
 /**
- * Grace between "the store is ready" and the first resumed turn.
+ * Grace between the server answering and the first resumed turn.
  *
- * `services.start()` runs BEFORE `app.listen()`, and resuming there would mean
- * spawning agent subprocesses — each one a `claude` process plus its MCP
- * children — while the port is still closed. The health gate in `upgrade.mjs`
- * and `UpdatingScreen`'s reload both poll `/api/health`, so a boot that spends
- * that time forking would read as an update that hung. Arming a short timer
- * instead puts the resumes just after the server starts answering, which is also
- * when a client is around to render the banner and stream the output.
+ * Resuming spawns agent process trees — a `claude` process plus its MCP children
+ * each — and both `upgrade.mjs`'s health gate and `UpdatingScreen`'s reload poll
+ * `/api/health`, so doing that with the port still closed reads as an update
+ * that hung.
+ *
+ * `restore()` is therefore called from `start.ts` AFTER `app.listen()` resolves,
+ * NOT from `services.start()`. Arming it inside `start()` did not hold: what
+ * runs after it is unbounded — `runner.reconcile()` awaits a
+ * `docker compose down` per persisted docker runner (routinely 5-30s), then the
+ * terminal reconcile/sweep, then `seedDefaultsIfEmpty` and `ensureSetupState` —
+ * and the timer fires from the event loop during any of those awaits. This
+ * delay is breathing room ON TOP of a guarantee the CALL SITE provides.
  */
 export const RESUME_START_DELAY_MS = 2_000;
 
@@ -136,6 +141,18 @@ export class RestartResumeService {
    * lying. The durable half is `settledAt` on each chat.
    */
   private settled: Settled[] = [];
+  /**
+   * chatId -> the attention id we raised for it, until the human speaks.
+   *
+   * Nothing else would ever clear these. `attention-resolve` is published in
+   * only three places — the broker's permission path, `resolveIdleAttention`
+   * (which clears ONLY `session.idleAttentionId`), and chat deletion — and the
+   * popover's rows navigate rather than dismiss. Without this edge a `question`
+   * item raised here outlives the answer it asked for, and since `question`
+   * counts as blocking it inflates the header badge for the life of the process.
+   */
+  private readonly pendingAttention = new Map<string, string>();
+  private offChatMessage?: () => void;
   private cause: "update" | "restart" = "restart";
   private ranAt: number | null = null;
   private dismissed = false;
@@ -196,10 +213,14 @@ export class RestartResumeService {
           pending: entry.pending,
           ...(sha ? { sha } : {}),
         };
+        // `patchChat`, never a get-then-save of the whole record: this runs
+        // BEFORE `broker.dispose()`, so a live session's `writeChain` may still
+        // be flushing `status` / `lastUserMessageAt` patches. A whole-file
+        // rewrite from out here would put the pre-flush record back.
+        //
         // No bus publish: every client is being told the server is going away,
         // and a `chat-update` racing the socket close is noise at best.
-        await this.store.saveChat({ ...chat, interruption });
-        written += 1;
+        if (await this.store.patchChat(entry.chatId, { interruption })) written += 1;
       } catch {
         /* one unwritable record must not cost the others theirs */
       }
@@ -238,6 +259,9 @@ export class RestartResumeService {
     this.disposed = true;
     if (this.timer !== undefined) this.clearTimer(this.timer);
     this.timer = undefined;
+    this.offChatMessage?.();
+    this.offChatMessage = undefined;
+    this.pendingAttention.clear();
   }
 
   /* --------------------------------------------------------------- banner */
@@ -325,10 +349,13 @@ export class RestartResumeService {
       // and this chat needs a human by construction. `question` rather than
       // `idle`: it is unfinished work blocked on a person, which is what that
       // weight means, and it must not sort below a finished-turn notice.
+      const attentionId = `interrupted:${chat.id}:${record.at}`;
+      this.pendingAttention.set(chat.id, attentionId);
+      this.watchForReplies();
       this.bus.publish({
         type: "attention-add",
         item: {
-          id: `interrupted:${chat.id}:${record.at}`,
+          id: attentionId,
           chatId: chat.id,
           projectId: chat.projectId,
           kind: "question",
@@ -380,11 +407,20 @@ export class RestartResumeService {
 
   private async resume(chat: Chat, record: ChatInterruption): Promise<void> {
     const cause = this.cause;
+    const what = cause === "update" ? "Dispatch updated and restarted" : "Dispatch restarted";
+    // A replayed message is ALREADY in the transcript: `sendMessage` emits the
+    // `user` row BEFORE pushing to the outbox (which is why a `queued` session
+    // has a populated outbox at all), so the replay appends a second, identical
+    // row. Say so, or the human sees their own sentence twice with nothing to
+    // mark which copy the agent never got.
     await this.notice(
       chat.id,
-      cause === "update"
-        ? "Dispatch updated and restarted — continuing this chat automatically."
-        : "Dispatch restarted — continuing this chat automatically.",
+      record.pending.length > 0
+        ? what +
+            (record.pending.length === 1
+              ? " — the message above never reached the agent, so it is being sent again."
+              : " — the messages above never reached the agent, so they are being sent again.")
+        : what + " — continuing this chat automatically.",
     );
 
     // A message the human already typed but the runtime never received is a
@@ -408,6 +444,28 @@ export class RestartResumeService {
         text: prompt,
       },
     ]);
+  }
+
+  /**
+   * Resolve our attention item the moment the human answers.
+   *
+   * Subscribed lazily — a boot that resumed everything raises no items and pays
+   * for no listener — and torn down again once the last one clears, so it never
+   * outlives the thing it is watching for.
+   */
+  private watchForReplies(): void {
+    if (this.offChatMessage || this.disposed) return;
+    this.offChatMessage = this.bus.on("chat-message", (evt) => {
+      if (evt.message?.kind !== "user") return;
+      const id = this.pendingAttention.get(evt.chatId);
+      if (!id) return;
+      this.pendingAttention.delete(evt.chatId);
+      this.bus.publish({ type: "attention-resolve", id, chatId: evt.chatId });
+      if (this.pendingAttention.size === 0) {
+        this.offChatMessage?.();
+        this.offChatMessage = undefined;
+      }
+    });
   }
 
   private remember(
@@ -435,13 +493,16 @@ export class RestartResumeService {
     settledAs: NonNullable<ChatInterruption["settledAs"]>,
   ): Promise<void> {
     try {
-      const chat = await this.store.getChat(chatId);
-      if (!chat) return;
-      const saved = await this.store.saveChat({
-        ...chat,
+      // `patchChat` merges under the chat's lock. A get-then-save pair here
+      // races the resume we just started: `sendMessage` returns WITHOUT awaiting
+      // its own writes — it queues `patchChat({ lastUserMessageAt })` and
+      // `setStatus(running)` onto the session's `writeChain` — so a whole-record
+      // rewrite from out here can land on top and persist `status: "done"` for
+      // a chat whose turn is actually running.
+      const saved = await this.store.patchChat(chatId, {
         interruption: { ...record, settledAt: this.now(), settledAs },
       });
-      this.bus.publish({ type: "chat-update", chat: saved });
+      if (saved) this.bus.publish({ type: "chat-update", chat: saved });
     } catch {
       /* the resume itself already happened; a lost stamp costs a re-run at most */
     }

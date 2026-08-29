@@ -307,6 +307,73 @@ describe("RestartResumeService", () => {
     expect(svc.status()?.needsInput.map((r) => r.chatId)).toEqual(["c"]);
   });
 
+  it("resolves its attention item as soon as the human answers", async () => {
+    await store.saveChat(chat("a"));
+    const capture = makeService();
+    await capture.capture([{ chatId: "a", status: "awaiting-input", pending: [] }]);
+
+    const svc = makeService();
+    svc.restore();
+    await tick(svc);
+    const raised = events.find((e) => e.type === "attention-add");
+    const id = (raised as { item: { id: string } }).item.id;
+
+    // Nothing else in the app would ever clear this: `resolveIdleAttention`
+    // only touches `session.idleAttentionId`, and the popover's rows navigate
+    // rather than dismiss. Without this edge the header badge stays inflated
+    // for the life of the process.
+    events.length = 0;
+    bus.publish({
+      type: "chat-message",
+      chatId: "a",
+      message: { id: "m1", chatId: "a", ts: clock, kind: "user", text: "here you go" },
+    } as never);
+
+    expect(events).toContainEqual({ type: "attention-resolve", id, chatId: "a" });
+  });
+
+  it("does not resolve on another chat's message, or on a non-user row", async () => {
+    for (const id of ["a", "b"]) await store.saveChat(chat(id));
+    const capture = makeService();
+    await capture.capture([{ chatId: "a", status: "awaiting-input", pending: [] }]);
+
+    const svc = makeService();
+    svc.restore();
+    await tick(svc);
+
+    events.length = 0;
+    bus.publish({
+      type: "chat-message",
+      chatId: "b",
+      message: { id: "m1", chatId: "b", ts: clock, kind: "user", text: "different chat" },
+    } as never);
+    bus.publish({
+      type: "chat-message",
+      chatId: "a",
+      message: { id: "m2", chatId: "a", ts: clock, kind: "assistant", text: "not the human" },
+    } as never);
+
+    expect(events.some((e) => e.type === "attention-resolve")).toBe(false);
+  });
+
+  it("says a replayed message is a RE-SEND — the transcript already has it", async () => {
+    await store.saveChat(chat("a"));
+    const capture = makeService();
+    await capture.capture([{ chatId: "a", status: "queued", pending: ["the parked one"] }]);
+
+    const svc = makeService();
+    svc.restore();
+    await tick(svc);
+
+    // `sendMessage` emits the `user` row BEFORE pushing to the outbox, so the
+    // human's sentence is already on screen; the replay adds a second copy.
+    const notices = events
+      .filter((e) => e.type === "chat-message")
+      .map((e) => (e as { message: { text?: string } }).message.text ?? "");
+    expect(notices.some((t) => t.includes("never reached the agent"))).toBe(true);
+    expect(notices.some((t) => t.includes("being sent again"))).toBe(true);
+  });
+
   /* -------------------------------------------------------------- undo */
 
   it("the undo interrupts every resumed turn and clears the banner", async () => {

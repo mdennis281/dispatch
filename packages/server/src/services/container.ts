@@ -975,11 +975,11 @@ export function createServices(
       // never strands a chat waiting on a limit that has since lifted.
       await resume.restore().catch(() => {});
 
-      // Continue the chats the last (deliberate) shutdown cut short. Only ARMS a
-      // timer — the resumes themselves must land after `app.listen()`, since
-      // each one spawns an agent process tree and this still runs with the port
-      // closed. See RESUME_START_DELAY_MS.
-      restartResume.restore();
+      // NOTE: `restartResume.restore()` is deliberately NOT called here. It
+      // spawns agent process trees, and everything from this point to
+      // `app.listen()` is unbounded — `runner.reconcile()` below awaits a
+      // `docker compose down` per persisted docker runner. `start.ts` arms it
+      // once the port is actually answering. See RESUME_START_DELAY_MS.
 
       // Boot reconciliation of persisted runners (best-effort).
       try {
