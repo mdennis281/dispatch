@@ -273,17 +273,53 @@ export const ManifestDefaultsSchema = z.object({
 export type ManifestDefaults = z.infer<typeof ManifestDefaultsSchema>;
 
 /**
- * Per-project override of the app's spawn-chat consent policy — whether an agent
- * calling `mcp__dispatch-chat__spawn_chat` here may start a chat WITHOUT stopping for
- * the human's approval. Absent → the global setting decides, which defaults to
- * asking. Committed with the repo because "agents may fan themselves out
- * unattended in this codebase" is a statement about the codebase, not about
- * whoever happens to be at the keyboard.
+ * This project's policy for `mcp__dispatch-chat__spawn_chat` — an agent starting
+ * ANOTHER chat. Two questions, both the repo's to answer rather than whoever
+ * happens to be at the keyboard, which is why this is committed:
+ *
+ * - `autoApprove` — may a spawn skip the human's approval prompt? Absent → the
+ *   global setting decides, which defaults to asking.
+ * - `maxDepth` — how deep may the chats it starts stack? Absent →
+ *   {@link DEFAULT_SPAWN_MAX_DEPTH}.
+ *
+ * They sit together because they are the same statement about a codebase:
+ * whether agents may fan themselves out unattended here, and how far.
  */
 export const ManifestSpawnChatSchema = z.object({
-  autoApprove: z.boolean(),
+  /**
+   * Optional so a project can author `maxDepth` alone. Absent is NOT `false`:
+   * `getSpawnAutoApprove` returns null for it, which is what lets the app
+   * setting decide (see its docblock).
+   */
+  autoApprove: z.boolean().optional(),
+  /**
+   * How many levels of SPAWNED chat this project's sidebar may stack, counting
+   * a top-level chat as 0. Absent → {@link DEFAULT_SPAWN_MAX_DEPTH}.
+   *
+   * The default of 1 is the shape the review workflow produces and the one the
+   * sidebar was designed around: a chat, the chats it spawned, and each of
+   * THOSE chats' PR reviewers. Reviewers are not counted against this — they
+   * are spawned by the PR registry rather than by `spawn_chat`, so a child chat
+   * that opens a pull request still gets its reviewer filed underneath it. What
+   * the cap stops is a spawned chat spawning chats of its OWN, which is what
+   * turned one branch into a flat run of twenty rows nobody could read.
+   *
+   * A NUMBER rather than a boolean because the constraint is soft on purpose:
+   * deeper trees are a thing this project wants later, and raising this is the
+   * whole of the opt-in. `0` forbids spawning here entirely.
+   */
+  maxDepth: z.number().int().min(0).max(10).optional(),
 });
 export type ManifestSpawnChat = z.infer<typeof ManifestSpawnChatSchema>;
+
+/**
+ * The nesting depth a project gets when its manifest doesn't author one.
+ *
+ * Lives beside the schema rather than at the enforcement site because BOTH ends
+ * read it — the server refuses the spawn, and the message it refuses with
+ * quotes the number — and two literals would drift the moment one moved.
+ */
+export const DEFAULT_SPAWN_MAX_DEPTH = 1;
 
 /**
  * The raw `.dispatch/project.yaml` manifest. All fields optional except

@@ -64,6 +64,7 @@ import { ResumeScheduler } from "./resume-scheduler.js";
 import { TrunkSyncService } from "./trunk-sync.js";
 import { PrReviewWatcher } from "./pr-review-watcher.js";
 import { PrRegistry } from "./pr-registry.js";
+import { chatNestingDepth } from "./chat-nesting.js";
 import { FileIndexService } from "./file-index.js";
 import { MetricsService } from "./metrics.js";
 import { MetricsBackfill } from "./metrics-backfill.js";
@@ -726,6 +727,18 @@ export function createServices(
       isBlockedOnHuman: (chatId) => broker.getStatus(chatId) === "awaiting-input",
     });
   broker.messenger = chatMessenger;
+  // The nesting walk needs BOTH parent edges, and the reviewer one is a PR
+  // record rather than a chat field — so it is assigned here, where the store
+  // is, for the same reason `spawnChat` below is.
+  broker.chatNestingDepth = (chatId) =>
+    chatNestingDepth(chatId, {
+      getChat: (id) => store.getChat(id).catch(() => null),
+      prAuthorChatId: (key) =>
+        store
+          .getPrRecord(key)
+          .then((row) => row?.chatId ?? null)
+          .catch(() => null),
+    });
   broker.spawnChat = async ({ request, project, parentChatId }) => {
     const chat = await createChat(services, {
       projectId: project.id,

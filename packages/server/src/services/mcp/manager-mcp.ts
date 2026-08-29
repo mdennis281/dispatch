@@ -122,6 +122,7 @@ import {
   type WorktreeInfo,
 } from "@dispatch/shared";
 import type { EventBus } from "../../bus.js";
+import type { SpawnNestingVerdict } from "../chat-nesting.js";
 import { clampBody } from "../memory.js";
 import type { MemoryGrepMatch, MemoryInventoryEntry } from "../memory.js";
 import type { MemoryHistoryResult } from "../memory-history.js";
@@ -1496,6 +1497,18 @@ export interface ManagerMcpChats {
    * than silently spawning somewhere else).
    */
   resolveProject(projectId?: string): Promise<SpawnChatTarget | null>;
+  /**
+   * Whether the project's nesting cap lets this chat file another row under
+   * itself (see `chat-nesting.ts`). Asked BEFORE `consent`, so a spawn the
+   * project forbids never costs the human a card to answer.
+   *
+   * Optional so older fakes stay valid — absent means uncapped, which is the
+   * right failure for a policy that is deliberately soft.
+   */
+  nesting?(input: {
+    request: SpawnChatRequest;
+    project: SpawnChatTarget;
+  }): Promise<SpawnNestingVerdict>;
   /** Ask the human (or consult the auto-approve setting). Never throws on deny. */
   consent(input: {
     request: SpawnChatRequest;
@@ -4851,7 +4864,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "standalone brief, because the new chat inherits NONE of this conversation. " +
       "The new chat is FILED UNDER YOURS in the sidebar, so a handful of them fold " +
       "into your row instead of scattering across the list — pass detached: true " +
-      "only for work whose life has nothing to do with this chat's. " +
+      "only for work whose life has nothing to do with this chat's. Projects cap how " +
+      "deep that filing goes (usually one level), so if YOU are already a spawned " +
+      "chat this call is refused and says so — do the work yourself instead. " +
       "Returns the new chatId; pass it to wait_for_chat to sequence behind it.",
     {
       prompt: z
@@ -4919,6 +4934,38 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             : "This session has no project, so there is nowhere to spawn a chat. Pass " +
                 "an explicit projectId.",
           true,
+        );
+      }
+
+      // The nesting cap, BEFORE consent: a spawn this project forbids should not
+      // cost the human a card to say no to. A thrown lookup is treated as no cap
+      // rather than as a refusal — the policy is soft by design, and failing it
+      // closed would take spawning down with the chat store.
+      const nesting = ctx.chats.nesting
+        ? await ctx.chats.nesting({ request, project }).catch(() => null)
+        : null;
+      if (nesting && !nesting.allowed) {
+        // Not flagged as an error, for the same reason the decline below isn't:
+        // "no" is a legitimate answer, and an error pushes the model into
+        // retrying the exact call it was just refused.
+        return textResult(
+          `Not spawned — this chat is itself ${nesting.depth} level${
+            nesting.depth === 1 ? "" : "s"
+          } deep in ${project.name}'s sidebar, and this project nests spawned chats ` +
+            `at most ${nesting.maxDepth} deep. Do NOT retry it.\n` +
+            "A chat at this depth can still pick up PR reviewers — those are filed " +
+            "underneath it — but it cannot start chats of its own. Carry the work here, " +
+            "or hand it back to the chat that spawned you. If it is genuinely " +
+            "independent of this one, spawn it with detached: true and it starts at the " +
+            "top level instead of under you.\n" +
+            "(The human sets this per project: spawnChat.maxDepth in .dispatch/project.yaml.)\n" +
+            JSON.stringify({
+              approved: false,
+              reason: "nesting-depth",
+              depth: nesting.depth,
+              maxDepth: nesting.maxDepth,
+              projectId: project.id,
+            }),
         );
       }
 

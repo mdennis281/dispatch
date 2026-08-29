@@ -153,6 +153,7 @@ import {
   type SpawnChatTarget,
   type SpawnedChat,
 } from "./mcp/manager-mcp.js";
+import type { SpawnNestingVerdict } from "./chat-nesting.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { createAuthoringEditor } from "./mcp/authoring-editor.js";
 import type { AuthoredConfigService } from "./authored-config.js";
@@ -184,6 +185,7 @@ import type { HarnessRegistry } from "../harness/index.js";
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
 import { managerMcpContextOf } from "./mcp/manager-mcp.js";
 import {
+  DEFAULT_SPAWN_MAX_DEPTH,
   isManagerServer,
   managerToolQualifiedName,
   type ManagerToolName,
@@ -1005,6 +1007,9 @@ export interface BrokerProjectConfig {
   /** A project's authored spawn-chat consent override, or null when it has none
    *  (then the app setting decides). Optional so older fakes stay valid. */
   getSpawnAutoApprove?(projectId: string): boolean | null;
+  /** A project's authored chat-nesting cap, or null when it has none (then
+   *  `DEFAULT_SPAWN_MAX_DEPTH` applies). Optional so older fakes stay valid. */
+  getSpawnMaxDepth?(projectId: string): number | null;
 }
 
 /**
@@ -1830,6 +1835,16 @@ export class SessionBroker {
     /** The chat that asked, so the new one can be traced back to it. */
     parentChatId: string;
   }) => Promise<SpawnedChat>;
+  /**
+   * How deep a chat already sits in the sidebar's tree (see `chat-nesting.ts`).
+   *
+   * Settable after construction for the same reason as `spawnChat`, and for a
+   * more specific one: the walk follows the REVIEWER edge as well as the direct
+   * one, so it needs the PR record store the container owns and the broker does
+   * not. Absent → every chat reads as depth 0 and the cap never bites, which is
+   * the right failure for a policy whose whole job is to be soft.
+   */
+  chatNestingDepth?: (chatId: string) => Promise<number>;
   /**
    * Chat-to-chat messaging (`chat_send` / `chat_ask` / `chat_reply` /
    * `chat_state`). Settable after construction for the same reason as
@@ -4679,6 +4694,37 @@ export class SessionBroker {
   }
 
   /**
+   * Whether a `spawn_chat` may file another row UNDER the calling chat, per the
+   * target project's nesting cap.
+   *
+   * Checked before {@link consentToSpawn}, so a spawn the project forbids never
+   * costs the human a card to say no to.
+   *
+   * Two spawns are exempt because neither one deepens anything, and refusing
+   * them would be the cap enforcing a rule it doesn't have:
+   *
+   * - `detached: true` writes no `parentChatId` at all, so the new chat is a
+   *   top-level row wherever it lands.
+   * - A spawn into ANOTHER project lands in a chat list its parent isn't in, so
+   *   there is no row there to fold under — the same reason `SpawnChatRequest`
+   *   documents a cross-project spawn as detaching on its own.
+   */
+  async checkSpawnNesting(
+    chatId: string,
+    request: SpawnChatRequest,
+    target: SpawnChatTarget,
+  ): Promise<SpawnNestingVerdict> {
+    const maxDepth =
+      this.projectConfig?.getSpawnMaxDepth?.(target.id) ?? DEFAULT_SPAWN_MAX_DEPTH;
+    const chat = await this.store.getChat(chatId).catch(() => null);
+    if (request.detached || !chat || chat.projectId !== target.id) {
+      return { allowed: true, depth: 0, maxDepth };
+    }
+    const depth = this.chatNestingDepth ? await this.chatNestingDepth(chatId).catch(() => 0) : 0;
+    return { allowed: depth < maxDepth, depth, maxDepth };
+  }
+
+  /**
    * Put a NON-tool decision in front of the human on a live session's behalf and
    * block until they answer — the same card, Attention Queue entry, transcript
    * row and resolve endpoint an ordinary `canUseTool` prompt uses.
@@ -5977,6 +6023,8 @@ export class SessionBroker {
                 const proj = await this.store.getProject(target).catch(() => null);
                 return proj ? { id: proj.id, name: proj.name } : null;
               },
+              nesting: async ({ request, project: target }) =>
+                this.checkSpawnNesting(session.chatId, request, target),
               consent: async ({ request, project: target }) =>
                 this.consentToSpawn(session.chatId, request, target),
               spawn: async ({ request, project: target }) => {
