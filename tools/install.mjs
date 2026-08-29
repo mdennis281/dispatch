@@ -12,6 +12,7 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -28,6 +29,19 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_REPO = "mdennis281/dispatch";
 const PNPM_VERSION = "11.5.0";
 const MIN_NODE_MAJOR = 24;
+/**
+ * Backup payloads kept under `backups/` after a successful update.
+ *
+ * ONE, because one is all a rollback can reach: `current.json` records exactly
+ * one `previous`, and putting that directory back is the only recovery this
+ * installer supports. Every older payload is a copy of a release still
+ * downloadable from GitHub — and they are not small. A payload is ~350 MB, so
+ * an install updated daily passes 10 GB inside a month. A real store had 63 of
+ * them totalling 22 GB, against 1.2 GB of the chat history the app exists for.
+ */
+const BACKUP_KEEP = 1;
+/** Directories under `backups/` this prunes: the two the swap below creates. */
+const BACKUP_NAME = /^(?:app|failed)-.+-(\d{10,})$/;
 const REQUIRED_PAYLOAD = [
   "package.json",
   "pnpm-lock.yaml",
@@ -452,6 +466,72 @@ function openBrowser(url) {
   }
 }
 
+/**
+ * Delete stale payloads under `backups/`, keeping the newest {@link BACKUP_KEEP}
+ * plus anything named in `protect`.
+ *
+ * ORDERED BY THE TRAILING EPOCH the swap stamps on, not by mtime and not
+ * lexically. mtime is wrong because restoring a rollback rewrites it; whole-name
+ * lexical order is wrong because the tag sits in the middle and its length
+ * varies, which sorts `app-v2026.9.1-…` after `app-v2026.10.1-…`. A directory
+ * whose name carries no stamp is not one of ours and is left alone entirely —
+ * this deletes hundreds of megabytes at a time and must only ever touch
+ * directories it can positively identify.
+ *
+ * `protect` is how the caller keeps THIS update's rollback target whatever its
+ * age, so `current.json`'s `previous` pointer can never dangle. Protected
+ * entries count toward `keep` rather than adding to it: the normal call
+ * protects the newest entry, and the point is to end up holding one payload.
+ *
+ * BEST-EFFORT. A payload that will not delete — an antivirus scanner holding a
+ * handle, a stale supervisor pinning a file — is a disk-space problem, and
+ * failing an update the user just completed successfully over one is the wrong
+ * trade. Failures are collected and returned for the caller to mention.
+ */
+export function pruneBackups(root, { keep = BACKUP_KEEP, protect = [] } = {}) {
+  const dir = join(root, "backups");
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return { removed: [], failed: [] }; // no backups dir yet — a first install
+  }
+  const found = entries
+    .filter((entry) => entry.isDirectory() && BACKUP_NAME.test(entry.name))
+    .map((entry) => ({
+      path: resolve(dir, entry.name),
+      at: Number(BACKUP_NAME.exec(entry.name)[1]),
+    }))
+    .sort((a, b) => b.at - a.at);
+
+  // Protected entries are seeded FIRST and then the budget is filled from the
+  // newest down, so protecting one consumes a slot instead of adding one. The
+  // ordinary call protects the newest entry and both rules agree; they diverge
+  // only when the rollback target is older than something else on disk, and
+  // there "keep the target AND the newest" would hold two payloads forever —
+  // which is the hoarding this exists to stop.
+  const survivors = new Set(protect.map((path) => resolve(path)));
+  for (const candidate of found) {
+    if (survivors.size >= Math.max(0, keep)) break;
+    survivors.add(candidate.path);
+  }
+
+  const removed = [];
+  const failed = [];
+  for (const candidate of found) {
+    if (survivors.has(candidate.path)) continue;
+    try {
+      // Through `safeRemove`, so a caller that somehow passed a root outside the
+      // install tree cannot turn this into a recursive delete of anything else.
+      safeRemove(candidate.path, root);
+      removed.push(candidate.path);
+    } catch (error) {
+      failed.push({ path: candidate.path, message: error.message });
+    }
+  }
+  return { removed, failed };
+}
+
 function safeRemove(path, root) {
   const resolvedPath = resolve(path);
   const resolvedRoot = resolve(root);
@@ -572,11 +652,28 @@ async function main() {
           if (args.open) openBrowser("http://127.0.0.1:4318");
         }
 
+        // The new payload is relinked, verified, stamped and (if asked) up, so
+        // `backup` is the rollback target now and everything older is dead
+        // weight. Pruning HERE rather than before the start is deliberate: the
+        // catch below restores `backup` when the start fails, and that is the
+        // one directory this is told to protect.
+        const pruned = movedOld
+          ? pruneBackups(root, { protect: [backup] })
+          : { removed: [], failed: [] };
+
         console.log(`\nDispatch ${selected.release.tag_name} is installed.`);
         console.log(`  app   : ${app}`);
         console.log(`  data  : ${join(root, "data")}`);
         console.log(`  config: ${join(root, "config")}`);
         if (args.start) console.log("  open  : http://127.0.0.1:4318");
+        if (pruned.removed.length) {
+          console.log(`  pruned: ${pruned.removed.length} superseded backup payload(s)`);
+        }
+        for (const failure of pruned.failed) {
+          console.warn(
+            `warning: could not remove the old backup ${failure.path}: ${failure.message}`,
+          );
+        }
       } catch (error) {
         // Any failure after the swap (including dependency relinking and the
         // health-gated start) restores the previous directory and version stamp.

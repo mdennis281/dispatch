@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,6 +17,7 @@ import {
   compareStamps,
   desktopRoot,
   parseArgs,
+  pruneBackups,
   renameWithRetry,
   resolveRelease,
 } from "./install.mjs";
@@ -248,5 +257,140 @@ test("the installer runs when it is invoked through a symlinked temp directory",
     assert.match(result.stdout, /Usage: node install\.mjs/);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+/** An install root with `backups/<name>/payload` for each name given. */
+function rootWithBackups(...names) {
+  const root = mkdtempSync(join(tmpdir(), "dispatch-backups-"));
+  for (const name of names) {
+    mkdirSync(join(root, "backups", name, "packages"), { recursive: true });
+    writeFileSync(join(root, "backups", name, "packages", "payload"), name);
+  }
+  return root;
+}
+
+/** The `backups/` entries left behind, sorted for a stable comparison. */
+function remaining(root) {
+  return readdirSync(join(root, "backups")).sort();
+}
+
+test("pruneBackups keeps the newest payload and deletes the ones behind it", () => {
+  // The 22 GB: `app/` is renamed into `backups/` on every update and nothing
+  // deleted the previous ones, so a daily-updated install accumulated 63
+  // payloads against 1.2 GB of actual chat history.
+  const root = rootWithBackups(
+    "app-v2026.08.13.77999-1786661069930",
+    "app-v2026.08.20.77894-1787262331961",
+    "app-v2026.08.27.54499-1787844289035",
+  );
+  try {
+    const result = pruneBackups(root);
+    assert.deepEqual(remaining(root), ["app-v2026.08.27.54499-1787844289035"]);
+    assert.equal(result.removed.length, 2);
+    assert.deepEqual(result.failed, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pruneBackups keeps a protected payload without keeping an extra one", () => {
+  // `current.json` records exactly one `previous`, so the rollback target must
+  // survive — and protecting it must not leave TWO payloads behind, which would
+  // halve the reclaim on every update and quietly restore the original bug.
+  const target = "app-v2026.08.20.77894-1787262331961";
+  const root = rootWithBackups(
+    "app-v2026.08.13.77999-1786661069930",
+    target,
+    "app-v2026.08.27.54499-1787844289035",
+  );
+  try {
+    pruneBackups(root, { protect: [join(root, "backups", target)] });
+    assert.deepEqual(remaining(root), [target]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pruneBackups orders by the trailing epoch, not by the name", () => {
+  // The tag sits in the middle and its length varies, so whole-name lexical
+  // order puts `…08.9.…` after `…08.10.…` and would delete the NEWEST payload —
+  // the one thing a rollback needs.
+  // The two orders must genuinely DISAGREE here or the test proves nothing:
+  // the newest payload (epoch …8442…) is the lexically SMALLER name, because
+  // "10" sorts below "9". Sorting by name keeps `…9.1…` and deletes the very
+  // payload a rollback needs.
+  const root = rootWithBackups(
+    "app-v2026.08.10.1-1787844289035",
+    "app-v2026.08.9.1-1787262331961",
+  );
+  try {
+    pruneBackups(root);
+    assert.deepEqual(remaining(root), ["app-v2026.08.10.1-1787844289035"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pruneBackups sweeps failed payloads alongside the superseded ones", () => {
+  // A failed swap parks the new payload as `backups/failed-<tag>-<ts>`. It is
+  // the same several hundred megabytes and nothing else ever reads it.
+  const root = rootWithBackups(
+    "failed-v2026.08.20.10897-1787320854909",
+    "app-v2026.08.27.54499-1787844289035",
+  );
+  try {
+    pruneBackups(root);
+    assert.deepEqual(remaining(root), ["app-v2026.08.27.54499-1787844289035"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pruneBackups leaves directories it cannot positively identify", () => {
+  // This deletes hundreds of megabytes at a time. Anything not matching the
+  // shape the swap writes — a human's copy, a half-finished restore — is not
+  // ours to remove, however old it looks.
+  const root = rootWithBackups(
+    "app-v2026.08.13.77999-1786661069930",
+    "app-v2026.08.27.54499-1787844289035",
+    "my-notes",
+    "app-without-a-stamp",
+  );
+  try {
+    pruneBackups(root);
+    assert.deepEqual(remaining(root), [
+      "app-v2026.08.27.54499-1787844289035",
+      "app-without-a-stamp",
+      "my-notes",
+    ].sort());
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pruneBackups is a no-op on a first install, which has no backups dir", () => {
+  const root = mkdtempSync(join(tmpdir(), "dispatch-backups-"));
+  try {
+    assert.deepEqual(pruneBackups(root), { removed: [], failed: [] });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pruneBackups honours a wider keep, for a caller that wants more history", () => {
+  const root = rootWithBackups(
+    "app-v2026.08.13.77999-1786661069930",
+    "app-v2026.08.20.77894-1787262331961",
+    "app-v2026.08.27.54499-1787844289035",
+  );
+  try {
+    pruneBackups(root, { keep: 2 });
+    assert.deepEqual(remaining(root), [
+      "app-v2026.08.20.77894-1787262331961",
+      "app-v2026.08.27.54499-1787844289035",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
