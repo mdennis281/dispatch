@@ -56,6 +56,7 @@ import {
   MOCK_WORKTREES,
   MOCK_WORKTREE_DIFF,
   MOCK_PRS,
+  MOCK_PR_RECORDS,
   MOCK_WORKFLOW_RUNS,
 } from "../lib/mock.js";
 
@@ -92,6 +93,11 @@ export function hydrateFromMock(): void {
     modes: MOCK_MODES,
   });
   useChats.getState().hydrate(MOCK_CHATS);
+  // The REGISTRY rows, not the panel's `PRInfo`. The sidebar's tree joins a
+  // reviewer chat to its parent through `reviewOf` -> `PrRecord.chatId`, so
+  // without this the fixture's reviewers sit at the top level and the nesting
+  // looks broken in exactly the shell it exists to be designed in.
+  usePrs.getState().hydrate(MOCK_PR_RECORDS);
   useMessages.getState().hydrate(MOCK_MESSAGES);
   useAttention.getState().hydrate(MOCK_ATTENTION);
   useRunners.getState().hydrate(MOCK_RUNNERS, MOCK_RUNNER_LOGS);

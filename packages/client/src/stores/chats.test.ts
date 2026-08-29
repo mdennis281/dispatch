@@ -239,7 +239,7 @@ describe("buildChatTree — reviewers file under the chat that opened the PR", (
   });
 
   const shape = (bs: ReturnType<typeof buildChatTree>) =>
-    bs.map((b) => [b.chat.id, ids(b.children)] as const);
+    bs.map((b) => [b.chat.id, b.children.map((c) => c.chat.id)] as const);
 
   it("nests every round, not just the one the registry remembers", () => {
     // The bug this exists for: `reviewAgent.chatId` holds ONE round, so three of
@@ -315,7 +315,7 @@ describe("buildChatTree — spawned chats file under the chat that spawned them"
   });
 
   const shape = (bs: ReturnType<typeof buildChatTree>) =>
-    bs.map((b) => [b.chat.id, ids(b.children)] as const);
+    bs.map((b) => [b.chat.id, b.children.map((c) => c.chat.id)] as const);
 
   it("nests every chat one parent spawned", () => {
     // The bug this exists for: five chats spawned from one parent sat in the
@@ -397,18 +397,76 @@ describe("buildChatTree — spawned chats file under the chat that spawned them"
     ]);
   });
 
-  it("files a grandchild under the grandparent, beside its own parent", () => {
-    // A folded chat can spawn too. Nesting is ONE level, so filing the grandchild
-    // under a row that is itself hidden would render it nowhere at all.
+  it("nests a grandchild under its own parent, not beside it", () => {
+    // The bug this exists for: nesting used to stop at ONE level, so a chat
+    // spawned by a folded chat was filed under the GRANDparent — sitting beside
+    // its own parent, in a flat run that said nothing about which chat produced
+    // which. `MAX_CHAT_NEST_DEPTH` is what buys the second indent.
     const chats = [
       chat("root", "p1", 100),
       spawned("child", "root", 50),
       spawned("grandchild", "child", 60),
     ];
+    const tree = buildChatTree(chats, {}, {});
 
-    expect(shape(buildChatTree(chats, {}, {}))).toEqual([
-      ["root", ["child", "grandchild"]],
+    expect(shape(tree)).toEqual([["root", ["child"]]]);
+    expect(tree[0]!.children[0]!.children.map((c) => c.chat.id)).toEqual(["grandchild"]);
+  });
+
+  it("clamps a chat deeper than the sidebar draws to the deepest level it does", () => {
+    // Nothing SPAWNS this deep any more (see `spawnChat.maxDepth`), but a
+    // reviewer arrives whatever that says, and the cap is a soft one a project
+    // may raise past what the indents cover. Filed under a row the tree never
+    // renders, this chat would render nowhere at all — so it lands beside its
+    // own parent on the last level there is.
+    const chats = [
+      chat("root", "p1", 100),
+      spawned("child", "root", 50),
+      spawned("grandchild", "child", 60),
+      spawned("great", "grandchild", 70),
+    ];
+    const tree = buildChatTree(chats, {}, {});
+
+    expect(shape(tree)).toEqual([["root", ["child"]]]);
+    expect(tree[0]!.children[0]!.children.map((c) => c.chat.id)).toEqual([
+      "grandchild",
+      "great",
     ]);
+  });
+
+  it("rolls every level up into `descendants` for the branch's own totals", () => {
+    // The row's process census, runtime total, reap and fold label are all over
+    // the WHOLE branch — a grandchild's dev server is one the top row is still
+    // holding, and it stopped being a direct child the moment nesting grew a
+    // level.
+    const chats = [
+      chat("root", "p1", 100),
+      spawned("child", "root", 50),
+      spawned("grandchild", "child", 60),
+    ];
+    const tree = buildChatTree(chats, {}, {});
+
+    expect(ids(tree[0]!.descendants)).toEqual(["child", "grandchild"]);
+    expect(ids(tree[0]!.children[0]!.descendants)).toEqual(["grandchild"]);
+  });
+
+  it("nests a spawned chat's reviewer under the spawned chat", () => {
+    // The report this whole change came from: a child chat that opened a PR had
+    // its reviewers filed at the SAME level as itself, interleaved with its
+    // siblings, so a branch of six children and their rounds read as one flat
+    // run of twenty rows with no way to tell which review belonged to what.
+    const reviewer: Chat = {
+      ...chat("r", "p1", 60),
+      reviewOf: "o/r#7",
+      purpose: { kind: "pr:review" },
+    };
+    const chats = [chat("root", "p1", 100), spawned("child", "root", 50), reviewer];
+    const tree = buildChatTree(chats, {}, {
+      "o/r#7": { key: "o/r#7", number: 7, chatId: "child" } as PrRecord,
+    });
+
+    expect(shape(tree)).toEqual([["root", ["child"]]]);
+    expect(tree[0]!.children[0]!.children.map((c) => c.chat.id)).toEqual(["r"]);
   });
 
   it("keeps both rows visible when two chats claim each other", () => {

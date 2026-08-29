@@ -14,8 +14,10 @@ import type {
   RunnerInstance,
   WorktreeInfo,
   PRInfo,
+  PrRecord,
   WorkflowRun,
 } from "@dispatch/shared";
+import { spawnedPurposeLabel } from "@dispatch/shared";
 
 const now = Date.now();
 const ago = (min: number) => now - min * 60_000;
@@ -107,6 +109,12 @@ export const CHAT_SETTINGS = "chat_settings";
 export const CHAT_STEAM = "chat_steam";
 export const CHAT_METRICS = "chat_metrics";
 export const CHAT_SCRATCH = "chat_scratch";
+/** Spawned BY {@link CHAT_STEAM} — the sidebar's second level. */
+export const CHAT_SPAWN_SAVE = "chat_spawn_save";
+export const CHAT_SPAWN_UI = "chat_spawn_ui";
+/** Reviewers of the PR {@link CHAT_SPAWN_SAVE} opened — the sidebar's THIRD level. */
+export const CHAT_REVIEW_82_R2 = "chat_review_82_r2";
+export const CHAT_REVIEW_82_R1 = "chat_review_82_r1";
 
 export const MOCK_CHATS: Chat[] = [
   {
@@ -164,6 +172,72 @@ export const MOCK_CHATS: Chat[] = [
     status: "done",
     createdAt: ago(60 * 20),
     updatedAt: ago(180),
+  },
+  // Three levels of one branch, which is the shape the review workflow actually
+  // produces and the only thing that exercises the sidebar's tree: a chat, the
+  // chats it spawned, and one of THOSE chats' reviewers. Without it the fold,
+  // the indents and the two child glyphs are all invisible to a screenshot.
+  {
+    id: CHAT_SPAWN_SAVE,
+    projectId: "hivebreak",
+    title: "**save**: cloud slot migration",
+    sessionId: "sess_5c1102",
+    agentId: "build",
+    modeId: "auto",
+    effort: "high",
+    parentChatId: CHAT_STEAM,
+    purpose: { kind: "spawned", label: spawnedPurposeLabel(CHAT_STEAM) },
+    worktrees: ["C:/Users/Michael/projects/zombie-worktrees/feat-cloud-slot-migration"],
+    prs: [{ number: 82, url: "#", branch: "feat/cloud-slot-migration", state: "open" }],
+    status: "waiting",
+    createdAt: ago(30),
+    updatedAt: ago(0.6),
+  },
+  {
+    id: CHAT_REVIEW_82_R2,
+    projectId: "hivebreak",
+    title: "**review**: #82 feat(save): cloud slot migration",
+    sessionId: "sess_7d9a41",
+    modeId: "auto",
+    effort: "high",
+    reviewOf: "dipduo/zombie#82",
+    purpose: { kind: "pr:review", label: "Reviewing PR #82 in dipduo/zombie" },
+    worktrees: [],
+    prs: [],
+    status: "running",
+    createdAt: ago(2),
+    updatedAt: ago(0.1),
+  },
+  {
+    id: CHAT_REVIEW_82_R1,
+    projectId: "hivebreak",
+    title: "**review**: #82 feat(save): cloud slot migration",
+    sessionId: "sess_2ef880",
+    modeId: "auto",
+    effort: "high",
+    reviewOf: "dipduo/zombie#82",
+    purpose: { kind: "pr:review", label: "Reviewing PR #82 in dipduo/zombie" },
+    worktrees: [],
+    prs: [],
+    status: "done",
+    createdAt: ago(9),
+    updatedAt: ago(7),
+  },
+  {
+    id: CHAT_SPAWN_UI,
+    projectId: "hivebreak",
+    title: "**ui**: save-slot picker copy",
+    sessionId: "sess_b30f77",
+    agentId: "build",
+    modeId: "edit",
+    effort: "medium",
+    parentChatId: CHAT_STEAM,
+    purpose: { kind: "spawned", label: spawnedPurposeLabel(CHAT_STEAM) },
+    worktrees: [],
+    prs: [],
+    status: "awaiting-input",
+    createdAt: ago(26),
+    updatedAt: ago(11),
   },
   {
     id: CHAT_SCRATCH,
@@ -646,6 +720,52 @@ export const MOCK_PRS: PRInfo[] = [
     checks: [{ name: "Build · Typecheck · Lint · Test", status: "completed", conclusion: "success" }],
     createdAt: new Date(ago(60 * 40)).toISOString(),
     updatedAt: new Date(ago(60 * 36)).toISOString(),
+  },
+];
+
+/**
+ * The PR registry rows the sidebar reads, which are NOT {@link MOCK_PRS}: that
+ * list is the panel's `PRInfo`, and a reviewer chat joins its parent through
+ * `reviewOf` -> `PrRecord.chatId` in this one. Seeding only the panel's copy
+ * leaves every reviewer stranded at the top level — which is precisely the
+ * clutter the nesting exists to clear, so the shell would show the feature
+ * doing nothing.
+ */
+export const MOCK_PR_RECORDS: PrRecord[] = [
+  {
+    key: "dipduo/zombie#82",
+    repo: "dipduo/zombie",
+    number: 82,
+    url: "https://github.com/dipduo/zombie/pull/82",
+    title: "feat(save): cloud slot migration",
+    branch: "feat/cloud-slot-migration",
+    baseBranch: "main",
+    state: "open",
+    isDraft: false,
+    labels: [],
+    hold: false,
+    mergeable: true,
+    reviewDecision: null,
+    reviewers: [],
+    threads: [],
+    checks: [],
+    chatId: CHAT_SPAWN_SAVE,
+    firstSeenAt: ago(30),
+    lastPolledAt: ago(0.2),
+    lastChangedAt: ago(0.2),
+    nextPollAt: 0,
+    quietPolls: 0,
+    watchedUntil: 0,
+    // Only the LATEST round can be credited with the findings — an earlier
+    // reviewer falls back to its own status, which is what the second row shows.
+    reviewAgent: {
+      chatId: CHAT_REVIEW_82_R2,
+      rounds: 2,
+      maxRounds: 2,
+      postedAt: ago(0.1),
+      findings: 3,
+      postedEvent: "REQUEST_CHANGES",
+    },
   },
 ];
 
