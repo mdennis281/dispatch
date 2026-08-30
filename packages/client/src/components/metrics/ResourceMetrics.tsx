@@ -22,7 +22,9 @@
  * how the table was sorted — a patch for the original defect, where a memory
  * bar sat under a table ranked by CPU and pointed away from the answer. Two
  * bars, always, is the fix that patch was approximating: memory above, CPU
- * below, told apart by hue (see `lib/resourceTone`). The bar no longer depends
+ * below, told apart by hue — and only the MEMORY bar escalates under pressure,
+ * so violet never appears on the memory row and the pair stays distinguishable
+ * however hot the chat gets (see `lib/resourceTone`). The bar no longer depends
  * on the sort, so it cannot disagree with it.
  *
  * ── THE MEMORY NUMBERS NEED A HEALTH WARNING, SO THEY GET ONE ────────────────
@@ -63,7 +65,7 @@ import {
 import { useChats } from "../../stores/chats.js";
 import { useChatProcesses } from "../../stores/chatProcesses.js";
 import { bytes, pct, dur } from "../../lib/format.js";
-import { CPU_BAR, chatCpuTone, chatTone, machineTone } from "../../lib/resourceTone.js";
+import { CPU_BAR, chatTone, machineTone } from "../../lib/resourceTone.js";
 import { cn } from "../../lib/cn.js";
 
 /** Which column the table is ranked by. */
@@ -314,7 +316,7 @@ function ChatRow({
             <SplitBar
               size="sm"
               usedPct={cpuShare}
-              tone={chatCpuTone(cpuShare)}
+              tone={CPU_BAR}
               title={
                 chat.cpuPct === null
                   ? "CPU not measured yet"

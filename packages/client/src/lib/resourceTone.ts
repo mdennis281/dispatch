@@ -21,7 +21,24 @@
  * other with no room for labels, and hue is what tells them apart.
  */
 
-/** CPU's fill, at every level. See the note above on why it never escalates. */
+/**
+ * CPU's fill, at EVERY level and both scales — the machine card and a chat row.
+ *
+ * Identical at both scales on purpose, and that is what makes the stacked pair
+ * in a chat row readable. `chatTone` climbs into amber and then red under
+ * pressure; a CPU ramp beside it would eventually meet it, and a chat sitting
+ * at 15% of the machine on BOTH axes would draw two identical `bg-warn` bars,
+ * stacked 2 px apart with no labels between them — the hue cue gone on exactly
+ * the rows a reader is hunting. Violet never appears on a memory bar, so
+ * leaving CPU uncoloured keeps the two distinguishable unconditionally rather
+ * than only while things are quiet.
+ *
+ * Severity is not lost with it: a hot chat is already announced three other
+ * ways — `nextAutoSort` ranks it to the top of the table, its bar is the
+ * longest one there, and `hottest` names the process doing it
+ * ("chrome.exe ×17"). Severity had other channels; metric identity had only
+ * this one.
+ */
 export const CPU_BAR = "bg-accent-2";
 
 /** Machine-scale memory pressure — the header pill and the page's hero card. */
@@ -44,18 +61,4 @@ export function chatTone(p: number): string {
   if (p >= 40) return "bg-danger";
   if (p >= 15) return "bg-warn";
   return "bg-accent";
-}
-
-/**
- * The same escalation for a chat's CPU, kept in the violet family until it is
- * genuinely a fault.
- *
- * A row that escalated straight from violet to amber would collide with the
- * memory bar sitting directly above it — the one cue that tells the two bars
- * apart is exactly the hue it would be borrowing.
- */
-export function chatCpuTone(p: number): string {
-  if (p >= 40) return "bg-danger";
-  if (p >= 15) return "bg-warn";
-  return CPU_BAR;
 }
