@@ -53,6 +53,7 @@ function snapshot(over: Partial<PrPollSnapshot> = {}): PrPollSnapshot {
     checks: [{ name: "build", status: "completed", conclusion: "success" }],
     requested: [],
     reported: [],
+    everReported: [],
     ...over,
   };
 }

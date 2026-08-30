@@ -26,6 +26,7 @@ import {
   readExemptionAnswer,
   EXEMPTION_ANSWERS,
   prCreateBlockers,
+  type CopilotQuotaFacts,
   WAIT_CAP_SECONDS,
   PR_POLL_INTERVAL_MS,
   NO_CHECKS_GRACE_MS,
@@ -1396,6 +1397,17 @@ describe("manager-mcp — request_review", () => {
     verify?: string[] | null,
     /** The login Dispatch's own reviewer posts as, when the project has one. */
     reviewAgentLogin?: string,
+    /**
+     * Extras for the empty-queue explanation: reviews already ON the PR, and the
+     * Copilot budget read. `quota` is only ever consulted when a Copilot
+     * reviewer went missing, so leaving it out is also a test that it isn't.
+     */
+    extra: {
+      reported?: Array<{ author: string; state: string }>;
+      everReported?: Array<{ author: string; state: string }>;
+      quota?: CopilotQuotaFacts | null;
+      onQuotaCall?: () => void;
+    } = {},
   ): ManagerMcpGitHub & { asked: Array<{ n: number; list: readonly string[] }> } => {
     const asked: Array<{ n: number; list: readonly string[] }> = [];
     const queued = verify === undefined ? result.requested : verify;
@@ -1403,8 +1415,28 @@ describe("manager-mcp — request_review", () => {
       asked,
       defaultReviewers: defaults,
       reviewAgentLogin,
+      copilotQuota:
+        extra.quota === undefined && !extra.onQuotaCall
+          ? undefined
+          : async () => {
+              extra.onQuotaCall?.();
+              return extra.quota ?? null;
+            },
       pollPrState: async () =>
-        snap({ review: queued === null ? null : { requested: queued, reported: [] } }),
+        snap({
+          review:
+            queued === null
+              ? null
+              : {
+                  requested: queued,
+                  reported: extra.reported ?? [],
+                  // Defaults FROM `reported`, because in reality the ever-list is
+                  // a superset of the live one. The cases that matter are where
+                  // they diverge, and those pass it explicitly — the same rule
+                  // `readyPr` follows for `everSubmittedReviews`.
+                  everReported: extra.everReported ?? extra.reported ?? [],
+                },
+        }),
       requestReviewers: async (n, list) => {
         asked.push({ n, list });
         return result;
@@ -1497,8 +1529,249 @@ describe("manager-mcp — request_review", () => {
     expect(res.isError).toBe(true);
     expect(resultText(res)).toContain("Nobody is queued");
     expect(resultText(res)).toContain("STILL EMPTY");
-    expect(resultText(res)).toContain("Do NOT go back to watch_pr");
+    expect(resultText(res)).toContain("Do NOT call watch_pr");
     expect(resultText(res)).toContain('"verified":true');
+  });
+
+  // The advice this replaced said "land the PR on the review you already have"
+  // whatever the truth was. On hivebreak #192 there was no such review, and the
+  // agent took that sentence to `approve_pr({ allowNoReview: true })` — putting
+  // an unreviewed merge in front of the human as though a review had happened.
+  it("says plainly that NOBODY has reviewed, rather than offering a review to land on", async () => {
+    const gh = ghWith({ requested: ["alice"], failed: [] }, undefined, []);
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    expect(resultText(res)).toContain("NOBODY has reviewed this PR at any point");
+    expect(resultText(res)).not.toContain("land it on the review it already has");
+    // The sanctioned route out, named — not a workaround the agent has to invent.
+    expect(resultText(res)).toContain("ask_user");
+    expect(resultText(res)).toContain("allowNoReview");
+  });
+
+  it("offers the existing review only when there actually is one", async () => {
+    const gh = ghWith({ requested: ["alice"], failed: [] }, undefined, [], undefined, {
+      reported: [{ author: "bob", state: "COMMENTED" }],
+    });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    expect(resultText(res)).toContain("does already carry a submitted review");
+    expect(resultText(res)).toContain("land it on the review it already has");
+    expect(resultText(res)).not.toContain("NOBODY has reviewed");
+  });
+
+  // Under `self` identity Dispatch's own round IS the review, and GitHub can
+  // never show it — a self-review is authored by the PR author, so it is
+  // filtered out of `reported` and `everReported` alike. Reading only GitHub
+  // made this tool tell the agent to escalate an unreviewed-merge waiver, and to
+  // assert something false to the human, about a PR `approve_pr` would have
+  // merged with no waiver at all (`roundsMetIt`). The same harm as #192, inverted.
+  it("counts Dispatch's own posted round as review evidence GitHub cannot show", async () => {
+    const gh = ghWith(
+      { requested: ["copilot-pull-request-reviewer[bot]"], failed: [] },
+      undefined,
+      [],
+    );
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+      prRegistry: reviewRegistry({ rounds: 1, maxRounds: 1, reviewedAt: 1_000, postedAt: 2_000 }),
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    const text = resultText(res);
+    expect(text).toContain("posted and spent its rounds");
+    expect(text).not.toContain("NOBODY has reviewed");
+    // And the advice must agree with what approve_pr will actually do.
+    expect(text).toContain("Do NOT ask the human to waive a review that happened");
+    expect(text).not.toContain("allowNoReview");
+  });
+
+  // `posted` alone is WEAKER than the bar `approve_pr` applies
+  // (`roundsMetIt = roundsSpent && posted`). On the default `maxRounds: 4` a
+  // posted round 1 is `posted: true, roundsSpent: false` — claiming the bar was
+  // met there asserts the opposite of the `no-review` about to be raised.
+  it("does not call the bar met on a posted round whose cap is not spent", async () => {
+    const gh = ghWith(
+      { requested: ["copilot-pull-request-reviewer[bot]"], failed: [] },
+      undefined,
+      [],
+    );
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+      prRegistry: reviewRegistry({ rounds: 1, maxRounds: 4, reviewedAt: 1_000, postedAt: 2_000 }),
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    const text = resultText(res);
+    expect(text).toContain("posted round 1 of 4");
+    expect(text).toContain("only met once its rounds are SPENT");
+    // Neither of the two wrong answers: the bar is not met…
+    expect(text).not.toContain("posted and spent its rounds");
+    // …and it is NOT true that nobody reviewed it.
+    expect(text).not.toContain("NOBODY has reviewed");
+  });
+
+  // `reported` is `latestReviews`, which supersedes on re-request — and that
+  // supersede persists after the request itself is gone. So a PR that HAS been
+  // reviewed can read as empty there while `everReported` still carries it.
+  it("reads everReported, not the list an old re-request can have emptied", async () => {
+    const gh = ghWith({ requested: ["alice"], failed: [] }, undefined, [], undefined, {
+      reported: [],
+      everReported: [{ author: "bob", state: "COMMENTED" }],
+    });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    expect(resultText(res)).toContain("does already carry a submitted review");
+    expect(resultText(res)).not.toContain("NOBODY has reviewed");
+  });
+
+  // A review someone opened in the browser and never submitted is not a review.
+  // `latestReviews` carries it as PENDING, and counting it would print the exact
+  // sentence this change exists to delete while `approve_pr` — which does filter
+  // PENDING — still refuses the merge for `no-review`.
+  it("does not count an unsubmitted PENDING review as an existing one", async () => {
+    const gh = ghWith({ requested: ["alice"], failed: [] }, undefined, [], undefined, {
+      reported: [{ author: "carol", state: "PENDING" }],
+    });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    expect(resultText(res)).toContain("NOBODY has reviewed this PR at any point");
+    expect(resultText(res)).not.toContain("land it on the review it already has");
+  });
+
+  // The failure that started this: GitHub answers 201 and queues nobody when the
+  // account's Copilot premium-request budget is spent, which is byte-identical
+  // to the bot declining a re-review. Only the budget read tells them apart.
+  it("names an exhausted Copilot budget as the reason, with the numbers", async () => {
+    const gh = ghWith(
+      { requested: ["copilot-pull-request-reviewer[bot]"], failed: [] },
+      undefined,
+      [],
+      undefined,
+      { quota: { exhausted: true, used: 19075, entitlement: 7000, resetDate: "2026-09-01" } },
+    );
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    const text = resultText(res);
+    expect(text).toContain("premium-request budget is exhausted");
+    expect(text).toContain("19075 of 7000 used");
+    expect(text).toContain("2026-09-01");
+    expect(text).toContain("NOT something to retry");
+  });
+
+  it("falls back to the candidate causes when the budget cannot be read", async () => {
+    const gh = ghWith(
+      { requested: ["copilot-pull-request-reviewer[bot]"], failed: [] },
+      undefined,
+      [],
+      undefined,
+      { quota: null },
+    );
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    // Undocumented endpoint: a null read must degrade to naming the candidates,
+    // never to asserting the budget is fine.
+    expect(resultText(res)).toContain("dropped by GitHub");
+    expect(resultText(res)).toContain("premium-request budget is spent");
+    expect(resultText(res)).not.toContain("is exhausted (");
+  });
+
+  it("does not spend a budget read when the reviewer that vanished is not Copilot", async () => {
+    let calls = 0;
+    const gh = ghWith({ requested: ["alice"], failed: [] }, ["alice"], [], undefined, {
+      quota: { exhausted: true },
+      onQuotaCall: () => {
+        calls += 1;
+      },
+    });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    expect(calls).toBe(0);
+    expect(resultText(res)).toContain("alice was not queued");
+    expect(resultText(res)).toContain("collaborator");
   });
 
   it("reports who is actually on the hook, not merely who was asked", async () => {
@@ -2103,6 +2376,61 @@ describe("prLandingBlockers", () => {
     // It says WHO we're waiting on, and names the override.
     expect(blocked[0].detail).toMatch(/copilot-pull-request-reviewer/);
     expect(blocked[0].detail).toMatch(/allowNoReview: true/);
+  });
+
+  // A reviewer that can never START is only the WHOLE answer when nobody else
+  // is configured to ask. With GitHub reviewers on the list, `request_review` is
+  // still the right call — a Copilot budget that has since reset is fixed by it,
+  // and even after the config fix it is what puts the reviewer in the queue on
+  // an already-open PR, since `create_pr` has been and gone.
+  it("names a reviewer that cannot run as the whole answer only when nobody else is asked", () => {
+    const problem =
+      "This project reviews as `dispatch-review`, but `workflow.pr.reviewers` does not list " +
+      "that account.";
+    const b = prLandingBlockers(
+      readyPr({ submittedReviews: [], requestedReviewers: [], reviewAgentProblem: problem }),
+      { requireReview: true, reviewers: [] },
+    );
+    expect(b.map((x) => x.code)).toEqual(["no-review"]);
+    expect(b[0].detail).toMatch(/cannot run/);
+    expect(b[0].detail).toMatch(/workflow\.pr\.reviewers/);
+    expect(b[0].detail).not.toMatch(/Call `mcp__dispatch-github__request_review` to ask/);
+  });
+
+  it("keeps pointing at request_review when the project has reviewers to re-ask", () => {
+    const b = prLandingBlockers(
+      readyPr({
+        submittedReviews: [],
+        requestedReviewers: [],
+        reviewAgentProblem: "`workflow.pr.reviewers` does not list that account.",
+      }),
+      { requireReview: true, reviewers: ["copilot-pull-request-reviewer[bot]"] },
+    );
+    // The re-askable reviewer wins the advice…
+    expect(b[0].detail).toMatch(/Call `mcp__dispatch-github__request_review` to ask/);
+    // …and the config problem rides along instead of replacing it.
+    expect(b[0].detail).toMatch(/Separately, Dispatch's own reviewer/);
+  });
+
+  // …but it must not DENY a wait that works. `notePolicy` mirrors the problem
+  // onto every open row of a project configured this way, so on that shape every
+  // PR carries it — including one where the GitHub reviewer is queued and simply
+  // has not reported yet. Leading with the problem told the agent to stop
+  // waiting for a review that was on its way.
+  it("still points at the queued reviewer when one is genuinely on the hook", () => {
+    const b = prLandingBlockers(
+      readyPr({
+        submittedReviews: [],
+        requestedReviewers: ["copilot-pull-request-reviewer[bot]"],
+        reviewAgentProblem: "`workflow.pr.reviewers` does not list that account.",
+      }),
+      { requireReview: true, reviewers: ["copilot-pull-request-reviewer[bot]"] },
+    );
+    expect(b[0].detail).toMatch(/Waiting on: copilot-pull-request-reviewer/);
+    expect(b[0].detail).toMatch(/watch_pr until they report/);
+    // The problem is still worth saying — it just must not deny the wait.
+    expect(b[0].detail).toMatch(/Separately, Dispatch's own reviewer/);
+    expect(b[0].detail).not.toMatch(/Waiting or re-requesting will not change this/);
   });
 
   // The PR is already OPEN, so "re-open it through create_pr" was advice the

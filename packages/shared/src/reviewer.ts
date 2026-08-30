@@ -112,14 +112,19 @@ export function reviewerStatus(cred: ReviewerCredential | null | undefined): Rev
  *
  * A rendering concern, but it lives here rather than in a component because the
  * fields it reads are subtle enough that two surfaces deriving it independently
- * would drift: `reviewedAt` is claim time and not completion, `rounds` is
- * meaningless without `maxRounds`, and a `problem` outranks everything because
- * it means none of the rest is going to happen. The PRs panel and the workspace
- * roster both show this, and they must agree.
+ * would drift: `reviewedAt` is claim time and not completion, and `rounds` is
+ * meaningless without `maxRounds`. The PRs panel and the workspace roster both
+ * show this, and they must agree.
  *
- *   - `blocked`  — the reviewer will not run: either the identity does not
- *                  resolve (`problem`), or GitHub refused to queue it on this
- *                  PR (`requestError`). Disabled, not degraded.
+ * A `problem` is DATA, not a phase — see {@link PrReviewAgentView.problem}. It
+ * used to outrank everything, on the reasoning that it meant none of the rest
+ * was going to happen; that stopped being true once a project could be
+ * misconfigured such that no round starts on its own while a hand-requested one
+ * runs perfectly well.
+ *
+ *   - `blocked`  — nothing is queued, running or filed, AND something is in the
+ *                  way: the identity does not resolve (`problem`), or GitHub
+ *                  refused to queue it on this PR (`requestError`).
  *   - `queued`   — asked for, waiting on the ~90s sweep to pick it up.
  *   - `running`  — a round is claimed and nothing has been posted for it yet.
  *   - `reviewed` — a review landed. `spent` says whether another can follow.
@@ -169,7 +174,15 @@ export interface PrReviewAgentView {
   postedEvent?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
   /** When the phase last moved, for a relative timestamp. */
   at?: number;
-  /** Set on `blocked` — the operator-facing sentence from `resolveReviewer`. */
+  /**
+   * The operator-facing sentence from `resolveReviewer` (or GitHub's refusal to
+   * queue), on ANY phase that has one.
+   *
+   * Not confined to `blocked`: a project can be misconfigured such that no round
+   * starts on its own while a manually-requested one runs perfectly well, so the
+   * complaint and the live phase are independent facts. `blocked` is what the
+   * phase becomes when this is the ONLY thing to report.
+   */
   problem?: string;
 }
 
@@ -213,7 +226,7 @@ export function prReviewAgentView(
   // the chip, and `watch_pr`, which otherwise blocks for half an hour on a round
   // that can never be claimed — has to mean the same thing by it.
   const roundsSpent = cap != null && round >= cap;
-  const base = {
+  const baseFields = {
     round,
     maxRounds: cap,
     roundsSpent,
@@ -221,16 +234,29 @@ export function prReviewAgentView(
     posted: false,
   };
 
-  // First, because these are the answer to "why has nothing happened" and every
-  // other phase below would answer that question wrongly.
-  //
   // `problem` outranks `requestError`: an identity that does not resolve is why
   // the request was never even attempted, so reporting GitHub's refusal of an
   // older attempt would name a symptom over its cause.
+  //
+  // Carried as a FIELD on every phase, and used as a phase only at the bottom.
+  // It used to short-circuit here, on the reasoning that it is "the answer to
+  // why nothing happened" — true of the two conditions that could set it then,
+  // both of which make a round impossible. It stopped being true when
+  // `resolveReviewer` grew a complaint about the reviewer being absent from
+  // `pr.reviewers`: that one leaves the reviewer perfectly able to run, it just
+  // never starts BY ITSELF, and `request_review({ reviewers: [<login>] })` or a
+  // human requesting the account on github.com starts one.
+  //
+  // Short-circuiting made `queued` and `running` unreachable for the whole
+  // project, which is not cosmetic — it is the PR #147 failure with a different
+  // cause. `spentReviewRounds` reads `phase === "running"` for `inFlight`, so
+  // `watch_pr` would report "every round is spent and nothing is coming" over a
+  // reviewer mid-diff; `request_review`'s in-flight guard reads the same phase,
+  // so `extraRounds` would put a second reviewer on the same diff; and `posted`
+  // is hard-coded false on this branch, so a round that HAD posted stopped
+  // counting as review evidence.
   const blocked = state.problem ?? state.requestError;
-  if (blocked) {
-    return { ...base, phase: "blocked", problem: blocked, at: state.requestedAt };
-  }
+  const base = { ...baseFields, problem: blocked };
 
   // A claim clears the request, so an outstanding one normally outranks the last
   // finished round: the row is waiting on the next sweep, not resting.
@@ -277,6 +303,14 @@ export function prReviewAgentView(
       postedEvent: state.postedEvent,
       at: state.postedAt,
     };
+  }
+
+  // LAST, not first: by here nothing is queued, running or filed, so a standing
+  // complaint really is the whole answer to "why has nothing happened". Above
+  // this line it would have been the answer to a question nobody asked, over the
+  // top of a round that was actually happening.
+  if (blocked) {
+    return { ...base, phase: "blocked", at: state.requestedAt };
   }
 
   return null;

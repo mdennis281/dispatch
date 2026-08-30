@@ -431,6 +431,13 @@ export interface PrWatchSnapshot extends PrPollResult {
   review: {
     requested: string[];
     reported: Array<{ author: string; state: string }>;
+    /**
+     * Every review ever submitted by somebody other than the author. Optional
+     * because older bindings and test doubles predate it; a consumer asking
+     * "has anybody reviewed" must prefer it and fall back to `reported`, which
+     * is `latestReviews` and goes empty under supersede-on-re-request.
+     */
+    everReported?: Array<{ author: string; state: string }>;
   } | null;
 }
 
@@ -463,6 +470,21 @@ export interface SubmitReviewOutcome {
  * whole poll is one call. Omitted from the ctx → the `watch_pr` tool isn't
  * offered.
  */
+/**
+ * A Copilot premium-request budget, as the empty-queue explainer reads it.
+ *
+ * Structural rather than imported from `github.js`, like every other GitHub
+ * shape in this file — see {@link ManagerMcpGitHub}. `exhausted` is the only
+ * required field because it is the only one the explanation cannot omit; the
+ * numbers are there to make the sentence concrete when they are available.
+ */
+export interface CopilotQuotaFacts {
+  entitlement?: number;
+  used?: number;
+  resetDate?: string;
+  exhausted: boolean;
+}
+
 export interface ManagerMcpGitHub {
   pollPrState(prNumber: number, repo?: string): Promise<PrWatchSnapshot | null>;
   /** Put reviewers back on the hook. Omitted → the `request_review` tool isn't offered. */
@@ -526,6 +548,13 @@ export interface ManagerMcpGitHub {
    * Dispatch reviewer was done reported success and never queued alice.
    */
   reviewAgentLogin?: string;
+  /**
+   * The account's Copilot premium-request budget — asked ONLY when a Copilot
+   * reviewer has already been seen vanishing from the queue, to say whether the
+   * budget is why. Best-effort and undocumented upstream; null means "couldn't
+   * tell", never "fine". See `GitHubService.copilotQuota`.
+   */
+  copilotQuota?(): Promise<CopilotQuotaFacts | null>;
   /**
    * Report that the watched PR has MERGED. Most merges here are performed by the
    * repo's auto-merge job rather than by us, so `watch_pr` observing the terminal
@@ -805,6 +834,17 @@ export interface PrReadiness {
    * policy exists to prevent. That case still raises `no-review` for the human.
    */
   reviewRounds: { roundsSpent: boolean; posted: boolean; round: number; maxRounds?: number } | null;
+  /**
+   * Why Dispatch's own reviewer cannot run on this project, when it cannot.
+   *
+   * Separate from {@link reviewRounds} because the two describe opposite states
+   * and only one of them is a cap: rounds are about a reviewer that ran, this is
+   * about one that never can. It is also why `reviewRounds` is `null` in this
+   * case — `spentReviewRounds` answers null for a row with no cap recorded, so
+   * without this field a reviewer blocked from ever starting looks exactly like
+   * a project that never configured one.
+   */
+  reviewAgentProblem?: string | null;
 }
 
 /**
@@ -1287,6 +1327,18 @@ export function prLandingBlockers(
         // create_pr" for all three is what sent an agent round a loop it could
         // not win on a project whose reviewer list was empty — there was no
         // reviewer for create_pr to ask, so the advice could never come true.
+        // Dispatch's reviewer being unable to start says NOTHING about whoever
+        // else is in the queue, so it is a note appended to the wait rather than
+        // a branch that replaces it. Ordering it first denied a wait that works:
+        // `notePolicy` mirrors the problem onto every open row of a project
+        // configured this way, so on the hivebreak shape EVERY PR carries it —
+        // including the first minutes of one where Copilot is queued and simply
+        // has not reported yet. The agent was told waiting could not help while
+        // the review it was waiting for was on its way.
+        const agentNote = pr.reviewAgentProblem
+          ? ` Separately, Dispatch's own reviewer is configured but cannot run: ` +
+            `${pr.reviewAgentProblem} That is a config fix, and independent of the wait above.`
+          : "";
         const waiting = rounds?.roundsSpent
           ? // Every round claimed and none of them filed. Pointing at watch_pr
             // here is the dead wait `reviews-spent` was added to prevent: no
@@ -1296,19 +1348,39 @@ export function prLandingBlockers(
             "check the reviewer chat. No further round can spawn on its own; " +
             "`request_review` with `extraRounds` can buy one if the reviewer is healthy again."
           : pr.requestedReviewers.length
-          ? `Waiting on: ${pr.requestedReviewers.join(", ")}. Call watch_pr until they report.`
+          ? `Waiting on: ${pr.requestedReviewers.join(", ")}. Call watch_pr until they report.` +
+            agentNote
           : policy.reviewers?.length
             ? // An OPEN PR with an empty queue is fixed by asking again, not by
               // re-opening it. Pointing at `create_pr` here sent an agent round a
               // loop it could not win: `create_pr` refuses a branch that already
               // has a PR, so the only advice on offer was impossible to take.
+              //
+              // Ahead of `reviewAgentProblem` for the same reason the queue check
+              // is: this project has GitHub reviewers who are re-askable right
+              // now — a Copilot budget that has since reset, or a transient drop,
+              // is fixed by exactly this call. And even once the config IS fixed,
+              // `request_review` is still what puts the reviewer in the queue on
+              // an already-open PR, because `create_pr` has been and gone and the
+              // sweep only ever READS the queue.
               `This project asks ${policy.reviewers.join(", ")} to review, but nobody is ` +
               "currently requested on this PR. Call `mcp__dispatch-github__request_review` to ask " +
               "them (GitHub clears a reviewer's request once they report, and new commits " +
-              "do not re-queue them), then watch_pr until they report."
-            : "This project configures NO reviewers (`workflow.pr.reviewers` in " +
-              "`.dispatch/project.yaml`), so nobody will ever be asked and this PR cannot " +
-              "satisfy its own bar. Fix the config rather than working around it.";
+              "do not re-queue them), then watch_pr until they report." +
+              agentNote
+            : pr.reviewAgentProblem
+              ? // Nobody queued, nobody configured to ask, AND Dispatch's own
+                // reviewer cannot start: now it really is the whole answer, and
+                // the only one with no GitHub-side symptom at all — the queue and
+                // the round record are both simply empty, which reads as "not
+                // asked yet" right up until you notice it has read that way on
+                // every PR the project has ever opened.
+                `Dispatch's own reviewer is configured but cannot run: ${pr.reviewAgentProblem} ` +
+                "Nobody else is configured to ask either, so this PR cannot satisfy its own " +
+                "bar until the config is fixed."
+              : "This project configures NO reviewers (`workflow.pr.reviewers` in " +
+                "`.dispatch/project.yaml`), so nobody will ever be asked and this PR cannot " +
+                "satisfy its own bar. Fix the config rather than working around it.";
         blockers.push({
           code: "no-review",
           detail:
@@ -2278,6 +2350,168 @@ async function watchForPrActivity(
   }
 }
 
+/** A login as either half of a reviewer comparison may spell it. */
+function normalizeLogin(login: string): string {
+  return login.trim().toLowerCase().replace(/\[bot\]$/, "");
+}
+
+/** Copilot's review bot, under any of the spellings GitHub gives it. */
+function isCopilotReviewer(login: string): boolean {
+  return normalizeLogin(login).startsWith("copilot");
+}
+
+/**
+ * Why is the review queue empty, in words an agent can act on.
+ *
+ * WHY this is a function rather than a string at each call site. Three separate
+ * failures produce a byte-identical empty queue, and the tools used to print one
+ * guess covering all of them: *"a bot reviewer often refuses a re-request on a
+ * head it has already reviewed; ask a human, or land the PR on the review you
+ * already have."* On `hivebreak` #192 every clause of that was false — nobody
+ * had ever reviewed it, so there was no review to land on, and the reviewer had
+ * been dropped because the account's Copilot budget was spent. The agent
+ * followed the advice it was given and put an unreviewed merge in front of the
+ * human as though a review had happened.
+ *
+ * So each cause gets named separately, and the one fact that decides what is
+ * even POSSIBLE next — has anybody reviewed this at all — is stated rather than
+ * assumed.
+ */
+async function explainEmptyReviewQueue(opts: {
+  /** Logins this call asked GitHub for. */
+  asked: readonly string[];
+  /** Logins actually on the hook afterwards (already known to be missing some). */
+  onHook: readonly string[];
+  /** Has ANY review ever been submitted on this PR, by anyone but its author? */
+  everReviewed: boolean;
+  /**
+   * Dispatch's own round record, as `prLandingBlockers` reads it.
+   *
+   * The second, independent way `pr.requireReview` is met, and under `self`
+   * identity the ONLY way — a self-review is authored by the PR author, so it
+   * is filtered out of both `reported` and `everReported`. Without it this
+   * function said "NOBODY has reviewed this PR at any point" and sent the agent
+   * to ask the human to waive a review that had happened.
+   *
+   * BOTH fields, because the bar is `roundsSpent && posted` (`roundsMetIt`) and
+   * `posted` alone is weaker. On the default `maxRounds: 4`, a posted round 1
+   * has `posted` true and `roundsSpent` false: claiming the bar was met there
+   * asserted the opposite of the `no-review` `approve_pr` was about to raise —
+   * this function's own failure mode, inverted a second time.
+   */
+  dispatchRounds?: { posted: boolean; roundsSpent: boolean; round: number; maxRounds?: number };
+  /** `resolveReviewer`'s complaint, when Dispatch's own reviewer cannot run here. */
+  reviewAgentProblem?: string;
+  /** Best-effort Copilot budget read — only consulted if Copilot was dropped. */
+  copilotQuota?: () => Promise<CopilotQuotaFacts | null>;
+  /**
+   * GitHub refused one or more reviewers by name, rather than silently dropping
+   * them. A different fix from everything else here — the list itself is wrong —
+   * so the advice has to keep saying so.
+   */
+  hadFailures?: boolean;
+}): Promise<{ causes: string[]; advice: string }> {
+  const queued = new Set(opts.onHook.map(normalizeLogin));
+  const dropped = opts.asked.filter((a) => !queued.has(normalizeLogin(a)));
+  const causes: string[] = [];
+
+  // First, because it is the only cause that is permanent AND fixable in this
+  // repo's own config — every other line below describes something on GitHub.
+  if (opts.reviewAgentProblem) {
+    causes.push(`Dispatch's own reviewer cannot run here: ${opts.reviewAgentProblem}`);
+  }
+
+  const copilot = dropped.filter(isCopilotReviewer);
+  if (copilot.length) {
+    // Only NOW is the undocumented budget endpoint worth calling: we already
+    // know a Copilot reviewer went missing, so a null read costs one wasted
+    // `gh` call on a path that is already failing.
+    const quota = await opts.copilotQuota?.().catch(() => null);
+    if (quota?.exhausted) {
+      const usage =
+        quota.used != null && quota.entitlement != null
+          ? ` (${quota.used} of ${quota.entitlement} used`
+          : " (spent";
+      causes.push(
+        `${copilot.join(", ")} was dropped by GitHub because this account's Copilot ` +
+          `premium-request budget is exhausted${usage}` +
+          (quota.resetDate ? `, resets ${quota.resetDate}` : "") +
+          "). Copilot code review costs one premium request per review, and with none left " +
+          "GitHub accepts the request and queues nobody rather than refusing it. No Copilot " +
+          "review can arrive until the budget resets, or until premium-request overage is " +
+          "enabled in GitHub billing. This is NOT something to retry.",
+      );
+    } else {
+      causes.push(
+        `${copilot.join(", ")} was dropped by GitHub, which answers success either way. ` +
+          "The usual causes, in order: the account's Copilot premium-request budget is spent " +
+          "(github.com/settings/billing), Copilot code review is not enabled for this " +
+          "repository, or the bot is declining to re-review a head it has already reported on.",
+      );
+    }
+  }
+
+  const humans = dropped.filter((d) => !isCopilotReviewer(d));
+  if (humans.length) {
+    causes.push(
+      `${humans.join(", ")} ${humans.length === 1 ? "was" : "were"} not queued. GitHub only ` +
+        "accepts a review request for a collaborator on the repo — check the account name and " +
+        "its access.",
+    );
+  }
+
+  // The load-bearing fact, and the one the old advice got wrong. Stated even
+  // when nothing above could be diagnosed, because it decides what is possible
+  // next regardless of WHY the queue is empty.
+  //
+  // Both sources of review evidence are consulted, or this asserts the opposite
+  // of what `approve_pr` is about to do — see `dispatchRounds`. The bar is
+  // `roundsSpent && posted`, spelled the same way `prLandingBlockers` spells it.
+  const rounds = opts.dispatchRounds;
+  const roundsMetBar = rounds?.posted === true && rounds.roundsSpent;
+  const reviewed = opts.everReviewed || roundsMetBar;
+  causes.push(
+    opts.everReviewed
+      ? "This PR does already carry a submitted review, so the review bar may be met even " +
+          "with the queue empty."
+      : roundsMetBar
+        ? "Dispatch's own reviewer has posted and spent its rounds on this PR, which satisfies " +
+          "`pr.requireReview` on its own. GitHub's review list does not show it under `self` " +
+          "identity — a self-review is authored by the PR author and is filtered out."
+        : rounds?.posted
+          ? // Reviewed, but not by enough to clear the bar. Saying "nobody has
+            // reviewed" here would be false, and saying the bar is met would be
+            // the `no-review` refusal in disguise — so say which it is, and that
+            // another round is still available, because that is the way out that
+            // does not involve a waiver.
+            `Dispatch's own reviewer has posted round ${rounds.round}` +
+            (rounds.maxRounds ? ` of ${rounds.maxRounds}` : "") +
+            ", but `pr.requireReview` is only met once its rounds are SPENT — so this does " +
+            "not clear the bar yet, and another round can still run. Not a case for a waiver."
+          : "NOBODY has reviewed this PR at any point — there is no existing review to fall back on.",
+  );
+
+  const advice =
+    "Do NOT call watch_pr — it would block on an empty queue — and do NOT re-call " +
+    "request_review, which will fail identically. " +
+    // Kept verbatim from before this function existed: a NAMED refusal is the
+    // one empty queue whose fix really is "the list is wrong", and folding it
+    // into the generic advice below would lose the only actionable sentence.
+    (opts.hadFailures || humans.length
+      ? "Fix the reviewer names or the project's `workflow.pr.reviewers`; retrying the " +
+        "same list will fail the same way. "
+      : "") +
+    (reviewed
+      ? "If no threads are outstanding, land it on the review it already has — call " +
+        "`approve_pr`, which counts both GitHub's reviews and Dispatch's completed rounds. " +
+        "Do NOT ask the human to waive a review that happened."
+      : "The review requirement cannot be met as things stand. Fix a cause above if you can; " +
+        "otherwise put the waiver to the human with `mcp__dispatch-confirm__ask_user` and only " +
+        "then call `approve_pr({ allowNoReview: true })` — telling them plainly that nobody " +
+        "has reviewed this PR.");
+  return { causes, advice };
+}
+
 /**
  * Reduce a PR row's reviewer state to {@link SpentReviewRounds} — or null,
  * meaning another round can still spawn and `watch_pr` should keep waiting the
@@ -2734,6 +2968,16 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       const noChecks = events.some((e) => e.type === "no-checks");
       const stalled = events.find((e) => e.type === "review-stalled");
       const spentNews = events.find((e) => e.type === "reviews-spent");
+      // Why Dispatch's own reviewer isn't coming, when it structurally can't.
+      // Read only on a stall: it is the one moment "no review is arriving" is
+      // the subject, and the row already holds the answer (`notePolicy` mirrors
+      // `resolveReviewer`'s complaint onto it every sweep). Without this the
+      // stall is reported as a fact of nature — see `explainEmptyReviewQueue`.
+      const agentProblem = stalled
+        ? prReviewAgentView(
+            (await ctx.prRegistry?.reviewAgent(number, repo).catch(() => null)) ?? undefined,
+          )?.problem
+        : undefined;
       // The STANDING cap fact, not just this call's news. The advice has to know
       // the reviewer is finished on every call, or the round where only a stall
       // fires sends the agent to `request_review` and back into the dead wait.
@@ -2760,13 +3004,19 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           case "no-checks":
             return `  · no checks are reporting on this PR`;
           case "review-stalled":
-            return e.reported.length
-              ? `  ⏸ nobody is queued to review — ${e.reported
-                  .map((r) => `${r.author} already ${r.state.toLowerCase().replace(/_/g, " ")}`)
-                  .join(", ")}. GitHub cleared their request when they reported, and your ` +
-                `commits since then did NOT re-queue them.`
-              : `  ⏸ nobody is queued to review and nobody has reviewed — no review will ` +
-                `ever arrive on this PR as it stands.`;
+            return (
+              (e.reported.length
+                ? `  ⏸ nobody is queued to review — ${e.reported
+                    .map((r) => `${r.author} already ${r.state.toLowerCase().replace(/_/g, " ")}`)
+                    .join(", ")}. GitHub cleared their request when they reported, and your ` +
+                  `commits since then did NOT re-queue them.`
+                : `  ⏸ nobody is queued to review and nobody has reviewed — no review will ` +
+                  `ever arrive on this PR as it stands.`) +
+              // The cause, where there is one to name. Appended rather than
+              // replacing the sentence above: the stall is still the news, this
+              // is why it will not clear on its own.
+              (agentProblem ? `\n     ⚠ ${agentProblem}` : "")
+            );
           case "reviews-spent":
             return (
               `  ⏹ Dispatch's reviewer has spent all ${e.round} of ${e.maxRounds} rounds ` +
@@ -3483,13 +3733,50 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       // back to watch_pr to wait on the empty queue this tool exists to refill.
       const queue = await gh.pollPrState(number, repo).catch(() => null);
       const onHook = queue?.review?.requested ?? null;
+      // Built here because it needs `onHook`, and consumed by the advice below.
+      // Undefined when the queue is not empty — there is nothing to explain.
+      const emptyQueue =
+        onHook !== null && !onHook.length
+          ? await explainEmptyReviewQueue({
+              asked,
+              onHook,
+              // `everReported`, not `reported`. An earlier accepted re-request
+              // supersedes a filed review out of `latestReviews` and that state
+              // PERSISTS once the request itself is gone — so `reported` can be
+              // empty on a PR that has genuinely been reviewed, which is #147's
+              // failure and precisely the lie this function exists to stop.
+              // `everReported` also drops PENDING and the PR's own author.
+              // Falls back only for a binding that predates the field.
+              everReviewed: (queue?.review?.everReported ?? queue?.review?.reported ?? []).some(
+                (r) => r.state !== "PENDING",
+              ),
+              // The other half of the same question, which GitHub cannot answer:
+              // under `self` identity Dispatch's round IS the review, and it is
+              // filtered out of both lists above as an author review. Handed
+              // over whole rather than reduced here, because the bar is
+              // `roundsSpent && posted` and only the explainer should decide.
+              dispatchRounds: roundView
+                ? {
+                    posted: roundView.posted,
+                    roundsSpent: roundView.roundsSpent,
+                    round: roundView.round,
+                    maxRounds: roundView.maxRounds,
+                  }
+                : undefined,
+              reviewAgentProblem: roundView?.problem,
+              copilotQuota: gh.copilotQuota?.bind(gh),
+              hadFailures: res.failed.length > 0,
+            })
+          : undefined;
       if (onHook !== null) {
-        lines.push(
-          onHook.length
-            ? `  · now awaiting review from ${onHook.join(", ")}`
-            : "  · ⚠ the reviewer queue is STILL EMPTY — GitHub accepted the request but " +
-              "queued nobody",
-        );
+        if (onHook.length) {
+          lines.push(`  · now awaiting review from ${onHook.join(", ")}`);
+        } else {
+          lines.push(
+            "  · ⚠ the reviewer queue is STILL EMPTY — GitHub answered success and queued nobody",
+          );
+          for (const cause of emptyQueue?.causes ?? []) lines.push(`  · ${cause}`);
+        }
       } else if (res.requested.length) {
         lines.push(`  · asked ${res.requested.join(", ")} (queue not re-read)`);
       }
@@ -3514,12 +3801,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             ? " Do not wait on Dispatch's own reviewer — its rounds are spent and the " +
               "review bar is already met."
             : "")
-        : onHook !== null && !res.failed.length
-          ? "Do NOT go back to watch_pr — it would block on an empty queue. A bot reviewer " +
-            "often refuses a re-request on a head it has already reviewed; ask a human, or " +
-            "land the PR on the review you already have if there's nothing outstanding."
-          : "Fix the reviewer names or the project's `workflow.pr.reviewers`; retrying the " +
-            "same list will fail the same way.";
+        : (emptyQueue?.advice ??
+          "Fix the reviewer names or the project's `workflow.pr.reviewers`; retrying the " +
+            "same list will fail the same way.");
       return prToolResult(
         "request_review",
         {
