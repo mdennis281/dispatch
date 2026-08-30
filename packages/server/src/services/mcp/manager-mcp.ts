@@ -431,6 +431,13 @@ export interface PrWatchSnapshot extends PrPollResult {
   review: {
     requested: string[];
     reported: Array<{ author: string; state: string }>;
+    /**
+     * Every review ever submitted by somebody other than the author. Optional
+     * because older bindings and test doubles predate it; a consumer asking
+     * "has anybody reviewed" must prefer it and fall back to `reported`, which
+     * is `latestReviews` and goes empty under supersede-on-re-request.
+     */
+    everReported?: Array<{ author: string; state: string }>;
   } | null;
 }
 
@@ -2377,6 +2384,18 @@ async function explainEmptyReviewQueue(opts: {
   onHook: readonly string[];
   /** Has ANY review ever been submitted on this PR, by anyone but its author? */
   everReviewed: boolean;
+  /**
+   * Dispatch's own reviewer has completed a round and POSTED it.
+   *
+   * The second, independent way `pr.requireReview` is met — `prLandingBlockers`
+   * counts it as `roundsSpent && posted` — and under `self` identity it is the
+   * ONLY way, because a self-review is authored by the PR author and is
+   * therefore filtered out of both `reported` and `everReported`. Without it
+   * this function reported "NOBODY has reviewed this PR at any point" and sent
+   * the agent to ask the human to waive a review that had happened, on a PR
+   * `approve_pr` would have merged with no waiver at all.
+   */
+  dispatchReviewPosted?: boolean;
   /** `resolveReviewer`'s complaint, when Dispatch's own reviewer cannot run here. */
   reviewAgentProblem?: string;
   /** Best-effort Copilot budget read — only consulted if Copilot was dropped. */
@@ -2440,11 +2459,19 @@ async function explainEmptyReviewQueue(opts: {
   // The load-bearing fact, and the one the old advice got wrong. Stated even
   // when nothing above could be diagnosed, because it decides what is possible
   // next regardless of WHY the queue is empty.
+  //
+  // Both sources of review evidence are consulted, or this asserts the opposite
+  // of what `approve_pr` is about to do — see `dispatchReviewPosted`.
+  const reviewed = opts.everReviewed || opts.dispatchReviewPosted === true;
   causes.push(
     opts.everReviewed
       ? "This PR does already carry a submitted review, so the review bar may be met even " +
           "with the queue empty."
-      : "NOBODY has reviewed this PR at any point — there is no existing review to fall back on.",
+      : opts.dispatchReviewPosted
+        ? "Dispatch's own reviewer has already posted a round on this PR, which satisfies " +
+          "`pr.requireReview` on its own. GitHub's review list does not show it under `self` " +
+          "identity — a self-review is authored by the PR author and is filtered out."
+        : "NOBODY has reviewed this PR at any point — there is no existing review to fall back on.",
   );
 
   const advice =
@@ -2457,8 +2484,10 @@ async function explainEmptyReviewQueue(opts: {
       ? "Fix the reviewer names or the project's `workflow.pr.reviewers`; retrying the " +
         "same list will fail the same way. "
       : "") +
-    (opts.everReviewed
-      ? "If no threads are outstanding, land it on the review it already has."
+    (reviewed
+      ? "If no threads are outstanding, land it on the review it already has — call " +
+        "`approve_pr`, which counts both GitHub's reviews and Dispatch's completed rounds. " +
+        "Do NOT ask the human to waive a review that happened."
       : "The review requirement cannot be met as things stand. Fix a cause above if you can; " +
         "otherwise put the waiver to the human with `mcp__dispatch-confirm__ask_user` and only " +
         "then call `approve_pr({ allowNoReview: true })` — telling them plainly that nobody " +
@@ -3694,19 +3723,20 @@ export function createManagerTools(ctx: ManagerMcpContext) {
           ? await explainEmptyReviewQueue({
               asked,
               onHook,
-              // Safe to read `reported` (newest-per-author) rather than the full
-              // history here: GitHub only supersedes a review when its author is
-              // re-queued, and this branch is the one where nobody was.
-              //
-              // PENDING is dropped for the same reason `prLandingBlockers` and
-              // `prReviewState.everReported` drop it: a review someone started in
-              // the browser and never submitted is not a review. Counting one
-              // would print "land it on the review it already has" — the sentence
-              // this whole function exists to delete — while `approve_pr`, which
-              // does filter, still refuses for `no-review`.
-              everReviewed: (queue?.review?.reported ?? []).some(
+              // `everReported`, not `reported`. An earlier accepted re-request
+              // supersedes a filed review out of `latestReviews` and that state
+              // PERSISTS once the request itself is gone — so `reported` can be
+              // empty on a PR that has genuinely been reviewed, which is #147's
+              // failure and precisely the lie this function exists to stop.
+              // `everReported` also drops PENDING and the PR's own author.
+              // Falls back only for a binding that predates the field.
+              everReviewed: (queue?.review?.everReported ?? queue?.review?.reported ?? []).some(
                 (r) => r.state !== "PENDING",
               ),
+              // The other half of the same question, which GitHub cannot answer:
+              // under `self` identity Dispatch's round IS the review, and it is
+              // filtered out of both lists above as an author review.
+              dispatchReviewPosted: roundView?.posted === true,
               reviewAgentProblem: roundView?.problem,
               copilotQuota: gh.copilotQuota?.bind(gh),
               hadFailures: res.failed.length > 0,

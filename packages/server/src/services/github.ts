@@ -245,6 +245,18 @@ export interface PrPollSnapshot {
    */
   requested: string[];
   reported: Array<{ author: string; state: string }>;
+  /**
+   * Every review EVER submitted by someone other than the PR's author — the
+   * honest answer to "has anybody looked at this", which `reported` cannot give.
+   *
+   * `reported` is GitHub's `latestReviews`, and it applies supersede-on-
+   * re-request: a reviewer put back in the queue has the review they already
+   * filed dropped out of it, and that supersede PERSISTS after the request
+   * itself is gone. See {@link PrReviewState.everReported}, which is the same
+   * derivation — built here too because the full `reviews` connection is
+   * already on this query, so it costs nothing.
+   */
+  everReported: Array<{ author: string; state: string }>;
 }
 
 /**
@@ -1486,6 +1498,24 @@ export class GitHubService {
       requested: reviewers.filter((r) => r.state === "requested").map((r) => r.login),
       reported: latestReviews
         .filter((r) => !r.isMinimized)
+        .map((r) => ({
+          author: r.author?.login ?? "",
+          state: String(r.state ?? "").toUpperCase(),
+        }))
+        .filter((r) => r.author),
+      // Same three filters as `prReviewState.everReported`, off the full
+      // `reviews` connection this query already carries: minimized is folded
+      // away as outdated, PENDING was begun and never submitted, and the PR's
+      // own author is excluded because `resolve_thread` posts its reply AS a
+      // review by the author — counting those would let a PR clear its own
+      // review bar by answering its reviewer.
+      everReported: allReviews
+        .filter(
+          (r) =>
+            !r.isMinimized &&
+            String(r.state ?? "").toUpperCase() !== "PENDING" &&
+            (r.author?.login ?? "").toLowerCase() !== (pr.author?.login ?? "").toLowerCase(),
+        )
         .map((r) => ({
           author: r.author?.login ?? "",
           state: String(r.state ?? "").toUpperCase(),

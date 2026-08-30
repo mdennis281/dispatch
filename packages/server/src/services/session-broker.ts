@@ -442,7 +442,11 @@ function makeGithubBinding(
         mergedAt: snap.mergedAt,
         checks: snap.checks,
         threads: snap.threads,
-        review: { requested: snap.requested, reported: snap.reported },
+        review: {
+          requested: snap.requested,
+          reported: snap.reported,
+          everReported: snap.everReported,
+        },
       };
     },
     // These three THROW on failure rather than degrading — they are actions the

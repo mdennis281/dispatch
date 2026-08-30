@@ -72,6 +72,7 @@ function fakeGitHub(over: FakePrScript = {}): PrReviewGitHub {
         checks: checks as PrPollSnapshot["checks"],
         requested: review?.requested ?? [],
         reported: review?.reported ?? [],
+        everReported: review?.reported ?? [],
         ...over.patch,
       };
     },

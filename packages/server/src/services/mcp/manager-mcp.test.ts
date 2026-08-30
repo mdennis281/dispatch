@@ -1404,6 +1404,7 @@ describe("manager-mcp — request_review", () => {
      */
     extra: {
       reported?: Array<{ author: string; state: string }>;
+      everReported?: Array<{ author: string; state: string }>;
       quota?: CopilotQuotaFacts | null;
       onQuotaCall?: () => void;
     } = {},
@@ -1424,7 +1425,17 @@ describe("manager-mcp — request_review", () => {
       pollPrState: async () =>
         snap({
           review:
-            queued === null ? null : { requested: queued, reported: extra.reported ?? [] },
+            queued === null
+              ? null
+              : {
+                  requested: queued,
+                  reported: extra.reported ?? [],
+                  // Defaults FROM `reported`, because in reality the ever-list is
+                  // a superset of the live one. The cases that matter are where
+                  // they diverge, and those pass it explicitly — the same rule
+                  // `readyPr` follows for `everSubmittedReviews`.
+                  everReported: extra.everReported ?? extra.reported ?? [],
+                },
         }),
       requestReviewers: async (n, list) => {
         asked.push({ n, list });
@@ -1565,6 +1576,63 @@ describe("manager-mcp — request_review", () => {
 
     expect(resultText(res)).toContain("does already carry a submitted review");
     expect(resultText(res)).toContain("land it on the review it already has");
+    expect(resultText(res)).not.toContain("NOBODY has reviewed");
+  });
+
+  // Under `self` identity Dispatch's own round IS the review, and GitHub can
+  // never show it — a self-review is authored by the PR author, so it is
+  // filtered out of `reported` and `everReported` alike. Reading only GitHub
+  // made this tool tell the agent to escalate an unreviewed-merge waiver, and to
+  // assert something false to the human, about a PR `approve_pr` would have
+  // merged with no waiver at all (`roundsMetIt`). The same harm as #192, inverted.
+  it("counts Dispatch's own posted round as review evidence GitHub cannot show", async () => {
+    const gh = ghWith(
+      { requested: ["copilot-pull-request-reviewer[bot]"], failed: [] },
+      undefined,
+      [],
+    );
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+      prRegistry: reviewRegistry({ rounds: 1, maxRounds: 1, reviewedAt: 1_000, postedAt: 2_000 }),
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    const text = resultText(res);
+    expect(text).toContain("already posted a round");
+    expect(text).not.toContain("NOBODY has reviewed");
+    // And the advice must agree with what approve_pr will actually do.
+    expect(text).toContain("Do NOT ask the human to waive a review that happened");
+    expect(text).not.toContain("allowNoReview");
+  });
+
+  // `reported` is `latestReviews`, which supersedes on re-request — and that
+  // supersede persists after the request itself is gone. So a PR that HAS been
+  // reviewed can read as empty there while `everReported` still carries it.
+  it("reads everReported, not the list an old re-request can have emptied", async () => {
+    const gh = ghWith({ requested: ["alice"], failed: [] }, undefined, [], undefined, {
+      reported: [],
+      everReported: [{ author: "bob", state: "COMMENTED" }],
+    });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    expect(resultText(res)).toContain("does already carry a submitted review");
     expect(resultText(res)).not.toContain("NOBODY has reviewed");
   });
 
