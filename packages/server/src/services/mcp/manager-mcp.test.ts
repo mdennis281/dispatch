@@ -1605,11 +1605,43 @@ describe("manager-mcp — request_review", () => {
     );
 
     const text = resultText(res);
-    expect(text).toContain("already posted a round");
+    expect(text).toContain("posted and spent its rounds");
     expect(text).not.toContain("NOBODY has reviewed");
     // And the advice must agree with what approve_pr will actually do.
     expect(text).toContain("Do NOT ask the human to waive a review that happened");
     expect(text).not.toContain("allowNoReview");
+  });
+
+  // `posted` alone is WEAKER than the bar `approve_pr` applies
+  // (`roundsMetIt = roundsSpent && posted`). On the default `maxRounds: 4` a
+  // posted round 1 is `posted: true, roundsSpent: false` — claiming the bar was
+  // met there asserts the opposite of the `no-review` about to be raised.
+  it("does not call the bar met on a posted round whose cap is not spent", async () => {
+    const gh = ghWith(
+      { requested: ["copilot-pull-request-reviewer[bot]"], failed: [] },
+      undefined,
+      [],
+    );
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+      prRegistry: reviewRegistry({ rounds: 1, maxRounds: 4, reviewedAt: 1_000, postedAt: 2_000 }),
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    const text = resultText(res);
+    expect(text).toContain("posted round 1 of 4");
+    expect(text).toContain("only met once its rounds are SPENT");
+    // Neither of the two wrong answers: the bar is not met…
+    expect(text).not.toContain("posted and spent its rounds");
+    // …and it is NOT true that nobody reviewed it.
+    expect(text).not.toContain("NOBODY has reviewed");
   });
 
   // `reported` is `latestReviews`, which supersedes on re-request — and that

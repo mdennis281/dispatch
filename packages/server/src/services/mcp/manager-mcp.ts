@@ -2385,17 +2385,21 @@ async function explainEmptyReviewQueue(opts: {
   /** Has ANY review ever been submitted on this PR, by anyone but its author? */
   everReviewed: boolean;
   /**
-   * Dispatch's own reviewer has completed a round and POSTED it.
+   * Dispatch's own round record, as `prLandingBlockers` reads it.
    *
-   * The second, independent way `pr.requireReview` is met — `prLandingBlockers`
-   * counts it as `roundsSpent && posted` — and under `self` identity it is the
-   * ONLY way, because a self-review is authored by the PR author and is
-   * therefore filtered out of both `reported` and `everReported`. Without it
-   * this function reported "NOBODY has reviewed this PR at any point" and sent
-   * the agent to ask the human to waive a review that had happened, on a PR
-   * `approve_pr` would have merged with no waiver at all.
+   * The second, independent way `pr.requireReview` is met, and under `self`
+   * identity the ONLY way — a self-review is authored by the PR author, so it
+   * is filtered out of both `reported` and `everReported`. Without it this
+   * function said "NOBODY has reviewed this PR at any point" and sent the agent
+   * to ask the human to waive a review that had happened.
+   *
+   * BOTH fields, because the bar is `roundsSpent && posted` (`roundsMetIt`) and
+   * `posted` alone is weaker. On the default `maxRounds: 4`, a posted round 1
+   * has `posted` true and `roundsSpent` false: claiming the bar was met there
+   * asserted the opposite of the `no-review` `approve_pr` was about to raise —
+   * this function's own failure mode, inverted a second time.
    */
-  dispatchReviewPosted?: boolean;
+  dispatchRounds?: { posted: boolean; roundsSpent: boolean; round: number; maxRounds?: number };
   /** `resolveReviewer`'s complaint, when Dispatch's own reviewer cannot run here. */
   reviewAgentProblem?: string;
   /** Best-effort Copilot budget read — only consulted if Copilot was dropped. */
@@ -2461,17 +2465,30 @@ async function explainEmptyReviewQueue(opts: {
   // next regardless of WHY the queue is empty.
   //
   // Both sources of review evidence are consulted, or this asserts the opposite
-  // of what `approve_pr` is about to do — see `dispatchReviewPosted`.
-  const reviewed = opts.everReviewed || opts.dispatchReviewPosted === true;
+  // of what `approve_pr` is about to do — see `dispatchRounds`. The bar is
+  // `roundsSpent && posted`, spelled the same way `prLandingBlockers` spells it.
+  const rounds = opts.dispatchRounds;
+  const roundsMetBar = rounds?.posted === true && rounds.roundsSpent;
+  const reviewed = opts.everReviewed || roundsMetBar;
   causes.push(
     opts.everReviewed
       ? "This PR does already carry a submitted review, so the review bar may be met even " +
           "with the queue empty."
-      : opts.dispatchReviewPosted
-        ? "Dispatch's own reviewer has already posted a round on this PR, which satisfies " +
+      : roundsMetBar
+        ? "Dispatch's own reviewer has posted and spent its rounds on this PR, which satisfies " +
           "`pr.requireReview` on its own. GitHub's review list does not show it under `self` " +
           "identity — a self-review is authored by the PR author and is filtered out."
-        : "NOBODY has reviewed this PR at any point — there is no existing review to fall back on.",
+        : rounds?.posted
+          ? // Reviewed, but not by enough to clear the bar. Saying "nobody has
+            // reviewed" here would be false, and saying the bar is met would be
+            // the `no-review` refusal in disguise — so say which it is, and that
+            // another round is still available, because that is the way out that
+            // does not involve a waiver.
+            `Dispatch's own reviewer has posted round ${rounds.round}` +
+            (rounds.maxRounds ? ` of ${rounds.maxRounds}` : "") +
+            ", but `pr.requireReview` is only met once its rounds are SPENT — so this does " +
+            "not clear the bar yet, and another round can still run. Not a case for a waiver."
+          : "NOBODY has reviewed this PR at any point — there is no existing review to fall back on.",
   );
 
   const advice =
@@ -3735,8 +3752,17 @@ export function createManagerTools(ctx: ManagerMcpContext) {
               ),
               // The other half of the same question, which GitHub cannot answer:
               // under `self` identity Dispatch's round IS the review, and it is
-              // filtered out of both lists above as an author review.
-              dispatchReviewPosted: roundView?.posted === true,
+              // filtered out of both lists above as an author review. Handed
+              // over whole rather than reduced here, because the bar is
+              // `roundsSpent && posted` and only the explainer should decide.
+              dispatchRounds: roundView
+                ? {
+                    posted: roundView.posted,
+                    roundsSpent: roundView.roundsSpent,
+                    round: roundView.round,
+                    maxRounds: roundView.maxRounds,
+                  }
+                : undefined,
               reviewAgentProblem: roundView?.problem,
               copilotQuota: gh.copilotQuota?.bind(gh),
               hadFailures: res.failed.length > 0,
