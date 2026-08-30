@@ -25,7 +25,13 @@
  * holds one.
  */
 import { create } from "zustand";
-import type { ChatProcessDetail, ResourceSnapshot, SystemResources } from "@dispatch/shared";
+import {
+  SHARED_PAGE_FACTOR,
+  type ChatProcessDetail,
+  type DispatchResources,
+  type ResourceSnapshot,
+  type SystemResources,
+} from "@dispatch/shared";
 import { api } from "../lib/api.js";
 
 /**
@@ -174,3 +180,87 @@ export function machinePct(cpuPct: number | null, cores: number): number | null 
   if (!Number.isFinite(cores) || cores <= 0) return cpuPct;
   return cpuPct / cores;
 }
+
+/**
+ * One metric cut three ways: Dispatch, everything else in use, and free.
+ *
+ * WHY IT LIVES HERE and not in the components. Three surfaces draw this exact
+ * split — the header pill's dropdown, the Resources page's hero cards, and
+ * (for CPU) the per-chat rows — and each one previously did its own arithmetic
+ * inline. Two of the corrections below are subtle enough that having them in
+ * one place, tested, is the difference between them being right everywhere and
+ * being right wherever somebody last looked.
+ *
+ * `pct` fields are the bar's GEOMETRY, always a share of the whole machine.
+ * The amount fields are in the metric's own unit — bytes for memory, percent-
+ * of-machine for CPU — because that is what the legend prints.
+ */
+export interface ResourceSplit {
+  /** Dispatch's slice as a percent of the machine. Zero when unmeasured. */
+  dispatchPct: number;
+  /** Total in use, Dispatch included, as a percent of the machine. */
+  usedPct: number;
+  /** Dispatch's amount, or `null` when the process table has not been read. */
+  dispatch: number | null;
+  /** In use but not Dispatch's. */
+  other: number;
+  /** Not in use. */
+  free: number;
+  /** False when the machine's own reading is missing — CPU's first poll. */
+  measured: boolean;
+}
+
+/** Machine memory, split by who is holding it. */
+export function memorySplit(
+  system: SystemResources,
+  dispatch: DispatchResources | null,
+): ResourceSplit {
+  const used = system.usedBytes;
+  // Shared pages are counted once per process, which runs the raw tree sum
+  // ~1.9x high — high enough that on a live install it EXCEEDED installed RAM.
+  // Corrected, it is a quantity that can sit inside a real machine total
+  // without the bright segment overflowing the fill it is drawn inside.
+  // See SHARED_PAGE_FACTOR; the UI marks every figure derived from it "≈".
+  const ours = dispatch ? Math.min(dispatch.rssBytes / SHARED_PAGE_FACTOR, used) : null;
+  return {
+    dispatchPct: share(ours ?? 0, system.totalBytes),
+    usedPct: share(used, system.totalBytes),
+    dispatch: ours,
+    other: Math.max(0, used - (ours ?? 0)),
+    free: system.freeBytes,
+    measured: true,
+  };
+}
+
+/** Machine CPU, split the same way. Percentages are of the WHOLE machine. */
+export function cpuSplit(
+  system: SystemResources,
+  dispatch: DispatchResources | null,
+): ResourceSplit {
+  const used = system.cpuPct;
+  const ours = machinePct(dispatch?.cpuPct ?? null, system.logicalCores);
+  // CLAMPED to the machine figure, because the two come from different
+  // samplers over different windows: `os.cpus()` deltas for the machine, a
+  // process-table walk for the tree. They disagree by a point or two routinely,
+  // and Dispatch reading ABOVE the machine would draw a bright segment
+  // sticking out past the used fill it is supposed to be nested in.
+  //
+  // A MISSING machine figure takes the slice with it rather than leaving it
+  // standing alone: those independent samplers mean one really can have a
+  // reading while the other does not, and "Dispatch's share of the machine"
+  // with no machine total is not a small number, it is not a number. Left
+  // through, it would draw a bright segment inside a zero-width fill —
+  // overhanging the entire bar on the one poll the page has nothing to say.
+  const capped = ours === null || used === null ? null : Math.min(ours, used);
+  return {
+    dispatchPct: clampPct(capped ?? 0),
+    usedPct: clampPct(used ?? 0),
+    dispatch: capped,
+    other: Math.max(0, (used ?? 0) - (capped ?? 0)),
+    free: Math.max(0, 100 - clampPct(used ?? 0)),
+    measured: used !== null,
+  };
+}
+
+const clampPct = (p: number): number =>
+  Number.isFinite(p) ? Math.max(0, Math.min(100, p)) : 0;

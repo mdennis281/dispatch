@@ -6,6 +6,25 @@
  * for, Runtime measures where the wall clock went, Resources measures what is
  * resident right now. Same header, same tab strip, one destination.
  *
+ * ── TWO CARDS, NOT FOUR TILES ────────────────────────────────────────────────
+ *
+ * The page shipped with a tile each for machine memory, machine CPU, Dispatch
+ * memory and Dispatch CPU — four bars, each against its own full-width track,
+ * and the one question a reader actually brings ("how much of that is us")
+ * answered only by dividing tile three by tile one in their head. The same four
+ * numbers nest into two: one bar per metric, Dispatch's slice drawn bright
+ * inside the dim total. Half the width, the comparison for free. See
+ * `SplitBar`, and `memorySplit`/`cpuSplit` for the arithmetic.
+ *
+ * ── EVERY ROW DRAWS BOTH METRICS ─────────────────────────────────────────────
+ *
+ * A chat row used to draw ONE bar and switch which metric it meant depending on
+ * how the table was sorted — a patch for the original defect, where a memory
+ * bar sat under a table ranked by CPU and pointed away from the answer. Two
+ * bars, always, is the fix that patch was approximating: memory above, CPU
+ * below, told apart by hue (see `lib/resourceTone`). The bar no longer depends
+ * on the sort, so it cannot disagree with it.
+ *
  * ── THE MEMORY NUMBERS NEED A HEALTH WARNING, SO THEY GET ONE ────────────────
  *
  * Resident set counts SHARED pages once per process, so summing it over a tree
@@ -13,11 +32,12 @@
  * against 8.7 GB real). The accurate figure costs seven seconds to collect and
  * is therefore not collected.
  *
- * The page defaults to RELATIVE — share-of-total bars — because the ranking is
- * sound even though the absolute is not, and ranking is the actual question
- * ("which chat do I reap"). Absolutes are behind a toggle, and when shown they
- * are marked `≈` and corrected by {@link SHARED_PAGE_FACTOR} rather than
- * printed raw, because a raw total that exceeds installed RAM reads as a bug.
+ * So every row leads with the RELATIVE figure — a share of the machine, whose
+ * ranking is sound — and carries the absolute underneath it in faint, marked
+ * `≈` and corrected by {@link SHARED_PAGE_FACTOR}. That pairing replaced a
+ * relative/absolute TOGGLE: with the row showing both at once there was nothing
+ * left for it to switch, and a control that answers a question already on
+ * screen is a control worth deleting.
  *
  * ── CPU IS BLANK BEFORE IT IS ZERO ───────────────────────────────────────────
  *
@@ -27,22 +47,24 @@
  * window is however long since the last poll rather than a fixed cadence.
  */
 import { useEffect, useState } from "react";
-import { ChevronRight, Cpu, Server, Skull } from "lucide-react";
+import { ChevronRight, Cpu, MemoryStick, Skull } from "lucide-react";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
+import { SplitBar, SplitDot } from "../ui/SplitBar.js";
 import { SHARED_PAGE_FACTOR, type ChatResources } from "@dispatch/shared";
-import { useResources, share, machinePct } from "../../stores/resources.js";
+import {
+  useResources,
+  share,
+  machinePct,
+  memorySplit,
+  cpuSplit,
+  type ResourceSplit,
+} from "../../stores/resources.js";
 import { useChats } from "../../stores/chats.js";
 import { useChatProcesses } from "../../stores/chatProcesses.js";
 import { bytes, pct, dur } from "../../lib/format.js";
+import { CPU_BAR, chatCpuTone, chatTone, machineTone } from "../../lib/resourceTone.js";
 import { cn } from "../../lib/cn.js";
-
-/** Bar tone by share of the machine. */
-function tone(p: number): string {
-  if (p >= 40) return "bg-danger";
-  if (p >= 15) return "bg-warn";
-  return "bg-accent";
-}
 
 /** Which column the table is ranked by. */
 export type SortKey = "mem" | "cpu" | "procs";
@@ -80,10 +102,7 @@ const CPU_BORING_PCT = 50;
  *
  * @param current What the automatic choice settled on last poll.
  */
-export function nextAutoSort(
-  current: SortKey,
-  chats: readonly ChatResources[],
-): SortKey {
+export function nextAutoSort(current: SortKey, chats: readonly ChatResources[]): SortKey {
   const hottest = chats.reduce((max, c) => Math.max(max, c.cpuPct ?? 0), 0);
   if (hottest >= CPU_INTERESTING_PCT) return "cpu";
   // Only leave CPU once things have gone properly quiet, and never touch a
@@ -102,46 +121,95 @@ export function sortChats(chats: readonly ChatResources[], by: SortKey): ChatRes
   return [...chats].sort((a, b) => key(b) - key(a) || a.chatId.localeCompare(b.chatId));
 }
 
-/** A labelled figure with a bar under it — the hero tiles across the top. */
-function Tile({
+/** One line of a hero card's legend: swatch, what it is, how much, in what. */
+function LegendRow({
+  layer,
+  barTone,
   label,
   value,
   sub,
-  pctOf,
-  barClass,
-  icon,
 }: {
+  layer: "share" | "other" | "free";
+  barTone: string;
   label: string;
   value: string;
-  sub?: string;
-  pctOf?: number;
-  barClass?: string;
-  icon?: React.ReactNode;
+  /** The same quantity in its other useful unit — a percent, or cores. */
+  sub: string;
 }) {
   return (
-    <div className="min-w-0 flex-1 rounded-md border border-line bg-panel-2/40 px-3 py-2.5">
-      <div className="mb-1 flex items-center gap-1.5">
-        {icon}
-        <span className="truncate text-2xs uppercase tracking-wide text-faint">{label}</span>
+    <div className="flex items-baseline gap-1.5">
+      <SplitDot layer={layer} tone={barTone} />
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate text-2xs",
+          layer === "share" ? "text-secondary" : "text-faint",
+        )}
+      >
+        {label}
+      </span>
+      <span
+        className={cn(
+          "cm-mono shrink-0 text-2xs tabular-nums",
+          layer === "share" ? "text-primary" : "text-muted",
+        )}
+      >
+        {value}
+      </span>
+      <span className="cm-mono w-16 shrink-0 text-right text-2xs tabular-nums text-faint">
+        {sub}
+      </span>
+    </div>
+  );
+}
+
+/** One metric across the top of the page: headline, split bar, three legends. */
+function HeroCard({
+  icon,
+  label,
+  headline,
+  denom,
+  split,
+  barTone,
+  legend,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  headline: string;
+  /** The quieter half of the headline — "/ 64 GB", "of 16 cores". */
+  denom: string;
+  split: ResourceSplit;
+  barTone: string;
+  legend: { label: string; value: string; sub: string }[];
+}) {
+  return (
+    <div className="min-w-0 flex-1 basis-64 rounded-md border border-line bg-panel-2/40 px-3 py-2.5">
+      <div className="mb-2 flex items-baseline gap-1.5">
+        <span className="self-center">{icon}</span>
+        <span className="text-2xs uppercase tracking-wide text-faint">{label}</span>
+        <div className="flex-1" />
+        <span className="cm-mono text-lg font-semibold leading-none tabular-nums text-primary">
+          {headline}
+        </span>
+        <span className="cm-mono text-2xs tabular-nums text-faint">{denom}</span>
       </div>
-      <div className="cm-mono text-lg font-semibold leading-tight text-primary">{value}</div>
-      {pctOf !== undefined && (
-        <div className="relative mt-1.5 h-1 w-full overflow-hidden rounded-full bg-line">
-          <span
-            className={cn(
-              "absolute inset-y-0 left-0 rounded-full",
-              // Animated because these bars are re-rendered every poll with a
-              // new number: a bar that JUMPS reads as a fresh render, one that
-              // slides reads as the same quantity moving, which is what makes
-              // a 5 s poll feel like a live reading rather than a slideshow.
-              "transition-[width] duration-500 ease-[var(--ease-out)]",
-              barClass ?? "bg-accent",
-            )}
-            style={{ width: `${pctOf}%` }}
+      <SplitBar
+        size="lg"
+        usedPct={split.usedPct}
+        sharePct={split.dispatch === null ? null : split.dispatchPct}
+        tone={barTone}
+      />
+      <div className="mt-2 space-y-1">
+        {(["share", "other", "free"] as const).map((layer, i) => (
+          <LegendRow
+            key={layer}
+            layer={layer}
+            barTone={barTone}
+            label={legend[i]!.label}
+            value={legend[i]!.value}
+            sub={legend[i]!.sub}
           />
-        </div>
-      )}
-      {sub && <div className="mt-1 truncate text-2xs text-faint">{sub}</div>}
+        ))}
+      </div>
     </div>
   );
 }
@@ -175,17 +243,12 @@ function SortTab({
 function ChatRow({
   chat,
   denominator,
-  absolute,
   cores,
-  sort,
 }: {
   chat: ChatResources;
-  /** Bytes that count as "100%" for the bar — the machine's total. */
+  /** Bytes that count as "100%" for the memory bar — the machine's total. */
   denominator: number;
-  absolute: boolean;
   cores: number;
-  /** Which column the table is ranked by — the bar tracks it. */
-  sort: SortKey;
 }) {
   const [open, setOpen] = useState(false);
   const detail = useResources((s) => s.details[chat.chatId]);
@@ -200,15 +263,14 @@ function ChatRow({
 
   const corrected = chat.rssBytes / SHARED_PAGE_FACTOR;
   const memShare = share(corrected, denominator);
-  // The bar shows whatever the table is RANKED by. A memory bar under a table
-  // sorted by CPU is the bug this page shipped with: the row that was pinning
-  // ten cores drew a stub of a bar because its memory was unremarkable, so the
-  // one visual cue on the row pointed away from the answer.
-  const barShare = sort === "cpu" ? share(chat.cpuPct ?? 0, 100 * cores) : memShare;
+  // Machine-relative, so this is on the same scale as the memory bar above it
+  // and as the cards at the top of the page, and the rows add up. The raw
+  // server figure is a share of ONE core. See `machinePct`.
+  const cpuShare = share(chat.cpuPct ?? 0, 100 * cores);
 
   return (
     <div className="cm-hairline-b">
-      <div className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-active/40">
+      <div className="flex items-center gap-2 px-3 py-1.5 transition-colors hover:bg-active/40">
         <IconButton
           onClick={() => setOpen((v) => !v)}
           tip={open ? "Collapse" : "Expand"}
@@ -232,38 +294,53 @@ function ChatRow({
                 {chat.hottest.count > 1 && `×${chat.hottest.count}`}
               </span>
             )}
+            <div className="flex-1" />
+            {/* Session and shells kept apart because an idle sweep reclaims the
+                first and never the second. */}
+            <span className="cm-mono shrink-0 text-2xs tabular-nums text-faint">
+              {chat.session.procs}+{chat.shells.procs}
+            </span>
           </div>
-          <div className="mt-1 relative h-1 w-full overflow-hidden rounded-full bg-line">
-            <span
-              className={cn(
-                "absolute inset-y-0 left-0 rounded-full",
-                "transition-[width] duration-500 ease-[var(--ease-out)]",
-                tone(barShare),
-              )}
-              style={{ width: `${barShare}%` }}
+          {/* Memory above, CPU below, in that order everywhere on this page —
+              including the two columns to the right, which are in the same
+              order left to right. */}
+          <div className="mt-1 flex flex-col gap-0.5">
+            <SplitBar
+              size="sm"
+              usedPct={memShare}
+              tone={chatTone(memShare)}
+              title={`memory ${memShare.toFixed(1)}% of machine`}
+            />
+            <SplitBar
+              size="sm"
+              usedPct={cpuShare}
+              tone={chatCpuTone(cpuShare)}
+              title={
+                chat.cpuPct === null
+                  ? "CPU not measured yet"
+                  : `CPU ${cpuShare.toFixed(1)}% of machine`
+              }
             />
           </div>
         </div>
 
-        <div className="w-20 shrink-0 text-right">
-          <div className="cm-mono text-xs font-semibold text-primary">
-            {absolute ? `≈${bytes(corrected)}` : `${memShare.toFixed(1)}%`}
+        <div className="w-16 shrink-0 text-right">
+          <div className="cm-mono text-xs font-semibold tabular-nums text-primary">
+            {memShare.toFixed(1)}%
           </div>
-          <div className="text-2xs text-faint">
-            {chat.session.procs}+{chat.shells.procs} proc
-          </div>
+          <div className="cm-mono text-2xs tabular-nums text-faint">≈{bytes(corrected)}</div>
         </div>
 
         <div className="w-16 shrink-0 text-right">
-          {/* Machine-relative, so this column is comparable with the machine
-              and Dispatch tiles above and the rows add up. The secondary line
-              gives the same figure in cores, which is the form that actually
-              means something for one busy chat ("it is using 2.4 cores"). */}
-          <div className="cm-mono text-xs text-secondary">
+          <div className="cm-mono text-xs tabular-nums text-secondary">
             {pct(machinePct(chat.cpuPct, cores))}
           </div>
+          {/* The same figure in cores, which is the form that actually means
+              something for one busy chat ("it is using 2.4 cores"). */}
           {chat.cpuPct !== null && (
-            <div className="text-2xs text-faint">{(chat.cpuPct / 100).toFixed(1)}× core</div>
+            <div className="cm-mono text-2xs tabular-nums text-faint">
+              {(chat.cpuPct / 100).toFixed(1)}× core
+            </div>
           )}
         </div>
 
@@ -309,10 +386,10 @@ function ChatRow({
                   {p.name ?? "?"}
                   <span className="text-faint"> · {p.pid}</span>
                 </span>
-                <span className="cm-mono w-16 shrink-0 text-right text-2xs text-primary">
+                <span className="cm-mono w-16 shrink-0 text-right text-2xs tabular-nums text-primary">
                   {bytes(p.rssBytes)}
                 </span>
-                <span className="cm-mono w-12 shrink-0 text-right text-2xs text-muted">
+                <span className="cm-mono w-12 shrink-0 text-right text-2xs tabular-nums text-muted">
                   {pct(machinePct(p.cpuPct, cores))}
                 </span>
               </div>
@@ -324,11 +401,20 @@ function ChatRow({
   );
 }
 
+/** Which hue means which metric, said once for the whole table below it. */
+function BarKey({ tone, label }: { tone: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 text-2xs text-faint">
+      <span className={cn("h-[3px] w-3 rounded-full", tone)} />
+      {label}
+    </span>
+  );
+}
+
 export function ResourceMetrics() {
   const snapshot = useResources((s) => s.snapshot);
   const loading = useResources((s) => s.loading);
   const subscribe = useResources((s) => s.subscribeSnapshot);
-  const [absolute, setAbsolute] = useState(false);
   /** `null` = nobody has clicked a column, so follow the pressure. */
   const [picked, setPicked] = useState<SortKey | null>(null);
   /** The automatic choice, CARRIED between polls so it can have hysteresis. */
@@ -357,8 +443,12 @@ export function ResourceMetrics() {
   }
 
   const { system, dispatch, chats } = snapshot;
-  const dispatchCorrected = (dispatch?.rssBytes ?? 0) / SHARED_PAGE_FACTOR;
   const cores = system.logicalCores;
+  const mem = memorySplit(system, dispatch);
+  const cpu = cpuSplit(system, dispatch);
+  const memTone = machineTone(mem.usedPct);
+  /** A machine-relative CPU percent as a count of cores — "2.9 cores". */
+  const inCores = (p: number): string => `${((p * cores) / 100).toFixed(1)} cores`;
 
   // An explicit click WINS and keeps winning; otherwise follow the damped
   // automatic choice above.
@@ -369,130 +459,142 @@ export function ResourceMetrics() {
   // nesting two makes the inner one swallow the wheel events the outer needs.
   return (
     <div className="flex flex-col gap-3 p-3">
-        <div className="flex flex-wrap gap-2">
-          <Tile
-            label="Machine memory"
-            value={`${bytes(system.usedBytes)} / ${bytes(system.totalBytes)}`}
-            pctOf={share(system.usedBytes, system.totalBytes)}
-            barClass={tone(share(system.usedBytes, system.totalBytes))}
-            sub={`${bytes(system.freeBytes)} free`}
-            icon={<Server className="size-3 text-faint" />}
-          />
-          <Tile
-            label="Machine CPU"
-            value={pct(system.cpuPct)}
-            pctOf={system.cpuPct ?? 0}
-            sub={`${cores} logical cores`}
-            icon={<Cpu className="size-3 text-faint" />}
-          />
-          <Tile
-            label="Dispatch memory"
-            value={dispatch ? `≈${bytes(dispatchCorrected)}` : "—"}
-            pctOf={share(dispatchCorrected, system.totalBytes)}
-            barClass={tone(share(dispatchCorrected, system.totalBytes))}
-            sub={
-              dispatch
-                ? `${Math.round(share(dispatchCorrected, system.totalBytes))}% of machine · ${dispatch.procs} procs`
-                : undefined
-            }
-          />
-          <Tile
-            label="Dispatch CPU"
-            value={pct(machinePct(dispatch?.cpuPct ?? null, cores))}
-            pctOf={share(dispatch?.cpuPct ?? 0, 100 * cores)}
-            sub={
-              dispatch
-                ? `server ${bytes(dispatch.serverRssBytes)} · ${chats.length} chats`
-                : undefined
-            }
-          />
-        </div>
+      <div className="flex flex-wrap gap-2">
+        <HeroCard
+          icon={<MemoryStick className="size-3 text-faint" />}
+          label="Memory"
+          headline={bytes(system.usedBytes)}
+          denom={`/ ${bytes(system.totalBytes)}`}
+          split={mem}
+          barTone={memTone.bar}
+          legend={[
+            {
+              label: "Dispatch",
+              // Marked because the tree sum counts shared pages once per
+              // process — see the module note and SHARED_PAGE_FACTOR.
+              value: mem.dispatch === null ? "—" : `≈${bytes(mem.dispatch)}`,
+              sub: mem.dispatch === null ? "" : `${mem.dispatchPct.toFixed(1)}%`,
+            },
+            {
+              // A claim we cannot make before the first scan — see the same
+              // note in the header dropdown's `Meter`.
+              label: mem.dispatch === null ? "In use" : "Everything else",
+              value: bytes(mem.other),
+              sub: `${(mem.usedPct - mem.dispatchPct).toFixed(1)}%`,
+            },
+            {
+              label: "Free",
+              value: bytes(mem.free),
+              sub: `${(100 - mem.usedPct).toFixed(1)}%`,
+            },
+          ]}
+        />
+        <HeroCard
+          icon={<Cpu className="size-3 text-faint" />}
+          label="CPU"
+          headline={pct(system.cpuPct)}
+          denom={`of ${cores} cores`}
+          split={cpu}
+          barTone={CPU_BAR}
+          legend={[
+            {
+              label: dispatch ? `Dispatch · ${dispatch.procs} procs` : "Dispatch",
+              value: pct(cpu.dispatch),
+              sub: cpu.dispatch === null ? "" : inCores(cpu.dispatch),
+            },
+            {
+              label: cpu.dispatch === null ? "In use" : "Everything else",
+              value: cpu.measured ? pct(cpu.other) : "—",
+              sub: cpu.measured ? inCores(cpu.other) : "",
+            },
+            {
+              label: "Idle",
+              value: cpu.measured ? pct(cpu.free) : "—",
+              sub: cpu.measured ? inCores(cpu.free) : "",
+            },
+          ]}
+        />
+      </div>
 
-        {/* What the server itself and its sub-app runners hold, as distinct
-            from anything a chat can be blamed for. A number that climbs here is
-            the signal that something is leaking outside a chat — which no
-            per-chat row would ever show. */}
-        {dispatch && dispatch.unattributed.procs > 0 && (
-          <div
-            className={cn(
-              "rounded-md border px-3 py-2 text-2xs text-muted",
-              // Loud only when the leftovers are actually BURNING something.
-              // A resident server process and a couple of runners is the
-              // normal state and should not look like an alarm.
-              (dispatch.unattributed.cpuPct ?? 0) >= CPU_INTERESTING_PCT
-                ? "border-warn/40 bg-warn/10"
-                : "border-line bg-panel-2/30",
-            )}
-          >
-            <span className="font-medium text-secondary">
-              {dispatch.unattributed.procs} processes
-            </span>{" "}
-            (≈{bytes(dispatch.unattributed.rssBytes / SHARED_PAGE_FACTOR)}
-            {dispatch.unattributed.cpuPct !== null && (
-              <>
-                {", "}
-                <span
-                  className={cn(
-                    (dispatch.unattributed.cpuPct ?? 0) >= CPU_INTERESTING_PCT &&
-                      "font-medium text-warn",
-                  )}
-                >
-                  {pct(machinePct(dispatch.unattributed.cpuPct, cores))} CPU
-                </span>
-              </>
-            )}
-            ) in Dispatch's tree belong to no chat — the server itself, sub-app runners, and
-            anything orphaned mid-teardown. The DB is inside the server process, not separate.
+      {/* What the server itself and its sub-app runners hold, as distinct
+          from anything a chat can be blamed for. A number that climbs here is
+          the signal that something is leaking outside a chat — which no
+          per-chat row would ever show. */}
+      {dispatch && dispatch.unattributed.procs > 0 && (
+        <div
+          className={cn(
+            "rounded-md border px-3 py-2 text-2xs text-muted",
+            // Loud only when the leftovers are actually BURNING something.
+            // A resident server process and a couple of runners is the
+            // normal state and should not look like an alarm.
+            (dispatch.unattributed.cpuPct ?? 0) >= CPU_INTERESTING_PCT
+              ? "border-warn/40 bg-warn/10"
+              : "border-line bg-panel-2/30",
+          )}
+        >
+          <span className="font-medium text-secondary">
+            {dispatch.unattributed.procs} processes
+          </span>{" "}
+          (≈{bytes(dispatch.unattributed.rssBytes / SHARED_PAGE_FACTOR)}
+          {dispatch.unattributed.cpuPct !== null && (
+            <>
+              {", "}
+              <span
+                className={cn(
+                  (dispatch.unattributed.cpuPct ?? 0) >= CPU_INTERESTING_PCT &&
+                    "font-medium text-warn",
+                )}
+              >
+                {pct(machinePct(dispatch.unattributed.cpuPct, cores))} CPU
+              </span>
+            </>
+          )}
+          ) in Dispatch's tree belong to no chat — the server itself (≈
+          {bytes(dispatch.serverRssBytes)}), sub-app runners, and anything orphaned
+          mid-teardown. The DB is inside the server process, not separate.
+        </div>
+      )}
+
+      <div className="overflow-hidden rounded-md border border-line">
+        <div className="flex items-center gap-2 border-b border-line bg-panel-2/50 px-3 py-1.5">
+          <span className="text-xs font-semibold text-primary">By chat</span>
+          <span className="cm-mono text-2xs tabular-nums text-faint">{chats.length}</span>
+          <span className="mx-1 h-3 w-px bg-line" />
+          <BarKey tone="bg-accent" label="memory" />
+          <BarKey tone={CPU_BAR} label="CPU" />
+          <div className="flex-1" />
+          <span className="text-2xs text-faint">sort</span>
+          <SortTab id="mem" sort={sort} onPick={setPicked}>
+            memory
+          </SortTab>
+          <SortTab id="cpu" sort={sort} onPick={setPicked}>
+            CPU
+          </SortTab>
+          <SortTab id="procs" sort={sort} onPick={setPicked}>
+            procs
+          </SortTab>
+        </div>
+        {rows.length === 0 ? (
+          <div className="px-3 py-4 text-center text-xs text-faint">
+            No chat is holding any processes.
           </div>
+        ) : (
+          rows.map((c) => (
+            <ChatRow key={c.chatId} chat={c} denominator={system.totalBytes} cores={cores} />
+          ))
         )}
+      </div>
 
-        <div className="overflow-hidden rounded-md border border-line">
-          <div className="flex items-center gap-2 border-b border-line bg-panel-2/50 px-3 py-1.5">
-            <span className="text-xs font-semibold text-primary">By chat</span>
-            <span className="cm-mono text-2xs text-faint">{chats.length}</span>
-            <div className="flex-1" />
-            <Button variant="link" size="sm" onClick={() => setAbsolute((v) => !v)}>
-              {absolute ? "show relative" : "show absolute"}
-            </Button>
-            <span className="text-2xs text-faint">sort</span>
-            <SortTab id="mem" sort={sort} onPick={setPicked}>
-              memory
-            </SortTab>
-            <SortTab id="cpu" sort={sort} onPick={setPicked}>
-              CPU
-            </SortTab>
-            <SortTab id="procs" sort={sort} onPick={setPicked}>
-              procs
-            </SortTab>
-          </div>
-          {rows.length === 0 ? (
-            <div className="px-3 py-4 text-center text-xs text-faint">
-              No chat is holding any processes.
-            </div>
-          ) : (
-            rows.map((c) => (
-              <ChatRow
-                key={c.chatId}
-                chat={c}
-                denominator={system.totalBytes}
-                absolute={absolute}
-                cores={cores}
-                sort={sort}
-              />
-            ))
-          )}
-        </div>
-
-        <div className="px-1 text-2xs leading-relaxed text-faint">
-          {snapshot.windowMs > 0 ? (
-            <>CPU averaged over the last {dur(snapshot.windowMs) ?? "—"}. </>
-          ) : (
-            <>CPU needs a second sample — figures appear on the next poll. </>
-          )}
-          Memory is resident set, which counts pages shared between processes once per
-          process; absolutes are divided by {SHARED_PAGE_FACTOR}× to approximate real usage
-          and are marked ≈. Ranking between chats is reliable; the totals are estimates.
-        </div>
+      <div className="px-1 text-2xs leading-relaxed text-faint">
+        {snapshot.windowMs > 0 ? (
+          <>CPU averaged over the last {dur(snapshot.windowMs) ?? "—"}. </>
+        ) : (
+          <>CPU needs a second sample — figures appear on the next poll. </>
+        )}
+        Memory is resident set, which counts pages shared between processes once per process;
+        absolutes are divided by {SHARED_PAGE_FACTOR}× to approximate real usage and are marked
+        ≈. Ranking between chats is reliable; the totals are estimates.
+      </div>
     </div>
   );
 }

@@ -15,6 +15,22 @@
  * it and the first reading is a moment behind; that is the honest trade, and it
  * beats scanning the process table forever on the chance somebody hovers.
  *
+ * ── THE PILL DRAWS TWO BARS AND NO SPLIT ─────────────────────────────────────
+ *
+ * It shipped with ONE bar between two numbers, and the bar was memory while the
+ * icon in front of it was a CPU chip — so the widget read left to right as
+ * "CPU 37%, [bar], 74%" and the bar belonged to neither number it sat between.
+ * Two metrics get two bars, each under its own icon and in front of its own
+ * figure.
+ *
+ * Neither carries Dispatch's share, unlike every other bar in this feature.
+ * That is the polling split above showing through: the pill has only the free
+ * reading, and the alternative — painting whatever share the last opened
+ * dropdown happened to leave in the store — is a figure that silently ages for
+ * as long as the tab stays open. A bar with no breakdown is drawn at full
+ * strength precisely so it cannot be mistaken for one whose Dispatch slice is
+ * merely small. See `SplitBar`'s `sharePct: null`.
+ *
  * TONE IS DRIVEN BY MEMORY, NOT CPU. Pegged CPU is what a working machine looks
  * like — agents compile things. Exhausted MEMORY is what makes it unusable, and
  * it is the one the reaper on the Resources page can actually do something
@@ -22,49 +38,102 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Cpu, MemoryStick, ExternalLink } from "lucide-react";
-import { SHARED_PAGE_FACTOR } from "@dispatch/shared";
-import { useResources, share, machinePct } from "../../stores/resources.js";
+import { Cpu, MemoryStick, ExternalLink, Server } from "lucide-react";
+import {
+  useResources,
+  share,
+  memorySplit,
+  cpuSplit,
+  type ResourceSplit,
+} from "../../stores/resources.js";
 import { setView, useView } from "../../stores/view.js";
 import { bytes, pct } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
+import { CPU_BAR, machineTone } from "../../lib/resourceTone.js";
 import { LAYER } from "../../lib/layers.js";
 import { Button } from "../ui/Button.js";
+import { SplitBar, SplitDot } from "../ui/SplitBar.js";
 
-/** Escalating tone by utilization — matches `UsageMeter.tone`. */
-function tone(p: number): { text: string; bar: string } {
-  if (p >= 90) return { text: "text-danger", bar: "bg-danger" };
-  if (p >= 75) return { text: "text-warn", bar: "bg-warn" };
-  return { text: "text-accent-hi", bar: "bg-accent" };
-}
-
-/** One labelled bar in the dropdown. */
-function Row({
+/** One legend entry — swatch, what it is, how much of it. */
+function Leg({
+  layer,
+  barTone,
   label,
   value,
-  pctOf,
-  hint,
-  barClass,
 }: {
+  layer: "share" | "other" | "free";
+  barTone: string;
   label: string;
   value: string;
-  pctOf: number;
-  hint?: string;
-  barClass?: string;
 }) {
   return (
+    <span className="inline-flex items-center gap-1">
+      <SplitDot layer={layer} tone={barTone} />
+      <span className="text-faint">{label}</span>
+      <span
+        className={cn("cm-mono tabular-nums", layer === "share" ? "text-secondary" : "text-muted")}
+      >
+        {value}
+      </span>
+    </span>
+  );
+}
+
+/** One metric in the dropdown: headline figure, split bar, inline legend. */
+function Meter({
+  label,
+  headline,
+  split,
+  barTone,
+  fmt,
+  approx,
+  freeWord,
+}: {
+  label: string;
+  headline: string;
+  split: ResourceSplit;
+  barTone: string;
+  fmt: (n: number) => string;
+  /** Mark Dispatch's figure `≈` — true for memory, which is an estimate. */
+  approx?: boolean;
+  freeWord: string;
+}) {
+  const measuring = split.dispatch === null;
+  return (
     <div className="px-3 py-2">
-      <div className="mb-1 flex items-baseline justify-between gap-2">
+      <div className="mb-1.5 flex items-baseline justify-between gap-2">
         <span className="text-xs font-medium text-secondary">{label}</span>
-        <span className="cm-mono text-xs font-semibold text-primary">{value}</span>
+        <span className="cm-mono text-xs font-semibold tabular-nums text-primary">{headline}</span>
       </div>
-      <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-line">
-        <span
-          className={cn("absolute inset-y-0 left-0 rounded-full", barClass ?? "bg-accent")}
-          style={{ width: `${pctOf}%` }}
-        />
+      <SplitBar
+        usedPct={split.usedPct}
+        sharePct={measuring ? null : split.dispatchPct}
+        tone={barTone}
+      />
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-2xs">
+        {!split.measured ? (
+          <span className="text-faint">needs a second sample</span>
+        ) : (
+          <>
+            <Leg
+              layer="share"
+              barTone={barTone}
+              label="Dispatch"
+              value={measuring ? "…" : `${approx ? "≈" : ""}${fmt(split.dispatch!)}`}
+            />
+            {/* "other" is a CLAIM — that this part is not Dispatch's — and
+                before the first process-table scan there is nothing behind it.
+                Until then the same quantity is only "in use". */}
+            <Leg
+              layer="other"
+              barTone={barTone}
+              label={measuring ? "in use" : "other"}
+              value={fmt(split.other)}
+            />
+            <Leg layer="free" barTone={barTone} label={freeWord} value={fmt(split.free)} />
+          </>
+        )}
       </div>
-      {hint && <div className="mt-1 text-2xs text-faint">{hint}</div>}
     </div>
   );
 }
@@ -115,31 +184,33 @@ export function ResourceMeter() {
   if (!system) return null;
 
   const memPct = share(system.usedBytes, system.totalBytes);
-  const t = tone(memPct);
+  const t = machineTone(memPct);
+  // The dropdown's half. `dispatch` is null until the first scan lands, and the
+  // splits carry that through as "measuring" rather than as zero.
   const dispatch = snapshot?.dispatch ?? null;
+  const mem = memorySplit(system, dispatch);
+  const cpu = cpuSplit(system, dispatch);
 
   return (
     <div className="relative inline-flex" onMouseEnter={openNow} onMouseLeave={closeSoon}>
       <button
         ref={btnRef}
         onClick={openNow}
-        aria-label="System resources"
+        aria-label={`System resources: CPU ${pct(system.cpuPct)}, memory ${Math.round(memPct)}%`}
         className={cn(
           "flex items-center gap-1.5 rounded-md border border-line bg-panel-2/60 px-2 py-1",
           "transition-colors hover:border-line-strong",
         )}
       >
-        <Cpu className="size-3 text-faint" />
+        <Cpu className="size-3 shrink-0 text-faint" />
+        <SplitBar size="xs" className="w-6" usedPct={system.cpuPct ?? 0} tone={CPU_BAR} />
         <span className="cm-mono text-xs font-semibold tabular-nums text-secondary">
           {pct(system.cpuPct)}
         </span>
-        <span className="relative h-1 w-7 overflow-hidden rounded-full bg-line">
-          <span
-            className={cn("absolute inset-y-0 left-0 rounded-full", t.bar)}
-            style={{ width: `${memPct}%` }}
-          />
-        </span>
-        <span className={cn("text-xs font-semibold tabular-nums", t.text)}>
+        <span className="mx-0.5 h-3 w-px shrink-0 bg-line" />
+        <MemoryStick className="size-3 shrink-0 text-faint" />
+        <SplitBar size="xs" className="w-6" usedPct={memPct} tone={t.bar} />
+        <span className={cn("cm-mono text-xs font-semibold tabular-nums", t.text)}>
           {Math.round(memPct)}%
         </span>
       </button>
@@ -152,71 +223,46 @@ export function ResourceMeter() {
             onMouseLeave={closeSoon}
             style={{ zIndex: LAYER.popover, top: pos.top, right: pos.right }}
             className={cn(
-              "fixed w-[280px] overflow-hidden rounded-md border border-line-strong",
+              "fixed w-[304px] overflow-hidden rounded-md border border-line-strong",
               "bg-overlay/98 backdrop-blur-md shadow-[var(--shadow-pop)] cm-anim-rise",
             )}
           >
             <div className="flex items-center gap-1.5 border-b border-line px-3 py-2">
-              <MemoryStick className="size-3.5 text-muted" />
+              <Server className="size-3.5 shrink-0 text-muted" />
               <span className="text-xs font-semibold tracking-tight text-primary">
                 This machine
-                <span className="text-faint"> · {system.logicalCores} cores</span>
+              </span>
+              <div className="flex-1" />
+              <span className="cm-mono text-2xs tabular-nums text-faint">
+                {system.logicalCores} cores
+                {dispatch && ` · ${dispatch.procs} procs`}
               </span>
             </div>
 
             <div className="divide-y divide-line-soft">
-              <Row
+              <Meter
                 label="Memory"
-                value={`${bytes(system.usedBytes)} / ${bytes(system.totalBytes)}`}
-                pctOf={memPct}
-                barClass={t.bar}
-                hint={`${bytes(system.freeBytes)} free`}
+                headline={`${bytes(system.usedBytes)} / ${bytes(system.totalBytes)}`}
+                split={mem}
+                barTone={t.bar}
+                fmt={bytes}
+                // Marked because the tree sum counts shared pages once per
+                // process; corrected by SHARED_PAGE_FACTOR, never exact.
+                approx
+                freeWord="free"
               />
-              <Row
+              <Meter
                 label="CPU"
-                value={pct(system.cpuPct)}
-                pctOf={system.cpuPct ?? 0}
-                hint={
-                  system.cpuPct === null ? "measuring…" : `across ${system.logicalCores} cores`
-                }
+                headline={pct(system.cpuPct)}
+                split={cpu}
+                barTone={CPU_BAR}
+                // Machine-relative on both layers. The server reports process
+                // CPU as a share of ONE core, and printing that raw beside a
+                // whole-machine figure put two numbers 16x apart under the same
+                // label. See `machinePct`.
+                fmt={(n) => pct(n)}
+                freeWord="idle"
               />
-            </div>
-
-            <div className="border-t border-line px-3 py-2">
-              <div className="mb-1.5 flex items-baseline justify-between gap-2">
-                <span className="text-xs font-semibold text-primary">Dispatch's share</span>
-                {dispatch && (
-                  <span className="cm-mono text-2xs text-faint">{dispatch.procs} procs</span>
-                )}
-              </div>
-              {dispatch ? (
-                <>
-                  <Row
-                    label="Memory"
-                    // Corrected for shared pages: the raw sum counts a shared
-                    // runtime image once per process and runs ~1.9x high, which
-                    // next to a real system total would be nonsense (it can
-                    // exceed installed RAM). See `SHARED_PAGE_FACTOR`.
-                    value={`≈${bytes(dispatch.rssBytes / SHARED_PAGE_FACTOR)}`}
-                    pctOf={share(dispatch.rssBytes / SHARED_PAGE_FACTOR, system.totalBytes)}
-                    hint={`≈${Math.round(
-                      share(dispatch.rssBytes / SHARED_PAGE_FACTOR, system.totalBytes),
-                    )}% of this machine · estimate`}
-                  />
-                  <Row
-                    label="CPU"
-                    // Machine-relative, like the row above it. The server
-                    // reports a share of ONE core; showing that raw next to a
-                    // whole-machine figure put two numbers 16x apart under the
-                    // same label. See `machinePct`.
-                    value={pct(machinePct(dispatch.cpuPct, system.logicalCores))}
-                    pctOf={share(dispatch.cpuPct ?? 0, 100 * system.logicalCores)}
-                    hint={`server itself ${bytes(dispatch.serverRssBytes)}`}
-                  />
-                </>
-              ) : (
-                <div className="px-0 py-1 text-2xs text-faint">measuring…</div>
-              )}
             </div>
 
             <Button
