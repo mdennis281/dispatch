@@ -1343,26 +1343,37 @@ export function prLandingBlockers(
           : pr.requestedReviewers.length
           ? `Waiting on: ${pr.requestedReviewers.join(", ")}. Call watch_pr until they report.` +
             agentNote
-          : pr.reviewAgentProblem
-          ? // Nobody queued AND the reviewer cannot start: now it IS the whole
-            // answer, and the only one with no GitHub-side symptom at all — the
-            // queue and the round record are both simply empty, which reads as
-            // "not asked yet" right up until you notice it has read that way on
-            // every PR the project has ever opened.
-            `Dispatch's own reviewer is configured but cannot run: ${pr.reviewAgentProblem} ` +
-            "Waiting or re-requesting will not change this — it is a config fix."
           : policy.reviewers?.length
             ? // An OPEN PR with an empty queue is fixed by asking again, not by
               // re-opening it. Pointing at `create_pr` here sent an agent round a
               // loop it could not win: `create_pr` refuses a branch that already
               // has a PR, so the only advice on offer was impossible to take.
+              //
+              // Ahead of `reviewAgentProblem` for the same reason the queue check
+              // is: this project has GitHub reviewers who are re-askable right
+              // now — a Copilot budget that has since reset, or a transient drop,
+              // is fixed by exactly this call. And even once the config IS fixed,
+              // `request_review` is still what puts the reviewer in the queue on
+              // an already-open PR, because `create_pr` has been and gone and the
+              // sweep only ever READS the queue.
               `This project asks ${policy.reviewers.join(", ")} to review, but nobody is ` +
               "currently requested on this PR. Call `mcp__dispatch-github__request_review` to ask " +
               "them (GitHub clears a reviewer's request once they report, and new commits " +
-              "do not re-queue them), then watch_pr until they report."
-            : "This project configures NO reviewers (`workflow.pr.reviewers` in " +
-              "`.dispatch/project.yaml`), so nobody will ever be asked and this PR cannot " +
-              "satisfy its own bar. Fix the config rather than working around it.";
+              "do not re-queue them), then watch_pr until they report." +
+              agentNote
+            : pr.reviewAgentProblem
+              ? // Nobody queued, nobody configured to ask, AND Dispatch's own
+                // reviewer cannot start: now it really is the whole answer, and
+                // the only one with no GitHub-side symptom at all — the queue and
+                // the round record are both simply empty, which reads as "not
+                // asked yet" right up until you notice it has read that way on
+                // every PR the project has ever opened.
+                `Dispatch's own reviewer is configured but cannot run: ${pr.reviewAgentProblem} ` +
+                "Nobody else is configured to ask either, so this PR cannot satisfy its own " +
+                "bar until the config is fixed."
+              : "This project configures NO reviewers (`workflow.pr.reviewers` in " +
+                "`.dispatch/project.yaml`), so nobody will ever be asked and this PR cannot " +
+                "satisfy its own bar. Fix the config rather than working around it.";
         blockers.push({
           code: "no-review",
           detail:

@@ -92,9 +92,14 @@ describe("prReviewAgentView — the reviewer's state on one PR", () => {
     });
   });
 
-  it("ranks a blocking problem above every other phase", () => {
-    // The reviewer is disabled, not degraded — so "reviewed 2/4" would be a
-    // report about a round that is never coming.
+  it("carries a problem alongside a round that actually happened, rather than hiding it", () => {
+    // This used to rank `blocked` above everything, on the reasoning that the
+    // reviewer is disabled so any other phase describes a round that is never
+    // coming. That reasoning does not survive `resolveReviewer`'s newer
+    // complaint — the reviewer being absent from `pr.reviewers` leaves it able
+    // to run, it just never starts by itself — and it was never true of a round
+    // that had already POSTED. A round with a `postedAt` happened; reporting it
+    // as `blocked, posted: false` denied review evidence that exists.
     expect(
       prReviewAgentView({
         rounds: 2,
@@ -103,7 +108,36 @@ describe("prReviewAgentView — the reviewer's state on one PR", () => {
         maxRounds: 4,
         problem: "no reviewer account is set up",
       }),
-    ).toMatchObject({ phase: "blocked", problem: "no reviewer account is set up" });
+    ).toMatchObject({
+      phase: "reviewed",
+      posted: true,
+      problem: "no reviewer account is set up",
+    });
+  });
+
+  it("lets a live round outrank a standing complaint — the phase `spentReviewRounds` reads", () => {
+    // The regression this guards is PR #147's with a different cause. A project
+    // whose reviewer is missing from `pr.reviewers` has `problem` mirrored onto
+    // EVERY open row by `notePolicy`, but a round requested by hand still runs.
+    // Short-circuiting on the problem made `running` unreachable there, and
+    // `spentReviewRounds` derives `inFlight` from exactly that phase — so
+    // `watch_pr` would announce that nothing is coming over a reviewer mid-diff,
+    // and `request_review`'s in-flight guard would let `extraRounds` put a
+    // second reviewer on the same diff.
+    const problem = "`workflow.pr.reviewers` does not list that account";
+    expect(prReviewAgentView({ rounds: 1, reviewedAt: 9, maxRounds: 2, problem })).toMatchObject({
+      phase: "running",
+      problem,
+    });
+    expect(prReviewAgentView({ rounds: 0, requestedAt: 7, maxRounds: 2, problem })).toMatchObject({
+      phase: "queued",
+      problem,
+    });
+    // With nothing in flight it IS the whole answer, and still says so.
+    expect(prReviewAgentView({ rounds: 0, maxRounds: 2, problem })).toMatchObject({
+      phase: "blocked",
+      problem,
+    });
   });
 
   it("blocks on a refused review request, not just an unresolvable identity", () => {

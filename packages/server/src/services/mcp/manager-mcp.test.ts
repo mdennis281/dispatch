@@ -2278,28 +2278,38 @@ describe("prLandingBlockers", () => {
     expect(blocked[0].detail).toMatch(/allowNoReview: true/);
   });
 
-  // A reviewer that can never START looks exactly like one that hasn't been
-  // asked yet: empty queue, no round record, no error. The difference is that
-  // waiting and re-requesting fix the second and never fix the first, and the
-  // blocker used to give the "ask them again" advice to both.
-  it("names a reviewer that structurally cannot run, ahead of every waiting branch", () => {
+  // A reviewer that can never START is only the WHOLE answer when nobody else
+  // is configured to ask. With GitHub reviewers on the list, `request_review` is
+  // still the right call — a Copilot budget that has since reset is fixed by it,
+  // and even after the config fix it is what puts the reviewer in the queue on
+  // an already-open PR, since `create_pr` has been and gone.
+  it("names a reviewer that cannot run as the whole answer only when nobody else is asked", () => {
+    const problem =
+      "This project reviews as `dispatch-review`, but `workflow.pr.reviewers` does not list " +
+      "that account.";
     const b = prLandingBlockers(
-      readyPr({
-        submittedReviews: [],
-        requestedReviewers: [],
-        reviewAgentProblem:
-          "This project reviews as `dispatch-review`, but `workflow.pr.reviewers` does not list " +
-          "that account — it asks copilot-pull-request-reviewer[bot].",
-      }),
-      { requireReview: true, reviewers: ["copilot-pull-request-reviewer[bot]"] },
+      readyPr({ submittedReviews: [], requestedReviewers: [], reviewAgentProblem: problem }),
+      { requireReview: true, reviewers: [] },
     );
     expect(b.map((x) => x.code)).toEqual(["no-review"]);
     expect(b[0].detail).toMatch(/cannot run/);
     expect(b[0].detail).toMatch(/workflow\.pr\.reviewers/);
-    expect(b[0].detail).toMatch(/config fix/);
-    // It must NOT fall through to "call request_review to ask them", which is
-    // the loop this branch exists to break.
     expect(b[0].detail).not.toMatch(/Call `mcp__dispatch-github__request_review` to ask/);
+  });
+
+  it("keeps pointing at request_review when the project has reviewers to re-ask", () => {
+    const b = prLandingBlockers(
+      readyPr({
+        submittedReviews: [],
+        requestedReviewers: [],
+        reviewAgentProblem: "`workflow.pr.reviewers` does not list that account.",
+      }),
+      { requireReview: true, reviewers: ["copilot-pull-request-reviewer[bot]"] },
+    );
+    // The re-askable reviewer wins the advice…
+    expect(b[0].detail).toMatch(/Call `mcp__dispatch-github__request_review` to ask/);
+    // …and the config problem rides along instead of replacing it.
+    expect(b[0].detail).toMatch(/Separately, Dispatch's own reviewer/);
   });
 
   // …but it must not DENY a wait that works. `notePolicy` mirrors the problem
