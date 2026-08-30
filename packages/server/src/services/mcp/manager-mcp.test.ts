@@ -1568,6 +1568,30 @@ describe("manager-mcp — request_review", () => {
     expect(resultText(res)).not.toContain("NOBODY has reviewed");
   });
 
+  // A review someone opened in the browser and never submitted is not a review.
+  // `latestReviews` carries it as PENDING, and counting it would print the exact
+  // sentence this change exists to delete while `approve_pr` — which does filter
+  // PENDING — still refuses the merge for `no-review`.
+  it("does not count an unsubmitted PENDING review as an existing one", async () => {
+    const gh = ghWith({ requested: ["alice"], failed: [] }, undefined, [], undefined, {
+      reported: [{ author: "carol", state: "PENDING" }],
+    });
+    const { requestReview } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      github: gh,
+    });
+
+    const res = await requestReview.handler(
+      { number: 83, extraRounds: undefined, reviewers: undefined, repo: undefined },
+      {},
+    );
+
+    expect(resultText(res)).toContain("NOBODY has reviewed this PR at any point");
+    expect(resultText(res)).not.toContain("land it on the review it already has");
+  });
+
   // The failure that started this: GitHub answers 201 and queues nobody when the
   // account's Copilot premium-request budget is spent, which is byte-identical
   // to the bot declining a re-review. Only the budget read tells them apart.
@@ -2276,6 +2300,27 @@ describe("prLandingBlockers", () => {
     // It must NOT fall through to "call request_review to ask them", which is
     // the loop this branch exists to break.
     expect(b[0].detail).not.toMatch(/Call `mcp__dispatch-github__request_review` to ask/);
+  });
+
+  // …but it must not DENY a wait that works. `notePolicy` mirrors the problem
+  // onto every open row of a project configured this way, so on that shape every
+  // PR carries it — including one where the GitHub reviewer is queued and simply
+  // has not reported yet. Leading with the problem told the agent to stop
+  // waiting for a review that was on its way.
+  it("still points at the queued reviewer when one is genuinely on the hook", () => {
+    const b = prLandingBlockers(
+      readyPr({
+        submittedReviews: [],
+        requestedReviewers: ["copilot-pull-request-reviewer[bot]"],
+        reviewAgentProblem: "`workflow.pr.reviewers` does not list that account.",
+      }),
+      { requireReview: true, reviewers: ["copilot-pull-request-reviewer[bot]"] },
+    );
+    expect(b[0].detail).toMatch(/Waiting on: copilot-pull-request-reviewer/);
+    expect(b[0].detail).toMatch(/watch_pr until they report/);
+    // The problem is still worth saying — it just must not deny the wait.
+    expect(b[0].detail).toMatch(/Separately, Dispatch's own reviewer/);
+    expect(b[0].detail).not.toMatch(/Waiting or re-requesting will not change this/);
   });
 
   // The PR is already OPEN, so "re-open it through create_pr" was advice the

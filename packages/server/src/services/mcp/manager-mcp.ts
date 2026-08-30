@@ -1320,16 +1320,19 @@ export function prLandingBlockers(
         // create_pr" for all three is what sent an agent round a loop it could
         // not win on a project whose reviewer list was empty — there was no
         // reviewer for create_pr to ask, so the advice could never come true.
-        const waiting = pr.reviewAgentProblem
-          ? // FIRST, because it outranks every branch below: they all describe a
-            // reviewer that could still arrive, and this one never will. It is
-            // also the only case with no GitHub-side symptom at all — the queue
-            // and the round record are both simply empty, which reads as "not
-            // asked yet" right up until you notice it has read that way on every
-            // PR the project has ever opened.
-            `Dispatch's own reviewer is configured but cannot run: ${pr.reviewAgentProblem} ` +
-            "Waiting or re-requesting will not change this — it is a config fix."
-          : rounds?.roundsSpent
+        // Dispatch's reviewer being unable to start says NOTHING about whoever
+        // else is in the queue, so it is a note appended to the wait rather than
+        // a branch that replaces it. Ordering it first denied a wait that works:
+        // `notePolicy` mirrors the problem onto every open row of a project
+        // configured this way, so on the hivebreak shape EVERY PR carries it —
+        // including the first minutes of one where Copilot is queued and simply
+        // has not reported yet. The agent was told waiting could not help while
+        // the review it was waiting for was on its way.
+        const agentNote = pr.reviewAgentProblem
+          ? ` Separately, Dispatch's own reviewer is configured but cannot run: ` +
+            `${pr.reviewAgentProblem} That is a config fix, and independent of the wait above.`
+          : "";
+        const waiting = rounds?.roundsSpent
           ? // Every round claimed and none of them filed. Pointing at watch_pr
             // here is the dead wait `reviews-spent` was added to prevent: no
             // round can spawn, so nothing will ever arrive to change this.
@@ -1338,7 +1341,16 @@ export function prLandingBlockers(
             "check the reviewer chat. No further round can spawn on its own; " +
             "`request_review` with `extraRounds` can buy one if the reviewer is healthy again."
           : pr.requestedReviewers.length
-          ? `Waiting on: ${pr.requestedReviewers.join(", ")}. Call watch_pr until they report.`
+          ? `Waiting on: ${pr.requestedReviewers.join(", ")}. Call watch_pr until they report.` +
+            agentNote
+          : pr.reviewAgentProblem
+          ? // Nobody queued AND the reviewer cannot start: now it IS the whole
+            // answer, and the only one with no GitHub-side symptom at all — the
+            // queue and the round record are both simply empty, which reads as
+            // "not asked yet" right up until you notice it has read that way on
+            // every PR the project has ever opened.
+            `Dispatch's own reviewer is configured but cannot run: ${pr.reviewAgentProblem} ` +
+            "Waiting or re-requesting will not change this — it is a config fix."
           : policy.reviewers?.length
             ? // An OPEN PR with an empty queue is fixed by asking again, not by
               // re-opening it. Pointing at `create_pr` here sent an agent round a
@@ -3674,7 +3686,16 @@ export function createManagerTools(ctx: ManagerMcpContext) {
               // Safe to read `reported` (newest-per-author) rather than the full
               // history here: GitHub only supersedes a review when its author is
               // re-queued, and this branch is the one where nobody was.
-              everReviewed: (queue?.review?.reported ?? []).length > 0,
+              //
+              // PENDING is dropped for the same reason `prLandingBlockers` and
+              // `prReviewState.everReported` drop it: a review someone started in
+              // the browser and never submitted is not a review. Counting one
+              // would print "land it on the review it already has" — the sentence
+              // this whole function exists to delete — while `approve_pr`, which
+              // does filter, still refuses for `no-review`.
+              everReviewed: (queue?.review?.reported ?? []).some(
+                (r) => r.state !== "PENDING",
+              ),
               reviewAgentProblem: roundView?.problem,
               copilotQuota: gh.copilotQuota?.bind(gh),
               hadFailures: res.failed.length > 0,
