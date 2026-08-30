@@ -25,7 +25,13 @@
  * holds one.
  */
 import { create } from "zustand";
-import type { ChatProcessDetail, ResourceSnapshot, SystemResources } from "@dispatch/shared";
+import {
+  SHARED_PAGE_FACTOR,
+  type ChatProcessDetail,
+  type DispatchResources,
+  type ResourceSnapshot,
+  type SystemResources,
+} from "@dispatch/shared";
 import { api } from "../lib/api.js";
 
 /**
@@ -173,4 +179,136 @@ export function machinePct(cpuPct: number | null, cores: number): number | null 
   if (cpuPct === null) return null;
   if (!Number.isFinite(cores) || cores <= 0) return cpuPct;
   return cpuPct / cores;
+}
+
+/**
+ * One metric cut three ways: Dispatch, everything else in use, and free.
+ *
+ * WHY IT LIVES HERE and not in the components. Three surfaces draw this exact
+ * split — the header pill's dropdown, the Resources page's hero cards, and
+ * (for CPU) the per-chat rows — and each one previously did its own arithmetic
+ * inline. Two of the corrections below are subtle enough that having them in
+ * one place, tested, is the difference between them being right everywhere and
+ * being right wherever somebody last looked.
+ *
+ * `pct` fields are the bar's GEOMETRY, always a share of the whole machine.
+ * The amount fields are in the metric's own unit — bytes for memory, percent-
+ * of-machine for CPU — because that is what the legend prints.
+ */
+export interface ResourceSplit {
+  /** Dispatch's slice as a percent of the machine. Zero when unmeasured. */
+  dispatchPct: number;
+  /** Total in use, Dispatch included, as a percent of the machine. */
+  usedPct: number;
+  /** Dispatch's amount, or `null` when the process table has not been read. */
+  dispatch: number | null;
+  /** In use but not Dispatch's. */
+  other: number;
+  /** Not in use. */
+  free: number;
+  /** False when the machine's own reading is missing — CPU's first poll. */
+  measured: boolean;
+}
+
+/** Machine memory, split by who is holding it. */
+export function memorySplit(
+  system: SystemResources,
+  dispatch: DispatchResources | null,
+): ResourceSplit {
+  const used = system.usedBytes;
+  // Shared pages are counted once per process, which runs the raw tree sum
+  // ~1.9x high — high enough that on a live install it EXCEEDED installed RAM.
+  // Corrected, it is a quantity that can sit inside a real machine total
+  // without the bright segment overflowing the fill it is drawn inside.
+  // See SHARED_PAGE_FACTOR; the UI marks every figure derived from it "≈".
+  const ours = dispatch ? Math.min(dispatch.rssBytes / SHARED_PAGE_FACTOR, used) : null;
+  return {
+    dispatchPct: share(ours ?? 0, system.totalBytes),
+    usedPct: share(used, system.totalBytes),
+    dispatch: ours,
+    other: Math.max(0, used - (ours ?? 0)),
+    free: system.freeBytes,
+    measured: true,
+  };
+}
+
+/** Machine CPU, split the same way. Percentages are of the WHOLE machine. */
+export function cpuSplit(
+  system: SystemResources,
+  dispatch: DispatchResources | null,
+): ResourceSplit {
+  const used = system.cpuPct;
+  const ours = machinePct(dispatch?.cpuPct ?? null, system.logicalCores);
+  // CLAMPED to the machine figure, because the two come from different
+  // samplers over different windows: `os.cpus()` deltas for the machine, a
+  // process-table walk for the tree. They disagree by a point or two routinely,
+  // and Dispatch reading ABOVE the machine would draw a bright segment
+  // sticking out past the used fill it is supposed to be nested in.
+  //
+  // A MISSING machine figure takes the slice with it rather than leaving it
+  // standing alone: those independent samplers mean one really can have a
+  // reading while the other does not, and "Dispatch's share of the machine"
+  // with no machine total is not a small number, it is not a number. Left
+  // through, it would draw a bright segment inside a zero-width fill —
+  // overhanging the entire bar on the one poll the page has nothing to say.
+  const capped = ours === null || used === null ? null : Math.min(ours, used);
+  return {
+    dispatchPct: clampPct(capped ?? 0),
+    usedPct: clampPct(used ?? 0),
+    dispatch: capped,
+    other: Math.max(0, (used ?? 0) - (capped ?? 0)),
+    free: Math.max(0, 100 - clampPct(used ?? 0)),
+    measured: used !== null,
+  };
+}
+
+const clampPct = (p: number): number =>
+  Number.isFinite(p) ? Math.max(0, Math.min(100, p)) : 0;
+
+/**
+ * How old a snapshot may be before its Dispatch figures stop being shown.
+ *
+ * Three poll intervals. Long enough that an open dropdown never blinks back to
+ * "measuring" between refreshes, short enough that a reading left behind by a
+ * page visit is rejected rather than drawn.
+ */
+export const SNAPSHOT_STALE_MS = 3 * SNAPSHOT_POLL_MS;
+
+/**
+ * The Dispatch half of a snapshot, but only while it is still current.
+ *
+ * WHY THIS EXISTS. `snapshot` is never cleared — `subscribeSnapshot`'s disposer
+ * stops the timer and nothing blanks the value, and `refreshSnapshot`
+ * deliberately keeps the last reading when a fetch fails. So the store can hold
+ * a Dispatch figure from a Resources page visit an hour ago, indefinitely.
+ *
+ * On its own that was survivable: the old dropdown showed it in its own
+ * "Dispatch's share" section, where a stale number could only be wrong about
+ * itself. Nesting it inside a LIVE machine total is what makes it dangerous,
+ * because the two halves now age at different rates — `system` polls every 2 s
+ * — and {@link memorySplit} clamps our slice to what the machine says is in
+ * use. Hover the pill after that build finished and the live `usedBytes` has
+ * fallen below the stale `rssBytes`; the clamp then pins Dispatch's slice to
+ * the WHOLE of it, and the panel confidently reads "Dispatch ≈12 GB · other
+ * 0 B" for a tree that is nearly idle.
+ *
+ * Returning `null` puts it on the "measuring…" path the UI already implements
+ * for a first open, which is the honest answer: not zero, not everything — not
+ * yet known. It is the same refusal-to-show-an-aging-figure rule the header
+ * pill's bars follow.
+ *
+ * The Resources PAGE deliberately does not need this. It renders `system` out
+ * of the same snapshot rather than from the live poll, so its two halves are
+ * always of one another even when both are a moment old. The hazard here is
+ * specifically mixing a live whole with a stale part.
+ */
+export function freshDispatch(
+  snapshot: ResourceSnapshot | null,
+  now: number = Date.now(),
+): DispatchResources | null {
+  if (!snapshot) return null;
+  // `at` is on the wire for exactly this. A snapshot from the future (a clock
+  // skew between server and browser) counts as current rather than as stale.
+  if (now - snapshot.at > SNAPSHOT_STALE_MS) return null;
+  return snapshot.dispatch;
 }

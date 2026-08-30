@@ -25,3 +25,5 @@ export type { Segment } from "./SegmentedControl.js";
 export { Select } from "./Select.js";
 export type { SelectOption } from "./Select.js";
 export { ToggleRow, OptionCard, SwitchTrack } from "./ToggleRow.js";
+export { SplitBar, SplitDot } from "./SplitBar.js";
+export type { SplitBarProps } from "./SplitBar.js";
