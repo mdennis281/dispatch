@@ -496,6 +496,10 @@ function makeGithubBinding(
       : undefined,
     defaultReviewers: reviewers,
     reviewAgentLogin: reviewAgent?.login,
+    // Bound unconditionally: it describes the ACCOUNT's Copilot budget, not this
+    // project's reviewer policy, and the projects that ask Copilot for reviews
+    // are exactly the ones with no Dispatch reviewer configured.
+    copilotQuota: () => github.copilotQuota(),
     notePrMerged: () => github.notePrMerged(chatId),
   };
 }
@@ -924,17 +928,24 @@ function makePrApprovalBinding(
         // `latestReviews` throws away the moment the reviewer is re-queued.
         // Best-effort: an unreadable row is `null`, which the blocker treats as
         // "no help here" and falls back to GitHub alone, exactly as before.
-        reviewRounds: await (async () => {
+        ...(await (async () => {
           const state = await reviewRounds?.(r, n).catch(() => null);
           const v = prReviewAgentView(state ?? undefined);
-          if (!v) return null;
           return {
-            roundsSpent: v.roundsSpent,
-            posted: v.posted,
-            round: v.round,
-            maxRounds: v.maxRounds,
+            reviewRounds: v
+              ? {
+                  roundsSpent: v.roundsSpent,
+                  posted: v.posted,
+                  round: v.round,
+                  maxRounds: v.maxRounds,
+                }
+              : null,
+            // Read off the SAME view, in one pass: two reads of the row could
+            // disagree, and this exists precisely to explain a `reviewRounds`
+            // of null.
+            reviewAgentProblem: v?.problem ?? null,
           };
-        })(),
+        })()),
       };
     },
     approve: async (n, repo, body) => github.approve(await requireRepo(repo), n, body, { chatId }),

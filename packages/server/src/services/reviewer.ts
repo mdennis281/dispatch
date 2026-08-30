@@ -76,7 +76,8 @@ export async function resolveReviewer(
   store: ReviewerStore,
   project: Project,
 ): Promise<ReviewerResolution> {
-  const policy = resolveWorkflow(project).pr.reviewAgent;
+  const pr = resolveWorkflow(project).pr;
+  const policy = pr.reviewAgent;
   if (!policy.enabled || policy.identity !== "dedicated") return { policy };
 
   const cred = await store.getReviewer().catch(() => null);
@@ -90,7 +91,49 @@ export async function resolveReviewer(
         "Add one in Config → Reviewer, or switch the project to self-review.",
     };
   }
+  // A dedicated reviewer is spawned off GitHub's OWN review queue and nothing
+  // else: `maybeSpawnReview` arms the row only when `policy.login` is sitting in
+  // it, and `claimReviewAgent` opens with `if (!state.requestedAt) return null`.
+  // The local-request path that self-review uses is deliberately withheld here
+  // (see `armPrWatch` in container.ts), on the assumption that `create_pr` put
+  // the account in the queue — but `create_pr` requests `pr.reviewers` verbatim
+  // and never appends the login. So an account missing from that list is a
+  // reviewer that can never run, on every PR of the project, and until this
+  // check existed it said so nowhere: `hivebreak` carried this config across 19
+  // pull requests without one armed row, and the misconfiguration only surfaced
+  // when the unrelated bot it listed instead stopped reviewing too.
+  //
+  // NOT `enabled: false`, unlike the missing-credential case above: the identity
+  // resolves fine and `post_review` works, so a review triggered by any other
+  // means must still post. What is broken is only the trigger.
+  if (!pr.reviewers.some((r) => sameLogin(r, cred.login))) {
+    return {
+      policy: { ...policy, login: cred.login },
+      token: cred.token,
+      problem:
+        `This project reviews as \`${cred.login}\`, but \`workflow.pr.reviewers\` does not ` +
+        `list that account` +
+        (pr.reviewers.length ? ` — it asks ${pr.reviewers.join(", ")}` : " (the list is empty)") +
+        `. The reviewer only ever starts when its own login appears in GitHub's review queue, ` +
+        `and \`create_pr\` requests exactly \`pr.reviewers\`, so no review will ever spawn on ` +
+        `this project. Add \`${cred.login}\` to \`workflow.pr.reviewers\` in ` +
+        `\`.dispatch/project.yaml\`; it must also be a collaborator on the repo.`,
+    };
+  }
   return { policy: { ...policy, login: cred.login }, token: cred.token };
+}
+
+/**
+ * Compare two reviewer logins.
+ *
+ * `[bot]` is stripped because the two halves of this comparison are written in
+ * different dialects: `pr.reviewers` is hand-authored and GitHub's own UI shows
+ * bots suffixed, while the API reports the bare login. A literal compare made
+ * every bot reviewer look absent from its own project's list.
+ */
+function sameLogin(a: string, b: string): boolean {
+  const norm = (s: string) => s.trim().toLowerCase().replace(/\[bot\]$/, "");
+  return norm(a) === norm(b);
 }
 
 /**

@@ -16,9 +16,17 @@ const CRED: ReviewerCredential = {
 const project = (workflow: WorkflowConfig): Project =>
   ({ id: "p1", name: "p", repoPath: "/repo", createdAt: 1, workflow }) as Project;
 
+/**
+ * `reviewers` defaults to the credential's own login — the WELL-FORMED shape.
+ * A dedicated reviewer is triggered by finding itself in GitHub's review queue,
+ * and `create_pr` fills that queue from this list, so a project that omits the
+ * account has a reviewer that can never start. Defaulting to the broken shape
+ * would make every test here assert against a misconfiguration.
+ */
 const REVIEW = (
   reviewAgent: NonNullable<NonNullable<WorkflowConfig["pr"]>["reviewAgent"]>,
-): WorkflowConfig => ({ profile: "review", pr: { reviewAgent } });
+  reviewers: string[] = [CRED.login],
+): WorkflowConfig => ({ profile: "review", pr: { reviewAgent, reviewers } });
 
 /**
  * A GitHub that answers `whoami` per token, knows one collaborator, and knows
@@ -75,6 +83,43 @@ describe("resolveReviewer — joining the policy to the credential", () => {
     expect(out.policy.enabled).toBe(false);
     expect(out.token).toBeUndefined();
     expect(out.problem).toMatch(/no reviewer account is set up/i);
+  });
+
+  it("complains when the account is missing from pr.reviewers — the reviewer that never runs", async () => {
+    // The `hivebreak` shape: a dedicated reviewer configured perfectly, and a
+    // reviewers list naming somebody else entirely. Nothing on GitHub is wrong,
+    // nothing errors, and no review ever spawns — 19 PRs went by that way.
+    const out = await resolveReviewer(
+      storeWith(CRED),
+      project(REVIEW({ enabled: true, identity: "dedicated" }, ["copilot-pull-request-reviewer[bot]"])),
+    );
+    expect(out.problem).toMatch(/does not list that account/i);
+    expect(out.problem).toMatch(/copilot-pull-request-reviewer/);
+    // NOT disabled, unlike the missing-credential case: the identity resolves
+    // and `post_review` still works, so a round triggered any other way must
+    // still be able to post. Only the trigger is broken.
+    expect(out.policy.enabled).toBe(true);
+    expect(out.policy.login).toBe("dispatch-reviewer");
+    expect(out.token).toBe("github_pat_secret");
+  });
+
+  it("accepts a `[bot]`-suffixed spelling of the same account", async () => {
+    // The two halves are written in different dialects: `pr.reviewers` is
+    // hand-authored from what GitHub's UI shows, the credential holds the bare
+    // login. A literal compare called every bot reviewer misconfigured.
+    const out = await resolveReviewer(
+      storeWith({ ...CRED, login: "some-review-bot" }),
+      project(REVIEW({ enabled: true, identity: "dedicated" }, ["Some-Review-Bot[bot]"])),
+    );
+    expect(out.problem).toBeUndefined();
+  });
+
+  it("says the list is empty rather than naming nobody", async () => {
+    const out = await resolveReviewer(
+      storeWith(CRED),
+      project(REVIEW({ enabled: true, identity: "dedicated" }, [])),
+    );
+    expect(out.problem).toMatch(/the list is empty/i);
   });
 
   it("does not read the credential at all when the reviewer is off", async () => {

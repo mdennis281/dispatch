@@ -247,6 +247,25 @@ export interface PrPollSnapshot {
   reported: Array<{ author: string; state: string }>;
 }
 
+/**
+ * The account's Copilot premium-request budget, reduced to what a silently
+ * dropped reviewer needs to explain itself. See {@link GitHubService.copilotQuota}.
+ */
+export interface CopilotQuota {
+  /** e.g. `individual_pro`. */
+  plan?: string;
+  /** Premium requests included in the plan this cycle. */
+  entitlement?: number;
+  /** Premium requests consumed this cycle — CAN exceed the entitlement. */
+  used?: number;
+  /** What's left; negative once the budget is overrun. */
+  remaining?: number;
+  /** `YYYY-MM-DD` the budget refills. */
+  resetDate?: string;
+  /** The budget is spent AND no overage is permitted — nothing premium will run. */
+  exhausted: boolean;
+}
+
 /** A PR's review state: who was asked, and who has actually reported. */
 export interface PrReviewState {
   /** Reviewers with an OUTSTANDING request (they haven't reported yet). */
@@ -447,6 +466,27 @@ interface RawReviewNode {
   submittedAt?: string | null;
   commit?: { oid?: string } | null;
 }
+/**
+ * `copilot_internal/user`, as far as {@link GitHubService.copilotQuota} reads it.
+ *
+ * Every field optional on purpose: this is an undocumented payload and the only
+ * safe assumption about it is that it may change shape.
+ */
+interface RawCopilotUser {
+  copilot_plan?: string;
+  quota_reset_date?: string;
+  quota_snapshots?: {
+    premium_interactions?: {
+      entitlement?: number;
+      credits_used?: number;
+      remaining?: number;
+      has_quota?: boolean;
+      unlimited?: boolean;
+      overage_permitted?: boolean;
+    };
+  };
+}
+
 /** The whole PR poll payload — see {@link PrPollSnapshot}. */
 interface RawGraphqlPoll {
   errors?: unknown[];
@@ -1136,6 +1176,50 @@ export class GitHubService {
   }
 
   /* ------------------------------------------------------------------- READ */
+
+  /**
+   * The account's Copilot premium-request budget, or null if it can't be read.
+   *
+   * WHY this exists. Copilot code review costs one premium request per review,
+   * and when that budget is spent GitHub does not refuse the review request — it
+   * answers **201 Created**, queues nobody, and writes no `review_requested`
+   * event. At the API that is indistinguishable from "the bot declined to
+   * re-review a head it has already seen", which is the guess `request_review`
+   * used to print. The guess is worse than no guess: it sent an agent to
+   * `approve_pr` with `allowNoReview` and the words "land the PR on the review
+   * you already have" on a pull request nobody had ever reviewed.
+   *
+   * `copilot_internal/user` is UNDOCUMENTED — it is the endpoint the editor
+   * plugins call, and GitHub may change it without notice. So this is strictly
+   * best-effort and never load-bearing: every failure path returns null and the
+   * caller falls back to naming the possible causes instead of one. It is only
+   * called once a Copilot reviewer has ALREADY been observed vanishing from the
+   * queue, so it costs nothing on the path where reviews work.
+   */
+  async copilotQuota(): Promise<CopilotQuota | null> {
+    // `allowFail` AND a catch: a non-zero exit gives `ghJson` a non-JSON error
+    // body to parse, which throws rather than returning null.
+    const raw = await this.ghJson<RawCopilotUser>(["api", "copilot_internal/user"], {
+      allowFail: true,
+    }).catch(() => null);
+    const pi = raw?.quota_snapshots?.premium_interactions;
+    if (!pi) return null;
+    return {
+      plan: raw?.copilot_plan,
+      entitlement: pi.entitlement,
+      used: pi.credits_used,
+      remaining: pi.remaining,
+      resetDate: raw?.quota_reset_date,
+      // `has_quota` is the flag GitHub itself gates on, but it is absent on
+      // older payloads — so fall back to the arithmetic. `unlimited` wins over
+      // both: a plan with no cap reports `remaining: 0` forever, and reading
+      // that as exhausted would blame the quota on every unlimited account.
+      exhausted:
+        !pi.unlimited &&
+        (pi.has_quota === false || (typeof pi.remaining === "number" && pi.remaining <= 0)) &&
+        pi.overage_permitted !== true,
+    };
+  }
 
   /** Most-recent PR for a branch (open or closed), or null. */
   async prForBranch(repo: string, branch: string): Promise<PRInfo | null> {
