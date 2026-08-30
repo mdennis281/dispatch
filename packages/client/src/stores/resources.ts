@@ -264,3 +264,51 @@ export function cpuSplit(
 
 const clampPct = (p: number): number =>
   Number.isFinite(p) ? Math.max(0, Math.min(100, p)) : 0;
+
+/**
+ * How old a snapshot may be before its Dispatch figures stop being shown.
+ *
+ * Three poll intervals. Long enough that an open dropdown never blinks back to
+ * "measuring" between refreshes, short enough that a reading left behind by a
+ * page visit is rejected rather than drawn.
+ */
+export const SNAPSHOT_STALE_MS = 3 * SNAPSHOT_POLL_MS;
+
+/**
+ * The Dispatch half of a snapshot, but only while it is still current.
+ *
+ * WHY THIS EXISTS. `snapshot` is never cleared — `subscribeSnapshot`'s disposer
+ * stops the timer and nothing blanks the value, and `refreshSnapshot`
+ * deliberately keeps the last reading when a fetch fails. So the store can hold
+ * a Dispatch figure from a Resources page visit an hour ago, indefinitely.
+ *
+ * On its own that was survivable: the old dropdown showed it in its own
+ * "Dispatch's share" section, where a stale number could only be wrong about
+ * itself. Nesting it inside a LIVE machine total is what makes it dangerous,
+ * because the two halves now age at different rates — `system` polls every 2 s
+ * — and {@link memorySplit} clamps our slice to what the machine says is in
+ * use. Hover the pill after that build finished and the live `usedBytes` has
+ * fallen below the stale `rssBytes`; the clamp then pins Dispatch's slice to
+ * the WHOLE of it, and the panel confidently reads "Dispatch ≈12 GB · other
+ * 0 B" for a tree that is nearly idle.
+ *
+ * Returning `null` puts it on the "measuring…" path the UI already implements
+ * for a first open, which is the honest answer: not zero, not everything — not
+ * yet known. It is the same refusal-to-show-an-aging-figure rule the header
+ * pill's bars follow.
+ *
+ * The Resources PAGE deliberately does not need this. It renders `system` out
+ * of the same snapshot rather than from the live poll, so its two halves are
+ * always of one another even when both are a moment old. The hazard here is
+ * specifically mixing a live whole with a stale part.
+ */
+export function freshDispatch(
+  snapshot: ResourceSnapshot | null,
+  now: number = Date.now(),
+): DispatchResources | null {
+  if (!snapshot) return null;
+  // `at` is on the wire for exactly this. A snapshot from the future (a clock
+  // skew between server and browser) counts as current rather than as stale.
+  if (now - snapshot.at > SNAPSHOT_STALE_MS) return null;
+  return snapshot.dispatch;
+}

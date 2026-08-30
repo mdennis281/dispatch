@@ -65,7 +65,7 @@ import {
 import { useChats } from "../../stores/chats.js";
 import { useChatProcesses } from "../../stores/chatProcesses.js";
 import { bytes, pct, dur } from "../../lib/format.js";
-import { CPU_BAR, chatTone, machineTone } from "../../lib/resourceTone.js";
+import { CHAT_MEM_RAMP, CPU_BAR, chatTone, machineTone } from "../../lib/resourceTone.js";
 import { cn } from "../../lib/cn.js";
 
 /** Which column the table is ranked by. */
@@ -403,11 +403,24 @@ function ChatRow({
   );
 }
 
-/** Which hue means which metric, said once for the whole table below it. */
-function BarKey({ tone, label }: { tone: string; label: string }) {
+/**
+ * Which hue means which metric, said once for the whole table below it.
+ *
+ * Takes a RAMP rather than a colour, because memory's bar escalates and CPU's
+ * does not. A memory swatch showing all three steps stays true on a row that
+ * has gone orange or red — where a flat amber chip would be naming a colour
+ * nothing on that row is wearing — and tells the reader the bar changes colour
+ * under pressure, which is worth knowing anyway. Sourced from
+ * `CHAT_MEM_RAMP`/`CPU_BAR` so the key cannot drift from the bars again.
+ */
+function BarKey({ tones, label }: { tones: readonly string[]; label: string }) {
   return (
     <span className="inline-flex items-center gap-1 text-2xs text-faint">
-      <span className={cn("h-[3px] w-3 rounded-full", tone)} />
+      <span className="flex h-[3px] w-3 overflow-hidden rounded-full">
+        {tones.map((t, i) => (
+          <span key={i} className={cn("flex-1", t)} />
+        ))}
+      </span>
       {label}
     </span>
   );
@@ -562,8 +575,8 @@ export function ResourceMetrics() {
           <span className="text-xs font-semibold text-primary">By chat</span>
           <span className="cm-mono text-2xs tabular-nums text-faint">{chats.length}</span>
           <span className="mx-1 h-3 w-px bg-line" />
-          <BarKey tone="bg-accent" label="memory" />
-          <BarKey tone={CPU_BAR} label="CPU" />
+          <BarKey tones={CHAT_MEM_RAMP} label="memory" />
+          <BarKey tones={[CPU_BAR]} label="CPU" />
           <div className="flex-1" />
           <span className="text-2xs text-faint">sort</span>
           <SortTab id="mem" sort={sort} onPick={setPicked}>

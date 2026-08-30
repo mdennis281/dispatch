@@ -58,7 +58,20 @@ export function machineTone(p: number): { text: string; bar: string } {
  * looks large.
  */
 export function chatTone(p: number): string {
-  if (p >= 40) return "bg-danger";
-  if (p >= 15) return "bg-warn";
-  return "bg-accent";
+  if (p >= 40) return CHAT_MEM_RAMP[2];
+  if (p >= 15) return CHAT_MEM_RAMP[1];
+  return CHAT_MEM_RAMP[0];
 }
+
+/**
+ * The three steps `chatTone` walks, quiet → pressured → critical.
+ *
+ * EXPORTED so the table's legend swatch can be built FROM it instead of
+ * hard-coding the quiet hue. That hard-coded copy was the bug: the key said
+ * memory was amber while any row above 15% of the machine drew an orange or
+ * red bar, so the legend stopped identifying the bar it exists to identify on
+ * exactly the rows a reader is scanning for. A swatch showing all three steps
+ * is true at every level and discloses that the bar escalates, which one flat
+ * colour cannot do. CPU needs no such thing — it is `CPU_BAR` always.
+ */
+export const CHAT_MEM_RAMP = ["bg-accent", "bg-warn", "bg-danger"] as const;

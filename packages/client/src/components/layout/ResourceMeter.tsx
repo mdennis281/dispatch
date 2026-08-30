@@ -44,6 +44,7 @@ import {
   share,
   memorySplit,
   cpuSplit,
+  freshDispatch,
   type ResourceSplit,
 } from "../../stores/resources.js";
 import { setView, useView } from "../../stores/view.js";
@@ -185,9 +186,12 @@ export function ResourceMeter() {
 
   const memPct = share(system.usedBytes, system.totalBytes);
   const t = machineTone(memPct);
-  // The dropdown's half. `dispatch` is null until the first scan lands, and the
-  // splits carry that through as "measuring" rather than as zero.
-  const dispatch = snapshot?.dispatch ?? null;
+  // The dropdown's half. Null until the first scan lands — AND null again once
+  // the store's copy has aged out, because the panel nests it inside a machine
+  // total that is two seconds old and a stale part inside a live whole is wrong
+  // about the whole. See `freshDispatch`. Either way the splits carry it
+  // through as "measuring" rather than as zero.
+  const dispatch = freshDispatch(snapshot);
   const mem = memorySplit(system, dispatch);
   const cpu = cpuSplit(system, dispatch);
 

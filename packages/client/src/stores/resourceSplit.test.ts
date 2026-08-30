@@ -10,8 +10,13 @@
  * which reads as a broken component rather than a bad reading.
  */
 import { describe, expect, it } from "vitest";
-import { SHARED_PAGE_FACTOR, type DispatchResources, type SystemResources } from "@dispatch/shared";
-import { cpuSplit, memorySplit } from "./resources.js";
+import {
+  SHARED_PAGE_FACTOR,
+  type DispatchResources,
+  type ResourceSnapshot,
+  type SystemResources,
+} from "@dispatch/shared";
+import { SNAPSHOT_STALE_MS, cpuSplit, freshDispatch, memorySplit } from "./resources.js";
 
 const GB = 1024 ** 3;
 
@@ -104,5 +109,59 @@ describe("cpuSplit", () => {
     const s = cpuSplit(system({ logicalCores: 0, cpuPct: 50 }), dispatch({ cpuPct: 30 }));
     expect(s.dispatch).toBe(30);
     expect(s.usedPct).toBe(50);
+  });
+});
+
+describe("freshDispatch", () => {
+  const snap = (at: number): ResourceSnapshot => ({
+    system: system(),
+    dispatch: dispatch(),
+    chats: [],
+    at,
+    windowMs: 5_000,
+  });
+
+  it("hands back the reading while it is current", () => {
+    const now = 1_000_000;
+    expect(freshDispatch(snap(now - 1_000), now)).not.toBeNull();
+  });
+
+  it("withholds a reading the store has been sitting on", () => {
+    // The failure: `snapshot` is never cleared, so a Resources page visit an
+    // hour ago leaves a Dispatch figure in the store forever, and the dropdown
+    // nests it inside a `system` total that is two seconds old.
+    const now = 1_000_000;
+    expect(freshDispatch(snap(now - SNAPSHOT_STALE_MS - 1), now)).toBeNull();
+  });
+
+  it("treats a snapshot from the future as current, not as stale", () => {
+    // Clock skew between server and browser must not blank the panel.
+    const now = 1_000_000;
+    expect(freshDispatch(snap(now + 5_000), now)).not.toBeNull();
+  });
+
+  it("stops a stale tree from claiming the whole of a shrunken machine", () => {
+    // What the gate is FOR, end to end. The build finished and the machine's
+    // live `usedBytes` fell to 8 GB, but the store still holds the tree from
+    // while it was running — 19 GB raw, 10 GB corrected, which is now MORE than
+    // the whole machine reports in use. Ungated, `memorySplit`'s clamp pins our
+    // slice to all 8 GB and the panel reads "Dispatch ≈8 GB · other 0 B":
+    // Dispatch is everything running, for a tree that may be near idle.
+    const now = 1_000_000;
+    const live = system({ usedBytes: 8 * GB, freeBytes: 56 * GB });
+    const stale = snap(now - SNAPSHOT_STALE_MS - 1);
+
+    const ungated = memorySplit(live, stale.dispatch);
+    expect(ungated.dispatch).toBe(8 * GB);
+    expect(ungated.other).toBe(0);
+    expect(ungated.dispatchPct).toBe(ungated.usedPct);
+
+    const gated = memorySplit(live, freshDispatch(stale, now));
+    expect(gated.dispatch).toBeNull();
+    expect(gated.other).toBe(8 * GB);
+  });
+
+  it("has nothing to hand back before the first scan", () => {
+    expect(freshDispatch(null)).toBeNull();
   });
 });
