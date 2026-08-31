@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { WsServerEvent } from "@dispatch/shared";
+import type { Chat, PeerSender, WsServerEvent } from "@dispatch/shared";
 import type { ServerConfig } from "../config.js";
 import type { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
@@ -203,5 +203,96 @@ describe("createServices().start() resilience", () => {
     expect(capture).toHaveBeenCalledWith([
       { chatId: "c1", status: "running", pending: [{ text: "keep going" }] },
     ]);
+  });
+});
+
+/**
+ * A spawned chat's opening prompt is written by an AGENT, not by the human — the
+ * human only approved the spawn. Unstamped it landed as the new chat's opening
+ * SPEECH BUBBLE, the most prominent row in a transcript that had nothing else in
+ * it, attributed to someone who never typed a word of it. The `peer` stamp is
+ * what the transcript renders a card from, and what `peerReminder` tells the
+ * model it heard from a colleague.
+ */
+describe("broker.spawnChat attribution", () => {
+  const PARENT = "parent_chat";
+
+  async function spawn(parent: Partial<Chat> | null) {
+    // Typed args, not `vi.fn(async () => {})`: an inferred empty tuple makes
+    // every `mock.calls[0][n]` read a type error.
+    const sendMessage =
+      vi.fn(async (_chatId: string, _text: string, _opts?: { peer?: PeerSender }) => {});
+    const saved: Chat[] = [];
+    const services = createServices(
+      {
+        config: { maxActiveSessions: 4 } as unknown as ServerConfig,
+        store: stub<Store>({
+          getProject: async () => ({ id: "p1", name: "Hivebreak" }),
+          getSettings: async () => ({}),
+          saveChat: async (c: Chat) => {
+            saved.push(c);
+            return c;
+          },
+          // Two callers with different needs: `ensureSession` looks up the chat
+          // just created, the peer stamp looks up its parent.
+          getChat: async (id: string) =>
+            id === PARENT ? parent : (saved.find((c) => c.id === id) ?? null),
+        }),
+        bus: new EventBus(),
+      },
+      {
+        // `has: true` so `ensureSession` short-circuits instead of trying to
+        // start a real subprocess.
+        broker: stub({ has: () => true, sendMessage }),
+        terminals: stub(),
+        memory: stub(),
+        projectConfig: stub(),
+        projectConfigArchive: stub(),
+        title: stub(),
+        checkpoints: stub(),
+        worktrees: stub(),
+        worktreeDetector: stub(),
+        worktreeReaper: stub(),
+        runner: stub(),
+        github: stub(),
+        notifier: stub(),
+        push: stub(),
+        attention: stub(),
+        usage: stub(),
+      },
+    );
+    await services.broker.spawnChat!({
+      request: { prompt: "Migrate the cloud save slots.", title: "save migration" },
+      project: { id: "p1", name: "Hivebreak" },
+      parentChatId: PARENT,
+    });
+    return sendMessage;
+  }
+
+  it("stamps the opening prompt as coming from the chat that spawned it", async () => {
+    const sendMessage = await spawn({
+      id: PARENT,
+      title: "Steam cloud save",
+      projectId: "hivebreak",
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]![1]).toBe("Migrate the cloud save slots.");
+    expect(sendMessage.mock.calls[0]![2]).toEqual({
+      // Denormalised, per PeerSenderSchema: the parent may be renamed or deleted
+      // before anyone reads the row, and a transcript can't be rewritten.
+      peer: { chatId: PARENT, title: "Steam cloud save", projectId: "hivebreak" },
+    });
+  });
+
+  it("still stamps the sender when the parent can no longer be read", async () => {
+    // An unreadable parent must cost the row its TITLE, never its attribution —
+    // falling back to an unstamped send would put the words back in the human's
+    // mouth for the one case nobody can check afterwards.
+    const sendMessage = await spawn(null);
+
+    expect(sendMessage.mock.calls[0]![2]).toEqual({
+      peer: { chatId: PARENT, title: undefined, projectId: undefined },
+    });
   });
 });

@@ -779,7 +779,22 @@ export function createServices(
       ...(request.detached ? {} : { parentChatId }),
     });
     await ensureSession(services, chat.id);
-    await broker.sendMessage(chat.id, request.prompt);
+    // Stamped `peer`, exactly like a `chat_send`, because that is what it is: an
+    // AGENT wrote this prompt via `spawn_chat` and the human only approved the
+    // spawn. Unstamped it landed as the new chat's opening speech bubble — the
+    // most prominent row in the transcript, attributed to a person who never
+    // typed a word of it — and the model was told nothing either, so a spawned
+    // chat would answer its briefing as though the human were sitting there
+    // waiting. The `peer` stamp fixes both halves: the row renders as a card
+    // naming the sender, and `peerReminder` tells the model who it heard from.
+    //
+    // Denormalised title, per PeerSenderSchema: the parent may be renamed or
+    // deleted long before anyone reads this row, and a transcript can't be
+    // rewritten. Best-effort — a missing parent must not fail the spawn.
+    const parent = await store.getChat(parentChatId).catch(() => null);
+    await broker.sendMessage(chat.id, request.prompt, {
+      peer: { chatId: parentChatId, title: parent?.title, projectId: parent?.projectId },
+    });
     return {
       chatId: chat.id,
       title: chat.title,

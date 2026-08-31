@@ -521,6 +521,11 @@ export const MOCK_MESSAGES: Record<string, ChatMessage[]> = {
     // is the only input channel a session has, so an agent-sent message is
     // structurally identical to something the human typed and is told apart
     // purely by how it renders.
+    //
+    // The first carries `parts` as well, which is the case that regressed once:
+    // memory surfacing appends a `context` part to ANY message, peer ones
+    // included, and a peer row with parts used to fall through to the human's
+    // speech bubble. Keep it here so that path stays visible in the shell.
     {
       kind: "user",
       id: "st3",
@@ -529,6 +534,17 @@ export const MOCK_MESSAGES: Record<string, ChatMessage[]> = {
       text: "Heads up — I merged the save-format change on #214, so rebase before you touch the serializer.",
       origin: "peer",
       peer: { chatId: CHAT_SETTINGS, title: "Save format v3", projectId: "hivebreak" },
+      parts: [
+        {
+          kind: "text",
+          text: "Heads up — I merged the save-format change on #214, so rebase before you touch the serializer.",
+        },
+        {
+          kind: "context",
+          label: "2 project memories surfaced — 2 in full",
+          text: "### save-format-v3-is-length-prefixed\nThe stash blob gained a 4-byte length prefix in #214.\n\n### steam-quota-is-per-app\nRemote Storage quota is per app id, not per file.",
+        },
+      ],
     },
     {
       kind: "user",

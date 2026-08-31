@@ -5,7 +5,8 @@ import { RowShell } from "./RowShell.js";
 import { Chip } from "../../ui/Chip.js";
 import { Button } from "../../ui/Button.js";
 import { MediaGroup } from "./MediaGroup.js";
-import { ComposedParts } from "./ComposedParts.js";
+import { ComposedParts, SPEECH_BUBBLE } from "./ComposedParts.js";
+import { PeerCard } from "./AuthoredCard.js";
 import { actions } from "../../../lib/actions.js";
 import { useHasCheckpoint } from "../../../stores/checkpoints.js";
 import { selectChat } from "../../../stores/navigation.js";
@@ -19,13 +20,19 @@ import { selectChat } from "../../../stores/navigation.js";
  * quoted rather than passed off as typed; see ComposedParts. Rows written before
  * that existed have no `parts` and render exactly as they always did.
  *
- * A turn ANOTHER CHAT sent (`chat_send` / `chat_ask`) arrives with
- * `origin: "peer"`. It has to be a `user` row — that is the only input channel a
- * session has — so this is the one place the human can ever find out an agent
- * said it and they did not. That makes the attribution here load-bearing rather
- * than decorative: `chat_send` deliberately has NO consent prompt, and this row
- * is what was traded for the prompt. Absent `origin` still means human, which is
- * every row written before peer messaging existed.
+ * A turn ANOTHER CHAT sent (`chat_send` / `chat_ask`, and the opening prompt of
+ * a chat some agent spawned) arrives with `origin: "peer"`. It has to be a
+ * `user` row — that is the only input channel a session has — so this is the one
+ * place the human can ever find out an agent said it and they did not. That
+ * makes the attribution here load-bearing rather than decorative: `chat_send`
+ * deliberately has NO consent prompt, and this row is what was traded for the
+ * prompt. Absent `origin` still means human, which is every row written before
+ * peer messaging existed.
+ *
+ * Which is why a peer turn gets the CARD, not the bubble (see AuthoredCard).
+ * Chips and a swapped avatar were the whole treatment once, and they lost: the
+ * body still wore the speech bubble, and the bubble is what people actually read
+ * "you typed this" off. Badges around a lie don't stop it being told.
  */
 export const UserRow = memo(function UserRow({
   chatId,
@@ -102,13 +109,17 @@ export const UserRow = memo(function UserRow({
       }
     >
       {composed ? (
-        <ComposedParts chatId={chatId} parts={composed} harness={row.harness} />
+        <ComposedParts
+          chatId={chatId}
+          parts={composed}
+          harness={row.harness}
+          peer={peer}
+          fromPeer={fromPeer}
+        />
+      ) : fromPeer ? (
+        <PeerCard chatId={chatId} text={row.text ?? ""} peer={peer} harness={row.harness} />
       ) : (
-        row.text && (
-          <div className="inline-block max-w-full rounded-2xl rounded-tr-sm border border-bubble-line bg-bubble px-3 py-1.5 text-left align-top text-base leading-[1.6] text-primary whitespace-pre-wrap">
-            {row.text}
-          </div>
-        )
+        row.text && <div className={SPEECH_BUBBLE}>{row.text}</div>
       )}
       {row.images && row.images.length > 0 && (
         <MediaGroup chatId={chatId} assets={row.images} className="mt-2 justify-end" />
