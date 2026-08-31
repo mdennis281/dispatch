@@ -19,6 +19,12 @@
  *   blanket `/.claude/skills/`. A skill the USER later authors under that
  *   directory still shows up in status, which a blanket rule would have hidden.
  *
+ * That second property only holds if the patterns come back OUT again, which is
+ * why {@link unexcludePathsFromGit} exists and teardown calls it. An append-only
+ * block would outlive the dir it described, and the next thing to appear at that
+ * path is precisely the user's own override of a bundled skill — silently
+ * unstageable, with nothing on screen to explain why.
+ *
  * Neither affects files git already tracks: exclude patterns are consulted only
  * for untracked paths, so a repo that COMMITS `.claude/skills/foo` keeps seeing
  * its own changes to it.
@@ -102,11 +108,17 @@ function readCommonDir(gitDir: string): string {
 /**
  * Turn an absolute path into a worktree-anchored exclude pattern, or null if it
  * falls outside the worktree (nothing there is ours to hide).
+ *
+ * Skill dir names are user-authored (`readSkillsDir` takes `entry.name` off disk
+ * verbatim), and exclude entries are GLOBS — so a dir named `foo[1]` would reach
+ * git as a character class, hiding a sibling `foo1` the user owns while leaving
+ * `foo[1]` itself on screen. Both halves wrong at once, hence the escaping.
  */
 function toPattern(root: string, absPath: string): string | null {
   const rel = relative(root, absPath);
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
-  return `/${rel.split(sep).join("/")}/`;
+  const literal = rel.split(sep).join("/").replace(/[\\*?[\]]/g, (c) => `\\${c}`);
+  return `/${literal}/`;
 }
 
 /**
@@ -155,15 +167,78 @@ export async function excludePathsFromGit(cwd: string, absPaths: string[]): Prom
   }
 }
 
+/**
+ * Drop exclude patterns for `absPaths` again — the teardown half of
+ * {@link excludePathsFromGit}, called when the dirs they describe are removed.
+ *
+ * Only lines inside OUR managed block are touched. A user who had excluded the
+ * same path by hand keeps their line: `excludePathsFromGit` never added it to
+ * the block, so there is nothing of ours there to take away.
+ *
+ * The repo is found by walking up from each path, which still works after the
+ * dir itself is gone. Never throws.
+ */
+export async function unexcludePathsFromGit(absPaths: string[]): Promise<void> {
+  if (!absPaths.length) return;
+  // Group by repo: one PR's worth of skill dirs is normally one repo, but a
+  // teardown could span more, and each has its own exclude file.
+  const byExcludeFile = new Map<string, { root: string; paths: string[] }>();
+  for (const path of absPaths) {
+    const layout = findGitLayout(path);
+    if (!layout) continue;
+    const file = join(layout.commonDir, "info", "exclude");
+    const entry = byExcludeFile.get(file) ?? { root: layout.root, paths: [] };
+    entry.paths.push(path);
+    byExcludeFile.set(file, entry);
+  }
+
+  for (const [file, { root, paths }] of byExcludeFile) {
+    try {
+      const current = await readFile(file, "utf8");
+      const drop = new Set(
+        paths.map((p) => toPattern(root, p)).filter((p): p is string => p !== null),
+      );
+      if (!drop.size) continue;
+      const next = removeFromBlock(current, drop);
+      if (next !== current) await writeFile(file, next, "utf8");
+    } catch {
+      /* no exclude file, or unwritable — nothing to undo */
+    }
+  }
+}
+
+/** Locate the managed block's delimiters, or null when it isn't there. */
+function findBlock(rows: string[]): { begin: number; end: number } | null {
+  const begin = rows.findIndex((l) => l.trim() === BEGIN);
+  if (begin < 0) return null;
+  const end = rows.findIndex((l, i) => i > begin && l.trim() === END);
+  return end > begin ? { begin, end } : null;
+}
+
+/** Remove `drop` lines from the managed block, deleting the block once empty. */
+function removeFromBlock(current: string, drop: Set<string>): string {
+  const eol = current.includes("\r\n") ? "\r\n" : "\n";
+  const rows = current.split(/\r?\n/);
+  const block = findBlock(rows);
+  if (!block) return current;
+
+  const kept = rows.slice(block.begin + 1, block.end).filter((l) => !drop.has(l.trim()));
+  const rest = kept.some((l) => l.trim() !== "");
+  // An empty block is litter in a file the user may read; take the whole thing.
+  const replacement = rest ? [rows[block.begin], ...kept, rows[block.end]] : [];
+  rows.splice(block.begin, block.end - block.begin + 1, ...replacement);
+  if (!rest) while (rows.length && rows[rows.length - 1].trim() === "") rows.pop();
+  return rows.length ? rows.join(eol) + (rest ? "" : eol) : "";
+}
+
 /** Insert `lines` into the managed block, creating the block if it's absent. */
 function spliceBlock(current: string, lines: string[]): string {
   const eol = current.includes("\r\n") ? "\r\n" : "\n";
   const rows = current.length ? current.split(/\r?\n/) : [];
-  const begin = rows.findIndex((l) => l.trim() === BEGIN);
-  const end = begin >= 0 ? rows.findIndex((l, i) => i > begin && l.trim() === END) : -1;
+  const block = findBlock(rows);
 
-  if (begin >= 0 && end > begin) {
-    rows.splice(end, 0, ...lines);
+  if (block) {
+    rows.splice(block.end, 0, ...lines);
     return rows.join(eol);
   }
 

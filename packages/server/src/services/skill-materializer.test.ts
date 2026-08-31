@@ -112,6 +112,26 @@ describe("skill-materializer", () => {
     expect(text).toContain("/.claude/skills/sprite/");
   });
 
+  it("takes the exclude pattern back out at teardown", async () => {
+    // The wiring, not the helper: leaving the pattern behind is what would make
+    // a user's later override of a bundled skill invisible to git.
+    await mkdir(join(cwd, ".git"), { recursive: true });
+    await writeDirSkill("sprite", "SKILL body");
+    const created = await materializeSkills(cwd, [dirSkill("sprite")]);
+
+    const exclude = join(cwd, ".git", "info", "exclude");
+    const read = () => readFile(exclude, "utf8").catch(() => "");
+    let text = await read();
+    for (let i = 0; i < 100 && !text.includes("/.claude/skills/sprite/"); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      text = await read();
+    }
+    expect(text).toContain("/.claude/skills/sprite/");
+
+    await cleanupMaterializedSkills(created);
+    expect(await read()).not.toContain("/.claude/skills/sprite/");
+  });
+
   it("empty skill list → no work, no dirs created", async () => {
     const created = await materializeSkills(cwd, []);
     expect(created).toEqual([]);
@@ -147,16 +167,23 @@ async function writeOrphan(name: string, body: string) {
 }
 
 describe("markerOwnerAlive", () => {
-  it("treats a dead owner's marker as reclaimable and a live one as off-limits", () => {
+  it("a dead owner is reclaimable", () => {
     expect(markerOwnerAlive(`${deadPid()}-whatever`)).toBe(false);
-    expect(markerOwnerAlive(`${process.pid}-whatever`)).toBe(true);
   });
 
-  it("keys on the PID, so the OTHER instance's live dirs are safe", () => {
+  it("keys on the PID, so ANOTHER live process's dirs are safe", () => {
     // Stable (4318) and dev (4319) share `config/`, so they share the projects
     // roster and can hold one repo as cwd at the same time. A different run id
-    // is NOT permission to delete — only a dead owner is.
-    expect(markerOwnerAlive(`${process.pid}-a-totally-different-run-id`)).toBe(true);
+    // is NOT permission to delete — only a dead owner is. `ppid` stands in for
+    // the other instance: a real pid, alive, and not ours.
+    expect(markerOwnerAlive(`${process.ppid}-the-other-instance`)).toBe(true);
+  });
+
+  it("treats OUR pid with a foreign run id as provably stale, not as ours", () => {
+    // No other LIVE process can hold our pid, so only a dead run wrote this —
+    // which is what a hard kill plus a restart inheriting the pid produces.
+    // Reading it as alive would pin the skill at its stale body forever.
+    expect(markerOwnerAlive(`${process.pid}-a-run-that-is-not-this-one`)).toBe(false);
   });
 
   it("errs toward alive on a marker it cannot parse", () => {
@@ -221,7 +248,7 @@ describe("orphan reclamation", () => {
     const other = join(skillsTargetDir(cwd), "stable-only");
     await mkdir(other, { recursive: true });
     await writeFile(join(other, "SKILL.md"), "STABLE'S COPY", "utf8");
-    await writeFile(join(other, MATERIALIZED_MARKER), `${process.pid}-other-instance`, "utf8");
+    await writeFile(join(other, MATERIALIZED_MARKER), `${process.ppid}-other-instance`, "utf8");
     await writeDirSkill("sprite", "SKILL body");
 
     await materializeSkills(cwd, [dirSkill("sprite")]);

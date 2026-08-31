@@ -25,27 +25,29 @@
  *   runs on a clean turn end; a hard kill used to strand these dirs forever, and
  *   because materialization skips a target that already exists, a stranded copy
  *   also silently pinned that skill at its old content.
- * - The dirs are added to the repo's `.git/info/exclude`, so they stop showing up
- *   as untracked churn in a project that hasn't gitignored `.claude` — see
- *   `git-exclude.ts` for why it's the exclude file and not `.gitignore`.
+ * - The dirs are added to the repo's `.git/info/exclude` while they exist, and
+ *   taken back out when they're cleaned up, so they stop showing up as untracked
+ *   churn in a project that hasn't gitignored `.claude` without ever hiding what
+ *   the user later puts at that path — see `git-exclude.ts`.
  */
 import { join, dirname } from "node:path";
 import { cp, mkdir, writeFile, rm, readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { SkillConfig } from "@dispatch/shared";
-import { excludePathsFromGit } from "./git-exclude.js";
+import { excludePathsFromGit, unexcludePathsFromGit } from "./git-exclude.js";
 
 /** Stamp file marking a skill dir as ours to delete. Holds the writing server's id. */
 export const MATERIALIZED_MARKER = ".dispatch-materialized";
 
 /**
- * Identifies THIS server run. The PID PREFIX is the load-bearing part: it is what
- * lets a marker be judged across processes, which matters because the two
- * documented instances (the installed app on 4318 and `pnpm dev` on 4319) share
- * `config/` — hence the projects roster, hence a project `path`. Both can have a
- * chat cwd'd to one repo at the same time. The uuid only disambiguates a pid the
- * OS later recycles.
+ * Identifies THIS server run. Both halves do work. The PID PREFIX is what lets a
+ * marker be judged across processes, which matters because the two documented
+ * instances (the installed app on 4318 and `pnpm dev` on 4319) share `config/` —
+ * hence the projects roster, hence a project `path`. Both can have a chat cwd'd
+ * to one repo at the same time. The UUID settles the one case a pid can't: a
+ * marker bearing OUR pid that we did not write, which a restart inheriting the
+ * dead run's pid produces.
  */
 const RUN_ID = `${process.pid}-${randomUUID()}`;
 
@@ -65,11 +67,22 @@ export function skillsTargetDir(cwd: string, providerDir: ".claude" | ".agents" 
  * we may not signal (EPERM). Failing that way just means we don't tidy up; the
  * owner's own teardown or a later run gets it. Failing the other way corrupts a
  * running session.
+ *
+ * One case is NOT ambiguous and must not be treated as such: our own pid on a
+ * marker we didn't write. No other live process can hold our pid, so only a dead
+ * run can have left it — which is exactly what a hard kill followed by a restart
+ * that inherits the pid produces. Reading it as "alive" would pin that skill at
+ * its stale body forever, the very failure the marker exists to prevent.
+ *
+ * The converse — an UNRELATED process inheriting a dead owner's pid — stays
+ * undetectable without a heartbeat, and is accepted: it only costs us a reclaim.
  */
 export function markerOwnerAlive(marker: string): boolean {
-  const pid = Number.parseInt(marker.trim().split("-")[0], 10);
+  const id = marker.trim();
+  if (id === RUN_ID) return true; // ours, this run — a sibling session's dirs
+  const pid = Number.parseInt(id.split("-")[0], 10);
   if (!Number.isInteger(pid) || pid <= 0) return true;
-  if (pid === process.pid) return true;
+  if (pid === process.pid) return false; // our pid, not our run → provably stale
   try {
     process.kill(pid, 0); // signal 0 tests existence without delivering anything
     return true;
@@ -191,9 +204,13 @@ export async function materializeSkills(
 export async function cleanupMaterializedSkills(dirs: string[]): Promise<void> {
   for (const dir of dirs) {
     try {
-      await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     } catch {
       /* best-effort: a stray transient skill dir is harmless */
     }
   }
+  // Take the exclude patterns back out with them. Leaving them would outlive the
+  // dirs they describe, and the next thing to appear at that path is the user's
+  // own override of a bundled skill — which would then be invisible to git.
+  await unexcludePathsFromGit(dirs);
 }
