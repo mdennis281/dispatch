@@ -19,9 +19,9 @@
  *
  * Two things make the copy invisible rather than merely temporary:
  *
- * - Every dir we write gets a {@link MATERIALIZED_MARKER} stamped with the id of
- *   the server run that wrote it, so a LATER run can tell its own leftovers from
- *   a repo-owned skill and reclaim them ({@link reclaimOrphans}). Teardown only
+ * - Every dir we write gets a {@link MATERIALIZED_MARKER} stamped with the pid of
+ *   the server that wrote it, so a later run can tell its own leftovers from a
+ *   repo-owned skill and reclaim them ({@link reclaimOrphans}). Teardown only
  *   runs on a clean turn end; a hard kill used to strand these dirs forever, and
  *   because materialization skips a target that already exists, a stranded copy
  *   also silently pinned that skill at its old content.
@@ -36,14 +36,16 @@ import { randomUUID } from "node:crypto";
 import type { SkillConfig } from "@dispatch/shared";
 import { excludePathsFromGit } from "./git-exclude.js";
 
-/** Stamp file marking a skill dir as ours to delete. Contains the writing run's id. */
+/** Stamp file marking a skill dir as ours to delete. Holds the writing server's id. */
 export const MATERIALIZED_MARKER = ".dispatch-materialized";
 
 /**
- * Identifies THIS server run. Orphan reclamation keys on it rather than on a
- * timestamp so that two chats sharing one project dir don't sweep each other:
- * within a run every session writes the same id and skips the others' dirs,
- * while anything left by a previous run is unambiguously abandoned.
+ * Identifies THIS server run. The PID PREFIX is the load-bearing part: it is what
+ * lets a marker be judged across processes, which matters because the two
+ * documented instances (the installed app on 4318 and `pnpm dev` on 4319) share
+ * `config/` — hence the projects roster, hence a project `path`. Both can have a
+ * chat cwd'd to one repo at the same time. The uuid only disambiguates a pid the
+ * OS later recycles.
  */
 const RUN_ID = `${process.pid}-${randomUUID()}`;
 
@@ -53,35 +55,75 @@ export function skillsTargetDir(cwd: string, providerDir: ".claude" | ".agents" 
 }
 
 /**
- * Delete skill dirs under `base` that a PREVIOUS server run materialized. A dir
- * with no marker is somebody else's (a repo-owned skill, or a user's own) and is
- * never touched; a dir marked with the current run id belongs to a live sibling
- * session. Returns the dirs removed. Never throws.
+ * Is the server that wrote this marker still running? Reclaiming keys on THIS,
+ * not on "the id isn't mine": the other instance's agent may be mid-turn against
+ * these very dirs, and its skill set is not necessarily ours (dev materializes
+ * this checkout's skills, stable the published payload's), so deleting them
+ * would strip a live session of skills this run would never put back.
+ *
+ * Errs toward "alive" in every ambiguous case — an unparseable marker, or a pid
+ * we may not signal (EPERM). Failing that way just means we don't tidy up; the
+ * owner's own teardown or a later run gets it. Failing the other way corrupts a
+ * running session.
  */
-export async function reclaimOrphans(base: string): Promise<string[]> {
+export function markerOwnerAlive(marker: string): boolean {
+  const pid = Number.parseInt(marker.trim().split("-")[0], 10);
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0); // signal 0 tests existence without delivering anything
+    return true;
+  } catch (err) {
+    // EPERM = it exists, we're just not allowed to signal it (another user).
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** What a reclamation pass did, so the caller can tell "gone" from "still broken". */
+export interface ReclaimResult {
+  /** Dirs fully removed. */
+  removed: string[];
+  /** Dirs we own and tried to remove but couldn't fully delete — possibly wreckage. */
+  stuck: string[];
+}
+
+/**
+ * Delete skill dirs under `base` whose owning server is gone. A dir with no
+ * marker is somebody else's (the repo's own skill, or the user's) and is never
+ * touched; a dir whose owner is still running is left alone whether that owner
+ * is this process or the other instance.
+ *
+ * A dir that resists deletion is reported as `stuck` rather than dropped: it may
+ * now be half-emptied, and letting the caller's "already exists" check skip it
+ * would hand the session a skill dir with no `SKILL.md`. Never throws.
+ */
+export async function reclaimOrphans(base: string): Promise<ReclaimResult> {
   const removed: string[] = [];
+  const stuck: string[] = [];
   let entries;
   try {
     entries = await readdir(base, { withFileTypes: true });
   } catch {
-    return removed; // no skills dir yet — nothing to reclaim
+    return { removed, stuck }; // no skills dir yet — nothing to reclaim
   }
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const dir = join(base, entry.name);
     try {
-      if ((await readFile(join(dir, MATERIALIZED_MARKER), "utf8")).trim() === RUN_ID) continue;
+      if (markerOwnerAlive(await readFile(join(dir, MATERIALIZED_MARKER), "utf8"))) continue;
     } catch {
       continue; // unmarked (or unreadable) → not ours to delete
     }
     try {
-      await rm(dir, { recursive: true, force: true });
+      // Retries because this is Windows: a file the dead owner's child process
+      // still holds open answers EBUSY/EPERM for a moment after it dies.
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
       removed.push(dir);
     } catch {
-      /* a locked leftover just stays; the merge below will reuse it */
+      stuck.push(dir);
     }
   }
-  return removed;
+  return { removed, stuck };
 }
 
 /**
@@ -98,12 +140,14 @@ export async function materializeSkills(
   const base = skillsTargetDir(cwd, providerDir);
   // Before deciding what "already exists" means, take back anything a crashed
   // run left behind — otherwise its stale copy reads as a repo-owned skill.
-  await reclaimOrphans(base);
+  const { stuck } = await reclaimOrphans(base);
   const created: string[] = [];
   for (const skill of skills) {
     const target = join(base, skill.dir);
-    // Never clobber a skill the repo already ships at this path.
-    if (existsSync(target)) continue;
+    // Never clobber a skill the repo already ships at this path — UNLESS it's a
+    // dir we own that resisted reclamation, which may now be half-emptied.
+    // Copying over it repairs it; skipping would leave a skill with no body.
+    if (existsSync(target) && !stuck.includes(target)) continue;
     try {
       await mkdir(base, { recursive: true });
       if (skill.layout === "dir") {
