@@ -8,6 +8,8 @@ import {
   materializeSkills,
   cleanupMaterializedSkills,
   skillsTargetDir,
+  reclaimOrphans,
+  MATERIALIZED_MARKER,
 } from "./skill-materializer.js";
 
 let srcDir: string;
@@ -89,9 +91,99 @@ describe("skill-materializer", () => {
     expect(await readFile(join(existing, "SKILL.md"), "utf8")).toBe("REPO OWNED");
   });
 
+  it("hides what it creates from git, so a project without a `.claude` ignore is quiet", async () => {
+    await mkdir(join(cwd, ".git"), { recursive: true });
+    await writeDirSkill("sprite", "SKILL body");
+    await materializeSkills(cwd, [dirSkill("sprite")]);
+
+    // Polled, not awaited: the exclude write is fire-and-forget on purpose so it
+    // never adds latency to the launch path (see `materializeSkills`).
+    const exclude = join(cwd, ".git", "info", "exclude");
+    for (let i = 0; i < 100 && !existsSync(exclude); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(await readFile(exclude, "utf8")).toContain("/.claude/skills/sprite/");
+  });
+
   it("empty skill list → no work, no dirs created", async () => {
     const created = await materializeSkills(cwd, []);
     expect(created).toEqual([]);
     expect(existsSync(skillsTargetDir(cwd))).toBe(false);
+  });
+});
+
+/* ------------------------------------------------- orphans from a dead run */
+
+/** Fake a dir left by a PREVIOUS server run: our marker, a different run id. */
+async function writeOrphan(name: string, body: string) {
+  const dir = join(skillsTargetDir(cwd), name);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "SKILL.md"), body, "utf8");
+  await writeFile(join(dir, MATERIALIZED_MARKER), "1234-a-previous-run", "utf8");
+  return dir;
+}
+
+describe("orphan reclamation", () => {
+  it("stamps every dir it creates, so a later run can recognize its own", async () => {
+    await writeDirSkill("sprite", "SKILL body");
+    await materializeSkills(cwd, [dirSkill("sprite")]);
+
+    const marker = join(skillsTargetDir(cwd), "sprite", MATERIALIZED_MARKER);
+    expect(existsSync(marker)).toBe(true);
+    expect(await readFile(marker, "utf8")).not.toBe("");
+  });
+
+  it("reclaims a dead run's leftover AND replaces its stale content", async () => {
+    // A hard kill (which Windows can't make graceful) skips teardown entirely,
+    // so the dir survives — and because materialization skips a target that
+    // exists, the stale copy also PINNED the skill at its old text.
+    await writeOrphan("sprite", "STALE from a killed run");
+    await writeDirSkill("sprite", "CURRENT body");
+
+    const created = await materializeSkills(cwd, [dirSkill("sprite")]);
+
+    const target = join(skillsTargetDir(cwd), "sprite");
+    expect(created).toEqual([target]);
+    expect(await readFile(join(target, "SKILL.md"), "utf8")).toBe("CURRENT body");
+  });
+
+  it("never reclaims an UNMARKED dir — that's the repo's own skill", async () => {
+    const own = join(skillsTargetDir(cwd), "sprite");
+    await mkdir(own, { recursive: true });
+    await writeFile(join(own, "SKILL.md"), "REPO OWNED", "utf8");
+    await writeDirSkill("sprite", "CONFIG version");
+
+    const created = await materializeSkills(cwd, [dirSkill("sprite")]);
+
+    expect(created).toEqual([]);
+    expect(await readFile(join(own, "SKILL.md"), "utf8")).toBe("REPO OWNED");
+  });
+
+  it("never reclaims THIS run's dirs — a sibling session may be using them", async () => {
+    // Two chats can share one project dir. Sweeping on a timestamp would let the
+    // second one delete the first's skills mid-turn; keying on the run id can't.
+    await writeDirSkill("sprite", "SKILL body");
+    await materializeSkills(cwd, [dirSkill("sprite")]);
+
+    const second = await materializeSkills(cwd, [dirSkill("sprite")]);
+
+    expect(second).toEqual([]);
+    const target = join(skillsTargetDir(cwd), "sprite");
+    expect(await readFile(join(target, "SKILL.md"), "utf8")).toBe("SKILL body");
+  });
+
+  it("reclaimOrphans on a cwd with no skills dir is a no-op", async () => {
+    await expect(reclaimOrphans(skillsTargetDir(cwd))).resolves.toEqual([]);
+  });
+
+  it("reclaimOrphans reports exactly what it removed", async () => {
+    const orphan = await writeOrphan("gone", "stale");
+    const own = join(skillsTargetDir(cwd), "kept");
+    await mkdir(own, { recursive: true });
+    await writeFile(join(own, "SKILL.md"), "REPO OWNED", "utf8");
+
+    expect(await reclaimOrphans(skillsTargetDir(cwd))).toEqual([orphan]);
+    expect(existsSync(orphan)).toBe(false);
+    expect(existsSync(own)).toBe(true);
   });
 });
