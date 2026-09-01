@@ -181,6 +181,19 @@ describe("GET /api/git/* — reading", () => {
     expect(worktree.headers["x-content-type-options"]).toBe("nosniff");
     expect(worktree.rawPayload.equals(workingBytes)).toBe(true);
 
+    const imageHead = await app.inject({
+      method: "HEAD",
+      url: q("/api/git/file/raw", {
+        repoPath: repo,
+        relPath: "chart.png",
+        rev: "WORKTREE",
+      }),
+    });
+    expect(imageHead.statusCode).toBe(200);
+    expect(imageHead.headers["x-dispatch-binary"]).toBe("true");
+    expect(imageHead.headers["content-length"]).toBe(String(workingBytes.length));
+    expect(imageHead.rawPayload).toHaveLength(0);
+
     const index = await get(
       q("/api/git/file/raw", { repoPath: repo, relPath: "chart.png", rev: "INDEX" }),
     );

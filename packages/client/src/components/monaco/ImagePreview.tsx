@@ -6,7 +6,15 @@
  * canvas here means both surfaces get the same transparency treatment and
  * sizing instead of source control inventing a second image viewer.
  */
-export function ImagePreview({ src, alt }: { src: string; alt: string }) {
+export function ImagePreview({
+  src,
+  alt,
+  onError,
+}: {
+  src: string;
+  alt: string;
+  onError?: () => void;
+}) {
   return (
     <div
       className="flex h-full min-h-0 items-center justify-center overflow-auto p-6"
@@ -22,6 +30,7 @@ export function ImagePreview({ src, alt }: { src: string; alt: string }) {
       <img
         src={src}
         alt={alt}
+        onError={onError}
         className="max-h-full max-w-full rounded-sm border border-line-strong bg-inset shadow-[var(--shadow-pop)]"
         style={{ imageRendering: "pixelated" }}
       />

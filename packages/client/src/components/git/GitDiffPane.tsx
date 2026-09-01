@@ -74,12 +74,45 @@ export function GitDiffPane({
     setLeft(null);
     setRight(null);
     // The EMPTY sentinel never reaches the server — it IS the absence of a side.
-    const fetchSide = (rev: string) =>
-      rev === GIT_REV_EMPTY
-        ? Promise.resolve({ ...EMPTY_FILE, path: relPath })
-        : api.git
+    const fetchSide = async (rev: string): Promise<WorktreeFileContent> => {
+      if (rev === GIT_REV_EMPTY) return { ...EMPTY_FILE, path: relPath };
+      if (!isImagePath(relPath)) {
+        return api.git
+          .file(repoPath, relPath, rev)
+          .catch(() => ({ ...EMPTY_FILE, path: relPath, ref: rev }));
+      }
+
+      try {
+        // A binary preview consumes the raw response below. Asking for its
+        // metadata with HEAD avoids first downloading and discarding a base64
+        // JSON copy of every image over the reverse proxy. Text-based image
+        // files (SVG and Git-LFS pointers) still take the regular file path so
+        // Monaco can show the meaningful text diff.
+        const response = await sessionFetch(gitFileRawUrl(repoPath, relPath, rev), {
+          method: "HEAD",
+        });
+        if (response.status === 404) return { ...EMPTY_FILE, path: relPath, ref: rev };
+        if (!response.ok) throw new Error(`Image metadata request failed (${response.status})`);
+        const binary = response.headers.get("x-dispatch-binary") === "true";
+        if (!binary) {
+          return api.git
             .file(repoPath, relPath, rev)
             .catch(() => ({ ...EMPTY_FILE, path: relPath, ref: rev }));
+        }
+        return {
+          path: relPath,
+          ref: rev,
+          content: "",
+          encoding: "base64",
+          binary: true,
+          size: Number(response.headers.get("content-length")) || 0,
+          exists: true,
+          truncated: false,
+        };
+      } catch {
+        return { ...EMPTY_FILE, path: relPath, ref: rev };
+      }
+    };
 
     Promise.all([fetchSide(leftRev), fetchSide(rightRev)])
       .then(([l, r]) => {
@@ -100,7 +133,9 @@ export function GitDiffPane({
 
   const language = useMemo(() => languageForPath(relPath), [relPath]);
   const binary = !!left?.binary || !!right?.binary;
-  const image = isImagePath(relPath);
+  // An image-shaped filename can still contain meaningful text (SVG or a
+  // Git-LFS pointer). Only binary content belongs in the visual preview.
+  const image = isImagePath(relPath) && binary;
   const leftText = left?.encoding === "utf8" ? left.content : "";
   const rightText = right?.encoding === "utf8" ? right.content : "";
   const truncated = !!left?.truncated || !!right?.truncated;
@@ -306,6 +341,9 @@ function GitImageDiff({
 }
 
 function ImageSide({ label, source, alt }: { label: string; source: ImageSource; alt: string }) {
+  const [decodeError, setDecodeError] = useState(false);
+  useEffect(() => setDecodeError(false), [source.src]);
+
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col" aria-label={label}>
       <div className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2 text-2xs font-semibold uppercase tracking-[0.08em] text-muted">
@@ -316,14 +354,14 @@ function ImageSide({ label, source, alt }: { label: string; source: ImageSource;
           <Centered>
             <Spinner size={18} />
           </Centered>
-        ) : source.error ? (
+        ) : source.error || decodeError ? (
           <Note
             icon={<AlertTriangle className="text-danger" />}
             title="Couldn't preview image"
-            detail={source.error}
+            detail={source.error ?? "The image bytes could not be decoded."}
           />
         ) : source.src ? (
-          <ImagePreview src={source.src} alt={alt} />
+          <ImagePreview src={source.src} alt={alt} onError={() => setDecodeError(true)} />
         ) : null}
       </div>
     </section>

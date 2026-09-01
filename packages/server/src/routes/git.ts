@@ -157,6 +157,10 @@ export function registerGitRoutes(app: FastifyInstance): void {
         reply.header("content-length", String(file.content.length));
         reply.header("cache-control", "private, no-store");
         reply.header("x-content-type-options", "nosniff");
+        reply.header(
+          "x-dispatch-binary",
+          file.content.subarray(0, 8192).includes(0) ? "true" : "false",
+        );
         // SVG is safe in an <img>, but pinning its own resource policy closes
         // the door if this endpoint is ever navigated to directly.
         if (media.mimeType === "image/svg+xml") {
