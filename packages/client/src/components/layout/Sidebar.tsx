@@ -14,13 +14,16 @@ import {
   Trash2,
   Pencil,
   MessagesSquare,
-  Power,
   SquareTerminal,
   BarChart3,
   Brain,
   FolderOpen,
   GitBranch,
   GitPullRequestArrow,
+  Menu,
+  RefreshCw,
+  Activity,
+  Skull,
   type LucideIcon,
 } from "lucide-react";
 import { parsePrRecordKey } from "@dispatch/shared";
@@ -697,12 +700,9 @@ function ChatRow({
   const press = useLongPress(useCallback(() => setTrayHeld(true), []));
 
   // An action taken is the tray's job done, so it goes away with the press that
-  // used it. Rename is where this MATTERS rather than merely tidies: the pencil
-  // is inside the rail, so the dismissal below deliberately ignores it, and
-  // `rename.start()` then unmounts this whole block. Commit the rename from the
-  // on-screen keyboard — OS chrome, which dispatches no pointer event to the
-  // page — and the rail remounts still flagged open, sliding the tray back over
-  // the title you just finished editing, for nobody.
+  // used it. The menu itself is portalled, but clearing the held state still
+  // matters on touch: closing it must not bring the hover rail back over the
+  // title it just renamed.
   const trayAction = (run: () => void) => () => {
     setTrayHeld(false);
     run();
@@ -943,9 +943,9 @@ function ChatRow({
           row is quietly telling you at rest, and the actions that slide over it.
 
           The actions are a full-height TRAY, not floating glyphs. They overhang
-          the title — three 24px buttons in a 32px gutter always will — and
-          against a chat called `**review**: #139 chore(config): commit the…` a
-          transparent pencil sat in the middle of the word it was covering. The
+          the title, and against a chat called
+          `**review**: #139 chore(config): commit the…` transparent glyphs sat
+          in the middle of the word they were covering. The
           tray carries the row's own highlight one step further (`bg-active` over
           `bg-hover`, `accent-ghost` at full strength over the selected row's
           70%), so it reads as part of this row rather than a card dropped on
@@ -986,7 +986,7 @@ function ChatRow({
                   processes moved to the stacked glyphs beside the title, where
                   they are visible on EVERY row rather than only at rest — the
                   gutter's markers vanish the moment the tray slides in, which
-                  is exactly when you are deciding whether to press Power. */}
+                  is exactly when you are deciding whether to open the menu. */}
               <StatusDot tone="warn" pulse size={6} />
             </span>
           )}
@@ -1009,21 +1009,6 @@ function ChatRow({
                 : "bg-[image:linear-gradient(var(--p-active),var(--p-active))]",
             )}
           >
-            {/* Reap, not evict. Nothing takes a chat's processes away on a
-                timer — idle chats hold their session on purpose, because a chat
-                parked waiting for someone to test something has to still be
-                there when they get back. So the decision is a button, and it
-                only appears on a row that actually has something to give back.
-
-                No confirmation dialog: this is REVERSIBLE in the way
-                `DeleteChatDialog` explains delete is not — the transcript
-                survives and the next message starts a fresh session. What it can
-                cost is a running turn, so the tip says so in as many words. */}
-            {processCount > 0 && (
-              <IconButton size="sm" tip={killTip} disabled={killing} onClick={trayAction(onKillProcesses)}>
-                <Power />
-              </IconButton>
-            )}
             {childChats.length > 0 && (
               <IconButton
                 size="sm"
@@ -1035,12 +1020,74 @@ function ChatRow({
                 <MessagesSquare />
               </IconButton>
             )}
-            <IconButton size="sm" tip="Rename chat" onClick={trayAction(rename.start)}>
-              <Pencil />
-            </IconButton>
-            <IconButton size="sm" tip="Delete chat" onClick={trayAction(() => setConfirmDelete(true))}>
-              <Trash2 />
-            </IconButton>
+            <Popover
+              side="right"
+              align="end"
+              className="min-w-[232px] p-1"
+              trigger={({ open, toggle }) => (
+                <IconButton size="sm" tip="Chat options" active={open} onClick={toggle}>
+                  <Menu />
+                </IconButton>
+              )}
+            >
+              {(close) => {
+                const choose = (run: () => void) => {
+                  close();
+                  setTrayHeld(false);
+                  run();
+                };
+
+                return (
+                  <div className="flex flex-col">
+                    <MenuItem icon={<Pencil />} onClick={() => choose(rename.start)}>
+                      Rename
+                    </MenuItem>
+                    <MenuItem
+                      icon={<RefreshCw />}
+                      onClick={() => choose(() => actions.regenerateTitle(chat.id))}
+                    >
+                      Regenerate title
+                    </MenuItem>
+                    <div className="my-1 h-px bg-line" />
+                    <MenuItem
+                      icon={<Activity />}
+                      title={
+                        processCount
+                          ? `${processCount} process${processCount === 1 ? "" : "es"} across this chat branch`
+                          : "No running processes"
+                      }
+                      onClick={() => choose(() => openOverlay("processes"))}
+                    >
+                      {processCount
+                        ? `Running processes (${processCount})…`
+                        : "No running processes"}
+                    </MenuItem>
+                    <MenuItem
+                      icon={<Skull />}
+                      className={cn(
+                        processCount > 0 &&
+                          "!text-danger hover:!text-danger hover:bg-danger/10 [&_span]:text-danger",
+                      )}
+                      disabled={processCount === 0 || killing}
+                      title={processCount ? killTip : "No processes to kill"}
+                      onClick={() => choose(() => void onKillProcesses())}
+                    >
+                      {processCount
+                        ? `Kill branch processes (${processCount})`
+                        : "No processes to kill"}
+                    </MenuItem>
+                    <div className="my-1 h-px bg-line" />
+                    <MenuItem
+                      icon={<Trash2 />}
+                      className="!text-danger hover:!text-danger hover:bg-danger/10 [&_span]:text-danger"
+                      onClick={() => choose(() => setConfirmDelete(true))}
+                    >
+                      Delete chat
+                    </MenuItem>
+                  </div>
+                );
+              }}
+            </Popover>
           </div>
         </div>
       )}
@@ -1492,6 +1539,7 @@ export function Sidebar() {
 
   return (
     <aside
+      data-popover-right-boundary
       className={cn(
         "flex flex-col border-r border-line bg-surface",
         // NOT SELECTABLE on a coarse pointer, on purpose, and there it has to

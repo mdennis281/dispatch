@@ -15,7 +15,12 @@ export interface PopoverProps {
   trigger: (o: { open: boolean; toggle: () => void }) => ReactNode;
   children: ReactNode | ((close: () => void) => ReactNode);
   align?: "start" | "end" | "center";
-  side?: "top" | "bottom";
+  /**
+   * `right` measures the nearest `data-popover-right-boundary` edge and opens
+   * beyond it when the live viewport has room. When it does not, the same menu
+   * falls back to the ordinary viewport-clamped dropdown placement.
+   */
+  side?: "top" | "bottom" | "right";
   className?: string;
   /**
    * Classes for the trigger's WRAPPER, not the trigger itself.
@@ -41,7 +46,16 @@ interface Placement {
   top: number;
   width: number;
   maxHeight: number;
-  side: "top" | "bottom";
+  side: "top" | "bottom" | "right";
+}
+
+/** Pure seam for the fit decision; kept exported so width regressions stay cheap to test. */
+export function fitsToRight(
+  boundaryRight: number,
+  menuWidth: number,
+  viewportWidth: number,
+): boolean {
+  return boundaryRight + GAP + menuWidth <= viewportWidth - MARGIN;
 }
 
 /**
@@ -86,14 +100,43 @@ export function Popover({
     const natural = width ?? menuEl.offsetWidth;
     const menuW = Math.min(maxW, Math.max(natural, Math.round(t.width)));
 
-    // vertical placement + flip toward the roomier side when cramped.
+    // A sidebar flyout is allowed only after BOTH live widths have been read.
+    // The boundary can resize independently of its row (desktop split/layout
+    // changes), while natural menu width can move as labels and counts change.
+    const boundaryEl =
+      side === "right"
+        ? trigEl.closest<HTMLElement>("[data-popover-right-boundary]")
+        : null;
+    const boundaryRight = boundaryEl?.getBoundingClientRect().right ?? t.right;
+    if (side === "right" && fitsToRight(boundaryRight, menuW, vw)) {
+      const needed = menuEl.scrollHeight;
+      const maxHeight = Math.max(MIN_MENU_H, vh - MARGIN * 2);
+      const usedH = Math.min(needed, maxHeight);
+      const top = Math.max(MARGIN, Math.min(t.top, vh - usedH - MARGIN));
+      const left = boundaryRight + GAP;
+
+      setPlacement((prev) =>
+        prev &&
+        prev.left === left &&
+        prev.top === top &&
+        prev.width === menuW &&
+        prev.maxHeight === maxHeight &&
+        prev.side === "right"
+          ? prev
+          : { left, top, width: menuW, maxHeight, side: "right" },
+      );
+      return;
+    }
+
+    // Ordinary dropdown placement + flip toward the roomier vertical side.
+    // `right` deliberately falls through here on a phone or cramped desktop.
     const spaceBelow = vh - t.bottom - GAP - MARGIN;
     const spaceAbove = t.top - GAP - MARGIN;
     const needed = menuEl.scrollHeight;
-    let resolved: "top" | "bottom" = side;
-    if (side === "bottom" && needed > spaceBelow && spaceAbove > spaceBelow) {
+    let resolved: "top" | "bottom" = side === "right" ? "bottom" : side;
+    if (resolved === "bottom" && needed > spaceBelow && spaceAbove > spaceBelow) {
       resolved = "top";
-    } else if (side === "top" && needed > spaceAbove && spaceBelow > spaceAbove) {
+    } else if (resolved === "top" && needed > spaceAbove && spaceBelow > spaceAbove) {
       resolved = "bottom";
     }
     const room = resolved === "bottom" ? spaceBelow : spaceAbove;
@@ -164,6 +207,9 @@ export function Popover({
 
     const ro = new ResizeObserver(onReflow);
     if (menuRef.current) ro.observe(menuRef.current);
+    if (triggerRef.current) ro.observe(triggerRef.current);
+    const boundary = triggerRef.current?.closest<HTMLElement>("[data-popover-right-boundary]");
+    if (boundary) ro.observe(boundary);
 
     return () => {
       document.removeEventListener("mousedown", onDown);
@@ -182,9 +228,11 @@ export function Popover({
           <div
             ref={menuRef}
             role="menu"
+            data-placement={placement?.side}
             className={cn(
               "fixed cm-scroll overflow-y-auto overflow-x-hidden rounded-md border " +
-                "border-line-strong bg-overlay/98 backdrop-blur-md shadow-[var(--shadow-pop)] cm-anim-rise",
+                "border-line-strong bg-overlay/98 backdrop-blur-md shadow-[var(--shadow-pop)]",
+              placement?.side === "right" ? "cm-anim-slide-right" : "cm-anim-rise",
               className,
             )}
             style={
