@@ -74,6 +74,7 @@ import { cn } from "../../lib/cn.js";
 import { midTruncate, relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
 import { useLongPress } from "../../lib/useLongPress.js";
+import { LAYER } from "../../lib/layers.js";
 import { foldedChildrenLabel } from "./reviewLabel.js";
 import { DeleteChatDialog } from "../chat/DeleteChatDialog.js";
 import { useChatRename } from "../chat/useChatRename.js";
@@ -1039,11 +1040,15 @@ function ChatRow({
                 </IconButton>
               )}
             >
-              {(close) => {
+              {(_close, closeAfter) => {
                 const choose = (run: () => void) => {
-                  close();
-                  setTrayHeld(false);
-                  run();
+                  // Some choices (notably Rename) unmount this rail. Defer
+                  // them through Popover's shared close lifecycle so the full
+                  // retract finishes before the action can remove its trigger.
+                  closeAfter(() => {
+                    setTrayHeld(false);
+                    run();
+                  });
                 };
 
                 return (
@@ -1549,8 +1554,12 @@ export function Sidebar() {
   return (
     <aside
       data-popover-right-boundary
+      // The desktop flyout sits one layer below this opaque column, which is
+      // what makes its full-width translated panel genuinely emerge from
+      // underneath instead of being revealed by a growing mask.
+      style={{ zIndex: LAYER.drawer }}
       className={cn(
-        "flex flex-col border-r border-line bg-surface",
+        "relative flex flex-col border-r border-line bg-surface",
         // NOT SELECTABLE on a coarse pointer, on purpose, and there it has to
         // be the whole column.
         //

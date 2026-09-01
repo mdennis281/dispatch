@@ -232,6 +232,7 @@ export default function App() {
         // Measured by `stores/viewport` so the readout can report where this
         // box's bottom edge actually LANDS rather than what it was asked for.
         data-cm-shell=""
+        data-popover-layer-root
         className="fixed inset-x-0 top-0 flex flex-col overflow-hidden bg-app text-primary antialiased"
         style={{ height: "100dvh", paddingBottom: "var(--cm-kb, 0px)" }}
       >
