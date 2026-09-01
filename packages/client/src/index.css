@@ -711,6 +711,20 @@
   }
 }
 
+/* A sidebar menu starts just behind the column edge and travels into the app. */
+@keyframes cm-slide-right {
+  from {
+    opacity: 0;
+    transform: translateX(-14px);
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+    clip-path: inset(0 0 0 0);
+  }
+}
+
 /*
  * The selected row's rail, arriving with some weight behind it.
  *
@@ -757,6 +771,9 @@
 }
 .cm-anim-rise {
   animation: cm-rise 0.18s var(--ease-out) both;
+}
+.cm-anim-slide-right {
+  animation: cm-slide-right 0.22s var(--ease-out) both;
 }
 .cm-anim-spin {
   animation: cm-spin 0.7s linear infinite;
