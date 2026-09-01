@@ -885,7 +885,7 @@ export const api = {
         `/api/worktrees/file${qs({ worktreePath, relPath, ref, mergeBase: mergeBase ? "1" : undefined })}`,
       ),
     /**
-     * Stream a worktree image as a Blob. Keeping it out of the JSON file reader
+     * Fetch a worktree image as a Blob. Keeping it out of the JSON file reader
      * avoids base64's extra copy; the caller must revoke its Blob URL on close.
      */
     image: async (
@@ -903,7 +903,7 @@ export const api = {
           | undefined;
         throw new ApiError(
           res.status,
-          detail?.error ? String(detail.error) : res.statusText || `HTTP ${res.status}`,
+          `Image preview request failed (HTTP ${res.status}).`,
           detail,
         );
       }

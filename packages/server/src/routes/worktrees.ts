@@ -162,9 +162,14 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
         .send({ error: "worktreePath and relPath required" });
     }
 
+    // Never trust the caller to define a filesystem root. Re-read the canonical
+    // path from Dispatch's worktree registry before resolving the relative file.
+    const record = await store.getWorktreeRecord(worktreePath);
+    if (!record) return reply.code(403).send({ error: "unknown-worktree" });
+
     let file;
     try {
-      file = await worktrees.readFile(worktreePath, relPath, {
+      file = await worktrees.readFile(record.path, relPath, {
         maxBytes: IMAGE_PREVIEW_LIMIT_BYTES,
       });
     } catch (err) {
@@ -179,7 +184,10 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
       file.encoding === "base64" ? "base64" : "utf8",
     );
     const media = identifyMedia(content, mediaTypeFromName(file.path));
-    if (mediaKind(media.mimeType) !== "image") {
+    // SVG and text-shaped image filenames (notably Git-LFS pointers) belong in
+    // Monaco so their source/diff remains available. Only actual binary image
+    // content takes the larger visual-preview path.
+    if (!file.binary || mediaKind(media.mimeType) !== "image") {
       return reply.code(415).send({ error: "not-image" });
     }
 

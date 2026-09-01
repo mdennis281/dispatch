@@ -288,9 +288,14 @@ describe("worktree file read (Monaco)", () => {
     }
   });
 
-  it("streams image previews past 2 MiB and caps them at 25 MiB", async () => {
+  it("serves image previews past 2 MiB and caps them at 25 MiB", async () => {
     const wt = await mkdtemp(join(tmpdir(), "cm-wt-image-"));
     try {
+      await store.upsertWorktreeRecord(wt, {
+        projectId: "preview-test",
+        branch: "preview-test",
+        origin: "external",
+      });
       const png = Buffer.from(PNG_B64, "base64");
       const overTwoMiB = Buffer.concat([png, Buffer.alloc(3 * 1024 * 1024)]);
       await writeFile(join(wt, "large.png"), overTwoMiB);
@@ -328,6 +333,30 @@ describe("worktree file read (Monaco)", () => {
       expect(capped.headers["x-dispatch-truncated"]).toBe("1");
       expect(Number(capped.headers["x-dispatch-file-size"])).toBe(overLimit.length);
       expect(capped.rawPayload.length).toBe(IMAGE_PREVIEW_LIMIT_BYTES);
+
+      const lfsPointer = Buffer.from(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 42\n",
+      );
+      await writeFile(join(wt, "pointer.png"), lfsPointer);
+      const textShaped = await app.inject({
+        method: "GET",
+        url: `/api/worktrees/image?worktreePath=${encodeURIComponent(wt)}&relPath=pointer.png`,
+      });
+      expect(textShaped.statusCode).toBe(415);
+      expect(textShaped.json()).toEqual({ error: "not-image" });
+
+      const unregistered = await mkdtemp(join(tmpdir(), "cm-unregistered-image-"));
+      try {
+        await writeFile(join(unregistered, "private.png"), png);
+        const denied = await app.inject({
+          method: "GET",
+          url: `/api/worktrees/image?worktreePath=${encodeURIComponent(unregistered)}&relPath=private.png`,
+        });
+        expect(denied.statusCode).toBe(403);
+        expect(denied.json()).toEqual({ error: "unknown-worktree" });
+      } finally {
+        await rm(unregistered, { recursive: true, force: true });
+      }
     } finally {
       await rm(wt, { recursive: true, force: true });
     }

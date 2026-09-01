@@ -37,6 +37,7 @@ import { Chip } from "../ui/Chip.js";
 import { cn } from "../../lib/cn.js";
 import { useDialogLayer } from "../../lib/layers.js";
 import { midTruncate } from "../../lib/format.js";
+import { ApiError } from "../../lib/api.js";
 import { leaseImagePreview } from "./imagePreviewLease.js";
 
 const MonacoPane = lazy(() => import("./MonacoPane.js"));
@@ -114,10 +115,38 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
     setOriginal(null);
     setImage(null);
 
-    if (isImage) {
-      const abort = new AbortController();
-      readWorktreeImage(worktreePath, relPath, abort.signal)
-        .then((result) => {
+    const abort = new AbortController();
+    const loadText = async () => {
+      const [w, o] = await Promise.all([
+        readWorktreeFile(worktreePath, relPath),
+        // `true` = read the base side at the fork point, not at `base`'s tip.
+        // Otherwise a branch cut before `main` moved shows every commit that
+        // landed since as its own deletion — hunks it never made, on files the
+        // worktree panel's list (which is merge-base'd) doesn't even mention.
+        readWorktreeFile(worktreePath, relPath, base, true).catch(() => ({
+          ...EMPTY_FILE,
+          path: relPath,
+          ref: base,
+        })),
+      ]);
+      if (!live) return;
+      setWorking(w);
+      setOriginal(o);
+      const seed = w.encoding === "utf8" ? w.content : "";
+      setDraft(seed);
+      setBaseline(seed);
+      setSaveErr(null);
+      setLoading(false);
+    };
+
+    const load = async () => {
+      if (isImage) {
+        try {
+          const result = await readWorktreeImage(
+            worktreePath,
+            relPath,
+            abort.signal,
+          );
           if (!live) return;
           imageLease = leaseImagePreview(result.blob);
           setImage({
@@ -127,48 +156,29 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
             truncated: result.truncated,
           });
           setLoading(false);
-        })
-        .catch((e: unknown) => {
-          if (!live) return;
-          setError(e instanceof Error ? e.message : "Failed to read image.");
-          setLoading(false);
-        });
-      return () => {
-        live = false;
-        abort.abort();
-        imageLease?.dispose();
-      };
-    }
+          return;
+        } catch (e) {
+          // SVG, Git-LFS pointers, empty image-named files, and files removed
+          // since their tool card rendered all remain useful in Monaco. The raw
+          // route rejects or cannot find them, so preserve the old text/missing
+          // behavior through the regular 2 MiB reader.
+          if (!(e instanceof ApiError) || (e.status !== 404 && e.status !== 415)) {
+            throw e;
+          }
+        }
+      }
+      await loadText();
+    };
 
-    Promise.all([
-      readWorktreeFile(worktreePath, relPath),
-      // `true` = read the base side at the fork point, not at `base`'s tip.
-      // Otherwise a branch cut before `main` moved shows every commit that
-      // landed since as its own deletion — hunks it never made, on files the
-      // worktree panel's list (which is merge-base'd) doesn't even mention.
-      readWorktreeFile(worktreePath, relPath, base, true).catch(() => ({
-        ...EMPTY_FILE,
-        path: relPath,
-        ref: base,
-      })),
-    ])
-      .then(([w, o]) => {
-        if (!live) return;
-        setWorking(w);
-        setOriginal(o);
-        const seed = w.encoding === "utf8" ? w.content : "";
-        setDraft(seed);
-        setBaseline(seed);
-        setSaveErr(null);
-        setLoading(false);
-      })
-      .catch((e: unknown) => {
-        if (!live) return;
-        setError(e instanceof Error ? e.message : "Failed to read file.");
-        setLoading(false);
-      });
+    void load().catch((e: unknown) => {
+      if (!live) return;
+      setError(e instanceof Error ? e.message : "Failed to read file.");
+      setLoading(false);
+    });
     return () => {
       live = false;
+      abort.abort();
+      imageLease?.dispose();
     };
   }, [worktreePath, relPath, base, isImage]);
 
@@ -184,7 +194,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   const language = useMemo(() => languageForPath(relPath), [relPath]);
   const workingBinary = !!working?.binary;
   // No editable diff — the config editor is always a single-file edit.
-  const canDiff = !isImage && !workingBinary && !error && !editable;
+  const canDiff = !image && !workingBinary && !error && !editable;
   const effectiveMode: CodeViewerMode = canDiff ? mode : "file";
 
   const modifiedText = working?.encoding === "utf8" ? working.content : "";
@@ -317,7 +327,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
               title="Couldn't open this file"
               detail={error}
             />
-          ) : isImage && image ? (
+          ) : image ? (
             <ImagePreview src={image.src} alt={baseName(relPath)} />
           ) : workingBinary ? (
             <StateNote

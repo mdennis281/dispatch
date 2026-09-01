@@ -339,7 +339,7 @@ export const readWorktreeFile = (
   mergeBase?: boolean,
 ) => api.worktrees.file(worktreePath, relPath, ref, mergeBase);
 
-/** Stream an image preview; closing the viewer aborts this request if still live. */
+/** Fetch an image preview; closing the viewer aborts this request if still live. */
 export const readWorktreeImage = (
   worktreePath: string,
   relPath: string,
