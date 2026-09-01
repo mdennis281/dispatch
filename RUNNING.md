@@ -78,7 +78,11 @@ workflow:
   pr:                         # what a PR here must include (see below); `review` only
     # Exact login. Copilot's carries the `[bot]` suffix, and quoting matters:
     # bare `[...]` at the start of a YAML scalar is a flow sequence.
-    reviewers: ["copilot-pull-request-reviewer[bot]"]
+    reviewers:
+      - "copilot-pull-request-reviewer[bot]"
+      # A row can be kept but switched OFF — never requested, one click from
+      # being asked again, and no login to retype exactly right to get it back.
+      - { login: dispatch-review, enabled: false }
     requireReview: true       # not "done" until a requested reviewer reports
     requireChecks: true       # on-green REFUSES when zero checks reported
     draft: false              # open PRs as drafts
@@ -105,7 +109,7 @@ correctly, and on a real run all four of these went wrong at once:
 
 | Field | Default (`review`) | What it does |
 |---|---|---|
-| `reviewers` | `["copilot-pull-request-reviewer[bot]"]` | Logins and/or `org/team` slugs `create_pr` requests on every PR. Nothing else remembers to. Defaults to Copilot so `requireReview` asks for a review someone can actually give; author `reviewers: []` to request nobody. |
+| `reviewers` | `["copilot-pull-request-reviewer[bot]"]` | Logins and/or `org/team` slugs `create_pr` requests on every PR. Nothing else remembers to. Defaults to Copilot so `requireReview` asks for a review someone can actually give; author `reviewers: []` to request nobody. A bare string is asked; `{ login: x, enabled: false }` is kept in the list and never asked — which is how you alternate between reviewers without retyping a login (Config → Reviewer gives each row a switch). |
 | `requireReview` | `true` | `approve_pr` refuses while no requested reviewer has **reported** (an outstanding request is the opposite of a review). |
 | `requireChecks` | `true` | `approve_pr` refuses when **no check reported at all** — "green" on no evidence is not green. |
 | `draft` | `false` | Open PRs as drafts. |

@@ -39,11 +39,13 @@ import {
   X,
 } from "lucide-react";
 import {
+  authorReviewerRoster,
   COPILOT_LOGIN,
   resolveWorkflow,
   type Effort,
   type ReviewerCheck,
   type ReviewerIdentity,
+  type ReviewerRosterEntry,
   type ReviewerStatus,
   type ReviewerVerify,
   type WorkflowConfig,
@@ -54,6 +56,7 @@ import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Select } from "../ui/Select.js";
 import { Spinner } from "../ui/Spinner.js";
+import { Switch } from "../ui/Switch.js";
 import { OptionCard, ToggleRow } from "../ui/ToggleRow.js";
 import { cn } from "../../lib/cn.js";
 
@@ -161,8 +164,8 @@ export function ReviewerSection({
           ASKED when a PR opens, and the agent below is a separate answer to the
           same question. They are not alternatives — a project can have both. */}
       <ReviewerList
-        value={pr.reviewers}
-        onChange={(reviewers) => patchPr({ reviewers })}
+        value={pr.reviewerRoster}
+        onChange={(roster) => patchPr({ reviewers: authorReviewerRoster(roster) })}
         requireReview={pr.requireReview}
         disabled={disabled}
       />
@@ -293,6 +296,13 @@ export function ReviewerSection({
  * with `?? base` precisely so `reviewers: []` means "ask nobody" instead of
  * falling back to the profile's Copilot default. So the empty state says what
  * that choice costs rather than looking like a form you forgot to fill in.
+ *
+ * Each row has a SWITCH as well as a delete, because who reviews here is
+ * something people alternate — Copilot on the noisy weeks, a named account on
+ * the careful ones — and a list that only supported add and remove made every
+ * switch a retype of a login that has to be exactly right (`[bot]` suffix and
+ * all) to work at all. Getting it wrong is silent: GitHub takes the request and
+ * queues nobody, and the PR waits for a review that is never coming.
  */
 function ReviewerList({
   value,
@@ -300,13 +310,14 @@ function ReviewerList({
   requireReview,
   disabled,
 }: {
-  value: string[];
-  onChange: (next: string[]) => void;
+  value: ReviewerRosterEntry[];
+  onChange: (next: ReviewerRosterEntry[]) => void;
   /** Drives the empty-state warning: with this off, an empty list blocks nothing. */
   requireReview: boolean;
   disabled?: boolean;
 }) {
   const [entry, setEntry] = useState("");
+  const asked = value.filter((r) => r.enabled);
 
   const add = () => {
     // A pasted `@octocat` is the same reviewer as `octocat`, and GitHub would
@@ -314,9 +325,17 @@ function ReviewerList({
     // case-insensitive, so two rows would ask one person twice.
     const login = entry.trim().replace(/^@/, "");
     if (!login) return;
-    if (!value.some((v) => v.toLowerCase() === login.toLowerCase())) onChange([...value, login]);
+    const at = value.findIndex((v) => v.login.toLowerCase() === login.toLowerCase());
+    // Typing the login of a row that is switched off SWITCHES IT ON. The
+    // alternative is a button that visibly does nothing, on the one input where
+    // "nothing happened" and "I typed it wrong" look identical.
+    if (at >= 0) onChange(value.map((v, i) => (i === at ? { ...v, enabled: true } : v)));
+    else onChange([...value, { login, enabled: true }]);
     setEntry("");
   };
+
+  const setEnabled = (login: string, enabled: boolean) =>
+    onChange(value.map((v) => (v.login === login ? { ...v, enabled } : v)));
 
   return (
     <div className="rounded-md border border-line bg-panel-2/40">
@@ -329,26 +348,43 @@ function ReviewerList({
         </span>
       </div>
 
-      {value.length > 0 ? (
+      {value.length > 0 && (
         <ul className="border-t border-line-soft">
-          {value.map((login) => {
+          {value.map(({ login, enabled }) => {
             const team = login.includes("/");
             const Icon = team ? Users : login.endsWith("]") ? Bot : UserRound;
             return (
+              // Keyed by login, which `normalizeReviewerRoster` guarantees is
+              // unique (case-insensitively) — the same guarantee the handlers
+              // below lean on when they match a row by its login.
               <li
                 key={login}
                 className="flex items-center gap-2 border-b border-line-soft px-3 py-1.5 last:border-b-0"
               >
-                <Icon className="size-3.5 shrink-0 text-muted" />
-                <span className="cm-mono truncate text-xs text-secondary">{login}</span>
-                <span className="ml-auto shrink-0 text-2xs text-faint">
-                  {team ? "team" : "user"}
+                <Icon className={cn("size-3.5 shrink-0", enabled ? "text-muted" : "text-faint")} />
+                <span
+                  className={cn(
+                    "cm-mono truncate text-xs",
+                    enabled ? "text-secondary" : "text-faint line-through decoration-faint",
+                  )}
+                >
+                  {login}
                 </span>
+                <span className="ml-auto shrink-0 text-2xs text-faint">
+                  {enabled ? (team ? "team" : "user") : "off"}
+                </span>
+                <Switch
+                  checked={enabled}
+                  onChange={(v) => setEnabled(login, v)}
+                  label=""
+                  ariaLabel={enabled ? `Stop asking ${login}` : `Ask ${login} again`}
+                  disabled={disabled}
+                />
                 <IconButton
                   size="sm"
-                  tip={`Stop asking ${login}`}
+                  tip={`Remove ${login} from the list`}
                   disabled={disabled}
-                  onClick={() => onChange(value.filter((v) => v !== login))}
+                  onClick={() => onChange(value.filter((v) => v.login !== login))}
                 >
                   <X />
                 </IconButton>
@@ -356,11 +392,15 @@ function ReviewerList({
             );
           })}
         </ul>
-      ) : (
+      )}
+
+      {asked.length === 0 && (
         <div className="flex items-start gap-2 border-t border-line-soft px-3 py-2">
           <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-warn" />
           <p className="text-2xs leading-snug text-secondary">
-            Nobody. GitHub is asked for no review when a PR opens here
+            {value.length > 0
+              ? "Every reviewer here is switched off, so GitHub is asked for no review when a PR opens"
+              : "Nobody. GitHub is asked for no review when a PR opens here"}
             {requireReview ? (
               <>
                 {" "}
@@ -399,12 +439,15 @@ function ReviewerList({
         <Button size="sm" leftIcon={<Plus />} disabled={disabled || !entry.trim()} onClick={add}>
           Add
         </Button>
-        {!value.some((v) => v.toLowerCase() === COPILOT_LOGIN) && (
+        {/* Gone once Copilot is IN the list, on or off — a muted row already has
+            its own switch two lines up, and a button that re-adds what you can
+            see would either duplicate the row or silently do nothing. */}
+        {!value.some((v) => v.login.toLowerCase() === COPILOT_LOGIN) && (
           <Button
             size="sm"
             variant="ghost"
             disabled={disabled}
-            onClick={() => onChange([...value, COPILOT_LOGIN])}
+            onClick={() => onChange([...value, { login: COPILOT_LOGIN, enabled: true }])}
           >
             Add Copilot
           </Button>

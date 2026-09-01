@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { resolveWorkflow, classifyWorkflowViolation, COPILOT_LOGIN } from "./workflow.js";
+import {
+  resolveWorkflow,
+  classifyWorkflowViolation,
+  authorReviewerRoster,
+  normalizeReviewerRoster,
+  COPILOT_LOGIN,
+} from "./workflow.js";
+import type { PrReviewerEntry } from "./workflow.js";
 
 describe("resolveWorkflow", () => {
   it("resolves `none` to the no-ceremony posture", () => {
@@ -100,6 +107,7 @@ describe("resolveWorkflow", () => {
       // Copilot by default, so `requireReview` asks for a review someone can
       // actually give instead of blocking on a reviewer nobody configured.
       reviewers: [COPILOT_LOGIN],
+      reviewerRoster: [{ login: COPILOT_LOGIN, enabled: true }],
       requireReview: true,
       requireChecks: true,
       draft: false,
@@ -129,6 +137,10 @@ describe("resolveWorkflow", () => {
     });
     expect(wf.pr).toEqual({
       reviewers: ["copilot-pull-request-reviewer", "acme/platform"],
+      reviewerRoster: [
+        { login: "copilot-pull-request-reviewer", enabled: true },
+        { login: "acme/platform", enabled: true },
+      ],
       // Unauthored fields still fall through to the profile default.
       requireReview: true,
       requireChecks: false,
@@ -182,6 +194,43 @@ describe("resolveWorkflow", () => {
     expect(wf.pr.reviewers).toEqual([]);
   });
 
+  it("keeps a muted reviewer in the roster and out of the request list", () => {
+    // The switch has to resolve away HERE, once. `create_pr`, `request_review`,
+    // the dedicated-account check and `approve_pr`'s `no-review` refusal all read
+    // `pr.reviewers`, and a mute only some of them honoured would be worse than
+    // no mute at all — a PR requested from somebody the config says is off.
+    const wf = resolveWorkflow({
+      workflow: {
+        profile: "review",
+        pr: { reviewers: [{ login: COPILOT_LOGIN, enabled: false }, "dispatch-review"] },
+      },
+    });
+    expect(wf.pr.reviewers).toEqual(["dispatch-review"]);
+    expect(wf.pr.reviewerRoster).toEqual([
+      { login: COPILOT_LOGIN, enabled: false },
+      { login: "dispatch-review", enabled: true },
+    ]);
+  });
+
+  it("reads a bare login as an ENABLED reviewer", () => {
+    // Every manifest written before the switch existed is a list of bare strings,
+    // and each one has to keep meaning "ask this reviewer" — the alternative is a
+    // silent upgrade that stops requesting anyone.
+    const wf = resolveWorkflow({
+      workflow: { profile: "review", pr: { reviewers: ["octocat", { login: "hubot" }] } },
+    });
+    expect(wf.pr.reviewers).toEqual(["octocat", "hubot"]);
+  });
+
+  it("resolves an all-muted roster to the same empty request list as `reviewers: []`", () => {
+    const wf = resolveWorkflow({
+      workflow: { profile: "review", pr: { reviewers: [{ login: "octocat", enabled: false }] } },
+    });
+    expect(wf.pr.reviewers).toEqual([]);
+    // But the row survives, which is the whole difference from deleting it.
+    expect(wf.pr.reviewerRoster).toEqual([{ login: "octocat", enabled: false }]);
+  });
+
   it("clamps the PR policy to inert on the rungs that have no PR", () => {
     // Same reason autoMerge is clamped: no consumer should have to re-check the
     // profile before trusting a resolved field.
@@ -200,6 +249,7 @@ describe("resolveWorkflow", () => {
       });
       expect(wf.pr, profile).toEqual({
         reviewers: [],
+        reviewerRoster: [],
         requireReview: false,
         requireChecks: false,
         draft: false,
@@ -343,5 +393,48 @@ describe("classifyWorkflowViolation", () => {
   it("ignores a `main` that is merely an argument to something else", () => {
     expect(classifyWorkflowViolation("git log origin/main", onTrunk)).toBeNull();
     expect(classifyWorkflowViolation("gh pr list --base main", onBranch)).toBeNull();
+  });
+});
+
+describe("the reviewer roster", () => {
+  it("drops a blank entry rather than passing it on as a login", () => {
+    // A stray `- ""` in the YAML reaches `POST /pulls/{n}/requested_reviewers`
+    // as a reviewer name, where it fails the whole batch — including the real
+    // reviewers sitting next to it in the same request.
+    expect(normalizeReviewerRoster(["octocat", "  ", { login: "" }])).toEqual([
+      { login: "octocat", enabled: true },
+    ]);
+  });
+
+  it("collapses a duplicated login, first row winning", () => {
+    // A hand-edited manifest can hold one login twice in disagreeing states, and
+    // there is no meaning to resolve there — GitHub logins are case-insensitive,
+    // so it is one reviewer asked twice. Collapsing is also what lets the editor
+    // key its rows by login: a switch on one row must not move another.
+    expect(normalizeReviewerRoster(["Octocat", { login: "octocat", enabled: false }])).toEqual([
+      { login: "Octocat", enabled: true },
+    ]);
+  });
+
+  it("skips a malformed row instead of throwing mid-resolve", () => {
+    // Every path here is schema-validated first, but this function is exported
+    // and pure — and a TypeError thrown inside `resolveWorkflow` takes out
+    // whatever was resolving the workflow, rather than the one row written wrong.
+    const junk = [{ enabled: false }, null, 7, "octocat"] as unknown as PrReviewerEntry[];
+    expect(normalizeReviewerRoster(junk)).toEqual([{ login: "octocat", enabled: true }]);
+  });
+
+  it("round-trips through the authored form, keeping bare logins bare", () => {
+    // Long-form every row and a project that never touched a switch gets a diff
+    // on a committed file in which nothing actually changed.
+    const authored = authorReviewerRoster([
+      { login: "octocat", enabled: true },
+      { login: COPILOT_LOGIN, enabled: false },
+    ]);
+    expect(authored).toEqual(["octocat", { login: COPILOT_LOGIN, enabled: false }]);
+    expect(normalizeReviewerRoster(authored)).toEqual([
+      { login: "octocat", enabled: true },
+      { login: COPILOT_LOGIN, enabled: false },
+    ]);
   });
 });

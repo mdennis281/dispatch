@@ -744,14 +744,23 @@ export class ProjectConfigService {
     }
     if (hasCi) return;
 
+    // The gate above is the ASKED list, so a roster whose every row is switched
+    // off lands here too — and "the list is empty, add a login" would be
+    // misdirection about a login the reader can see, one switch away, on the
+    // same config screen this error is shown on.
+    const muted = wf.pr.reviewerRoster.length > 0;
     errors.push({
       scope: "manifest",
       file: MANIFEST_FILE,
       message:
         "`workflow.autoMerge: on-green` is vacuous here: this repo has no GitHub Actions " +
         "workflows, so no check ever reports and \"green\" is trivially true — and " +
-        "`workflow.pr.reviewers` is empty, so nobody is asked to look either. Add a CI " +
-        "workflow, list reviewers under `workflow.pr.reviewers`, or turn auto-merge off. " +
+        (muted
+          ? "every reviewer in `workflow.pr.reviewers` is switched off, so nobody is asked " +
+            "to look either. Add a CI workflow, switch a reviewer back on, or turn " +
+            "auto-merge off. "
+          : "`workflow.pr.reviewers` is empty, so nobody is asked to look either. Add a CI " +
+            "workflow, list reviewers under `workflow.pr.reviewers`, or turn auto-merge off. ") +
         "Until then `pr.requireChecks`/`pr.requireReview` will refuse the merge.",
     });
   }
