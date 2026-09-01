@@ -348,6 +348,11 @@ export function fsAssetUrl(chatId: string, path: string): string {
   return `${BASE}/api/chats/${chatId}/fs-asset?path=${encodeURIComponent(path)}`;
 }
 
+/** Raw bytes for an image at a git snapshot, fetched with the active session. */
+export function gitFileRawUrl(repoPath: string, relPath: string, rev: string): string {
+  return `${BASE}/api/git/file/raw${qs({ repoPath, relPath, rev })}`;
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
