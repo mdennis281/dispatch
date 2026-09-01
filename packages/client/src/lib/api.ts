@@ -18,6 +18,7 @@ import type {
   NotificationPrefs,
   PermissionRequest,
   RunnerInstance,
+  RunnerLogLine,
   RegistryQuery,
   TerminalInfo,
   WorktreeInfo,
@@ -701,8 +702,7 @@ export const api = {
       chatId?: string;
     }) => post<RunnerInstance>("/api/runners", body),
     stop: (id: string) => del<void>(`/api/runners/${id}`),
-    logs: (id: string) =>
-      get<{ stream: string; line: string; ts: number }[]>(`/api/runners/${id}/logs`),
+    logs: (id: string) => get<RunnerLogLine[]>(`/api/runners/${id}/logs`),
   },
 
   /* OS-level process inspector — what's actually holding a project's ports */

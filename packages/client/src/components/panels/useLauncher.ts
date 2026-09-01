@@ -213,6 +213,8 @@ export function findRunner(
     if (opts.worktreePath && r.worktreePath) return samePath(r.worktreePath, opts.worktreePath);
     if (opts.branch && r.branch) return r.branch === opts.branch;
     return false;
-  });
+  }).sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+  // Active wins even when an older run record happens to precede it; otherwise
+  // the newest terminal result is the one the sidebar should explain.
   return mine.find((r) => active.has(r.status)) ?? mine[0];
 }

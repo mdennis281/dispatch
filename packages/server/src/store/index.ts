@@ -15,7 +15,7 @@
  * the ability to fix one with an editor.
  *
  * STATE root (`dataDir`) — high-write, per-instance, SQLITE (`state.db`):
- *   runner, mcp_port_lease, worktree, terminal, terminal_line, pr, checkpoint
+ *   runner, runner_line, mcp_port_lease, worktree, terminal, terminal_line, pr, checkpoint
  *
  * …plus what is still on the filesystem there, on purpose:
  *   chats/<id>/chat.json         — Chat
@@ -81,6 +81,8 @@ import {
   type ChatMessage,
   RunnerInstanceSchema,
   type RunnerInstance,
+  RunnerLogLineSchema,
+  type RunnerLogLine,
   CheckpointSchema,
   type Checkpoint,
   WorktreeRecordSchema,
@@ -1141,8 +1143,39 @@ export class Store {
       .run(validated.id, JSON.stringify(validated));
     return validated;
   }
+  async appendRunnerLog(
+    runnerId: string,
+    line: RunnerLogLine,
+    maxLines = 2000,
+  ): Promise<void> {
+    const validated = RunnerLogLineSchema.parse(line);
+    this.db.tx(() => {
+      this.db
+        .prepare("INSERT INTO runner_line (runner_id, ts, stream, line) VALUES (?, ?, ?, ?)")
+        .run(runnerId, validated.ts, validated.stream, validated.line);
+      // Bound each transcript in the database just like the old memory ring.
+      // The OFFSET row is the first one we must discard; a run below the cap
+      // makes the subquery empty and the DELETE a no-op.
+      this.db
+        .prepare(
+          "DELETE FROM runner_line WHERE runner_id = ? AND seq <= (" +
+            "SELECT seq FROM runner_line WHERE runner_id = ? ORDER BY seq DESC LIMIT 1 OFFSET ?" +
+            ")",
+        )
+        .run(runnerId, runnerId, maxLines);
+    });
+  }
+  async listRunnerLogs(runnerId: string): Promise<RunnerLogLine[]> {
+    return this.rows(
+      "SELECT ts, stream, line FROM runner_line WHERE runner_id = ? ORDER BY seq",
+      runnerId,
+    ).map((row) => RunnerLogLineSchema.parse(row));
+  }
   async deleteRunner(id: string): Promise<void> {
-    this.db.prepare("DELETE FROM runner WHERE id = ?").run(id);
+    this.db.tx(() => {
+      this.db.prepare("DELETE FROM runner_line WHERE runner_id = ?").run(id);
+      this.db.prepare("DELETE FROM runner WHERE id = ?").run(id);
+    });
   }
 
   /* ---------------------------------------------------- MCP port leases */

@@ -107,13 +107,15 @@ describe("RunnerService — real process", () => {
       await waitFor(() => logLines(runner.id).some((l) => l.startsWith("RUNNER-UP:")));
       const up = logLines(runner.id).find((l) => l.startsWith("RUNNER-UP:"))!;
       expect(up).toBe(`RUNNER-UP:${runner.port}`);
-      // logs() ring buffer holds it too.
-      expect(service.logs(runner.id).some((l) => l.line === up)).toBe(true);
+      // The durable transcript holds it too.
+      expect((await service.logs(runner.id)).some((l) => l.line === up)).toBe(true);
 
       // Stop tree-kills the process and flips it to stopped.
       await service.stop(runner.id);
       await waitFor(async () => (await store.getRunner(runner.id))?.status === "stopped");
       expect((await store.getRunner(runner.id))?.status).toBe("stopped");
+      // Process exit used to delete the in-memory ring at exactly this point.
+      expect((await service.logs(runner.id)).some((l) => l.line === up)).toBe(true);
     },
     20000,
   );

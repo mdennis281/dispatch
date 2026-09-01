@@ -231,6 +231,29 @@ describe("Store runners + checkpoints + settings", () => {
     expect(await store.getRunner("r1")).toBeNull();
   });
 
+  it("keeps bounded runner output after exit and removes it with the run", async () => {
+    const r: RunnerInstance = {
+      id: "run-with-output",
+      worktreePath: "C:/wt",
+      subAppId: "game",
+      kind: "process",
+      status: "crashed",
+      exitCode: 1,
+    };
+    await store.saveRunner(r);
+    await store.appendRunnerLog(r.id, { stream: "stdout", line: "boot", ts: 1 }, 2);
+    await store.appendRunnerLog(r.id, { stream: "stderr", line: "bad config", ts: 2 }, 2);
+    await store.appendRunnerLog(r.id, { stream: "stderr", line: "exit 1", ts: 3 }, 2);
+
+    expect(await store.listRunnerLogs(r.id)).toEqual([
+      { stream: "stderr", line: "bad config", ts: 2 },
+      { stream: "stderr", line: "exit 1", ts: 3 },
+    ]);
+
+    await store.deleteRunner(r.id);
+    expect(await store.listRunnerLogs(r.id)).toEqual([]);
+  });
+
   it("stores checkpoints per chat/message", async () => {
     const cp: Checkpoint = { messageId: "m1", chatId: "c1", ref: "refs/cm/x", createdAt: Date.now() };
     await store.saveCheckpoint(cp);

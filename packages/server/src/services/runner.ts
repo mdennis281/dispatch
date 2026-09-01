@@ -8,9 +8,9 @@
  *      in that file's directory FIRST;
  *   3. spawns `subApp.dev` (via a shell) in `worktreePath/subApp.path` with `PORT`
  *      injected and the manager's own env stripped (see MANAGER_ENV_VARS),
- *      registering a `RunnerInstance` in `runners.json`;
- *   4. streams stdout/stderr line-by-line as `runner-log` bus events and keeps a
- *      bounded in-memory ring for `logs(id)`.
+ *      persisting a `RunnerInstance` in the state store;
+ *   4. streams stdout/stderr line-by-line as `runner-log` bus events and writes
+ *      the bounded transcript to SQLite so failed runs remain inspectable.
  *
  * stop() tree-kills the process (Windows-safe via tree-kill) and, if docker was
  * used, runs `docker compose down`. reconcile() runs at boot and terminates every
@@ -27,6 +27,7 @@ import treeKill from "tree-kill";
 import { nanoid } from "nanoid";
 import type {
   RunnerInstance,
+  RunnerLogLine,
   RunnerStatus,
   SubApp,
   WsServerEvent,
@@ -46,11 +47,11 @@ import { envNames } from "../config.js";
  * `DISPATCH_CONFIG_DIR` into the server's environment. Everything the server
  * spawns inherits them, so starting this repo's own `dev-server` subApp from the
  * Runner brought a SECOND Dispatch up on the INSTALLED instance's data dir —
- * confirmed from the dev server's own boot line. `runners.json` and
- * `checkpoints.json` are whole-file read-modify-write maps guarded only by an
- * in-process KeyedMutex (see `store/index.ts`), so the two processes silently
- * dropped each other's writes: state corruption in the instance the user trusts
- * with long runs, with no error anywhere. The inherited `DISPATCH_IPC=1` was the
+ * confirmed from the dev server's own boot line. At the time, runner and
+ * checkpoint state used whole-file read-modify-write maps with an in-process
+ * mutex, so the two processes silently dropped each other's writes: state
+ * corruption in the instance the user trusts with long runs, with no error
+ * anywhere. The inherited `DISPATCH_IPC=1` was the
  * second half of it — the child read its launcher's closed stdin as a
  * `shutdown` (see `shutdown.ts`) and died the moment that pipe went away.
  *
@@ -203,13 +204,6 @@ export interface RunnerDeps {
   maxLogLines?: number;
   /** Env a child starts from, before scrubbing + overlay. Injectable for tests. */
   parentEnv?: NodeJS.ProcessEnv;
-}
-
-/** One captured output line, returned by `logs()`. */
-export interface RunnerLogLine {
-  stream: "stdout" | "stderr";
-  line: string;
-  ts: number;
 }
 
 /* -------------------------------------------------------------- default wiring */
@@ -497,11 +491,27 @@ export class RunnerService {
     // 1) docker compose up -d (in the compose file's directory), if declared.
     if (usedDocker && composeDir && composeFile) {
       this.pushLog(id, "stdout", `$ docker compose -f ${composeFile} up -d`);
-      const res = await this.runOnce(
-        "docker",
-        ["compose", "-f", composeFile, "up", "-d"],
-        { cwd: composeDir, env: childEnv },
-      );
+      let res: RunOnceResult;
+      try {
+        res = await this.runOnce(
+          "docker",
+          ["compose", "-f", composeFile, "up", "-d"],
+          { cwd: composeDir, env: childEnv },
+        );
+      } catch (err) {
+        this.pushLog(
+          id,
+          "stderr",
+          `docker compose up failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        runner = await this.saveAndEmit({
+          ...runner,
+          status: "crashed",
+          exitCode: null,
+        });
+        this.live.delete(id);
+        return runner;
+      }
       // exitCode is `undefined` for a signal-killed process — treat that as a
       // failure too (only exit 0 counts as "up").
       if ((res.exitCode ?? 1) !== 0) {
@@ -524,10 +534,28 @@ export class RunnerService {
 
     // 2) spawn the long-running dev process (if any).
     if (hasDev) {
-      const child = this.spawn(substitutePorts(subApp.dev!, ports), {
-        cwd: resolve(worktreePath, subApp.path),
-        env: childEnv,
-      });
+      const command = substitutePorts(subApp.dev!, ports);
+      this.pushLog(id, "stdout", `$ ${command}`);
+      let child: ChildLike;
+      try {
+        child = this.spawn(command, {
+          cwd: resolve(worktreePath, subApp.path),
+          env: childEnv,
+        });
+      } catch (err) {
+        this.pushLog(
+          id,
+          "stderr",
+          `spawn failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        runner = await this.saveAndEmit({
+          ...runner,
+          status: "crashed",
+          exitCode: null,
+        });
+        this.live.delete(id);
+        return runner;
+      }
       live.child = child;
       this.wireChild(id, child);
       // A stop() during startup would otherwise orphan this freshly-spawned child
@@ -602,8 +630,8 @@ export class RunnerService {
   }
 
   /** The retained (bounded) output lines for a runner, oldest-first. */
-  logs(instanceId: string): RunnerLogLine[] {
-    return this.live.get(instanceId)?.logs.slice() ?? [];
+  logs(instanceId: string): Promise<RunnerLogLine[]> {
+    return this.store.listRunnerLogs(instanceId);
   }
 
   /* ----------------------------------------------------------------- internals */
@@ -618,17 +646,22 @@ export class RunnerService {
       out.flush();
       err.flush();
       const code = args[0];
-      // `.catch` because `onExit` reads `runners.json` through a Zod parse that
-      // THROWS on a torn/contended file — and a rejection raised from a child
-      // process event handler has no caller to catch it, so it killed the server.
-      void this.onExit(id, typeof code === "number" ? code : null, false).catch(() => {});
+      const signal = args[1];
+      // A rejection raised from a child process event handler has no caller to
+      // catch it, so a malformed persisted runner must not kill the server.
+      void this.onExit(
+        id,
+        typeof code === "number" ? code : null,
+        typeof signal === "string" ? signal : null,
+        false,
+      ).catch(() => {});
     });
     child.once("error", (...args: unknown[]) => {
       const e = args[0] as Error | undefined;
       this.pushLog(id, "stderr", `spawn error: ${e?.message ?? String(e)}`);
       out.flush();
       err.flush();
-      void this.onExit(id, null, true).catch(() => {});
+      void this.onExit(id, null, null, true).catch(() => {});
     });
   }
 
@@ -699,6 +732,7 @@ export class RunnerService {
   private async onExit(
     id: string,
     code: number | null,
+    signal: string | null,
     errored: boolean,
   ): Promise<void> {
     const live = this.live.get(id);
@@ -710,10 +744,23 @@ export class RunnerService {
     }
     const status: RunnerStatus = live?.stopping
       ? "stopped"
-      : errored || (code !== null && code !== 0)
+      : errored || code !== 0
         ? "crashed"
         : "exited";
-    await this.saveAndEmit({ ...runner, status, exitCode: code });
+    if (!errored) {
+      const reason = signal ? `signal ${signal}` : `exit ${code ?? "unknown"}`;
+      this.pushLog(
+        id,
+        status === "crashed" ? "stderr" : "stdout",
+        status === "stopped" ? `process stopped (${reason})` : `process finished (${reason})`,
+      );
+    }
+    await this.saveAndEmit({
+      ...runner,
+      status,
+      exitCode: code,
+      exitSignal: signal,
+    });
     this.live.delete(id);
   }
 
@@ -746,7 +793,7 @@ export class RunnerService {
    *
    * The manifest `env` is re-read from the project rather than persisted onto
    * the runner: those values can expand `${VAR}` from the manager's environment,
-   * and `runners.json` is not a place to write anything that might be a secret.
+   * and runner state is not a place to write anything that might be a secret.
    * Ports come from the runner record, so `{port}` substitution is exact even
    * if the manifest has since been edited. Best-effort throughout — a missing
    * project or subApp degrades to `PORT` alone, which is still closer than the
@@ -788,16 +835,25 @@ export class RunnerService {
 
   private pushLog(id: string, stream: "stdout" | "stderr", line: string): void {
     const ts = this.now();
+    const record = { stream, line, ts } satisfies RunnerLogLine;
     const live = this.live.get(id);
     if (live) {
-      live.logs.push({ stream, line, ts });
+      live.logs.push(record);
       if (live.logs.length > this.maxLogLines) live.logs.shift();
     }
+    // StateDb is synchronous underneath this Promise, so insertion happens in
+    // event order before appendRunnerLog returns. Catch only protects a noisy
+    // child from turning a transient database failure into an unhandled rejection.
+    void this.store.appendRunnerLog(id, record, this.maxLogLines).catch(() => {});
     this.emit({ type: "runner-log", runnerId: id, stream, line, ts });
   }
 
   private async saveAndEmit(runner: RunnerInstance): Promise<RunnerInstance> {
-    const saved = await this.store.saveRunner(runner);
+    const finalized =
+      TERMINAL.has(runner.status) && runner.endedAt === undefined
+        ? { ...runner, endedAt: this.now() }
+        : runner;
+    const saved = await this.store.saveRunner(finalized);
     this.emit({ type: "runner-update", runner: saved });
     return saved;
   }
