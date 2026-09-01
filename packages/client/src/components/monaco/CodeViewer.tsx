@@ -270,7 +270,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
               title="Couldn't open this file"
               detail={error}
             />
-          ) : isImage && working ? (
+          ) : isImage && workingBinary && working ? (
             <ImagePreview
               src={
                 working.encoding === "base64"

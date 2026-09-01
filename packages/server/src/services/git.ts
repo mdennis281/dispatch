@@ -90,11 +90,15 @@ const realExec: GitExecFn = async (file, args, opts) => {
       windowsHide: true,
       encoding: "buffer",
     });
-    const stdoutBuffer = r.stdout instanceof Uint8Array
-      ? Buffer.from(r.stdout)
+    const stdoutBuffer = Buffer.isBuffer(r.stdout)
+      ? r.stdout
+      : r.stdout instanceof Uint8Array
+        ? Buffer.from(r.stdout.buffer, r.stdout.byteOffset, r.stdout.byteLength)
       : Buffer.from(String(r.stdout ?? ""), "utf8");
-    const stderrBuffer = r.stderr instanceof Uint8Array
-      ? Buffer.from(r.stderr)
+    const stderrBuffer = Buffer.isBuffer(r.stderr)
+      ? r.stderr
+      : r.stderr instanceof Uint8Array
+        ? Buffer.from(r.stderr.buffer, r.stderr.byteOffset, r.stderr.byteLength)
       : Buffer.from(String(r.stderr ?? ""), "utf8");
     return {
       stdout: stdoutBuffer.toString("utf8"),

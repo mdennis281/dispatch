@@ -178,6 +178,7 @@ describe("GET /api/git/* — reading", () => {
     );
     expect(worktree.statusCode).toBe(200);
     expect(worktree.headers["content-type"]).toContain("image/png");
+    expect(worktree.headers["x-content-type-options"]).toBe("nosniff");
     expect(worktree.rawPayload.equals(workingBytes)).toBe(true);
 
     const index = await get(

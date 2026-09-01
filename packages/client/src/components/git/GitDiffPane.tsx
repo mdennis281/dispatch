@@ -239,8 +239,13 @@ function useGitImageSource(
           const body = (await response.json().catch(() => null)) as { error?: string } | null;
           throw new Error(body?.error ?? `Image request failed (${response.status})`);
         }
-        objectUrl = URL.createObjectURL(await response.blob());
-        if (live) setState({ src: objectUrl, loading: false });
+        const blob = await response.blob();
+        // The user may have selected another path while a large image was in
+        // flight. Do not mint an object URL after this effect's cleanup has
+        // already had its only chance to revoke it.
+        if (!live) return;
+        objectUrl = URL.createObjectURL(blob);
+        setState({ src: objectUrl, loading: false });
       })
       .catch((error: unknown) => {
         if (live) {
