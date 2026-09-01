@@ -1,5 +1,23 @@
+import { createElement } from "react";
+import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { fitsToRight } from "./Popover.js";
+import { fitsToRight, Popover } from "./Popover.js";
+
+describe("Popover", () => {
+  it("can render closed without browser globals", () => {
+    expect(() =>
+      renderToString(
+        createElement(
+          Popover,
+          {
+            trigger: ({ toggle }) => createElement("button", { onClick: toggle }, "Open"),
+            children: "Menu",
+          },
+        ),
+      ),
+    ).not.toThrow();
+  });
+});
 
 describe("fitsToRight", () => {
   it("includes the live boundary and menu widths in the flyout decision", () => {

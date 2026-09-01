@@ -4,6 +4,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -51,6 +52,11 @@ interface Placement {
   side: "top" | "bottom" | "right";
 }
 
+type PopoverStyle = CSSProperties & {
+  "--cm-popover-gap"?: string;
+  "--cm-popover-animation-from"?: string;
+};
+
 /** Pure seam for the fit decision; kept exported so width regressions stay cheap to test. */
 export function fitsToRight(
   boundaryRight: number,
@@ -86,6 +92,7 @@ export function Popover({
   const menuRef = useRef<HTMLDivElement>(null);
   const afterCloseRef = useRef<(() => void) | null>(null);
   const [placement, setPlacement] = useState<Placement | null>(null);
+  const [animationFrom, setAnimationFrom] = useState<string | null>(null);
   const mounted = open || closing;
 
   // The fixed app shell is a stacking context. A flyout portalled straight to
@@ -93,19 +100,34 @@ export function Popover({
   // can mask it. Right flyouts stay inside the shell instead, where their 39/40
   // ordering against the sidebar is real. Ordinary popovers remain body-level.
   const portalRoot =
-    side === "right"
-      ? (triggerRef.current?.closest<HTMLElement>("[data-popover-layer-root]") ??
-        document.body)
-      : document.body;
+    mounted && typeof document !== "undefined"
+      ? side === "right"
+        ? (triggerRef.current?.closest<HTMLElement>("[data-popover-layer-root]") ??
+          document.body)
+        : document.body
+      : null;
+
+  // Direction changes must start at the compositor's current position. Starting
+  // the opposite keyframe at its declared endpoint makes a quick toggle jump
+  // fully behind/outside the sidebar before travelling the other way.
+  const readFlyoutTransform = useCallback(
+    () =>
+      placement?.side === "right" && menuRef.current
+        ? getComputedStyle(menuRef.current).transform
+        : null,
+    [placement?.side],
+  );
 
   // Every dismissal path lands here — trigger toggle, menu choice, outside
   // press, Escape. Keep the portal mounted until its own exit animation ends;
   // callers that would unmount the trigger (inline rename is one) can use
   // `closeAfter` so that action cannot cut the animation short.
   const close = useCallback(() => {
+    if (closing) return;
+    setAnimationFrom(readFlyoutTransform());
     setOpen(false);
     setClosing(true);
-  }, []);
+  }, [closing, readFlyoutTransform]);
 
   const closeAfter = useCallback(
     (after: () => void) => {
@@ -118,6 +140,7 @@ export function Popover({
   const finishClose = useCallback(() => {
     setClosing(false);
     setPlacement(null);
+    setAnimationFrom(null);
     const after = afterCloseRef.current;
     afterCloseRef.current = null;
     after?.();
@@ -265,6 +288,7 @@ export function Popover({
     }
     // A second trigger press during the retract reverses back to open.
     afterCloseRef.current = null;
+    setAnimationFrom(closing ? readFlyoutTransform() : null);
     setClosing(false);
     setOpen(true);
   };
@@ -273,6 +297,7 @@ export function Popover({
     <div ref={triggerRef} className={cn("relative inline-flex", triggerClassName)}>
       {trigger({ open: mounted, toggle })}
       {mounted &&
+        portalRoot &&
         createPortal(
           <div
             ref={menuRef}
@@ -280,7 +305,12 @@ export function Popover({
             data-placement={placement?.side}
             data-closing={closing || undefined}
             onAnimationEnd={(event) => {
-              if (event.target === event.currentTarget && closing) finishClose();
+              if (event.target !== event.currentTarget) return;
+              if (closing) {
+                finishClose();
+              } else {
+                setAnimationFrom(null);
+              }
             }}
             className={cn(
               "fixed cm-scroll overflow-y-auto overflow-x-hidden rounded-md border " +
@@ -294,7 +324,7 @@ export function Popover({
                   : "cm-anim-rise",
               className,
             )}
-            style={
+            style={(
               placement
                 ? {
                     // A right flyout physically starts behind the opaque
@@ -307,6 +337,8 @@ export function Popover({
                     width: placement.width,
                     maxHeight: placement.maxHeight,
                     pointerEvents: closing ? "none" : undefined,
+                    "--cm-popover-gap": `${GAP}px`,
+                    "--cm-popover-animation-from": animationFrom ?? undefined,
                   }
                 : {
                     zIndex: LAYER.popover,
@@ -318,7 +350,7 @@ export function Popover({
                     visibility: "hidden",
                     pointerEvents: "none",
                   }
-            }
+            ) as PopoverStyle}
           >
             {typeof children === "function" ? children(close, closeAfter) : children}
           </div>,

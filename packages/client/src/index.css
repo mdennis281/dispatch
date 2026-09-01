@@ -721,7 +721,10 @@
  */
 @keyframes cm-slide-right {
   from {
-    transform: translateX(calc(-100% - 6px));
+    transform: var(
+      --cm-popover-animation-from,
+      translateX(calc(-100% - var(--cm-popover-gap, 6px)))
+    );
   }
   to {
     transform: translateX(0);
@@ -730,10 +733,10 @@
 
 @keyframes cm-slide-left {
   from {
-    transform: translateX(0);
+    transform: var(--cm-popover-animation-from, translateX(0));
   }
   to {
-    transform: translateX(calc(-100% - 6px));
+    transform: translateX(calc(-100% - var(--cm-popover-gap, 6px)));
   }
 }
 
