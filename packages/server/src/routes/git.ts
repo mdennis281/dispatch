@@ -27,6 +27,8 @@
  * upstream", "please commit your changes before switching").
  */
 import type { FastifyInstance } from "fastify";
+import { identifyMedia } from "../services/media-sniff.js";
+import { mediaKind, mediaTypeFromName } from "../services/media-types.js";
 
 /** git ran and refused → 502 with git's own words; guard rejections → 400. */
 function fail(err: unknown): { code: number; body: { error: string } } {
@@ -129,6 +131,42 @@ export function registerGitRoutes(app: FastifyInstance): void {
       if (!cwd) return reply;
       try {
         return await git.stashes(cwd);
+      } catch (err) {
+        const { code, body } = fail(err);
+        return reply.code(code).send(body);
+      }
+    },
+  );
+
+  app.get<{ Querystring: { repoPath?: string; relPath?: string; rev?: string } }>(
+    "/api/git/file/raw",
+    async (req, reply) => {
+      const cwd = await repo(req.query.repoPath, reply);
+      if (!cwd) return reply;
+      if (!req.query.relPath) {
+        return reply.code(400).send({ error: "relPath required" });
+      }
+      try {
+        const file = await git.readRawFile(cwd, req.query.relPath, req.query.rev);
+        if (!file.exists) return reply.code(404).send({ error: "file not found" });
+        const media = identifyMedia(file.content, mediaTypeFromName(file.path));
+        if (mediaKind(media.mimeType) !== "image") {
+          return reply.code(415).send({ error: "file is not a supported image" });
+        }
+        reply.header("content-type", media.mimeType);
+        reply.header("content-length", String(file.content.length));
+        reply.header("cache-control", "private, no-store");
+        reply.header("x-content-type-options", "nosniff");
+        reply.header(
+          "x-dispatch-binary",
+          file.content.subarray(0, 8192).includes(0) ? "true" : "false",
+        );
+        // SVG is safe in an <img>, but pinning its own resource policy closes
+        // the door if this endpoint is ever navigated to directly.
+        if (media.mimeType === "image/svg+xml") {
+          reply.header("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'");
+        }
+        return reply.send(file.content);
       } catch (err) {
         const { code, body } = fail(err);
         return reply.code(code).send(body);

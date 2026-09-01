@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { leaseImagePreview } from "./imagePreview.js";
+import { leaseImagePreview } from "./imagePreviewLease.js";
 
 beforeEach(() => {
   globalThis.URL.createObjectURL = vi.fn(() => "blob:preview/1");

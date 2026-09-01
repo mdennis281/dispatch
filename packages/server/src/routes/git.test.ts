@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execa } from "execa";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -154,6 +154,80 @@ describe("GET /api/git/* — reading", () => {
     );
     expect(crafted.statusCode).toBe(400);
     expect(crafted.json().error).toMatch(/invalid rev/);
+  });
+
+  it("serves complete image bytes beyond the text preview cap from worktree and index", async () => {
+    if (!available) return;
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const stagedBytes = Buffer.concat([png, Buffer.alloc(3 * 1024 * 1024, 1)]);
+    const workingBytes = Buffer.concat([png, Buffer.alloc(3 * 1024 * 1024, 7)]);
+    await writeFile(join(repo, "chart.png"), stagedBytes);
+    await post("/api/git/stage", { repoPath: repo, paths: ["chart.png"] });
+    await writeFile(join(repo, "chart.png"), workingBytes);
+
+    const metadata = await get(
+      q("/api/git/file", { repoPath: repo, relPath: "chart.png", rev: "WORKTREE" }),
+    );
+    expect(metadata.json()).toMatchObject({ binary: true, truncated: true });
+
+    const worktree = await get(
+      q("/api/git/file/raw", { repoPath: repo, relPath: "chart.png", rev: "WORKTREE" }),
+    );
+    expect(worktree.statusCode).toBe(200);
+    expect(worktree.headers["content-type"]).toContain("image/png");
+    expect(worktree.headers["x-content-type-options"]).toBe("nosniff");
+    expect(worktree.rawPayload.equals(workingBytes)).toBe(true);
+
+    const imageHead = await app.inject({
+      method: "HEAD",
+      url: q("/api/git/file/raw", {
+        repoPath: repo,
+        relPath: "chart.png",
+        rev: "WORKTREE",
+      }),
+    });
+    expect(imageHead.statusCode).toBe(200);
+    expect(imageHead.headers["x-dispatch-binary"]).toBe("true");
+    expect(imageHead.headers["content-length"]).toBe(String(workingBytes.length));
+    expect(imageHead.rawPayload).toHaveLength(0);
+
+    const index = await get(
+      q("/api/git/file/raw", { repoPath: repo, relPath: "chart.png", rev: "INDEX" }),
+    );
+    expect(index.statusCode).toBe(200);
+    expect(index.rawPayload.equals(stagedBytes)).toBe(true);
+  });
+
+  it("refuses a worktree image symlink that lands outside the repo", async () => {
+    if (!available) return;
+    const outside = await mkdtemp(join(tmpdir(), "cm-git-outside-"));
+    try {
+      const target = join(outside, "secret.png");
+      await writeFile(target, Buffer.from("not really an image\n"));
+      try {
+        await symlink(target, join(repo, "linked.png"), "file");
+      } catch (error) {
+        // Creating symlinks requires a privilege on some Windows hosts. The
+        // Linux CI gate always exercises the containment assertion below.
+        if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+        throw error;
+      }
+
+      const response = await get(
+        q("/api/git/file/raw", {
+          repoPath: repo,
+          relPath: "linked.png",
+          rev: "WORKTREE",
+        }),
+      );
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error).toMatch(/escapes the repo/);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it("400s a path that tries to escape the repo", async () => {

@@ -28,6 +28,7 @@ import {
 } from "../../lib/actions.js";
 import { useCodeViewer, type CodeViewerMode, type CodeViewerRequest } from "./store.js";
 import { languageForPath, isImagePath } from "./lang.js";
+import { ImagePreview } from "./ImagePreview.js";
 import { Spinner } from "../ui/Spinner.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Button } from "../ui/Button.js";
@@ -36,7 +37,7 @@ import { Chip } from "../ui/Chip.js";
 import { cn } from "../../lib/cn.js";
 import { useDialogLayer } from "../../lib/layers.js";
 import { midTruncate } from "../../lib/format.js";
-import { leaseImagePreview } from "./imagePreview.js";
+import { leaseImagePreview } from "./imagePreviewLease.js";
 
 const MonacoPane = lazy(() => import("./MonacoPane.js"));
 
@@ -317,7 +318,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
               detail={error}
             />
           ) : isImage && image ? (
-            <ImagePreview src={image.src} relPath={relPath} />
+            <ImagePreview src={image.src} alt={baseName(relPath)} />
           ) : workingBinary ? (
             <StateNote
               icon={<FileWarning className="text-warn" />}
@@ -390,7 +391,6 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
     document.body,
   );
 }
-
 function StateNote({
   icon,
   title,
@@ -409,31 +409,6 @@ function StateNote({
       {detail && (
         <p className="mt-0.5 max-w-md cm-mono !text-xs text-faint break-words">{detail}</p>
       )}
-    </div>
-  );
-}
-
-/** Inline preview of an image file streamed into a revocable Blob URL. */
-function ImagePreview({ src, relPath }: { src: string; relPath: string }) {
-  return (
-    <div
-      className="flex h-full items-center justify-center overflow-auto p-6"
-      style={{
-        // Transparency checkerboard. Token-driven so the squares stay one rung
-        // off the surface behind them; a fixed dark hex would turn into a black
-        // grid on a light theme and read as image content, not as "no pixels".
-        backgroundImage:
-          "linear-gradient(45deg,var(--p-panel-2) 25%,transparent 25%),linear-gradient(-45deg,var(--p-panel-2) 25%,transparent 25%),linear-gradient(45deg,transparent 75%,var(--p-panel-2) 75%),linear-gradient(-45deg,transparent 75%,var(--p-panel-2) 75%)",
-        backgroundSize: "18px 18px",
-        backgroundPosition: "0 0,0 9px,9px -9px,-9px 0",
-      }}
-    >
-      <img
-        src={src}
-        alt={baseName(relPath)}
-        className="max-h-full max-w-full rounded-sm border border-line-strong bg-inset shadow-[var(--shadow-pop)]"
-        style={{ imageRendering: "pixelated" }}
-      />
     </div>
   );
 }

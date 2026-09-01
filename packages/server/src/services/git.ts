@@ -22,7 +22,11 @@
  */
 import { execa } from "execa";
 import { existsSync } from "node:fs";
-import { readFile as fsReadFile } from "node:fs/promises";
+import {
+  readFile as fsReadFile,
+  realpath as fsRealpath,
+  stat as fsStat,
+} from "node:fs/promises";
 import { resolve, relative, isAbsolute } from "node:path";
 import {
   GitStatusSchema,
@@ -47,6 +51,8 @@ import {
 
 export interface GitExecResult {
   stdout: string;
+  /** Exact stdout bytes when the runner can provide them (production does). */
+  stdoutBuffer?: Buffer;
   stderr: string;
   exitCode: number;
 }
@@ -62,6 +68,8 @@ export type GitExecFn = (
 const DEFAULT_TIMEOUT_MS = 30_000;
 /** Network ops (fetch/pull/push) get a longer leash. */
 const NETWORK_TIMEOUT_MS = 120_000;
+/** Source-control image previews may exceed Monaco's 2 MB text cap. */
+const MAX_IMAGE_PREVIEW_BYTES = 32 * 1024 * 1024;
 
 /**
  * Env every git call inherits: never prompt for credentials (fail fast instead
@@ -84,10 +92,22 @@ const realExec: GitExecFn = async (file, args, opts) => {
       reject: false,
       stripFinalNewline: false,
       windowsHide: true,
+      encoding: "buffer",
     });
+    const stdoutBuffer = Buffer.isBuffer(r.stdout)
+      ? r.stdout
+      : r.stdout instanceof Uint8Array
+        ? Buffer.from(r.stdout.buffer, r.stdout.byteOffset, r.stdout.byteLength)
+      : Buffer.from(String(r.stdout ?? ""), "utf8");
+    const stderrBuffer = Buffer.isBuffer(r.stderr)
+      ? r.stderr
+      : r.stderr instanceof Uint8Array
+        ? Buffer.from(r.stderr.buffer, r.stderr.byteOffset, r.stderr.byteLength)
+      : Buffer.from(String(r.stderr ?? ""), "utf8");
     return {
-      stdout: String(r.stdout ?? ""),
-      stderr: String(r.stderr ?? ""),
+      stdout: stdoutBuffer.toString("utf8"),
+      stdoutBuffer,
+      stderr: stderrBuffer.toString("utf8"),
       exitCode: typeof r.exitCode === "number" ? r.exitCode : r.failed ? 1 : 0,
     };
   } catch (err) {
@@ -297,7 +317,83 @@ export class GitService {
         truncated: false,
       };
     }
-    return packFileContent(rel, Buffer.from(r.stdout, "utf8"), rev);
+    return packFileContent(rel, r.stdoutBuffer ?? Buffer.from(r.stdout, "utf8"), rev);
+  }
+
+  /**
+   * Exact bytes for an inline image preview.
+   *
+   * Monaco's JSON file shape intentionally truncates at 2 MB; image files are
+   * often larger and a truncated PNG/JPEG cannot render at all. This separate
+   * path keeps the text-viewer cap intact, preserves `git show` bytes instead
+   * of round-tripping them through UTF-8, and applies its own bounded ceiling.
+   */
+  async readRawFile(
+    repoPath: string,
+    relPath: string,
+    rev: string = GIT_REV_WORKTREE,
+  ): Promise<{ path: string; ref: string; content: Buffer; size: number; exists: boolean }> {
+    const rel = normalizeRelPath(relPath);
+    if (rel === null) throw new Error(`invalid relPath: ${relPath}`);
+
+    if (rev === GIT_REV_WORKTREE) {
+      const root = resolve(repoPath);
+      const abs = resolve(root, rel);
+      const relToRoot = relative(root, abs);
+      if (!relToRoot || relToRoot.startsWith("..") || isAbsolute(relToRoot)) {
+        throw new Error(`relPath escapes the repo: ${relPath}`);
+      }
+      if (!existsSync(abs)) {
+        return { path: rel, ref: rev, content: Buffer.alloc(0), size: 0, exists: false };
+      }
+      let realRoot: string;
+      let realFile: string;
+      try {
+        realRoot = await fsRealpath(root);
+        realFile = await fsRealpath(abs);
+      } catch {
+        return { path: rel, ref: rev, content: Buffer.alloc(0), size: 0, exists: false };
+      }
+      const relToRealRoot = relative(realRoot, realFile);
+      // The lexical gate above rejects `..`, but it cannot see through a
+      // symlink inside the repo. Check where the file actually lands before
+      // reading it so an image-shaped link cannot expose an outside file.
+      if (!relToRealRoot || relToRealRoot.startsWith("..") || isAbsolute(relToRealRoot)) {
+        throw new Error(`relPath escapes the repo: ${relPath}`);
+      }
+      const info = await fsStat(realFile);
+      if (!info.isFile()) {
+        return { path: rel, ref: rev, content: Buffer.alloc(0), size: 0, exists: false };
+      }
+      if (info.size > MAX_IMAGE_PREVIEW_BYTES) {
+        throw new Error(`file too large for image preview (${info.size} bytes)`);
+      }
+      return {
+        path: rel,
+        ref: rev,
+        content: await fsReadFile(realFile),
+        size: info.size,
+        exists: true,
+      };
+    }
+
+    const spec = rev === GIT_REV_INDEX ? `:${rel}` : `${assertRev(rev)}:${rel}`;
+    const sized = await this.exec("git", ["cat-file", "-s", spec], { cwd: repoPath });
+    if (sized.exitCode !== 0) {
+      return { path: rel, ref: rev, content: Buffer.alloc(0), size: 0, exists: false };
+    }
+    const size = Number.parseInt(sized.stdout.trim(), 10);
+    if (!Number.isFinite(size) || size < 0) throw new Error(`couldn't size git object: ${spec}`);
+    if (size > MAX_IMAGE_PREVIEW_BYTES) {
+      throw new Error(`file too large for image preview (${size} bytes)`);
+    }
+
+    const shown = await this.exec("git", ["show", "--end-of-options", spec], { cwd: repoPath });
+    if (shown.exitCode !== 0) {
+      return { path: rel, ref: rev, content: Buffer.alloc(0), size: 0, exists: false };
+    }
+    const content = shown.stdoutBuffer ?? Buffer.from(shown.stdout, "utf8");
+    return { path: rel, ref: rev, content, size, exists: true };
   }
 
   /* ------------------------------------------------------------ staging */
