@@ -711,17 +711,40 @@
   }
 }
 
-/* A sidebar menu starts just behind the column edge and travels into the app. */
+/*
+ * A rigid, full-width menu travelling out from beneath the sidebar.
+ *
+ * The panel is one layer BELOW the opaque sidebar (`LAYER.sidebarFlyout`), so
+ * the column itself masks the starting position. Translating by the panel's
+ * entire width plus the placement gap puts its right edge exactly behind the
+ * sidebar edge. No clip-path: glyphs and background move together as one box.
+ */
 @keyframes cm-slide-right {
   from {
-    opacity: 0;
-    transform: translateX(-14px);
-    clip-path: inset(0 100% 0 0);
+    transform: translateX(calc(-100% - 6px));
   }
   to {
-    opacity: 1;
     transform: translateX(0);
-    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes cm-slide-left {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(calc(-100% - 6px));
+  }
+}
+
+@keyframes cm-popover-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(4px);
   }
 }
 
@@ -773,7 +796,15 @@
   animation: cm-rise 0.18s var(--ease-out) both;
 }
 .cm-anim-slide-right {
-  animation: cm-slide-right 0.22s var(--ease-out) both;
+  animation: cm-slide-right 0.24s var(--ease-out) both;
+  will-change: transform;
+}
+.cm-anim-slide-left {
+  animation: cm-slide-left 0.2s var(--ease-out) both;
+  will-change: transform;
+}
+.cm-anim-popover-out {
+  animation: cm-popover-out 0.16s var(--ease-out) both;
 }
 .cm-anim-spin {
   animation: cm-spin 0.7s linear infinite;

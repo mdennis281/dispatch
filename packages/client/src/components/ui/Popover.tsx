@@ -13,7 +13,9 @@ import { LAYER } from "../../lib/layers.js";
 export interface PopoverProps {
   /** Render-prop trigger; receives the current open state + a toggle. */
   trigger: (o: { open: boolean; toggle: () => void }) => ReactNode;
-  children: ReactNode | ((close: () => void) => ReactNode);
+  children:
+    | ReactNode
+    | ((close: () => void, closeAfter: (after: () => void) => void) => ReactNode);
   align?: "start" | "end" | "center";
   /**
    * `right` measures the nearest `data-popover-right-boundary` edge and opens
@@ -79,11 +81,47 @@ export function Popover({
   width,
 }: PopoverProps) {
   const [open, setOpen] = useState(false);
+  const [closing, setClosing] = useState(false);
   const triggerRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const afterCloseRef = useRef<(() => void) | null>(null);
   const [placement, setPlacement] = useState<Placement | null>(null);
+  const mounted = open || closing;
 
-  const close = useCallback(() => setOpen(false), []);
+  // The fixed app shell is a stacking context. A flyout portalled straight to
+  // `body` sits above that WHOLE context, so no z-index on the nested sidebar
+  // can mask it. Right flyouts stay inside the shell instead, where their 39/40
+  // ordering against the sidebar is real. Ordinary popovers remain body-level.
+  const portalRoot =
+    side === "right"
+      ? (triggerRef.current?.closest<HTMLElement>("[data-popover-layer-root]") ??
+        document.body)
+      : document.body;
+
+  // Every dismissal path lands here — trigger toggle, menu choice, outside
+  // press, Escape. Keep the portal mounted until its own exit animation ends;
+  // callers that would unmount the trigger (inline rename is one) can use
+  // `closeAfter` so that action cannot cut the animation short.
+  const close = useCallback(() => {
+    setOpen(false);
+    setClosing(true);
+  }, []);
+
+  const closeAfter = useCallback(
+    (after: () => void) => {
+      afterCloseRef.current = after;
+      close();
+    },
+    [close],
+  );
+
+  const finishClose = useCallback(() => {
+    setClosing(false);
+    setPlacement(null);
+    const after = afterCloseRef.current;
+    afterCloseRef.current = null;
+    after?.();
+  }, []);
 
   const reposition = useCallback(() => {
     const trigEl = triggerRef.current;
@@ -169,22 +207,22 @@ export function Popover({
 
   // Position synchronously before paint so there's no flash at the wrong spot.
   useLayoutEffect(() => {
-    if (!open) {
+    if (!mounted) {
       setPlacement(null);
       return;
     }
     reposition();
-  }, [open, reposition]);
+  }, [mounted, reposition]);
 
   // Keep the menu glued to the trigger + close on outside-click / Escape.
   useEffect(() => {
-    if (!open) return;
+    if (!mounted) return;
 
     const onDown = (e: MouseEvent) => {
       const target = e.target as Node;
       if (triggerRef.current?.contains(target)) return;
       if (menuRef.current?.contains(target)) return;
-      setOpen(false);
+      close();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -195,7 +233,7 @@ export function Popover({
       // dialog and discard in-progress edits. Only Escape is swallowed; every
       // other key still propagates.
       e.stopPropagation();
-      setOpen(false);
+      close();
     };
     const onReflow = () => reposition();
 
@@ -218,31 +256,57 @@ export function Popover({
       window.removeEventListener("scroll", onReflow, true);
       ro.disconnect();
     };
-  }, [open, reposition]);
+  }, [close, mounted, reposition]);
+
+  const toggle = () => {
+    if (open) {
+      close();
+      return;
+    }
+    // A second trigger press during the retract reverses back to open.
+    afterCloseRef.current = null;
+    setClosing(false);
+    setOpen(true);
+  };
 
   return (
     <div ref={triggerRef} className={cn("relative inline-flex", triggerClassName)}>
-      {trigger({ open, toggle: () => setOpen((v) => !v) })}
-      {open &&
+      {trigger({ open: mounted, toggle })}
+      {mounted &&
         createPortal(
           <div
             ref={menuRef}
             role="menu"
             data-placement={placement?.side}
+            data-closing={closing || undefined}
+            onAnimationEnd={(event) => {
+              if (event.target === event.currentTarget && closing) finishClose();
+            }}
             className={cn(
               "fixed cm-scroll overflow-y-auto overflow-x-hidden rounded-md border " +
                 "border-line-strong bg-overlay/98 backdrop-blur-md shadow-[var(--shadow-pop)]",
-              placement?.side === "right" ? "cm-anim-slide-right" : "cm-anim-rise",
+              placement?.side === "right"
+                ? closing
+                  ? "cm-anim-slide-left"
+                  : "cm-anim-slide-right"
+                : closing
+                  ? "cm-anim-popover-out"
+                  : "cm-anim-rise",
               className,
             )}
             style={
               placement
                 ? {
-                    zIndex: LAYER.popover,
+                    // A right flyout physically starts behind the opaque
+                    // sidebar. Other placements stay above every dialog as
+                    // ordinary popovers, including the mobile fallback.
+                    zIndex:
+                      placement.side === "right" ? LAYER.sidebarFlyout : LAYER.popover,
                     left: placement.left,
                     top: placement.top,
                     width: placement.width,
                     maxHeight: placement.maxHeight,
+                    pointerEvents: closing ? "none" : undefined,
                   }
                 : {
                     zIndex: LAYER.popover,
@@ -256,9 +320,9 @@ export function Popover({
                   }
             }
           >
-            {typeof children === "function" ? children(close) : children}
+            {typeof children === "function" ? children(close, closeAfter) : children}
           </div>,
-          document.body,
+          portalRoot,
         )}
     </div>
   );

@@ -43,6 +43,8 @@ import { useEffect, useState } from "react";
 export const LAYER = {
   /** Dim behind an off-canvas drawer. */
   drawerScrim: 30,
+  /** Desktop sidebar flyouts travel beneath the opaque sidebar but above app content. */
+  sidebarFlyout: 39,
   /** The off-canvas panel itself (mobile sidebar / right panel / More sheet). */
   drawer: 40,
   /** The mobile bottom nav — above the drawers it opens and closes. */
