@@ -103,6 +103,26 @@ describe("resolveReviewer — joining the policy to the credential", () => {
     expect(out.token).toBe("github_pat_secret");
   });
 
+  it("says the account is switched OFF rather than missing, when it is muted", async () => {
+    // The new way to configure a reviewer that can never start: the login is
+    // right there in the list with its switch off. Telling someone to ADD a
+    // login they can see is advice that makes them distrust the rest of it.
+    const out = await resolveReviewer(
+      storeWith(CRED),
+      project({
+        profile: "review",
+        pr: {
+          reviewAgent: { enabled: true, identity: "dedicated" },
+          reviewers: [{ login: CRED.login, enabled: false }, "copilot-pull-request-reviewer[bot]"],
+        },
+      }),
+    );
+    expect(out.problem).toMatch(/switched OFF/i);
+    expect(out.problem).not.toMatch(/does not list that account/i);
+    expect(out.policy.enabled).toBe(true);
+    expect(out.policy.login).toBe("dispatch-reviewer");
+  });
+
   it("accepts a `[bot]`-suffixed spelling of the same account", async () => {
     // The two halves are written in different dialects: `pr.reviewers` is
     // hand-authored from what GitHub's UI shows, the credential holds the bare

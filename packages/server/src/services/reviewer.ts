@@ -107,17 +107,28 @@ export async function resolveReviewer(
   // resolves fine and `post_review` works, so a review triggered by any other
   // means must still post. What is broken is only the trigger.
   if (!pr.reviewers.some((r) => sameLogin(r, cred.login))) {
+    // Switched off is its own diagnosis, not a missing entry. Telling someone to
+    // "add" a login they can SEE in the list — greyed out, one click from
+    // working — is the kind of advice that makes a reader distrust the rest of
+    // the message.
+    const muted = pr.reviewerRoster.some((r) => !r.enabled && sameLogin(r.login, cred.login));
     return {
       policy: { ...policy, login: cred.login },
       token: cred.token,
-      problem:
-        `This project reviews as \`${cred.login}\`, but \`workflow.pr.reviewers\` does not ` +
-        `list that account` +
-        (pr.reviewers.length ? ` — it asks ${pr.reviewers.join(", ")}` : " (the list is empty)") +
-        `. The reviewer only ever starts when its own login appears in GitHub's review queue, ` +
-        `and \`create_pr\` requests exactly \`pr.reviewers\`, so no review will ever spawn on ` +
-        `this project. Add \`${cred.login}\` to \`workflow.pr.reviewers\` in ` +
-        `\`.dispatch/project.yaml\`; it must also be a collaborator on the repo.`,
+      problem: muted
+        ? `This project reviews as \`${cred.login}\`, but that account is switched OFF in ` +
+          `\`workflow.pr.reviewers\`` +
+          (pr.reviewers.length ? ` — it asks ${pr.reviewers.join(", ")} instead` : "") +
+          `. The reviewer only ever starts when its own login appears in GitHub's review ` +
+          `queue, and \`create_pr\` requests only the reviewers that are on, so no review ` +
+          `will spawn on this project until it is switched back on in Config → Reviewer.`
+        : `This project reviews as \`${cred.login}\`, but \`workflow.pr.reviewers\` does not ` +
+          `list that account` +
+          (pr.reviewers.length ? ` — it asks ${pr.reviewers.join(", ")}` : " (the list is empty)") +
+          `. The reviewer only ever starts when its own login appears in GitHub's review queue, ` +
+          `and \`create_pr\` requests exactly \`pr.reviewers\`, so no review will ever spawn on ` +
+          `this project. Add \`${cred.login}\` to \`workflow.pr.reviewers\` in ` +
+          `\`.dispatch/project.yaml\`; it must also be a collaborator on the repo.`,
     };
   }
   return { policy: { ...policy, login: cred.login }, token: cred.token };

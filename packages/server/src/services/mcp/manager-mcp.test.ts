@@ -2456,7 +2456,7 @@ describe("prLandingBlockers", () => {
       requireReview: true,
       reviewers: [],
     });
-    expect(b[0].detail).toMatch(/configures NO reviewers/);
+    expect(b[0].detail).toMatch(/asks NO reviewers/);
     expect(b[0].detail).toMatch(/workflow\.pr\.reviewers/);
     // It must NOT send the agent back to create_pr, which would change nothing.
     expect(b[0].detail).not.toMatch(/create_pr/);

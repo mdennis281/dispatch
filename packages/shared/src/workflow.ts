@@ -182,6 +182,76 @@ export const ResolvedReviewAgentSchema = z.object({
 export type ResolvedReviewAgent = z.infer<typeof ResolvedReviewAgentSchema>;
 
 /**
+ * One row of the reviewer roster: a login, or a login that is switched OFF.
+ *
+ * Muting rather than deleting exists because "who reviews here" is a thing
+ * people SWITCH — Copilot this week, the dedicated account next week — and the
+ * only way to express that was to delete a row and retype the login (spelled
+ * exactly right, `[bot]` suffix and all) to get it back. A wrong retype is not
+ * loud, either: GitHub accepts the request and simply queues nobody, so the
+ * cost of the round trip is a PR that waits for a review that will never come.
+ *
+ * A bare string is an ENABLED reviewer, so every manifest written before this
+ * existed keeps its exact meaning and hand-editing stays a one-line job. The
+ * long form is only worth its extra lines when a row is off:
+ *
+ * ```yaml
+ * reviewers:
+ *   - copilot-pull-request-reviewer[bot]
+ *   - login: dispatch-review
+ *     enabled: false
+ * ```
+ *
+ * The roster stays ONE list rather than a second `reviewersOff` key, because two
+ * lists can disagree — a login in both is a state nothing on either side owns —
+ * and because order is the only thing that says who this project asks first.
+ */
+export const PrReviewerEntrySchema = z.union([
+  z.string(),
+  z.object({
+    login: z.string(),
+    /** Off = kept in the list, never requested. Absent means on. */
+    enabled: z.boolean().optional(),
+  }),
+]);
+export type PrReviewerEntry = z.infer<typeof PrReviewerEntrySchema>;
+
+/** A roster row with the shorthand expanded — what consumers actually read. */
+export const ReviewerRosterEntrySchema = z.object({
+  login: z.string(),
+  enabled: z.boolean(),
+});
+export type ReviewerRosterEntry = z.infer<typeof ReviewerRosterEntrySchema>;
+
+/**
+ * Expand an authored roster into `{ login, enabled }` rows.
+ *
+ * Blank entries are dropped rather than passed on: a stray `- ""` in the YAML
+ * would otherwise reach `POST /pulls/{n}/requested_reviewers` as a login, where
+ * it fails the whole batch of reviewers rather than just itself.
+ */
+export function normalizeReviewerRoster(
+  entries: readonly PrReviewerEntry[] | undefined,
+): ReviewerRosterEntry[] {
+  const out: ReviewerRosterEntry[] = [];
+  for (const e of entries ?? []) {
+    const login = (typeof e === "string" ? e : e.login).trim();
+    if (!login) continue;
+    out.push({ login, enabled: typeof e === "string" ? true : (e.enabled ?? true) });
+  }
+  return out;
+}
+
+/**
+ * The inverse — the roster in the shortest form that still says what it means,
+ * so an editor that never touches the switches doesn't rewrite the file into
+ * long form and hand the human a diff full of rows that changed nothing.
+ */
+export function authorReviewerRoster(roster: readonly ReviewerRosterEntry[]): PrReviewerEntry[] {
+  return roster.map((r) => (r.enabled ? r.login : { login: r.login, enabled: false }));
+}
+
+/**
  * The PR policy — what OPENING a pull request here must include, and what
  * "ready to land" actually requires.
  *
@@ -206,8 +276,12 @@ export type ResolvedReviewAgent = z.infer<typeof ResolvedReviewAgentSchema>;
  *   - `draft`         — open PRs as drafts by default.
  */
 export const WorkflowPrConfigSchema = z.object({
-  /** Reviewers to request on create: user logins and/or `org/team` slugs. */
-  reviewers: z.array(z.string()).optional(),
+  /**
+   * Reviewers to request on create: user logins and/or `org/team` slugs.
+   *
+   * An entry may be muted rather than removed — see {@link PrReviewerEntrySchema}.
+   */
+  reviewers: z.array(PrReviewerEntrySchema).optional(),
   /** A PR is not "done" until a requested reviewer reports. */
   requireReview: z.boolean().optional(),
   /** `on-green` refuses when NO check reported (vacuous green). */
@@ -221,7 +295,17 @@ export type WorkflowPrConfig = z.infer<typeof WorkflowPrConfigSchema>;
 
 /** The PR policy with every implication made explicit (see {@link WorkflowPrConfigSchema}). */
 export const ResolvedPrPolicySchema = z.object({
+  /**
+   * Who is actually REQUESTED — muted rows are already gone.
+   *
+   * Resolving the mute away here rather than at each call site is the point of
+   * this field: `create_pr`, `request_review`, the reviewer-account check and
+   * `approve_pr`'s `no-review` refusal all read this list, and a switch that
+   * only some of them honoured would be worse than no switch at all.
+   */
   reviewers: z.array(z.string()),
+  /** The full roster, muted rows included — what the editor renders. */
+  reviewerRoster: z.array(ReviewerRosterEntrySchema),
   requireReview: z.boolean(),
   requireChecks: z.boolean(),
   draft: z.boolean(),
@@ -346,6 +430,7 @@ const REVIEW_AGENT_OFF: ResolvedReviewAgent = {
 /** The inert PR policy — what the rungs with no PR resolve to. */
 const INERT_PR_POLICY: ResolvedPrPolicy = {
   reviewers: [],
+  reviewerRoster: [],
   requireReview: false,
   requireChecks: false,
   draft: false,
@@ -408,6 +493,7 @@ const PROFILE_DEFAULTS: Record<WorkflowProfile, Omit<ResolvedWorkflow, "worktree
       // the one reviewer a default can name. Author `reviewers: []` to opt out.
       pr: {
         reviewers: [COPILOT_LOGIN],
+        reviewerRoster: normalizeReviewerRoster([COPILOT_LOGIN]),
         requireReview: true,
         requireChecks: true,
         draft: false,
@@ -447,6 +533,11 @@ export function resolveWorkflow(source: WorkflowSource | null | undefined): Reso
   const profile: WorkflowProfile = wf?.profile ?? (source?.shipCmd ? "review" : "none");
   const base = PROFILE_DEFAULTS[profile];
   const pr = wf?.pr;
+  // `?? base` and not `|| base`: an authored `reviewers: []` means "ask nobody",
+  // which is a decision and not an omission. A roster whose rows are all MUTED
+  // resolves to the same empty request list by a different route — the rows are
+  // still there to switch back on, but nobody is asked meanwhile.
+  const roster = normalizeReviewerRoster(pr?.reviewers ?? base.pr.reviewerRoster);
   return ResolvedWorkflowSchema.parse({
     ...base,
     // Command overrides fall back to the legacy top-level project fields.
@@ -460,7 +551,8 @@ export function resolveWorkflow(source: WorkflowSource | null | undefined): Reso
     pr:
       profile === "review"
         ? {
-            reviewers: pr?.reviewers ?? base.pr.reviewers,
+            reviewers: roster.filter((r) => r.enabled).map((r) => r.login),
+            reviewerRoster: roster,
             requireReview: pr?.requireReview ?? base.pr.requireReview,
             requireChecks: pr?.requireChecks ?? base.pr.requireChecks,
             draft: pr?.draft ?? base.pr.draft,

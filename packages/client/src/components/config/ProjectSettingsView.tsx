@@ -43,7 +43,13 @@ import {
   Save,
   Undo2,
 } from "lucide-react";
-import { ARCHIVE_EXT, ARCHIVE_EXTS, CONFIG_DIR_NAME, resolveWorkflow } from "@dispatch/shared";
+import {
+  ARCHIVE_EXT,
+  ARCHIVE_EXTS,
+  authorReviewerRoster,
+  CONFIG_DIR_NAME,
+  resolveWorkflow,
+} from "@dispatch/shared";
 import type {
   ConfigSection,
   Project,
@@ -115,7 +121,10 @@ function savedWorkflow(project: Project | null): WorkflowConfig {
     autoMerge: r.autoMerge,
     mergeMethod: r.mergeMethod,
     pr: {
-      reviewers: pr.reviewers,
+      // The ROSTER, not the asked list: a project whose manifest mutes a
+      // reviewer would otherwise compare its saved value against a baseline that
+      // had already dropped that row, and read as dirty the moment it rendered.
+      reviewers: authorReviewerRoster(pr.reviewerRoster),
       requireReview: pr.requireReview,
       requireChecks: pr.requireChecks,
       draft: pr.draft,

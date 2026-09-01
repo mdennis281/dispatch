@@ -1378,9 +1378,13 @@ export function prLandingBlockers(
                 `Dispatch's own reviewer is configured but cannot run: ${pr.reviewAgentProblem} ` +
                 "Nobody else is configured to ask either, so this PR cannot satisfy its own " +
                 "bar until the config is fixed."
-              : "This project configures NO reviewers (`workflow.pr.reviewers` in " +
-                "`.dispatch/project.yaml`), so nobody will ever be asked and this PR cannot " +
-                "satisfy its own bar. Fix the config rather than working around it.";
+              : // "Empty" and "every entry switched off" are one state from here —
+                // both ask nobody — and naming only the first sends a reader off
+                // to ADD a login that is already sitting in the list, muted.
+                "This project asks NO reviewers (`workflow.pr.reviewers` in " +
+                "`.dispatch/project.yaml` is empty, or every reviewer in it is switched " +
+                "off), so nobody will ever be asked and this PR cannot satisfy its own " +
+                "bar. Fix the config rather than working around it.";
         blockers.push({
           code: "no-review",
           detail:
@@ -3692,9 +3696,10 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       }
       if (!asked.length) {
         return textResult(
-          "No reviewers to request: none were passed and this project configures none " +
-            "(`workflow.pr.reviewers` in `.dispatch/project.yaml`). Nobody will ever be " +
-            "asked to review here — that's a config fix, not something to retry.",
+          "No reviewers to request: none were passed and this project asks none " +
+            "(`workflow.pr.reviewers` in `.dispatch/project.yaml` is empty, or every " +
+            "reviewer in it is switched off). Nobody will ever be asked to review here — " +
+            "that's a config fix, not something to retry.",
           true,
         );
       }
@@ -4053,7 +4058,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         // looking at it and everyone assuming somebody is.
         lines.push(
           "  · ⚠ no reviewers are configured for this project (`workflow.pr.reviewers` " +
-            "in `.dispatch/project.yaml`), so NOBODY has been asked to look at this",
+            "in `.dispatch/project.yaml` is empty, or every reviewer in it is switched " +
+            "off), so NOBODY has been asked to look at this",
         );
       }
       for (const f of res.reviewersFailed) {
