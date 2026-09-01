@@ -109,6 +109,7 @@ import {
   type PrToolKind,
   type PrToolOutcome,
   type Effort,
+  type HarnessKind,
   type ManifestMcpServer,
   type ProjectMemory,
   type ReviewDecision,
@@ -1511,6 +1512,8 @@ export interface SpawnChatRequest {
   /** Target project; omitted → the caller's own. */
   projectId?: string;
   modeId?: string;
+  /** Runtime provider for the new chat; omitted inherits the parent chat's provider. */
+  provider?: HarnessKind;
   agentId?: string;
   effort?: Effort;
   model?: string;
@@ -1553,6 +1556,8 @@ export interface SpawnedChat {
   title: string;
   projectId: string;
   projectName: string;
+  provider: HarnessKind;
+  model?: string;
 }
 
 /**
@@ -5152,6 +5157,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "explain it in `reason`. On approval the chat is created, started, and handed " +
       "your `prompt` as its first message — write that prompt as a complete, " +
       "standalone brief, because the new chat inherits NONE of this conversation. " +
+      "The child may use a different provider and model from yours: set `provider` " +
+      "and `model` explicitly when you want that; `model` alone never switches the " +
+      "provider. " +
       "The new chat is FILED UNDER YOURS in the sidebar, so a handful of them fold " +
       "into your row instead of scattering across the list — pass detached: true " +
       "only for work whose life has nothing to do with this chat's. Projects cap how " +
@@ -5171,12 +5179,29 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .optional()
         .describe("Project to spawn in. Defaults to this chat's own project."),
       modeId: z.string().optional().describe("Mode id for the new chat (default: your project's)."),
-      agentId: z.string().optional().describe("Custom agent id to run the new chat as."),
+      provider: z
+        .enum(["claude", "codex"])
+        .optional()
+        .describe(
+          "Provider/runtime for the new chat. Choose claude or codex; omit to inherit " +
+            "this chat's current provider. Model does not select the provider.",
+        ),
+      agentId: z
+        .string()
+        .optional()
+        .describe("Custom agent/persona id for the new chat. This does not select its provider."),
       effort: z
         .enum(["low", "medium", "high", "xhigh", "max"])
         .optional()
         .describe("Reasoning effort for the new chat (default: medium)."),
-      model: z.string().optional().describe("Model id override for the new chat."),
+      model: z
+        .string()
+        .optional()
+        .describe(
+          "Model id override within the selected provider. Omit to inherit this chat's current " +
+            "model, except that changing provider uses the new provider's configured default. " +
+            "This does not select the provider.",
+        ),
       reason: z
         .string()
         .optional()
@@ -5208,6 +5233,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         projectId:
           typeof args.projectId === "string" ? args.projectId.trim() || undefined : undefined,
         modeId: typeof args.modeId === "string" ? args.modeId.trim() || undefined : undefined,
+        provider: args.provider as HarnessKind | undefined,
         agentId: typeof args.agentId === "string" ? args.agentId.trim() || undefined : undefined,
         effort: args.effort as Effort | undefined,
         model: typeof args.model === "string" ? args.model.trim() || undefined : undefined,
@@ -5303,6 +5329,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
               chatId: spawned.chatId,
               title: spawned.title,
               projectId: spawned.projectId,
+              provider: spawned.provider,
+              model: spawned.model,
             }),
         );
       } catch (err) {

@@ -4152,6 +4152,8 @@ function fakeChats(opts: {
         title: request.title ?? "New chat",
         projectId: target.id,
         projectName: target.name,
+        provider: request.provider ?? "claude",
+        model: request.model,
       };
     },
   };
@@ -4164,6 +4166,7 @@ function spawnArgs(over: Partial<SpawnChatRequest> & { prompt: string }) {
     title: undefined,
     projectId: undefined,
     modeId: undefined,
+    provider: undefined,
     agentId: undefined,
     effort: undefined,
     model: undefined,
@@ -4198,6 +4201,36 @@ describe("manager-mcp — spawn_chat", () => {
     expect(chats.calls.spawned).toHaveLength(1);
     expect(res.isError).toBeFalsy();
     expect(resultText(res)).toContain("c-new");
+  });
+
+  it("keeps provider and model as separate child-chat choices", async () => {
+    const chats = fakeChats({});
+    const { spawnChat } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      chats: chats.binding,
+    });
+
+    const res = await spawnChat.handler(
+      spawnArgs({
+        prompt: "fix the review",
+        provider: "codex",
+        model: "gpt-5.6-sol",
+      }),
+      {},
+    );
+
+    expect(chats.calls.consented[0]).toMatchObject({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+    });
+    expect(chats.calls.spawned[0]).toMatchObject({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+    });
+    expect(resultText(res)).toContain('"provider":"codex"');
+    expect(resultText(res)).toContain('"model":"gpt-5.6-sol"');
   });
 
   it("does NOT spawn when the human declines, and says so without erroring", async () => {
@@ -4312,6 +4345,14 @@ describe("manager-mcp — spawn_chat", () => {
     expect(keys).not.toContain("requireConsent");
     expect(keys).not.toContain("force");
     expect(keys).not.toContain("skipConsent");
+  });
+
+  it("exposes provider and model as independent child-chat choices", () => {
+    const keys = Object.keys(
+      createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}) }).spawnChat.inputSchema,
+    );
+    expect(keys).toContain("provider");
+    expect(keys).toContain("model");
   });
 });
 
