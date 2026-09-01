@@ -22,11 +22,12 @@ import {
 } from "lucide-react";
 import {
   readWorktreeFile,
+  readWorktreeImage,
   writeWorktreeFile,
   type WorktreeFileContent,
 } from "../../lib/actions.js";
 import { useCodeViewer, type CodeViewerMode, type CodeViewerRequest } from "./store.js";
-import { languageForPath, isImagePath, imageMimeForPath } from "./lang.js";
+import { languageForPath, isImagePath } from "./lang.js";
 import { Spinner } from "../ui/Spinner.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Button } from "../ui/Button.js";
@@ -35,6 +36,7 @@ import { Chip } from "../ui/Chip.js";
 import { cn } from "../../lib/cn.js";
 import { useDialogLayer } from "../../lib/layers.js";
 import { midTruncate } from "../../lib/format.js";
+import { leaseImagePreview } from "./imagePreview.js";
 
 const MonacoPane = lazy(() => import("./MonacoPane.js"));
 
@@ -54,6 +56,13 @@ function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function fmtPreviewLimit(n: number): string {
+  if (n >= 1024 * 1024 && n % (1024 * 1024) === 0) {
+    return `${n / (1024 * 1024)} MB`;
+  }
+  return fmtBytes(n);
+}
+
 function baseName(p: string): string {
   return p.replace(/\\/g, "/").split("/").pop() ?? p;
 }
@@ -62,6 +71,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   const close = useCodeViewer((s) => s.close);
   const { worktreePath, relPath, base, branch } = request;
   const editable = !!request.editable;
+  const isImage = isImagePath(relPath);
   // Above whatever opened it — this viewer is routinely launched FROM the
   // project-config dialog, and a file you asked to see must not open behind it.
   const z = useDialogLayer();
@@ -74,6 +84,12 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   const [error, setError] = useState<string | null>(null);
   const [working, setWorking] = useState<WorktreeFileContent | null>(null);
   const [original, setOriginal] = useState<WorktreeFileContent | null>(null);
+  const [image, setImage] = useState<{
+    src: string;
+    size: number;
+    limit: number;
+    truncated: boolean;
+  } | null>(null);
 
   // Editable-mode state: the live draft, the last-persisted baseline (for the
   // dirty check), and save status.
@@ -90,10 +106,39 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   // Fetch working-tree + base content (base is tolerant: a new file has none).
   useEffect(() => {
     let live = true;
+    let imageLease: ReturnType<typeof leaseImagePreview> | null = null;
     setLoading(true);
     setError(null);
     setWorking(null);
     setOriginal(null);
+    setImage(null);
+
+    if (isImage) {
+      const abort = new AbortController();
+      readWorktreeImage(worktreePath, relPath, abort.signal)
+        .then((result) => {
+          if (!live) return;
+          imageLease = leaseImagePreview(result.blob);
+          setImage({
+            src: imageLease.src,
+            size: result.size,
+            limit: result.limit,
+            truncated: result.truncated,
+          });
+          setLoading(false);
+        })
+        .catch((e: unknown) => {
+          if (!live) return;
+          setError(e instanceof Error ? e.message : "Failed to read image.");
+          setLoading(false);
+        });
+      return () => {
+        live = false;
+        abort.abort();
+        imageLease?.dispose();
+      };
+    }
+
     Promise.all([
       readWorktreeFile(worktreePath, relPath),
       // `true` = read the base side at the fork point, not at `base`'s tip.
@@ -124,7 +169,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
     return () => {
       live = false;
     };
-  }, [worktreePath, relPath, base]);
+  }, [worktreePath, relPath, base, isImage]);
 
   // Escape to close.
   useEffect(() => {
@@ -136,15 +181,17 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
   }, [close]);
 
   const language = useMemo(() => languageForPath(relPath), [relPath]);
-  const isImage = isImagePath(relPath);
   const workingBinary = !!working?.binary;
   // No editable diff — the config editor is always a single-file edit.
-  const canDiff = !workingBinary && !error && !editable;
+  const canDiff = !isImage && !workingBinary && !error && !editable;
   const effectiveMode: CodeViewerMode = canDiff ? mode : "file";
 
   const modifiedText = working?.encoding === "utf8" ? working.content : "";
   const originalText = original?.encoding === "utf8" ? original.content : "";
-  const truncated = !!working?.truncated || (effectiveMode === "diff" && !!original?.truncated);
+  const truncated =
+    !!image?.truncated ||
+    !!working?.truncated ||
+    (effectiveMode === "diff" && !!original?.truncated);
 
   const copyPath = () => {
     void navigator.clipboard?.writeText(relPath).then(() => {
@@ -269,8 +316,8 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
               title="Couldn't open this file"
               detail={error}
             />
-          ) : isImage && workingBinary && working ? (
-            <ImagePreview file={working} relPath={relPath} />
+          ) : isImage && image ? (
+            <ImagePreview src={image.src} relPath={relPath} />
           ) : workingBinary ? (
             <StateNote
               icon={<FileWarning className="text-warn" />}
@@ -312,8 +359,8 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
         {/* footer */}
         <div className="flex h-8 shrink-0 items-center gap-3 border-t border-line px-3 text-2xs text-faint">
           <span className="uppercase tracking-[0.08em]">{language}</span>
-          {working && !workingBinary && (
-            <span className="tabular-nums">{fmtBytes(working.size)}</span>
+          {(image || (working && !workingBinary)) && (
+            <span className="tabular-nums">{fmtBytes(image?.size ?? working?.size ?? 0)}</span>
           )}
           {effectiveMode === "diff" && (
             <span className="text-muted">
@@ -334,7 +381,7 @@ export function CodeViewer({ request }: { request: CodeViewerRequest }) {
           {truncated && (
             <span className="ml-auto inline-flex items-center gap-1 text-warn">
               <AlertTriangle className="size-3" />
-              Truncated at 2&nbsp;MB
+              Truncated at {fmtPreviewLimit(image?.limit || 2 * 1024 * 1024)}
             </span>
           )}
         </div>
@@ -366,12 +413,8 @@ function StateNote({
   );
 }
 
-/** Inline preview of an image file straight out of the worktree (base64). */
-function ImagePreview({ file, relPath }: { file: WorktreeFileContent; relPath: string }) {
-  const src =
-    file.encoding === "base64"
-      ? `data:${imageMimeForPath(relPath)};base64,${file.content}`
-      : `data:${imageMimeForPath(relPath)};utf8,${encodeURIComponent(file.content)}`;
+/** Inline preview of an image file streamed into a revocable Blob URL. */
+function ImagePreview({ src, relPath }: { src: string; relPath: string }) {
   return (
     <div
       className="flex h-full items-center justify-center overflow-auto p-6"

@@ -303,6 +303,13 @@ export interface WorktreeFileContent {
   truncated: boolean;
 }
 
+export interface WorktreeImageContent {
+  blob: Blob;
+  size: number;
+  limit: number;
+  truncated: boolean;
+}
+
 /** Body accepted by POST /api/chats/:id/assets. */
 export interface UploadAssetBody {
   /** Base64 or a `data:<mime>;base64,<…>` URL. */
@@ -872,6 +879,36 @@ export const api = {
       get<WorktreeFileContent>(
         `/api/worktrees/file${qs({ worktreePath, relPath, ref, mergeBase: mergeBase ? "1" : undefined })}`,
       ),
+    /**
+     * Stream a worktree image as a Blob. Keeping it out of the JSON file reader
+     * avoids base64's extra copy; the caller must revoke its Blob URL on close.
+     */
+    image: async (
+      worktreePath: string,
+      relPath: string,
+      signal?: AbortSignal,
+    ): Promise<WorktreeImageContent> => {
+      const res = await sessionFetch(
+        `${BASE}/api/worktrees/image${qs({ worktreePath, relPath })}`,
+        { signal },
+      );
+      if (!res.ok) {
+        const detail = await res.json().catch(() => undefined) as
+          | { error?: unknown }
+          | undefined;
+        throw new ApiError(
+          res.status,
+          detail?.error ? String(detail.error) : res.statusText || `HTTP ${res.status}`,
+          detail,
+        );
+      }
+      return {
+        blob: await res.blob(),
+        size: Number(res.headers.get("x-dispatch-file-size") ?? 0),
+        limit: Number(res.headers.get("x-dispatch-preview-limit") ?? 0),
+        truncated: res.headers.get("x-dispatch-truncated") === "1",
+      };
+    },
     /** Save edited working-tree file content (editable Monaco). */
     writeFile: (worktreePath: string, relPath: string, content: string) =>
       put<{ path: string; size: number }>("/api/worktrees/file", {

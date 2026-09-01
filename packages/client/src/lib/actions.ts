@@ -320,7 +320,12 @@ export function deleteChat(chatId: string): Promise<void> {
 // Re-export the read helpers features use for Monaco so they import from one place.
 // (`assetUrl` is deliberately NOT re-exported: it is not a usable `<img src>` —
 // see lib/assetSrc.ts.)
-export type { WorktreeFileContent, ServerWorktreeDiff, ServerFileDiff } from "./api.js";
+export type {
+  WorktreeFileContent,
+  WorktreeImageContent,
+  ServerWorktreeDiff,
+  ServerFileDiff,
+} from "./api.js";
 
 /**
  * Read a worktree file (working tree, or at `ref` for the base side of a diff).
@@ -333,6 +338,13 @@ export const readWorktreeFile = (
   ref?: string,
   mergeBase?: boolean,
 ) => api.worktrees.file(worktreePath, relPath, ref, mergeBase);
+
+/** Stream an image preview; closing the viewer aborts this request if still live. */
+export const readWorktreeImage = (
+  worktreePath: string,
+  relPath: string,
+  signal?: AbortSignal,
+) => api.worktrees.image(worktreePath, relPath, signal);
 
 /** Save edited working-tree file content (editable Monaco config editor). */
 export const writeWorktreeFile = (

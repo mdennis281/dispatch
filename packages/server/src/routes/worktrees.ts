@@ -6,6 +6,7 @@
  *   DELETE /api/worktrees {worktreePath,chatId?,force?} → remove
  *   GET    /api/worktrees/diff?worktreePath=&base= → WorktreeDiff
  *   GET    /api/worktrees/file?worktreePath=&relPath=&ref= → WorktreeFile (Monaco)
+ *   GET    /api/worktrees/image?worktreePath=&relPath= → raw image preview (25 MiB cap)
  *   PUT    /api/worktrees/file {worktreePath,relPath,content} → write (Monaco save)
  *   GET    /api/worktrees/refresh?projectId=      → force a detection pass
  *   GET    /api/worktrees/cleanup?projectId=&probe= → ReapPlan (what's stale)
@@ -15,6 +16,22 @@
  */
 import type { FastifyInstance } from "fastify";
 import { parseRegistryQuery, RegistryQueryError } from "@dispatch/shared";
+import {
+  isDenied,
+  openFsAsset,
+  resolveFsAsset,
+  type FsAssetDenial,
+} from "../services/fs-assets.js";
+
+/** Worktree images are streamed raw up to this limit; code/diffs stay at 2 MiB. */
+export const IMAGE_PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
+
+const IMAGE_DENIAL_STATUS: Record<FsAssetDenial, number> = {
+  "not-found": 404,
+  forbidden: 403,
+  "too-large": 413,
+  "not-media": 415,
+};
 
 export function registerWorktreeRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
@@ -139,6 +156,56 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
         .code(400)
         .send({ error: err instanceof Error ? err.message : String(err) });
     }
+  });
+
+  /**
+   * Stream an image preview without turning 25 MiB of bytes into a ~33 MiB
+   * base64 JSON string. The client owns the resulting Blob URL and revokes it
+   * when the preview closes; aborting that fetch also stops this stream early.
+   */
+  app.get<{
+    Querystring: { worktreePath?: string; relPath?: string };
+  }>("/api/worktrees/image", async (req, reply) => {
+    const { worktreePath, relPath } = req.query;
+    if (!worktreePath || !relPath) {
+      return reply
+        .code(400)
+        .send({ error: "worktreePath and relPath required" });
+    }
+
+    const found = await resolveFsAsset(relPath, [worktreePath]);
+    if (isDenied(found)) {
+      return reply
+        .code(IMAGE_DENIAL_STATUS[found.denied])
+        .send({ error: found.denied });
+    }
+    if (!found.mimeType.startsWith("image/")) {
+      return reply.code(415).send({ error: "not-image" });
+    }
+
+    const served = Math.min(found.size, IMAGE_PREVIEW_LIMIT_BYTES);
+    reply.header("content-type", found.mimeType);
+    reply.header("x-content-type-options", "nosniff");
+    reply.header("cache-control", "private, no-store");
+    reply.header("content-length", String(served));
+    reply.header("x-dispatch-file-size", String(found.size));
+    reply.header("x-dispatch-preview-limit", String(IMAGE_PREVIEW_LIMIT_BYTES));
+    reply.header(
+      "x-dispatch-truncated",
+      found.size > IMAGE_PREVIEW_LIMIT_BYTES ? "1" : "0",
+    );
+    if (found.mimeType === "image/svg+xml") {
+      reply.header(
+        "content-security-policy",
+        "default-src 'none'; style-src 'unsafe-inline'",
+      );
+    }
+    return reply.send(
+      openFsAsset(
+        found.path,
+        found.size > served ? { start: 0, end: served - 1 } : undefined,
+      ),
+    );
   });
 
   // Save edited file content back to the working tree (editable Monaco config

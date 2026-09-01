@@ -12,6 +12,7 @@ import { buildApp } from "../app.js";
 import { loadConfig } from "../config.js";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
+import { IMAGE_PREVIEW_LIMIT_BYTES } from "./worktrees.js";
 
 /** A 1×1 transparent PNG. */
 const PNG_B64 =
@@ -282,6 +283,51 @@ describe("worktree file read (Monaco)", () => {
         url: `/api/worktrees/file?worktreePath=${encodeURIComponent(wt)}&relPath=${encodeURIComponent("../escape.txt")}`,
       });
       expect(traversal.statusCode).toBe(400);
+    } finally {
+      await rm(wt, { recursive: true, force: true });
+    }
+  });
+
+  it("streams image previews past 2 MiB and caps them at 25 MiB", async () => {
+    const wt = await mkdtemp(join(tmpdir(), "cm-wt-image-"));
+    try {
+      const png = Buffer.from(PNG_B64, "base64");
+      const overTwoMiB = Buffer.concat([png, Buffer.alloc(3 * 1024 * 1024)]);
+      await writeFile(join(wt, "large.png"), overTwoMiB);
+
+      const full = await app.inject({
+        method: "GET",
+        url: `/api/worktrees/image?worktreePath=${encodeURIComponent(wt)}&relPath=large.png`,
+      });
+      expect(full.statusCode).toBe(200);
+      expect(full.headers["content-type"]).toBe("image/png");
+      expect(full.headers["x-dispatch-truncated"]).toBe("0");
+      expect(Number(full.headers["x-dispatch-preview-limit"])).toBe(
+        IMAGE_PREVIEW_LIMIT_BYTES,
+      );
+      expect(full.rawPayload.length).toBe(overTwoMiB.length);
+
+      // The larger allowance belongs only to the raw image route. Monaco text
+      // and diff reads still carry the original 2 MiB memory/wire guard.
+      const monaco = await app.inject({
+        method: "GET",
+        url: `/api/worktrees/file?worktreePath=${encodeURIComponent(wt)}&relPath=large.png`,
+      });
+      expect((monaco.json() as { truncated: boolean }).truncated).toBe(true);
+
+      const overLimit = Buffer.concat([
+        png,
+        Buffer.alloc(IMAGE_PREVIEW_LIMIT_BYTES + 1024),
+      ]);
+      await writeFile(join(wt, "too-large.png"), overLimit);
+      const capped = await app.inject({
+        method: "GET",
+        url: `/api/worktrees/image?worktreePath=${encodeURIComponent(wt)}&relPath=too-large.png`,
+      });
+      expect(capped.statusCode).toBe(200);
+      expect(capped.headers["x-dispatch-truncated"]).toBe("1");
+      expect(Number(capped.headers["x-dispatch-file-size"])).toBe(overLimit.length);
+      expect(capped.rawPayload.length).toBe(IMAGE_PREVIEW_LIMIT_BYTES);
     } finally {
       await rm(wt, { recursive: true, force: true });
     }
