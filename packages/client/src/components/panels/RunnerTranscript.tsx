@@ -66,7 +66,9 @@ export function RunnerTranscript({
     return () => {
       current = false;
     };
-  }, [runnerId]);
+  // Re-fetch when a run settles: the websocket store is intentionally bounded,
+  // while the durable snapshot contains the complete retained transcript.
+  }, [runnerId, active]);
 
   const lines = useMemo(() => mergeRunnerLogs(snapshot, live), [snapshot, live]);
   const bodyRef = useRef<HTMLDivElement>(null);

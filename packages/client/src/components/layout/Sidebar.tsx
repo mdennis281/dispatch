@@ -307,7 +307,7 @@ function SubAppRow({
         </Chip>
       )}
       {runner?.status === "crashed" && (
-        <Chip tone="danger" mono={runner.exitCode !== null}>
+        <Chip tone="danger" mono={runner.exitCode != null}>
           {runner.exitCode !== undefined && runner.exitCode !== null
             ? `exit ${runner.exitCode}`
             : runner.exitSignal ?? "failed"}
