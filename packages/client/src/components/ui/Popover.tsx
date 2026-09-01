@@ -101,7 +101,7 @@ export function Popover({
   // ordering against the sidebar is real. Ordinary popovers remain body-level.
   const portalRoot =
     mounted && typeof document !== "undefined"
-      ? side === "right"
+      ? placement?.side === "right"
         ? (triggerRef.current?.closest<HTMLElement>("[data-popover-layer-root]") ??
           document.body)
         : document.body
