@@ -3,6 +3,7 @@ import type { Chat, PeerSender, WsServerEvent } from "@dispatch/shared";
 import type { ServerConfig } from "../config.js";
 import type { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
+import type { SpawnChatRequest } from "./mcp/manager-mcp.js";
 import {
   createServices,
   recoverInterruptedChatStatuses,
@@ -217,7 +218,13 @@ describe("createServices().start() resilience", () => {
 describe("broker.spawnChat attribution", () => {
   const PARENT = "parent_chat";
 
-  async function spawn(parent: Partial<Chat> | null) {
+  async function spawn(
+    parent: Partial<Chat> | null,
+    request: SpawnChatRequest = {
+      prompt: "Migrate the cloud save slots.",
+      title: "save migration",
+    },
+  ) {
     // Typed args, not `vi.fn(async () => {})`: an inferred empty tuple makes
     // every `mock.calls[0][n]` read a type error.
     const sendMessage =
@@ -262,15 +269,15 @@ describe("broker.spawnChat attribution", () => {
       },
     );
     await services.broker.spawnChat!({
-      request: { prompt: "Migrate the cloud save slots.", title: "save migration" },
+      request,
       project: { id: "p1", name: "Hivebreak" },
       parentChatId: PARENT,
     });
-    return sendMessage;
+    return { sendMessage, saved };
   }
 
   it("stamps the opening prompt as coming from the chat that spawned it", async () => {
-    const sendMessage = await spawn({
+    const { sendMessage } = await spawn({
       id: PARENT,
       title: "Steam cloud save",
       projectId: "hivebreak",
@@ -289,10 +296,62 @@ describe("broker.spawnChat attribution", () => {
     // An unreadable parent must cost the row its TITLE, never its attribution —
     // falling back to an unstamped send would put the words back in the human's
     // mouth for the one case nobody can check afterwards.
-    const sendMessage = await spawn(null);
+    const { sendMessage } = await spawn(null);
 
     expect(sendMessage.mock.calls[0]![2]).toEqual({
       peer: { chatId: PARENT, title: undefined, projectId: undefined },
+    });
+  });
+
+  it("inherits the parent chat's current provider and model by default", async () => {
+    const { saved } = await spawn({
+      id: PARENT,
+      title: "Review repair",
+      projectId: "hivebreak",
+      harness: "codex",
+      model: "gpt-5.6-sol",
+    });
+
+    expect(saved[0]).toMatchObject({
+      harness: "codex",
+      model: "gpt-5.6-sol",
+    });
+  });
+
+  it("does not carry a model across an explicit provider change", async () => {
+    const { saved } = await spawn(
+      {
+        id: PARENT,
+        title: "Review repair",
+        projectId: "hivebreak",
+        harness: "claude",
+        model: "claude-opus-5",
+      },
+      {
+        prompt: "Fix PR #54.",
+        title: "PR #54",
+        provider: "codex",
+      },
+    );
+
+    expect(saved[0]).toMatchObject({ harness: "codex" });
+    expect(saved[0]?.model).toBeUndefined();
+  });
+
+  it("creates the child on the explicitly selected provider and model", async () => {
+    const { saved } = await spawn(
+      { id: PARENT, title: "Review repair", projectId: "hivebreak" },
+      {
+        prompt: "Fix PR #54.",
+        title: "PR #54",
+        provider: "codex",
+        model: "gpt-5.6-sol",
+      },
+    );
+
+    expect(saved[0]).toMatchObject({
+      harness: "codex",
+      model: "gpt-5.6-sol",
     });
   });
 });

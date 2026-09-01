@@ -761,13 +761,29 @@ export function createServices(
           .catch(() => null),
     });
   broker.spawnChat = async ({ request, project, parentChatId }) => {
+    // A spawned chat is an extension of the chat that asked for it, so the
+    // parent's provider/model are the least-surprising defaults. Project/app
+    // defaults are for chats started from the UI, not for a child silently
+    // changing runtimes underneath its parent.
+    const parent = await store.getChat(parentChatId).catch(() => null);
+    // Legacy chats predate the persisted harness field; those chats are Claude,
+    // which was the only provider when their rows were written.
+    const parentProvider = parent ? (parent.harness ?? "claude") : undefined;
+    const provider = request.provider ?? parentProvider;
+    // A model id belongs to one provider's catalogue. When the provider is
+    // explicitly changed, let that provider choose its configured default
+    // unless the request also names a model for it.
+    const model =
+      request.model ??
+      (!request.provider || request.provider === parentProvider ? parent?.model : undefined);
     const chat = await createChat(services, {
       projectId: project.id,
       title: request.title,
       modeId: request.modeId,
+      harness: provider,
       agentId: request.agentId,
       effort: request.effort,
-      model: request.model,
+      model,
       // Built in shared, beside the parser that reads it back — the detached form
       // deliberately does NOT match that parser, and two prose literals in two
       // packages would only agree by luck. See `spawnedPurposeLabel`.
@@ -791,7 +807,6 @@ export function createServices(
     // Denormalised title, per PeerSenderSchema: the parent may be renamed or
     // deleted long before anyone reads this row, and a transcript can't be
     // rewritten. Best-effort — a missing parent must not fail the spawn.
-    const parent = await store.getChat(parentChatId).catch(() => null);
     await broker.sendMessage(chat.id, request.prompt, {
       peer: { chatId: parentChatId, title: parent?.title, projectId: parent?.projectId },
     });
@@ -800,6 +815,8 @@ export function createServices(
       title: chat.title,
       projectId: chat.projectId,
       projectName: project.name,
+      provider: chat.harness ?? "claude",
+      model: chat.model,
     };
   };
 
