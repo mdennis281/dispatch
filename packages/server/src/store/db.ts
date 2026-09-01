@@ -241,6 +241,22 @@ const MIGRATIONS: ReadonlyArray<string> = [
   `
   CREATE INDEX metric_span_chat ON metric_span(chat_id, end_ts, start_ts);
   `,
+
+  // 5 — durable subApp run output.
+  //
+  // Runner records have always survived process exit, but their stdout/stderr
+  // lived only in RunnerService's in-memory ring. The service deleted that ring
+  // on exit, so an immediate exit 1 lost its evidence exactly when it mattered.
+  `
+  CREATE TABLE runner_line (
+    seq       INTEGER PRIMARY KEY,
+    runner_id TEXT NOT NULL,
+    ts        INTEGER NOT NULL,
+    stream    TEXT NOT NULL,
+    line      TEXT NOT NULL
+  );
+  CREATE INDEX runner_line_runner ON runner_line(runner_id, seq);
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import {
   Gamepad2,
   Database,
@@ -24,8 +24,8 @@ import { IconButton } from "../ui/IconButton.js";
 import { Button } from "../ui/Button.js";
 import { SectionLabel } from "../ui/Panel.js";
 import { cn } from "../../lib/cn.js";
-import { clock } from "../../lib/format.js";
 import { openRunnerLogWindow } from "./RunnerLogWindow.js";
+import { RunnerTranscript } from "./RunnerTranscript.js";
 import { ProcessesPanel } from "./ProcessesPanel.js";
 import { BranchWorktreePicker } from "./BranchWorktreePicker.js";
 import {
@@ -42,21 +42,12 @@ const SUBAPP_ICON: Record<string, LucideIcon> = {
   "studio-director": Clapperboard,
 };
 
-const EMPTY_LOGS: import("../../stores/runners.js").RunnerLogLine[] = [];
 const ACTIVE = new Set<RunnerInstance["status"]>(["starting", "running"]);
 
 function RunnerCard({ runner }: { runner: RunnerInstance }) {
   const Icon = SUBAPP_ICON[runner.subAppId] ?? Circle;
-  const logs = useRunners((s) => s.logs[runner.id] ?? EMPTY_LOGS);
   const running = runner.status === "running";
   const active = ACTIVE.has(runner.status);
-
-  // Follow the tail: pin the log view to the bottom as lines stream in.
-  const logRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = logRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [logs]);
 
   const open = () => {
     if (runner.url) window.open(runner.url, "_blank", "noopener,noreferrer");
@@ -127,31 +118,20 @@ function RunnerCard({ runner }: { runner: RunnerInstance }) {
         </button>
       )}
 
-      {logs.length > 0 && (
-        <div className="border-t border-line-soft">
-          <div className="flex items-center gap-1.5 px-3 pt-1.5">
-            <span className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">Output</span>
-            <button
-              onClick={popOut}
-              title="Pop out logs into a separate window"
-              className="ml-auto flex items-center gap-1 text-2xs text-muted transition-colors hover:text-accent-hi [&_svg]:size-3"
-            >
-              <Terminal />
-              pop out
-            </button>
-          </div>
-          <div ref={logRef} className="cm-scroll max-h-48 overflow-y-auto bg-inset px-3 py-2">
-            {logs.map((l, i) => (
-              <div key={i} className="flex gap-2 py-px cm-mono !text-2xs leading-relaxed">
-                <span className="shrink-0 text-faint">{clock(l.ts)}</span>
-                <span className={cn("min-w-0 flex-1 break-all", l.stream === "stderr" ? "text-warn" : "text-secondary")}>
-                  {l.line}
-                </span>
-              </div>
-            ))}
-          </div>
+      <div className="border-t border-line-soft">
+        <div className="flex items-center gap-1.5 px-3 pt-1.5">
+          <span className="text-2xs font-semibold uppercase tracking-[0.09em] text-faint">Output</span>
+          <button
+            onClick={popOut}
+            title="Pop out logs into a separate window"
+            className="ml-auto flex items-center gap-1 text-2xs text-muted transition-colors hover:text-accent-hi [&_svg]:size-3"
+          >
+            <Terminal />
+            pop out
+          </button>
         </div>
-      )}
+        <RunnerTranscript runnerId={runner.id} active={active} className="max-h-48" />
+      </div>
 
       <div className="flex items-center gap-1.5 border-t border-line-soft px-3 py-2">
         {active ? (

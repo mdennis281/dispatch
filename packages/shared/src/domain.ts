@@ -1022,9 +1022,21 @@ export const RunnerInstanceSchema = z.object({
   composeFile: z.string().optional(),
   status: RunnerStatusSchema,
   startedAt: z.number().int().optional(),
+  /** When the run reached a terminal state (used for duration/history). */
+  endedAt: z.number().int().optional(),
   exitCode: z.number().int().nullable().optional(),
+  /** OS signal when the process ended without an exit code. */
+  exitSignal: z.string().nullable().optional(),
 });
 export type RunnerInstance = z.infer<typeof RunnerInstanceSchema>;
+
+/** One retained line from a subApp run's stdout/stderr transcript. */
+export const RunnerLogLineSchema = z.object({
+  stream: z.enum(["stdout", "stderr"]),
+  line: z.string(),
+  ts: z.number().int(),
+});
+export type RunnerLogLine = z.infer<typeof RunnerLogLineSchema>;
 
 /* --------------------------------------------------------------- terminals */
 

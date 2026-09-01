@@ -78,6 +78,7 @@ import { foldedChildrenLabel } from "./reviewLabel.js";
 import { DeleteChatDialog } from "../chat/DeleteChatDialog.js";
 import { useChatRename } from "../chat/useChatRename.js";
 import { BranchWorktreePicker } from "../panels/BranchWorktreePicker.js";
+import { SubAppRunsPopover } from "../panels/SubAppRunsPopover.js";
 import {
   useLaunchTargets,
   useLaunchBranch,
@@ -305,6 +306,14 @@ function SubAppRow({
           :{runner.port}
         </Chip>
       )}
+      {runner?.status === "crashed" && (
+        <Chip tone="danger" mono={runner.exitCode !== null}>
+          {runner.exitCode !== undefined && runner.exitCode !== null
+            ? `exit ${runner.exitCode}`
+            : runner.exitSignal ?? "failed"}
+        </Chip>
+      )}
+      <SubAppRunsPopover app={app} projectId={project.id} latest={runner} />
       {transitioning ? (
         <span className="flex size-6 items-center justify-center">
           <Spinner size={12} />

@@ -9,14 +9,12 @@
  * Because a fresh connection has no history, we ALSO backfill once from
  * `GET /api/runners/:id/logs` and stitch it in front of the live tail.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Circle, Terminal, ExternalLink } from "lucide-react";
-import { api } from "../../lib/api.js";
-import { useRunners, type RunnerLogLine } from "../../stores/runners.js";
+import { useEffect, useMemo } from "react";
+import { Terminal, ExternalLink } from "lucide-react";
+import { useRunners } from "../../stores/runners.js";
 import { useConnection } from "../../stores/index.js";
 import { StatusDot } from "../ui/StatusDot.js";
-import { clock } from "../../lib/format.js";
-import { cn } from "../../lib/cn.js";
+import { RunnerTranscript } from "./RunnerTranscript.js";
 
 const ACTIVE = new Set(["starting", "running"]);
 
@@ -37,57 +35,12 @@ export function RunnerLogWindow() {
     [],
   );
   const runner = useRunners((s) => s.byId[runnerId]);
-  const liveLogs = useRunners((s) => s.logs[runnerId]);
   const conn = useConnection((s) => s.state);
-
-  // One-shot backfill of history (the fresh WS only carries lines from now on).
-  const [backfill, setBackfill] = useState<RunnerLogLine[]>([]);
-  const [backfillMaxTs, setBackfillMaxTs] = useState(0);
-  useEffect(() => {
-    if (!runnerId) return;
-    let live = true;
-    api.runners
-      .logs(runnerId)
-      .then((lines) => {
-        if (!live) return;
-        const norm = lines.map((l) => ({
-          stream: l.stream === "stderr" ? "stderr" : "stdout",
-          line: l.line,
-          ts: l.ts,
-        })) as RunnerLogLine[];
-        setBackfill(norm);
-        setBackfillMaxTs(norm.length ? norm[norm.length - 1]!.ts : 0);
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [runnerId]);
-
-  // Backfill (history) followed by only the live lines newer than it, so the
-  // handoff between the REST snapshot and the WS stream doesn't duplicate.
-  const lines = useMemo(() => {
-    const tail = (liveLogs ?? []).filter((l) => l.ts > backfillMaxTs);
-    return [...backfill, ...tail];
-  }, [backfill, liveLogs, backfillMaxTs]);
 
   // Title reflects the app so the OS window/taskbar entry is identifiable.
   useEffect(() => {
     document.title = runner ? `logs · ${runner.subAppId}` : "runner logs";
   }, [runner]);
-
-  // Follow the tail.
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const pinnedRef = useRef(true);
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [lines]);
-  const onScroll = () => {
-    const el = bodyRef.current;
-    if (!el) return;
-    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-  };
 
   const status = runner?.status;
   const active = status ? ACTIVE.has(status) : false;
@@ -127,36 +80,12 @@ export function RunnerLogWindow() {
         )}
       </div>
 
-      {/* body */}
-      <div
-        ref={bodyRef}
-        onScroll={onScroll}
-        className="cm-scroll min-h-0 flex-1 overflow-y-auto px-3 py-2"
-      >
-        {lines.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-xs text-faint">
-            <Circle className="mr-1.5 size-2 animate-pulse" />
-            waiting for output…
-          </div>
-        ) : (
-          lines.map((l, i) => (
-            <div
-              key={i}
-              className="flex gap-2 py-px cm-mono !text-xs leading-relaxed"
-            >
-              <span className="shrink-0 text-faint">{clock(l.ts)}</span>
-              <span
-                className={cn(
-                  "min-w-0 flex-1 whitespace-pre-wrap break-all",
-                  l.stream === "stderr" ? "text-warn" : "text-secondary",
-                )}
-              >
-                {l.line}
-              </span>
-            </div>
-          ))
-        )}
-      </div>
+      <RunnerTranscript
+        runnerId={runnerId}
+        active={active}
+        className="min-h-0 flex-1"
+        textSize="text-xs"
+      />
     </div>
   );
 }
