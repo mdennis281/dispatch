@@ -828,7 +828,7 @@ export class WorktreeService {
   async readFile(
     worktreePath: string,
     relPath: string,
-    opts: { ref?: string; mergeBase?: boolean } = {},
+    opts: { ref?: string; mergeBase?: boolean; maxBytes?: number } = {},
   ): Promise<WorktreeFile> {
     const rel = normalizeRelPath(relPath);
     if (rel === null) throw new Error(`invalid relPath: ${relPath}`);
@@ -864,7 +864,12 @@ export class WorktreeService {
           truncated: false,
         };
       }
-      return packFileContent(rel, Buffer.from(r.stdout, "utf8"), ref);
+      return packFileContent(
+        rel,
+        Buffer.from(r.stdout, "utf8"),
+        ref,
+        opts.maxBytes,
+      );
     }
 
     const abs = resolve(worktreePath, rel);
@@ -883,7 +888,7 @@ export class WorktreeService {
         truncated: false,
       };
     }
-    return packFileContent(rel, await fsReadFile(abs));
+    return packFileContent(rel, await fsReadFile(abs), undefined, opts.maxBytes);
   }
 
   /**
@@ -1181,9 +1186,14 @@ function looksBinary(buf: Buffer): boolean {
  * EXPORTED so GitService packs working-tree/index/rev reads identically — the
  * Monaco viewer consumes one shape no matter which service fetched it.
  */
-export function packFileContent(rel: string, buf: Buffer, ref?: string): WorktreeFile {
-  const truncated = buf.length > MAX_FILE_BYTES;
-  const slice = truncated ? buf.subarray(0, MAX_FILE_BYTES) : buf;
+export function packFileContent(
+  rel: string,
+  buf: Buffer,
+  ref?: string,
+  maxBytes = MAX_FILE_BYTES,
+): WorktreeFile {
+  const truncated = buf.length > maxBytes;
+  const slice = truncated ? buf.subarray(0, maxBytes) : buf;
   const binary = looksBinary(slice);
   return {
     path: rel,

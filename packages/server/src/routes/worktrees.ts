@@ -15,23 +15,12 @@
  * actions use (publishing `worktree-update` / `chat-update` / `notice`).
  */
 import type { FastifyInstance } from "fastify";
-import { parseRegistryQuery, RegistryQueryError } from "@dispatch/shared";
-import {
-  isDenied,
-  openFsAsset,
-  resolveFsAsset,
-  type FsAssetDenial,
-} from "../services/fs-assets.js";
+import { mediaKind, parseRegistryQuery, RegistryQueryError } from "@dispatch/shared";
+import { mediaTypeFromName } from "../services/media-types.js";
+import { identifyMedia } from "../services/media-sniff.js";
 
-/** Worktree images are streamed raw up to this limit; code/diffs stay at 2 MiB. */
+/** Worktree images are served raw up to this limit; code/diffs stay at 2 MiB. */
 export const IMAGE_PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
-
-const IMAGE_DENIAL_STATUS: Record<FsAssetDenial, number> = {
-  "not-found": 404,
-  forbidden: 403,
-  "too-large": 413,
-  "not-media": 415,
-};
 
 export function registerWorktreeRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
@@ -159,9 +148,9 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
   });
 
   /**
-   * Stream an image preview without turning 25 MiB of bytes into a ~33 MiB
+   * Serve an image preview without turning 25 MiB of bytes into a ~33 MiB
    * base64 JSON string. The client owns the resulting Blob URL and revokes it
-   * when the preview closes; aborting that fetch also stops this stream early.
+   * when the preview closes.
    */
   app.get<{
     Querystring: { worktreePath?: string; relPath?: string };
@@ -173,39 +162,41 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
         .send({ error: "worktreePath and relPath required" });
     }
 
-    const found = await resolveFsAsset(relPath, [worktreePath]);
-    if (isDenied(found)) {
+    let file;
+    try {
+      file = await worktrees.readFile(worktreePath, relPath, {
+        maxBytes: IMAGE_PREVIEW_LIMIT_BYTES,
+      });
+    } catch (err) {
       return reply
-        .code(IMAGE_DENIAL_STATUS[found.denied])
-        .send({ error: found.denied });
+        .code(400)
+        .send({ error: err instanceof Error ? err.message : String(err) });
     }
-    if (!found.mimeType.startsWith("image/")) {
+    if (!file.exists) return reply.code(404).send({ error: "not-found" });
+
+    const content = Buffer.from(
+      file.content,
+      file.encoding === "base64" ? "base64" : "utf8",
+    );
+    const media = identifyMedia(content, mediaTypeFromName(file.path));
+    if (mediaKind(media.mimeType) !== "image") {
       return reply.code(415).send({ error: "not-image" });
     }
 
-    const served = Math.min(found.size, IMAGE_PREVIEW_LIMIT_BYTES);
-    reply.header("content-type", found.mimeType);
+    reply.header("content-type", media.mimeType);
     reply.header("x-content-type-options", "nosniff");
     reply.header("cache-control", "private, no-store");
-    reply.header("content-length", String(served));
-    reply.header("x-dispatch-file-size", String(found.size));
+    reply.header("content-length", String(content.length));
+    reply.header("x-dispatch-file-size", String(file.size));
     reply.header("x-dispatch-preview-limit", String(IMAGE_PREVIEW_LIMIT_BYTES));
-    reply.header(
-      "x-dispatch-truncated",
-      found.size > IMAGE_PREVIEW_LIMIT_BYTES ? "1" : "0",
-    );
-    if (found.mimeType === "image/svg+xml") {
+    reply.header("x-dispatch-truncated", file.truncated ? "1" : "0");
+    if (media.mimeType === "image/svg+xml") {
       reply.header(
         "content-security-policy",
         "default-src 'none'; style-src 'unsafe-inline'",
       );
     }
-    return reply.send(
-      openFsAsset(
-        found.path,
-        found.size > served ? { start: 0, end: served - 1 } : undefined,
-      ),
-    );
+    return reply.send(content);
   });
 
   // Save edited file content back to the working tree (editable Monaco config
