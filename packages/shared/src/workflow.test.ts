@@ -6,6 +6,7 @@ import {
   normalizeReviewerRoster,
   COPILOT_LOGIN,
 } from "./workflow.js";
+import type { PrReviewerEntry } from "./workflow.js";
 
 describe("resolveWorkflow", () => {
   it("resolves `none` to the no-ceremony posture", () => {
@@ -403,6 +404,24 @@ describe("the reviewer roster", () => {
     expect(normalizeReviewerRoster(["octocat", "  ", { login: "" }])).toEqual([
       { login: "octocat", enabled: true },
     ]);
+  });
+
+  it("collapses a duplicated login, first row winning", () => {
+    // A hand-edited manifest can hold one login twice in disagreeing states, and
+    // there is no meaning to resolve there — GitHub logins are case-insensitive,
+    // so it is one reviewer asked twice. Collapsing is also what lets the editor
+    // key its rows by login: a switch on one row must not move another.
+    expect(normalizeReviewerRoster(["Octocat", { login: "octocat", enabled: false }])).toEqual([
+      { login: "Octocat", enabled: true },
+    ]);
+  });
+
+  it("skips a malformed row instead of throwing mid-resolve", () => {
+    // Every path here is schema-validated first, but this function is exported
+    // and pure — and a TypeError thrown inside `resolveWorkflow` takes out
+    // whatever was resolving the workflow, rather than the one row written wrong.
+    const junk = [{ enabled: false }, null, 7, "octocat"] as unknown as PrReviewerEntry[];
+    expect(normalizeReviewerRoster(junk)).toEqual([{ login: "octocat", enabled: true }]);
   });
 
   it("round-trips through the authored form, keeping bare logins bare", () => {

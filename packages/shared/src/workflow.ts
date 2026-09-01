@@ -226,18 +226,36 @@ export type ReviewerRosterEntry = z.infer<typeof ReviewerRosterEntrySchema>;
 /**
  * Expand an authored roster into `{ login, enabled }` rows.
  *
- * Blank entries are dropped rather than passed on: a stray `- ""` in the YAML
- * would otherwise reach `POST /pulls/{n}/requested_reviewers` as a login, where
- * it fails the whole batch of reviewers rather than just itself.
+ * Three things are dropped rather than passed on:
+ *
+ *   - BLANK logins. A stray `- ""` in the YAML would otherwise reach
+ *     `POST /pulls/{n}/requested_reviewers` as a login, where it fails the whole
+ *     batch of reviewers rather than just itself.
+ *   - DUPLICATES, case-insensitively, first occurrence winning. GitHub logins are
+ *     case-insensitive, so two rows are one reviewer asked twice — and a
+ *     hand-edited manifest can now hold the same login twice in DISAGREEING
+ *     states (one bare, one muted), which has no meaning to resolve. Collapsing
+ *     here is also what lets the editor key its rows by login: the roster is
+ *     unique by construction, so the switch on one row cannot move another.
+ *   - MALFORMED entries — anything whose login isn't a string. Every path into
+ *     this function is supposed to be schema-validated first, but it is exported
+ *     and pure, and a `TypeError` thrown mid-resolve is a far worse failure than
+ *     a dropped row: it takes out whatever was resolving the workflow, rather
+ *     than the one reviewer that was written wrong.
  */
 export function normalizeReviewerRoster(
   entries: readonly PrReviewerEntry[] | undefined,
 ): ReviewerRosterEntry[] {
   const out: ReviewerRosterEntry[] = [];
+  const seen = new Set<string>();
   for (const e of entries ?? []) {
-    const login = (typeof e === "string" ? e : e.login).trim();
-    if (!login) continue;
-    out.push({ login, enabled: typeof e === "string" ? true : (e.enabled ?? true) });
+    const raw: unknown = typeof e === "string" ? e : (e as { login?: unknown } | null)?.login;
+    if (typeof raw !== "string") continue;
+    const login = raw.trim();
+    if (!login || seen.has(login.toLowerCase())) continue;
+    seen.add(login.toLowerCase());
+    const enabled = typeof e === "string" ? true : e.enabled;
+    out.push({ login, enabled: typeof enabled === "boolean" ? enabled : true });
   }
   return out;
 }

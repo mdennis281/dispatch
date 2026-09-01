@@ -354,6 +354,9 @@ function ReviewerList({
             const team = login.includes("/");
             const Icon = team ? Users : login.endsWith("]") ? Bot : UserRound;
             return (
+              // Keyed by login, which `normalizeReviewerRoster` guarantees is
+              // unique (case-insensitively) — the same guarantee the handlers
+              // below lean on when they match a row by its login.
               <li
                 key={login}
                 className="flex items-center gap-2 border-b border-line-soft px-3 py-1.5 last:border-b-0"
