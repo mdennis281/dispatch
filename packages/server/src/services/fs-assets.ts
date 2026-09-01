@@ -33,7 +33,7 @@ import { isPathWithinRoots } from "./mcp-assets.js";
 import { sniffMediaType } from "./media-sniff.js";
 
 /** Enough bytes for every signature `sniffMediaType` looks at, SVG included. */
-const SNIFF_BYTES = 4096;
+const SNIFF_BYTES = 8192;
 
 /**
  * Ceiling for a file served this way. Generous enough for a screen recording,
@@ -51,6 +51,8 @@ export interface FsAssetHit {
   size: number;
   /** Sniffed from the bytes — never inferred from the extension. */
   mimeType: string;
+  /** Text-shaped image files stay in Monaco instead of losing their source. */
+  binary: boolean;
 }
 
 export type FsAssetResult = FsAssetHit | { denied: FsAssetDenial };
@@ -116,13 +118,15 @@ export async function resolveFsAsset(
   if (!withinRootsExact(real, allowed)) return { denied: "forbidden" };
   if (info.size > MAX_FS_ASSET_BYTES) return { denied: "too-large" };
 
-  const mimeType = await sniffFile(real);
+  const sniffed = await sniffFile(real);
   // Refuse anything that isn't media. Without this, `?path=.env` would stream a
   // secrets file to whoever could reach the endpoint — the extension is not
   // consulted precisely so that renaming it `.png` doesn't help either.
-  if (!mimeType || mediaKind(mimeType) === "file") return { denied: "not-media" };
+  if (!sniffed?.mimeType || mediaKind(sniffed.mimeType) === "file") {
+    return { denied: "not-media" };
+  }
 
-  return { path: real, size: info.size, mimeType };
+  return { path: real, size: info.size, ...sniffed };
 }
 
 /**
@@ -160,13 +164,17 @@ function withinRootsExact(resolved: string, roots: string[]): boolean {
 }
 
 /** Sniff a file's type from a bounded prefix, without reading the whole thing. */
-async function sniffFile(path: string): Promise<string | undefined> {
+async function sniffFile(
+  path: string,
+): Promise<{ mimeType: string; binary: boolean } | undefined> {
   const handle = await open(path, "r").catch(() => null);
   if (!handle) return undefined;
   try {
     const buf = Buffer.alloc(SNIFF_BYTES);
     const { bytesRead } = await handle.read(buf, 0, SNIFF_BYTES, 0);
-    return sniffMediaType(buf.subarray(0, bytesRead));
+    const sample = buf.subarray(0, bytesRead);
+    const mimeType = sniffMediaType(sample);
+    return mimeType ? { mimeType, binary: sample.includes(0) } : undefined;
   } finally {
     await handle.close().catch(() => {});
   }
