@@ -42,7 +42,7 @@ const SUBAPP_ICON: Record<string, LucideIcon> = {
   "studio-director": Clapperboard,
 };
 
-const ACTIVE = new Set<RunnerInstance["status"]>(["starting", "running"]);
+const ACTIVE = new Set<RunnerInstance["status"]>(["starting", "running", "stopping"]);
 
 function RunnerCard({ runner }: { runner: RunnerInstance }) {
   const Icon = SUBAPP_ICON[runner.subAppId] ?? Circle;

@@ -6,17 +6,18 @@
  *
  * Data path: the window opens its own WS (the shared `ws` singleton + `startLiveData`
  * bootstrap in main.tsx), so `runner-log` events append to the runners store live.
- * Because a fresh connection has no history, we ALSO backfill once from
- * `GET /api/runners/:id/logs` and stitch it in front of the live tail.
+ * RunnerTranscript backfills durable history, merges the websocket tail, and
+ * refreshes the retained transcript when the run reaches a terminal state.
  */
 import { useEffect, useMemo } from "react";
 import { Terminal, ExternalLink } from "lucide-react";
+import type { RunnerInstance } from "@dispatch/shared";
 import { useRunners } from "../../stores/runners.js";
 import { useConnection } from "../../stores/index.js";
 import { StatusDot } from "../ui/StatusDot.js";
 import { RunnerTranscript } from "./RunnerTranscript.js";
 
-const ACTIVE = new Set(["starting", "running"]);
+const ACTIVE = new Set<RunnerInstance["status"]>(["starting", "running", "stopping"]);
 
 /** Open the read-only log terminal for a runner in a detached popup window. */
 export function openRunnerLogWindow(runnerId: string, label?: string): void {
