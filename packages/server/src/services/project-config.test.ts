@@ -802,6 +802,23 @@ describe("ProjectConfigService — vacuous auto-merge warning", () => {
     expect(res.config?.name).toBe("P");
   });
 
+  it("says SWITCHED OFF rather than empty when the roster is all muted", async () => {
+    // Same vacuous state by the other route, and the wording is the whole point:
+    // "the list is empty, add a login" is misdirection about a login the reader
+    // can see one switch away, on the same config screen this error shows on.
+    await manifest(
+      "  profile: review\n  autoMerge: on-green\n  pr:\n    reviewers:\n" +
+        "      - login: dispatch-review\n        enabled: false\n",
+    );
+    const svc = new ProjectConfigService({ store, bus, watch: () => null });
+    const res = await svc.load(await seedProject());
+
+    const warn = res.errors.find((e) => /vacuous/.test(e.message));
+    expect(warn?.message).toMatch(/switched off/i);
+    expect(warn?.message).toMatch(/switch a reviewer back on/i);
+    expect(warn?.message).not.toMatch(/is empty/);
+  });
+
   it("stays quiet once the repo has a CI workflow", async () => {
     await manifest("  profile: review\n  autoMerge: on-green\n  pr:\n    reviewers: []\n");
     await mkdir(join(repoDir, ".github", "workflows"), { recursive: true });
