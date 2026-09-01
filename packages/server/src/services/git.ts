@@ -22,7 +22,11 @@
  */
 import { execa } from "execa";
 import { existsSync } from "node:fs";
-import { readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
+import {
+  readFile as fsReadFile,
+  realpath as fsRealpath,
+  stat as fsStat,
+} from "node:fs/promises";
 import { resolve, relative, isAbsolute } from "node:path";
 import {
   GitStatusSchema,
@@ -342,14 +346,35 @@ export class GitService {
       if (!existsSync(abs)) {
         return { path: rel, ref: rev, content: Buffer.alloc(0), size: 0, exists: false };
       }
-      const info = await fsStat(abs);
+      let realRoot: string;
+      let realFile: string;
+      try {
+        realRoot = await fsRealpath(root);
+        realFile = await fsRealpath(abs);
+      } catch {
+        return { path: rel, ref: rev, content: Buffer.alloc(0), size: 0, exists: false };
+      }
+      const relToRealRoot = relative(realRoot, realFile);
+      // The lexical gate above rejects `..`, but it cannot see through a
+      // symlink inside the repo. Check where the file actually lands before
+      // reading it so an image-shaped link cannot expose an outside file.
+      if (!relToRealRoot || relToRealRoot.startsWith("..") || isAbsolute(relToRealRoot)) {
+        throw new Error(`relPath escapes the repo: ${relPath}`);
+      }
+      const info = await fsStat(realFile);
       if (!info.isFile()) {
         return { path: rel, ref: rev, content: Buffer.alloc(0), size: 0, exists: false };
       }
       if (info.size > MAX_IMAGE_PREVIEW_BYTES) {
         throw new Error(`file too large for image preview (${info.size} bytes)`);
       }
-      return { path: rel, ref: rev, content: await fsReadFile(abs), size: info.size, exists: true };
+      return {
+        path: rel,
+        ref: rev,
+        content: await fsReadFile(realFile),
+        size: info.size,
+        exists: true,
+      };
     }
 
     const spec = rev === GIT_REV_INDEX ? `:${rel}` : `${assertRev(rev)}:${rel}`;

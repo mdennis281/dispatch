@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execa } from "execa";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -186,6 +186,35 @@ describe("GET /api/git/* — reading", () => {
     );
     expect(index.statusCode).toBe(200);
     expect(index.rawPayload.equals(stagedBytes)).toBe(true);
+  });
+
+  it("refuses a worktree image symlink that lands outside the repo", async () => {
+    if (!available) return;
+    const outside = await mkdtemp(join(tmpdir(), "cm-git-outside-"));
+    try {
+      const target = join(outside, "secret.png");
+      await writeFile(target, Buffer.from("not really an image\n"));
+      try {
+        await symlink(target, join(repo, "linked.png"), "file");
+      } catch (error) {
+        // Creating symlinks requires a privilege on some Windows hosts. The
+        // Linux CI gate always exercises the containment assertion below.
+        if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+        throw error;
+      }
+
+      const response = await get(
+        q("/api/git/file/raw", {
+          repoPath: repo,
+          relPath: "linked.png",
+          rev: "WORKTREE",
+        }),
+      );
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error).toMatch(/escapes the repo/);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it("400s a path that tries to escape the repo", async () => {
