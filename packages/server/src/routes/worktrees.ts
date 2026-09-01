@@ -203,12 +203,6 @@ export function registerWorktreeRoutes(app: FastifyInstance): void {
       "x-dispatch-truncated",
       found.size > IMAGE_PREVIEW_LIMIT_BYTES ? "1" : "0",
     );
-    if (found.mimeType === "image/svg+xml") {
-      reply.header(
-        "content-security-policy",
-        "default-src 'none'; style-src 'unsafe-inline'",
-      );
-    }
     return reply.send(
       openFsAsset(
         found.path,
