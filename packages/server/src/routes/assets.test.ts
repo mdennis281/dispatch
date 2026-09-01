@@ -343,7 +343,18 @@ describe("worktree file read (Monaco)", () => {
         url: `/api/worktrees/image?worktreePath=${encodeURIComponent(wt)}&relPath=pointer.png`,
       });
       expect(textShaped.statusCode).toBe(415);
-      expect(textShaped.json()).toEqual({ error: "not-image" });
+      expect(textShaped.json()).toEqual({ error: "not-media" });
+
+      await writeFile(
+        join(wt, "source.svg"),
+        '<svg xmlns="http://www.w3.org/2000/svg"><circle r="1" /></svg>',
+      );
+      const svgSource = await app.inject({
+        method: "GET",
+        url: `/api/worktrees/image?worktreePath=${encodeURIComponent(wt)}&relPath=source.svg`,
+      });
+      expect(svgSource.statusCode).toBe(415);
+      expect(svgSource.json()).toEqual({ error: "not-image" });
 
       const unregistered = await mkdtemp(join(tmpdir(), "cm-unregistered-image-"));
       try {
