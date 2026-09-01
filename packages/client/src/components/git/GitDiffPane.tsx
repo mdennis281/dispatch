@@ -19,11 +19,14 @@ import {
   Check,
   FileCode2,
   FileWarning,
+  Image as ImageIcon,
   Rows2,
 } from "lucide-react";
 import { GIT_REV_EMPTY } from "@dispatch/shared";
-import { api, type WorktreeFileContent } from "../../lib/api.js";
-import { languageForPath } from "../monaco/lang.js";
+import { api, gitFileRawUrl, type WorktreeFileContent } from "../../lib/api.js";
+import { sessionFetch } from "../../stores/auth.js";
+import { languageForPath, isImagePath } from "../monaco/lang.js";
+import { ImagePreview } from "../monaco/ImagePreview.js";
 import { Spinner } from "../ui/Spinner.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Chip } from "../ui/Chip.js";
@@ -97,6 +100,7 @@ export function GitDiffPane({
 
   const language = useMemo(() => languageForPath(relPath), [relPath]);
   const binary = !!left?.binary || !!right?.binary;
+  const image = isImagePath(relPath);
   const leftText = left?.encoding === "utf8" ? left.content : "";
   const rightText = right?.encoding === "utf8" ? right.content : "";
   const truncated = !!left?.truncated || !!right?.truncated;
@@ -112,7 +116,11 @@ export function GitDiffPane({
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-inset">
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line bg-panel px-3">
-        <FileCode2 className="size-4 shrink-0 text-accent-hi" />
+        {image ? (
+          <ImageIcon className="size-4 shrink-0 text-accent-hi" />
+        ) : (
+          <FileCode2 className="size-4 shrink-0 text-accent-hi" />
+        )}
         <span className="min-w-0 truncate" title={relPath}>
           <span className="cm-mono !text-sm text-primary">{name}</span>
           {dir && (
@@ -128,14 +136,16 @@ export function GitDiffPane({
           <Chip tone="muted" mono>
             {label}
           </Chip>
-          <IconButton
-            size="sm"
-            tip={splitDiff ? "Inline diff" : "Side-by-side diff"}
-            active
-            onClick={() => setSplitDiff((v) => !v)}
-          >
-            {splitDiff ? <Rows2 /> : <Columns2 />}
-          </IconButton>
+          {!image && !binary && (
+            <IconButton
+              size="sm"
+              tip={splitDiff ? "Inline diff" : "Side-by-side diff"}
+              active
+              onClick={() => setSplitDiff((v) => !v)}
+            >
+              {splitDiff ? <Rows2 /> : <Columns2 />}
+            </IconButton>
+          )}
         </div>
       </div>
 
@@ -149,6 +159,15 @@ export function GitDiffPane({
             icon={<AlertTriangle className="text-danger" />}
             title="Couldn't open this file"
             detail={error}
+          />
+        ) : image && left && right ? (
+          <GitImageDiff
+            repoPath={repoPath}
+            relPath={relPath}
+            leftRev={leftRev}
+            rightRev={rightRev}
+            left={left}
+            right={right}
           />
         ) : binary ? (
           <Note
@@ -176,11 +195,11 @@ export function GitDiffPane({
       </div>
 
       <div className="flex h-7 shrink-0 items-center gap-3 border-t border-line bg-panel px-3 text-2xs text-faint">
-        <span className="uppercase tracking-[0.08em]">{language}</span>
+        <span className="uppercase tracking-[0.08em]">{image ? "image" : language}</span>
         <span className="cm-mono !text-2xs text-muted">
           {leftRev === GIT_REV_EMPTY ? "∅" : leftRev} → {rightRev}
         </span>
-        {truncated && (
+        {truncated && !image && (
           <span className="ml-auto inline-flex items-center gap-1 text-warn">
             <AlertTriangle className="size-3" />
             Truncated at 2&nbsp;MB
@@ -188,6 +207,121 @@ export function GitDiffPane({
         )}
       </div>
     </div>
+  );
+}
+
+interface ImageSource {
+  src?: string;
+  loading: boolean;
+  error?: string;
+}
+
+/** Fetch raw snapshot bytes through the bearer-aware session, then revoke them on exit. */
+function useGitImageSource(
+  enabled: boolean,
+  repoPath: string,
+  relPath: string,
+  rev: string,
+): ImageSource {
+  const [state, setState] = useState<ImageSource>({ loading: enabled });
+
+  useEffect(() => {
+    if (!enabled) {
+      setState({ loading: false });
+      return;
+    }
+    let live = true;
+    let objectUrl: string | undefined;
+    setState({ loading: true });
+    void sessionFetch(gitFileRawUrl(repoPath, relPath, rev))
+      .then(async (response) => {
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(body?.error ?? `Image request failed (${response.status})`);
+        }
+        objectUrl = URL.createObjectURL(await response.blob());
+        if (live) setState({ src: objectUrl, loading: false });
+      })
+      .catch((error: unknown) => {
+        if (live) {
+          setState({
+            loading: false,
+            error: error instanceof Error ? error.message : "Couldn't load image preview.",
+          });
+        }
+      });
+    return () => {
+      live = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [enabled, repoPath, relPath, rev]);
+
+  return state;
+}
+
+function GitImageDiff({
+  repoPath,
+  relPath,
+  leftRev,
+  rightRev,
+  left,
+  right,
+}: {
+  repoPath: string;
+  relPath: string;
+  leftRev: string;
+  rightRev: string;
+  left: WorktreeFileContent;
+  right: WorktreeFileContent;
+}) {
+  const hasLeft = left.exists && leftRev !== GIT_REV_EMPTY;
+  const hasRight = right.exists && rightRev !== GIT_REV_EMPTY;
+  const before = useGitImageSource(hasLeft, repoPath, relPath, leftRev);
+  const after = useGitImageSource(hasRight, repoPath, relPath, rightRev);
+  const paired = hasLeft && hasRight;
+
+  return (
+    <div className={paired ? "grid h-full min-h-0 grid-cols-2 divide-x divide-line" : "h-full min-h-0"}>
+      {hasLeft && (
+        <ImageSide
+          label={paired ? "Before" : "Deleted image"}
+          source={before}
+          alt={`${relPath} before`}
+        />
+      )}
+      {hasRight && (
+        <ImageSide
+          label={paired ? "After" : "New image"}
+          source={after}
+          alt={`${relPath} after`}
+        />
+      )}
+    </div>
+  );
+}
+
+function ImageSide({ label, source, alt }: { label: string; source: ImageSource; alt: string }) {
+  return (
+    <section className="flex h-full min-h-0 min-w-0 flex-col" aria-label={label}>
+      <div className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2 text-2xs font-semibold uppercase tracking-[0.08em] text-muted">
+        {label}
+      </div>
+      <div className="min-h-0 flex-1">
+        {source.loading ? (
+          <Centered>
+            <Spinner size={18} />
+          </Centered>
+        ) : source.error ? (
+          <Note
+            icon={<AlertTriangle className="text-danger" />}
+            title="Couldn't preview image"
+            detail={source.error}
+          />
+        ) : source.src ? (
+          <ImagePreview src={source.src} alt={alt} />
+        ) : null}
+      </div>
+    </section>
   );
 }
 

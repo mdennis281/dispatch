@@ -156,6 +156,37 @@ describe("GET /api/git/* — reading", () => {
     expect(crafted.json().error).toMatch(/invalid rev/);
   });
 
+  it("serves complete image bytes beyond the text preview cap from worktree and index", async () => {
+    if (!available) return;
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const stagedBytes = Buffer.concat([png, Buffer.alloc(3 * 1024 * 1024, 1)]);
+    const workingBytes = Buffer.concat([png, Buffer.alloc(3 * 1024 * 1024, 7)]);
+    await writeFile(join(repo, "chart.png"), stagedBytes);
+    await post("/api/git/stage", { repoPath: repo, paths: ["chart.png"] });
+    await writeFile(join(repo, "chart.png"), workingBytes);
+
+    const metadata = await get(
+      q("/api/git/file", { repoPath: repo, relPath: "chart.png", rev: "WORKTREE" }),
+    );
+    expect(metadata.json()).toMatchObject({ binary: true, truncated: true });
+
+    const worktree = await get(
+      q("/api/git/file/raw", { repoPath: repo, relPath: "chart.png", rev: "WORKTREE" }),
+    );
+    expect(worktree.statusCode).toBe(200);
+    expect(worktree.headers["content-type"]).toContain("image/png");
+    expect(worktree.rawPayload.equals(workingBytes)).toBe(true);
+
+    const index = await get(
+      q("/api/git/file/raw", { repoPath: repo, relPath: "chart.png", rev: "INDEX" }),
+    );
+    expect(index.statusCode).toBe(200);
+    expect(index.rawPayload.equals(stagedBytes)).toBe(true);
+  });
+
   it("400s a path that tries to escape the repo", async () => {
     if (!available) return;
     const res = await get(
