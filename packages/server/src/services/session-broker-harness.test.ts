@@ -16,9 +16,9 @@ import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import { SessionBroker } from "./session-broker.js";
 
-async function waitUntil(check: () => boolean): Promise<void> {
+async function waitUntil(check: () => boolean | Promise<boolean>): Promise<void> {
   for (let i = 0; i < 100; i++) {
-    if (check()) return;
+    if (await check()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("condition did not become true");
@@ -191,11 +191,20 @@ describe("SessionBroker neutral harness path", () => {
     await broker.waitFor(chat.id, "failed");
 
     session.emit({ type: "tool-result", toolUseId: "tool-1", ok: false, content: "cancelled" });
+    // Poll for the row rather than sleeping a fixed 20ms. The handler awaits an
+    // image-persist and a store append before the row exists, and on a loaded CI
+    // runner that window expired first — the assertion below then read a
+    // transcript missing `tool_result` and reddened main on a commit whose own
+    // PR had gone green.
+    await waitUntil(async () =>
+      (await store.readMessages(chat.id)).some((row) => row.kind === "tool_result"),
+    );
+    // A revive would be the status write immediately AFTER that row, so let one
+    // more turn of the loop run before asserting it never came.
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(broker.getStatus(chat.id)).toBe("failed");
     expect((await store.getChat(chat.id))?.status).toBe("failed");
-    expect((await store.readMessages(chat.id)).map((row) => row.kind)).toContain("tool_result");
   });
 
   it("automatically resumes a turn interrupted by a late guard catch", async () => {
