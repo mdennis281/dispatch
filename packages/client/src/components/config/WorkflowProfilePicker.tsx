@@ -112,14 +112,21 @@ export function WorkflowProfilePicker({
   value,
   onChange,
   fromManifest,
+  inRepo,
   disabled,
 }: {
   /** The caller's draft workflow block (never the persisted record). */
   value: WorkflowConfig;
   /** Report an edit; the caller decides when it reaches the server. */
   onChange: (next: WorkflowConfig) => void;
-  /** True when the repo carries a `.dispatch/project.yaml`. */
+  /** True when a `project.yaml` backs this project, wherever it lives. */
   fromManifest: boolean;
+  /**
+   * Whether that manifest is INSIDE the working tree. Wording only — but a
+   * footnote promising a save is "committable" when the file lives in the
+   * install's own config dir is a promise the repo will not keep.
+   */
+  inRepo?: boolean;
   disabled?: boolean;
 }) {
   // Resolve the DRAFT (not the project) so the card reflects unsaved edits, and
@@ -249,9 +256,11 @@ export function WorkflowProfilePicker({
       )}
       {fromManifest && (
         <p className="border-t border-line-soft px-3 py-1.5 text-2xs text-faint">
-          Saving writes <span className="cm-mono">workflow:</span> into this repo&rsquo;s{" "}
-          <span className="cm-mono">.dispatch/project.yaml</span> — committable, and your comments
-          and key order are preserved.
+          Saving writes <span className="cm-mono">workflow:</span> into{" "}
+          {inRepo ? "this repo’s " : "this project’s "}
+          <span className="cm-mono">project.yaml</span>
+          {inRepo ? " — committable," : " outside the repo — private to this install,"} and your
+          comments and key order are preserved.
         </p>
       )}
     </div>

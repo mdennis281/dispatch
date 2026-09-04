@@ -44,6 +44,7 @@ import type {
   GitCommitFile,
   GitStash,
   ProjectConfigResult,
+  ProjectConfigLocation,
   UsageSnapshot,
   ChatRuntimeResponse,
   MetricDimension,
@@ -545,12 +546,12 @@ export const api = {
     list: () => get<HarnessInfo[]>("/api/harnesses"),
   },
 
-  /* self-contained `.dispatch/` project config */
+  /* self-contained project config (the repo's `.dispatch/`, or the external one) */
   projectConfig: {
     /** The loaded config + errors (cached load, or a fresh one). */
     get: (projectId: string) =>
       get<ProjectConfigResult>(`/api/projects/${projectId}/config`),
-    /** Re-read `.dispatch/` from disk (sync store + broadcast). */
+    /** Re-read the config dir from disk (sync store + broadcast). */
     reload: (projectId: string) =>
       post<ProjectConfigResult>(`/api/projects/${projectId}/config/reload`),
     /**
@@ -568,7 +569,7 @@ export const api = {
         `/api/projects/${projectId}/config/shell-filter`,
         { shellFilter: shellFilter ?? null },
       ),
-    /** Derive a `.dispatch/` from the project's `.data` record. */
+    /** Derive a config dir from the project's `.data` record. */
     scaffold: (projectId: string, force?: boolean) =>
       post<{ created: boolean; sourceDir: string; files: string[]; result: ProjectConfigResult }>(
         `/api/projects/${projectId}/config/scaffold`,
@@ -579,9 +580,23 @@ export const api = {
       del<ProjectConfigResult>(
         `/api/projects/${projectId}/config/item?rel=${encodeURIComponent(rel)}`,
       ),
+    /**
+     * Move the config dir between the repo and the install's own config root,
+     * copying the tree across. The source is left on disk — going repo →
+     * external the files are also tracked in git, and removing tracked files is
+     * a commit the human writes, not one the app makes behind their back.
+     */
+    setLocation: (projectId: string, location: ProjectConfigLocation) =>
+      post<{
+        moved: boolean;
+        from: string;
+        sourceDir: string;
+        files: string[];
+        result: ProjectConfigResult;
+      }>(`/api/projects/${projectId}/config/location`, { location }),
     /** A GET URL that downloads the project's `.dispatch` archive. */
     exportUrl: (projectId: string) => `${BASE}/api/projects/${projectId}/config/export`,
-    /** Import an archive (base64) into the repo, then reload. */
+    /** Import an archive (base64) into the project's config dir, then reload. */
     import: (projectId: string, data: string) =>
       post<{ sourceDir: string; files: string[]; result: ProjectConfigResult }>(
         `/api/projects/${projectId}/config/import`,

@@ -1,6 +1,6 @@
 import { Cpu } from "lucide-react";
 import { SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
-import type { Effort, HarnessKind } from "@dispatch/shared";
+import type { Effort, HarnessKind, ProjectConfigLocation } from "@dispatch/shared";
 import { Field } from "../../sidebar/Modal.js";
 import { Select, type SelectOption } from "../../ui/Select.js";
 import { SectionLabel } from "../../ui/Panel.js";
@@ -19,6 +19,19 @@ import type { AppPaneProps } from "./types.js";
  * position. Anything that answers "what happens when I open a chat" is here;
  * anything about the window filling up is in Context.
  */
+const configLocationOptions: SelectOption<ProjectConfigLocation>[] = [
+  {
+    value: "external",
+    label: "Outside the repo",
+    hint: "nothing to commit",
+  },
+  {
+    value: "repo",
+    label: "In the repo (.dispatch/)",
+    hint: "committed, shared with the team",
+  },
+];
+
 export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps) {
   const modes = useProjects((s) => s.modes);
   const harness = draft.harness ?? {};
@@ -65,6 +78,18 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
             value={draft.defaultModeId ?? ""}
             onChange={(v) => patch({ defaultModeId: v || undefined })}
             options={modeOptions}
+          />
+        </Field>
+        {/* Only ever consulted when a config dir is PLACED for the first time —
+            a project that already has one keeps it whatever this says, which is
+            what makes the setting safe to flip on a live install. */}
+        <Field label="New project config" hint="where a new project's config dir goes">
+          <Select
+            width={280}
+            align="start"
+            value={draft.projectConfigLocation ?? "external"}
+            onChange={(projectConfigLocation) => patch({ projectConfigLocation })}
+            options={configLocationOptions}
           />
         </Field>
 

@@ -118,6 +118,7 @@ export function ReviewerSection({
   projectId,
   repo,
   fromManifest,
+  inRepo,
   disabled,
 }: {
   value: WorkflowConfig;
@@ -127,6 +128,8 @@ export function ReviewerSection({
   /** `owner/name` when the view knows it — display only, for the setup steps. */
   repo?: string;
   fromManifest?: boolean;
+  /** Whether that manifest is inside the working tree (wording only). */
+  inRepo?: boolean;
   disabled?: boolean;
 }) {
   // Resolved as though the profile were already `review`, because it is what the
@@ -272,9 +275,10 @@ export function ReviewerSection({
 
       {fromManifest && (
         <p className="text-2xs leading-snug text-faint">
-          Saving writes <span className="cm-mono">workflow.pr</span> into this repo&rsquo;s{" "}
-          <span className="cm-mono">.dispatch/project.yaml</span>. The account and its token are
-          never written there — that file is committed.
+          Saving writes <span className="cm-mono">workflow.pr</span> into{" "}
+          {inRepo ? "this repo’s " : "this project’s "}
+          <span className="cm-mono">project.yaml</span>. The account and its token are never
+          written there — they belong to this install, not to the project.
         </p>
       )}
     </div>
