@@ -11,7 +11,7 @@
     "build": "pnpm -r build",
     "start": "pnpm --filter @dispatch/server start",
     "dev": "pnpm --filter @dispatch/server dev",
-    "test": "pnpm --filter @dispatch/shared exec vitest run && pnpm --filter @dispatch/cli exec vitest run && pnpm --filter @dispatch/server exec vitest run && node --test tools/install.test.mjs",
+    "test": "pnpm --filter @dispatch/shared exec vitest run && pnpm --filter @dispatch/cli exec vitest run && pnpm --filter @dispatch/server exec vitest run && node --test tools/install.test.mjs tools/app/migrate-config.test.mjs",
     "typecheck": "pnpm -r typecheck",
     "verify": "node tools/verify/shot.mjs",
     "verify:tool-names": "node tools/verify/no-stale-tool-names.mjs",
@@ -25,6 +25,7 @@
     "app:shortcut": "node tools/app/create-shortcut.mjs",
     "app:migrate": "node tools/app/migrate-data.mjs",
     "app:migrate-store": "node tools/app/migrate-store.mjs",
+    "app:migrate-config": "node tools/app/migrate-config.mjs",
     "app:backsync": "node tools/app/backsync.mjs"
   },
   "devDependencies": {
