@@ -13,6 +13,7 @@ export {
   saveManifest,
   configDirFor,
   resolveProjectPaths,
+  pathsForConfigDir,
   manifestJs,
   ensureConfigReadme,
   type LoadedManifest,

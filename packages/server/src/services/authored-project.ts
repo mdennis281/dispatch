@@ -25,7 +25,12 @@
 import { join, relative, resolve } from "node:path";
 import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { loadManifest, saveManifest, type LoadedManifest } from "@dispatch/cli/core";
+import {
+  loadManifest,
+  saveManifest,
+  type LoadedManifest,
+  type ProjectPaths,
+} from "@dispatch/cli/core";
 import { isSeq, type Document } from "yaml";
 import {
   DEFAULT_INSTRUCTIONS_DIR,
@@ -97,19 +102,22 @@ export async function listProjectItems(
  * Create or overwrite a project-scope item, registering an instruction in the
  * manifest when it isn't already listed.
  *
- * `repoPath` should be the project's MAIN working copy, not a session worktree:
- * `.dispatch/` is committed config, and an edit made in a throwaway tree would be
+ * `target` is either resolved {@link ProjectPaths} — what the server passes, so
+ * a project whose config lives outside the repo is written where its config
+ * actually is — or a directory to walk up from, which is what the CLI and these
+ * tests have. Either way it must name the project's MAIN working copy, never a
+ * session worktree: a committed `.dispatch/` edited in a throwaway tree is
  * discarded with it — the same rule `mcp-config-editor` follows.
  */
 export async function writeProjectItem(
-  repoPath: string,
+  target: string | ProjectPaths,
   kind: AuthoredKind,
   name: string,
   body: string,
   description?: string,
 ): Promise<ProjectWriteResult> {
   assertName(name);
-  const loaded = await loadManifest(repoPath);
+  const loaded = await loadManifest(target);
   const configDir = loaded.paths.configDir;
 
   if (kind === "skill") {
@@ -142,12 +150,12 @@ export async function writeProjectItem(
  * file as a config error on every reload.
  */
 export async function deleteProjectItem(
-  repoPath: string,
+  target: string | ProjectPaths,
   kind: AuthoredKind,
   name: string,
 ): Promise<boolean> {
   assertName(name);
-  const loaded = await loadManifest(repoPath);
+  const loaded = await loadManifest(target);
   if (!loaded.existed) return false;
   const configDir = loaded.paths.configDir;
 
@@ -177,12 +185,12 @@ export async function deleteProjectItem(
 
 /** Read one project-scope item's raw file. Null when it isn't there. */
 export async function readProjectItem(
-  repoPath: string,
+  target: string | ProjectPaths,
   kind: AuthoredKind,
   name: string,
 ): Promise<{ path: string; text: string } | null> {
   assertName(name);
-  const loaded = await loadManifest(repoPath);
+  const loaded = await loadManifest(target);
   const configDir = loaded.paths.configDir;
   const candidates =
     kind === "skill"

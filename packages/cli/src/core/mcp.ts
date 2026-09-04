@@ -74,7 +74,7 @@ export function assertValidServerName(name: string): void {
 /* ------------------------------------------------------------------ read */
 
 /** Every configured server, in manifest order. Never throws for "no config". */
-export async function listServers(cwd: string): Promise<{
+export async function listServers(cwd: string | ProjectPaths): Promise<{
   paths: ProjectPaths;
   servers: ManifestMcpServer[];
 }> {
@@ -85,7 +85,7 @@ export async function listServers(cwd: string): Promise<{
 
 /** One server by name, or null when the project has no such server. */
 export async function getServer(
-  cwd: string,
+  cwd: string | ProjectPaths,
   name: string,
 ): Promise<ManifestMcpServer | null> {
   const { servers } = await listServers(cwd);
@@ -110,7 +110,7 @@ export interface AddResult {
  * teammate configured is the kind of edit that should be deliberate.
  */
 export async function addServer(
-  cwd: string,
+  cwd: string | ProjectPaths,
   input: { name: string; transport: ManifestMcpTransport },
   opts: { force?: boolean } = {},
 ): Promise<AddResult> {
@@ -148,7 +148,7 @@ export async function addServer(
  * caller decides whether that's an error) and never writes in that case.
  */
 export async function removeServer(
-  cwd: string,
+  cwd: string | ProjectPaths,
   name: string,
 ): Promise<{ removed: boolean; paths: ProjectPaths }> {
   const loaded = await loadManifest(cwd);
@@ -180,7 +180,7 @@ export async function removeServer(
  * than lingering as an empty map.
  */
 export async function setServerEnabled(
-  cwd: string,
+  cwd: string | ProjectPaths,
   name: string,
   enabled: boolean | null,
 ): Promise<{ changed: boolean; paths: ProjectPaths }> {
@@ -240,7 +240,7 @@ export interface ImportEntry {
  * 10 beats failing the whole file over one bad line.
  */
 export async function importServers(
-  cwd: string,
+  cwd: string | ProjectPaths,
   source: McpJsonShape,
   opts: { force?: boolean } = {},
 ): Promise<{ entries: ImportEntry[]; paths: ProjectPaths }> {

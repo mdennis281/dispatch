@@ -255,9 +255,22 @@ describe("workflow-writer", () => {
 
   it("isManifestBacked reflects whether project.yaml exists", async () => {
     const p = await seedProject();
-    expect(isManifestBacked(p)).toBe(false);
+    const external = store.projectConfigDir(p.id);
+    expect(isManifestBacked(p, external)).toBe(false);
     await writeManifest("name: Seed\n");
-    expect(isManifestBacked(p)).toBe(true);
+    expect(isManifestBacked(p, external)).toBe(true);
+  });
+
+  it("isManifestBacked sees a manifest that lives OUTSIDE the repo", async () => {
+    // The case the repo-relative walk-up used to miss entirely: config in the
+    // install's own dir, and a `.data` write that a manifest nothing looked
+    // for would silently override on the next load.
+    const p = await seedProject({ configLocation: "external" });
+    const external = store.projectConfigDir(p.id);
+    expect(isManifestBacked(p, external)).toBe(false);
+    await mkdir(external, { recursive: true });
+    await writeFile(join(external, "project.yaml"), "name: Seed\n", "utf8");
+    expect(isManifestBacked(p, external)).toBe(true);
   });
 
   it("stores a shell filter on projects without a manifest and can reset it", async () => {

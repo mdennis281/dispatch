@@ -12,7 +12,7 @@ import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { listServers } from "@dispatch/cli/core";
+import { listServers, pathsForConfigDir, resolveProjectPaths } from "@dispatch/cli/core";
 import { EventBus } from "../../bus.js";
 import {
   createManagerTools,
@@ -58,6 +58,8 @@ function call(
 }
 
 let repo: string;
+/** The repo's config dir as the broker resolves it before binding the editor. */
+const repoPaths = () => pathsForConfigDir(join(repo, ".dispatch"), repo);
 beforeEach(async () => {
   repo = await mkdtemp(join(tmpdir(), "cm-mcp-tools-"));
 });
@@ -88,7 +90,7 @@ describe("MCP-config tool gating", () => {
   });
 
   it("registers them on dispatch-mcp once an editor is bound", () => {
-    const servers = createManagerMcpServers(ctx(createMcpConfigEditor(repo)));
+    const servers = createManagerMcpServers(ctx(createMcpConfigEditor(repoPaths())));
     expect(servers["dispatch-mcp"]).toBeDefined();
     expect(registeredNames(servers)).toEqual(
       expect.arrayContaining(["mcp_list", "mcp_add", "mcp_remove"]),
@@ -114,7 +116,7 @@ describe("MCP-config tool gating", () => {
 
 describe("mcp_add", () => {
   it("writes a stdio server the CLI core can read back", async () => {
-    const { mcpAdd } = createManagerTools(ctx(createMcpConfigEditor(repo)));
+    const { mcpAdd } = createManagerTools(ctx(createMcpConfigEditor(repoPaths())));
     const res = await call(mcpAdd.handler, {
       name: "ripgrep",
       command: "npx",
@@ -133,7 +135,7 @@ describe("mcp_add", () => {
   });
 
   it("infers http from a url and keeps ${VAR} placeholders literal", async () => {
-    const { mcpAdd } = createManagerTools(ctx(createMcpConfigEditor(repo)));
+    const { mcpAdd } = createManagerTools(ctx(createMcpConfigEditor(repoPaths())));
     await call(mcpAdd.handler, {
       name: "linear",
       url: "https://mcp.linear.app/mcp",
@@ -147,7 +149,7 @@ describe("mcp_add", () => {
   });
 
   it("refuses a duplicate name unless force is set", async () => {
-    const { mcpAdd } = createManagerTools(ctx(createMcpConfigEditor(repo)));
+    const { mcpAdd } = createManagerTools(ctx(createMcpConfigEditor(repoPaths())));
     await call(mcpAdd.handler, { name: "a", command: "one" });
 
     const dup = await call(mcpAdd.handler, { name: "a", command: "two" });
@@ -161,7 +163,7 @@ describe("mcp_add", () => {
   });
 
   it("explains what's missing instead of writing a broken server", async () => {
-    const { mcpAdd } = createManagerTools(ctx(createMcpConfigEditor(repo)));
+    const { mcpAdd } = createManagerTools(ctx(createMcpConfigEditor(repoPaths())));
 
     const noCommand = await call(mcpAdd.handler, { name: "x" });
     expect(noCommand.isError).toBe(true);
@@ -175,7 +177,7 @@ describe("mcp_add", () => {
   });
 
   it("rejects a name that can't be addressed as mcp__<name>__<tool>", async () => {
-    const { mcpAdd } = createManagerTools(ctx(createMcpConfigEditor(repo)));
+    const { mcpAdd } = createManagerTools(ctx(createMcpConfigEditor(repoPaths())));
     const res = await call(mcpAdd.handler, { name: "bad name", command: "npx" });
     expect(res.isError).toBe(true);
     expect(text(res)).toMatch(/Invalid server name/);
@@ -186,7 +188,7 @@ describe("mcp_add", () => {
 
 describe("mcp_list and mcp_remove", () => {
   it("lists nothing helpfully, then lists what was added", async () => {
-    const tools = createManagerTools(ctx(createMcpConfigEditor(repo)));
+    const tools = createManagerTools(ctx(createMcpConfigEditor(repoPaths())));
 
     expect(text(await call(tools.mcpList.handler, {}))).toMatch(/no MCP servers configured/i);
 
@@ -199,7 +201,7 @@ describe("mcp_list and mcp_remove", () => {
   });
 
   it("removes a server and reports a miss as an error result", async () => {
-    const tools = createManagerTools(ctx(createMcpConfigEditor(repo)));
+    const tools = createManagerTools(ctx(createMcpConfigEditor(repoPaths())));
     await call(tools.mcpAdd.handler, { name: "rg", command: "npx" });
 
     const ok = await call(tools.mcpRemove.handler, { name: "rg" });
@@ -216,17 +218,24 @@ describe("mcp_list and mcp_remove", () => {
 
 describe("createMcpConfigEditor", () => {
   it("resolves the manifest from a nested path within the repo", async () => {
-    await createMcpConfigEditor(repo).add(
+    await createMcpConfigEditor(repoPaths()).add(
       { name: "a", transport: { type: "stdio", command: "x" } },
       {},
     );
-    const nested = join(repo, "packages", "web");
     // A session running in a subdirectory must still see the ONE project config.
-    expect(await createMcpConfigEditor(nested).list()).toHaveLength(1);
+    // The walk-up that guarantees it moved OUT of the editor when the editor
+    // started taking a resolved config dir — a project may now keep its config
+    // outside the repo, which no amount of walking up from a cwd would find. So
+    // assert it where it now lives, and that the editor built on the result is
+    // still pointed at the same manifest.
+    const nested = join(repo, "packages", "web");
+    const resolved = resolveProjectPaths(nested);
+    expect(resolved.configDir).toBe(join(repo, ".dispatch"));
+    expect(await createMcpConfigEditor(resolved).list()).toHaveLength(1);
   });
 
   it("reports the manifest path it wrote", async () => {
-    const result = await createMcpConfigEditor(repo).add(
+    const result = await createMcpConfigEditor(repoPaths()).add(
       { name: "a", transport: { type: "stdio", command: "x" } },
       {},
     );

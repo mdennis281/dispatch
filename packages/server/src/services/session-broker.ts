@@ -157,6 +157,7 @@ import {
 import type { SpawnNestingVerdict } from "./chat-nesting.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { createAuthoringEditor } from "./mcp/authoring-editor.js";
+import { configPathsFor } from "./config-location.js";
 import type { AuthoredConfigService } from "./authored-config.js";
 import type { SlashCommandService } from "./slash-commands.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
@@ -6140,7 +6141,11 @@ export class SessionBroker {
         // session's cwd: `.dispatch/` is committed config, so a server the
         // agent adds while working in a throwaway worktree has to land in the
         // real working copy or it vanishes with the worktree.
-        mcpConfig: project?.repoPath ? createMcpConfigEditor(project.repoPath) : undefined,
+        mcpConfig: project?.repoPath
+          ? createMcpConfigEditor(
+              configPathsFor(project, this.store.projectConfigDir(project.id)),
+            )
+          : undefined,
         // Authoring is offered even without a project: the `global` scope is a
         // machine-wide dir that exists regardless, and a projectless session
         // still benefits from reading what's shipped. `hasProject` is what
@@ -6148,7 +6153,9 @@ export class SessionBroker {
         authoring: this.authored
           ? createAuthoringEditor({
               authored: this.authored,
-              repoPath: project?.repoPath ?? null,
+              configPaths: project
+                ? configPathsFor(project, this.store.projectConfigDir(project.id))
+                : null,
               getConfig: () =>
                 projectId && this.projectConfig?.getConfig
                   ? (this.projectConfig.getConfig(projectId) ?? null)

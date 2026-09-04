@@ -9,13 +9,15 @@
  *
  * The toggle endpoint is covered against a REAL temp repo rather than a mock,
  * because the two halves worth protecting are both on-disk: a project pin has to
- * land in `.dispatch/project.yaml`, and an app pin has to land in settings and
- * NOT in the repo — a leak in either direction commits somebody's local
- * preference or strands a team decision on one machine.
+ * land in the project's RESOLVED `project.yaml` (which by default is not in the
+ * repo at all), and an app pin has to land in settings and not in the manifest —
+ * a leak in either direction commits somebody's local preference or strands a
+ * team decision on one machine.
  */
 import { MANAGER_SERVER_NAMES } from "@dispatch/shared";
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -523,7 +525,7 @@ describe("GET /api/projects/:projectId/mcp", () => {
 
 describe("PUT /api/projects/:projectId/mcp/:name/enabled", () => {
   /** A live app with one project rooted at a real temp dir. */
-  async function setup(): Promise<{ projectId: string; repo: string }> {
+  async function setup(): Promise<{ projectId: string; repo: string; sourceDir: string }> {
     dir = await mkdtemp(join(tmpdir(), "cm-mcp-toggle-"));
     const store = new Store(dir);
     await store.init();
@@ -536,7 +538,11 @@ describe("PUT /api/projects/:projectId/mcp/:name/enabled", () => {
       payload: { name: "Widget", repoPath: dir, worktreeRoot: "wt" },
     });
     expect(created.statusCode).toBe(201);
-    return { projectId: created.json().id as string, repo: dir };
+    const projectId = created.json().id as string;
+    // Ask where the config actually landed rather than assuming the repo: a new
+    // project keeps its config OUTSIDE the working tree by default.
+    const cfg = await app.inject({ method: "GET", url: `/api/projects/${projectId}/config` });
+    return { projectId, repo: dir, sourceDir: cfg.json().sourceDir as string };
   }
 
   /**
@@ -569,14 +575,18 @@ describe("PUT /api/projects/:projectId/mcp/:name/enabled", () => {
     expect(pw.defaultReason).toMatch(/no sub-app/);
   });
 
-  it("writes a project pin to .dispatch/project.yaml and returns the rebuilt catalog", async () => {
-    const { projectId, repo } = await setup();
+  it("writes a project pin to the project.yaml and returns the rebuilt catalog", async () => {
+    const { projectId, repo, sourceDir } = await setup();
     const res = await toggle(projectId, "chrome-devtools", { scope: "project", enabled: false });
     expect(res.statusCode).toBe(200);
 
-    const manifest = await readFile(join(repo, ".dispatch", "project.yaml"), "utf8");
+    const manifest = await readFile(join(sourceDir, "project.yaml"), "utf8");
     expect(manifest).toContain("mcpEnabled");
     expect(manifest).toContain("chrome-devtools: false");
+    // Resolved, not walked up from the repo — the pin has to reach the manifest
+    // this project actually uses, and creating a second one in the working tree
+    // would both lose the setting and dirty a repo that opted out of carrying one.
+    expect(existsSync(join(repo, ".dispatch"))).toBe(false);
 
     // The response must already reflect the write — the config watcher is
     // debounced, and a catalog built off the stale cache would snap the switch
@@ -586,15 +596,15 @@ describe("PUT /api/projects/:projectId/mcp/:name/enabled", () => {
   });
 
   it("writes an app pin to settings, not to the repo", async () => {
-    const { projectId, repo } = await setup();
+    const { projectId, sourceDir } = await setup();
     const res = await toggle(projectId, "playwright", { scope: "app", enabled: true });
     expect(res.statusCode).toBe(200);
 
     const settings = await app.inject({ method: "GET", url: "/api/settings" });
     expect(settings.json().mcpEnabled).toEqual({ playwright: true });
-    // Never committed: an install-level preference has no business in the repo,
-    // whose manifest project creation already scaffolded.
-    const manifest = await readFile(join(repo, ".dispatch", "project.yaml"), "utf8");
+    // Never in the manifest: an install-level preference has no business in a
+    // file that can be committed and handed to a teammate.
+    const manifest = await readFile(join(sourceDir, "project.yaml"), "utf8");
     expect(manifest).not.toContain("mcpEnabled");
 
     // …and it takes effect: the auto-gate said off, the pin says on.

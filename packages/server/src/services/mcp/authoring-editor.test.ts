@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProjectConfig } from "@dispatch/shared";
 import { AuthoredConfigService } from "../authored-config.js";
+import { pathsForConfigDir } from "@dispatch/cli/core";
 import { createAuthoringEditor } from "./authoring-editor.js";
 
 let repo: string;
@@ -41,7 +42,12 @@ const config = (): ProjectConfig =>
   }) as never;
 
 const editor = (repoPath: string | null = repo) =>
-  createAuthoringEditor({ authored, repoPath, getConfig: () => (repoPath ? config() : null) });
+  createAuthoringEditor({
+    authored,
+    // The repo-located config dir, resolved the way the broker resolves it.
+    configPaths: repoPath ? pathsForConfigDir(join(repoPath, ".dispatch"), repoPath) : null,
+    getConfig: () => (repoPath ? config() : null),
+  });
 
 describe("createAuthoringEditor", () => {
   it("reads the most specific copy when no scope is named", async () => {

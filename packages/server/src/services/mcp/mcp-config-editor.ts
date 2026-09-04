@@ -12,28 +12,34 @@
  */
 import { addServer, listServers, removeServer } from "@dispatch/cli/core";
 import type { ManifestMcpServer } from "@dispatch/shared";
+import type { ProjectPaths } from "@dispatch/cli/core";
 import type { ManagerMcpConfig } from "./manager-mcp.js";
 
 /**
- * Build the per-session MCP-config binding for a project rooted at `repoPath`.
+ * Build the per-session MCP-config binding for a project's config dir.
  *
- * `repoPath` should be the project's MAIN working copy rather than a session's
- * worktree: `.dispatch/` is committed config, and an edit made in a
- * throwaway worktree would be discarded with it. The core still walks up from
- * whatever it's given, so a nested path resolves to the same manifest.
+ * `configPaths` is resolved by the caller because only it knows whether this
+ * project keeps its config in the repo or in the install's own config root — the
+ * walk-up the core does for a bare path can only ever find the former, so an
+ * external project handed a repo path would get a `.dispatch/` created in its
+ * working tree instead of an edit to the manifest it actually uses.
+ *
+ * When the config IS in the repo it must be the MAIN working copy's rather than
+ * a session worktree's: committed config edited in a throwaway worktree is
+ * discarded with it.
  */
-export function createMcpConfigEditor(repoPath: string): ManagerMcpConfig {
+export function createMcpConfigEditor(configPaths: ProjectPaths): ManagerMcpConfig {
   return {
     async list(): Promise<ManifestMcpServer[]> {
-      const { servers } = await listServers(repoPath);
+      const { servers } = await listServers(configPaths);
       return servers;
     },
     async add(server, opts) {
-      const result = await addServer(repoPath, server, opts);
+      const result = await addServer(configPaths, server, opts);
       return { outcome: result.outcome, manifestPath: result.paths.manifestPath };
     },
     async remove(name) {
-      const { removed } = await removeServer(repoPath, name);
+      const { removed } = await removeServer(configPaths, name);
       return removed;
     },
   };
