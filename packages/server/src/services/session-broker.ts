@@ -1736,6 +1736,12 @@ interface LiveSession {
    * instead of a hardcoded constant. Undefined until the first refresh lands.
    */
   contextWindow?: number;
+  /**
+   * The provider's session-cumulative `total_cost_usd` as of the last result —
+   * the baseline the next turn's own cost is measured against (see
+   * {@link SessionBroker.turnCost}).
+   */
+  lastCostUsd?: number;
   /** Per-session serialized transcript write chain. */
   writeChain: Promise<void>;
   turn: number;
@@ -3600,6 +3606,23 @@ export class SessionBroker {
     return false;
   }
 
+  /**
+   * This turn's cost, from the provider's SESSION-CUMULATIVE `total_cost_usd`.
+   *
+   * The transcript's turn footer prints it beside per-turn numbers (steps,
+   * duration), where a running total reads as the price of the turn you just
+   * watched — off by the whole chat. A restarted harness restarts the provider's
+   * counter, so a FALL is a new baseline, not a refund.
+   *
+   * Mutates the baseline: call it exactly once per emitted result.
+   */
+  private turnCost(session: LiveSession, total: number | undefined): number | undefined {
+    if (typeof total !== "number") return undefined;
+    const last = session.lastCostUsd;
+    session.lastCostUsd = total;
+    return last === undefined || total < last ? total : total - last;
+  }
+
   /* ---------------------------------------------------------- consume */
 
   private async consumeHarness(session: LiveSession): Promise<void> {
@@ -3857,6 +3880,7 @@ export class SessionBroker {
             contextTokens: session.lastContextTokens,
             contextWindow: session.contextWindow,
             costUsd: event.costUsd,
+            turnCostUsd: this.turnCost(session, event.costUsd),
           });
           session.turn += 1;
           session.turnOpen = true;
@@ -3880,6 +3904,7 @@ export class SessionBroker {
           contextTokens: session.lastContextTokens,
           contextWindow: session.contextWindow,
           costUsd: event.costUsd,
+          turnCostUsd: this.turnCost(session, event.costUsd),
         });
         session.turn += 1;
         if (!event.ok) this.onTurnError?.(session.chatId, event.result ?? event.limit?.reason);
@@ -4222,6 +4247,7 @@ export class SessionBroker {
           contextTokens: session.lastContextTokens,
           contextWindow: session.contextWindow,
           costUsd: (m as { total_cost_usd?: number }).total_cost_usd,
+          turnCostUsd: this.turnCost(session, (m as { total_cost_usd?: number }).total_cost_usd),
         });
         session.turn += 1;
         // A turn that ended in error may have hit a usage limit — hand the

@@ -59,11 +59,22 @@ export function clock(ts: number): string {
   ).padStart(2, "0")}`;
 }
 
-/** "1.2s", "840ms" — human tool durations. */
+/**
+ * "840ms", "1.2s", "45s", "2m 14s", "2h 34m" — a duration at any scale.
+ *
+ * Steps up through the units because this is not only a tool-call formatter:
+ * a turn footer or a backgrounded command runs for hours, and `9225s` is a
+ * number a reader has to do arithmetic on before it means anything.
+ */
 export function dur(ms: number | undefined): string | null {
   if (ms === undefined) return null;
   if (ms < 1000) return `${Math.round(ms)}ms`;
-  return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return s % 60 ? `${m}m ${s % 60}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
 }
 
 /** Split an `mcp__<server>__<tool>` name into its parts. */

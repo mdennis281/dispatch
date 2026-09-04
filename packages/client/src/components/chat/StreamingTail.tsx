@@ -38,8 +38,16 @@ export function StreamingTail({ chatId, running, workingLabel, onGrow }: Streami
 
   return (
     <>
-      {streamRows.map((s) => (
-        <StreamingRow key={`stream-${s.messageId}`} chatId={chatId} text={s.text} thinking={s.thinking} />
+      {streamRows.map((s, i) => (
+        <StreamingRow
+          key={`stream-${s.messageId}`}
+          chatId={chatId}
+          text={s.text}
+          thinking={s.thinking}
+          // Live rows are consecutive by construction, so all but the first
+          // continue the one above — matching how they'll read once settled.
+          continued={i > 0}
+        />
       ))}
       {showWorking && <WorkingRow label={workingLabel} />}
     </>

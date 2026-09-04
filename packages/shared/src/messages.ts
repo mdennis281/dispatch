@@ -267,7 +267,21 @@ export const ResultRowSchema = z.object({
    * 200k). Absent until the session has reported usage at least once.
    */
   contextWindow: z.number().int().optional(),
+  /**
+   * SESSION-CUMULATIVE cost — the provider's `total_cost_usd`, which is the whole
+   * chat's spend so far, not this turn's. Sitting unlabelled beside the per-turn
+   * `numTurns`/`durationMs` it read as the turn's price; {@link turnCostUsd} is
+   * the number the turn footer shows, and this one is the tooltip's "so far".
+   */
   costUsd: z.number().optional(),
+  /**
+   * This turn's cost — the rise in {@link costUsd} since the previous result. A
+   * harness restart restarts the provider's counter (it happens often enough:
+   * ~180 drops across 304 recorded chats), so a FALL in the total is read as a
+   * new baseline rather than a negative turn. Absent only on rows written before
+   * this was recorded, or when the provider reported no cost at all.
+   */
+  turnCostUsd: z.number().optional(),
 });
 export type ResultRow = z.infer<typeof ResultRowSchema>;
 

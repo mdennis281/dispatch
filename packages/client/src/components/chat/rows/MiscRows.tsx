@@ -13,6 +13,7 @@ import type { NoticeRow, ResultRow, SystemMessageRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { TypingPulse } from "../../ui/Spinner.js";
 import { Chip } from "../../ui/Chip.js";
+import { Tooltip } from "../../ui/Tooltip.js";
 import { Markdown } from "../Markdown.js";
 import { cn } from "../../../lib/cn.js";
 import { dur } from "../../../lib/format.js";
@@ -43,7 +44,18 @@ export function WorkingRow({ label }: { label?: string }) {
  * streamed markdown with a trailing typing pulse; falls back to a "Thinking…"
  * shimmer while only the thinking channel has arrived.
  */
-export function StreamingRow({ chatId, text, thinking }: { chatId: string; text: string; thinking?: string }) {
+export function StreamingRow({
+  chatId,
+  text,
+  thinking,
+  continued = false,
+}: {
+  chatId: string;
+  text: string;
+  thinking?: string;
+  /** Another live row is already streaming above this one — don't re-announce. */
+  continued?: boolean;
+}) {
   const provider = harnessLabel(useChats((s) => s.byId[chatId]?.harness));
   // Reveal the live buffer letter-by-letter, adaptive to the arrival speed —
   // a subtle trail that never gates the actual stream (see useTypewriter).
@@ -51,6 +63,7 @@ export function StreamingRow({ chatId, text, thinking }: { chatId: string; text:
   return (
     <RowShell
       tint="assistant"
+      continued={continued}
       who={provider}
       gutter={
         <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent-hi ring-1 ring-accent-line [&_svg]:size-3.5">
@@ -109,7 +122,12 @@ function CenterNote({
   );
 }
 
-/** The turn-done result marker — turns / duration / cost, or an error line. */
+/** "$2.14", "$0.004" — a cost too small for cents keeps three places. */
+function money(n: number): string {
+  return `$${n.toFixed(n < 1 ? 3 : 2)}`;
+}
+
+/** The turn-done result marker — steps / duration / cost, or an error line. */
 export const ResultRowView = memo(function ResultRowView({ row }: { row: ResultRow }) {
   if (row.isError) {
     return (
@@ -119,16 +137,31 @@ export const ResultRowView = memo(function ResultRowView({ row }: { row: ResultR
     );
   }
   const parts: string[] = [];
-  if (row.numTurns) parts.push(`${row.numTurns} turn${row.numTurns === 1 ? "" : "s"}`);
+  // `numTurns` counts the agent's own loop steps — one per model response,
+  // tool calls included. Printing that as "turns" next to the words "Turn
+  // complete" gave the reader "Turn complete · 409 turns", which is not a
+  // sentence anyone can parse.
+  if (row.numTurns) parts.push(`${row.numTurns} step${row.numTurns === 1 ? "" : "s"}`);
   const d = dur(row.durationMs);
   if (d) parts.push(d);
-  if (typeof row.costUsd === "number" && row.costUsd > 0) {
-    parts.push(`$${row.costUsd.toFixed(row.costUsd < 1 ? 3 : 2)}`);
-  }
+  const turn = row.turnCostUsd;
+  const total = row.costUsd;
+  const haveTotal = typeof total === "number" && total > 0;
+  if (typeof turn === "number" && turn > 0) parts.push(money(turn));
+  // Rows recorded before the per-turn cost existed only have the running total.
+  // Say so rather than letting it pass for the price of this turn.
+  else if (haveTotal) parts.push(`${money(total)} total`);
+  const note =
+    typeof turn === "number" && haveTotal
+      ? `This turn cost ${money(turn)} · ${money(total)} for the chat so far, at API rates`
+      : haveTotal
+        ? `${money(total)} for the chat so far, at API rates — this turn's share wasn't recorded`
+        : null;
+  const meta = <span className="cm-mono !text-2xs text-faint"> · {parts.join(" · ")}</span>;
   return (
     <CenterNote icon={<CheckCircle2 />}>
       Turn complete
-      {parts.length > 0 && <span className="cm-mono !text-2xs text-faint"> · {parts.join(" · ")}</span>}
+      {parts.length > 0 && (note ? <Tooltip label={note}>{meta}</Tooltip> : meta)}
     </CenterNote>
   );
 });

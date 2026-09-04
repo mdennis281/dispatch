@@ -1,5 +1,5 @@
 import { memo, useCallback, useMemo, type ReactNode } from "react";
-import { parseSessionLimit, type ChatMessage, type ToolResultRow } from "@dispatch/shared";
+import type { ChatMessage, ToolResultRow } from "@dispatch/shared";
 import type { SubagentRun } from "../../lib/subagentRuns.js";
 import { findTaskStatus, indexTaskStatus } from "../../lib/subagentRuns.js";
 import { useSubagentRuns } from "../../lib/useSubagentRuns.js";
@@ -16,18 +16,9 @@ import { NoticeRowView, ResultRowView, SystemRowView } from "./rows/MiscRows.js"
 import { LimitPausedCard } from "./rows/LimitPausedCard.js";
 import { actions } from "../../lib/actions.js";
 import { groupTranscriptRows, toolPresentation } from "../../lib/toolPresentations.js";
+import { continuedAssistantIds, isLimitSentence } from "../../lib/messageGrouping.js";
 
 export type { StreamRow } from "../../stores/messages.js";
-
-/**
- * Is this text nothing but a usage-limit notice? Single-line, so a real answer
- * that merely mentions hitting a limit is never swallowed.
- */
-function isLimitSentence(text: string | undefined): boolean {
-  const t = text?.trim();
-  if (!t || t.includes("\n")) return false;
-  return parseSessionLimit(t, Date.now()) !== null;
-}
 
 export interface MessageListProps {
   chatId: string;
@@ -88,6 +79,10 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
   // existing renderRow/ToolCallCard fallback unchanged.
   const transcriptItems = useMemo(() => groupTranscriptRows(roots), [roots]);
 
+  // Two messages from the same speaker with nothing between them are one thing
+  // being said, not two: only the first keeps its avatar/name/model/time.
+  const continued = useMemo(() => continuedAssistantIds(transcriptItems), [transcriptItems]);
+
   // Stable across renders (deps only change when the transcript does) so the
   // memoized row components actually get to bail out.
   const renderRow = useCallback(
@@ -101,7 +96,14 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           // (with the schedule + cancel), so the bare echo is dropped. Only a
           // message that is nothing BUT the sentence qualifies.
           if (isLimitSentence(row.text)) return null;
-          return <AssistantRow key={row.id} chatId={chatId} row={row} />;
+          return (
+            <AssistantRow
+              key={row.id}
+              chatId={chatId}
+              row={row}
+              continued={continued.has(row.id)}
+            />
+          );
         case "tool_use": {
           // A Task spawn renders as its run's card, whether or not the subagent
           // has produced any rows yet — so a just-launched run is visible
@@ -156,7 +158,7 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           return null;
       }
     },
-    [chatId, resultsByUse, runsById, taskStatus],
+    [chatId, continued, resultsByUse, runsById, taskStatus],
   );
 
   return (

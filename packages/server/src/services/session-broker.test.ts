@@ -648,6 +648,35 @@ describe("chat status persistence", () => {
     await runningP;
     expect(broker.getStatus("c1")).toBe("running");
   });
+
+  it("stamps each result with THIS turn's cost, not the session's running total", async () => {
+    // `total_cost_usd` is session-cumulative, and the turn footer prints it
+    // beside per-turn numbers, where it read as the price of the turn you just
+    // watched. The third total is LOWER than the second — a restarted harness
+    // restarting its counter, which happens routinely and must be read as a new
+    // baseline rather than booked as a negative turn.
+    const totals = [1.5, 4, 0.25];
+    let turn = 0;
+    const { fn } = makeFakeQuery(() => [
+      assistantText("ok"),
+      { ...resultMsg(), total_cost_usd: totals[turn++] },
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    for (const text of ["one", "two", "three"]) {
+      const idle = broker.waitFor("c1", "idle");
+      await broker.sendMessage("c1", text);
+      await idle;
+    }
+
+    const results = events.flatMap((e) =>
+      e.type === "chat-message" && e.message.kind === "result" ? [e.message] : [],
+    );
+    expect(results.map((r) => r.costUsd)).toEqual(totals);
+    expect(results.map((r) => r.turnCostUsd)).toEqual([1.5, 2.5, 0.25]);
+  });
 });
 
 function waitForResults(chatId: string, n: number, ms = 3000): Promise<void> {
