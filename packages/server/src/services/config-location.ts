@@ -24,7 +24,7 @@
  * of a project that already has one.
  */
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, isAbsolute } from "node:path";
 import { configDirFor, pathsForConfigDir, type ProjectPaths } from "@dispatch/cli/core";
 import {
   CONFIG_DIR_NAMES,
@@ -53,11 +53,27 @@ function hasManifest(dir: string): boolean {
 }
 
 /**
+ * Whether `repoPath` can be probed at all.
+ *
+ * A `Project.repoPath` that is empty — or relative, which no real record should
+ * be — makes `join(repoPath, ".dispatch")` a RELATIVE path, and `existsSync`
+ * then resolves it against the server process's own working directory. In dev
+ * that directory is a checkout of Dispatch, which carries a committed
+ * `.dispatch/`: a degenerate project record would "find" this repo's config and
+ * serve it as its own. Anything that turns a repoPath into a probe goes through
+ * here first.
+ */
+function probeableRepo(repoPath: string): boolean {
+  return !!repoPath && isAbsolute(repoPath);
+}
+
+/**
  * The repo's committed config dir when one is actually there, else null.
  * Distinct from {@link configDirFor}, which names the path a config WOULD take
  * and so can never answer "does this repo carry one".
  */
 export function findRepoConfigDir(repoPath: string): string | null {
+  if (!probeableRepo(repoPath)) return null;
   for (const name of CONFIG_DIR_NAMES) {
     const dir = join(repoPath, name);
     if (hasManifest(dir)) return dir;
@@ -83,7 +99,12 @@ export function findRepoConfigDir(repoPath: string): string | null {
 export function resolveConfigDir(project: Project, externalDir: string): ResolvedConfigDir {
   if (project.configLocation === "repo") {
     const dir = configDirFor(project.repoPath);
-    return { dir, location: "repo", exists: hasManifest(dir) };
+    // The pin is honoured either way, but an unprobeable repoPath can only ever
+    // report `exists: false` — never the server cwd's manifest. Callers then
+    // treat it as a project with no config (back-compat `.data`), which is the
+    // truth: a repo-pinned project with no repo has no config dir.
+    const exists = probeableRepo(project.repoPath) && hasManifest(dir);
+    return { dir, location: "repo", exists };
   }
   if (project.configLocation === "external") {
     return { dir: externalDir, location: "external", exists: hasManifest(externalDir) };

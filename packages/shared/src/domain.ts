@@ -83,7 +83,7 @@ export const ProjectSchema = z.object({
   /**
    * Where THIS project's config dir lives, overriding both the repo's own
    * evidence and the app-wide default (see {@link ProjectConfigLocationSchema}
-   * and `resolveConfigLocation`).
+   * and `resolveConfigDir`).
    *
    * Optional, and the absence is load-bearing twice over: an untouched project
    * record round-trips byte-identical, and "unset" is what lets a repo with a

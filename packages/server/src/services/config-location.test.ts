@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, isAbsolute } from "node:path";
 import type { Project } from "@dispatch/shared";
 import { resolveConfigDir, resolvePlacementDir, findRepoConfigDir } from "./config-location.js";
 
@@ -63,6 +63,27 @@ describe("findRepoConfigDir", () => {
     await seedManifest(join(repo, ".dispatch"), "name: New\n");
     expect(findRepoConfigDir(repo)).toBe(join(repo, ".dispatch"));
   });
+
+  it("never probes a RELATIVE repoPath, even one that would resolve", async () => {
+    // `join(repoPath, ".dispatch")` on an empty or relative repoPath stays
+    // relative, and `existsSync` resolves it against the SERVER'S cwd. In dev
+    // that is a checkout of Dispatch, which carries a committed `.dispatch/` —
+    // so a degenerate project record would adopt this repo's config as its own.
+    //
+    // The relative path here is built to genuinely RESOLVE to a seeded manifest
+    // from wherever the runner happens to be. Asserting on a bare "" would pass
+    // whether or not the guard exists, because the runner's cwd has no
+    // `.dispatch/` — a test that cannot fail is not a test.
+    await seedManifest(join(repo, ".dispatch"));
+    const viaRelative = relative(process.cwd(), repo);
+    expect(isAbsolute(viaRelative)).toBe(false);
+    expect(findRepoConfigDir(viaRelative)).toBeNull();
+
+    expect(findRepoConfigDir("")).toBeNull();
+    // …and the same path absolute still resolves, so the guard rejects the
+    // relativity rather than the repo.
+    expect(findRepoConfigDir(repo)).toBe(join(repo, ".dispatch"));
+  });
 });
 
 describe("resolveConfigDir", () => {
@@ -101,6 +122,16 @@ describe("resolveConfigDir", () => {
   it("an override to repo points at the repo even before the dir is there", () => {
     const r = resolveConfigDir(project({ configLocation: "repo" }), external);
     expect(r).toEqual({ dir: join(repo, ".dispatch"), location: "repo", exists: false });
+  });
+
+  it("reports a repo-pinned project with a relative repo as having no config", async () => {
+    // Same hazard through the explicit pin rather than the auto-detect: the pin
+    // is kept, but `exists` must never be answered from the server cwd.
+    await seedManifest(join(repo, ".dispatch"));
+    const rel = relative(process.cwd(), repo);
+    const r = resolveConfigDir(project({ repoPath: rel, configLocation: "repo" }), external);
+    expect(r.location).toBe("repo");
+    expect(r.exists).toBe(false);
   });
 });
 

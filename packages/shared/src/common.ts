@@ -85,7 +85,7 @@ export const DEFAULT_HARNESS: HarnessKind = "claude";
  * `external` is the default for a project with no committed `.dispatch/`. A repo
  * that HAS one keeps using it regardless of the default: someone committed that
  * deliberately, and quietly reading a different directory instead would strand
- * every instruction and memory in it. See `resolveConfigLocation` for the full
+ * every instruction and memory in it. See `resolveConfigDir` for the full
  * precedence chain.
  *
  * It lives in `common.ts` rather than beside the rest of the config vocabulary in
