@@ -9,13 +9,20 @@
  * `mcp__dispatch-memory__remember|recall|forget` tools append/query/remove it (write);
  * the Memory panel curates it.
  *
- * Storage location (resolved per-project via {@link dir}):
- *   - a project with a self-contained `.dispatch/` config → the repo's
- *     `.dispatch/memory/` dir (from {@link ProjectConfig.memoryDir}). This
- *     is the COMMITTABLE source of truth; remember/recall/forget + injection all
- *     read/write there.
- *   - a project WITHOUT a config dir → the legacy runtime store dir
- *     `.data/projects/<projectId>/memory/` (back-compat, unchanged).
+ * Storage location (resolved per-project via {@link dir}) is always the config
+ * dir's `memory/`, and WHERE that is depends on the project (see
+ * `ProjectConfigLocationSchema`):
+ *   - config in the repo → the committable `.dispatch/memory/`. Memories are
+ *     reviewed and shipped like code, and `workflow.memory: commit` lands them.
+ *   - config EXTERNAL (the default) → `<configDir>/projects/<id>/memory/`, which
+ *     is the same directory a project with no config dir has always used. That
+ *     is not a coincidence: the external config dir was chosen to BE the
+ *     project's entity dir precisely so adopting it moves no memory files.
+ *   - a project with no config dir at all → that same store dir (back-compat,
+ *     unchanged).
+ * Nothing downstream branches on this. `MemoryCommitter` and `MemoryHistory`
+ * both already decline when the memory dir resolves outside the repo, so an
+ * external project simply has no commits to make or read.
  * A one-time transparent {@link migrateProject} copies any legacy `.data`
  * memories that aren't already present in the repo dir when a project gains a
  * config dir (idempotent; the originals are left in place).

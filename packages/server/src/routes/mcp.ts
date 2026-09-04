@@ -40,6 +40,7 @@ import {
 } from "../services/mcp/browser-mcp.js";
 
 import { resolveMcpServers } from "../services/mcp-session.js";
+import { configPathsFor } from "../services/config-location.js";
 
 /** How long an assembled catalog is reused before a re-probe. */
 const CACHE_TTL_MS = 15_000;
@@ -247,10 +248,24 @@ export function registerMcpRoutes(app: FastifyInstance): void {
           ...(Object.keys(next).length ? { mcpEnabled: next } : { mcpEnabled: undefined }),
         });
       } else {
-        // The PRIMARY checkout: `.dispatch/` is committed config, and an edit
-        // made in a throwaway worktree would be discarded with it.
-        await setServerEnabled(project.repoPath, name, enabled);
-        // The `.dispatch/` watcher would pick this up on its own, but only after
+        // The project's RESOLVED config dir — its committed `.dispatch/`, or the
+        // external one. Resolved rather than walked up from `repoPath` because
+        // the walk can only find the former: an external project would get a
+        // `.dispatch/` created in the working tree it asked to keep clean. When
+        // it IS the repo's, it is the PRIMARY checkout's — committed config
+        // edited in a throwaway worktree is discarded with it.
+        const paths = configPathsFor(project, store.projectConfigDir(project.id));
+        // Null means there is nowhere safe to write (a `repo` pin whose checkout
+        // is missing). Refusing beats writing a manifest under the server's cwd.
+        if (!paths) {
+          return reply.code(400).send({
+            error: `this project has no writable config dir (repoPath: ${
+              project.repoPath || "unset"
+            })`,
+          });
+        }
+        await setServerEnabled(paths, name, enabled);
+        // The config watcher would pick this up on its own, but only after
         // a debounce — and the catalog rebuilt below reads through the config
         // cache. Without this the response would report the value we just
         // replaced, and the switch would visibly snap back.

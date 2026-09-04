@@ -416,7 +416,7 @@ describe("routes — REST CRUD", () => {
     expect(noIds.statusCode).toBe(400);
   });
 
-  it("POST /api/projects auto-scaffolds a .dispatch/ into an existing repo", async () => {
+  it("POST /api/projects auto-scaffolds config OUTSIDE the repo", async () => {
     const repo = await mkdtemp(join(tmpdir(), "cm-repo-"));
     try {
       const res = await app.inject({
@@ -425,9 +425,38 @@ describe("routes — REST CRUD", () => {
         payload: { name: "Widget", repoPath: repo, worktreeRoot: "wt" },
       });
       expect(res.statusCode).toBe(201);
-      const manifest = join(repo, ".dispatch", "project.yaml");
+      const cfg = await app.inject({
+        method: "GET",
+        url: `/api/projects/${res.json().id}/config`,
+      });
+      const manifest = join(cfg.json().sourceDir as string, "project.yaml");
       expect(existsSync(manifest)).toBe(true);
       expect(readFileSync(manifest, "utf8")).toContain("name: Widget");
+      // Adding a repo to Dispatch leaves nothing behind for anyone to commit.
+      expect(existsSync(join(repo, ".dispatch"))).toBe(false);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("POST /api/projects honours a repo placement from app settings", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "cm-repo-committed-"));
+    try {
+      const settings = await app.inject({ method: "GET", url: "/api/settings" });
+      await app.inject({
+        method: "PUT",
+        url: "/api/settings",
+        payload: { ...(settings.json() as Record<string, unknown>), projectConfigLocation: "repo" },
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/projects",
+        payload: { name: "Committed", repoPath: repo, worktreeRoot: "wt" },
+      });
+      expect(res.statusCode).toBe(201);
+      const manifest = join(repo, ".dispatch", "project.yaml");
+      expect(existsSync(manifest)).toBe(true);
+      expect(readFileSync(manifest, "utf8")).toContain("name: Committed");
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
@@ -465,8 +494,14 @@ describe("routes — REST CRUD", () => {
     // The initial branch matches the project's declared trunk — a repo that
     // landed on `master` while the config says otherwise breaks diff-vs-base.
     expect(readFileSync(join(fresh, ".git", "HEAD"), "utf8")).toContain("refs/heads/trunk");
-    // The repo now exists, so the scaffold ran too.
-    expect(existsSync(join(fresh, ".dispatch", "project.yaml"))).toBe(true);
+    // The scaffold ran too — into the install's config dir, not this brand-new
+    // repo, whose very first commit should be the human's code and not ours.
+    const cfg = await app.inject({
+      method: "GET",
+      url: `/api/projects/${res.json().id}/config`,
+    });
+    expect(existsSync(join(cfg.json().sourceDir as string, "project.yaml"))).toBe(true);
+    expect(existsSync(join(fresh, ".dispatch"))).toBe(false);
   });
 
   it("initRepo leaves an existing checkout's git dir alone", async () => {

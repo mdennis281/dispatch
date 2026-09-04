@@ -59,6 +59,17 @@ export const DEFAULT_MODES_DIR = "modes";
 export const DEFAULT_MEMORY_DIR = "memory";
 export const DEFAULT_SKILLS_DIR = "skills";
 
+// WHERE the config dir lives (repo vs the install's own config root) is
+// {@link ProjectConfigLocationSchema}. It is defined in `common.ts` — the leaf
+// module — because `domain.ts` needs it for `Project.configLocation` and already
+// imports from here in the other direction. Re-exported so the whole "what is a
+// project's config dir" vocabulary stays importable from one place.
+export {
+  ProjectConfigLocationSchema,
+  DEFAULT_CONFIG_LOCATION,
+  type ProjectConfigLocation,
+} from "./common.js";
+
 /* =============================================================== manifest */
 
 /**

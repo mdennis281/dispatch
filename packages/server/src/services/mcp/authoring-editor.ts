@@ -12,9 +12,11 @@
  *  - **Writes must name a writable scope.** `shipped` is delivered by an app
  *    upgrade, so a write there evaporates at the next publish.
  *
- * `repoPath` is the project's MAIN working copy, never a session worktree —
- * `.dispatch/` is committed config, and an edit made in a throwaway tree would be
- * discarded with it. Same rule, same reason, as `mcp-config-editor`.
+ * `configPaths` names the project's config dir — resolved by the caller, because
+ * only the caller knows whether this project keeps its config in the repo or
+ * outside it. When it IS in the repo it must be the MAIN working copy's, never a
+ * session worktree's: committed config edited in a throwaway tree is discarded
+ * with it. Same rule, same reason, as `mcp-config-editor`.
  */
 import { readFile } from "node:fs/promises";
 import type {
@@ -31,22 +33,23 @@ import {
   readProjectItem,
   writeProjectItem,
 } from "../authored-project.js";
+import type { ProjectPaths } from "@dispatch/cli/core";
 import type { ManagerMcpAuthoring } from "./manager-mcp.js";
 
 export interface AuthoringEditorDeps {
   authored: AuthoredConfigService;
-  /** The project's main checkout, or null for a session with no project. */
-  repoPath: string | null;
+  /** The project's resolved config dir, or null for a session with no project. */
+  configPaths: ProjectPaths | null;
   /** The project's currently-loaded config, for listing. Null when unloaded. */
   getConfig: () => ProjectConfig | null;
 }
 
 /** Build the per-session authoring binding the `config_*` tools consume. */
 export function createAuthoringEditor(deps: AuthoringEditorDeps): ManagerMcpAuthoring {
-  const { authored, repoPath, getConfig } = deps;
+  const { authored, configPaths, getConfig } = deps;
 
   return {
-    hasProject: Boolean(repoPath),
+    hasProject: Boolean(configPaths),
 
     async list(kind: AuthoredKind): Promise<AuthoredItem[]> {
       const config = getConfig();
@@ -60,8 +63,8 @@ export function createAuthoringEditor(deps: AuthoringEditorDeps): ManagerMcpAuth
       const order: AuthoredScope[] = scope ? [scope] : ["project", "global", "shipped"];
       for (const s of order) {
         if (s === "project") {
-          if (!repoPath) continue;
-          const found = await readProjectItem(repoPath, kind, name).catch(() => null);
+          if (!configPaths) continue;
+          const found = await readProjectItem(configPaths, kind, name).catch(() => null);
           if (found) return { scope: s, path: found.path, text: found.text };
           continue;
         }
@@ -77,8 +80,8 @@ export function createAuthoringEditor(deps: AuthoringEditorDeps): ManagerMcpAuth
 
     async write({ kind, scope, name, description, body }) {
       if (scope === "project") {
-        if (!repoPath) throw new Error("this session has no project to write config into");
-        const result = await writeProjectItem(repoPath, kind, name, body, description);
+        if (!configPaths) throw new Error("this session has no project to write config into");
+        const result = await writeProjectItem(configPaths, kind, name, body, description);
         return { path: result.path, registered: result.registered };
       }
       const path = await authored.write(kind, name, body, description);
@@ -89,8 +92,8 @@ export function createAuthoringEditor(deps: AuthoringEditorDeps): ManagerMcpAuth
 
     async remove(kind, name, scope: WritableAuthoredScope) {
       if (scope === "project") {
-        if (!repoPath) throw new Error("this session has no project to delete config from");
-        return deleteProjectItem(repoPath, kind, name);
+        if (!configPaths) throw new Error("this session has no project to delete config from");
+        return deleteProjectItem(configPaths, kind, name);
       }
       return authored.remove(kind, name);
     },

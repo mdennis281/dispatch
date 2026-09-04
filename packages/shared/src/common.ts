@@ -65,6 +65,40 @@ export type HarnessKind = z.infer<typeof HarnessKindSchema>;
 /** The harness a project gets when it has never said otherwise. */
 export const DEFAULT_HARNESS: HarnessKind = "claude";
 
+/**
+ * WHERE a project's config dir lives — the repo, or the app's own config root.
+ *
+ *   - `repo`     — `<repoPath>/.dispatch/`. Committable: the config travels with
+ *                  the code, teammates inherit it on clone, and a change to it is
+ *                  reviewed like any other diff.
+ *   - `external` — `<configDir>/projects/<id>/`, owned by the install. Nothing
+ *                  Dispatch authors — the manifest, instructions, skills, and the
+ *                  hundreds of files an agent's `remember` accumulates — ever
+ *                  touches the working tree, so a repo with commit policies
+ *                  (protected trunk, required review, a lint gate on every file)
+ *                  never has to be argued with to save a memory.
+ *
+ * The two do NOT merge. Exactly one directory is a project's config, because a
+ * merge rule makes "why is this instruction in effect" unanswerable by reading
+ * one file — and the whole value of the manifest is that it is readable.
+ *
+ * `external` is the default for a project with no committed `.dispatch/`. A repo
+ * that HAS one keeps using it regardless of the default: someone committed that
+ * deliberately, and quietly reading a different directory instead would strand
+ * every instruction and memory in it. See `resolveConfigDir` for the full
+ * precedence chain.
+ *
+ * It lives in `common.ts` rather than beside the rest of the config vocabulary in
+ * `project-config.ts` only because `domain.ts` needs it for `Project` and
+ * `project-config.ts` already imports FROM `domain.ts` — defining it there would
+ * close a cycle and leave one of the two zod schemas undefined at init.
+ */
+export const ProjectConfigLocationSchema = z.enum(["repo", "external"]);
+export type ProjectConfigLocation = z.infer<typeof ProjectConfigLocationSchema>;
+
+/** Where a project's config goes when neither it nor its repo has said. */
+export const DEFAULT_CONFIG_LOCATION: ProjectConfigLocation = "external";
+
 /** SDK PermissionMode literal union (mirrors @anthropic-ai/claude-agent-sdk 0.3.222). */
 export const PermissionModeSchema = z.enum([
   "default",

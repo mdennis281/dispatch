@@ -71,6 +71,28 @@ export function configDirFor(root: string): string {
 }
 
 /**
+ * {@link ProjectPaths} for a config dir the caller ALREADY knows, skipping the
+ * walk-up entirely.
+ *
+ * The walk-up below can only ever find a config dir INSIDE a repo, which is the
+ * right answer for the CLI (it starts from your cwd and has no other way to
+ * know) and the wrong one for the server, whose projects may keep their config
+ * outside the repo entirely — see `ProjectConfigLocationSchema`. Without this,
+ * every manifest write from the server would walk up from `repoPath`, miss the
+ * external dir, and helpfully create the `.dispatch/` in the working tree that
+ * the project chose not to have.
+ *
+ * `root` stays explicit because it is NOT derivable from an external config dir:
+ * the dir's parent is the install's `projects/` folder, not a checkout, and the
+ * one thing `root` feeds — the synthesized `name:` of a fresh manifest — wants
+ * the repo it describes.
+ */
+export function pathsForConfigDir(configDir: string, root: string): ProjectPaths {
+  const manifestPath = join(configDir, MANIFEST_FILE);
+  return { root, configDir, manifestPath, exists: existsSync(manifestPath) };
+}
+
+/**
  * Resolve the project whose config an invocation targets, by walking UP from
  * `startDir`. An existing config dir (either name) always wins; failing that, the
  * nearest `.git` marks the repo root (so `dispatch mcp add` from a nested package
@@ -113,9 +135,21 @@ export interface LoadedManifest {
  * MINIMAL in-memory document is synthesized (`name: <repo dir name>`) so the
  * caller can add to it and save — first `dispatch mcp add` in a repo scaffolds the
  * config instead of erroring. Nothing is written until {@link saveManifest}.
+ *
+ * Takes either a directory to walk up from (the CLI, which only knows a cwd) or
+ * an already-resolved {@link ProjectPaths} (the server, which knows the project
+ * and therefore where its config dir actually is — see {@link pathsForConfigDir}).
  */
-export async function loadManifest(startDir: string): Promise<LoadedManifest> {
-  const paths = resolveProjectPaths(startDir);
+export async function loadManifest(
+  target: string | ProjectPaths,
+): Promise<LoadedManifest> {
+  const resolved = typeof target === "string" ? resolveProjectPaths(target) : target;
+  // Re-stat rather than trusting `resolved.exists`. On a caller-supplied
+  // ProjectPaths that flag is a SNAPSHOT from whenever the paths were resolved,
+  // and the server holds one for a whole session: the first `mcp_add` creates
+  // the manifest, and every later call would still read `exists: false`,
+  // synthesize an empty document, and save it OVER the file it just wrote.
+  const paths: ProjectPaths = { ...resolved, exists: existsSync(resolved.manifestPath) };
   if (!paths.exists) {
     const doc = new Document({ name: basename(paths.root) });
     doc.commentBefore =

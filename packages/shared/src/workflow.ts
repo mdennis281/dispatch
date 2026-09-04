@@ -54,6 +54,13 @@ export type WorkflowGuard = z.infer<typeof WorkflowGuardSchema>;
  *   - `ignore` — leave them dirty; the human commits them with everything else,
  *   - `commit` — commit them on the primary checkout in their own `chore(memory)`
  *                commit, and push when the trunk has an upstream.
+ *
+ * Both settings are INERT for a project whose config lives outside the repo (the
+ * default — see `ProjectConfigLocationSchema`): there is nothing in the working
+ * tree to leave dirty or to commit, which is the entire point of that placement.
+ * `MemoryCommitter` declines on its own when the memory dir resolves outside
+ * `repoPath`, so this needs no branch — but a `memory:` key in an external
+ * project's manifest is decoration, not policy.
  */
 export const WorkflowMemoryPolicySchema = z.enum(["ignore", "commit"]);
 export type WorkflowMemoryPolicy = z.infer<typeof WorkflowMemoryPolicySchema>;

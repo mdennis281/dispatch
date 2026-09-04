@@ -157,6 +157,7 @@ import {
 import type { SpawnNestingVerdict } from "./chat-nesting.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { createAuthoringEditor } from "./mcp/authoring-editor.js";
+import { configPathsFor } from "./config-location.js";
 import type { AuthoredConfigService } from "./authored-config.js";
 import type { SlashCommandService } from "./slash-commands.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
@@ -5825,6 +5826,13 @@ export class SessionBroker {
             this.mcpPorts,
           )
         : declaredMcp;
+    // Where this project's manifest actually is, resolved ONCE for the two
+    // bindings that write to it. Null when there is nowhere safe to write — a
+    // `repo` pin with no usable checkout — in which case neither is bound rather
+    // than either falling back to a path relative to the server's own cwd.
+    const projectConfigPaths = project
+      ? configPathsFor(project, this.store.projectConfigDir(project.id))
+      : null;
     options.mcpServers = {
       ...(externalMcp as unknown as Record<string, SdkMcpServerConfig>),
       // Spread LAST so Dispatch's own servers are never clobbered — including by
@@ -6136,11 +6144,13 @@ export class SessionBroker {
               },
             }
           : undefined,
-        // Bind the MCP-config editor to the project's MAIN repo path, NOT this
-        // session's cwd: `.dispatch/` is committed config, so a server the
-        // agent adds while working in a throwaway worktree has to land in the
-        // real working copy or it vanishes with the worktree.
-        mcpConfig: project?.repoPath ? createMcpConfigEditor(project.repoPath) : undefined,
+        // Bind the MCP-config editor to the project's RESOLVED config dir, NOT
+        // this session's cwd: config a server is added to must land where the
+        // project actually keeps it, or it vanishes with the throwaway worktree.
+        // `configPathsFor` returns null when there is nowhere safe to write, and
+        // an unbound editor is the right answer to that — the agent is told the
+        // tool is unavailable instead of writing under the server's own cwd.
+        mcpConfig: projectConfigPaths ? createMcpConfigEditor(projectConfigPaths) : undefined,
         // Authoring is offered even without a project: the `global` scope is a
         // machine-wide dir that exists regardless, and a projectless session
         // still benefits from reading what's shipped. `hasProject` is what
@@ -6148,7 +6158,7 @@ export class SessionBroker {
         authoring: this.authored
           ? createAuthoringEditor({
               authored: this.authored,
-              repoPath: project?.repoPath ?? null,
+              configPaths: projectConfigPaths,
               getConfig: () =>
                 projectId && this.projectConfig?.getConfig
                   ? (this.projectConfig.getConfig(projectId) ?? null)

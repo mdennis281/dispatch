@@ -1,5 +1,5 @@
 /**
- * ProjectSettingsView — the project's `.dispatch/` config, section by section.
+ * ProjectSettingsView — the project's config dir, section by section.
  *
  * Two rewrites in its history, and this is the second. The first killed a wall
  * of counts ("Modes: 2", "Skills: 0") that told you what existed and nothing
@@ -42,18 +42,21 @@ import {
   SquarePen,
   Save,
   Undo2,
+  FolderInput,
+  FolderOutput,
 } from "lucide-react";
 import {
   ARCHIVE_EXT,
   ARCHIVE_EXTS,
   authorReviewerRoster,
-  CONFIG_DIR_NAME,
+  CONFIG_DIR_NAMES,
   resolveWorkflow,
 } from "@dispatch/shared";
 import type {
   ConfigSection,
   Project,
   ProjectConfigError,
+  ProjectConfigLocation,
   WorkflowConfig,
 } from "@dispatch/shared";
 import { InlineError } from "../sidebar/Modal.js";
@@ -197,14 +200,23 @@ export function ProjectSettingsView() {
   const errors = result?.errors ?? [];
   const hasDir = !!result?.sourceDir;
   const activeSection = SECTIONS.find((s) => s.id === section) ?? SECTIONS[0]!;
-  // The config dir's own name, so file paths work in a repo that still carries
-  // the pre-rename directory.
-  const configDirName = useMemo(() => {
+  // The config dir split into the directory that CONTAINS it plus its own name.
+  // Both halves have to come off `sourceDir`: the dir may be the repo's
+  // `.dispatch/` (or a pre-rename `.claude-manager/`), or it may be outside the
+  // repo altogether — in which case composing paths from `repoPath` names files
+  // that do not exist. Splitting the resolved path covers all three without this
+  // component having to know which one it is looking at.
+  const configPath = useMemo(() => {
     const src = result?.sourceDir;
-    if (!src) return CONFIG_DIR_NAME;
-    const parts = src.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
-    return parts[parts.length - 1] || CONFIG_DIR_NAME;
+    if (!src) return null;
+    const norm = src.replace(/\\/g, "/").replace(/\/+$/, "");
+    const cut = norm.lastIndexOf("/");
+    if (cut <= 0) return null;
+    return { root: norm.slice(0, cut), name: norm.slice(cut + 1) };
   }, [result?.sourceDir]);
+  // Whether the config sits inside the working tree — i.e. whether git will see
+  // an edit to it. Drives the wording and the location control, not behaviour.
+  const inRepo = (CONFIG_DIR_NAMES as readonly string[]).includes(configPath?.name ?? "");
 
   // Fetch on mount / project change (the WS event keeps it fresh after).
   useEffect(() => {
@@ -254,19 +266,19 @@ export function ProjectSettingsView() {
   }, [projectId, dirty, saving, workflowDirty, draft, filterDirty, filterDraft, discard, pushToast]);
 
   // Open a config file in the editor. Saving there writes it back and the
-  // `.dispatch/` watcher reloads the config, refreshing this view in place.
+  // config watcher reloads it, refreshing this view in place.
   const openFile = useCallback(
     (rel: string) => {
-      if (!project?.repoPath) return;
+      if (!configPath) return;
       openCodeViewer({
-        worktreePath: project.repoPath,
-        relPath: `${configDirName}/${rel}`,
+        worktreePath: configPath.root,
+        relPath: `${configPath.name}/${rel}`,
         mode: "file",
-        base: project.defaultBranch || "main",
+        base: project?.defaultBranch || "main",
         editable: true,
       });
     },
-    [project, configDirName],
+    [project, configPath],
   );
 
   const deleteItem = useCallback(
@@ -306,7 +318,9 @@ export function ProjectSettingsView() {
       useConfig.getState().set(projectId, out.result);
       pushToast({
         level: "info",
-        text: out.created ? `Scaffolded .dispatch/ (${out.files.length} files)` : "Config reloaded",
+        text: out.created
+          ? `Created config (${out.files.length} files) in ${out.sourceDir}`
+          : "Config reloaded",
       });
     } catch (e) {
       pushToast({ level: "error", text: e instanceof Error ? e.message : String(e) });
@@ -314,6 +328,34 @@ export function ProjectSettingsView() {
       setBusy(false);
     }
   }, [projectId, busy, pushToast]);
+
+  // Move the config between the repo and the install's own dir. The server
+  // copies the tree, so this is a move rather than a re-point at an empty
+  // directory — but it deliberately leaves the source behind, and going repo →
+  // external those files may still be tracked, so say so rather than letting
+  // someone assume the working tree is clean now.
+  const setLocation = useCallback(
+    async (location: ProjectConfigLocation) => {
+      if (!projectId || busy) return;
+      setBusy(true);
+      try {
+        const out = await api.projectConfig.setLocation(projectId, location);
+        useConfig.getState().set(projectId, out.result);
+        pushToast({
+          level: "info",
+          text: out.moved
+            ? `Config moved to ${out.sourceDir} — ${out.files.length} files copied. ` +
+              `The originals are still in ${out.from}.`
+            : `Config location set to ${location}.`,
+        });
+      } catch (e) {
+        pushToast({ level: "error", text: e instanceof Error ? e.message : String(e) });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [projectId, busy, pushToast],
+  );
 
   const onImportFile = useCallback(
     async (file: File) => {
@@ -353,7 +395,7 @@ export function ProjectSettingsView() {
     <SettingsShell<ConfigSection>
       icon={<FileCog />}
       title="Project config"
-      subtitle={project ? `.dispatch/ for ${project.name}` : undefined}
+      subtitle={project ? `Dispatch config for ${project.name}` : undefined}
       sections={SECTIONS.map((s) => ({
         id: s.id,
         icon: s.icon,
@@ -421,9 +463,30 @@ export function ProjectSettingsView() {
               project.yaml
             </Button>
           )}
+          {hasDir && (
+            <Button
+              variant="ghost"
+              className="w-full justify-start"
+              leftIcon={inRepo ? <FolderOutput /> : <FolderInput />}
+              disabled={busy}
+              onClick={() => void setLocation(inRepo ? "external" : "repo")}
+              title={
+                inRepo
+                  ? "Copy this config out of the repo, so nothing Dispatch writes has to be committed"
+                  : "Copy this config into the repo, so it can be committed and shared with the team"
+              }
+            >
+              {inRepo ? "Move out of repo" : "Move into repo"}
+            </Button>
+          )}
           <p className="px-2 pt-1 text-2xs leading-snug text-faint" title={result?.sourceDir ?? ""}>
-            {result?.sourceDir ?? "no .dispatch/ — using .data defaults"}
+            {result?.sourceDir ?? "no config dir — using .data defaults"}
           </p>
+          {hasDir && (
+            <p className="px-2 text-2xs leading-snug text-faint">
+              {inRepo ? "Committed with the repo." : "Private to this install; never committed."}
+            </p>
+          )}
         </div>
       }
       footer={
@@ -468,11 +531,11 @@ export function ProjectSettingsView() {
           {!hasDir && !config && (
             <div className="rounded-md border border-dashed border-line px-3 py-4 text-center">
               <FileCog className="mx-auto mb-1.5 size-5 text-faint" />
-              <p className="text-sm text-secondary">No .dispatch/ in this repo.</p>
+              <p className="text-sm text-secondary">No config dir for this project yet.</p>
               <p className="mx-auto mt-0.5 max-w-md text-xs text-faint">
-                The workflow profile still applies. Scaffold a committable
-                <span className="cm-mono"> .dispatch/</span> to add instructions, agents, skills
-                and the rest — and to share them with the repo.
+                The workflow profile still applies. Create one to add instructions, agents,
+                skills and the rest. It goes outside the repo by default, so nothing here has to
+                be committed — move it in later if you want to share it with the team.
               </p>
               <Button
                 className="mt-3"
@@ -481,7 +544,7 @@ export function ProjectSettingsView() {
                 disabled={busy}
                 onClick={doScaffold}
               >
-                Scaffold .dispatch/
+                Create config
               </Button>
             </div>
           )}
@@ -506,6 +569,7 @@ export function ProjectSettingsView() {
                   value={workflow}
                   onChange={setDraft}
                   fromManifest={hasDir}
+                  inRepo={inRepo}
                   disabled={saving}
                 />
                 <div className="border-t border-line-soft pt-3">
@@ -533,6 +597,7 @@ export function ProjectSettingsView() {
                 onChange={setDraft}
                 projectId={projectId}
                 fromManifest={hasDir}
+                inRepo={inRepo}
                 disabled={saving}
               />
             )}

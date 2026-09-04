@@ -18,13 +18,7 @@
  * changed are rewritten. It is validated against `ProjectManifestSchema` and
  * written atomically before this returns.
  */
-import { existsSync } from "node:fs";
-import {
-  loadManifest,
-  saveManifest,
-  resolveProjectPaths,
-  type LoadedManifest,
-} from "@dispatch/cli/core";
+import { loadManifest, saveManifest, type LoadedManifest } from "@dispatch/cli/core";
 import {
   WorkflowConfigSchema,
   type Project,
@@ -33,6 +27,7 @@ import {
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { ProjectConfigService } from "./project-config.js";
+import { configPathsFor, resolveConfigDir } from "./config-location.js";
 
 /** Where a workflow save landed — surfaced to the UI so it can say so. */
 export type WorkflowSaveTarget = "manifest" | "store";
@@ -57,10 +52,18 @@ const WORKFLOW_KEYS = Object.keys(WorkflowConfigSchema.shape) as (keyof Workflow
 /**
  * True when this project's config is manifest-backed — i.e. a `project.yaml`
  * exists that would override anything written to `.data`.
+ *
+ * Asks the resolver rather than walking up from `repoPath`, so a project whose
+ * manifest lives OUTSIDE the repo still counts as manifest-backed. Getting this
+ * wrong is silent and lasting: a workflow save would go to `.data` and then be
+ * overridden on the next load by the manifest it never touched.
+ *
+ * The old `existsSync(repoPath)` precondition is gone with it. It stood in for
+ * "nothing to walk up from", which no longer decides anything — an external
+ * config dir exists whether or not the checkout does.
  */
-export function isManifestBacked(project: Project): boolean {
-  if (!project.repoPath || !existsSync(project.repoPath)) return false;
-  return resolveProjectPaths(project.repoPath).exists;
+export function isManifestBacked(project: Project, externalDir: string): boolean {
+  return resolveConfigDir(project, externalDir).exists;
 }
 
 /**
@@ -144,7 +147,8 @@ export async function saveProjectWorkflow(
   // of an error the caller can see.
   const incoming = WorkflowConfigSchema.parse(workflow);
 
-  if (!isManifestBacked(project)) {
+  const externalDir = deps.store.projectConfigDir(projectId);
+  if (!isManifestBacked(project, externalDir)) {
     // The store path makes the same promise as the manifest one, or a project
     // would keep or lose its `pr` block depending on whether the repo happens to
     // carry a `.dispatch/`.
@@ -153,7 +157,15 @@ export async function saveProjectWorkflow(
     return { target: "store", project: saved };
   }
 
-  const loaded = await loadManifest(project.repoPath);
+  const paths = configPathsFor(project, externalDir);
+  // No writable config dir (a `repo` pin with no usable checkout). Fall back to
+  // `.data` rather than to a cwd-relative manifest — see `configPathsFor`.
+  if (!paths) {
+    const merged = mergeWorkflow(project.workflow, incoming);
+    const saved = await deps.store.saveProject({ ...project, workflow: merged });
+    return { target: "store", project: saved };
+  }
+  const loaded = await loadManifest(paths);
   // Key-by-key (rather than replacing the whole `workflow` node) so comments
   // attached to the keys we aren't touching survive the write.
   for (const key of WORKFLOW_KEYS) applyAuthored(loaded.doc, ["workflow", key], incoming[key]);
@@ -175,14 +187,22 @@ export async function saveProjectShellFilter(
   const project = await deps.store.getProject(projectId).catch(() => null);
   if (!project) return null;
 
-  if (!isManifestBacked(project)) {
+  const externalDir = deps.store.projectConfigDir(projectId);
+  if (!isManifestBacked(project, externalDir)) {
     const next = { ...project, shellFilter };
     if (shellFilter === undefined) delete next.shellFilter;
     const saved = await deps.store.saveProject(next);
     return { target: "store", project: saved };
   }
 
-  const loaded = await loadManifest(project.repoPath);
+  const paths = configPathsFor(project, externalDir);
+  if (!paths) {
+    const next = { ...project, shellFilter };
+    if (shellFilter === undefined) delete next.shellFilter;
+    const saved = await deps.store.saveProject(next);
+    return { target: "store", project: saved };
+  }
+  const loaded = await loadManifest(paths);
   if (shellFilter === undefined) loaded.doc.deleteIn(["defaults", "shellFilter"]);
   else loaded.doc.setIn(["defaults", "shellFilter"], shellFilter);
   const manifestPath = await saveManifest(loaded);

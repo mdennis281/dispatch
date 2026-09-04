@@ -30,6 +30,7 @@ import { readdir, readFile } from "node:fs/promises";
 import {
   AGENT_TASKS,
   CONFIG_DIR_NAME,
+  CONFIG_DIR_NAMES,
   DEFAULT_AGENTS_DIR,
   DEFAULT_INSTRUCTIONS_DIR,
   DEFAULT_MODES_DIR,
@@ -72,9 +73,19 @@ interface ConfigDirs {
 }
 
 function dirsFor(config: ProjectConfig | null): ConfigDirs {
-  // Names, not absolute paths: the prompt reads better as repo-relative, and the
-  // agent resolves them from the repo root it's already working in.
-  const configDir = config?.sourceDir ? basename(config.sourceDir) : CONFIG_DIR_NAME;
+  // A repo-located config dir is named, not pathed: the prompt reads better as
+  // repo-relative and the agent resolves it from the repo root it is already in.
+  //
+  // An EXTERNAL one has to be absolute or the instruction is a lie — its
+  // basename is a project id, and `hivebreak/instructions/x.md` resolved against
+  // the repo root names a file in the working tree that nothing will ever read.
+  // The basename being a known config-dir name is exactly what distinguishes the
+  // two, so no extra plumbing is needed to tell them apart.
+  const source = config?.sourceDir;
+  const inRepo = !source || (CONFIG_DIR_NAMES as readonly string[]).includes(basename(source));
+  const configDir = source ? (inRepo ? basename(source) : source) : CONFIG_DIR_NAME;
+  // Sub-dirs stay bare names either way — every brief interpolates them as
+  // `${configDir}/${sub}/…`, so an absolute one here would compose into nonsense.
   const rel = (abs: string | undefined, fallback: string) => (abs ? basename(abs) : fallback);
   return {
     configDir,
