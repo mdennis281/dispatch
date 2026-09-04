@@ -300,3 +300,66 @@ test("running the CLI directly actually does something", async () => {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });
+
+test("a flag with no value is refused, not silently widened", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mig-argv-"));
+  try {
+    const repo = await seedRepo(root, "lambda");
+    const configDir = await seedConfig(root, [
+      { id: "p1", name: "Lambda", repoPath: repo, worktreeRoot: "", subApps: [], createdAt: 1 },
+    ]);
+    const env = { DISPATCH_HOME: join(root, "none") };
+    // The dangerous shape: `--project` last means "every project", and
+    // `--config-dir` last means "the real install".
+    await assert.rejects(
+      () => main(["--config-dir", configDir, "--apply", "--project"], env),
+      /--project needs a value/,
+    );
+    await assert.rejects(
+      () => main(["--apply", "--config-dir"], env),
+      /--config-dir needs a value/,
+    );
+    // A flag swallowing the NEXT flag is the same bug wearing a value.
+    await assert.rejects(
+      () => main(["--config-dir", configDir, "--project", "--apply"], env),
+      /--project needs a value/,
+    );
+    assert.ok(existsSync(join(repo, ".dispatch")), "nothing ran");
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("a record whose id is not a path segment is skipped, not followed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mig-badid-"));
+  try {
+    const repo = await seedRepo(root, "mu");
+    const configDir = await seedConfig(root, [
+      { id: "good", name: "Good", repoPath: repo, worktreeRoot: "", subApps: [], createdAt: 1 },
+    ]);
+    // A record whose `id` would escape `config/projects/` if joined verbatim.
+    // The filename cannot hold a separator, so the mismatch is the tell.
+    const evilRepo = await seedRepo(root, "nu");
+    await writeFile(
+      join(configDir, "projects", "evil.json"),
+      JSON.stringify({
+        id: "../../../escaped", name: "Evil", repoPath: evilRepo,
+        worktreeRoot: "", subApps: [], createdAt: 1,
+      }, null, 2),
+      "utf8",
+    );
+    // …and a stray file that is not a project record at all.
+    await writeFile(join(configDir, "projects", "not.an.id.json"), "{}", "utf8");
+
+    const res = await main(["--config-dir", configDir, "--apply"], {
+      DISPATCH_HOME: join(root, "none"),
+    });
+
+    assert.deepEqual(res.migrated, ["good"], "only the valid record ran");
+    assert.ok(existsSync(join(evilRepo, ".dispatch")), "the bad record touched nothing");
+    assert.ok(!existsSync(join(configDir, "projects", "..", "..", "..", "escaped")));
+    assert.ok(!existsSync(join(root, "escaped")), "nothing was written outside the config dir");
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});

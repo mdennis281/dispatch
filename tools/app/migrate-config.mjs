@@ -48,6 +48,18 @@ import { pathToFileURL } from "node:url";
 import { desktopPaths } from "./paths.mjs";
 import { portAlive } from "./build-payload.mjs";
 
+/**
+ * Ids that may become a path segment — the same allowlist the server Store
+ * enforces (`ENTITY_ID` in store/index.ts).
+ *
+ * This tool builds `config/projects/<rec.id>/` and then DELETES a directory,
+ * so a record carrying `../../something` would not merely read the wrong
+ * place. The server guards its own writes; a tool that reads those files back
+ * and acts on them has to guard them again rather than assume they were only
+ * ever written by a guarded version.
+ */
+const ENTITY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
 /** Config dir names in resolution order — mirrors `CONFIG_DIR_NAMES`. */
 const CONFIG_DIR_NAMES = [".dispatch", ".claude-manager"];
 const MANIFEST_FILE = "project.yaml";
@@ -62,14 +74,28 @@ const RUNTIME_SIDECARS = new Set(["memory-stats.json"]);
 
 function parseArgs(argv) {
   const args = { apply: false, keepRepo: false, project: null };
+  /**
+   * A flag that swallowed a missing value used to leave `undefined`, and on
+   * THIS tool the fallbacks are dangerous in both directions: an undefined
+   * `--project` means "every project", and an undefined `--config-dir` means
+   * "the real install". `--apply --project` (a typo away from a one-project
+   * run) would have migrated all eight.
+   */
+  const value = (flag, i) => {
+    const v = argv[i];
+    if (v === undefined || v.startsWith("--")) {
+      throw new Error(`${flag} needs a value`);
+    }
+    return v;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     // `pnpm run app:migrate-config -- --apply` forwards the separator itself.
     if (a === "--") continue;
     else if (a === "--apply") args.apply = true;
     else if (a === "--keep-repo") args.keepRepo = true;
-    else if (a === "--project") args.project = argv[++i];
-    else if (a === "--config-dir") args.configDir = argv[++i];
+    else if (a === "--project") args.project = value(a, ++i);
+    else if (a === "--config-dir") args.configDir = value(a, ++i);
     else throw new Error(`unknown argument: ${a}`);
   }
   return args;
@@ -133,6 +159,15 @@ function loadProjects(configDir, only) {
       rec = JSON.parse(readFileSync(file, "utf8"));
     } catch (err) {
       out.push({ file, broken: String(err) });
+      continue;
+    }
+    // A file whose name is not an id, or a record whose `id` is not one, is
+    // not a project this tool will act on. `listProjects` in the Store
+    // tolerates strays the same way — by skipping them, not by failing the
+    // whole run, because one bad file should not block seven good ones.
+    const stem = name.slice(0, -".json".length);
+    if (!ENTITY_ID.test(stem) || rec.id !== stem) {
+      out.push({ file, stray: rec.id === stem ? "id is not a valid path segment" : `id "${rec.id}" does not match filename "${stem}"` });
       continue;
     }
     if (only && rec.id !== only && rec.name !== only) continue;
@@ -317,8 +352,12 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   console.log(args.apply ? "mode: APPLY\n" : "mode: DRY RUN (pass --apply to execute)\n");
 
   const entries = loadProjects(configDir, args.project);
-  const broken = entries.filter((e) => e.broken);
-  for (const b of broken) console.log(`  ! unreadable project record: ${b.file} (${b.broken})`);
+  for (const b of entries.filter((e) => e.broken)) {
+    console.log(`  ! unreadable project record, skipped: ${b.file} (${b.broken})`);
+  }
+  for (const st of entries.filter((e) => e.stray)) {
+    console.log(`  ! not a project record, skipped: ${st.file} (${st.stray})`);
+  }
 
   const plans = entries.filter((e) => e.rec).map((e) => planFor(configDir, e));
   const todo = plans.filter((p) => !p.skip);
