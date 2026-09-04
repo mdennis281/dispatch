@@ -42,7 +42,7 @@
  */
 import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
 import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
-import { join, relative, dirname, isAbsolute } from "node:path";
+import { join, relative, dirname, isAbsolute, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { desktopPaths } from "./paths.mjs";
@@ -121,16 +121,33 @@ function trackedUnder(repo, rel) {
 
 /* --------------------------------------------------------------------- fs */
 
-/** Every file under `dir`, as paths relative to it (forward-slashed). */
+/**
+ * Every entry under `dir`, split into plain FILES and anything else.
+ *
+ * The "anything else" bucket exists because of a silent data-loss path: a
+ * `Dirent` for a symlink is neither `isDirectory()` nor `isFile()`, so an
+ * earlier version simply skipped them — they were never copied, never
+ * verified, and then deleted by the `rm -r` that cleans up. Collecting them
+ * lets the caller REFUSE, which is the only honest answer: a symlink in a
+ * config dir could be relative, absolute, cross-device or a Windows junction,
+ * and guessing which to follow is how a migration eats the target.
+ */
 function walk(dir, base = dir) {
-  if (!existsSync(dir)) return [];
-  const out = [];
+  if (!existsSync(dir)) return { files: [], odd: [] };
+  const files = [];
+  const odd = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const abs = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...walk(abs, base));
-    else if (entry.isFile()) out.push(relative(base, abs).split("\\").join("/"));
+    const rel = relative(base, abs).split("\\").join("/");
+    if (entry.isSymbolicLink()) odd.push(`${rel} (symlink)`);
+    else if (entry.isDirectory()) {
+      const sub = walk(abs, base);
+      files.push(...sub.files);
+      odd.push(...sub.odd);
+    } else if (entry.isFile()) files.push(rel);
+    else odd.push(`${rel} (not a regular file)`);
   }
-  return out;
+  return { files, odd };
 }
 
 /** The repo's committed config dir (one holding a manifest), or null. */
@@ -211,7 +228,15 @@ function planFor(configDir, entry) {
   }
   plan.repoDir = repoDir;
   plan.dirName = repoDir.split("\\").join("/").split("/").pop();
-  plan.files = walk(repoDir).filter((f) => !RUNTIME_SIDECARS.has(f));
+  const walked = walk(repoDir);
+  plan.odd = walked.odd;
+  if (plan.odd.length) {
+    // Refuse the whole project rather than migrate part of it. Cleanup deletes
+    // the directory wholesale, so anything this cannot copy would be lost.
+    plan.skip = `contains ${plan.odd.length} entry/entries this will not copy: ${plan.odd.join(", ")}`;
+    return plan;
+  }
+  plan.files = walked.files.filter((f) => !RUNTIME_SIDECARS.has(f));
   plan.collisions = plan.files.filter((f) => existsSync(join(external, f)));
 
   if (isGitRepo(repoPath)) {
@@ -431,7 +456,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 // `import.meta.url` is `file:///C:/...` (three slashes, drive letter) and a
 // hand-rolled `file://` + path never matches, so the CLI silently did
 // nothing when run directly.
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   main().catch((err) => {
     console.error(`\n${err.message}`);
     process.exit(1);

@@ -15,7 +15,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile, symlink } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -359,6 +359,43 @@ test("a record whose id is not a path segment is skipped, not followed", async (
     assert.ok(existsSync(join(evilRepo, ".dispatch")), "the bad record touched nothing");
     assert.ok(!existsSync(join(configDir, "projects", "..", "..", "..", "escaped")));
     assert.ok(!existsSync(join(root, "escaped")), "nothing was written outside the config dir");
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("a symlink in the config dir aborts that project instead of eating it", async () => {
+  // The silent-loss path: a link Dirent is neither isDirectory() nor isFile(),
+  // so it was skipped by the copy AND by the verify — then deleted by the
+  // `rm -r` cleanup. Refusing is the only honest answer.
+  //
+  // A DIRECTORY link, deliberately. A file symlink needs Developer Mode or
+  // admin on Windows and throws EPERM otherwise, so the first version of this
+  // test bailed in its own catch and passed with the fix removed — a test that
+  // cannot fail. A junction needs no privileges and `readdir` reports it as
+  // isSymbolicLink() with isFile() and isDirectory() both false: the exact case.
+  const root = await mkdtemp(join(tmpdir(), "mig-link-"));
+  try {
+    const repo = await seedRepo(root, "xi");
+    const outside = join(root, "outside");
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "precious.md"), "precious", "utf8");
+    await symlink(outside, join(repo, ".dispatch", "linked"), "junction");
+
+    const configDir = await seedConfig(root, [
+      { id: "p1", name: "Xi", repoPath: repo, worktreeRoot: "", subApps: [], createdAt: 1 },
+    ]);
+    const res = await main(["--config-dir", configDir, "--apply"], {
+      DISPATCH_HOME: join(root, "none"),
+    });
+
+    assert.deepEqual(res.migrated, [], "refused to migrate");
+    assert.ok(existsSync(join(repo, ".dispatch")), "repo dir left intact");
+    assert.equal(
+      await readFile(join(outside, "precious.md"), "utf8"),
+      "precious",
+      "and whatever the link pointed at is untouched",
+    );
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
