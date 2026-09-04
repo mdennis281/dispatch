@@ -28,7 +28,7 @@
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { readdir, readFile } from "node:fs/promises";
 import { existsSync, watch as fsWatch, type FSWatcher } from "node:fs";
-import { configDirFor } from "@dispatch/cli/core";
+import { resolveConfigDir } from "./config-location.js";
 import { parse as parseYaml } from "yaml";
 import {
   ProjectManifestSchema,
@@ -526,16 +526,27 @@ export class ProjectConfigService {
   }
 
   /**
-   * Load a project's `.dispatch/` from disk into a normalized result.
+   * The config dir this project resolves to — the repo's committed `.dispatch/`
+   * or the install-owned external one. See `config-location.ts` for the
+   * precedence; everything in this service goes through here so the two
+   * locations are indistinguishable to the loader, the watcher and the cache.
+   */
+  private resolveDir(project: Project) {
+    return resolveConfigDir(project, this.store.projectConfigDir(project.id));
+  }
+
+  /**
+   * Load a project's config dir from disk into a normalized result.
    * Pure read — no store writes, no events. Resilient: any parse/read failure
    * becomes a structured error, never a throw.
    */
   async load(project: Project): Promise<ProjectConfigResult> {
-    const sourceDir = configDirFor(project.repoPath);
+    const resolved = this.resolveDir(project);
+    const sourceDir = resolved.dir;
     const manifestPath = join(sourceDir, MANIFEST_FILE);
 
     // No config dir → back-compat: the `.data` store is used as-is.
-    if (!existsSync(manifestPath)) {
+    if (!resolved.exists) {
       return ProjectConfigResultSchema.parse({ sourceDir: null, config: null, errors: [] });
     }
 
@@ -785,7 +796,7 @@ export class ProjectConfigService {
     } catch (err) {
       // Defensive: `load` is resilient, but never let reload throw.
       result = ProjectConfigResultSchema.parse({
-        sourceDir: configDirFor(project.repoPath),
+        sourceDir: this.resolveDir(project).dir,
         config: null,
         errors: [{ scope: "io", message: msg(err) }],
       });
@@ -815,13 +826,13 @@ export class ProjectConfigService {
   }
 
   /**
-   * Watch a project's `.dispatch/` for changes and debounced-reload. No-op
+   * Watch a project's config dir for changes and debounced-reload. No-op
    * when the dir is absent (a back-compat project needs no watcher) or already
    * watched. Idempotent.
    */
   watchProject(project: Project): void {
     if (this.watchers.has(project.id)) return;
-    const dir = configDirFor(project.repoPath);
+    const dir = this.resolveDir(project).dir;
     if (!existsSync(dir)) return;
     const watcher = this.watchFactory(dir, () => this.onWatchEvent(project.id));
     if (watcher) this.watchers.set(project.id, watcher);

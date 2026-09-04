@@ -11,6 +11,7 @@ import {
   PermissionModeSchema,
   ChatStatusSchema,
   ShellTranscriptFilterSchema,
+  ProjectConfigLocationSchema,
 } from "./common.js";
 import { ResumePlanSchema } from "./limits.js";
 import { PeerSenderSchema } from "./messages.js";
@@ -79,6 +80,18 @@ export const ProjectSchema = z.object({
   subApps: z.array(SubAppSchema).default([]),
   /** Default branch for diff-vs-base / PR base (default "main"). */
   defaultBranch: z.string().optional(),
+  /**
+   * Where THIS project's config dir lives, overriding both the repo's own
+   * evidence and the app-wide default (see {@link ProjectConfigLocationSchema}
+   * and `resolveConfigLocation`).
+   *
+   * Optional, and the absence is load-bearing twice over: an untouched project
+   * record round-trips byte-identical, and "unset" is what lets a repo with a
+   * committed `.dispatch/` keep it without anyone having to write that down.
+   * Setting it is the ONLY way to move a project off a config dir it already
+   * has — in either direction.
+   */
+  configLocation: ProjectConfigLocationSchema.optional(),
   createdAt: z.number().int(),
 });
 export type Project = z.infer<typeof ProjectSchema>;

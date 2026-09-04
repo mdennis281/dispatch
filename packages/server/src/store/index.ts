@@ -97,6 +97,7 @@ import {
   type McpPortLease,
   ShellTranscriptFilterSchema,
   McpEnabledMapSchema,
+  ProjectConfigLocationSchema,
 } from "@dispatch/shared";
 import {
   HarnessSettingsSchema,
@@ -213,6 +214,21 @@ export const AppSettingsSchema = z.object({
    * which is also what every install predating channels was on.
    */
   updateChannel: UpdateChannelSchema.optional(),
+  /**
+   * Where a NEW project's config dir goes when the project itself hasn't said
+   * and its repo carries no committed one — `external` (the default) keeps
+   * Dispatch's files out of the working tree entirely; `repo` restores the
+   * older behaviour of scaffolding a committable `.dispatch/` into every repo.
+   *
+   * It belongs here rather than in a manifest for the obvious reason: it decides
+   * WHERE the manifest is read from, so a manifest could never carry it.
+   *
+   * Optional rather than `.default("external")` so every existing AppSettings
+   * literal (tests, DEFAULT_SETTINGS) stays valid — and note that changing it
+   * moves nothing. It is consulted only when a config dir is being placed for
+   * the first time; a project that already has one keeps it either way.
+   */
+  projectConfigLocation: ProjectConfigLocationSchema.optional(),
   /**
    * Policy for `mcp__dispatch-chat__spawn_chat` — an agent starting ANOTHER chat.
    * `autoApprove` off (the default, and the reason this is opt-in rather than
@@ -507,6 +523,25 @@ export class Store {
    */
   projectMemoryDir(projectId: string) {
     return join(this.projectsDir(), assertEntityId("project", projectId), "memory");
+  }
+  /**
+   * Absolute path to a project's EXTERNAL config dir — the `.dispatch/` for a
+   * project that keeps its config out of the repo (see
+   * {@link ProjectConfigLocationSchema}). Holds the same tree a committed
+   * `.dispatch/` would: `project.yaml`, `instructions/`, `skills/`, `memory/`.
+   *
+   * Deliberately the project's own entity dir and NOT a `dispatch/` child of it,
+   * so `<dir>/memory` is exactly {@link projectMemoryDir} — the dir memories have
+   * always lived in for projects without a config dir. Adopting external config
+   * therefore moves no memory files and needs no migration; the loader simply
+   * starts resolving `memoryDir` onto the pile that was already there.
+   *
+   * It follows that this is the CONFIG root, not the state root: shared between
+   * the stable install and a `pnpm dev` instance, which is what keeps one set of
+   * house rules and one set of memories rather than two that quietly diverge.
+   */
+  projectConfigDir(projectId: string) {
+    return join(this.projectsDir(), assertEntityId("project", projectId));
   }
   /**
    * Sidecar ACCESS-telemetry file for a project's memories (how often each is

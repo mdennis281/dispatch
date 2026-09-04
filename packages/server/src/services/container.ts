@@ -243,12 +243,13 @@ export function createServices(
   // The store makes them durable: the roster and each shell's transcript survive
   // a restart, so "what did that build print?" outlives the process that ran it.
   const terminals = overrides.terminals ?? new TerminalService({ bus, store });
-  // Self-contained `.dispatch/` project config: discovers + validates the
-  // authored config in a managed repo, syncs it into the project store (authored
-  // overrides `.data`), and watches it for live reload. Projects without a
-  // `.dispatch/` fall back to the `.data` store untouched (back-compat).
-  // Constructed before `memory` so it can relocate a config-dir project's memory
-  // to the repo's committable `.dispatch/memory/` source of truth.
+  // Self-contained project config: discovers + validates the authored config for
+  // a managed project — the repo's committed `.dispatch/` or the install-owned
+  // dir, resolved per project by `config-location.ts` — syncs it into the
+  // project store (authored overrides `.data`), and watches it for live reload.
+  // A project with no config dir anywhere falls back to the `.data` store
+  // untouched (back-compat). Constructed before `memory` so it can point a
+  // config-dir project's memory at that config's `memory/`.
   // The usage ledger. Constructed before the broker because the broker RECORDS
   // into it; per-instance (it lives in `.data`, never the shared `config/`) for
   // the same reason `runners.json` is — two processes writing one SQLite file
@@ -260,8 +261,9 @@ export function createServices(
     overrides.projectConfig ?? new ProjectConfigService({ store, bus });
   // Per-project durable agent memory: injected at session start + exposed to the
   // agent as `mcp__dispatch-memory__remember|recall|forget`, and curated in the UI. Reads
-  // from the repo `.dispatch/memory/` when the project has a config dir
-  // (source of truth), else the `.data` store (back-compat).
+  // from the project config dir's `memory/` when it has one (source of truth),
+  // else the `.data` store (back-compat) — which for the default EXTERNAL
+  // placement is the same directory either way.
   const memory =
     overrides.memory ?? new MemoryService({ store, bus, projectConfig });
   // App-level authored guidance: Dispatch's own shipped instructions + skills,
