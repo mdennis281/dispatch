@@ -731,6 +731,30 @@ describe("chat status persistence", () => {
     expect(result?.costUsd).toBe(42.5);
     expect(result?.turnCostUsd).toBeUndefined();
   });
+
+  it("ignores a baseline left behind by a retired session", async () => {
+    // `/clear` retires the native thread and clears `sessionId`; the fresh one
+    // counts its own `total_cost_usd` from zero. Subtracting the dead session's
+    // total would understate the first turn back — here, report 3.00 of a 5.00
+    // turn — so a baseline without a session is not a baseline.
+    await store.saveChat({ ...chatFor("c1"), sessionId: undefined, costBaselineUsd: 2 });
+
+    const { fn } = makeFakeQuery(() => [
+      assistantText("ok"),
+      { ...resultMsg(), total_cost_usd: 5 },
+    ]);
+    const broker = makeBroker(fn);
+    broker.create((await store.getChat("c1"))!);
+
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "fresh thread");
+    await idle;
+
+    const result = events.flatMap((e) =>
+      e.type === "chat-message" && e.message.kind === "result" ? [e.message] : [],
+    )[0];
+    expect(result?.turnCostUsd).toBe(5);
+  });
 });
 
 function waitForResults(chatId: string, n: number, ms = 3000): Promise<void> {

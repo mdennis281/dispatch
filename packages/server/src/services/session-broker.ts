@@ -1984,10 +1984,13 @@ export class SessionBroker {
         explicitInterruptPending: false,
         turnOpen: false,
         sessionId: chat.sessionId,
-        lastCostUsd: chat.costBaselineUsd,
+        // Only alongside a live `sessionId`: a baseline outliving the session it
+        // measured (a `/clear` retires the thread) would be subtracted from a
+        // fresh session's total, understating its first turn.
+        lastCostUsd: chat.sessionId ? chat.costBaselineUsd : undefined,
         // A chat that already had a session before the baseline was recorded has
         // nothing to subtract from. See {@link SessionBroker.turnCost}.
-        costBaselineUnknown: chat.costBaselineUsd === undefined && Boolean(chat.sessionId),
+        costBaselineUnknown: Boolean(chat.sessionId) && chat.costBaselineUsd === undefined,
         model: chat.model,
         modelOverride: chat.model,
         status:
@@ -2811,10 +2814,15 @@ export class SessionBroker {
       session.harnessSession = undefined;
       session.started = false;
       session.sessionId = undefined;
+      // The baseline belongs to the thread being retired — the fresh one starts
+      // its own `total_cost_usd` from zero, and measuring against a dead
+      // session's total would understate the first turn back.
+      session.lastCostUsd = undefined;
+      session.costBaselineUnknown = false;
       session.managerGrant?.revoke();
       session.managerGrant = undefined;
       void live.dispose();
-      void this.patchChat(chatId, { sessionId: undefined });
+      void this.patchChat(chatId, { sessionId: undefined, costBaselineUsd: undefined });
       this.onTurnEnd(session);
     } else {
       session.outbox.push({
