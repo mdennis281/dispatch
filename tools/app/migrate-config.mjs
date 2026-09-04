@@ -40,7 +40,14 @@
  * races that cache, and a project saved by the running server afterwards can
  * write back the record this just pinned.
  */
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  readdirSync,
+  mkdirSync,
+  lstatSync,
+} from "node:fs";
 import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import { join, relative, dirname, isAbsolute, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -225,6 +232,20 @@ function planFor(configDir, entry) {
       ? "no config dir in the repo (already resolves external)"
       : "no repoPath";
     return plan;
+  }
+  // The DESTINATION has to be a real directory, for the same reason the source
+  // must contain no links — and this is the half I missed first time round.
+  // `config/projects/<id>` existing as a symlink or junction means `copyTree`
+  // writes THROUGH it, outside the config root; existing as a regular file
+  // means `mkdirSync` throws and takes the whole run down with it.
+  if (existsSync(external)) {
+    const st = lstatSync(external);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      plan.skip = `${external} is not a real directory (${
+        st.isSymbolicLink() ? "symlink" : "not a directory"
+      }) — refusing to write through it`;
+      return plan;
+    }
   }
   plan.repoDir = repoDir;
   plan.dirName = repoDir.split("\\").join("/").split("/").pop();

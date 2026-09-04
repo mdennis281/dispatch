@@ -16,7 +16,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, mkdir, writeFile, readFile, symlink } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -396,6 +396,55 @@ test("a symlink in the config dir aborts that project instead of eating it", asy
       "precious",
       "and whatever the link pointed at is untouched",
     );
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("refuses when the external target is not a real directory", async () => {
+  // The mirror of the source-side link guard, and the half missed first time:
+  // if `config/projects/<id>` is itself a link, the copy writes THROUGH it and
+  // lands outside the config root; if it is a regular file, mkdir throws and
+  // takes the whole run down.
+  const root = await mkdtemp(join(tmpdir(), "mig-dest-"));
+  try {
+    const repo = await seedRepo(root, "omicron");
+    const configDir = await seedConfig(root, [
+      { id: "p1", name: "Omicron", repoPath: repo, worktreeRoot: "", subApps: [], createdAt: 1 },
+    ]);
+    const escapeTo = join(root, "escape-target");
+    await mkdir(escapeTo, { recursive: true });
+    await symlink(escapeTo, join(configDir, "projects", "p1"), "junction");
+
+    const res = await main(["--config-dir", configDir, "--apply"], {
+      DISPATCH_HOME: join(root, "none"),
+    });
+
+    assert.deepEqual(res.migrated, [], "refused");
+    assert.ok(existsSync(join(repo, ".dispatch")), "repo dir left intact");
+    assert.deepEqual(
+      readdirSync(escapeTo),
+      [],
+      "and nothing was written through the link",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("refuses when the external target is a regular file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mig-destfile-"));
+  try {
+    const repo = await seedRepo(root, "pi");
+    const configDir = await seedConfig(root, [
+      { id: "p1", name: "Pi", repoPath: repo, worktreeRoot: "", subApps: [], createdAt: 1 },
+    ]);
+    await writeFile(join(configDir, "projects", "p1"), "not a directory", "utf8");
+    const res = await main(["--config-dir", configDir, "--apply"], {
+      DISPATCH_HOME: join(root, "none"),
+    });
+    assert.deepEqual(res.migrated, [], "refused instead of throwing mid-run");
+    assert.ok(existsSync(join(repo, ".dispatch")));
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
