@@ -43,7 +43,11 @@ import {
   type ProjectConfigResult,
 } from "@dispatch/shared";
 import { configDirFor } from "@dispatch/cli/core";
-import { resolveConfigDir, resolvePlacementDir } from "./config-location.js";
+import {
+  isUsableRepoPath,
+  resolveConfigDir,
+  resolvePlacementDir,
+} from "./config-location.js";
 import type { Store } from "../store/index.js";
 import { zipSync, unzipSync, type ZipEntry } from "./zip.js";
 
@@ -281,10 +285,13 @@ export class ProjectConfigArchive {
     );
     const dir = target.dir;
     // Writing into a repo means creating directories in the human's workspace, so
-    // a mistyped `repoPath` must not materialize one. An EXTERNAL dir is inside
-    // the install's own config root and has no such hazard — which is why this
-    // guard lives here, where the placement is known, rather than at the caller.
-    if (target.location === "repo" && !existsSync(project.repoPath)) {
+    // a mistyped `repoPath` must not materialize one. `isUsableRepoPath` and not
+    // a bare `existsSync`: a RELATIVE path "exists" relative to the server's own
+    // cwd, which is how a scaffold lands inside the install. An EXTERNAL dir is
+    // inside the install's config root by design and has no such hazard — which
+    // is why this guard lives here, where the placement is known, not at the
+    // caller.
+    if (target.location === "repo" && !isUsableRepoPath(project.repoPath, true)) {
       const result = await this.projectConfig.reload(projectId);
       return { created: false, sourceDir: dir, files: [], result };
     }
@@ -336,14 +343,15 @@ export class ProjectConfigArchive {
     const externalDir = this.store.projectConfigDir(project.id);
     const from = resolveConfigDir(project, externalDir);
 
-    // A project record can carry an empty or stale `repoPath` (one typed wrong,
-    // or a checkout since deleted). `configDirFor("")` is the RELATIVE string
-    // `.dispatch`, which `mkdir` then resolves against the server's own working
-    // directory — so this refused-to-be-a-move quietly created a config dir
-    // inside the Dispatch install itself. Caught by the API round-trip, and the
-    // reason this is a throw rather than a silent no-op: the human pressed a
-    // button, and "nothing happened" is not an answer they can act on.
-    if (to === "repo" && (!project.repoPath || !existsSync(project.repoPath))) {
+    // A project record can carry an empty, relative or stale `repoPath` (one
+    // typed wrong, or a checkout since deleted). `configDirFor("")` is the
+    // RELATIVE string `.dispatch`, which `mkdir` then resolves against the
+    // server's own working directory — so this refused-to-be-a-move quietly
+    // created a config dir inside the Dispatch install itself. Caught by the API
+    // round-trip, and the reason this is a throw rather than a silent no-op: the
+    // human pressed a button, and "nothing happened" is not an answer they can
+    // act on.
+    if (to === "repo" && !isUsableRepoPath(project.repoPath, true)) {
       throw new Error(
         `cannot move config into the repo: ${project.repoPath || "(no repo path)"} does not exist`,
       );
@@ -388,11 +396,22 @@ export class ProjectConfigArchive {
     const entries = unzipSync(buffer);
     if (!entries.length) throw new Error("archive is empty");
     const settings = await this.store.getSettings().catch(() => null);
-    const dir = resolvePlacementDir(
+    const target = resolvePlacementDir(
       project,
       this.store.projectConfigDir(project.id),
       settings?.projectConfigLocation,
-    ).dir;
+    );
+    // Same guard as scaffold and relocate, for the same reason: an import that
+    // lands on a repo placement must not resolve `.dispatch` against the
+    // server's own cwd. A throw rather than a silent fallback because the caller
+    // chose a FILE to import — putting it somewhere they didn't ask for is worse
+    // than saying no.
+    if (target.location === "repo" && !isUsableRepoPath(project.repoPath, true)) {
+      throw new Error(
+        `cannot import into the repo: ${project.repoPath || "(no repo path)"} does not exist`,
+      );
+    }
+    const dir = target.dir;
     await mkdir(dir, { recursive: true });
     const files = await this.writeEntries(dir, entries);
     this.projectConfig.watchProject(project);

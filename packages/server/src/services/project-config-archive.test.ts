@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, isAbsolute } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
@@ -345,6 +345,23 @@ describe("ProjectConfigArchive — relocate", () => {
     const { archive } = makeArchive();
     const out = await archive.relocate("hivebreak", "external");
     expect(out?.sourceDir).toBe(store.projectConfigDir("hivebreak"));
+  });
+
+  it("refuses a RELATIVE repoPath that would resolve against the server cwd", async () => {
+    // `existsSync` is not the guard — it is exactly what SUCCEEDS for a relative
+    // path resolved against the process cwd. The path here is built to exist
+    // relative to wherever the runner is, so a test that only checked existence
+    // would pass with the fix removed.
+    const rel = relative(process.cwd(), repoDir);
+    expect(isAbsolute(rel)).toBe(false);
+    await seedProject({ repoPath: rel });
+    const ext = store.projectConfigDir("hivebreak");
+    await mkdir(ext, { recursive: true });
+    await writeFile(join(ext, "project.yaml"), "name: Stray\n", "utf8");
+
+    const { archive } = makeArchive();
+    await expect(archive.relocate("hivebreak", "repo")).rejects.toThrow(/does not exist/);
+    expect(existsSync(join(repoDir, ".dispatch"))).toBe(false);
   });
 
   it("returns null for an unknown project", async () => {

@@ -53,18 +53,28 @@ function hasManifest(dir: string): boolean {
 }
 
 /**
- * Whether `repoPath` can be probed at all.
+ * Whether `repoPath` names a REAL, usable checkout — absolute, and on disk.
  *
- * A `Project.repoPath` that is empty — or relative, which no real record should
- * be — makes `join(repoPath, ".dispatch")` a RELATIVE path, and `existsSync`
- * then resolves it against the server process's own working directory. In dev
- * that directory is a checkout of Dispatch, which carries a committed
- * `.dispatch/`: a degenerate project record would "find" this repo's config and
- * serve it as its own. Anything that turns a repoPath into a probe goes through
- * here first.
+ * A `Project.repoPath` that is empty, or relative (a mistyped path, a degenerate
+ * record), makes `join(repoPath, ".dispatch")` a RELATIVE path — and `existsSync`
+ * and `mkdir` then resolve it against the server process's own working
+ * directory. In dev that directory is a checkout of Dispatch, which carries a
+ * committed `.dispatch/`, so a bad record can READ this repo's config as its own
+ * and WRITE a config dir into the install itself. Both happened while this was
+ * being built.
+ *
+ * `existsSync` alone is not the guard: it is exactly what succeeds for a
+ * relative path resolved against the cwd. Absoluteness is the part that matters,
+ * so this is the ONE predicate every repo-path probe and repo placement goes
+ * through, rather than the check being restated per call site.
+ *
+ * @param mustExist require the directory to be there too. Reads want `false` —
+ *        a checkout can be temporarily unmounted without the config being wrong.
+ *        WRITES want `true`: never create directories under a path nobody named.
  */
-function probeableRepo(repoPath: string): boolean {
-  return !!repoPath && isAbsolute(repoPath);
+export function isUsableRepoPath(repoPath: string, mustExist = false): boolean {
+  if (!repoPath || !isAbsolute(repoPath)) return false;
+  return mustExist ? existsSync(repoPath) : true;
 }
 
 /**
@@ -73,7 +83,7 @@ function probeableRepo(repoPath: string): boolean {
  * and so can never answer "does this repo carry one".
  */
 export function findRepoConfigDir(repoPath: string): string | null {
-  if (!probeableRepo(repoPath)) return null;
+  if (!isUsableRepoPath(repoPath)) return null;
   for (const name of CONFIG_DIR_NAMES) {
     const dir = join(repoPath, name);
     if (hasManifest(dir)) return dir;
@@ -103,7 +113,7 @@ export function resolveConfigDir(project: Project, externalDir: string): Resolve
     // report `exists: false` — never the server cwd's manifest. Callers then
     // treat it as a project with no config (back-compat `.data`), which is the
     // truth: a repo-pinned project with no repo has no config dir.
-    const exists = probeableRepo(project.repoPath) && hasManifest(dir);
+    const exists = isUsableRepoPath(project.repoPath) && hasManifest(dir);
     return { dir, location: "repo", exists };
   }
   if (project.configLocation === "external") {
