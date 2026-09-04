@@ -120,6 +120,15 @@ export interface AppSettings {
   /** App-wide defaults for which tool families appear in transcript shells. */
   shellFilter?: ShellTranscriptFilter;
   /**
+   * Where a NEW project's config dir goes when neither the project nor its repo
+   * has said — `external` (unset reads as this) keeps everything Dispatch writes
+   * out of the working tree; `repo` scaffolds a committable `.dispatch/`.
+   *
+   * Consulted only when a config dir is PLACED for the first time. A project
+   * that already has one keeps it either way, so changing this moves nothing.
+   */
+  projectConfigLocation?: ProjectConfigLocation;
+  /**
    * Per-server MCP on/off pins for this install, under a project's own
    * `mcpEnabled`. Written through `api.mcp.setEnabled`, NOT through a settings
    * PUT — that endpoint is a full replace and the MCP view holds one toggle,

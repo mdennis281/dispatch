@@ -569,7 +569,6 @@ export function ProjectSettingsView() {
                   value={workflow}
                   onChange={setDraft}
                   fromManifest={hasDir}
-                inRepo={inRepo}
                   inRepo={inRepo}
                   disabled={saving}
                 />
@@ -598,6 +597,7 @@ export function ProjectSettingsView() {
                 onChange={setDraft}
                 projectId={projectId}
                 fromManifest={hasDir}
+                inRepo={inRepo}
                 disabled={saving}
               />
             )}
