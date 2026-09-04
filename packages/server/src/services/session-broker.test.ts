@@ -755,6 +755,30 @@ describe("chat status persistence", () => {
     )[0];
     expect(result?.turnCostUsd).toBe(5);
   });
+
+  it("drops the baseline when the provider hands over a DIFFERENT session", async () => {
+    // Every path that retires a native thread — `/clear`, `setHarness`, a fork —
+    // ends with a new session id arriving at init, so that is where the baseline
+    // is dropped rather than at each call site. The replacement thread counts
+    // from zero, so its 5.00 is 5.00, not 5.00 minus a dead session's 2.00.
+    await store.saveChat({ ...chatFor("c1"), sessionId: "sess-old", costBaselineUsd: 2 });
+
+    const { fn } = makeFakeQuery(
+      () => [assistantText("ok"), { ...resultMsg(), total_cost_usd: 5 }],
+      "sess-new",
+    );
+    const broker = makeBroker(fn);
+    broker.resume((await store.getChat("c1"))!);
+
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "after the switch");
+    await idle;
+
+    const result = events.flatMap((e) =>
+      e.type === "chat-message" && e.message.kind === "result" ? [e.message] : [],
+    )[0];
+    expect(result?.turnCostUsd).toBe(5);
+  });
 });
 
 function waitForResults(chatId: string, n: number, ms = 3000): Promise<void> {

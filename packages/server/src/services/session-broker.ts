@@ -3683,11 +3683,28 @@ export class SessionBroker {
     };
     switch (event.type) {
       case "init":
+        // A cost baseline belongs to the native session that ran up the total, and
+        // this is the one place every retirement is observable: `/clear`,
+        // `setHarness`, a fork, anything added later — they all end with the
+        // provider handing over a DIFFERENT session id here. Keying on that beats
+        // remembering to clear the baseline at each call site, and it can't
+        // misfire on an ordinary resume, which keeps its id (stable across turns
+        // in 96 of 104 recorded chats; it moves only when a thread is retired).
+        // Not `!== undefined &&`: `setHarness` REBUILDS the session with no id at
+        // all while the record keeps the old provider's baseline, so "no id yet"
+        // has to count as a mismatch too. A resume arrives here with its id
+        // already restored from the record, so it matches and keeps its baseline.
+        const retired = session.sessionId !== event.sessionId;
+        if (retired) {
+          session.lastCostUsd = undefined;
+          session.costBaselineUnknown = false;
+        }
         session.sessionId = event.sessionId;
         session.model = event.model ?? session.model;
         session.contextWindow = event.contextWindow ?? session.contextWindow;
         await this.patchChat(session.chatId, {
           sessionId: event.sessionId,
+          ...(retired ? { costBaselineUsd: undefined } : {}),
           model: session.model,
           harness: session.harnessKind,
           harnessHandoff: undefined,
@@ -3980,7 +3997,16 @@ export class SessionBroker {
           const sid = (m as { session_id?: string }).session_id;
           if (sid && sid !== session.sessionId) {
             session.sessionId = sid;
-            void this.patchChat(session.chatId, { sessionId: sid, harnessHandoff: undefined });
+            // A different native session means the old cost baseline measured a
+            // thread that no longer exists — see the harness path's init for why
+            // this is the one place worth checking.
+            session.lastCostUsd = undefined;
+            session.costBaselineUnknown = false;
+            void this.patchChat(session.chatId, {
+              sessionId: sid,
+              costBaselineUsd: undefined,
+              harnessHandoff: undefined,
+            });
           }
           session.model = (m as { model?: string }).model;
           await this.emit(session, {
