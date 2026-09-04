@@ -61,19 +61,25 @@ async function writeConfig(rel: string, body: string): Promise<void> {
 
 /** A watch factory that captures the change listener for manual triggering. */
 function captureWatch(): {
-  factory: (dir: string, onChange: () => void) => ConfigWatcher | null;
-  trigger: () => void;
+  factory: (dir: string, onChange: (file?: string) => void) => ConfigWatcher | null;
+  /** Fire the watcher, optionally naming the file that changed. */
+  trigger: (file?: string) => void;
   closed: () => boolean;
+  /** The dir the service asked to watch, or null when it never asked. */
+  dir: () => string | null;
 } {
-  let listener: (() => void) | undefined;
+  let listener: ((file?: string) => void) | undefined;
+  let watched: string | null = null;
   let isClosed = false;
   return {
-    factory: (_dir, onChange) => {
+    factory: (dir, onChange) => {
+      watched = dir;
       listener = onChange;
       return { close: () => { isClosed = true; } };
     },
-    trigger: () => listener?.(),
+    trigger: (file) => listener?.(file),
     closed: () => isClosed,
+    dir: () => watched,
   };
 }
 
@@ -667,7 +673,51 @@ describe("ProjectConfigService — watch + debounced reload", () => {
     expect(watch.closed()).toBe(true);
   });
 
-  it("watchProject is a no-op when the project has no .dispatch/ dir", async () => {
+  it("watchProject ignores a memory-stats.json write", async () => {
+    // An EXTERNAL config dir is the project's entity dir, so the store's
+    // recall telemetry is written INSIDE the tree this watches recursively.
+    // Reloading the whole config on every recall would be pure churn.
+    const project = await seedProject();
+    await writeConfig("project.yaml", "name: V1");
+    const watch = captureWatch();
+    const svc = new ProjectConfigService({ store, bus, debounceMs: 5, watch: watch.factory });
+    await svc.reload("p1");
+    svc.watchProject(project);
+
+    events.length = 0;
+    watch.trigger("memory-stats.json");
+    await delay(40);
+    expect(events.some((e) => e.type === "project-config-update")).toBe(false);
+
+    // …but a real config edit still reloads, so the filter is not a mute.
+    watch.trigger("project.yaml");
+    await waitFor(() => events.some((e) => e.type === "project-config-update"));
+    svc.stop();
+  });
+
+  it("watchProject needs a MANIFEST, not just a directory", async () => {
+    // The external config dir is the project's ENTITY dir, so it exists as soon
+    // as the project has a single memory — with no config in it at all. If the
+    // mere directory armed the watcher, every back-compat project would get one
+    // and reload a config that does not exist on every `remember`.
+    const project = await seedProject();
+    const external = store.projectConfigDir("p1");
+    await mkdir(join(external, "memory"), { recursive: true });
+    await writeFile(join(external, "memory", "a.md"), "remembered", "utf8");
+
+    const watch = captureWatch();
+    const svc = new ProjectConfigService({ store, bus, watch: watch.factory });
+    svc.watchProject(project);
+    expect(watch.dir()).toBeNull();
+
+    // Give it a manifest and it arms, so this is gated on config, not muted.
+    await writeFile(join(external, "project.yaml"), "name: External", "utf8");
+    svc.watchProject(project);
+    expect(watch.dir()).toBe(external);
+    svc.stop();
+  });
+
+  it("watchProject is a no-op when the project has no config dir", async () => {
     const project = await seedProject();
     const watch = captureWatch();
     const svc = new ProjectConfigService({ store, bus, watch: watch.factory });

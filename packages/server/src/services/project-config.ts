@@ -82,14 +82,42 @@ export interface ProjectConfigServiceOptions {
   /** Debounce for watcher-triggered reloads (ms). Default 250. */
   debounceMs?: number;
   /**
-   * Injectable watch factory (tests). Given the `.dispatch/` dir and a
-   * change listener, returns a closable watcher. Defaults to a recursive
+   * Injectable watch factory (tests). Given the config dir and a change
+   * listener, returns a closable watcher. Defaults to a recursive
    * `fs.watch`. A factory that returns `null` disables watching.
+   *
+   * The listener takes the changed path (relative to the dir) so the service
+   * can ignore churn it does not care about; it is optional because a test
+   * factory that just calls `onChange()` is saying "something changed".
    */
-  watch?: (dir: string, onChange: () => void) => ConfigWatcher | null;
+  watch?: (dir: string, onChange: (file?: string) => void) => ConfigWatcher | null;
 }
 
 /* ------------------------------------------------------------------ helpers */
+
+/**
+ * Watcher events this service must ignore.
+ *
+ * An EXTERNAL config dir is the project's own entity dir, so the store's
+ * `memory-stats.json` — recall counts, rewritten every time a memory is
+ * surfaced — sits inside the tree this watches recursively. Without this, every
+ * recall would debounce-reload the whole project config and publish a
+ * `project-config-update` to every open client, for a file the loader never
+ * reads.
+ *
+ * Deliberately NOT extended to `memory/` itself. Memory markdown has always
+ * lived inside a repo's `.dispatch/` and always triggered a reload, and the
+ * Memory panel is one of the things that reload refreshes; changing that is a
+ * separate decision from where the config dir lives.
+ */
+const IGNORED_WATCH_FILES = new Set(["memory-stats.json"]);
+
+function isIgnoredWatchPath(file: string | undefined): boolean {
+  // An event with no filename (some platforms, some event types) says only
+  // "something changed" — reload rather than risk missing a real edit.
+  if (!file) return false;
+  return IGNORED_WATCH_FILES.has(file.replace(/\\/g, "/"));
+}
 
 /**
  * Upper bound on the authored-instructions text injected into a session's
@@ -282,7 +310,7 @@ export class ProjectConfigService {
   private readonly debounceMs: number;
   private readonly watchFactory: (
     dir: string,
-    onChange: () => void,
+    onChange: (file?: string) => void,
   ) => ConfigWatcher | null;
 
   /** projectId → last loaded result (the in-memory runtime cache). */
@@ -302,7 +330,9 @@ export class ProjectConfigService {
       ((dir, onChange) => {
         let w: FSWatcher;
         try {
-          w = fsWatch(dir, { recursive: true }, () => onChange());
+          w = fsWatch(dir, { recursive: true }, (_event, file) =>
+            onChange(typeof file === "string" ? file : undefined),
+          );
         } catch {
           return null;
         }
@@ -827,14 +857,25 @@ export class ProjectConfigService {
 
   /**
    * Watch a project's config dir for changes and debounced-reload. No-op
-   * when the dir is absent (a back-compat project needs no watcher) or already
-   * watched. Idempotent.
+   * when the project has no config (a back-compat project needs no watcher)
+   * or is already watched. Idempotent.
+   *
+   * Gated on the resolver's `exists` — a MANIFEST — rather than on the
+   * directory being there, for two reasons. A relative `dir` (from a
+   * degenerate `repoPath`) would otherwise be probed against the server
+   * process's cwd; and an EXTERNAL config dir is the project's entity dir,
+   * which exists as soon as the project has a single memory. Watching that
+   * would put a watcher on every back-compat project and reload a config that
+   * does not exist on every `remember`.
    */
   watchProject(project: Project): void {
     if (this.watchers.has(project.id)) return;
-    const dir = this.resolveDir(project).dir;
-    if (!existsSync(dir)) return;
-    const watcher = this.watchFactory(dir, () => this.onWatchEvent(project.id));
+    const resolved = this.resolveDir(project);
+    if (!resolved.exists) return;
+    const watcher = this.watchFactory(resolved.dir, (file) => {
+      if (isIgnoredWatchPath(file)) return;
+      this.onWatchEvent(project.id);
+    });
     if (watcher) this.watchers.set(project.id, watcher);
   }
 
