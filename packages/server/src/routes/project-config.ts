@@ -5,20 +5,29 @@
  *   PUT  /api/projects/:id/config/workflow  → save the workflow block (manifest or .data)
  *   DELETE /api/projects/:id/config/item    → delete one config file (path-guarded)
  *   POST /api/projects/:id/config/reload    → re-read from disk (sync + emit)
- *   POST /api/projects/:id/config/scaffold  → derive a `.dispatch/` from .data
+ *   POST /api/projects/:id/config/scaffold  → derive a config dir from .data
+ *   POST /api/projects/:id/config/location → move the config dir repo ⇄ external
  *   GET  /api/projects/:id/config/export    → the `.dispatch` zip (binary download)
  *   POST /api/projects/:id/config/import     → import an archive (base64 body) → reload
  *
  * `GET` returns the cached load if present, else loads fresh; `POST …/reload`
  * always re-reads disk, re-syncs the store, and broadcasts `project-config-update`.
- * A project with no `.dispatch/` yields `{ sourceDir: null, config: null }`
+ * A project with no config dir yields `{ sourceDir: null, config: null }`
  * (back-compat) rather than a 404. Export/import round-trip the portable `.dispatch`
  * format; scaffold writes a starter config from the project's `.data` record.
+ *
+ * `sourceDir` is the RESOLVED dir and may be outside the repo entirely, so a
+ * client that wants to show or open a config file must read it from here rather
+ * than composing `<repoPath>/.dispatch` for itself.
  */
 import type { FastifyInstance } from "fastify";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { ShellTranscriptFilterSchema, WorkflowConfigSchema } from "@dispatch/shared";
+import {
+  ProjectConfigLocationSchema,
+  ShellTranscriptFilterSchema,
+  WorkflowConfigSchema,
+} from "@dispatch/shared";
 import { saveProjectShellFilter, saveProjectWorkflow } from "../services/workflow-writer.js";
 import { safeArchivePath } from "../services/project-config-archive.js";
 
@@ -140,6 +149,32 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
       const out = await projectConfigArchive.scaffold(req.params.id, { force });
       if (!out) return reply.code(404).send({ error: "project not found" });
       return out;
+    },
+  );
+
+  // Move the config dir between the repo and the install's own config root,
+  // copying the tree across so nothing is stranded. Idempotent: asking for the
+  // location a project is already pinned to just reloads.
+  app.post<{ Params: { id: string }; Body?: { location?: string } }>(
+    "/api/projects/:id/config/location",
+    async (req, reply) => {
+      const parsed = ProjectConfigLocationSchema.safeParse(
+        (req.body as { location?: string } | undefined)?.location,
+      );
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'location must be "repo" or "external"' });
+      }
+      try {
+        const out = await projectConfigArchive.relocate(req.params.id, parsed.data);
+        if (!out) return reply.code(404).send({ error: "project not found" });
+        return out;
+      } catch (err) {
+        // A refused move (no repo to move INTO) is the caller's problem to see,
+        // not a 500 — the UI shows the reason on the button they pressed.
+        return reply
+          .code(400)
+          .send({ error: err instanceof Error ? err.message : String(err) });
+      }
     },
   );
 

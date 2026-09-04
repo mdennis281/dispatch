@@ -144,7 +144,10 @@ describe("archive — pure mapping helpers", () => {
 
 describe("ProjectConfigArchive — scaffold", () => {
   it("writes a project.yaml + copies .data memories, then the config loads back", async () => {
-    await seedProject();
+    // Pinned to `repo`: copying `.data` memories into the tree is what a
+    // COMMITTED config dir is for. The default places config outside the repo,
+    // where those memories already live and nothing needs copying.
+    await seedProject({ configLocation: "repo" });
     await seedMemory("deploy-runbook.md", "---\nname: deploy-runbook\ndescription: ship\ntype: project\n---\nRun pnpm ship.");
     await seedMemory("MEMORY.md", "# Project memory\n\n- [deploy-runbook](deploy-runbook.md) — ship\n");
 
@@ -181,9 +184,172 @@ describe("ProjectConfigArchive — scaffold", () => {
     expect(parseYaml(await readFile(join(cfgDir, "project.yaml"), "utf8")).name).toBe("Existing");
   });
 
+  it("places config OUTSIDE the repo by default, leaving the working tree clean", async () => {
+    await seedProject();
+    await seedMemory("note.md", "---\nname: note\ndescription: n\ntype: project\n---\nbody");
+
+    const { archive, svc } = makeArchive();
+    const out = await archive.scaffold("hivebreak");
+
+    expect(out?.created).toBe(true);
+    expect(out?.sourceDir).toBe(store.projectConfigDir("hivebreak"));
+    // The whole point: nothing appeared in the repo to be committed.
+    expect(existsSync(join(repoDir, ".dispatch"))).toBe(false);
+    // And the memories were not re-copied, because `<dir>/memory` IS the dir
+    // they already live in — a copy here would be a rewrite of live files.
+    expect(out?.files).toEqual(["project.yaml"]);
+    expect(svc.getConfig("hivebreak")?.memoryDir).toBe(store.projectMemoryDir("hivebreak"));
+    expect(svc.getConfig("hivebreak")?.name).toBe("Hivebreak");
+  });
+
+  it("keeps a COMMITTED .dispatch/ even though the default is external", async () => {
+    // The back-compat rule that makes the new default safe to ship: a config dir
+    // someone put under version control outranks any app-wide preference.
+    await seedProject();
+    const cfgDir = join(repoDir, ".dispatch");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(join(cfgDir, "project.yaml"), "name: Committed\n", "utf8");
+
+    const { archive, svc } = makeArchive();
+    const out = await archive.scaffold("hivebreak");
+    expect(out?.created).toBe(false);
+    expect(out?.sourceDir).toBe(cfgDir);
+    expect(svc.getConfig("hivebreak")?.name).toBe("Committed");
+  });
+
+  it("scaffolds into the repo when the app default says so", async () => {
+    await seedProject();
+    await store.saveSettings({ theme: "dark", projectConfigLocation: "repo" });
+
+    const { archive } = makeArchive();
+    const out = await archive.scaffold("hivebreak");
+    expect(out?.sourceDir).toBe(join(repoDir, ".dispatch"));
+    expect(existsSync(join(repoDir, ".dispatch", "project.yaml"))).toBe(true);
+  });
+
+  it("does not create a repo dir under a repoPath that does not exist", async () => {
+    // The guard that used to live at the route. It only applies to a REPO
+    // placement — an external dir is inside the install and has no such hazard.
+    await seedProject({ repoPath: join(repoDir, "gone"), configLocation: "repo" });
+    const { archive } = makeArchive();
+    const out = await archive.scaffold("hivebreak");
+    expect(out?.created).toBe(false);
+    expect(existsSync(join(repoDir, "gone"))).toBe(false);
+  });
+
   it("returns null for an unknown project", async () => {
     const { archive } = makeArchive();
     expect(await archive.scaffold("nope")).toBeNull();
+  });
+});
+
+/* ---------------------------------------------------------------- relocate */
+
+describe("ProjectConfigArchive — relocate", () => {
+  it("moves a committed .dispatch/ out of the repo, memories and all", async () => {
+    await seedProject();
+    const cfgDir = join(repoDir, ".dispatch");
+    await mkdir(join(cfgDir, "memory"), { recursive: true });
+    await mkdir(join(cfgDir, "instructions"), { recursive: true });
+    await writeFile(
+      join(cfgDir, "project.yaml"),
+      "name: Hivebreak\ninstructions:\n  - file: house.md\n",
+      "utf8",
+    );
+    await writeFile(join(cfgDir, "instructions", "house.md"), "House rules.", "utf8");
+    await writeFile(join(cfgDir, "memory", "a.md"), "remembered", "utf8");
+
+    const { archive, svc } = makeArchive();
+    const out = await archive.relocate("hivebreak", "external");
+
+    expect(out?.moved).toBe(true);
+    expect(out?.sourceDir).toBe(store.projectConfigDir("hivebreak"));
+    expect(out?.files).toEqual(["instructions/house.md", "memory/a.md", "project.yaml"]);
+    // The config is live from its new home…
+    expect(svc.getConfig("hivebreak")?.instructionsText).toContain("House rules.");
+    expect(
+      await readFile(join(store.projectMemoryDir("hivebreak"), "a.md"), "utf8"),
+    ).toBe("remembered");
+    // …and the originals are left for the human to `git rm` in a real commit.
+    expect(existsSync(join(cfgDir, "project.yaml"))).toBe(true);
+    expect((await store.getProject("hivebreak"))?.configLocation).toBe("external");
+  });
+
+  it("moves an external config into the repo", async () => {
+    await seedProject();
+    const ext = store.projectConfigDir("hivebreak");
+    await mkdir(ext, { recursive: true });
+    await writeFile(join(ext, "project.yaml"), "name: Moved\n", "utf8");
+
+    const { archive, svc } = makeArchive();
+    const out = await archive.relocate("hivebreak", "repo");
+
+    expect(out?.moved).toBe(true);
+    expect(out?.sourceDir).toBe(join(repoDir, ".dispatch"));
+    expect(svc.getConfig("hivebreak")?.name).toBe("Moved");
+  });
+
+  it("does not carry runtime telemetry into the repo", async () => {
+    // `memory-stats.json` shares the external dir but is machine-local access
+    // counts. Committing one person's recall counts is exactly the churn the
+    // external placement exists to avoid.
+    await seedProject();
+    const ext = store.projectConfigDir("hivebreak");
+    await mkdir(ext, { recursive: true });
+    await writeFile(join(ext, "project.yaml"), "name: Moved\n", "utf8");
+    await writeFile(join(ext, "memory-stats.json"), '{"a":1}', "utf8");
+
+    const { archive } = makeArchive();
+    const out = await archive.relocate("hivebreak", "repo");
+    expect(out?.files).toEqual(["project.yaml"]);
+    expect(existsSync(join(repoDir, ".dispatch", "memory-stats.json"))).toBe(false);
+  });
+
+  it("is a no-op when the project is already pinned there", async () => {
+    await seedProject({ configLocation: "external" });
+    const { archive } = makeArchive();
+    const out = await archive.relocate("hivebreak", "external");
+    expect(out?.moved).toBe(false);
+    expect(out?.files).toEqual([]);
+  });
+
+  it("pins the location even when there is no config to move", async () => {
+    await seedProject();
+    const { archive } = makeArchive();
+    const out = await archive.relocate("hivebreak", "repo");
+    expect(out?.moved).toBe(false);
+    expect((await store.getProject("hivebreak"))?.configLocation).toBe("repo");
+  });
+
+  it("refuses to move into a repoPath that is empty or gone", async () => {
+    // Regression: `configDirFor("")` is the RELATIVE string `.dispatch`, so this
+    // used to mkdir a config dir inside the SERVER'S OWN working directory —
+    // silently, and reported as a successful move.
+    await seedProject({ repoPath: "" });
+    const ext = store.projectConfigDir("hivebreak");
+    await mkdir(ext, { recursive: true });
+    await writeFile(join(ext, "project.yaml"), "name: Stray\n", "utf8");
+
+    const { archive } = makeArchive();
+    await expect(archive.relocate("hivebreak", "repo")).rejects.toThrow(/does not exist/);
+    expect(existsSync(".dispatch")).toBe(false);
+
+    await seedProject({ repoPath: join(repoDir, "deleted-checkout") });
+    await expect(archive.relocate("hivebreak", "repo")).rejects.toThrow(/does not exist/);
+  });
+
+  it("still allows moving OUT of a repo that has vanished", async () => {
+    // The guard is one-directional on purpose: rescuing config from a checkout
+    // that is no longer there is exactly when you most want the move.
+    await seedProject({ repoPath: join(repoDir, "deleted-checkout") });
+    const { archive } = makeArchive();
+    const out = await archive.relocate("hivebreak", "external");
+    expect(out?.sourceDir).toBe(store.projectConfigDir("hivebreak"));
+  });
+
+  it("returns null for an unknown project", async () => {
+    const { archive } = makeArchive();
+    expect(await archive.relocate("nope", "repo")).toBeNull();
   });
 });
 
@@ -214,6 +380,9 @@ describe("ProjectConfigArchive — export/import round-trip", () => {
       await store.saveProject({
         id: "other",
         name: "Other",
+        // Pinned for the same reason: this case is about landing an archive in a
+        // REPO. The external destination has its own test below.
+        configLocation: "repo",
         repoPath: otherRepo,
         worktreeRoot: "",
         subApps: [],
