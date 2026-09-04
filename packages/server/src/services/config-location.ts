@@ -130,16 +130,27 @@ export function resolveConfigDir(project: Project, externalDir: string): Resolve
 
 /**
  * The resolved config dir as {@link ProjectPaths}, for the manifest EDITORS in
- * `@dispatch/cli/core`.
+ * `@dispatch/cli/core` — or NULL when this project has no writable config dir.
  *
  * Every server-side manifest write goes through this rather than handing
  * `loadManifest` a repo path. The walk-up that a bare path triggers can only
  * find a config dir inside the repo, so on an external project it would miss the
  * real manifest, synthesize an empty one, and write a `.dispatch/` into the very
  * working tree the project asked to keep clean.
+ *
+ * It returns null rather than a best-effort path because the alternative is the
+ * stray-write bug the rest of this module exists to stop: a project pinned to
+ * `repo` with an empty or relative `repoPath` yields a RELATIVE `configDir`, and
+ * `loadManifest` would then read and `saveManifest` would then WRITE
+ * `.dispatch/project.yaml` under the server process's own working directory. A
+ * caller that cannot get paths must disable the manifest write, not fall back.
  */
-export function configPathsFor(project: Project, externalDir: string): ProjectPaths {
-  return pathsForConfigDir(resolveConfigDir(project, externalDir).dir, project.repoPath);
+export function configPathsFor(project: Project, externalDir: string): ProjectPaths | null {
+  const resolved = resolveConfigDir(project, externalDir);
+  if (resolved.location === "repo" && !isUsableRepoPath(project.repoPath, true)) {
+    return null;
+  }
+  return pathsForConfigDir(resolved.dir, project.repoPath);
 }
 
 /**

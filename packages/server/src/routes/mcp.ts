@@ -254,11 +254,17 @@ export function registerMcpRoutes(app: FastifyInstance): void {
         // `.dispatch/` created in the working tree it asked to keep clean. When
         // it IS the repo's, it is the PRIMARY checkout's — committed config
         // edited in a throwaway worktree is discarded with it.
-        await setServerEnabled(
-          configPathsFor(project, store.projectConfigDir(project.id)),
-          name,
-          enabled,
-        );
+        const paths = configPathsFor(project, store.projectConfigDir(project.id));
+        // Null means there is nowhere safe to write (a `repo` pin whose checkout
+        // is missing). Refusing beats writing a manifest under the server's cwd.
+        if (!paths) {
+          return reply.code(400).send({
+            error: `this project has no writable config dir (repoPath: ${
+              project.repoPath || "unset"
+            })`,
+          });
+        }
+        await setServerEnabled(paths, name, enabled);
         // The config watcher would pick this up on its own, but only after
         // a debounce — and the catalog rebuilt below reads through the config
         // cache. Without this the response would report the value we just

@@ -157,7 +157,15 @@ export async function saveProjectWorkflow(
     return { target: "store", project: saved };
   }
 
-  const loaded = await loadManifest(configPathsFor(project, externalDir));
+  const paths = configPathsFor(project, externalDir);
+  // No writable config dir (a `repo` pin with no usable checkout). Fall back to
+  // `.data` rather than to a cwd-relative manifest — see `configPathsFor`.
+  if (!paths) {
+    const merged = mergeWorkflow(project.workflow, incoming);
+    const saved = await deps.store.saveProject({ ...project, workflow: merged });
+    return { target: "store", project: saved };
+  }
+  const loaded = await loadManifest(paths);
   // Key-by-key (rather than replacing the whole `workflow` node) so comments
   // attached to the keys we aren't touching survive the write.
   for (const key of WORKFLOW_KEYS) applyAuthored(loaded.doc, ["workflow", key], incoming[key]);
@@ -187,7 +195,14 @@ export async function saveProjectShellFilter(
     return { target: "store", project: saved };
   }
 
-  const loaded = await loadManifest(configPathsFor(project, externalDir));
+  const paths = configPathsFor(project, externalDir);
+  if (!paths) {
+    const next = { ...project, shellFilter };
+    if (shellFilter === undefined) delete next.shellFilter;
+    const saved = await deps.store.saveProject(next);
+    return { target: "store", project: saved };
+  }
+  const loaded = await loadManifest(paths);
   if (shellFilter === undefined) loaded.doc.deleteIn(["defaults", "shellFilter"]);
   else loaded.doc.setIn(["defaults", "shellFilter"], shellFilter);
   const manifestPath = await saveManifest(loaded);

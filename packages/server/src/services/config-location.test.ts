@@ -12,7 +12,12 @@ import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, isAbsolute } from "node:path";
 import type { Project } from "@dispatch/shared";
-import { resolveConfigDir, resolvePlacementDir, findRepoConfigDir } from "./config-location.js";
+import {
+  configPathsFor,
+  findRepoConfigDir,
+  resolveConfigDir,
+  resolvePlacementDir,
+} from "./config-location.js";
 
 let repo: string;
 let external: string;
@@ -132,6 +137,38 @@ describe("resolveConfigDir", () => {
     const r = resolveConfigDir(project({ repoPath: rel, configLocation: "repo" }), external);
     expect(r.location).toBe("repo");
     expect(r.exists).toBe(false);
+  });
+});
+
+describe("configPathsFor", () => {
+  it("gives writable paths for a real repo config", async () => {
+    await seedManifest(join(repo, ".dispatch"));
+    const paths = configPathsFor(project(), external);
+    expect(paths?.configDir).toBe(join(repo, ".dispatch"));
+    expect(paths?.manifestPath).toBe(join(repo, ".dispatch", "project.yaml"));
+  });
+
+  it("gives writable paths for an external config", () => {
+    const paths = configPathsFor(project({ configLocation: "external" }), external);
+    expect(paths?.configDir).toBe(external);
+  });
+
+  it("REFUSES rather than returning a cwd-relative path", async () => {
+    // `loadManifest` reads and `saveManifest` WRITES through these paths. A
+    // relative `configDir` would put `.dispatch/project.yaml` under the server
+    // process's own working directory — the stray-install write this module
+    // exists to prevent. Null is the only safe answer; callers disable the
+    // manifest write rather than falling back.
+    await seedManifest(join(repo, ".dispatch"));
+    const rel = relative(process.cwd(), repo);
+    expect(isAbsolute(rel)).toBe(false);
+    expect(configPathsFor(project({ repoPath: rel, configLocation: "repo" }), external)).toBeNull();
+    expect(configPathsFor(project({ repoPath: "", configLocation: "repo" }), external)).toBeNull();
+  });
+
+  it("refuses a repo pin whose checkout is gone", () => {
+    const missing = join(repo, "deleted-checkout");
+    expect(configPathsFor(project({ repoPath: missing, configLocation: "repo" }), external)).toBeNull();
   });
 });
 
