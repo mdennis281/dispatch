@@ -1739,9 +1739,15 @@ interface LiveSession {
   /**
    * The provider's session-cumulative `total_cost_usd` as of the last result —
    * the baseline the next turn's own cost is measured against (see
-   * {@link SessionBroker.turnCost}).
+   * {@link SessionBroker.turnCost}). Seeded from the chat record, which is where
+   * it survives a restart.
    */
   lastCostUsd?: number;
+  /**
+   * This chat was already running before the baseline was ever recorded, so its
+   * first result here has nothing to subtract from and no way to guess.
+   */
+  costBaselineUnknown?: boolean;
   /** Per-session serialized transcript write chain. */
   writeChain: Promise<void>;
   turn: number;
@@ -1978,6 +1984,10 @@ export class SessionBroker {
         explicitInterruptPending: false,
         turnOpen: false,
         sessionId: chat.sessionId,
+        lastCostUsd: chat.costBaselineUsd,
+        // A chat that already had a session before the baseline was recorded has
+        // nothing to subtract from. See {@link SessionBroker.turnCost}.
+        costBaselineUnknown: chat.costBaselineUsd === undefined && Boolean(chat.sessionId),
         model: chat.model,
         modelOverride: chat.model,
         status:
@@ -3614,39 +3624,28 @@ export class SessionBroker {
    * watched — off by the whole chat. A restarted harness restarts the provider's
    * counter, so a FALL is a new baseline, not a refund.
    *
+   * Returns undefined — "not known" — rather than a guess for the one turn that
+   * cannot be measured: the first result of a chat that was already running
+   * before the baseline was ever recorded. The footer then shows the running
+   * total, labelled as one, which is the honest answer.
+   *
    * Mutates the baseline: call it exactly once per emitted result.
    */
-  private async turnCost(
-    session: LiveSession,
-    total: number | undefined,
-  ): Promise<number | undefined> {
+  private turnCost(session: LiveSession, total: number | undefined): number | undefined {
     if (typeof total !== "number") return undefined;
-    // This broker can be minutes old while the chat is hours old: a restart, or
-    // any RESUMED session, starts with no baseline in memory. If the provider
-    // carries `total_cost_usd` across the resume, an empty baseline would book
-    // the entire chat's spend as the first post-resume turn — so recover it from
-    // the last result on disk. When the provider instead restarts its counter,
-    // the fall past that baseline is caught below and costs nothing.
-    if (session.lastCostUsd === undefined) {
-      session.lastCostUsd = await this.lastPersistedCost(session.chatId);
-    }
     const last = session.lastCostUsd;
     session.lastCostUsd = total;
-    return last === undefined || total < last ? total : total - last;
-  }
-
-  /**
-   * The `costUsd` of the most recent persisted result row, or undefined when the
-   * window holds none — in which case the first turn simply reports the
-   * provider's own figure, which is what it did before any of this existed.
-   */
-  private async lastPersistedCost(chatId: string): Promise<number | undefined> {
-    const rows = await this.store.readMessages(chatId, { limit: 240 }).catch(() => []);
-    for (let i = rows.length - 1; i >= 0; i--) {
-      const row = rows[i];
-      if (row?.kind === "result" && typeof row.costUsd === "number") return row.costUsd;
+    // Straight to the store, deliberately not through `patchChat`: this is
+    // bookkeeping no client renders, so it must not broadcast a `chat-update`
+    // per turn, and it must not bump `updatedAt` — that field means the chat
+    // changed, not that we wrote down a number about it.
+    void this.store.patchChat(session.chatId, { costBaselineUsd: total }).catch(() => {});
+    if (last !== undefined) return total < last ? total : total - last;
+    if (session.costBaselineUnknown) {
+      session.costBaselineUnknown = false;
+      return undefined;
     }
-    return undefined;
+    return total;
   }
 
   /* ---------------------------------------------------------- consume */
@@ -3895,7 +3894,7 @@ export class SessionBroker {
           session.guardRecoveries.length > 0
         ) {
           const recoveries = session.guardRecoveries.splice(0);
-          const guardTurnCost = await this.turnCost(session, event.costUsd);
+          const guardTurnCost = this.turnCost(session, event.costUsd);
           await this.emit(session, {
             ...base,
             kind: "result",
@@ -3919,7 +3918,7 @@ export class SessionBroker {
         // A different terminal outcome must not let an old guard marker recover
         // an unrelated later turn.
         session.guardRecoveries.length = 0;
-        const endTurnCost = await this.turnCost(session, event.costUsd);
+        const endTurnCost = this.turnCost(session, event.costUsd);
         await this.emit(session, {
           ...base,
           kind: "result",
@@ -4259,7 +4258,7 @@ export class SessionBroker {
           typeof (m as { result?: unknown }).result === "string"
             ? ((m as { result?: string }).result as string)
             : undefined;
-        const legacyTurnCost = await this.turnCost(
+        const legacyTurnCost = this.turnCost(
           session,
           (m as { total_cost_usd?: number }).total_cost_usd,
         );

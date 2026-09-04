@@ -678,29 +678,19 @@ describe("chat status persistence", () => {
     expect(results.map((r) => r.turnCostUsd)).toEqual([1.5, 2.5, 0.25]);
   });
 
-  it("recovers the cost baseline from disk, so a resumed chat's first turn is a delta", async () => {
+  it("persists the cost baseline, so a resumed chat's first turn is still a delta", async () => {
     // The baseline lives in memory, and this broker can be minutes old while the
     // chat is hours old. If the provider carries `total_cost_usd` across the
     // resume, an empty baseline would book the whole chat's spend — 40.00 here —
     // as the first turn back.
-    await store.saveChat({ ...chatFor("c1"), sessionId: "sess-1" });
-    await store.appendMessage({
-      kind: "result",
-      id: "r-old",
-      chatId: "c1",
-      ts: 1,
-      subtype: "success",
-      isError: false,
-      costUsd: 40,
-    });
+    await store.saveChat({ ...chatFor("c1"), sessionId: "sess-1", costBaselineUsd: 40 });
 
     const { fn } = makeFakeQuery(() => [
       assistantText("ok"),
       { ...resultMsg(), total_cost_usd: 42.5 },
     ]);
     const broker = makeBroker(fn);
-    const chat = (await store.getChat("c1"))!;
-    broker.resume(chat);
+    broker.resume((await store.getChat("c1"))!);
 
     const idle = broker.waitFor("c1", "idle");
     await broker.sendMessage("c1", "carry on");
@@ -711,6 +701,35 @@ describe("chat status persistence", () => {
     )[0];
     expect(result?.costUsd).toBe(42.5);
     expect(result?.turnCostUsd).toBe(2.5);
+    // And the new baseline is written back for the turn after this one.
+    await vi.waitFor(async () =>
+      expect((await store.getChat("c1"))?.costBaselineUsd).toBe(42.5),
+    );
+  });
+
+  it("reports no per-turn cost at all when the chat predates the baseline", async () => {
+    // An in-flight chat upgraded into this feature has a session but no baseline,
+    // and no way to know what share of the provider's total belongs to this turn.
+    // Undefined makes the footer show the running total labelled as one; a number
+    // here would be a guess wearing the same clothes as a measurement.
+    await store.saveChat({ ...chatFor("c1"), sessionId: "sess-1" });
+
+    const { fn } = makeFakeQuery(() => [
+      assistantText("ok"),
+      { ...resultMsg(), total_cost_usd: 42.5 },
+    ]);
+    const broker = makeBroker(fn);
+    broker.resume((await store.getChat("c1"))!);
+
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "carry on");
+    await idle;
+
+    const result = events.flatMap((e) =>
+      e.type === "chat-message" && e.message.kind === "result" ? [e.message] : [],
+    )[0];
+    expect(result?.costUsd).toBe(42.5);
+    expect(result?.turnCostUsd).toBeUndefined();
   });
 });
 
