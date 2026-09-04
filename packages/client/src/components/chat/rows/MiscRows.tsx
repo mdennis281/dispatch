@@ -13,9 +13,10 @@ import type { NoticeRow, ResultRow, SystemMessageRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { TypingPulse } from "../../ui/Spinner.js";
 import { Chip } from "../../ui/Chip.js";
+import { Tooltip } from "../../ui/Tooltip.js";
 import { Markdown } from "../Markdown.js";
 import { cn } from "../../../lib/cn.js";
-import { dur } from "../../../lib/format.js";
+import { turnFooter } from "../../../lib/turnFooter.js";
 import { useTypewriter } from "../../../lib/useTypewriter.js";
 import { useChats } from "../../../stores/chats.js";
 import { harnessLabel } from "../../../lib/harness.js";
@@ -43,7 +44,18 @@ export function WorkingRow({ label }: { label?: string }) {
  * streamed markdown with a trailing typing pulse; falls back to a "Thinking…"
  * shimmer while only the thinking channel has arrived.
  */
-export function StreamingRow({ chatId, text, thinking }: { chatId: string; text: string; thinking?: string }) {
+export function StreamingRow({
+  chatId,
+  text,
+  thinking,
+  continued = false,
+}: {
+  chatId: string;
+  text: string;
+  thinking?: string;
+  /** Another live row is already streaming above this one — don't re-announce. */
+  continued?: boolean;
+}) {
   const provider = harnessLabel(useChats((s) => s.byId[chatId]?.harness));
   // Reveal the live buffer letter-by-letter, adaptive to the arrival speed —
   // a subtle trail that never gates the actual stream (see useTypewriter).
@@ -51,6 +63,7 @@ export function StreamingRow({ chatId, text, thinking }: { chatId: string; text:
   return (
     <RowShell
       tint="assistant"
+      continued={continued}
       who={provider}
       gutter={
         <span className="flex size-6 items-center justify-center rounded-md bg-accent-ghost text-accent-hi ring-1 ring-accent-line [&_svg]:size-3.5">
@@ -109,7 +122,7 @@ function CenterNote({
   );
 }
 
-/** The turn-done result marker — turns / duration / cost, or an error line. */
+/** The turn-done result marker — steps / duration / cost, or an error line. */
 export const ResultRowView = memo(function ResultRowView({ row }: { row: ResultRow }) {
   if (row.isError) {
     return (
@@ -118,17 +131,12 @@ export const ResultRowView = memo(function ResultRowView({ row }: { row: ResultR
       </CenterNote>
     );
   }
-  const parts: string[] = [];
-  if (row.numTurns) parts.push(`${row.numTurns} turn${row.numTurns === 1 ? "" : "s"}`);
-  const d = dur(row.durationMs);
-  if (d) parts.push(d);
-  if (typeof row.costUsd === "number" && row.costUsd > 0) {
-    parts.push(`$${row.costUsd.toFixed(row.costUsd < 1 ? 3 : 2)}`);
-  }
+  const { parts, note } = turnFooter(row);
+  const meta = <span className="cm-mono !text-2xs text-faint"> · {parts.join(" · ")}</span>;
   return (
     <CenterNote icon={<CheckCircle2 />}>
       Turn complete
-      {parts.length > 0 && <span className="cm-mono !text-2xs text-faint"> · {parts.join(" · ")}</span>}
+      {parts.length > 0 && (note ? <Tooltip label={note}>{meta}</Tooltip> : meta)}
     </CenterNote>
   );
 });

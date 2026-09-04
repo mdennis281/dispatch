@@ -1736,6 +1736,18 @@ interface LiveSession {
    * instead of a hardcoded constant. Undefined until the first refresh lands.
    */
   contextWindow?: number;
+  /**
+   * The provider's session-cumulative `total_cost_usd` as of the last result —
+   * the baseline the next turn's own cost is measured against (see
+   * {@link SessionBroker.turnCost}). Seeded from the chat record, which is where
+   * it survives a restart.
+   */
+  lastCostUsd?: number;
+  /**
+   * This chat was already running before the baseline was ever recorded, so its
+   * first result here has nothing to subtract from and no way to guess.
+   */
+  costBaselineUnknown?: boolean;
   /** Per-session serialized transcript write chain. */
   writeChain: Promise<void>;
   turn: number;
@@ -1972,6 +1984,13 @@ export class SessionBroker {
         explicitInterruptPending: false,
         turnOpen: false,
         sessionId: chat.sessionId,
+        // Only alongside a live `sessionId`: a baseline outliving the session it
+        // measured (a `/clear` retires the thread) would be subtracted from a
+        // fresh session's total, understating its first turn.
+        lastCostUsd: chat.sessionId ? chat.costBaselineUsd : undefined,
+        // A chat that already had a session before the baseline was recorded has
+        // nothing to subtract from. See {@link SessionBroker.turnCost}.
+        costBaselineUnknown: Boolean(chat.sessionId) && chat.costBaselineUsd === undefined,
         model: chat.model,
         modelOverride: chat.model,
         status:
@@ -2795,10 +2814,15 @@ export class SessionBroker {
       session.harnessSession = undefined;
       session.started = false;
       session.sessionId = undefined;
+      // The baseline belongs to the thread being retired — the fresh one starts
+      // its own `total_cost_usd` from zero, and measuring against a dead
+      // session's total would understate the first turn back.
+      session.lastCostUsd = undefined;
+      session.costBaselineUnknown = false;
       session.managerGrant?.revoke();
       session.managerGrant = undefined;
       void live.dispose();
-      void this.patchChat(chatId, { sessionId: undefined });
+      void this.patchChat(chatId, { sessionId: undefined, costBaselineUsd: undefined });
       this.onTurnEnd(session);
     } else {
       session.outbox.push({
@@ -3600,6 +3624,38 @@ export class SessionBroker {
     return false;
   }
 
+  /**
+   * This turn's cost, from the provider's SESSION-CUMULATIVE `total_cost_usd`.
+   *
+   * The transcript's turn footer prints it beside per-turn numbers (steps,
+   * duration), where a running total reads as the price of the turn you just
+   * watched — off by the whole chat. A restarted harness restarts the provider's
+   * counter, so a FALL is a new baseline, not a refund.
+   *
+   * Returns undefined — "not known" — rather than a guess for the one turn that
+   * cannot be measured: the first result of a chat that was already running
+   * before the baseline was ever recorded. The footer then shows the running
+   * total, labelled as one, which is the honest answer.
+   *
+   * Mutates the baseline: call it exactly once per emitted result.
+   */
+  private turnCost(session: LiveSession, total: number | undefined): number | undefined {
+    if (typeof total !== "number") return undefined;
+    const last = session.lastCostUsd;
+    session.lastCostUsd = total;
+    // Straight to the store, deliberately not through `patchChat`: this is
+    // bookkeeping no client renders, so it must not broadcast a `chat-update`
+    // per turn, and it must not bump `updatedAt` — that field means the chat
+    // changed, not that we wrote down a number about it.
+    void this.store.patchChat(session.chatId, { costBaselineUsd: total }).catch(() => {});
+    if (last !== undefined) return total < last ? total : total - last;
+    if (session.costBaselineUnknown) {
+      session.costBaselineUnknown = false;
+      return undefined;
+    }
+    return total;
+  }
+
   /* ---------------------------------------------------------- consume */
 
   private async consumeHarness(session: LiveSession): Promise<void> {
@@ -3627,11 +3683,28 @@ export class SessionBroker {
     };
     switch (event.type) {
       case "init":
+        // A cost baseline belongs to the native session that ran up the total, and
+        // this is the one place every retirement is observable: `/clear`,
+        // `setHarness`, a fork, anything added later — they all end with the
+        // provider handing over a DIFFERENT session id here. Keying on that beats
+        // remembering to clear the baseline at each call site, and it can't
+        // misfire on an ordinary resume, which keeps its id (stable across turns
+        // in 96 of 104 recorded chats; it moves only when a thread is retired).
+        // Not `!== undefined &&`: `setHarness` REBUILDS the session with no id at
+        // all while the record keeps the old provider's baseline, so "no id yet"
+        // has to count as a mismatch too. A resume arrives here with its id
+        // already restored from the record, so it matches and keeps its baseline.
+        const retired = session.sessionId !== event.sessionId;
+        if (retired) {
+          session.lastCostUsd = undefined;
+          session.costBaselineUnknown = false;
+        }
         session.sessionId = event.sessionId;
         session.model = event.model ?? session.model;
         session.contextWindow = event.contextWindow ?? session.contextWindow;
         await this.patchChat(session.chatId, {
           sessionId: event.sessionId,
+          ...(retired ? { costBaselineUsd: undefined } : {}),
           model: session.model,
           harness: session.harnessKind,
           harnessHandoff: undefined,
@@ -3846,6 +3919,7 @@ export class SessionBroker {
           session.guardRecoveries.length > 0
         ) {
           const recoveries = session.guardRecoveries.splice(0);
+          const guardTurnCost = this.turnCost(session, event.costUsd);
           await this.emit(session, {
             ...base,
             kind: "result",
@@ -3857,6 +3931,7 @@ export class SessionBroker {
             contextTokens: session.lastContextTokens,
             contextWindow: session.contextWindow,
             costUsd: event.costUsd,
+            turnCostUsd: guardTurnCost,
           });
           session.turn += 1;
           session.turnOpen = true;
@@ -3868,6 +3943,7 @@ export class SessionBroker {
         // A different terminal outcome must not let an old guard marker recover
         // an unrelated later turn.
         session.guardRecoveries.length = 0;
+        const endTurnCost = this.turnCost(session, event.costUsd);
         await this.emit(session, {
           ...base,
           kind: "result",
@@ -3880,6 +3956,7 @@ export class SessionBroker {
           contextTokens: session.lastContextTokens,
           contextWindow: session.contextWindow,
           costUsd: event.costUsd,
+          turnCostUsd: endTurnCost,
         });
         session.turn += 1;
         if (!event.ok) this.onTurnError?.(session.chatId, event.result ?? event.limit?.reason);
@@ -3920,7 +3997,16 @@ export class SessionBroker {
           const sid = (m as { session_id?: string }).session_id;
           if (sid && sid !== session.sessionId) {
             session.sessionId = sid;
-            void this.patchChat(session.chatId, { sessionId: sid, harnessHandoff: undefined });
+            // A different native session means the old cost baseline measured a
+            // thread that no longer exists — see the harness path's init for why
+            // this is the one place worth checking.
+            session.lastCostUsd = undefined;
+            session.costBaselineUnknown = false;
+            void this.patchChat(session.chatId, {
+              sessionId: sid,
+              costBaselineUsd: undefined,
+              harnessHandoff: undefined,
+            });
           }
           session.model = (m as { model?: string }).model;
           await this.emit(session, {
@@ -4206,6 +4292,10 @@ export class SessionBroker {
           typeof (m as { result?: unknown }).result === "string"
             ? ((m as { result?: string }).result as string)
             : undefined;
+        const legacyTurnCost = this.turnCost(
+          session,
+          (m as { total_cost_usd?: number }).total_cost_usd,
+        );
         await this.emit(session, {
           kind: "result",
           id: this.genId(),
@@ -4222,6 +4312,7 @@ export class SessionBroker {
           contextTokens: session.lastContextTokens,
           contextWindow: session.contextWindow,
           costUsd: (m as { total_cost_usd?: number }).total_cost_usd,
+          turnCostUsd: legacyTurnCost,
         });
         session.turn += 1;
         // A turn that ended in error may have hit a usage limit — hand the

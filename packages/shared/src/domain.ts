@@ -788,6 +788,16 @@ export const ChatSchema = z.object({
     .optional(),
   /** Runtime session id captured from the init event (for resume/fork). */
   sessionId: z.string().optional(),
+  /**
+   * The provider's session-cumulative `total_cost_usd` as of this chat's last
+   * result — the baseline each turn's own cost is measured against.
+   *
+   * Persisted next to {@link sessionId} because it has the same lifetime and the
+   * same failure without it: a broker restarted mid-chat has no baseline in
+   * memory, and if the provider carries its total across the resume, the first
+   * turn back is booked the whole chat's spend. Bookkeeping — never rendered.
+   */
+  costBaselineUsd: z.number().optional(),
   agentId: z.string().optional(),
   modeId: z.string(),
   effort: EffortSchema,

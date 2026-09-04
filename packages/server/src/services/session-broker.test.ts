@@ -648,6 +648,137 @@ describe("chat status persistence", () => {
     await runningP;
     expect(broker.getStatus("c1")).toBe("running");
   });
+
+  it("stamps each result with THIS turn's cost, not the session's running total", async () => {
+    // `total_cost_usd` is session-cumulative, and the turn footer prints it
+    // beside per-turn numbers, where it read as the price of the turn you just
+    // watched. The third total is LOWER than the second — a restarted harness
+    // restarting its counter, which happens routinely and must be read as a new
+    // baseline rather than booked as a negative turn.
+    const totals = [1.5, 4, 0.25];
+    let turn = 0;
+    const { fn } = makeFakeQuery(() => [
+      assistantText("ok"),
+      { ...resultMsg(), total_cost_usd: totals[turn++] },
+    ]);
+    const broker = makeBroker(fn);
+    await store.saveChat(chatFor("c1"));
+    broker.create(chatFor("c1"));
+
+    for (const text of ["one", "two", "three"]) {
+      const idle = broker.waitFor("c1", "idle");
+      await broker.sendMessage("c1", text);
+      await idle;
+    }
+
+    const results = events.flatMap((e) =>
+      e.type === "chat-message" && e.message.kind === "result" ? [e.message] : [],
+    );
+    expect(results.map((r) => r.costUsd)).toEqual(totals);
+    expect(results.map((r) => r.turnCostUsd)).toEqual([1.5, 2.5, 0.25]);
+  });
+
+  it("persists the cost baseline, so a resumed chat's first turn is still a delta", async () => {
+    // The baseline lives in memory, and this broker can be minutes old while the
+    // chat is hours old. If the provider carries `total_cost_usd` across the
+    // resume, an empty baseline would book the whole chat's spend — 40.00 here —
+    // as the first turn back.
+    await store.saveChat({ ...chatFor("c1"), sessionId: "sess-1", costBaselineUsd: 40 });
+
+    const { fn } = makeFakeQuery(() => [
+      assistantText("ok"),
+      { ...resultMsg(), total_cost_usd: 42.5 },
+    ]);
+    const broker = makeBroker(fn);
+    broker.resume((await store.getChat("c1"))!);
+
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "carry on");
+    await idle;
+
+    const result = events.flatMap((e) =>
+      e.type === "chat-message" && e.message.kind === "result" ? [e.message] : [],
+    )[0];
+    expect(result?.costUsd).toBe(42.5);
+    expect(result?.turnCostUsd).toBe(2.5);
+    // And the new baseline is written back for the turn after this one.
+    await vi.waitFor(async () =>
+      expect((await store.getChat("c1"))?.costBaselineUsd).toBe(42.5),
+    );
+  });
+
+  it("reports no per-turn cost at all when the chat predates the baseline", async () => {
+    // An in-flight chat upgraded into this feature has a session but no baseline,
+    // and no way to know what share of the provider's total belongs to this turn.
+    // Undefined makes the footer show the running total labelled as one; a number
+    // here would be a guess wearing the same clothes as a measurement.
+    await store.saveChat({ ...chatFor("c1"), sessionId: "sess-1" });
+
+    const { fn } = makeFakeQuery(() => [
+      assistantText("ok"),
+      { ...resultMsg(), total_cost_usd: 42.5 },
+    ]);
+    const broker = makeBroker(fn);
+    broker.resume((await store.getChat("c1"))!);
+
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "carry on");
+    await idle;
+
+    const result = events.flatMap((e) =>
+      e.type === "chat-message" && e.message.kind === "result" ? [e.message] : [],
+    )[0];
+    expect(result?.costUsd).toBe(42.5);
+    expect(result?.turnCostUsd).toBeUndefined();
+  });
+
+  it("ignores a baseline left behind by a retired session", async () => {
+    // `/clear` retires the native thread and clears `sessionId`; the fresh one
+    // counts its own `total_cost_usd` from zero. Subtracting the dead session's
+    // total would understate the first turn back — here, report 3.00 of a 5.00
+    // turn — so a baseline without a session is not a baseline.
+    await store.saveChat({ ...chatFor("c1"), sessionId: undefined, costBaselineUsd: 2 });
+
+    const { fn } = makeFakeQuery(() => [
+      assistantText("ok"),
+      { ...resultMsg(), total_cost_usd: 5 },
+    ]);
+    const broker = makeBroker(fn);
+    broker.create((await store.getChat("c1"))!);
+
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "fresh thread");
+    await idle;
+
+    const result = events.flatMap((e) =>
+      e.type === "chat-message" && e.message.kind === "result" ? [e.message] : [],
+    )[0];
+    expect(result?.turnCostUsd).toBe(5);
+  });
+
+  it("drops the baseline when the provider hands over a DIFFERENT session", async () => {
+    // Every path that retires a native thread — `/clear`, `setHarness`, a fork —
+    // ends with a new session id arriving at init, so that is where the baseline
+    // is dropped rather than at each call site. The replacement thread counts
+    // from zero, so its 5.00 is 5.00, not 5.00 minus a dead session's 2.00.
+    await store.saveChat({ ...chatFor("c1"), sessionId: "sess-old", costBaselineUsd: 2 });
+
+    const { fn } = makeFakeQuery(
+      () => [assistantText("ok"), { ...resultMsg(), total_cost_usd: 5 }],
+      "sess-new",
+    );
+    const broker = makeBroker(fn);
+    broker.resume((await store.getChat("c1"))!);
+
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "after the switch");
+    await idle;
+
+    const result = events.flatMap((e) =>
+      e.type === "chat-message" && e.message.kind === "result" ? [e.message] : [],
+    )[0];
+    expect(result?.turnCostUsd).toBe(5);
+  });
 });
 
 function waitForResults(chatId: string, n: number, ms = 3000): Promise<void> {

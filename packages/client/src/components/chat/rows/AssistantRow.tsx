@@ -24,9 +24,12 @@ import { rowHarnessLabel } from "../../../lib/harness.js";
 export const AssistantRow = memo(function AssistantRow({
   chatId,
   row,
+  continued = false,
 }: {
   chatId: string;
   row: AssistantMessageRow;
+  /** The row directly above is the same speaker — render as one block, no header. */
+  continued?: boolean;
 }) {
   const [showThinking, setShowThinking] = useState(false);
   const canRollback = useHasCheckpoint(chatId, row.id);
@@ -47,6 +50,7 @@ export const AssistantRow = memo(function AssistantRow({
   return (
     <RowShell
       tint="assistant"
+      continued={continued}
       who={rowHarnessLabel(row.harness, chat?.harness)}
       ts={row.ts}
       rollback={canRollback}
