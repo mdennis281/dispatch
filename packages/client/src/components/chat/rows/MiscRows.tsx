@@ -16,7 +16,7 @@ import { Chip } from "../../ui/Chip.js";
 import { Tooltip } from "../../ui/Tooltip.js";
 import { Markdown } from "../Markdown.js";
 import { cn } from "../../../lib/cn.js";
-import { dur } from "../../../lib/format.js";
+import { turnFooter } from "../../../lib/turnFooter.js";
 import { useTypewriter } from "../../../lib/useTypewriter.js";
 import { useChats } from "../../../stores/chats.js";
 import { harnessLabel } from "../../../lib/harness.js";
@@ -122,11 +122,6 @@ function CenterNote({
   );
 }
 
-/** "$2.14", "$0.004" — a cost too small for cents keeps three places. */
-function money(n: number): string {
-  return `$${n.toFixed(n < 1 ? 3 : 2)}`;
-}
-
 /** The turn-done result marker — steps / duration / cost, or an error line. */
 export const ResultRowView = memo(function ResultRowView({ row }: { row: ResultRow }) {
   if (row.isError) {
@@ -136,27 +131,7 @@ export const ResultRowView = memo(function ResultRowView({ row }: { row: ResultR
       </CenterNote>
     );
   }
-  const parts: string[] = [];
-  // `numTurns` counts the agent's own loop steps — one per model response,
-  // tool calls included. Printing that as "turns" next to the words "Turn
-  // complete" gave the reader "Turn complete · 409 turns", which is not a
-  // sentence anyone can parse.
-  if (row.numTurns) parts.push(`${row.numTurns} step${row.numTurns === 1 ? "" : "s"}`);
-  const d = dur(row.durationMs);
-  if (d) parts.push(d);
-  const turn = row.turnCostUsd;
-  const total = row.costUsd;
-  const haveTotal = typeof total === "number" && total > 0;
-  if (typeof turn === "number" && turn > 0) parts.push(money(turn));
-  // Rows recorded before the per-turn cost existed only have the running total.
-  // Say so rather than letting it pass for the price of this turn.
-  else if (haveTotal) parts.push(`${money(total)} total`);
-  const note =
-    typeof turn === "number" && haveTotal
-      ? `This turn cost ${money(turn)} · ${money(total)} for the chat so far, at API rates`
-      : haveTotal
-        ? `${money(total)} for the chat so far, at API rates — this turn's share wasn't recorded`
-        : null;
+  const { parts, note } = turnFooter(row);
   const meta = <span className="cm-mono !text-2xs text-faint"> · {parts.join(" · ")}</span>;
   return (
     <CenterNote icon={<CheckCircle2 />}>

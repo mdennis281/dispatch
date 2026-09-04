@@ -677,6 +677,41 @@ describe("chat status persistence", () => {
     expect(results.map((r) => r.costUsd)).toEqual(totals);
     expect(results.map((r) => r.turnCostUsd)).toEqual([1.5, 2.5, 0.25]);
   });
+
+  it("recovers the cost baseline from disk, so a resumed chat's first turn is a delta", async () => {
+    // The baseline lives in memory, and this broker can be minutes old while the
+    // chat is hours old. If the provider carries `total_cost_usd` across the
+    // resume, an empty baseline would book the whole chat's spend — 40.00 here —
+    // as the first turn back.
+    await store.saveChat({ ...chatFor("c1"), sessionId: "sess-1" });
+    await store.appendMessage({
+      kind: "result",
+      id: "r-old",
+      chatId: "c1",
+      ts: 1,
+      subtype: "success",
+      isError: false,
+      costUsd: 40,
+    });
+
+    const { fn } = makeFakeQuery(() => [
+      assistantText("ok"),
+      { ...resultMsg(), total_cost_usd: 42.5 },
+    ]);
+    const broker = makeBroker(fn);
+    const chat = (await store.getChat("c1"))!;
+    broker.resume(chat);
+
+    const idle = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "carry on");
+    await idle;
+
+    const result = events.flatMap((e) =>
+      e.type === "chat-message" && e.message.kind === "result" ? [e.message] : [],
+    )[0];
+    expect(result?.costUsd).toBe(42.5);
+    expect(result?.turnCostUsd).toBe(2.5);
+  });
 });
 
 function waitForResults(chatId: string, n: number, ms = 3000): Promise<void> {

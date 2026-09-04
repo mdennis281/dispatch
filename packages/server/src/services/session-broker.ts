@@ -3616,11 +3616,37 @@ export class SessionBroker {
    *
    * Mutates the baseline: call it exactly once per emitted result.
    */
-  private turnCost(session: LiveSession, total: number | undefined): number | undefined {
+  private async turnCost(
+    session: LiveSession,
+    total: number | undefined,
+  ): Promise<number | undefined> {
     if (typeof total !== "number") return undefined;
+    // This broker can be minutes old while the chat is hours old: a restart, or
+    // any RESUMED session, starts with no baseline in memory. If the provider
+    // carries `total_cost_usd` across the resume, an empty baseline would book
+    // the entire chat's spend as the first post-resume turn — so recover it from
+    // the last result on disk. When the provider instead restarts its counter,
+    // the fall past that baseline is caught below and costs nothing.
+    if (session.lastCostUsd === undefined) {
+      session.lastCostUsd = await this.lastPersistedCost(session.chatId);
+    }
     const last = session.lastCostUsd;
     session.lastCostUsd = total;
     return last === undefined || total < last ? total : total - last;
+  }
+
+  /**
+   * The `costUsd` of the most recent persisted result row, or undefined when the
+   * window holds none — in which case the first turn simply reports the
+   * provider's own figure, which is what it did before any of this existed.
+   */
+  private async lastPersistedCost(chatId: string): Promise<number | undefined> {
+    const rows = await this.store.readMessages(chatId, { limit: 240 }).catch(() => []);
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i];
+      if (row?.kind === "result" && typeof row.costUsd === "number") return row.costUsd;
+    }
+    return undefined;
   }
 
   /* ---------------------------------------------------------- consume */
@@ -3869,6 +3895,7 @@ export class SessionBroker {
           session.guardRecoveries.length > 0
         ) {
           const recoveries = session.guardRecoveries.splice(0);
+          const guardTurnCost = await this.turnCost(session, event.costUsd);
           await this.emit(session, {
             ...base,
             kind: "result",
@@ -3880,7 +3907,7 @@ export class SessionBroker {
             contextTokens: session.lastContextTokens,
             contextWindow: session.contextWindow,
             costUsd: event.costUsd,
-            turnCostUsd: this.turnCost(session, event.costUsd),
+            turnCostUsd: guardTurnCost,
           });
           session.turn += 1;
           session.turnOpen = true;
@@ -3892,6 +3919,7 @@ export class SessionBroker {
         // A different terminal outcome must not let an old guard marker recover
         // an unrelated later turn.
         session.guardRecoveries.length = 0;
+        const endTurnCost = await this.turnCost(session, event.costUsd);
         await this.emit(session, {
           ...base,
           kind: "result",
@@ -3904,7 +3932,7 @@ export class SessionBroker {
           contextTokens: session.lastContextTokens,
           contextWindow: session.contextWindow,
           costUsd: event.costUsd,
-          turnCostUsd: this.turnCost(session, event.costUsd),
+          turnCostUsd: endTurnCost,
         });
         session.turn += 1;
         if (!event.ok) this.onTurnError?.(session.chatId, event.result ?? event.limit?.reason);
@@ -4231,6 +4259,10 @@ export class SessionBroker {
           typeof (m as { result?: unknown }).result === "string"
             ? ((m as { result?: string }).result as string)
             : undefined;
+        const legacyTurnCost = await this.turnCost(
+          session,
+          (m as { total_cost_usd?: number }).total_cost_usd,
+        );
         await this.emit(session, {
           kind: "result",
           id: this.genId(),
@@ -4247,7 +4279,7 @@ export class SessionBroker {
           contextTokens: session.lastContextTokens,
           contextWindow: session.contextWindow,
           costUsd: (m as { total_cost_usd?: number }).total_cost_usd,
-          turnCostUsd: this.turnCost(session, (m as { total_cost_usd?: number }).total_cost_usd),
+          turnCostUsd: legacyTurnCost,
         });
         session.turn += 1;
         // A turn that ended in error may have hit a usage limit — hand the
