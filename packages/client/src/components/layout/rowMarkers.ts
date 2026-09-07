@@ -10,7 +10,9 @@
  * the tooltip, where it has room to say what it is actually counting.
  *
  * Pure, and split out of the row, so the colour rules can be tested without
- * rendering a sidebar — the same split `reviewLabel` and `navState` use.
+ * rendering a sidebar — the same split `reviewLabel` and `navState` use. The
+ * one rule the row's ACTION TRAY asks of the same census lives here too, for
+ * the same reason: see `canReapBranch`.
  *
  * Class names are spelled out as literals rather than built from a token name:
  * Tailwind scans source for LITERAL candidates, so a `text-${tint}` template
@@ -81,4 +83,31 @@ export function processTitle({ session, shells }: BranchProcs): string {
   if (shells > 0) parts.push(`${shells} background shell${shells === 1 ? "" : "s"}`);
   if (session > 0) parts.push(`${session} session process${session === 1 ? "" : "es"}`);
   return parts.length > 0 ? parts.join(", ") : "No processes";
+}
+
+/**
+ * Whether the row should offer a ONE-CLICK reap of the branch's processes.
+ *
+ * Only when the branch is holding something AND nothing on it is mid-turn. A
+ * chat that finished an hour ago and still has its session tree and the dev
+ * server it started resident is the case worth a single click — nobody is
+ * using them and nothing will reclaim the shells. A branch with an agent still
+ * on it is not: the kill interrupts the turn, there is no undo, and a 24px
+ * button that arrives under the pointer on hover is the wrong place to put
+ * that. Killing a busy branch stays in the row's menu, behind an item whose
+ * text says what it costs.
+ *
+ * "Mid-turn" is `isChatWorking`, not `status === "running"`, for the reason
+ * `childChatTint` spells out above: `waiting` is a tool blocked on work
+ * elsewhere — a `watch_pr` parked on a PR for ten minutes — and reading that as
+ * "at rest" would put the hair trigger on precisely the branch you must not
+ * touch.
+ */
+export function canReapBranch(
+  procs: BranchProcs,
+  status: Chat["status"],
+  children: readonly Chat[],
+): boolean {
+  if (procs.session + procs.shells === 0) return false;
+  return !isChatWorking(status) && !children.some((c) => isChatWorking(c.status));
 }

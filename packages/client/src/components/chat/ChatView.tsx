@@ -48,7 +48,7 @@ import { worktreeMatchesChat, samePath } from "../panels/panelBus.js";
 import { useNotices } from "../../stores/notices.js";
 import { useChatProcessPids, useProcesses } from "../../stores/processes.js";
 import { openOverlay } from "../../stores/view.js";
-import { copyToClipboard } from "../../lib/clipboard.js";
+import { useCopyId } from "../../lib/useCopyId.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
@@ -199,18 +199,7 @@ export function ChatView({ chat }: { chat: Chat }) {
   }, [chat, injected.show]);
 
   const pushToast = useNotices((s) => s.push);
-  const copyId = useCallback(
-    (value: string, label: string) => {
-      void copyToClipboard(value).then((ok) => {
-        pushToast(
-          ok
-            ? { level: "info", text: `${label} copied`, detail: value }
-            : { level: "error", text: `Couldn't copy ${label.toLowerCase()}`, detail: value },
-        );
-      });
-    },
-    [pushToast],
-  );
+  const copyId = useCopyId();
 
   // Inline title rename + delete confirmation, both shared with the sidebar row
   // so a chat renames and deletes the same way wherever you reach for it.
