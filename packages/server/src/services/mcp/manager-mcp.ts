@@ -136,14 +136,14 @@ import type {
   ReadChatQuery,
   ReadChatResult,
 } from "../inspect.js";
-import type {
-  PeerAskResult,
-  PeerChatState,
-  PeerDelivery,
-  PeerReplyResult,
-  PeerSendResult,
+import {
+  PEER_MESSAGE_LIMIT,
+  type PeerAskResult,
+  type PeerChatState,
+  type PeerDelivery,
+  type PeerReplyResult,
+  type PeerSendResult,
 } from "../chat-messenger.js";
-import { PEER_MESSAGE_LIMIT } from "../chat-messenger.js";
 
 /** Hard ceiling on a single `wait` (also the default `wait_for_chat` timeout). */
 export const WAIT_CAP_SECONDS = 3600;
