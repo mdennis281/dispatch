@@ -136,12 +136,13 @@ import type {
   ReadChatQuery,
   ReadChatResult,
 } from "../inspect.js";
-import type {
-  PeerAskResult,
-  PeerChatState,
-  PeerDelivery,
-  PeerReplyResult,
-  PeerSendResult,
+import {
+  PEER_MESSAGE_LIMIT,
+  type PeerAskResult,
+  type PeerChatState,
+  type PeerDelivery,
+  type PeerReplyResult,
+  type PeerSendResult,
 } from "../chat-messenger.js";
 
 /** Hard ceiling on a single `wait` (also the default `wait_for_chat` timeout). */
@@ -1811,6 +1812,43 @@ function peerRefusalResult(result: PeerSendResult): CallToolResult {
       refusal: result.refusal,
       ...(result.retryAt ? { retryAt: result.retryAt } : {}),
     })}`,
+    true,
+  );
+}
+
+/**
+ * Refuse a peer message that is over {@link PEER_MESSAGE_LIMIT}, or `null` to
+ * let it through — shared by `chat_send`, `chat_ask` and `chat_reply` so the
+ * three cannot drift into three different budgets.
+ *
+ * The refusal names the overage and HOW TO CUT IT, because "too long" on its own
+ * gets obeyed by trimming adjectives. What made these messages long was never
+ * the wording: it was restated context, ratification, and reasoning nobody
+ * asked for. So the message says which of those to drop and where the detail
+ * can go instead.
+ *
+ * An error, not a plain result, for the reason spelled out on
+ * {@link peerRefusalResult}: read as a delivered message the model moves on and
+ * the words never arrive. That reasoning holds even for `chat_reply`, where an
+ * asker is BLOCKED on the answer — a refusal costs them the seconds it takes to
+ * resend it shorter, where a silent drop costs them the whole timeout.
+ */
+function peerTooLongResult(
+  toolName: string,
+  field: string,
+  text: string,
+): CallToolResult | null {
+  if (text.length <= PEER_MESSAGE_LIMIT) return null;
+  const facts = { ok: false, refusal: "too-long", length: text.length, limit: PEER_MESSAGE_LIMIT };
+  return textResult(
+    `${toolName}: this ${field} is ${text.length} characters and the limit is ` +
+      `${PEER_MESSAGE_LIMIT}. Nothing was sent.\n\n` +
+      `Put the point in the first sentence and stop. Cut context the other chat can ` +
+      `read for itself (the repo, the PR, project memory), cut acknowledgement of what ` +
+      `it did, and cut reasoning it did not ask for. If detail genuinely has to travel, ` +
+      `write it to a file or the pull request and send the path — that costs them one ` +
+      `read they can skip instead of a page they cannot.\n` +
+      JSON.stringify(facts),
     true,
   );
 }
@@ -6083,13 +6121,18 @@ ${look}` : "")
       "starts a turn there, so write it as a complete instruction: the other chat cannot " +
       "see this conversation. A chat that has finished is woken up to receive it. This " +
       "does NOT wait for a response — use chat_ask when you need an answer back. Find " +
-      "ids with chat_find; check what a chat is doing first with chat_state.",
+      "ids with chat_find; check what a chat is doing first with chat_state. Keep it " +
+      `SHORT: under ${PEER_MESSAGE_LIMIT} characters, enforced. It costs the other chat ` +
+      "a whole turn, so send the thing it has to act on, not a briefing.",
     {
       chatId: z.string().describe("The chat to message, as reported by chat_find."),
       message: z
         .string()
         .describe(
-          "What to say — self-contained, since the other chat has none of your context.",
+          "What to say. Self-contained — the other chat has none of your context — but " +
+            `SHORT, under ${PEER_MESSAGE_LIMIT} characters: the point in the first ` +
+            "sentence, no restating what it can read for itself, no acknowledgement. " +
+            "Detail that must travel goes in a file or the PR; send the path.",
         ),
       delivery: z
         .enum(["queue", "interrupt"])
@@ -6115,6 +6158,8 @@ ${look}` : "")
           true,
         );
       }
+      const tooLong = peerTooLongResult("chat_send", "message", message);
+      if (tooLong) return tooLong;
       const result = await ctx.messaging.send({
         to,
         message,
@@ -6156,12 +6201,17 @@ ${look}` : "")
       "and the other chat answers with chat_reply; this call blocks until it does or " +
       "the timeout expires. A timeout is a normal answer, not an error: it means nobody " +
       "replied, so carry on without it rather than asking again. Ask ONE clear question " +
-      "— the other chat cannot see your context.",
+      `— the other chat cannot see your context — in under ${PEER_MESSAGE_LIMIT} ` +
+      "characters, enforced.",
     {
       chatId: z.string().describe("The chat to ask, as reported by chat_find."),
       question: z
         .string()
-        .describe("The question — self-contained, and answerable on its own."),
+        .describe(
+          "The question — self-contained, answerable on its own, and under " +
+            `${PEER_MESSAGE_LIMIT} characters. Ask the question; do not brief them ` +
+            "first. Background that is genuinely needed goes in a file they can read.",
+        ),
       timeoutSeconds: z
         .number()
         .optional()
@@ -6175,6 +6225,8 @@ ${look}` : "")
       const question = typeof args.question === "string" ? args.question.trim() : "";
       if (!to) return textResult("chat_ask requires a non-empty chatId.", true);
       if (!question) return textResult("chat_ask requires a non-empty question.", true);
+      const tooLong = peerTooLongResult("chat_ask", "question", question);
+      if (tooLong) return tooLong;
 
       // Floored, not just capped. `clampSeconds` bottoms out at 0 and the schema
       // has no minimum, so `timeoutSeconds: 0` would deliver the question —
@@ -6246,10 +6298,17 @@ ${look}` : "")
     "Answer a question another chat asked you with chat_ask. That chat is BLOCKED " +
       "waiting on this call, so answer as soon as you can. The askId is in the message " +
       "that asked you. Answering is the whole response — the asking chat sees your " +
-      "`answer` text and nothing else, so make it stand on its own.",
+      "`answer` text and nothing else, so make it stand on its own — in under " +
+      `${PEER_MESSAGE_LIMIT} characters, enforced.`,
     {
       askId: z.string().describe("The askId carried by the question you were sent."),
-      answer: z.string().describe("Your answer, complete in itself."),
+      answer: z
+        .string()
+        .describe(
+          `Your answer, complete in itself and under ${PEER_MESSAGE_LIMIT} characters. ` +
+            "Answer what was asked; skip the working. If the answer is a table or a " +
+            "diff, put it somewhere they can read and reply with the path.",
+        ),
     },
     async (args): Promise<CallToolResult> => {
       if (!ctx.messaging) {
@@ -6259,6 +6318,8 @@ ${look}` : "")
       const answer = typeof args.answer === "string" ? args.answer.trim() : "";
       if (!askId) return textResult("chat_reply requires the askId you were sent.", true);
       if (!answer) return textResult("chat_reply requires a non-empty answer.", true);
+      const tooLong = peerTooLongResult("chat_reply", "answer", answer);
+      if (tooLong) return tooLong;
 
       const result = ctx.messaging.reply({ askId, answer });
       if (result.ok) {

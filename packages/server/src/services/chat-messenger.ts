@@ -59,6 +59,32 @@ export const PEER_TARGET_LIMIT = 30;
 /** Window for {@link PEER_TARGET_LIMIT}. */
 export const PEER_TARGET_WINDOW_MS = 5 * 60_000;
 
+/**
+ * Ceiling on ONE peer message, in characters — the other half of the budget,
+ * because the windows above count messages and the cost is length.
+ *
+ * Measured over 1,068 chats and 636 peer messages before this existed: the
+ * median was 3,072 characters and the 25th percentile 2,281, with only 5% under
+ * 500. That is not a tail of a few runaway chats, it is the default shape of
+ * every message — and it sails through the windows above, which are tuned
+ * against the hundreds-per-minute a loop produces. Ten messages at the observed
+ * median is 30 KB of prose inside one pair's five-minute budget.
+ *
+ * What that length was actually made of, read back: the load-bearing sentence
+ * first ("your test on main is red and it is yours"), then a page of context the
+ * recipient could have read itself and acknowledgement it did not need. So the
+ * cap is set where a lead sentence and its qualification fit and a briefing
+ * document does not. Detail that genuinely has to travel has somewhere better to
+ * go — a file, the PR, project memory — and a pointer costs the recipient one
+ * read it can skip rather than a page it cannot.
+ *
+ * ENFORCED AT THE TOOL BOUNDARY, not in `deliver` below, and deliberately: this
+ * is a rule about what agents WRITE, and the transport also carries messages
+ * nobody composed — review notifications and the like — which have no business
+ * being truncated to a prose budget.
+ */
+export const PEER_MESSAGE_LIMIT = 800;
+
 /* ----------------------------------------------------------------- types */
 
 /** How a message reaches a target that is mid-turn. */
