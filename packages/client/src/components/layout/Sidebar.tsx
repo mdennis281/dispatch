@@ -785,8 +785,15 @@ function ChatRow({
   // sidebar — the rationale belongs in Settings → Context, which is where the
   // policy is actually set. The one thing worth interrupting for is that a turn
   // is mid-flight, because that is the only part which is not recoverable.
+  //
+  // "in flight", not "running": `branchRunning` counts `waiting` and `queued`
+  // too, and a tip that names the STATUS would be wrong for the case it exists
+  // for — the ten-minute `watch_pr` reads `waiting`, and someone who checked
+  // the row and saw no "Running" would take the warning as stale. Only the
+  // menu ever shows this half now; the tray's button is gated on the branch
+  // being at rest, so its tip is always the short one.
   const killTip = branchRunning
-    ? `End ${processCount} processes — interrupts a running turn`
+    ? `End ${processCount} processes — interrupts a turn in flight`
     : `End ${processCount} processes`;
 
   // The tray's one-click reap, offered only for a branch holding processes with
