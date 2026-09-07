@@ -1,6 +1,12 @@
 import { describe, it, expect } from "vitest";
 import type { Chat, ChatStatus } from "@dispatch/shared";
-import { childChatTint, childChatTitle, processTint, processTitle } from "./rowMarkers.js";
+import {
+  canReapBranch,
+  childChatTint,
+  childChatTitle,
+  processTint,
+  processTitle,
+} from "./rowMarkers.js";
 
 /** A reviewer chat in a given state, the way `launchAgentTask` records it. */
 function child(id: string, status?: ChatStatus, reviewOf = "o/r#140"): Chat {
@@ -92,5 +98,36 @@ describe("processTitle — the halves stay named even though the glyph merged th
     expect(processTitle({ session: 2, shells: 1 })).toBe(
       "1 background shell, 2 session processes",
     );
+  });
+});
+
+describe("canReapBranch — when the row offers a one-click kill", () => {
+  const held = { session: 3, shells: 1 };
+
+  it("stays away from a branch holding nothing", () => {
+    // Nothing to reap is not a disabled button, it is no button: the tray is
+    // four icons wide and a permanently dead one costs a slot on every row.
+    expect(canReapBranch({ session: 0, shells: 0 }, "idle", [])).toBe(false);
+  });
+
+  it("offers it for a parked branch that never let go of its processes", () => {
+    expect(canReapBranch(held, "idle", [])).toBe(true);
+    expect(canReapBranch(held, "done", [child("r1", "done")])).toBe(true);
+    expect(canReapBranch(held, "error", [child("r1", "error")])).toBe(true);
+  });
+
+  it("withholds it while ANY chat on the branch is mid-turn", () => {
+    // Including `waiting` and `queued`. A reviewer parked on `watch_pr` reports
+    // `waiting` for as long as CI takes, and that is the single longest window
+    // in which an accidental click would cost real work.
+    for (const status of ["running", "waiting", "queued"] as const) {
+      expect(canReapBranch(held, status, [])).toBe(false);
+      expect(canReapBranch(held, "idle", [child("r1", status)])).toBe(false);
+    }
+  });
+
+  it("counts the branch's shells, not just its session tree", () => {
+    // A dev server with the session already swept still has something to reap.
+    expect(canReapBranch({ session: 0, shells: 1 }, "idle", [])).toBe(true);
   });
 });

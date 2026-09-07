@@ -24,6 +24,7 @@ import {
   RefreshCw,
   Activity,
   Skull,
+  Copy,
   type LucideIcon,
 } from "lucide-react";
 import { parsePrRecordKey } from "@dispatch/shared";
@@ -36,6 +37,7 @@ import { formatDuration } from "../metrics/duration.js";
 import { TitleText } from "../ui/TitleText.js";
 import { purposeIcon } from "../config/sections.js";
 import {
+  canReapBranch,
   childChatTint,
   childChatTitle,
   processTint,
@@ -50,6 +52,7 @@ import {
   useChats,
   useProjectChatTree,
   useProjectAgentCounts,
+  isChatWorking,
   isReviewerChat,
   reviewTargetKey,
   type ChatBranch,
@@ -74,6 +77,7 @@ import { cn } from "../../lib/cn.js";
 import { midTruncate, relTimeShort } from "../../lib/format.js";
 import { useFlipReorder } from "../../lib/useFlip.js";
 import { useLongPress } from "../../lib/useLongPress.js";
+import { useCopyId } from "../../lib/useCopyId.js";
 import { LAYER } from "../../lib/layers.js";
 import { foldedChildrenLabel } from "./reviewLabel.js";
 import { DeleteChatDialog } from "../chat/DeleteChatDialog.js";
@@ -745,6 +749,7 @@ function ChatRow({
   const PurposeIcon = purposeIcon(chat.purpose?.kind);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const rename = useChatRename(chat);
+  const copyId = useCopyId();
 
   const childCount = `${childChats.length} chat${childChats.length === 1 ? "" : "s"}`;
 
@@ -768,8 +773,13 @@ function ChatRow({
   const processCount = procs.session + procs.shells;
   const killProcesses = useChatProcesses((s) => s.kill);
   const [killing, setKilling] = useState(false);
+  // Is anything on this branch mid-turn? `isChatWorking`, not
+  // `status === "running"`: `waiting` is a tool blocked on work elsewhere, and
+  // a `watch_pr` parked on a PR for ten minutes is the longest stretch a kill
+  // could interrupt. Both the tip below and the tray's reap button read this
+  // one definition — two spellings of "busy" a line apart is a bug waiting.
   const branchRunning =
-    chat.status === "running" || childChats.some((c) => c.status === "running");
+    isChatWorking(chat.status) || childChats.some((c) => isChatWorking(c.status));
   // A LABEL, not an explanation. These sit on hover over a 24px button in a
   // narrow column, and a sentence there is a paragraph floating over the
   // sidebar — the rationale belongs in Settings → Context, which is where the
@@ -778,6 +788,11 @@ function ChatRow({
   const killTip = branchRunning
     ? `End ${processCount} processes — interrupts a running turn`
     : `End ${processCount} processes`;
+
+  // The tray's one-click reap, offered only for a branch holding processes with
+  // nothing left running them. See `canReapBranch` for why the busy case is
+  // deliberately menu-only.
+  const reapable = canReapBranch(procs, chat.status, childChats);
 
   const onKillProcesses = async (): Promise<void> => {
     if (killing) return;
@@ -1019,6 +1034,29 @@ function ChatRow({
                 : "bg-[image:linear-gradient(var(--p-active),var(--p-active))]",
             )}
           >
+            {/* Reap what this branch is still holding, without going through
+                the menu — leftmost, because it is the item you WON'T mean to
+                press and the disclosure beside it is the one you press most.
+                Only mounted when the kill is safe (`canReapBranch`), so the
+                tray never grows a hair trigger over a running turn.
+
+                Danger-coloured at rest rather than only on hover: it appears
+                and disappears with the branch's own state, so the one glance
+                you get at it has to say what it does. `!` on all three
+                utilities because `cn` is plain clsx with no conflict
+                resolution and `IconButton`'s own `hover:` colours are emitted
+                after these — same reason the menu's kill item below shouts. */}
+            {reapable && (
+              <IconButton
+                size="sm"
+                disabled={killing}
+                tip={killTip}
+                className="!text-danger hover:!bg-danger-ghost hover:!text-danger"
+                onClick={trayAction(() => void onKillProcesses())}
+              >
+                <Skull />
+              </IconButton>
+            )}
             {childChats.length > 0 && (
               <IconButton
                 size="sm"
@@ -1061,6 +1099,18 @@ function ChatRow({
                       onClick={() => choose(() => actions.regenerateTitle(chat.id))}
                     >
                       Regenerate title
+                    </MenuItem>
+                    {/* The CHAT id — what `chat_read`/`chat_find` and every chat
+                        route are keyed by. Same item, same wording and same
+                        toast as the transcript header's menu: the sidebar is
+                        where you are when you want to hand another agent the id
+                        of a chat you are NOT currently in, which is most of the
+                        times anyone wants one. */}
+                    <MenuItem
+                      icon={<Copy />}
+                      onClick={() => choose(() => copyId(chat.id, "Chat ID"))}
+                    >
+                      Copy chat ID
                     </MenuItem>
                     <div className="my-1 h-px bg-line" />
                     <MenuItem
