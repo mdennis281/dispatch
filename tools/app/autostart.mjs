@@ -382,19 +382,29 @@ export function enableAutostart(plan, { activate = true, log = console.log } = {
   return plan;
 }
 
-/** Remove the entry. Idempotent: nothing registered is a success, not an error. */
-export function disableAutostart(plan, { log = console.log } = {}) {
+/**
+ * Remove the entry. Idempotent: nothing registered is a success, not an error.
+ *
+ * The service-manager calls are made UNCONDITIONALLY, never gated on the file
+ * still being there. What actually starts Dispatch on Linux is the symlink
+ * `systemctl enable` drops in `default.target.wants/`, and on macOS the job
+ * launchd has already loaded — deleting the unit or the plist by hand leaves
+ * both behind, and that is exactly the state someone is in when they reach for
+ * `--disable` a second time. `quiet()` swallows the "no such unit" that the
+ * ordinary already-clean path produces.
+ */
+export function disableAutostart(plan, { log = console.log, runQuiet = quiet } = {}) {
   const existed = existsSync(plan.path);
   if (plan.kind === "launch-agent") {
-    quiet("launchctl", ["bootout", `gui/${process.getuid?.() ?? ""}/${plan.label}`]);
-  } else if (plan.kind === "systemd-user" && existed) {
+    runQuiet("launchctl", ["bootout", `gui/${process.getuid?.() ?? ""}/${plan.label}`]);
+  } else if (plan.kind === "systemd-user") {
     // `disable --now` and not just `disable`: leaving the unit active would let
     // its ExecStop stop Dispatch at the next logout, long after the user asked
     // for autostart to be gone.
-    quiet("systemctl", ["--user", "disable", "--now", plan.unit]);
+    runQuiet("systemctl", ["--user", "disable", "--now", plan.unit]);
   }
   rmSync(plan.path, { force: true });
-  if (plan.kind === "systemd-user") quiet("systemctl", ["--user", "daemon-reload"]);
+  if (plan.kind === "systemd-user") runQuiet("systemctl", ["--user", "daemon-reload"]);
   log(existed ? `autostart removed: ${plan.path}` : "autostart was not registered.");
   return existed;
 }

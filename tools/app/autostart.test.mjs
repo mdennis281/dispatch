@@ -152,6 +152,38 @@ test("enable writes the entry and disable takes it back off", () => {
   }
 });
 
+test("disable unregisters the unit even when its file is already gone", () => {
+  // `systemctl enable` drops a symlink in default.target.wants/, and THAT is
+  // what starts Dispatch. Deleting the unit file by hand leaves it behind, so
+  // gating the systemctl call on the file existing would leave autostart on
+  // for the one person who reaches for --disable a second time.
+  const plan = {
+    ...autostartPlan({ ...POSIX, platform: "linux", systemd: true }),
+    // The fixture's path is fictional; keep the rmSync below aimed at a name
+    // that cannot collide with anything on the machine running this.
+    path: join(tmpdir(), "dispatch-autostart-absent", "dispatch.service"),
+  };
+  const ran = [];
+  const runQuiet = (command, args) => ran.push([command, ...args].join(" "));
+
+  assert.equal(disableAutostart(plan, { log: () => {}, runQuiet }), false);
+  assert.deepEqual(ran, [
+    "systemctl --user disable --now dispatch.service",
+    "systemctl --user daemon-reload",
+  ]);
+});
+
+test("disabling a LaunchAgent boots out the job launchd already loaded", () => {
+  const plan = {
+    ...autostartPlan({ ...POSIX, platform: "darwin" }),
+    path: join(tmpdir(), "dispatch-autostart-absent", "com.dispatch.app.plist"),
+  };
+  const ran = [];
+  disableAutostart(plan, { log: () => {}, runQuiet: (c, a) => ran.push([c, ...a].join(" ")) });
+  assert.equal(ran.length, 1);
+  assert.match(ran[0], /^launchctl bootout gui\/.*\/com\.dispatch\.app$/);
+});
+
 test("the CLI defaults to reporting, and rejects a --target with no value", () => {
   assert.deepEqual(parseArgs([]), { mode: "status", activate: true });
   assert.equal(parseArgs(["--enable"]).mode, "enable");
