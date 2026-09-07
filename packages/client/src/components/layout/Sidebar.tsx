@@ -778,7 +778,7 @@ function ChatRow({
   // a `watch_pr` parked on a PR for ten minutes is the longest stretch a kill
   // could interrupt. Both the tip below and the tray's reap button read this
   // one definition — two spellings of "busy" a line apart is a bug waiting.
-  const branchRunning =
+  const branchWorking =
     isChatWorking(chat.status) || childChats.some((c) => isChatWorking(c.status));
   // A LABEL, not an explanation. These sit on hover over a 24px button in a
   // narrow column, and a sentence there is a paragraph floating over the
@@ -786,13 +786,13 @@ function ChatRow({
   // policy is actually set. The one thing worth interrupting for is that a turn
   // is mid-flight, because that is the only part which is not recoverable.
   //
-  // "in flight", not "running": `branchRunning` counts `waiting` and `queued`
+  // "in flight", not "running": `branchWorking` counts `waiting` and `queued`
   // too, and a tip that names the STATUS would be wrong for the case it exists
   // for — the ten-minute `watch_pr` reads `waiting`, and someone who checked
   // the row and saw no "Running" would take the warning as stale. Only the
   // menu ever shows this half now; the tray's button is gated on the branch
   // being at rest, so its tip is always the short one.
-  const killTip = branchRunning
+  const killTip = branchWorking
     ? `End ${processCount} processes — interrupts a turn in flight`
     : `End ${processCount} processes`;
 
