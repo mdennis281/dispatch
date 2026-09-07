@@ -484,6 +484,44 @@ pnpm app:migrate-store -- --source "%LOCALAPPDATA%\claude-manager\data"
 `--target` writes the database somewhere else, leaving the source untouched — that is how
 to rehearse against real data at real scale before committing to it.
 
+### Start at login
+
+The release installer registers Dispatch to come back by itself after a reboot, unless
+you pass `--no-autostart`. From a checkout it's `pnpm app:autostart -- --enable`
+(`--disable`, `--status`). One entry per platform, all of them per-user:
+
+| Platform | Entry | Turn it off |
+|---|---|---|
+| Windows | `Startup\Dispatch.lnk` | Task Manager → **Startup apps** |
+| macOS | `~/Library/LaunchAgents/com.dispatch.app.plist` | `launchctl bootout gui/$UID/com.dispatch.app` |
+| Linux (systemd) | `~/.config/systemd/user/dispatch.service` | `systemctl --user disable --now dispatch` |
+| Linux (no systemd) | `~/.config/autostart/dispatch.desktop` | delete it |
+
+All of them run `launch.py --no-window --target <root>`: the **server** starts, no window
+opens, and the entry is pinned to the root it was installed into so a `--target` install
+never wakes up a different one. Rerunning the installer rewrites the entry;
+`--no-autostart` deletes it, so the one-liner is how you turn this off as well as on.
+
+Three things that look like bugs and aren't:
+
+- **Per-user, never a machine service.** Dispatch runs `claude`, `codex` and `gh` with
+  *your* credentials, out of *your* home directory. A SYSTEM-scoped service starts before
+  any of that is reachable and runs as an account that owns none of it, so it would come
+  up looking like a machine with no agents installed.
+- **"After a reboot" means "after you log in."** On a headless box that isn't good enough:
+  run `loginctl enable-linger $USER` once and systemd starts your user manager — and so
+  Dispatch — at boot. Windows has no equivalent short of an elevated Scheduled Task with a
+  stored password, which is a worse trade than clicking the shortcut.
+- **The entry records an absolute interpreter path**, not `python3`. launchd hands a job
+  `/usr/bin:/bin:/usr/sbin:/sbin` and a systemd user manager little more, so a pyenv,
+  Homebrew or Windows Store Python is not on the PATH the entry runs under — and that
+  failure lands at login, unattended, with nothing on screen to read.
+
+If Dispatch didn't come back, `pnpm app:autostart -- --status` says whether the entry
+exists and whether it still matches what this build would write. For what the launcher
+itself said: macOS redirects it to `<root>/autostart.log`, and systemd keeps it in
+`journalctl --user -u dispatch`.
+
 **Requirements:** Python 3.10+ with `pip install pwa-launcher`, and any Chromium-based
 browser (Chrome, Edge, Brave, Vivaldi…).
 

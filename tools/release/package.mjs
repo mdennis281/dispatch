@@ -56,6 +56,7 @@ const files = [
   "packages/shared/dist",
   "packages/cli/package.json",
   "packages/cli/dist",
+  "tools/app/autostart.mjs",
   "tools/app/create-shortcut.mjs",
   "tools/app/launch.py",
   "tools/app/paths.mjs",

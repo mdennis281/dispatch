@@ -19,6 +19,7 @@ import {
   parseArgs,
   pruneBackups,
   renameWithRetry,
+  resolveAutostart,
   resolveRelease,
 } from "./install.mjs";
 
@@ -143,6 +144,36 @@ test("the browser opens by default, and DISPATCH_INSTALL_NO_OPEN suppresses it l
     if (previous === undefined) delete process.env.DISPATCH_INSTALL_NO_OPEN;
     else process.env.DISPATCH_INSTALL_NO_OPEN = previous;
   }
+});
+
+test("autostart is unset without a flag, so the stamp can answer for it", () => {
+  assert.equal(parseArgs([]).autostart, undefined);
+  assert.equal(parseArgs(["--no-autostart"]).autostart, false);
+  assert.equal(parseArgs(["--autostart"]).autostart, true);
+  // Independent of --no-start: installing without starting still means the box
+  // should have Dispatch back after the next reboot.
+  assert.equal(parseArgs(["--no-start"]).autostart, undefined);
+});
+
+test("a first install starts at login, and an explicit flag always wins", () => {
+  assert.equal(resolveAutostart(undefined, null), true);
+  assert.equal(resolveAutostart(false, null), false);
+  assert.equal(resolveAutostart(true, JSON.stringify({ autostart: false })), true);
+  assert.equal(resolveAutostart(false, JSON.stringify({ autostart: true })), false);
+});
+
+test("an update with no flags keeps the autostart choice the install already made", () => {
+  // The in-app self-update runs the installer with NO flags. Reading the
+  // default as `true` there would switch autostart back on for someone who
+  // deliberately ran --no-autostart, on a path they never see.
+  assert.equal(resolveAutostart(undefined, JSON.stringify({ autostart: false })), false);
+  assert.equal(resolveAutostart(undefined, JSON.stringify({ autostart: true })), true);
+  // A stamp written before the field existed, or one that will not parse at
+  // all, is not an answer — it falls back to the default rather than throwing.
+  assert.equal(resolveAutostart(undefined, JSON.stringify({ tag: "v2026.08.13.12345" })), true);
+  assert.equal(resolveAutostart(undefined, Buffer.from('{"autostart": false}')), false);
+  assert.equal(resolveAutostart(undefined, Buffer.from("not json at all")), true);
+  assert.equal(resolveAutostart(undefined, JSON.stringify({ autostart: "yes" })), true);
 });
 
 test("compareStamps orders build stamps and refuses to order anything else", () => {

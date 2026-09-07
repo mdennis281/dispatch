@@ -44,6 +44,15 @@ installs runtime dependencies, and starts Dispatch at
 command again to update. Existing chats and
 configuration live outside the app payload and survive updates.
 
+It also registers Dispatch to **start when you log in** — a Startup shortcut on
+Windows, a LaunchAgent on macOS, a systemd *user* unit (or an XDG autostart
+entry) on Linux. That starts the server only; no window opens. Everything is
+per-user rather than a machine service, because Dispatch runs your agent CLIs
+with your credentials, so on a headless box you want
+`loginctl enable-linger $USER` to bring it up at boot rather than at first login.
+`--no-autostart` skips it, and removes it if a previous install set it up. See
+[RUNNING.md](./RUNNING.md#start-at-login).
+
 **Updating from a build older than the SQLite store:** per-instance state
 (checkpoints, PRs, worktrees, runners, terminals) moved out of JSON files into
 `data/state.db`, and the server refuses to start on a store that still has the old
@@ -63,9 +72,9 @@ Every successful build of `main` is automatically tagged and published using the
 UTC build version displayed in the app (`vyyyy.mm.dd.sssss`). Re-running the
 release workflow for the same commit safely refreshes that release's assets.
 
-Use `--version v2026.08.13.12345`, `--no-start`, `--no-shortcut`, or
-`--target <path>` when running a downloaded copy of the script. Set
-`GITHUB_TOKEN` while the repository is private.
+Use `--version v2026.08.13.12345`, `--no-start`, `--no-open`, `--no-shortcut`,
+`--no-autostart`, or `--target <path>` when running a downloaded copy of the
+script. Set `GITHUB_TOKEN` while the repository is private.
 
 ## Develop from source
 
