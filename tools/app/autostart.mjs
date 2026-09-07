@@ -217,10 +217,28 @@ WantedBy=default.target
 `;
 }
 
+/**
+ * An `Exec=` argument, escaped for the desktop-entry spec.
+ *
+ * Two separate layers, and missing either one corrupts the command:
+ *
+ * 1. Inside a quoted argument, `"`, `` ` ``, `$` and `\` take a backslash. The
+ *    reserved set that FORCES quoting is wider than whitespace — `&`, `;`, `|`,
+ *    `<`, `>`, `*`, `?`, `#`, `~`, `(`, `)` all count.
+ * 2. `%` introduces a FIELD CODE (`%u`, `%f`, `%i`…), so a literal one has to
+ *    be written `%%` whether or not the argument is quoted. A single `%` in a
+ *    path is either silently eaten or gets the whole entry rejected, and paths
+ *    do contain them — a percent-encoded directory name is enough.
+ */
+const EXEC_RESERVED = /[\s"'\\`$<>~|&;*?#()]/;
+const execArg = (a) => {
+  const escaped = String(a).replace(/(["\\`$])/g, "\\$1");
+  const withCodes = EXEC_RESERVED.test(a) ? `"${escaped}"` : escaped;
+  return withCodes.replace(/%/g, "%%");
+};
+
 function desktopEntry({ interpreter, args }) {
-  const exec = [interpreter, ...args]
-    .map((a) => (/[\s"'\\`$]/.test(a) ? `"${a.replace(/(["\\`$])/g, "\\$1")}"` : a))
-    .join(" ");
+  const exec = [interpreter, ...args].map(execArg).join(" ");
   return `[Desktop Entry]
 Type=Application
 Name=Dispatch

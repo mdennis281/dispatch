@@ -129,6 +129,21 @@ test("a path with a space is quoted in the desktop entry's Exec line", () => {
   assert.match(plan.contents, /"\/home\/ada\/my apps\/dispatch"/);
 });
 
+test("a literal % in a path is doubled, because Exec reads it as a field code", () => {
+  const plan = autostartPlan({
+    ...POSIX,
+    platform: "linux",
+    systemd: false,
+    // A percent-encoded directory name is all it takes, and `%u` here would be
+    // read as the field code for a URL rather than as part of the path.
+    root: "/home/ada/100%u backup/dispatch",
+  });
+  const exec = plan.contents.match(/^Exec=(.*)$/m)[1];
+  assert.match(exec, /100%%u backup/);
+  // No lone `%` survives anywhere on the line.
+  assert.equal(exec.replace(/%%/g, "").includes("%"), false, exec);
+});
+
 test("enable writes the entry and disable takes it back off", () => {
   const dir = mkdtempSync(join(tmpdir(), "dispatch-autostart-"));
   try {
