@@ -51,6 +51,7 @@ const REQUIRED_PAYLOAD = [
   "packages/shared/dist/index.js",
   "packages/cli/dist/index.js",
   "tools/app/launch.py",
+  "tools/app/autostart.mjs",
 ];
 
 function usage() {
@@ -65,6 +66,8 @@ Usage: node install.mjs [options]
   --no-start          install without starting Dispatch
   --no-open           start Dispatch without opening it in a browser
   --no-shortcut       do not create a Start-menu/PATH launcher
+  --autostart         start Dispatch at login (the default on a first install)
+  --no-autostart      do not, and remove the login entry if one is registered
   --dry-run           resolve and verify the release without changing the install
   --help              show this help
 
@@ -87,6 +90,10 @@ export function parseArgs(argv) {
     // flag is for people.
     open: process.env.DISPATCH_INSTALL_NO_OPEN !== "1",
     shortcut: true,
+    // Deliberately UNSET rather than `true`: the effective value comes from
+    // resolveAutostart() below, which falls back to what this install last
+    // chose. Defaulting here would erase that memory on every self-update.
+    autostart: undefined,
     dryRun: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -96,6 +103,8 @@ export function parseArgs(argv) {
     else if (arg === "--no-start") out.start = false;
     else if (arg === "--no-open") out.open = false;
     else if (arg === "--no-shortcut") out.shortcut = false;
+    else if (arg === "--no-autostart") out.autostart = false;
+    else if (arg === "--autostart") out.autostart = true;
     else if (arg === "--dry-run") out.dryRun = true;
     else if (arg === "--version") out.version = requiredValue(argv, ++i, arg);
     else if (arg === "--channel") out.channel = requiredValue(argv, ++i, arg);
@@ -430,6 +439,33 @@ function launch(python, launcher, args = []) {
   run(python.command, [...python.prefix, launcher, ...args], { cwd: dirname(launcher) });
 }
 
+/**
+ * Whether this install should come back at login.
+ *
+ * ON by default, because an installed Dispatch supervises long-running agents
+ * and is reached from a phone or another machine as often as from the one it
+ * runs on: "up unless you stopped it" is the behaviour that matches how it gets
+ * used. `--no-autostart` REMOVES the entry rather than merely skipping it, so
+ * rerunning the one-liner with the flag genuinely turns the thing off — unlike
+ * `--no-shortcut`, where a leftover Start-menu tile is harmless.
+ *
+ * The stamp fallback is what makes that stick. An in-app self-update runs this
+ * installer with NO flags, so reading the default as `true` unconditionally
+ * would quietly switch autostart back on for someone who deliberately turned it
+ * off, on a code path they never see. An install predating the field, like a
+ * first install, has no recorded answer and gets the default.
+ */
+export function resolveAutostart(flag, previousStamp) {
+  if (flag !== undefined) return flag;
+  try {
+    const prior = JSON.parse(previousStamp);
+    if (typeof prior?.autostart === "boolean") return prior.autostart;
+  } catch {
+    // No stamp, or one this build cannot read. The default is the answer.
+  }
+  return true;
+}
+
 function createPosixLauncher(root, python) {
   const bin = join(homedir(), ".local", "bin");
   const target = join(bin, "dispatch");
@@ -599,6 +635,7 @@ async function main() {
       const backup = join(root, "backups", `app-${selected.release.tag_name}-${Date.now()}`);
       const stampPath = join(root, "current.json");
       const previousStamp = existsSync(stampPath) ? readFileSync(stampPath) : null;
+      const autostart = resolveAutostart(args.autostart, previousStamp);
       let movedOld = false;
       let movedStage = false;
       try {
@@ -629,6 +666,7 @@ async function main() {
             tag: selected.release.tag_name,
             sha: manifest.sha || selected.release.target_commitish,
             installedAt: new Date().toISOString(),
+            autostart,
             source: `https://github.com/${args.repo}/releases/tag/${selected.release.tag_name}`,
             previous: movedOld ? backup : null,
           }, null, 2),
@@ -652,6 +690,30 @@ async function main() {
           if (args.open) openBrowser("http://127.0.0.1:4318");
         }
 
+        // AFTER the start, not beside the shortcut: enabling the systemd user
+        // unit with `--now` is what leaves it active so its ExecStop can stop
+        // agents at logout, and that is only honest once the app is actually
+        // meant to be up. A failure here is reported and swallowed — the app is
+        // installed, running and usable; not coming back by itself after a
+        // reboot is a smaller problem than an install that reports failure.
+        try {
+          run(
+            process.execPath,
+            [
+              join(app, "tools", "app", "autostart.mjs"),
+              autostart ? "--enable" : "--disable",
+              "--target",
+              root,
+              ...(args.start ? [] : ["--no-activate"]),
+            ],
+            { cwd: app },
+          );
+        } catch (autostartError) {
+          console.warn(
+            `warning: Dispatch installed, but ${autostart ? "will not start at login" : "its login entry could not be removed"}: ${autostartError.message}`,
+          );
+        }
+
         // The new payload is relinked, verified, stamped and (if asked) up, so
         // `backup` is the rollback target now and everything older is dead
         // weight. Pruning HERE rather than before the start is deliberate: the
@@ -666,6 +728,7 @@ async function main() {
         console.log(`  data  : ${join(root, "data")}`);
         console.log(`  config: ${join(root, "config")}`);
         if (args.start) console.log("  open  : http://127.0.0.1:4318");
+        console.log(`  login : ${autostart ? "starts automatically" : "manual (--no-autostart)"}`);
         if (pruned.removed.length) {
           console.log(`  pruned: ${pruned.removed.length} superseded backup payload(s)`);
         }
