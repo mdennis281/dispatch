@@ -10,6 +10,7 @@ import type {
   WorkflowExemption,
 } from "@dispatch/shared";
 import { EventBus } from "../../bus.js";
+import { PEER_MESSAGE_LIMIT } from "../chat-messenger.js";
 import { memorySimilarity } from "../memory.js";
 import {
   decodePrToolPayload,
@@ -46,6 +47,7 @@ import {
   type PrCreateState,
   type PrCreateResult,
   type ManagerMcpChats,
+  type ManagerMcpMessaging,
   type ManagerMcpExemptions,
   type SpawnChatConsent,
   type SpawnChatRequest,
@@ -4508,5 +4510,136 @@ describe("manager-mcp — server factory", () => {
     expect(
       names({ chatId: "c1", bus, broker: fakeBroker({}), chats: fakeChats({}).binding }),
     ).toContain("spawn_chat");
+  });
+});
+
+/* ------------------------------------------------- peer message length cap */
+
+/**
+ * The cap exists because the rate limits could not see the problem: they count
+ * messages over a window, and what actually cost the humans their token budget
+ * was 636 peer messages with a MEDIAN length of 3,072 characters. Ten of those
+ * fit inside one pair's five-minute budget.
+ *
+ * So the assertions that matter are (1) nothing reaches the messenger when the
+ * text is over — a refusal that still delivers is worse than no cap, since the
+ * recipient pays the turn either way — and (2) it is an `isError`, because a
+ * plain result reads as "sent" and the words silently never arrive.
+ */
+describe("peer messages are capped in length", () => {
+  /** Records what reached the messenger, so "not sent" is checkable. */
+  function spyMessaging() {
+    const calls: string[] = [];
+    const binding: ManagerMcpMessaging = {
+      send: async ({ message }) => {
+        calls.push(message);
+        return { ok: true, held: false, woke: false };
+      },
+      ask: async ({ question }) => {
+        calls.push(question);
+        return { ok: true, answered: true, answer: "ok", askId: "a1" };
+      },
+      reply: ({ answer }) => {
+        calls.push(answer);
+        return { ok: true, askerChatId: "c2" };
+      },
+      state: async () => null,
+    };
+    return { calls, binding };
+  }
+
+  const over = "x".repeat(PEER_MESSAGE_LIMIT + 1);
+  const atLimit = "x".repeat(PEER_MESSAGE_LIMIT);
+
+  it("refuses a chat_send over the limit without sending it", async () => {
+    const { calls, binding } = spyMessaging();
+    const { chatSend } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      messaging: binding,
+    });
+
+    const res = await chatSend.handler({ chatId: "c2", message: over, delivery: undefined }, {});
+
+    expect(res.isError).toBe(true);
+    expect(calls).toEqual([]);
+    expect(resultText(res)).toContain("Nothing was sent");
+    // The refusal has to say how much to cut and how, or it gets obeyed by
+    // trimming adjectives off a briefing that should not have been sent.
+    expect(resultText(res)).toContain(String(PEER_MESSAGE_LIMIT));
+    expect(resultText(res)).toContain("first sentence");
+  });
+
+  it("allows a message exactly at the limit — the cap is inclusive", async () => {
+    const { calls, binding } = spyMessaging();
+    const { chatSend } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      messaging: binding,
+    });
+
+    const res = await chatSend.handler({ chatId: "c2", message: atLimit, delivery: undefined }, {});
+
+    expect(res.isError).toBeFalsy();
+    expect(calls).toEqual([atLimit]);
+  });
+
+  it("measures the TRIMMED text, so trailing whitespace cannot trip it", async () => {
+    const { calls, binding } = spyMessaging();
+    const { chatSend } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      messaging: binding,
+    });
+
+    const res = await chatSend.handler({ chatId: "c2", message: `\n  ${atLimit}  \n`, delivery: undefined }, {});
+
+    expect(res.isError).toBeFalsy();
+    expect(calls).toEqual([atLimit]);
+  });
+
+  it("refuses an over-long chat_ask without costing the target a turn", async () => {
+    const { calls, binding } = spyMessaging();
+    const { chatAsk } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      messaging: binding,
+    });
+
+    const res = await chatAsk.handler({ chatId: "c2", question: over, timeoutSeconds: undefined }, {});
+
+    expect(res.isError).toBe(true);
+    expect(calls).toEqual([]);
+    expect(resultText(res)).toContain("chat_ask");
+  });
+
+  it("refuses an over-long chat_reply rather than delivering an essay to a blocked asker", async () => {
+    const { calls, binding } = spyMessaging();
+    const { chatReply } = createManagerTools({
+      chatId: "c1",
+      bus,
+      broker: fakeBroker({}),
+      messaging: binding,
+    });
+
+    const res = await chatReply.handler({ askId: "a1", answer: over }, {});
+
+    expect(res.isError).toBe(true);
+    expect(calls).toEqual([]);
+    expect(resultText(res)).toContain("chat_reply");
+  });
+
+  it("tells the three tools' descriptions about the budget, since the schema cannot", () => {
+    // The old wording asked for exactly what it got: "self-contained, since the
+    // other chat has none of your context", with no ceiling anywhere. An
+    // enforced limit the model only discovers by being refused wastes a turn.
+    const byName = new Map(managerToolDescriptors().map((d) => [d.name, d]));
+    for (const name of ["chat_send", "chat_ask", "chat_reply"]) {
+      expect(byName.get(name)?.description).toContain(String(PEER_MESSAGE_LIMIT));
+    }
   });
 });
