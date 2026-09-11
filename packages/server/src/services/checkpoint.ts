@@ -33,6 +33,7 @@ import type { Checkpoint } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { EventBus } from "../bus.js";
 import { KeyedMutex } from "../store/fsq.js";
+import { pathKey } from "./worktree.js";
 
 /** Hidden ref namespace holding per-chat checkpoint commits. */
 export const CHECKPOINT_REF_NS = "refs/cm/checkpoints";
@@ -53,6 +54,13 @@ export const CHECKPOINT_REF_NS = "refs/cm/checkpoints";
  * history.
  */
 export const MAX_CHECKPOINTS_PER_CHAT = 200;
+
+/**
+ * Refs per `update-ref --stdin` transaction. Bounded so one bad ref fails a
+ * batch rather than the whole 9,600-ref backlog one repo here carried, and so a
+ * single git process never holds `packed-refs.lock` for the entire sweep.
+ */
+const REF_DELETE_BATCH = 1000;
 
 /** Dependencies injected into the service (store + bus; `gitBin` for tests). */
 export interface CheckpointServiceDeps {
@@ -386,6 +394,157 @@ export class CheckpointService {
       }
     }
     return deleted;
+  }
+
+  /* ------------------------------------------------- removed-worktree cleanup */
+
+  /**
+   * Drop every checkpoint taken in `worktreePath`, rows AND refs, once that
+   * worktree has been removed. `repoCwd` is any live checkout of the same
+   * repository (the primary one, in practice): refs are shared repo-wide, and
+   * the worktree itself is by definition no longer there to run git in.
+   *
+   * A checkpoint in a removed worktree does nothing useful. `rollback` restores
+   * files INTO the recorded directory and throws when it is gone, before
+   * `broker.fork` ever runs, so the conversation rewind that
+   * `sessionMessageUuid` would drive is unreachable too. Meanwhile its ref pins
+   * a whole commit and tree that `git gc` can never collect: on one install,
+   * 13,031 of 24,806 rows were exactly this.
+   *
+   * Rows are matched by {@link pathKey}, not by string: `chat.worktrees[0]` and
+   * the path a caller hands `WorktreeService.remove()` can differ in case and in
+   * trailing separators.
+   */
+  async forgetWorktree(
+    worktreePath: string,
+    repoCwd: string,
+  ): Promise<{ rows: number; refs: number }> {
+    const key = pathKey(worktreePath);
+    const groups = (await this.store.listCheckpointWorktrees()).filter(
+      (g) => pathKey(g.worktreePath) === key,
+    );
+    let rows = 0;
+    let refs = 0;
+    for (const g of groups) {
+      // The per-chat lock `snapshot` holds, so a snapshot that was mid-flight in
+      // this worktree when it was removed lands its row BEFORE we read the rows —
+      // otherwise its ref would be written after the sweep and orphaned.
+      const r = await this.locks.run(`cp:${g.chatId}`, () => this.retireGroups([g], repoCwd));
+      rows += r.rows;
+      refs += r.refs;
+    }
+    return { rows, refs };
+  }
+
+  /**
+   * Retire every checkpoint whose recorded worktree no longer exists on disk.
+   *
+   * The backstop for {@link forgetWorktree}: it catches worktrees removed
+   * without going through `WorktreeService.remove()` (a `git worktree remove`
+   * an agent ran itself, a directory deleted by hand) and the rows that piled up
+   * before that hook existed.
+   *
+   * `repoFor` maps a chat to its project's primary checkout. A chat it cannot
+   * place, or whose checkout is ALSO missing, is skipped rather than having its
+   * rows dropped: the rows are the only record of which refs to delete, and a
+   * repository that vanished along with the worktree is more likely a drive
+   * that is offline than one that is gone.
+   *
+   * Refs are deleted per REPOSITORY, not per chat — one `update-ref --stdin`
+   * transaction rewrites `packed-refs` once, where a spawn per ref would rewrite
+   * a multi-megabyte file ten thousand times.
+   */
+  async sweepMissingWorktrees(
+    repoFor: (chatId: string) => Promise<string | null>,
+  ): Promise<{ rows: number; refs: number; skipped: number }> {
+    const byRepo = new Map<string, Array<{ chatId: string; worktreePath: string }>>();
+    let skipped = 0;
+    const exists = new Map<string, boolean>();
+    for (const g of await this.store.listCheckpointWorktrees()) {
+      let present = exists.get(g.worktreePath);
+      if (present === undefined) {
+        present = existsSync(g.worktreePath);
+        exists.set(g.worktreePath, present);
+      }
+      if (present) continue;
+      const repo = await repoFor(g.chatId).catch(() => null);
+      if (!repo || !existsSync(repo)) {
+        skipped += g.count;
+        continue;
+      }
+      const list = byRepo.get(repo) ?? [];
+      list.push(g);
+      byRepo.set(repo, list);
+    }
+    let rows = 0;
+    let refs = 0;
+    // No per-chat lock here, deliberately. `snapshot` only ever writes into a
+    // chat's CURRENT worktree, which exists, so it never adds rows to a group
+    // this selected; and `enforceCap` retiring the same old rows concurrently
+    // is harmless, since deleting a ref that is already gone succeeds.
+    for (const [repo, groups] of byRepo) {
+      const r = await this.retireGroups(groups, repo);
+      rows += r.rows;
+      refs += r.refs;
+      skipped += r.skipped;
+    }
+    return { rows, refs, skipped };
+  }
+
+  /**
+   * Delete the refs of every row in `groups`, then — only if git accepted that —
+   * the rows. A failed transaction (a concurrent gc holding `packed-refs.lock`)
+   * keeps the rows so the next sweep can retry: dropping them first would lose
+   * the only map to refs that are still pinning objects.
+   */
+  private async retireGroups(
+    groups: Array<{ chatId: string; worktreePath: string }>,
+    repoCwd: string,
+  ): Promise<{ rows: number; refs: number; skipped: number }> {
+    if (!groups.length || !existsSync(repoCwd)) {
+      return { rows: 0, refs: 0, skipped: 0 };
+    }
+    const wanted = new Set<string>();
+    const counts: number[] = [];
+    for (const g of groups) {
+      const cps = await this.store.getCheckpointsIn(g.chatId, g.worktreePath);
+      counts.push(cps.length);
+      for (const cp of cps) wanted.add(cp.ref);
+    }
+    // Only the refs git actually has. Deleting a missing ref would succeed
+    // anyway; listing first is what makes the logged count a count of objects
+    // freed rather than of rows read.
+    const live = new Set(
+      (await this.gitTry(["for-each-ref", "--format=%(refname)", CHECKPOINT_REF_NS], repoCwd))
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean),
+    );
+    const doomed = [...wanted].filter((ref) => live.has(ref));
+    if (!(await this.deleteRefs(doomed, repoCwd))) {
+      return { rows: 0, refs: 0, skipped: counts.reduce((a, b) => a + b, 0) };
+    }
+    let rows = 0;
+    for (const g of groups) rows += await this.store.deleteCheckpointsIn(g.chatId, g.worktreePath);
+    return { rows, refs: doomed.length, skipped: 0 };
+  }
+
+  /** Delete refs in `update-ref --stdin` transactions. True only if all landed. */
+  private async deleteRefs(refs: string[], cwd: string): Promise<boolean> {
+    for (let i = 0; i < refs.length; i += REF_DELETE_BATCH) {
+      const input = refs
+        .slice(i, i + REF_DELETE_BATCH)
+        .map((ref) => `delete ${ref}\n`)
+        .join("");
+      const res = await execa(this.gitBin, [...GIT_CONFIG_ARGS, "update-ref", "--stdin"], {
+        cwd,
+        env: { ...GIT_ENV },
+        input,
+        reject: false,
+      });
+      if (res.exitCode !== 0) return false;
+    }
+    return true;
   }
 
   /* ---------------------------------------------------------------- rollback */

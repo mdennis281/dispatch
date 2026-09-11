@@ -224,6 +224,12 @@ export class WorktreeService {
    */
   mcpPorts?: { releaseCheckout(path: string): Promise<void> };
 
+  /**
+   * Checkpoint cleanup for a removed worktree. Settable after construction for
+   * the same reason as {@link mcpPorts}; unset in standalone/tests.
+   */
+  checkpoints?: { forgetWorktree(path: string, repoCwd: string): Promise<unknown> };
+
   /** Boots each MCP server's `prewarm` command in a newly created worktree.
    *  Settable after construction for the same reason as {@link mcpPorts}. */
   mcpPrewarm?: {
@@ -625,6 +631,12 @@ export class WorktreeService {
       worktreePath,
     ];
     await this.git(args, cwd);
+    // Retire the checkpoints taken in it. Their refs pin commits git gc can never
+    // collect, and with the directory gone `rollback` can no longer restore them
+    // anyway. Run from `cwd` — the primary checkout, resolved BEFORE the removal
+    // — because refs are shared repo-wide and the worktree is no longer there.
+    // Best-effort: the retention sweep retries anything this misses.
+    await this.checkpoints?.forgetWorktree(worktreePath, cwd).catch(() => {});
     // Notify the detector: this removal happens outside its detection loop, so it
     // must evict the path from its baseline or a recreation at the same path stays
     // undetectable.

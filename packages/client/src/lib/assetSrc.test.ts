@@ -3,7 +3,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const sessionFetch = vi.fn();
 vi.mock("../stores/auth.js", () => ({ sessionFetch: (...args: unknown[]) => sessionFetch(...args) }));
 
-const { assetSrcTarget, directSrc, loadAsset, __resetAssetCache } = await import("./assetSrc.js");
+const { AssetExpiredError, assetSrcTarget, directSrc, loadAsset, __resetAssetCache } = await import(
+  "./assetSrc.js"
+);
 
 let created = 0;
 
@@ -74,6 +76,23 @@ describe("loadAsset", () => {
     await expect(loadAsset("/api/chats/c1/assets/shot.png")).rejects.toThrow(
       "asset /api/chats/c1/assets/shot.png failed: 401 Unauthorized",
     );
+  });
+
+  it("reports a 410 as an expiry, and never asks the server about it again", async () => {
+    // Retention deleted it for good. A scrolling transcript remounts its
+    // thumbnails constantly; re-fetching each dead screenshot buys nothing.
+    sessionFetch.mockResolvedValue({ ok: false, status: 410, statusText: "Gone",
+      blob: async () => ({}) as Blob });
+    await expect(loadAsset("/api/chats/c1/assets/old.png")).rejects.toBeInstanceOf(AssetExpiredError);
+    await expect(loadAsset("/api/chats/c1/assets/old.png")).rejects.toBeInstanceOf(AssetExpiredError);
+    expect(sessionFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not report an ordinary failure as an expiry", async () => {
+    sessionFetch.mockResolvedValue({ ok: false, status: 404, statusText: "Not Found",
+      blob: async () => ({}) as Blob });
+    const err = await loadAsset("/api/chats/c1/assets/typo.png").catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(AssetExpiredError);
   });
 
   it("does not memoize a failure, so a blip can recover", async () => {

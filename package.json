@@ -11,7 +11,7 @@
     "build": "pnpm -r build",
     "start": "pnpm --filter @dispatch/server start",
     "dev": "pnpm --filter @dispatch/server dev",
-    "test": "pnpm --filter @dispatch/shared exec vitest run && pnpm --filter @dispatch/cli exec vitest run && pnpm --filter @dispatch/server exec vitest run && node --test tools/install.test.mjs tools/app/migrate-config.test.mjs tools/app/autostart.test.mjs",
+    "test": "pnpm --filter @dispatch/shared exec vitest run && pnpm --filter @dispatch/cli exec vitest run && pnpm --filter @dispatch/server exec vitest run && node --test tools/install.test.mjs tools/app/migrate-config.test.mjs tools/app/autostart.test.mjs tools/app/failed-retention.test.mjs",
     "typecheck": "pnpm -r typecheck",
     "verify": "node tools/verify/shot.mjs",
     "verify:tool-names": "node tools/verify/no-stale-tool-names.mjs",

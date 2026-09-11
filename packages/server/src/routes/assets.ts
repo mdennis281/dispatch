@@ -4,7 +4,8 @@
  * bytes are persisted under the chat's assets/ dir and an `ImageRef` is returned
  * that `send-message` can carry straight to the SDK.
  *   POST /api/chats/:id/assets  { data, mimeType?, alt?, width?, height?, filename? } → ImageRef
- *   GET  /api/chats/:id/assets/:name → the raw image bytes (inline display)
+ *   GET  /api/chats/:id/assets/:name → the raw image bytes (inline display);
+ *                                      410 once retention has expired it
  */
 import type { FastifyInstance } from "fastify";
 import { extname } from "node:path";
@@ -153,7 +154,14 @@ export function registerAssetRoutes(app: FastifyInstance): void {
       // few hundred MB, so reading the whole file to slice four bytes out of it
       // would spike memory per request — and undo the point of range support.
       const info = await store.statChatAsset(req.params.id, req.params.name);
-      if (!info) return reply.code(404).send({ error: "not found" });
+      if (!info) {
+        // 410, not 404, for an image retention deleted: the transcript still
+        // names it and always will, and the client draws "image expired" for a
+        // 410 where a 404 can only be a broken picture.
+        const expiredAt = await store.chatAssetExpiredAt(req.params.id, req.params.name);
+        if (expiredAt !== null) return reply.code(410).send({ error: "expired", expiredAt });
+        return reply.code(404).send({ error: "not found" });
+      }
       reply.header("content-type", mediaTypeFromName(req.params.name));
       reply.header("cache-control", "private, max-age=31536000, immutable");
       // Advertised unconditionally: a browser decides whether to seek by looking

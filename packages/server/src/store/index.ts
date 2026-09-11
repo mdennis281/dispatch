@@ -1043,6 +1043,15 @@ export class Store {
    * best-effort scan over history, and one torn line must not cost the caller
    * every row after it.
    */
+  /**
+   * A transcript's raw lines, unparsed. For a sweep that can reject nearly every
+   * row on a substring test: parsing an 8,000-row transcript to find the dozen
+   * rows that mention an asset is the cost `scanMessages` already exists to cut.
+   */
+  async readMessageLines(chatId: string): Promise<string[]> {
+    return readJsonlLines(this.messagesFile(chatId));
+  }
+
   async scanMessages(
     chatId: string,
     visit: (row: Record<string, unknown>) => void,
@@ -1153,6 +1162,85 @@ export class Store {
     const abs = this.safeAssetPath(chatId, name);
     if (!abs || !existsSync(abs)) return null;
     return createReadStream(abs, range ? { start: range.start, end: range.end } : undefined);
+  }
+
+  /**
+   * Where a chat records the assets retention deleted: `{ <name>: expiredAtMs }`.
+   *
+   * Beside `assets/` rather than inside it, so the asset route can never serve
+   * it, and inside the chat dir rather than in `state.db`, so it goes when the
+   * chat does and travels with the chat when `backsync` copies one across.
+   *
+   * It exists so a deleted screenshot can answer "expired" instead of "not
+   * found". The transcript still names the file and can never be rewritten —
+   * once Claude Code's own session cleanup runs it is the only copy — so without
+   * this record the UI could only show a broken image and guess why.
+   */
+  private expiredAssetsFile(chatId: string) {
+    return join(this.chatDir(chatId), "assets-expired.json");
+  }
+
+  /** Files in a chat's assets dir, with sizes. `[]` when the chat has none. */
+  async listChatAssets(chatId: string): Promise<Array<{ name: string; size: number }>> {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(this.chatAssetsDir(chatId), { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const out: Array<{ name: string; size: number }> = [];
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      const s = await stat(join(this.chatAssetsDir(chatId), e.name)).catch(() => null);
+      if (s) out.push({ name: e.name, size: s.size });
+    }
+    return out;
+  }
+
+  /**
+   * Delete assets and record each one as expired. Returns the names actually
+   * deleted — a file Windows won't let go of (a read stream still open on it) is
+   * left for the next pass and NOT recorded, so the record never claims an
+   * expiry that didn't happen.
+   */
+  async expireChatAssets(chatId: string, names: string[], at = Date.now()): Promise<string[]> {
+    if (!names.length) return [];
+    return this.mutex.run(`assets-expired:${chatId}`, async () => {
+      // A chat deleted mid-sweep: recording into it would `writeJsonAtomic` a
+      // lone tombstone file into a directory `deleteChat` just removed.
+      if (!existsSync(this.chatDir(chatId))) return [];
+      const deleted: string[] = [];
+      for (const name of names) {
+        const abs = this.safeAssetPath(chatId, name);
+        if (!abs) continue;
+        try {
+          await this.mutex.run(`asset:${chatId}:${basename(name)}`, () => rm(abs));
+          deleted.push(basename(name));
+        } catch (err) {
+          // Already gone counts as expired; anything else is retried next pass.
+          if (isMissing(err)) deleted.push(basename(name));
+        }
+      }
+      if (!deleted.length) return [];
+      const record = await this.readExpiredAssets(chatId);
+      for (const name of deleted) record[name] ??= at;
+      await writeJsonAtomic(this.expiredAssetsFile(chatId), record);
+      return deleted;
+    });
+  }
+
+  /** When retention deleted this asset, or null if it never did. */
+  async chatAssetExpiredAt(chatId: string, name: string): Promise<number | null> {
+    const base = basename(String(name));
+    const at = (await this.readExpiredAssets(chatId))[base];
+    return typeof at === "number" ? at : null;
+  }
+
+  private async readExpiredAssets(chatId: string): Promise<Record<string, number>> {
+    const raw = await readJson(this.expiredAssetsFile(chatId)).catch(() => undefined);
+    return raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, number>)
+      : {};
   }
 
   /* ----------------------------------------------------------- runners */
@@ -1646,6 +1734,46 @@ export class Store {
   }
   async deleteCheckpoints(chatId: string): Promise<void> {
     this.db.prepare("DELETE FROM checkpoint WHERE chat_id = ?").run(chatId);
+  }
+
+  /**
+   * Every (chat, worktree) pair the checkpoint rows name, with a row count.
+   *
+   * Grouped rather than listed because the retention sweep only needs to ask
+   * "does this directory still exist?" once per directory — on stable that is a
+   * few hundred questions, against 24k rows. Rows with no `worktreePath` are
+   * left out: they can never be rolled back, and nothing here could say which
+   * repository their ref lives in.
+   */
+  async listCheckpointWorktrees(): Promise<
+    Array<{ chatId: string; worktreePath: string; count: number }>
+  > {
+    return this.rows(
+      "SELECT chat_id, json_extract(body, '$.worktreePath') AS path, COUNT(*) AS n" +
+        " FROM checkpoint WHERE path IS NOT NULL GROUP BY chat_id, path",
+    ).map((r) => ({
+      chatId: String(r.chat_id),
+      worktreePath: String(r.path),
+      count: Number(r.n),
+    }));
+  }
+  /** One chat's checkpoints taken in one worktree, oldest first. */
+  async getCheckpointsIn(chatId: string, worktreePath: string): Promise<Checkpoint[]> {
+    return this.rows(
+      "SELECT body FROM checkpoint WHERE chat_id = ? AND json_extract(body, '$.worktreePath') = ?" +
+        " ORDER BY seq",
+      chatId,
+      worktreePath,
+    ).map((r) => CheckpointSchema.parse(JSON.parse(r.body as string)));
+  }
+  /** Drop one chat's checkpoints taken in one worktree. Returns the rows removed. */
+  async deleteCheckpointsIn(chatId: string, worktreePath: string): Promise<number> {
+    const res = this.db
+      .prepare(
+        "DELETE FROM checkpoint WHERE chat_id = ? AND json_extract(body, '$.worktreePath') = ?",
+      )
+      .run(chatId, worktreePath);
+    return Number(res.changes);
   }
 
   /* ---------------------------------------------------------- settings */
