@@ -3,7 +3,7 @@ import { execa } from "execa";
 import { mkdtemp, rm, writeFile, readFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import type { WsServerEvent } from "@dispatch/shared";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
@@ -324,5 +324,116 @@ describe("checkpoint ref lifecycle", () => {
     await capped.rollback("roll", "m2");
 
     expect(await read("a.txt")).toBe("two");
+  });
+});
+
+describe("checkpoints on removed worktrees", () => {
+  async function allRefs(): Promise<string[]> {
+    const out = await git(["for-each-ref", "--format=%(refname)", CHECKPOINT_REF_NS]);
+    return out.split("\n").map((l) => l.trim()).filter(Boolean);
+  }
+
+  /** A linked worktree of `repo`, parked in its own temp dir. */
+  async function linkedWorktree(branch: string): Promise<{ wt: string; parked: string }> {
+    const parked = await mkdtemp(join(tmpdir(), "cm-cp-wt-"));
+    const wt = join(parked, "wt");
+    await git(["worktree", "add", wt, "-b", branch]);
+    return { wt, parked };
+  }
+
+  it("forgetWorktree() drops that worktree's rows and refs, and only those", async () => {
+    // A chat that moved checkouts: its rows name two directories. Removing one
+    // must not cost the other its rollback points.
+    const { wt, parked } = await linkedWorktree("moved-on");
+    await svc.snapshot({ chatId: "mover", messageId: "m1", worktreePath: wt });
+    await svc.snapshot({ chatId: "mover", messageId: "m2", worktreePath: wt });
+    await svc.snapshot({ chatId: "mover", messageId: "m3", worktreePath: repo });
+    await svc.snapshot({ chatId: "other", messageId: "o1", worktreePath: wt });
+    await git(["worktree", "remove", "--force", wt]);
+
+    const res = await svc.forgetWorktree(wt, repo);
+
+    expect(res).toEqual({ rows: 3, refs: 3 });
+    expect((await store.getCheckpoints("mover")).map((c) => c.messageId)).toEqual(["m3"]);
+    expect(await store.getCheckpoints("other")).toEqual([]);
+    expect(await allRefs()).toEqual([`${CHECKPOINT_REF_NS}/mover/3`]);
+    await rm(parked, { recursive: true, force: true });
+  });
+
+  it("forgetWorktree() matches the path the way the filesystem does", async () => {
+    // `chat.worktrees[0]` and the path handed to `WorktreeService.remove()` are
+    // spelled by different code; a trailing separator (or, on Windows, a case
+    // difference) must not leave the rows behind.
+    const { wt, parked } = await linkedWorktree("spelled");
+    await svc.snapshot({ chatId: "c", messageId: "m1", worktreePath: wt });
+    await git(["worktree", "remove", "--force", wt]);
+
+    const res = await svc.forgetWorktree(`${wt}${sep}`, repo);
+
+    expect(res.rows).toBe(1);
+    expect(await allRefs()).toEqual([]);
+    await rm(parked, { recursive: true, force: true });
+  });
+
+  it("sweepMissingWorktrees() retires rows for directories that are gone", async () => {
+    const { wt, parked } = await linkedWorktree("reaped-by-hand");
+    await svc.snapshot({ chatId: "a", messageId: "m1", worktreePath: wt });
+    await svc.snapshot({ chatId: "b", messageId: "m1", worktreePath: wt });
+    await svc.snapshot({ chatId: "live", messageId: "m1", worktreePath: repo });
+    // Removed WITHOUT going through WorktreeService — an agent's own removal,
+    // which is what the sweep exists to catch.
+    await git(["worktree", "remove", "--force", wt]);
+
+    const res = await svc.sweepMissingWorktrees(async () => repo);
+
+    expect(res).toEqual({ rows: 2, refs: 2, skipped: 0 });
+    expect(await store.getCheckpoints("a")).toEqual([]);
+    expect(await store.getCheckpoints("b")).toEqual([]);
+    expect(await allRefs()).toEqual([`${CHECKPOINT_REF_NS}/live/1`]);
+    await rm(parked, { recursive: true, force: true });
+  });
+
+  it("sweepMissingWorktrees() keeps rows it cannot place in a live repository", async () => {
+    // The rows are the only map to the refs. A chat with no project, or a repo
+    // that vanished with the worktree (an offline drive), must keep them.
+    const { wt, parked } = await linkedWorktree("orphan");
+    await svc.snapshot({ chatId: "unplaced", messageId: "m1", worktreePath: wt });
+    await svc.snapshot({ chatId: "offline", messageId: "m1", worktreePath: wt });
+    await git(["worktree", "remove", "--force", wt]);
+
+    const res = await svc.sweepMissingWorktrees(async (chatId) =>
+      chatId === "offline" ? join(tmpdir(), "cm-cp-drive-is-offline") : null,
+    );
+
+    expect(res).toEqual({ rows: 0, refs: 0, skipped: 2 });
+    expect(await store.getCheckpoints("unplaced")).toHaveLength(1);
+    expect(await allRefs()).toHaveLength(2);
+    await rm(parked, { recursive: true, force: true });
+  });
+
+  it("sweepMissingWorktrees() keeps the rows when git refuses the deletion", async () => {
+    // A concurrent gc holding packed-refs.lock. Dropping the rows anyway would
+    // lose the only record of refs that are still pinning objects.
+    const { wt, parked } = await linkedWorktree("locked");
+    await svc.snapshot({ chatId: "c", messageId: "m1", worktreePath: wt });
+    await git(["worktree", "remove", "--force", wt]);
+    await git(["pack-refs", "--all"]);
+    const lock = join(repo, ".git", "packed-refs.lock");
+    await writeFile(lock, "");
+
+    const res = await svc.sweepMissingWorktrees(async () => repo);
+
+    expect(res.rows).toBe(0);
+    expect(res.skipped).toBe(1);
+    expect(await store.getCheckpoints("c")).toHaveLength(1);
+    await rm(lock, { force: true });
+    // …and the next pass, with the lock gone, finishes the job.
+    expect(await svc.sweepMissingWorktrees(async () => repo)).toEqual({
+      rows: 1,
+      refs: 1,
+      skipped: 0,
+    });
+    expect(await allRefs()).toEqual([]);
+    await rm(parked, { recursive: true, force: true });
   });
 });

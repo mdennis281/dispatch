@@ -12,7 +12,7 @@ import {
   Plus,
   X,
 } from "lucide-react";
-import { mediaKind, type ImageRef } from "@dispatch/shared";
+import { TOOL_IMAGE_RETENTION_DAYS, mediaKind, type ImageRef } from "@dispatch/shared";
 import { Button } from "../../ui/Button.js";
 import { IconButton } from "../../ui/IconButton.js";
 import { useDialogLayer } from "../../../lib/layers.js";
@@ -77,7 +77,7 @@ export function MediaViewer({
     0,
   );
   const asset = assets[index];
-  const { src, failed: loadFailed } = useAssetSrc(chatId, asset);
+  const { src, failed: loadFailed, expired } = useAssetSrc(chatId, asset);
   const item = asset
     ? {
         src: src ?? "",
@@ -432,7 +432,17 @@ export function MediaViewer({
           // The browser's own pan/zoom would fight ours on a touchscreen.
           style={{ touchAction: zoomable ? "none" : undefined }}
         >
-          {broken ? (
+          {expired ? (
+            // Walking the gallery onto a screenshot retention deleted. The
+            // arrows keep working; only this frame says it is gone, and why.
+            <div className="flex h-full flex-col items-center justify-center gap-1 px-6 text-center">
+              <span className="text-sm text-secondary">Image expired</span>
+              <span className="text-xs text-muted">
+                Tool-output images are deleted {TOOL_IMAGE_RETENTION_DAYS} days after the turn
+                that produced them.
+              </span>
+            </div>
+          ) : broken ? (
             <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted">
               Could not load {item.name}
             </div>

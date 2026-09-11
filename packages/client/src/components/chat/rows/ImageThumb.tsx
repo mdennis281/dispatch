@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { ImageIcon } from "lucide-react";
-import type { ImageRef } from "@dispatch/shared";
+import { ImageIcon, ImageOff } from "lucide-react";
+import { TOOL_IMAGE_RETENTION_DAYS, type ImageRef } from "@dispatch/shared";
 import { cn } from "../../../lib/cn.js";
 import { useAssetSrc } from "../../../lib/assetSrc.js";
 import { MediaViewer, assetName } from "./MediaViewer.js";
@@ -33,9 +33,31 @@ export function ImageThumb({
   const [zoomed, setZoomed] = useState(false);
   const name = assetName(img);
   const dims = img.width && img.height ? `${img.width}×${img.height}` : undefined;
-  const { src, failed } = useAssetSrc(chatId, img);
+  const { src, failed, expired } = useAssetSrc(chatId, img);
   const broken = failed || decodeFailed;
   const tile = variant === "tile";
+
+  if (expired) {
+    // Deleted by the server's retention sweep, on purpose. Said plainly rather
+    // than drawn as the broken-image card below, which reads as a bug to chase.
+    return (
+      <div
+        className="flex items-center gap-2 rounded-md border border-dashed border-line bg-inset px-2 py-1.5"
+        title={`Tool-output images are deleted ${TOOL_IMAGE_RETENTION_DAYS} days after the turn that produced them.`}
+      >
+        <span
+          className="flex size-9 items-center justify-center rounded-[5px] border border-line-soft text-faint [&_svg]:size-4"
+          aria-hidden
+        >
+          <ImageOff />
+        </span>
+        <div className="leading-tight">
+          <div className="text-xs text-secondary">Image expired</div>
+          <div className="cm-mono !text-2xs text-faint">{name}</div>
+        </div>
+      </div>
+    );
+  }
 
   if (broken) {
     return (

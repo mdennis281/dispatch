@@ -10,6 +10,7 @@ import { Store } from "../store/index.js";
 import {
   WorktreeService,
   canonicalWorktreePath,
+  samePath,
   parseWorktreePorcelain,
   parseNumstat,
   resolveNumstatPath,
@@ -310,6 +311,40 @@ describe("WorktreeService on a real temp repo", () => {
     const after = await svc.list(project());
     expect(after.some((w) => w.branch === "feat/test")).toBe(false);
     expect(events.some((e) => e.type === "notice")).toBe(true);
+  });
+
+  it("retires the removed tree's checkpoints from the PRIMARY checkout", async () => {
+    // Every removal — the reaper's, the UI's, the `worktree` tool's — comes
+    // through here, so this is the one place the hook has to be. It must run
+    // from the primary checkout: the worktree it would otherwise run git in is
+    // exactly the directory that was just deleted.
+    const calls: Array<{ path: string; repoCwd: string; existed: boolean }> = [];
+    svc.checkpoints = {
+      forgetWorktree: async (path, repoCwd) => {
+        calls.push({ path, repoCwd, existed: existsSync(path) });
+      },
+    };
+    const info = await svc.create(project(), "feat/checkpointed", { base: "main", noFetch: true });
+
+    await svc.remove(info.path, true);
+
+    expect(calls).toHaveLength(1);
+    expect(samePath(calls[0]!.path, info.path)).toBe(true);
+    expect(samePath(calls[0]!.repoCwd, repo)).toBe(true);
+    // After the removal, not before: a failed `git worktree remove` must not
+    // cost a tree that is still there its rollback points.
+    expect(calls[0]!.existed).toBe(false);
+  });
+
+  it("keeps a tree's checkpoints when git refuses to remove it", async () => {
+    const calls: string[] = [];
+    svc.checkpoints = { forgetWorktree: async (path) => void calls.push(path) };
+    const info = await svc.create(project(), "feat/dirty", { base: "main", noFetch: true });
+    await writeFile(join(info.path, "keep.txt"), "uncommitted\n");
+
+    await expect(svc.remove(info.path)).rejects.toThrow();
+
+    expect(calls).toEqual([]);
   });
 
   it("surfaces untracked (newly-created) files as added entries", async () => {

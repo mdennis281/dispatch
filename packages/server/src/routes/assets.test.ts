@@ -71,6 +71,21 @@ describe("chat assets", () => {
     expect(got.rawPayload.length).toBe(Buffer.from(PNG_B64, "base64").length);
   });
 
+  it("answers 410 for an image retention expired, and still 404 for one that never existed", async () => {
+    // The transcript keeps naming an expired screenshot forever; 410 is what
+    // lets the client say "expired" instead of drawing a broken picture.
+    const chatId = await makeChat();
+    await store.writeChatAsset(chatId, "shot.png", Buffer.from(PNG_B64, "base64"));
+    expect(await store.expireChatAssets(chatId, ["shot.png"], 1234)).toEqual(["shot.png"]);
+
+    const gone = await app.inject({ method: "GET", url: `/api/chats/${chatId}/assets/shot.png` });
+    expect(gone.statusCode).toBe(410);
+    expect(gone.json()).toEqual({ error: "expired", expiredAt: 1234 });
+
+    const never = await app.inject({ method: "GET", url: `/api/chats/${chatId}/assets/nope.png` });
+    expect(never.statusCode).toBe(404);
+  });
+
   it("accepts an upload larger than Fastify's 1 MiB JSON default (bodyLimit raised)", async () => {
     const chatId = await makeChat();
     // ~2 MiB of bytes → base64 ~2.7 MiB, so the JSON body blows past Fastify's

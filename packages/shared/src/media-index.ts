@@ -34,6 +34,16 @@ export interface MediaScanRow {
   content?: unknown;
 }
 
+/**
+ * Days a TOOL-OUTPUT image is kept after the turn that produced it; the
+ * server's retention sweep deletes it after that. Images the human attached
+ * are never expired.
+ *
+ * Here rather than in the server so the client's "image expired" placeholder
+ * states the same number the sweep enforces.
+ */
+export const TOOL_IMAGE_RETENTION_DAYS = 30;
+
 /** Row kinds that can carry an image. Everything else is skipped unread. */
 export const MEDIA_ROW_KINDS: ReadonlySet<string> = new Set([
   "tool_use", // not media itself — it supplies the caption

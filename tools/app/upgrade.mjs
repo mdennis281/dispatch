@@ -109,6 +109,7 @@ import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { desktopPaths } from "./paths.mjs";
+import { pruneFailedPayloads } from "./failed-retention.mjs";
 import {
   assertNodeVersion,
   buildInto,
@@ -1127,6 +1128,10 @@ async function runSwap(p, args, ctx, { log, tell }) {
   const back = await restart(p, ctx, { after: ctx.at, log, tell });
 
   if (back.ok) {
+    // Only now, with the restored build serving: this deletes whole payloads,
+    // and doing it between the stop and the restart would lengthen the outage.
+    // The payload that just failed is the newest, so it is the one kept.
+    pruneFailedPayloads(p.failed, { log });
     writeState(p, { phase: "rolled-back", ok: false, failedPayload: failedDir });
     tell(
       `ROLLED BACK — the previous build is running again at http://127.0.0.1:${back.port}.\n` +
@@ -1547,6 +1552,12 @@ async function main() {
     rmSync(p.lock, { force: true });
   }
   if (!acquireLock(p)) throw new Error(`could not take the upgrade lock at ${p.lock}`);
+
+  // Every upgrade, not only the ones that fail: a failed payload has to age out
+  // even when nothing ever fails again, and an upgrade is the only thing that
+  // runs against the install root. Under the lock, so a concurrent swap's
+  // rollback is never deleting from the same directory.
+  pruneFailedPayloads(p.failed, { log });
 
   try {
     writeState(p, { phase: "staging", sha, subject, ref: args.ref, startedAt: new Date().toISOString() });

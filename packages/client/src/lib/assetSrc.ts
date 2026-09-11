@@ -69,6 +69,27 @@ interface Entry {
 const cache = new Map<string, Entry>();
 let clock = 0;
 
+/**
+ * A chat asset the server's retention sweep deleted — answered 410, never 404.
+ *
+ * Its own error type because it is the one failure that is NOT a failure to
+ * load: the transcript still names the file and always will, and the honest
+ * thing to draw is "this image expired", not a broken picture inviting a retry.
+ */
+export class AssetExpiredError extends Error {
+  constructor(url: string) {
+    super(`asset ${url} expired`);
+    this.name = "AssetExpiredError";
+  }
+}
+
+/**
+ * URLs known to be expired. Remembered, unlike every other failure, because an
+ * expiry is permanent: a long transcript remounts its thumbnails as it scrolls,
+ * and re-asking the server about each dead screenshot every time buys nothing.
+ */
+const expiredUrls = new Set<string>();
+
 function evict(): void {
   if (cache.size <= MAX_ENTRIES) return;
   const cold = [...cache.entries()]
@@ -98,6 +119,10 @@ export function assetSrcTarget(chatId: string, path: string): string {
 }
 
 function entryFor(url: string): Entry {
+  if (expiredUrls.has(url)) {
+    // Not cached: there are no bytes to pin, and nothing to evict.
+    return { refs: 0, usedAt: ++clock, promise: Promise.reject(new AssetExpiredError(url)) };
+  }
   const existing = cache.get(url);
   if (existing) {
     existing.usedAt = ++clock;
@@ -106,6 +131,10 @@ function entryFor(url: string): Entry {
   const entry: Entry = { refs: 0, usedAt: ++clock, promise: undefined as never };
   entry.promise = (async () => {
     const response = await sessionFetch(url);
+    if (response.status === 410) {
+      expiredUrls.add(url);
+      throw new AssetExpiredError(url);
+    }
     if (!response.ok) {
       // Name the asset: several are usually in flight at once, and a bare
       // status says nothing about which one failed.
@@ -142,6 +171,8 @@ export interface ResolvedAsset {
   /** Undefined while the bytes are still in flight. */
   src?: string;
   failed: boolean;
+  /** The failure was an expiry (see {@link AssetExpiredError}). Implies `failed`. */
+  expired?: boolean;
 }
 
 /**
@@ -174,7 +205,9 @@ export function useAssetSrc(
     setState((prev) => (prev.src === undefined && !prev.failed ? prev : { failed: false }));
     void entry.promise.then(
       (src) => { if (live) setState({ src, failed: false }); },
-      () => { if (live) setState({ failed: true }); },
+      (error: unknown) => {
+        if (live) setState({ failed: true, expired: error instanceof AssetExpiredError });
+      },
     );
     return () => {
       live = false;
@@ -189,4 +222,5 @@ export function useAssetSrc(
 export function __resetAssetCache(): void {
   for (const entry of cache.values()) if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
   cache.clear();
+  expiredUrls.clear();
 }

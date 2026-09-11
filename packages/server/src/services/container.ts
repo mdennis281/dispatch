@@ -47,6 +47,8 @@ import { CheckpointService } from "./checkpoint.js";
 import { WorktreeService } from "./worktree.js";
 import { WorktreeDetector } from "./worktree-detector.js";
 import { WorktreeReaper } from "./worktree-reaper.js";
+import { RetentionService } from "./retention.js";
+import { deleteChat } from "./chat-deletion.js";
 import { GitService } from "./git.js";
 import { CommitMessageService } from "./commit-message.js";
 import { RunnerService } from "./runner.js";
@@ -99,6 +101,7 @@ export interface ServiceOverrides {
   worktrees?: WorktreeService;
   worktreeDetector?: WorktreeDetector;
   worktreeReaper?: WorktreeReaper;
+  retention?: RetentionService;
   git?: GitService;
   commitMessage?: CommitMessageService;
   runner?: RunnerService;
@@ -151,6 +154,8 @@ export interface Services extends ServiceBase {
   worktreeDetector: WorktreeDetector;
   /** Removes worktrees whose branch has landed, so nobody has to remember to. */
   worktreeReaper: WorktreeReaper;
+  /** Deletes stale checkpoints, settled reviewer chats and old tool-output images. */
+  retention: RetentionService;
   /** Working-copy git (status/stage/commit/branch/stash) for the Source Control UI. */
   git: GitService;
   /** One-shot AI commit messages drafted from the staged diff. */
@@ -440,6 +445,27 @@ export function createServices(
           enabled: s.worktreeCleanup?.enabled ?? true,
           deleteBranch: s.worktreeCleanup?.deleteBranch ?? true,
         };
+      },
+    });
+  // Removing a worktree retires the checkpoints taken in it — the one removal
+  // path the reaper, the UI and the `worktree` tool all share.
+  worktrees.checkpoints = checkpoints;
+  // What nothing else ever deletes. `deleteChat` is the route's own full path,
+  // late-bound through `services` like `ensureSession` above.
+  const retention =
+    overrides.retention ??
+    new RetentionService({
+      store,
+      checkpoints,
+      deleteChat: (chatId) => deleteChat(services, chatId),
+      isBusy: (chatId) => {
+        const status = broker.getStatus(chatId);
+        return (
+          status === "running" ||
+          status === "waiting" ||
+          status === "awaiting-input" ||
+          status === "queued"
+        );
       },
     });
   // Removing a worktree hands its MCP ports back. Assigned here rather than
@@ -848,6 +874,7 @@ export function createServices(
     worktrees,
     worktreeDetector,
     worktreeReaper,
+    retention,
     git,
     commitMessage,
     runner,
@@ -1036,6 +1063,13 @@ export function createServices(
       }, TERMINAL_SWEEP_MS);
       terminalSweep.unref?.();
 
+      // Data retention: checkpoints on removed worktrees, settled reviewer
+      // chats, old tool-output images. Hourly, and NOT at boot like the terminal
+      // sweep above — its first pass on an install with a backlog deletes
+      // thousands of refs and reads transcripts, which has no business racing
+      // startup. See RETENTION_FIRST_SWEEP_MS.
+      retention.start();
+
       // Worktree cleanup, on two triggers that share one gate.
       //
       // The hourly sweep is the backstop — it catches trees whose owning chat
@@ -1068,6 +1102,10 @@ export function createServices(
       // Let an in-flight sweep land rather than tearing the store out from
       // under a removal that is halfway through updating the registry.
       await worktreeReaper.drain().catch(() => {});
+      // Same shape: disarm, then let an in-flight pass finish deleting rather
+      // than closing the store under a half-retired checkpoint batch.
+      retention.stop();
+      await retention.drain().catch(() => {});
       offMemoryMigrate?.();
       offMemoryMigrate = undefined;
       // Unsubscribe FIRST (so broker teardown's `done` events don't enqueue new
