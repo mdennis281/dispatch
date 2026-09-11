@@ -13,7 +13,7 @@
  * squash-merged branch in these tests is squash-merged the same way one is in
  * the repo this was written for.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execa } from "execa";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -213,6 +213,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   reaper.stop();
   store.close();
   // Windows holds handles on a directory git was just working in, so this
@@ -584,6 +585,74 @@ describe("WorktreeReaper.sweep", () => {
 
     await reaper.sweep();
     expect(notices.some((t) => t.includes("feat/announced"))).toBe(true);
+  });
+
+  gitIt("reaps a tree registered long ago, though its own list() just re-stamped it", async () => {
+    // The default grace window, on purpose — this is the pass as it runs in the app.
+    const hourly = new WorktreeReaper({ store, bus, worktrees });
+    const p = await makeBranchWorktree("feat/landed-long-ago");
+    await push(p, "feat/landed-long-ago");
+    await mergeToMain("feat/landed-long-ago");
+    // First sighting: the registry row is created, `createdAt` = `lastSeenAt` = now.
+    await worktrees.list(mkProject());
+
+    // An hour on. Only `Date` is faked, so git's subprocesses still run on real
+    // timers. Nothing touches the registry by hand: the sweep's own list() is
+    // what re-stamps `lastSeenAt`, which is the whole bug — every tree the sweep
+    // looked at had been "seen" that same instant, so every one read as too new.
+    const later = Date.now() + 60 * 60_000;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(later);
+
+    const c = (await hourly.plan({ cheapOnly: true })).candidates.find(
+      (x) => x.branch === "feat/landed-long-ago",
+    );
+    // Proof the trap was actually sprung, so this can't pass vacuously: the
+    // sighting stamp IS now, courtesy of the plan that just ran.
+    expect(c?.lastSeenAt).toBe(later);
+    expect(c?.blockers).toEqual([]);
+
+    expect((await hourly.sweep()).removed).toBe(1);
+    expect(existsSync(p)).toBe(false);
+  });
+
+  gitIt("gets further each pass, rather than re-probing the same dirty trees forever", async () => {
+    const capped = new WorktreeReaper({ store, bus, worktrees, graceMs: 0, sweepProbeCap: 2 });
+    const branches = ["feat/rot-a", "feat/rot-b", "feat/rot-c"];
+    // One git call per tree rather than the seven of a push-and-merge: a branch
+    // cut from main with no commits is an ancestor of the trunk, and its recorded
+    // merged PR vouches for the upstream it never had. At ~6s a spawn the full
+    // fixture would put three trees past this file's timeout.
+    for (const b of branches) {
+      await git(repo, "worktree", "add", "-b", b, join(wtRoot, b.replace(/\//g, "-")), "main");
+    }
+    await store.saveChat(
+      mkChat({
+        prs: branches.map((branch, i) => ({
+          number: 200 + i,
+          url: `u${i}`,
+          branch,
+          state: "merged" as const,
+        })),
+      }),
+    );
+
+    // Probe order is git's `worktree list` order, which is readdir order and so
+    // differs by filesystem. Read it rather than assume it, then dirty exactly
+    // the two trees a fixed-order pass would spend its whole budget on.
+    const order = (await capped.plan({ cheapOnly: true })).candidates
+      .filter((c) => c.blockers.length === 0)
+      .map((c) => c.path);
+    expect(order).toHaveLength(3);
+    await writeFile(join(order[0]!, "wip.txt"), "not done\n");
+    await writeFile(join(order[1]!, "wip.txt"), "not done\n");
+
+    expect((await capped.sweep()).removed).toBe(0);
+    // The second pass must spend its budget on the tree the first never reached.
+    expect((await capped.sweep()).removed).toBe(1);
+    expect(existsSync(order[2]!)).toBe(false);
+    expect(existsSync(order[0]!)).toBe(true);
+    expect(existsSync(order[1]!)).toBe(true);
   });
 
   gitIt("does nothing, and says nothing, when there is nothing to do", async () => {

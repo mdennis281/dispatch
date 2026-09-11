@@ -73,10 +73,11 @@ import type { WorktreeService } from "./worktree.js";
 /* --------------------------------------------------------------- tunables */
 
 /**
- * How long a tree must have gone untouched before the unattended sweep will
- * consider it. Not a safety gate so much as a courtesy one: the liveness checks
- * already cover a chat that is actually working, and this covers the seam where
- * a tree was created seconds ago by something that hasn't reported itself yet.
+ * How long after its registry row was created a tree must wait before the
+ * unattended sweep will consider it. Not a safety gate so much as a courtesy
+ * one: the liveness checks already cover a chat that is actually working, and
+ * this covers the seam where a tree was created seconds ago by something that
+ * hasn't reported itself yet.
  */
 const DEFAULT_GRACE_MS = 15 * 60_000;
 
@@ -200,6 +201,23 @@ export class WorktreeReaper {
   private readonly probeTimeoutMs: number;
   private readonly policy?: () => Promise<{ enabled: boolean; deleteBranch: boolean }>;
 
+  /**
+   * `pathKey` → when that tree was last probed, as a position in {@link probeSeq}.
+   *
+   * This is what makes a capped pass get further than the one before it. The
+   * budget used to be the first N survivors in `git worktree list` order, and
+   * that order is identical every pass, so twelve dirty trees at the front of
+   * the list took the whole budget every hour and nothing behind them was ever
+   * looked at. Probing least-recently-probed first means a backlog gets fully
+   * covered before any tree is looked at twice.
+   *
+   * In memory on purpose. Losing it on restart costs one pass that starts from
+   * the front again, and that's not worth a table.
+   */
+  private readonly lastProbed = new Map<string, number>();
+  /** A counter, not a clock, so two probes in the same millisecond still have an order. */
+  private probeSeq = 0;
+
   /** Serializes sweeps so an hourly pass and a chat-idle pass can't race. */
   private chain: Promise<unknown> = Promise.resolve();
   private timer?: ReturnType<typeof setInterval>;
@@ -283,8 +301,21 @@ export class WorktreeReaper {
       return { candidates, truncated: false, probed: 0 };
     }
 
-    // Only trees that cleared every cheap gate are worth ~35s each.
-    const toProbe = candidates.filter((c) => c.blockers.length === 0);
+    // An unscoped plan saw every tree there is, so a remembered probe for a path
+    // it didn't see belongs to a tree that's gone. Scoped plans can't tell that.
+    if (!opts.projectId && !wanted) {
+      const seen = new Set(candidates.map((c) => pathKey(c.path)));
+      for (const key of this.lastProbed.keys()) {
+        if (!seen.has(key)) this.lastProbed.delete(key);
+      }
+    }
+
+    // Only trees that cleared every cheap gate are worth ~35s each, and the ones
+    // probed longest ago (or never) go first; see `lastProbed`. `sort` is
+    // stable, so trees that tie keep their list order.
+    const toProbe = candidates
+      .filter((c) => c.blockers.length === 0)
+      .sort((a, b) => this.probedAt(a.path) - this.probedAt(b.path));
     const cap = opts.probeCap ?? this.sweepProbeCap;
     const budget = toProbe.slice(0, cap === Infinity ? undefined : cap);
     await this.probeAll(budget);
@@ -344,11 +375,18 @@ export class WorktreeReaper {
     }
     if (live.runnerPaths.some((p) => samePath(p, path))) blockers.push("runner-live");
 
-    const touched = tree.lastSeenAt ?? tree.createdAt;
+    // `createdAt`, NOT `lastSeenAt`. `lastSeenAt` is a sighting stamp: every
+    // `list()` re-stamps it once it's 5 minutes stale, and this plan's own
+    // `listTrees()` is one of those lists, so it was never more than ~5 minutes
+    // old by the time it got here. Read as "touched", it kept every tree inside
+    // a 15-minute window forever, and the hourly sweep reaped nothing at all.
+    // "Worked in recently" isn't this gate's job anyway. The liveness gates
+    // cover a session standing in the tree, and `dirty`/`unpushed` cover work
+    // left in it. What's left is the creation seam this window exists for.
     if (
       !opts.ignoreGrace &&
-      touched !== undefined &&
-      this.now() - touched < this.graceMs
+      tree.createdAt !== undefined &&
+      this.now() - tree.createdAt < this.graceMs
     ) {
       blockers.push("too-new");
     }
@@ -399,6 +437,7 @@ export class WorktreeReaper {
         const i = next++;
         const c = candidates[i];
         if (!c) return;
+        this.lastProbed.set(pathKey(c.path), ++this.probeSeq);
         const blocker = await this.probe(c.path);
         c.probed = true;
         if (blocker) c.blockers.push(blocker);
@@ -410,6 +449,11 @@ export class WorktreeReaper {
         worker,
       ),
     );
+  }
+
+  /** Where `path` sits in the probe order; a tree never probed sorts first. */
+  private probedAt(path: string): number {
+    return this.lastProbed.get(pathKey(path)) ?? 0;
   }
 
   /**
