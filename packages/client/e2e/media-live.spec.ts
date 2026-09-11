@@ -142,6 +142,13 @@ async function seed(dir: string): Promise<{ chatId: string }> {
     return (await res.json()) as Record<string, unknown>;
   };
 
+  // Tell the server first run is over. A fresh data dir is a new install, and a
+  // new install gets the setup wizard INSTEAD of the shell — so since the wizard
+  // landed, every test in this file stopped at "Protect Dispatch" waiting for a
+  // "Connected" pill that was never rendered. The wizard's own path is
+  // shell-live's to walk; this spec is about what the shell draws.
+  await post("/api/setup/complete", {});
+
   const project = await post("/api/projects", {
     name: PROJECT_NAME,
     repoPath: join(dir, "repo"),
@@ -535,4 +542,111 @@ test("the viewer's toolbar clears the window controls overlay", async ({ page })
   // tooltip, shortcut hint and all — "Close  (Esc)".
   await viewer.getByRole("button", { name: /^Close/ }).click();
   await expect(viewer).toBeHidden();
+});
+
+/**
+ * In the installed window the top bar IS the title bar — and still works.
+ *
+ * The bar used to answer the overlay with an extra 33px drag strip above the
+ * real row, holding only the logo. It now moves into that strip, which puts
+ * three things at risk that nothing else in the repo can see, because each one
+ * only exists in an installed window:
+ *
+ *   - a control under the window buttons: painted, and never pressable;
+ *   - a control left inside the DRAG region: the OS takes the pointer first, so
+ *     it is lit and inert — `app-region` is readable from computed style, which
+ *     is the only reason this is checkable at all;
+ *   - no drag region left: a title bar you cannot move the window by.
+ *
+ * `display-mode` is not something CDP can emulate, so the overlay is switched on
+ * by answering `matchMedia` before the bundle runs (see `useWindowControlsOverlay`),
+ * and the geometry is injected as above. The controls slab here is the REAL
+ * Windows one, ~262px — Chromium's overlay toggle, extensions and app menu beside
+ * the system three — because the bar's width steps are keyed to what is left of
+ * the strip, and the 138 above would make every width look roomier than it is.
+ */
+const WCO_CHROMIUM_CONTROLS_W = 262;
+
+test("the top bar moves into the window controls overlay and stays usable", async ({ page }) => {
+  await page.addInitScript(() => {
+    const real = window.matchMedia.bind(window);
+    window.matchMedia = (q: string) =>
+      q.includes("window-controls-overlay")
+        ? ({
+            matches: true,
+            media: q,
+            addEventListener() {},
+            removeEventListener() {},
+            addListener() {},
+            removeListener() {},
+            onchange: null,
+            dispatchEvent: () => false,
+          } as unknown as MediaQueryList)
+        : real(q);
+  });
+  await openChat(page);
+  await page.addStyleTag({
+    content: `:root {
+      --cm-titlebar-h: ${WCO_STRIP_H}px;
+      --cm-titlebar-x: 0px;
+      --cm-titlebar-w: calc(100% - ${WCO_CHROMIUM_CONTROLS_W}px);
+    }`,
+  });
+
+  // Down to the `md` floor: every step of the bar's width ladder, including the
+  // 1095px window it was tuned against.
+  for (const width of [1440, 1095, 960, 800]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForTimeout(150);
+
+    const report = await page.evaluate(
+      ({ stripH, controlsW }) => {
+        const header = document.querySelector("header")!;
+        const vw = document.documentElement.clientWidth;
+        const region = (el: Element) => getComputedStyle(el).getPropertyValue("-webkit-app-region");
+        const name = (el: Element) => el.getAttribute("aria-label") ?? el.tagName;
+        const controls = Array.from(header.querySelectorAll("button, a"))
+          .map((el) => ({ el, r: el.getBoundingClientRect() }))
+          .filter(({ r }) => r.width > 0);
+
+        // Largest run of the strip with nothing pressable in it: that is what you
+        // actually get to grab the window by.
+        const edges = controls.map(({ r }) => [r.left, r.right]).sort((a, b) => a[0]! - b[0]!);
+        let gap = 0;
+        for (let i = 1; i < edges.length; i += 1) gap = Math.max(gap, edges[i]![0]! - edges[i - 1]![1]!);
+
+        return {
+          // One row: the strip plus the header's hairline — not strip + a 52px row.
+          headerH: Math.round(header.getBoundingClientRect().height),
+          barRegion: region(header.querySelector(".cm-titlebar")!),
+          underButtons: controls
+            .filter(({ r }) => r.right > vw - controlsW && r.top < stripH)
+            .map(({ el }) => name(el)),
+          stillDraggable: controls.filter(({ el }) => region(el) !== "no-drag").map(({ el }) => name(el)),
+          gapAtLeast64: gap >= 64,
+          settingsReachable: controls.some(({ el }) => name(el) === "Settings"),
+        };
+      },
+      { stripH: WCO_STRIP_H, controlsW: WCO_CHROMIUM_CONTROLS_W },
+    );
+
+    expect(report, `at ${width}px`).toEqual({
+      headerH: WCO_STRIP_H + 1,
+      barRegion: "drag",
+      underButtons: [],
+      stillDraggable: [],
+      gapAtLeast64: true,
+      settingsReachable: true,
+    });
+    await page.screenshot({
+      path: join(artifacts, `titlebar-wco-${width}.png`),
+      clip: { x: 0, y: 0, width, height: 80 },
+    });
+  }
+
+  // And it is a real control, not a picture of one: the palette opens from the
+  // strip. (A regex, because an `IconButton`'s name is its tooltip — at 800px the
+  // box has collapsed to the icon, whose name carries the ⌘K hint.)
+  await page.getByRole("button", { name: /^Search or run a command/ }).first().click();
+  await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
 });

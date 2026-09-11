@@ -460,7 +460,7 @@
   }
 
   /*
-   * The window's drag handle, in the space the title bar used to have.
+   * The top bar, when it is the window's title bar.
    *
    * Two boxes, because the strip and the CONTENT of the strip want different
    * widths. The outer one spans the whole window so the header's background is
@@ -474,27 +474,53 @@
    * the moment anything above it grows a horizontal padding the arithmetic is
    * quietly wrong by that much. Absolute lengths from the UA can't drift.
    *
+   * The height has a floor because `titlebar-area-height` is in CSS pixels, and
+   * page zoom divides it: at 150% the ~33px strip reports 22, shorter than the
+   * 24px controls now riding in it, which would then overhang the hairline
+   * below. A row taller than the band only means a few empty pixels under the
+   * window buttons — the area box is still clear of them sideways.
+   *
    * `app-region: drag` is what buys the behaviour: not just moving the window,
    * but double-click to maximise, right-click for the system menu, and snapping
-   * to a screen edge — everything a real title bar does, which is the whole
-   * argument for spending a row on this. Both spellings, because the unprefixed
-   * property is the standardisation of Chromium's `-webkit-` one and is not yet
-   * documented as shipped. Draggability INHERITS, and it eats clicks and text
-   * selection with it, so anything interactive placed in here would need
-   * `app-region: no-drag` — today nothing is, deliberately.
+   * to a screen edge — everything a real title bar does. Both spellings, because
+   * the unprefixed property is the standardisation of Chromium's `-webkit-` one
+   * and is not yet documented as shipped.
    */
   .cm-titlebar {
     position: relative;
-    height: var(--cm-titlebar-h);
+    height: max(var(--cm-titlebar-h), 1.75rem);
     -webkit-app-region: drag;
     app-region: drag;
   }
+  /*
+   * …and the holes in it.
+   *
+   * A drag region covers everything inside it, and the OS takes the pointer
+   * there before the page ever sees it: no click, no hover, no tooltip. So with
+   * the bar's controls moved up into the strip, every one of them would have been
+   * a painted picture of a button — present, lit, and inert — in the installed
+   * window only, which is the one place none of the test harnesses can reach.
+   *
+   * Carved out here by ELEMENT rather than by a class on each control, so the
+   * next button anyone adds to the top bar is pressable without its author
+   * knowing this rule exists. `.cm-no-drag` is for the rare non-control that
+   * still needs the pointer — something whose only affordance is a `title`.
+   */
+  .cm-titlebar :where(button, a, input, select, textarea, [role="button"], .cm-no-drag) {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+  }
+  /* `overflow: hidden` is the last resort behind TopBar's width ladder, and the
+   * reason it is here at all: a row that outgrows this box would otherwise run
+   * on under the window buttons, where a control is painted but can never be
+   * pressed. Cut short at the edge is the better way to be wrong. */
   .cm-titlebar-area {
     position: absolute;
     top: 0;
     bottom: 0;
     left: var(--cm-titlebar-x);
     width: var(--cm-titlebar-w);
+    overflow: hidden;
   }
 
   .cm-hairline-b {

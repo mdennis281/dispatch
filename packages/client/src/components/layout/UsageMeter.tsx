@@ -118,7 +118,7 @@ export function UsageMeter() {
         onClick={openNow}
         aria-label={`${usage.provider === "codex" ? "Codex" : "Claude"} usage`}
         className={cn(
-          "flex items-center gap-1.5 rounded-md border border-line bg-panel-2/60 px-2 py-1",
+          "flex h-6 items-center gap-1.5 rounded-md border border-line bg-panel-2/60 px-2",
           "transition-colors hover:border-line-strong",
           usage.stale && "opacity-70",
         )}
