@@ -1257,7 +1257,13 @@ export class Store {
 
   /* --------------------------------------------------------- worktrees */
 
-  /** How stale a worktree's `lastSeenAt` may get before a sighting rewrites it. */
+  /**
+   * How stale a worktree's `lastSeenAt` may get before a sighting rewrites it.
+   *
+   * Because of this, `lastSeenAt` is never much older than the last `list()`,
+   * so it can't tell you how long a tree has sat idle. WorktreeReaper's grace
+   * gate once read it that way and blocked every tree, forever.
+   */
   private static readonly LAST_SEEN_REFRESH_MS = 5 * 60_000;
 
   /** Upsert by path, preserving `seq` (and therefore roster order). */
