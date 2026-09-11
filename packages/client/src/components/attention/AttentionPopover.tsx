@@ -92,7 +92,11 @@ export function AttentionPopover() {
           )}
         >
           <Inbox />
-          <span>Attention</span>
+          {/* `sr-only` rather than gone when a narrow window title bar needs the
+              room (see TopBar): the word is still this button's accessible name,
+              and the inbox glyph plus the badge still say what it holds. Inert
+              anywhere but the title bar. */}
+          <span className="@max-[52rem]/titlebar:sr-only">Attention</span>
           <Badge count={blocking} tone="warn" />
         </button>
       )}

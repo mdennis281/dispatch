@@ -202,18 +202,32 @@ export function ResourceMeter() {
         onClick={openNow}
         aria-label={`System resources: CPU ${pct(system.cpuPct)}, memory ${Math.round(memPct)}%`}
         className={cn(
-          "flex items-center gap-1.5 rounded-md border border-line bg-panel-2/60 px-2 py-1",
+          "flex h-6 items-center gap-1.5 rounded-md border border-line bg-panel-2/60 px-2",
           "transition-colors hover:border-line-strong",
         )}
       >
         <Cpu className="size-3 shrink-0 text-faint" />
-        <SplitBar size="xs" className="w-6" usedPct={system.cpuPct ?? 0} tone={CPU_BAR} />
+        {/* The bars are the first thing a narrow window title bar gives up (see
+            TopBar): each one repeats the figure printed right beside it, and
+            together they are 60px the window's drag area needs more. Inert
+            anywhere but the title bar. */}
+        <SplitBar
+          size="xs"
+          className="w-6 @max-[56rem]/titlebar:hidden"
+          usedPct={system.cpuPct ?? 0}
+          tone={CPU_BAR}
+        />
         <span className="cm-mono text-xs font-semibold tabular-nums text-secondary">
           {pct(system.cpuPct)}
         </span>
         <span className="mx-0.5 h-3 w-px shrink-0 bg-line" />
         <MemoryStick className="size-3 shrink-0 text-faint" />
-        <SplitBar size="xs" className="w-6" usedPct={memPct} tone={t.bar} />
+        <SplitBar
+          size="xs"
+          className="w-6 @max-[56rem]/titlebar:hidden"
+          usedPct={memPct}
+          tone={t.bar}
+        />
         <span className={cn("cm-mono text-xs font-semibold tabular-nums", t.text)}>
           {Math.round(memPct)}%
         </span>
