@@ -34,6 +34,10 @@ export function clampSelectionToMessage(root: HTMLElement): void {
   const touched: Range[] = [];
   for (const body of root.querySelectorAll(`[${COPY_BODY_ATTR}]`)) {
     if (!range.intersectsNode(body)) continue;
+    // Bodies nest (a ShellRunGroup's RowShell holds an embedded DispatchToolCard,
+    // itself a RowShell). The row is the message, so only the outermost counts —
+    // otherwise the pair reads as two messages and the clamp never fires there.
+    if (body.parentElement?.closest(`[${COPY_BODY_ATTR}]`)) continue;
     const part = intersect(range, body);
     if (part.toString().trim()) touched.push(part);
   }
