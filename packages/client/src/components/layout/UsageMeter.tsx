@@ -11,7 +11,8 @@ import { HoverCard } from "../ui/HoverCard.js";
 import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { Spinner } from "../ui/Spinner.js";
 import { SplitBar } from "../ui/SplitBar.js";
-import { GAUGE_TRIGGER, Gauge } from "./Gauge.js";
+import { windowTag } from "../../lib/usageWindow.js";
+import { BAR_W, GAUGE_LINE_TRIGGER, GAUGE_TRIGGER, Gauge, type GaugeLayout } from "./Gauge.js";
 
 /** Escalating tone by utilization — accent (fine) → warn → danger. */
 function tone(pct: number): { text: string; bar: string } {
@@ -54,6 +55,37 @@ function WindowRow({
   );
 }
 
+/** One window as a gauge: tag, bar, percent. */
+function WindowGauge({
+  tag,
+  win,
+  layout,
+  className,
+}: {
+  tag: string;
+  win: UsageWindow;
+  layout: GaugeLayout;
+  className?: string;
+}) {
+  const t = tone(win.percent);
+  return (
+    <Gauge
+      label={tag}
+      value={`${Math.round(win.percent)}%`}
+      tone={t.text}
+      layout={layout}
+      className={className}
+    >
+      <SplitBar
+        size={layout === "stacked" ? "md" : "xs"}
+        className={BAR_W[layout]}
+        usedPct={win.percent}
+        tone={t.bar}
+      />
+    </Gauge>
+  );
+}
+
 function statusLine(usage: UsageSnapshot | undefined, now: number): string {
   if (!usage) return "loading…";
   if (usage.error === "rate_limited") return "rate-limited · showing last";
@@ -63,15 +95,17 @@ function statusLine(usage: UsageSnapshot | undefined, now: number): string {
 }
 
 /**
- * Header usage meter: the 5-hour window as a gauge in the status line; on hover
- * a panel with the 5h + weekly windows, reset countdowns, and a manual refresh.
+ * Header usage meter: the provider's primary window as a gauge in the top bar;
+ * on hover a panel with every window it reports, reset countdowns, and a refresh.
  * Claude's numbers are polled once server-side (every 5 min) and pushed over the
  * bus; other providers are read when asked for.
  *
- * The TRIGGER shows one window, not both. Two stacked 2px tracks in a 33px
- * title bar is a picture of a chart rather than a reading, and the weekly
- * figure is not one anybody acts on hour to hour — it belongs in the panel,
- * where it has room for its own label and reset countdown.
+ * The TRIGGER shows ONE window, in both layouts. A second, weekly bar was tried
+ * on the title bar's second line and taken out: providers do not share a pair
+ * of windows — Claude has a 5-hour session and a week, Codex reports whatever
+ * lengths its rate limits carry, and a provider may have only one — so a
+ * permanent "WK" row is a slot shaped like one provider's plan. The card lists
+ * every window the provider actually has, under its own name.
  *
  * The gauge follows the provider you are working in (the active chat's, else
  * the app default), but the card can show EVERY installed provider: running a
@@ -80,7 +114,7 @@ function statusLine(usage: UsageSnapshot | undefined, now: number): string {
  * opens a portalled `Popover`, and clicking into a second portal blurs this
  * card's panel — the exact dismissal `blurLeavesCard` exists to prevent.
  */
-export function UsageMeter() {
+export function UsageMeter({ layout }: { layout: GaugeLayout }) {
   const harness = useUsage((s) => s.harness);
   const byProvider = useUsage((s) => s.byProvider);
   const refreshing = useUsage((s) => s.refreshing);
@@ -132,8 +166,9 @@ export function UsageMeter() {
 
   // The gauge shows the 5-hour window (falls back to weekly if only that exists).
   const primary = usage.fiveHour ?? usage.sevenDay!;
-  const primaryLabel = harness === "codex" ? "usage" : usage.fiveHour ? "5h" : "7d";
-  const t = tone(primary.percent);
+  const primaryTag = usage.fiveHour
+    ? windowTag(usage.primaryLabel, "primary")
+    : windowTag(usage.secondaryLabel, "secondary");
 
   const shown = byProvider[viewing];
   const multi = providers.length > 1;
@@ -151,7 +186,10 @@ export function UsageMeter() {
       // Stale means the last refresh failed and these numbers are the previous
       // ones; the panel says so in words, and the whole gauge dims so you can
       // see it without opening anything.
-      className={cn(GAUGE_TRIGGER, usage.stale && "opacity-70")}
+      className={cn(
+        layout === "stacked" ? GAUGE_LINE_TRIGGER : GAUGE_TRIGGER.inline,
+        usage.stale && "opacity-70",
+      )}
       card={() => (
         <>
           <div
@@ -204,9 +242,7 @@ export function UsageMeter() {
         </>
       )}
     >
-      <Gauge label={primaryLabel} value={`${Math.round(primary.percent)}%`} tone={t.text}>
-        <SplitBar size="xs" className="w-7" usedPct={primary.percent} tone={t.bar} />
-      </Gauge>
+      <WindowGauge tag={primaryTag} win={primary} layout={layout} />
     </HoverCard>
   );
 }

@@ -229,12 +229,12 @@
      * between a header and a header with a close button through it.
      *
      * `-h` is OS- and DPI-determined (~33px at 100% on Windows) and cannot be
-     * set by us, which is exactly why the drag row is sized from it rather than
-     * from a number that looked right on one machine.
+     * set by us, which is exactly why the title bar's first line is sized from
+     * it rather than from a number that looked right on one machine.
      *
      * The fallbacks are the overlay-absent case and they are what makes these
-     * inert everywhere else: 0 height, so `.cm-titlebar` collapses; a full-width
-     * area starting at 0, so nothing gets indented. Note the `0px` rather than
+     * inert everywhere else: 0 height, and a full-width area starting at 0, so
+     * nothing gets indented. Note the `0px` rather than
      * `0` — these are `calc()`'d and compared as lengths.
      */
     --cm-titlebar-h: env(titlebar-area-height, 0px);
@@ -462,33 +462,19 @@
   /*
    * The top bar, when it is the window's title bar.
    *
-   * Two boxes, because the strip and the CONTENT of the strip want different
-   * widths. The outer one spans the whole window so the header's background is
-   * continuous behind the window controls — Chromium paints those buttons on a
-   * slab of the manifest's `theme_color`, and a strip that stopped short of them
-   * would put a visible seam a few pixels in from the corner. The inner one is
-   * clipped to `titlebar-area-*`, which is where drawing is actually allowed.
-   *
-   * Positioned with `left`/`width` off the env vars rather than by subtracting a
-   * gutter from `100%`: a percentage resolves against the containing block, so
-   * the moment anything above it grows a horizontal padding the arithmetic is
-   * quietly wrong by that much. Absolute lengths from the UA can't drift.
-   *
-   * The height has a floor because `titlebar-area-height` is in CSS pixels, and
-   * page zoom divides it: at 150% the ~33px strip reports 22, shorter than the
-   * 24px controls now riding in it, which would then overhang the hairline
-   * below. A row taller than the band only means a few empty pixels under the
-   * window buttons — the area box is still clear of them sideways.
+   * The WHOLE header is the drag region, both lines of it — not just the band
+   * the OS reserves. With the overlay up there is no title bar at all, so the
+   * header IS one, and a title bar you can only grab by its top 33px while the
+   * 36px under it ignores you is a title bar with a dead zone in it.
    *
    * `app-region: drag` is what buys the behaviour: not just moving the window,
    * but double-click to maximise, right-click for the system menu, and snapping
-   * to a screen edge — everything a real title bar does. Both spellings, because
-   * the unprefixed property is the standardisation of Chromium's `-webkit-` one
-   * and is not yet documented as shipped.
+   * to a screen edge. Both spellings, because the unprefixed property is the
+   * standardisation of Chromium's `-webkit-` one and is not yet documented as
+   * shipped.
    */
   .cm-titlebar {
     position: relative;
-    height: max(var(--cm-titlebar-h), 1.75rem);
     -webkit-app-region: drag;
     app-region: drag;
   }
@@ -496,10 +482,10 @@
    * …and the holes in it.
    *
    * A drag region covers everything inside it, and the OS takes the pointer
-   * there before the page ever sees it: no click, no hover, no tooltip. So with
-   * the bar's controls moved up into the strip, every one of them would have been
-   * a painted picture of a button — present, lit, and inert — in the installed
-   * window only, which is the one place none of the test harnesses can reach.
+   * there before the page ever sees it: no click, no hover, no tooltip. So every
+   * control in the bar would be a painted picture of a button — present, lit,
+   * and inert — in the installed window only, which is the one place none of
+   * the test harnesses can reach.
    *
    * Carved out here by ELEMENT rather than by a class on each control, so the
    * next button anyone adds to the top bar is pressable without its author
@@ -510,17 +496,45 @@
     -webkit-app-region: no-drag;
     app-region: no-drag;
   }
-  /* `overflow: hidden` is the last resort behind TopBar's width ladder, and the
-   * reason it is here at all: a row that outgrows this box would otherwise run
-   * on under the window buttons, where a control is painted but can never be
-   * pressed. Cut short at the edge is the better way to be wrong. */
-  .cm-titlebar-area {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: var(--cm-titlebar-x);
-    width: var(--cm-titlebar-w);
-    overflow: hidden;
+  /*
+   * The two-line title bar's geometry.
+   *
+   * LINE ONE is the band the OS paints its buttons in, so it is sized from
+   * `titlebar-area-height` rather than from a number that looked right on one
+   * machine. It has a floor because that height is in CSS pixels and page zoom
+   * divides it — at 150% the ~33px band reports 22, shorter than a 24px control.
+   * LINE TWO is ours outright. Everything that is one line tall in the bar is
+   * sized off these two, so a reading on line one is centred on the window
+   * buttons and one on line two on the icons under them.
+   *
+   * `padding-left` is the macOS case: there the buttons are the traffic lights,
+   * top-LEFT, and `titlebar-area-x` is how far in the drawable band starts. The
+   * lockup spans both lines, so it has to start there too. 0 on Windows.
+   */
+  .cm-topbar-tall {
+    --tb-l1: max(var(--cm-titlebar-h), 1.75rem);
+    --tb-l2: 2.25rem;
+    height: calc(var(--tb-l1) + var(--tb-l2));
+    padding-left: var(--cm-titlebar-x);
+  }
+  /*
+   * The column under the window buttons, at least as wide as they are.
+   *
+   * On Windows the buttons take the top-RIGHT corner, so the only things that
+   * may sit at the right end of the bar are one line tall and live on line two.
+   * This column is where they go, and its minimum width is what keeps the
+   * two-line readings to its left from ever sliding under the buttons as the
+   * window narrows — they are hidden by container query first, and clipped by
+   * the header's `overflow: hidden` as a last resort, rather than painted where
+   * they cannot be pressed.
+   *
+   * `100vw` rather than `100%`: the `titlebar-area-*` values are viewport
+   * lengths, and a percentage here would resolve against this column's own
+   * containing block. The extra 1rem is air between the readings and the
+   * buttons. On macOS the slab is on the other side and this reduces to 1rem.
+   */
+  .cm-topbar-slab {
+    min-width: calc(100vw - var(--cm-titlebar-x) - var(--cm-titlebar-w) + 1rem);
   }
 
   .cm-hairline-b {

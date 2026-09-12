@@ -92,6 +92,15 @@ export interface HoverCardProps {
    * move in here — the hover behaviour is generic, the polling is not.
    */
   onOpenChange?: (open: boolean) => void;
+  /**
+   * How long the POINTER has to rest on the trigger before the panel opens.
+   *
+   * Zero for the gauges, which you point at on purpose. Not zero for the brand
+   * lockup: it is the top-left corner of the app, which the pointer crosses on
+   * its way to the sidebar all day, and a 252px card flashing open on every pass
+   * is noise. Click and keyboard focus ignore it — those are always deliberate.
+   */
+  openDelay?: number;
   /** Classes for the trigger button. */
   className?: string;
   children: ReactNode;
@@ -132,6 +141,7 @@ export function HoverCard({
   card,
   width,
   onOpenChange,
+  openDelay = 0,
   className,
   children,
 }: HoverCardProps) {
@@ -140,6 +150,7 @@ export function HoverCard({
   const btnRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Was this opened by a keyboard? Only then does the panel take focus. */
   const byKeyboard = useRef(false);
 
@@ -151,20 +162,34 @@ export function HoverCard({
     [onOpenChange],
   );
 
-  const openNow = useCallback(() => {
+  const clearTimers = useCallback(() => {
     if (closeTimer.current) clearTimeout(closeTimer.current);
+    if (openTimer.current) clearTimeout(openTimer.current);
+  }, []);
+
+  const openNow = useCallback(() => {
+    clearTimers();
     change(true);
-  }, [change]);
+  }, [change, clearTimers]);
+
+  // Re-entering an OPEN card must not wait out the delay again: that would be
+  // the pointer coming back from the panel's gap, and the close it armed on the
+  // way out has to be cancelled now, not in 250ms.
+  const openSoon = useCallback(() => {
+    if (!openDelay || open) return openNow();
+    clearTimers();
+    openTimer.current = setTimeout(() => change(true), openDelay);
+  }, [openDelay, open, openNow, change, clearTimers]);
 
   const closeSoon = useCallback(() => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
+    clearTimers();
     closeTimer.current = setTimeout(() => change(false), CLOSE_GRACE_MS);
-  }, [change]);
+  }, [change, clearTimers]);
 
   const closeNow = useCallback(() => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
+    clearTimers();
     change(false);
-  }, [change]);
+  }, [change, clearTimers]);
 
   // Glued to the trigger while open. `scroll` in CAPTURE so a scroll in any
   // container the trigger sits in reaches this, not just the window's.
@@ -225,10 +250,10 @@ export function HoverCard({
     if (panel.querySelector(FOCUSABLE)) panel.focus();
   }, [open, pos]);
 
-  useEffect(() => () => void (closeTimer.current && clearTimeout(closeTimer.current)), []);
+  useEffect(() => clearTimers, [clearTimers]);
 
   return (
-    <div className="relative inline-flex" onMouseEnter={openNow} onMouseLeave={closeSoon}>
+    <div className="relative inline-flex" onMouseEnter={openSoon} onMouseLeave={closeSoon}>
       <button
         ref={btnRef}
         type="button"
