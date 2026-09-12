@@ -110,6 +110,7 @@ function isHumanWait(n: string, tool: string | undefined): boolean {
     n === "exitplanmode" ||
     tool === "ask_user" ||
     tool === "request_exemption" ||
+    tool === "request_human_review" ||
     tool === "spawn_chat"
   );
 }

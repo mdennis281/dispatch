@@ -241,9 +241,12 @@ export function buildWorkflowDirective(
           `project has auto-merge on, so finishing a task means the work is merged, not that ` +
           `a PR link is waiting for someone to click.`,
         "",
-        `   **Unless the user said otherwise.** If they asked you to leave the PR open, to ` +
-          `let them look first, to "just open a PR", or not to merge — don't. Say the PR is ` +
-          `ready and stop. Same if the PR carries a \`hold\` label: someone parked it ` +
+        `   **Unless the user said otherwise.** If they asked to look first or not to merge ` +
+          `before they've seen it — don't merge. Put it in front of them with ` +
+          `\`mcp__dispatch-confirm__request_human_review\` (screenshots, or a running preview ` +
+          `from \`run_subapp\`) and act on the verdict it returns; do the same when YOU aren't ` +
+          `sure the change is right. If they only said to "just open a PR" or leave it open, ` +
+          `say the PR is ready and stop. A PR carrying a \`hold\` label was parked ` +
           `deliberately, so leave it (and never remove the label to get around that).`,
       );
     } else {

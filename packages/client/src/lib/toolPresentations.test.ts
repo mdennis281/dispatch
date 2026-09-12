@@ -35,6 +35,14 @@ describe("tool presentation handlers", () => {
       activity: "Waiting for an answer",
       category: "chat",
     });
+    expect(
+      toolPresentation(tool("mcp__dispatch-confirm__request_human_review", { title: "New card" })),
+    ).toMatchObject({
+      kind: "dispatch",
+      title: "Human review",
+      activity: "Waiting for your review",
+      category: "chat",
+    });
     expect(toolPresentation(tool("mcp__dispatch-session__wait", { seconds: 10 }))).toMatchObject({
       kind: "dispatch",
       title: "Wait",

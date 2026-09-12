@@ -54,6 +54,7 @@ const nullBroker: ManagerMcpBroker = {
   compact: () => {},
   markPrWatched: () => {},
   askUser: async () => ({ status: "declined" }),
+  requestHumanReview: async () => ({ status: "dismissed" }),
 };
 
 function chatFor(id: string, projectId = "p1"): Chat {

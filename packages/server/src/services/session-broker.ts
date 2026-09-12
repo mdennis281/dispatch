@@ -27,7 +27,7 @@
  */
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { basename, extname, isAbsolute, join, resolve as resolvePath } from "node:path";
-import { realpath, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { McpPortLeaseService, resolveMcpServers } from "./mcp-session.js";
 import { buildBrowserMcpServers, effectiveSubApps } from "./mcp/browser-mcp.js";
 import { spawnWithPid } from "../harness/claude/spawn.js";
@@ -36,6 +36,7 @@ import { McpPrewarmService } from "./mcp-prewarm.js";
 import { tmpdir } from "node:os";
 import {
   parseAssetReference,
+  pathFromFileUri,
   isPathWithinRoots,
   approxBase64Bytes,
   MAX_INLINE_ASSET_BYTES,
@@ -103,8 +104,13 @@ import {
   applyMcpEnablement,
   classifyWorkflowViolation,
   describeExemptionScope,
+  HTTP_URL_RE,
   isPrSettledIdle,
+  parseHumanReviewAnswer,
   parseInlineMedia,
+  QUESTION_NOTES_SEPARATOR,
+  readHumanReview,
+  type HumanReviewPayload,
   prReviewAgentView,
   resolveWorkflow,
   type McpEnablementLayers,
@@ -140,10 +146,13 @@ import type { WorktreeService } from "./worktree.js";
 import {
   createManagerMcpServers,
   exemptionConsentQuestion,
+  humanReviewQuestion,
   overrideConsentPrompt,
   readExemptionAnswer,
   type ManagerAskQuestion,
   type ManagerAskResult,
+  type ManagerHumanReviewRequest,
+  type ManagerHumanReviewResult,
   type ManagerMcpGitHub,
   type ManagerMcpPrRegistry,
   type ManagerMcpPrApproval,
@@ -1283,6 +1292,11 @@ function deriveTarget(input: Record<string, unknown>): string | undefined {
  * (`{ questions: [{ question }] }` or a flat `{ question | prompt | header }`).
  */
 function questionSummary(input: Record<string, unknown>): string {
+  // A review's question text opens with its title but runs on into the summary
+  // and links, written for a client that can't draw the review card. The queue
+  // row only has room for what is being asked, and "Review:" is that.
+  const review = readHumanReview(input);
+  if (review) return truncate(`Review: ${review.title}`, 80);
   const first =
     Array.isArray(input.questions) && input.questions.length
       ? (input.questions[0] as Record<string, unknown>)
@@ -1315,6 +1329,9 @@ const SELF_GATED_TOOLS: ReadonlySet<string> = new Set(
       // this particular gate can afford. Unlike `approve_pr`'s conditional override,
       // there is no path through this tool that DOESN'T ask.
       "request_exemption",
+      // Every call raises the review card and waits on it; a tool-call prompt in
+      // front of that would ask "may the agent ask for your review?" first.
+      "request_human_review",
     ] as const satisfies readonly ManagerToolName[]
   ).map(managerToolQualifiedName),
 );
@@ -1345,7 +1362,7 @@ interface QuestionAnswerOpt {
  */
 function withNotes(value: string, notes?: string): string {
   const n = pickStr(notes);
-  return n ? `${value} — additional instructions: ${n}` : value;
+  return n ? `${value}${QUESTION_NOTES_SEPARATOR}${n}` : value;
 }
 
 function pickStr(v: unknown): string | undefined {
@@ -4832,6 +4849,126 @@ export class SessionBroker {
         )
       : {};
     return { status: "answered", answers };
+  }
+
+  /**
+   * Put a change in front of the human for a verdict — the broker half of
+   * `mcp__dispatch-confirm__request_human_review`.
+   *
+   * A QUESTION card underneath (see `humanReviewQuestion` for why), carrying the
+   * `review` payload the client's review card draws from. Screenshots are copied
+   * into the chat's assets BEFORE the card goes up, and any one that can't be is
+   * refused outright: a review card missing the shot the agent meant to show is
+   * a card the human approves without having seen the thing.
+   */
+  async requestHumanReview(
+    chatId: string,
+    request: ManagerHumanReviewRequest,
+    signal?: AbortSignal,
+  ): Promise<ManagerHumanReviewResult> {
+    const session = this.sessions.get(chatId);
+    if (!session) {
+      return { status: "unavailable", message: "No live session is available to ask through." };
+    }
+    const screenshots: ImageRef[] = [];
+    for (const ref of request.screenshots) {
+      const shot = await this.ingestReviewScreenshot(session, ref);
+      if (typeof shot === "string") return { status: "invalid", message: shot };
+      screenshots.push(shot);
+    }
+    const review: HumanReviewPayload = {
+      title: request.title,
+      summary: request.summary,
+      screenshots,
+      ...(request.previewUrl ? { previewUrl: request.previewUrl } : {}),
+      ...(request.prUrl ? { prUrl: request.prUrl } : {}),
+    };
+    const question = humanReviewQuestion(review);
+    const result = await this.handlePermission(
+      session,
+      "AskUserQuestion",
+      { questions: [question], review },
+      { displayName: "Review", signal },
+    );
+    if (result.behavior !== "allow") return { status: "dismissed", message: result.message };
+    // The card has exactly ONE question, so take its one answer rather than
+    // looking it up by text: the answers map is keyed by a TRIMMED question, and
+    // a title with a leading space made the lookup miss — reporting a press of
+    // Approve to the agent as a dismissal.
+    const raw = result.updatedInput?.answers as Record<string, unknown> | undefined;
+    const answer = Object.values(raw ?? {}).find((v): v is string => typeof v === "string");
+    const verdict = parseHumanReviewAnswer(answer);
+    if (!verdict) {
+      return { status: "dismissed", message: "The card was answered without a verdict." };
+    }
+    return { status: "reviewed", ...verdict };
+  }
+
+  /**
+   * One review screenshot copied into the chat's assets — or, as a string, why
+   * it can't be, worded for the agent to fix.
+   *
+   * Deliberately NOT {@link ingestAssetReference}. That path confines reads to
+   * the session's tree and the temp dir because its paths come from an MCP
+   * SERVER, possibly a remote one borrowing the manager's filesystem. These come
+   * from the chat's own agent, which already has a shell here — and the worktree
+   * it took the screenshot in is routinely NOT the session's cwd (a chat started
+   * in the primary checkout works under `.worktrees/…`), so that confinement
+   * would refuse the ordinary case. What this does insist on is that the BYTES
+   * are an image: the card is for looking at, not a way to put any file on disk
+   * in front of the human.
+   */
+  private async ingestReviewScreenshot(
+    session: LiveSession,
+    ref: string,
+  ): Promise<ImageRef | string> {
+    const given = ref.trim();
+    if (HTTP_URL_RE.test(given)) {
+      // Nothing to sniff — the browser fetches it. But the card picks image vs
+      // download chip from `mimeType`, and an untyped ref drew as a chip, so
+      // type it from the URL's extension. Only an EXTENSIONLESS URL (a render
+      // endpoint) is taken on trust as an image; an extension the table doesn't
+      // know — `report.html` — is refused, not assumed to be a PNG.
+      const name = basename(new URL(given).pathname) || "screenshot";
+      const mimeType = mediaTypeFromName(
+        name,
+        /\.[^.]+$/.test(name) ? "application/octet-stream" : "image/png",
+      );
+      if (mediaKind(mimeType) !== "image") {
+        return `Screenshot ${given} doesn't look like an image (${mimeType}).`;
+      }
+      return { id: this.genId(), path: given, mimeType, alt: name };
+    }
+    const project = await this.projectForChat(session.chatId).catch(() => null);
+    const base = session.worktreeCwd ?? project?.repoPath ?? process.cwd();
+    const path = pathFromFileUri(given) ?? given;
+    const abs = isAbsolute(path) ? path : resolvePath(base, path);
+    try {
+      const real = await realpath(abs);
+      const info = await stat(real);
+      if (!info.isFile()) return `Screenshot ${abs} is not a file.`;
+      if (info.size > MAX_INLINE_ASSET_BYTES) {
+        return (
+          `Screenshot ${abs} is ${formatBytes(info.size)}; the limit is ` +
+          `${formatBytes(MAX_INLINE_ASSET_BYTES)}. Capture the viewport rather than the full page.`
+        );
+      }
+      const buf = await readFile(real);
+      // Sniffed with no declared type on purpose: a `.png` extension on a text
+      // file must not be enough to get it drawn on the card.
+      const { mimeType, width, height } = identifyMedia(buf);
+      if (mediaKind(mimeType) !== "image") {
+        return `Screenshot ${abs} is not an image (read as ${mimeType}).`;
+      }
+      const name = `${this.genId()}${extFromMediaType(mimeType, ".png")}`;
+      const relPath = await this.store.writeChatAsset(session.chatId, name, buf);
+      return { id: this.genId(), path: relPath, mimeType, alt: basename(real), width, height };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      return code === "ENOENT"
+        ? `Screenshot ${abs} does not exist. Pass the absolute path the screenshot tool saved to.`
+        : `Screenshot ${abs} could not be read: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
   /**

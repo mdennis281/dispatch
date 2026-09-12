@@ -22,6 +22,20 @@ import { spawnedPurposeLabel } from "@dispatch/shared";
 const now = Date.now();
 const ago = (min: number) => now - min * 60_000;
 
+/** A placeholder "screenshot" as an SVG data URL — renders with no asset route. */
+function mockShot(label: string, width: number, height: number): string {
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
+    `<rect width="100%" height="100%" fill="#1d1b19"/>` +
+    `<rect x="24" y="24" width="${width - 48}" height="${height - 48}" rx="10" fill="#2a2724" stroke="#4a443d"/>` +
+    `<rect x="48" y="52" width="${Math.round(width * 0.4)}" height="14" rx="4" fill="#e7a53c"/>` +
+    `<rect x="48" y="84" width="${width - 96}" height="10" rx="4" fill="#4a443d"/>` +
+    `<rect x="48" y="104" width="${Math.round((width - 96) * 0.7)}" height="10" rx="4" fill="#4a443d"/>` +
+    `<text x="50%" y="58%" fill="#a89f94" font-family="sans-serif" font-size="20" text-anchor="middle">${label}</text>` +
+    `</svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
 /* ------------------------------------------------------------------ project */
 
 export const MOCK_PROJECT: Project = {
@@ -498,6 +512,40 @@ export const MOCK_MESSAGES: Record<string, ChatMessage[]> = {
       uuid: "u_s2",
       text: "I traced it to the mode toggle using raw `80vh` under the UI-scale zoom. I have two options for the fix — which do you prefer?",
     },
+    // A human review card, pending: the one row whose body is EVIDENCE (shots
+    // and a preview link) rather than a question. Its screenshots are inline
+    // SVG so the card renders here with no asset route behind it.
+    {
+      kind: "permission",
+      id: "s3",
+      chatId: CHAT_SETTINGS,
+      ts: ago(3),
+      turn: 1,
+      requestId: "perm_review_settings",
+      toolName: "AskUserQuestion",
+      displayName: "Review",
+      decision: "pending",
+      input: {
+        questions: [
+          {
+            header: "Review",
+            question: "Settings modal fits small viewports",
+            options: [{ label: "Approve" }, { label: "Keep iterating" }, { label: "Stop work" }],
+          },
+        ],
+        review: {
+          title: "Settings modal fits small viewports",
+          summary:
+            "Swapped the raw 80vh for the zoom-aware dvh clamp, so the mode toggle no longer overflows at 125% UI scale. Not sure the tighter footer spacing reads well on a phone.",
+          screenshots: [
+            { id: "shot_desktop", path: mockShot("Desktop · 125%", 640, 400), mimeType: "image/svg+xml", alt: "desktop-125.png" },
+            { id: "shot_phone", path: mockShot("Phone · 390px", 390, 700), mimeType: "image/svg+xml", alt: "phone-390.png" },
+          ],
+          previewUrl: "http://localhost:5174/#settings",
+          prUrl: "https://github.com/mdennis281/hivebreak/pull/231",
+        },
+      },
+    },
   ],
   [CHAT_STEAM]: [
     {
@@ -579,8 +627,9 @@ export const MOCK_ATTENTION: AttentionItem[] = [
     id: "att_settings",
     chatId: CHAT_SETTINGS,
     kind: "question",
-    summary: "Settings modal cleanup — pick a fix approach",
+    summary: "Review: Settings modal fits small viewports",
     projectId: "hivebreak",
+    permissionRequestId: "perm_review_settings",
     createdAt: ago(3),
   },
   {

@@ -4,6 +4,7 @@ import type { ImageRef } from "@dispatch/shared";
 import { cn } from "../../../lib/cn.js";
 import { indexOfAsset, useChatMedia } from "../../../lib/chatMedia.js";
 import { Attachment } from "./Attachment.js";
+import type { ThumbVariant } from "./ImageThumb.js";
 import { MediaViewer } from "./MediaViewer.js";
 
 /**
@@ -26,10 +27,13 @@ export function MediaGroup({
   chatId,
   assets,
   className,
+  variant,
 }: {
   chatId: string;
   assets: ImageRef[];
   className?: string;
+  /** Force one thumbnail size for every image instead of choosing by count. */
+  variant?: ThumbVariant;
 }) {
   const [openPath, setOpenPath] = useState<string | null>(null);
   // Only asked for once something opens: the gallery is a whole-transcript
@@ -60,13 +64,23 @@ export function MediaGroup({
             <span>{assets.length} images</span>
           </div>
         )}
-        <div className={cn("flex flex-wrap", tiled ? "gap-1.5" : "gap-2")}>
+        <div
+          className={cn(
+            "flex",
+            // A strip is ONE swipeable row: wrapped, three phone-sized
+            // screenshots turn a review card into a page of scrolling before
+            // anyone reaches the buttons it exists for.
+            variant === "strip"
+              ? "cm-scroll cm-scroll-x gap-2 overflow-x-auto pb-1 [&>*]:shrink-0"
+              : cn("flex-wrap", tiled ? "gap-1.5" : "gap-2"),
+          )}
+        >
           {assets.map((asset, index) => (
             <Attachment
               key={asset.id || `${asset.path}-${index}`}
               chatId={chatId}
               asset={asset}
-              variant={tiled ? "tile" : "single"}
+              variant={variant ?? (tiled ? "tile" : "single")}
               onOpen={() => setOpenPath(asset.path)}
             />
           ))}

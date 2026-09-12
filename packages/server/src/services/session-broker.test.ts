@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
-import { isPrSettledIdle } from "@dispatch/shared";
+import { HUMAN_REVIEW_ANSWERS, isPrSettledIdle } from "@dispatch/shared";
 import { EXEMPTION_ANSWERS } from "./mcp/manager-mcp.js";
 import {
   buildManagerToolsDirective,
@@ -1216,6 +1216,177 @@ describe("SessionBroker — permissions", () => {
     ).resolves.toEqual({
       status: "unavailable",
       message: "No live session is available to ask through.",
+    });
+  });
+
+  describe("requestHumanReview", () => {
+    // The smallest valid PNG: signature + IHDR (1×1) + IDAT + IEND.
+    const PNG_1X1 = Buffer.from(
+      "89504e470d0a1a0a0000000d4948445200000001000000010806000000" +
+        "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082",
+      "hex",
+    );
+    const request = {
+      title: "New review card",
+      summary: "Verdict buttons under the evidence. Unsure about the spacing on mobile.",
+      screenshots: [] as string[],
+      previewUrl: "http://localhost:5173",
+    };
+
+    it("raises a question card carrying the review payload and reads the verdict back out", async () => {
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+
+      const reqP = nextPermissionId();
+      const verdictP = broker.requestHumanReview("c1", request);
+      const reqId = await reqP;
+
+      const raised = events.find(
+        (e): e is Extract<WsServerEvent, { type: "permission-request" }> =>
+          e.type === "permission-request" && e.request.id === reqId,
+      );
+      expect(raised?.request.toolName).toBe("AskUserQuestion");
+      expect(raised?.request.input.review).toEqual({
+        title: request.title,
+        summary: request.summary,
+        screenshots: [],
+        previewUrl: request.previewUrl,
+      });
+      // The queue row names what's being asked, not the fallback card's whole body.
+      const attn = events.find(
+        (e): e is Extract<WsServerEvent, { type: "attention-add" }> =>
+          e.type === "attention-add" && e.item.permissionRequestId === reqId,
+      );
+      expect(attn?.item).toMatchObject({ kind: "question", summary: "Review: New review card" });
+
+      // Exactly what the card sends: the label as the answer, the comment as notes.
+      broker.answerQuestion(reqId, {
+        optionId: HUMAN_REVIEW_ANSWERS.iterate,
+        answer: HUMAN_REVIEW_ANSWERS.iterate,
+        notes: "Buttons are too close together on a phone.",
+      });
+
+      await expect(verdictP).resolves.toEqual({
+        status: "reviewed",
+        verdict: "iterate",
+        comment: "Buttons are too close together on a phone.",
+      });
+    });
+
+    it("settles as dismissed — never approved — when the human declines the card", async () => {
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+
+      const reqP = nextPermissionId();
+      const verdictP = broker.requestHumanReview("c1", request);
+      broker.declineQuestion(await reqP, "Replied with a message instead.");
+
+      await expect(verdictP).resolves.toEqual({
+        status: "dismissed",
+        message: "Replied with a message instead.",
+      });
+    });
+
+    it("copies screenshots into the chat's assets before the card goes up", async () => {
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+      // Outside every root the MCP-asset ingest allows: an agent's worktree is
+      // routinely not the session's cwd, and this path must still work.
+      const shots = await mkdtemp(join(tmpdir(), "cm-review-shots-"));
+      const shot = join(shots, "mobile.png");
+      await writeFile(shot, PNG_1X1);
+
+      const reqP = nextPermissionId();
+      const verdictP = broker.requestHumanReview("c1", { ...request, screenshots: [shot] });
+      const reqId = await reqP;
+
+      const raised = events.find(
+        (e): e is Extract<WsServerEvent, { type: "permission-request" }> =>
+          e.type === "permission-request" && e.request.id === reqId,
+      );
+      const review = raised?.request.input.review as { screenshots: { path: string }[] };
+      expect(review.screenshots).toHaveLength(1);
+      expect(review.screenshots[0]).toMatchObject({ mimeType: "image/png", alt: "mobile.png", width: 1 });
+      const stored = review.screenshots[0]!.path.replace(/^assets\//, "");
+      expect(await store.readChatAsset("c1", stored)).toEqual(PNG_1X1);
+
+      broker.answerQuestion(reqId, { answer: HUMAN_REVIEW_ANSWERS.approve });
+      await expect(verdictP).resolves.toEqual({ status: "reviewed", verdict: "approve" });
+      await rm(shots, { recursive: true, force: true });
+    });
+
+    it("refuses a screenshot that isn't an image, without raising a card", async () => {
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+      const shots = await mkdtemp(join(tmpdir(), "cm-review-shots-"));
+      const fake = join(shots, "secrets.png");
+      await writeFile(fake, "API_KEY=not-a-picture");
+
+      const notImage = await broker.requestHumanReview("c1", { ...request, screenshots: [fake] });
+      const missing = await broker.requestHumanReview("c1", {
+        ...request,
+        screenshots: [join(shots, "nope.png")],
+      });
+
+      expect(notImage).toMatchObject({ status: "invalid" });
+      expect(notImage.status === "invalid" && notImage.message).toContain("not an image");
+      expect(missing.status === "invalid" && missing.message).toContain("does not exist");
+      expect(events.some((e) => e.type === "permission-request")).toBe(false);
+      await rm(shots, { recursive: true, force: true });
+    });
+
+    it("reads the verdict even when the title is padded with whitespace", async () => {
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+
+      const reqP = nextPermissionId();
+      const verdictP = broker.requestHumanReview("c1", { ...request, title: "  Padded title" });
+      broker.answerQuestion(await reqP, { answer: HUMAN_REVIEW_ANSWERS.approve });
+
+      await expect(verdictP).resolves.toEqual({ status: "reviewed", verdict: "approve" });
+    });
+
+    it("types an http(s) screenshot as an image so the card draws it, not a download chip", async () => {
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+
+      const reqP = nextPermissionId();
+      const verdictP = broker.requestHumanReview("c1", {
+        ...request,
+        screenshots: ["https://cdn.example/shots/card.webp", "https://render.example/shot?id=3"],
+      });
+      const reqId = await reqP;
+      const raised = events.find(
+        (e): e is Extract<WsServerEvent, { type: "permission-request" }> =>
+          e.type === "permission-request" && e.request.id === reqId,
+      );
+      const review = raised?.request.input.review as { screenshots: { mimeType?: string; alt?: string }[] };
+      expect(review.screenshots.map((s) => [s.mimeType, s.alt])).toEqual([
+        ["image/webp", "card.webp"],
+        ["image/png", "shot"],
+      ]);
+      broker.declineQuestion(reqId);
+      await verdictP;
+
+      const page = await broker.requestHumanReview("c1", {
+        ...request,
+        screenshots: ["https://example.com/report.html"],
+      });
+      expect(page.status === "invalid" && page.message).toContain("doesn't look like an image");
+    });
+
+    it("reports unavailable without a live session", async () => {
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+      await expect(broker.requestHumanReview("nobody", request)).resolves.toEqual({
+        status: "unavailable",
+        message: "No live session is available to ask through.",
+      });
     });
   });
 

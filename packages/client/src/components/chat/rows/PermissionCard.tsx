@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { ShieldQuestion, Check, X, ShieldCheck, Pencil } from "lucide-react";
-import type { PermissionRow } from "@dispatch/shared";
+import { readHumanReview, type PermissionRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { QuestionCard } from "./QuestionCard.js";
+import { ReviewCard } from "./ReviewCard.js";
 import { PlanCard } from "./PlanCard.js";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
@@ -48,7 +49,11 @@ export function PermissionCard({ row }: PermissionCardProps) {
 
   // AskUserQuestion and ExitPlanMode ride the same permission channel, but a raw
   // JSON dump of their payload is unreadable — each gets a purpose-built card.
-  if (row.toolName === "AskUserQuestion") return <QuestionCard row={row} />;
+  // A human review is a question with a `review` payload beside it.
+  if (row.toolName === "AskUserQuestion") {
+    const review = readHumanReview(row.input);
+    return review ? <ReviewCard row={row} review={review} /> : <QuestionCard row={row} />;
+  }
   if (row.toolName === "ExitPlanMode") return <PlanCard row={row} />;
 
   const pending = row.decision === "pending";

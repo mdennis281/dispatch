@@ -111,11 +111,12 @@ export const MANAGER_TOOL_CATEGORY = {
   request_review: "github",
   resolve_thread: "github",
 
-  /* confirm — the two tools whose whole purpose is to put a card in front of a
-     human and wait. Both run their own gate, which is why they are also the
-     membership of `SELF_GATED_TOOLS`. */
+  /* confirm — the tools whose whole purpose is to put a card in front of a
+     human and wait. Each runs its own gate, which is why they are also in
+     `SELF_GATED_TOOLS`. */
   ask_user: "confirm",
   request_exemption: "confirm",
+  request_human_review: "confirm",
 
   /* chat — other chats: start one, wait on one, find one, read one, and talk
      to one. The messaging four are the only WRITE path into another chat. */
