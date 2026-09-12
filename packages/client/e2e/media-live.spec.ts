@@ -619,6 +619,7 @@ test("the top bar's status line is the title bar, and the row below it is not", 
         const rect = (el: Element) => el.getBoundingClientRect();
         const visible = (el: Element) => rect(el).width > 0;
 
+        const mark = header.querySelector("svg.dispatch-mark");
         const inStrip = Array.from(strip.querySelectorAll("button, a")).filter(visible);
         const all = Array.from(header.querySelectorAll("button, a")).filter(visible);
 
@@ -630,15 +631,15 @@ test("the top bar's status line is the title bar, and the row below it is not", 
           gap = Math.max(gap, edges[i]!.left - edges[i - 1]!.right);
         }
 
-        const mark = header.querySelector("svg.dispatch-mark");
-
         return {
           // The strip is exactly the band the OS owns — the hairline under it is
           // inside that height, not added to it.
           stripH: Math.round(rect(strip).height),
-          // Two bands, so the header is taller than the strip: this is the
-          // assertion that fails if the row is ever folded back into it.
-          headerTallerThanStrip: Math.round(rect(header).height) > Math.round(rect(strip).height),
+          // The identity is in the ACTION ROW, at full size — the two halves of
+          // what folding this bar into one line cost. "Taller than the strip"
+          // would not have caught it: that layout measured 34 against a 33px
+          // strip and passed.
+          markBelowStrip: !!mark && Math.round(rect(mark).top) >= Math.round(rect(strip).bottom),
           stripRegion: region(strip),
           underButtons: all
             .filter((el) => rect(el).right > vw - controlsW && rect(el).top < stripH)
@@ -654,7 +655,7 @@ test("the top bar's status line is the title bar, and the row below it is not", 
 
     expect(report, `at ${width}px`).toEqual({
       stripH: WCO_STRIP_H,
-      headerTallerThanStrip: true,
+      markBelowStrip: true,
       stripRegion: "drag",
       underButtons: [],
       stripControlsDraggable: [],
