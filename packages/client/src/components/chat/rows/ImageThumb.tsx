@@ -7,12 +7,14 @@ import { MediaViewer, assetName } from "./MediaViewer.js";
 
 /**
  * How much room this thumbnail gets. See {@link MediaGroup} for the choice
- * between `single` and `tile`. `strip` is for EVIDENCE — a review card's
- * screenshots — where the whole frame is the point: one fixed height, natural
- * aspect, never cropped. A square crop of a phone screenshot is a strip of
- * status bar, which is exactly the part nobody was asked to judge.
+ * between `single` and `tile`. `fill` is for EVIDENCE, like a review card's
+ * screenshots, where the whole frame is the point. It fills its grid cell and
+ * is never cropped: a square crop of a phone screenshot is a strip of status
+ * bar, which is exactly the part nobody was asked to judge. Its height comes
+ * from the grid (`--thumb-h` / `--thumb-max-h`), so a lone shot gets room and
+ * six get smaller together.
  */
-export type ThumbVariant = "single" | "tile" | "strip";
+export type ThumbVariant = "single" | "tile" | "fill";
 
 /**
  * One image thumbnail — a real preview via the chat's asset endpoint with a
@@ -42,7 +44,7 @@ export function ImageThumb({
   const { src, failed, expired } = useAssetSrc(chatId, img);
   const broken = failed || decodeFailed;
   const tile = variant === "tile";
-  const strip = variant === "strip";
+  const fill = variant === "fill";
 
   if (expired) {
     // Deleted by the server's retention sweep, on purpose. Said plainly rather
@@ -91,6 +93,7 @@ export function ImageThumb({
           // A tile carries no caption bar — its filename is the tooltip. Five
           // captions stacked under five tiles is more text than picture.
           tile && "w-[132px]",
+          fill && "w-full",
         )}
       >
         {/* Nothing to enlarge until the bytes land — don't advertise a zoom
@@ -114,15 +117,19 @@ export function ImageThumb({
               // transparent instead of as a picture with a hole in it — the
               // thing that most often looks like "the image is broken".
               className={cn(
-                "block bg-[repeating-conic-gradient(#191d23_0deg_90deg,#14181d_90deg_180deg)] bg-[length:12px_12px]",
+                "block",
+                fill
+                  ? // Letterboxed on the figure's own background rather than the
+                    // checkerboard: in a grid, the empty bands beside a portrait
+                    // shot would otherwise read as transparent image.
+                    "h-[var(--thumb-h)] max-h-[var(--thumb-max-h)] w-full object-contain"
+                  : "bg-[repeating-conic-gradient(#191d23_0deg_90deg,#14181d_90deg_180deg)] bg-[length:12px_12px]",
                 tile
                   ? // Uniform squares, cropped: a contact sheet only reads as a
                     // set if the cells line up, and letterboxing five different
                     // aspect ratios into one row does the opposite.
                     "h-[132px] w-[132px] object-cover"
-                  : strip
-                    ? "h-48 w-auto max-w-[min(420px,100%)] object-contain"
-                    : "max-h-72 max-w-[420px] object-contain",
+                  : !fill && "max-h-72 max-w-[420px] object-contain",
               )}
             />
           ) : (
@@ -131,7 +138,7 @@ export function ImageThumb({
             <span
               className={cn(
                 "block animate-pulse bg-panel-2",
-                tile ? "size-[132px]" : strip ? "h-48 w-[240px]" : "h-40 w-[280px]",
+                tile ? "size-[132px]" : fill ? "h-40 w-full" : "h-40 w-[280px]",
               )}
               aria-hidden
             />

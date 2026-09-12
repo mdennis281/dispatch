@@ -58,20 +58,19 @@ const DISPOSE_RPC_TIMEOUT_MS = 250;
 /**
  * Codex's per-call deadline for Dispatch's own MCP servers, in seconds.
  *
- * Left unset, Codex cuts every `tools/call` off at its 300s default. Dispatch's
- * tools BLOCK by design: `watch_pr` and `wait_for_chat` for up to an hour, and
- * `ask_user` / `request_human_review` for as long as a human takes. So every
- * Codex chat that waited on CI, a peer, or the human got "timed out awaiting
- * tools/call after 300s" and carried on as if nothing had been decided. On
- * 2026-09-12 a review was answered three minutes after that and the verdict
- * went nowhere.
+ * Left unset, Codex cuts every `tools/call` off at 300s. `watch_pr` and
+ * `wait_for_chat` then error at five minutes, when they should return their
+ * documented "timed out, call again" result. A review card answered after that
+ * cutoff lost its verdict on 2026-09-12.
  *
- * A day rather than infinity: the bounded tools stop themselves at an hour,
- * and a human card still open past a day is abandoned. Its late answer then
- * reaches the chat as a message instead (see SessionBroker's abandoned-card
- * handling).
+ * One minute past the longest any bounded Dispatch tool waits on its own (the
+ * hour `WAIT_CAP_SECONDS` / `ASK_USER_TIMEOUT_CAP_SECONDS` allow). Every one
+ * of them returns normally, and nothing blocks longer than about an hour. It
+ * was a day in #212, and Michael rejected that as far too long. A review or
+ * question card still open past the deadline doesn't lose its answer: the
+ * broker delivers it as a message.
  */
-export const MANAGER_TOOL_TIMEOUT_SEC = 24 * 60 * 60;
+export const MANAGER_TOOL_TIMEOUT_SEC = 61 * 60;
 
 async function settleForDisposal(work: (signal: AbortSignal) => Promise<unknown>): Promise<void> {
   const controller = new AbortController();

@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { CodexSession, MANAGER_TOOL_TIMEOUT_SEC } from "./session.js";
+import {
+  ASK_USER_TIMEOUT_CAP_SECONDS,
+  WAIT_CAP_SECONDS,
+  WATCH_PR_DEFAULT_TIMEOUT_SECONDS,
+} from "../../services/mcp/manager-mcp.js";
 import type { CodexConnection, RpcFrame, ServerRequest } from "./rpc.js";
 import type { HarnessEvent, HarnessSessionSpec } from "../types.js";
 
@@ -437,8 +442,6 @@ describe("CodexSession lifecycle", () => {
             remote: { url: "https://example.com/mcp", http_headers: { "X-Test": "yes" } },
             // One Codex MCP server per category, all sharing the session's
             // single bearer token — the grant authorises a CHAT, not a category.
-            // …and a tool deadline long enough for tools that block on CI, a
-            // peer or the human. Codex's 300s default cut all of them off.
             "dispatch-session": {
               url: "http://127.0.0.1:4319/api/mcp/manager/session",
               http_headers: { Authorization: "Bearer secret" },
@@ -453,6 +456,20 @@ describe("CodexSession lifecycle", () => {
         },
       },
     });
+    // Project servers keep Codex's own default — only Dispatch's tools block by design.
+    const servers = (fake.calls[0]!.params.config as { mcp_servers: Record<string, object> }).mcp_servers;
+    expect(servers.files).not.toHaveProperty("tool_timeout_sec");
+    expect(servers.remote).not.toHaveProperty("tool_timeout_sec");
+  });
+
+  it("gives Dispatch's tools a deadline just past their own longest wait, and no longer", () => {
+    // Every bounded manager tool returns on its own by WAIT_CAP_SECONDS. Shrink
+    // the deadline below that and Codex errors a watch_pr that was about to
+    // return normally. Grow it much past, and a stuck call holds the turn for no
+    // reason (a day was rejected as far too long).
+    const longestOwnWait = Math.max(WAIT_CAP_SECONDS, ASK_USER_TIMEOUT_CAP_SECONDS, WATCH_PR_DEFAULT_TIMEOUT_SECONDS);
+    expect(MANAGER_TOOL_TIMEOUT_SEC).toBeGreaterThan(longestOwnWait);
+    expect(MANAGER_TOOL_TIMEOUT_SEC).toBeLessThanOrEqual(longestOwnWait + 5 * 60);
   });
 
   it("uses current thread settings RPCs for live model, effort, and posture changes", async () => {

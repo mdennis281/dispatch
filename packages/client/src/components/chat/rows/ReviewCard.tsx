@@ -275,7 +275,7 @@ export function ReviewCard({ row, review }: ReviewCardProps) {
           </p>
           <EvidenceLinks review={review} />
           {review.screenshots.length > 0 && (
-            <MediaGroup chatId={row.chatId} assets={review.screenshots} variant="strip" />
+            <MediaGroup chatId={row.chatId} assets={review.screenshots} variant="fill" />
           )}
         </div>
 
