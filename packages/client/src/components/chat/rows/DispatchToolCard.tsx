@@ -76,6 +76,7 @@ function StateMark({ state }: { state: ToolDetailState }) {
 
 function promptFor(tool: string, category: DispatchToolCategory): string {
   if (tool === "ask_user") return "ask";
+  if (tool === "request_human_review") return "review";
   if (tool === "wait") return "sleep";
   if (tool === "recall") return "recall";
   if (tool === "remember") return "remember";
@@ -129,6 +130,7 @@ function commandPreview(use: ToolUseRow, tool: string, subject: string | undefin
   if (tool === "resolve_thread") return `resolve ${subject ?? "review thread"}`;
   if (tool === "request_review") return `request review${subject ? ` for ${subject}` : ""}`;
   if (tool === "post_review") return `review ${subject ?? "pull request"}`;
+  if (tool === "request_human_review") return textInput(use, "title") ?? activity;
   if (tool === "run_subapp") return `${use.input.stop === true ? "stop" : "start"} ${subject ?? "app"}`;
   if (tool === "terminal_output") return `read ${subject ?? "terminal"}`;
   return subject ?? activity;

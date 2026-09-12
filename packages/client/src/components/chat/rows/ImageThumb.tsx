@@ -5,8 +5,14 @@ import { cn } from "../../../lib/cn.js";
 import { useAssetSrc } from "../../../lib/assetSrc.js";
 import { MediaViewer, assetName } from "./MediaViewer.js";
 
-/** How much room this thumbnail gets. See {@link MediaGroup} for the choice. */
-export type ThumbVariant = "single" | "tile";
+/**
+ * How much room this thumbnail gets. See {@link MediaGroup} for the choice
+ * between `single` and `tile`. `strip` is for EVIDENCE — a review card's
+ * screenshots — where the whole frame is the point: one fixed height, natural
+ * aspect, never cropped. A square crop of a phone screenshot is a strip of
+ * status bar, which is exactly the part nobody was asked to judge.
+ */
+export type ThumbVariant = "single" | "tile" | "strip";
 
 /**
  * One image thumbnail — a real preview via the chat's asset endpoint with a
@@ -36,6 +42,7 @@ export function ImageThumb({
   const { src, failed, expired } = useAssetSrc(chatId, img);
   const broken = failed || decodeFailed;
   const tile = variant === "tile";
+  const strip = variant === "strip";
 
   if (expired) {
     // Deleted by the server's retention sweep, on purpose. Said plainly rather
@@ -113,14 +120,19 @@ export function ImageThumb({
                     // set if the cells line up, and letterboxing five different
                     // aspect ratios into one row does the opposite.
                     "h-[132px] w-[132px] object-cover"
-                  : "max-h-72 max-w-[420px] object-contain",
+                  : strip
+                    ? "h-48 w-auto max-w-[min(420px,100%)] object-contain"
+                    : "max-h-72 max-w-[420px] object-contain",
               )}
             />
           ) : (
             // The bytes are still being fetched. Hold the row's height so a
             // transcript doesn't jump as thumbnails resolve.
             <span
-              className={cn("block animate-pulse bg-panel-2", tile ? "size-[132px]" : "h-40 w-[280px]")}
+              className={cn(
+                "block animate-pulse bg-panel-2",
+                tile ? "size-[132px]" : strip ? "h-48 w-[240px]" : "h-40 w-[280px]",
+              )}
               aria-hidden
             />
           )}
