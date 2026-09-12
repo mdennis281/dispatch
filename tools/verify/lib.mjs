@@ -92,13 +92,13 @@ export async function createHarness({ base = DEFAULT_BASE, out, scale = 2, viewp
 
 /* --------------------------------------------------------------- flow helpers */
 
-/** Navigate to the app; wait for the shell, then a SOFT wait for WS "Connected". */
+/** Navigate to the app; wait for the shell, then a SOFT wait for the WS. */
 export async function gotoApp(page, base, timeout = 20_000) {
   await page.goto(`${base}/`, { waitUntil: "networkidle" });
   await page.getByText("Dispatch").first().waitFor({ timeout });
   // WS hydrate is best-effort — screenshot even if it stays "Connecting…".
   await page
-    .getByText("Connected")
+    .getByRole("button", { name: "Connection: Connected" })
     .first()
     .waitFor({ timeout: 8_000 })
     .catch(() => {});

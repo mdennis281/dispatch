@@ -106,8 +106,13 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * `IconButton` is a `size-6` box with a rounded hover fill — it cannot take
  * `inset-y-0` without fighting its own height, and its fill would draw a chip on
  * the rail the chevron is meant to be a node on.
+ *
+ * 91 → 89: the header's two meters lost their hand-rolled hover triggers. Both
+ * were a bare `<button>` wrapped in the same open-on-hover, portal-a-panel,
+ * re-place-on-scroll dance; that is now `ui/HoverCard`, which owns the button,
+ * so the connection dot got the same behaviour without adding a third.
  */
-const BASELINE = 91;
+const BASELINE = 89;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

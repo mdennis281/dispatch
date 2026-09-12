@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import { FOCUSABLE } from "../../lib/focusable.js";
 import { cn } from "../../lib/cn.js";
 import { LAYER } from "../../lib/layers.js";
 
@@ -56,10 +57,6 @@ const ANCHOR: Record<DrawerSide, string> = {
   right: "inset-y-0 right-0",
   bottom: "inset-x-0 bottom-0",
 };
-
-const FOCUSABLE =
-  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),' +
-  'textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
 /**
  * An off-canvas sheet that keeps its contents MOUNTED.

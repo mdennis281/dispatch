@@ -15,30 +15,34 @@
  * it and the first reading is a moment behind; that is the honest trade, and it
  * beats scanning the process table forever on the chance somebody hovers.
  *
- * ── THE PILL DRAWS TWO BARS AND NO SPLIT ─────────────────────────────────────
+ * ── WHAT THE TRIGGER DRAWS ───────────────────────────────────────────────────
  *
  * It shipped with ONE bar between two numbers, and the bar was memory while the
  * icon in front of it was a CPU chip — so the widget read left to right as
  * "CPU 37%, [bar], 74%" and the bar belonged to neither number it sat between.
- * Two metrics get two bars, each under its own icon and in front of its own
- * figure.
+ * Two metrics get two shapes now, each behind its own label (see `Gauge`).
  *
- * Neither carries Dispatch's share, unlike every other bar in this feature.
- * That is the polling split above showing through: the pill has only the free
- * reading, and the alternative — painting whatever share the last opened
- * dropdown happened to leave in the store — is a figure that silently ages for
- * as long as the tab stays open. A bar with no breakdown is drawn at full
- * strength precisely so it cannot be mistaken for one whose Dispatch slice is
- * merely small. See `SplitBar`'s `sharePct: null`.
+ * CPU is a SPARKLINE and memory is a bar, because the two readings are not the
+ * same kind of fact. "CPU is at 37%" is never the interesting part — a build
+ * pegs it, an idle machine doesn't — what a reader wants is whether it has been
+ * like that for the last minute, and only a line can say so. Memory has no such
+ * question: it is a level against a ceiling, which is what a bar is for.
+ *
+ * NEITHER carries Dispatch's share, unlike every other bar in this feature.
+ * That is the polling split above showing through: the trigger has only the free
+ * reading, and the alternative — painting whatever share the last opened panel
+ * happened to leave in the store — is a figure that silently ages for as long as
+ * the tab stays open. The bar is drawn at full strength precisely so it cannot
+ * be mistaken for one whose Dispatch slice is merely small. See `SplitBar`'s
+ * `sharePct: null`.
  *
  * TONE IS DRIVEN BY MEMORY, NOT CPU. Pegged CPU is what a working machine looks
  * like — agents compile things. Exhausted MEMORY is what makes it unusable, and
  * it is the one the reaper on the Resources page can actually do something
  * about, so it is the one that turns the pill amber.
  */
-import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { Cpu, MemoryStick, ExternalLink, Server } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ExternalLink, Server } from "lucide-react";
 import {
   useResources,
   share,
@@ -50,10 +54,12 @@ import {
 import { setView, useView } from "../../stores/view.js";
 import { bytes, pct } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
-import { CPU_BAR, machineTone } from "../../lib/resourceTone.js";
-import { LAYER } from "../../lib/layers.js";
+import { CPU_BAR, CPU_LINE, machineTone } from "../../lib/resourceTone.js";
 import { Button } from "../ui/Button.js";
+import { HoverCard } from "../ui/HoverCard.js";
+import { Sparkline } from "../ui/Sparkline.js";
 import { SplitBar, SplitDot } from "../ui/SplitBar.js";
+import { GAUGE_TRIGGER, Gauge, GaugeSep } from "./Gauge.js";
 
 /** One legend entry — swatch, what it is, how much of it. */
 function Leg({
@@ -141,44 +147,23 @@ function Meter({
 
 export function ResourceMeter() {
   const system = useResources((s) => s.system);
+  const cpuHistory = useResources((s) => s.cpuHistory);
   const snapshot = useResources((s) => s.snapshot);
   const refreshSnapshot = useResources((s) => s.refreshSnapshot);
   const view = useView((s) => s.view);
 
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // The expensive half, fetched on OPEN and then kept warm while it stays open.
-  // Nothing scans the process table on this widget's behalf until someone
-  // actually asks to see the breakdown.
+  // The expensive half, fetched when the panel OPENS and then kept warm while
+  // it stays open. Nothing scans the process table on this widget's behalf
+  // until someone actually asks to see the breakdown. `HoverCard` owns the
+  // hovering and the placement; this is the part that is ours.
   useEffect(() => {
     if (!open) return;
-    const place = () => {
-      const r = btnRef.current?.getBoundingClientRect();
-      if (r) setPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
-    };
-    place();
     void refreshSnapshot();
     const tick = setInterval(() => void refreshSnapshot(), 5_000);
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, true);
-    return () => {
-      clearInterval(tick);
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
-    };
+    return () => clearInterval(tick);
   }, [open, refreshSnapshot]);
-
-  const openNow = () => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
-    setOpen(true);
-  };
-  const closeSoon = () => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
-    closeTimer.current = setTimeout(() => setOpen(false), 140);
-  };
 
   // Nothing at all until the first reading lands — a pill showing "—/—" for a
   // second on every load is worse than one that arrives a second late.
@@ -186,7 +171,7 @@ export function ResourceMeter() {
 
   const memPct = share(system.usedBytes, system.totalBytes);
   const t = machineTone(memPct);
-  // The dropdown's half. Null until the first scan lands — AND null again once
+  // The panel's half. Null until the first scan lands — AND null again once
   // the store's copy has aged out, because the panel nests it inside a machine
   // total that is two seconds old and a stale part inside a live whole is wrong
   // about the whole. See `freshDispatch`. Either way the splits carry it
@@ -196,112 +181,86 @@ export function ResourceMeter() {
   const cpu = cpuSplit(system, dispatch);
 
   return (
-    <div className="relative inline-flex" onMouseEnter={openNow} onMouseLeave={closeSoon}>
-      <button
-        ref={btnRef}
-        onClick={openNow}
-        aria-label={`System resources: CPU ${pct(system.cpuPct)}, memory ${Math.round(memPct)}%`}
-        className={cn(
-          "flex h-6 items-center gap-1.5 rounded-md border border-line bg-panel-2/60 px-2",
-          "transition-colors hover:border-line-strong",
-        )}
-      >
-        <Cpu className="size-3 shrink-0 text-faint" />
-        {/* The bars are the first thing a narrow window title bar gives up (see
-            TopBar): each one repeats the figure printed right beside it, and
-            together they are 60px the window's drag area needs more. Inert
-            anywhere but the title bar. */}
-        <SplitBar
-          size="xs"
-          className="w-6 @max-[56rem]/titlebar:hidden"
-          usedPct={system.cpuPct ?? 0}
-          tone={CPU_BAR}
-        />
-        <span className="cm-mono text-xs font-semibold tabular-nums text-secondary">
-          {pct(system.cpuPct)}
-        </span>
-        <span className="mx-0.5 h-3 w-px shrink-0 bg-line" />
-        <MemoryStick className="size-3 shrink-0 text-faint" />
-        <SplitBar
-          size="xs"
-          className="w-6 @max-[56rem]/titlebar:hidden"
-          usedPct={memPct}
-          tone={t.bar}
-        />
-        <span className={cn("cm-mono text-xs font-semibold tabular-nums", t.text)}>
-          {Math.round(memPct)}%
-        </span>
-      </button>
+    <HoverCard
+      label={`System resources: CPU ${pct(system.cpuPct)}, memory ${Math.round(memPct)}%`}
+      width={304}
+      onOpenChange={setOpen}
+      className={GAUGE_TRIGGER}
+      card={(close) => (
+        <>
+          <div className="flex items-center gap-1.5 border-b border-line px-3 py-2">
+            <Server className="size-3.5 shrink-0 text-muted" />
+            <span className="text-xs font-semibold tracking-tight text-primary">This machine</span>
+            <div className="flex-1" />
+            <span className="cm-mono text-2xs tabular-nums text-faint">
+              {system.logicalCores} cores
+              {dispatch && ` · ${dispatch.procs} procs`}
+            </span>
+          </div>
 
-      {open &&
-        pos &&
-        createPortal(
-          <div
-            onMouseEnter={openNow}
-            onMouseLeave={closeSoon}
-            style={{ zIndex: LAYER.popover, top: pos.top, right: pos.right }}
+          <div className="divide-y divide-line-soft">
+            <Meter
+              label="Memory"
+              headline={`${bytes(system.usedBytes)} / ${bytes(system.totalBytes)}`}
+              split={mem}
+              barTone={t.bar}
+              fmt={bytes}
+              // Marked because the tree sum counts shared pages once per
+              // process; corrected by SHARED_PAGE_FACTOR, never exact.
+              approx
+              freeWord="free"
+            />
+            <Meter
+              label="CPU"
+              headline={pct(system.cpuPct)}
+              split={cpu}
+              barTone={CPU_BAR}
+              // Machine-relative on both layers. The server reports process
+              // CPU as a share of ONE core, and printing that raw beside a
+              // whole-machine figure put two numbers 16x apart under the same
+              // label. See `machinePct`.
+              fmt={(n) => pct(n)}
+              freeWord="idle"
+            />
+          </div>
+
+          <Button
+            variant="ghost"
+            size="sm"
+            rightIcon={<ExternalLink className="size-3" />}
+            onClick={() => {
+              // `close()`, not `setOpen(false)`: `open` here is only this
+              // component's mirror of the card's state, and all it gates is the
+              // snapshot poll. Setting it dismissed nothing — the 304px panel
+              // stayed painted over the Resources page you had just landed on
+              // until the pointer wandered off it.
+              close();
+              setView("metrics");
+              useView.getState().setMetricsSection("resources");
+            }}
             className={cn(
-              "fixed w-[304px] overflow-hidden rounded-md border border-line-strong",
-              "bg-overlay/98 backdrop-blur-md shadow-[var(--shadow-pop)] cm-anim-rise",
+              "w-full justify-between rounded-none border-t border-line px-3",
+              view === "metrics" && "text-primary",
             )}
           >
-            <div className="flex items-center gap-1.5 border-b border-line px-3 py-2">
-              <Server className="size-3.5 shrink-0 text-muted" />
-              <span className="text-xs font-semibold tracking-tight text-primary">
-                This machine
-              </span>
-              <div className="flex-1" />
-              <span className="cm-mono text-2xs tabular-nums text-faint">
-                {system.logicalCores} cores
-                {dispatch && ` · ${dispatch.procs} procs`}
-              </span>
-            </div>
-
-            <div className="divide-y divide-line-soft">
-              <Meter
-                label="Memory"
-                headline={`${bytes(system.usedBytes)} / ${bytes(system.totalBytes)}`}
-                split={mem}
-                barTone={t.bar}
-                fmt={bytes}
-                // Marked because the tree sum counts shared pages once per
-                // process; corrected by SHARED_PAGE_FACTOR, never exact.
-                approx
-                freeWord="free"
-              />
-              <Meter
-                label="CPU"
-                headline={pct(system.cpuPct)}
-                split={cpu}
-                barTone={CPU_BAR}
-                // Machine-relative on both layers. The server reports process
-                // CPU as a share of ONE core, and printing that raw beside a
-                // whole-machine figure put two numbers 16x apart under the same
-                // label. See `machinePct`.
-                fmt={(n) => pct(n)}
-                freeWord="idle"
-              />
-            </div>
-
-            <Button
-              variant="ghost"
-              size="sm"
-              rightIcon={<ExternalLink className="size-3" />}
-              onClick={() => {
-                setOpen(false);
-                setView("metrics");
-                useView.getState().setMetricsSection("resources");
-              }}
-              className={cn(
-                "w-full justify-between rounded-none border-t border-line px-3",
-                view === "metrics" && "text-primary",
-              )}
-            >
-              Break down by chat
-            </Button>
-          </div>,
-          document.body,
-        )}
-    </div>
+            Break down by chat
+          </Button>
+        </>
+      )}
+    >
+      {/* CPU is the half that goes when the strip runs out of room: memory is
+          the reading that decides whether the machine is still usable, and it is
+          the one the reaper on the Resources page can act on. Inert outside a
+          `statusline` container, i.e. everywhere but the header. */}
+      <span className="inline-flex items-center gap-2 @max-[26rem]/statusline:hidden">
+        <Gauge label="CPU" value={pct(system.cpuPct)} tone="text-secondary">
+          <Sparkline values={cpuHistory} className={CPU_LINE} width={30} height={11} />
+        </Gauge>
+        <GaugeSep />
+      </span>
+      <Gauge label="Mem" value={`${Math.round(memPct)}%`} tone={t.text}>
+        <SplitBar size="xs" className="w-7" usedPct={memPct} tone={t.bar} />
+      </Gauge>
+    </HoverCard>
   );
 }

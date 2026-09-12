@@ -32,7 +32,8 @@ test.describe("verify smoke (live server)", () => {
     // Shell chrome is always present (top bar mark).
     await expect(page.getByText("Dispatch")).toBeVisible();
 
-    // WS hydrate flips the top-bar connection pill to "Connected".
-    await expect(page.getByText("Connected")).toBeVisible();
+    // WS hydrate turns the top bar's connection dot green; its accessible name
+    // is the state, since the dot has no text of its own.
+    await expect(page.getByRole("button", { name: "Connection: Connected" })).toBeVisible();
   });
 });

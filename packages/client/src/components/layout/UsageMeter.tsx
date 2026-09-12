@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { RotateCw, Gauge } from "lucide-react";
+import { useEffect, useState } from "react";
+import { RotateCw, Gauge as GaugeIcon } from "lucide-react";
 import type { UsageWindow } from "@dispatch/shared";
 import { useUsage } from "../../stores/usage.js";
 import { useChats } from "../../stores/chats.js";
 import { untilShort, relTime } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
-import { LAYER } from "../../lib/layers.js";
+import { HoverCard } from "../ui/HoverCard.js";
+import { SplitBar } from "../ui/SplitBar.js";
+import { GAUGE_TRIGGER, Gauge } from "./Gauge.js";
 
 /** Escalating tone by utilization — accent (fine) → warn → danger. */
 function tone(pct: number): { text: string; bar: string } {
@@ -50,10 +51,15 @@ function WindowRow({
 }
 
 /**
- * Header usage meter: a compact 5-hour pill; on hover a dropdown with the 5h +
- * weekly windows, reset countdowns, and a manual refresh. Data is polled once
- * server-side (every 5 min) and pushed over the bus, so this only reads the store
- * (plus a lazy initial REST load on mount).
+ * Header usage meter: the 5-hour window as a gauge in the status line; on hover
+ * a panel with the 5h + weekly windows, reset countdowns, and a manual refresh.
+ * Data is polled once server-side (every 5 min) and pushed over the bus, so this
+ * only reads the store (plus a lazy initial REST load on mount).
+ *
+ * The TRIGGER shows one window, not both. Two stacked 2px tracks in a 33px
+ * title bar is a picture of a chart rather than a reading, and the weekly
+ * figure is not one anybody acts on hour to hour — it belongs in the panel,
+ * where it has room for its own label and reset countdown.
  */
 export function UsageMeter() {
   const usage = useUsage((s) => s.usage);
@@ -65,121 +71,78 @@ export function UsageMeter() {
   );
 
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Lazy initial load; live `usage-update` events keep it fresh thereafter.
   useEffect(() => {
     void load(activeHarness ?? undefined);
   }, [load, activeHarness]);
 
-  // While open, keep the panel glued to the trigger and countdowns ticking.
+  // Countdowns tick only while the panel is open — "resets in 41m" is the only
+  // thing in here that goes stale on its own, and it is not on screen until
+  // then. `HoverCard` owns the hover and the placement.
   useEffect(() => {
     if (!open) return;
-    const place = () => {
-      const r = btnRef.current?.getBoundingClientRect();
-      if (r) setPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
-    };
-    place();
     setNow(Date.now());
     const tick = setInterval(() => setNow(Date.now()), 30_000);
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, true);
-    return () => {
-      clearInterval(tick);
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
-    };
+    return () => clearInterval(tick);
   }, [open]);
-
-  const openNow = () => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
-    setOpen(true);
-  };
-  const closeSoon = () => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
-    closeTimer.current = setTimeout(() => setOpen(false), 140);
-  };
 
   // Nothing to show for an API-key-only / offline account (no windows at all).
   if (!usage || (!usage.fiveHour && !usage.sevenDay)) return null;
 
-  // Trigger shows the 5-hour window (falls back to weekly if only that exists).
+  // The gauge shows the 5-hour window (falls back to weekly if only that exists).
   const primary = usage.fiveHour ?? usage.sevenDay!;
   const primaryLabel = usage.provider === "codex" ? "usage" : usage.fiveHour ? "5h" : "7d";
   const t = tone(primary.percent);
 
   return (
-    <div className="relative inline-flex" onMouseEnter={openNow} onMouseLeave={closeSoon}>
-      <button
-        ref={btnRef}
-        onClick={openNow}
-        aria-label={`${usage.provider === "codex" ? "Codex" : "Claude"} usage`}
-        className={cn(
-          "flex h-6 items-center gap-1.5 rounded-md border border-line bg-panel-2/60 px-2",
-          "transition-colors hover:border-line-strong",
-          usage.stale && "opacity-70",
-        )}
-      >
-        <span className="cm-mono text-2xs text-faint">{primaryLabel}</span>
-        <span className="relative h-1 w-7 overflow-hidden rounded-full bg-line">
-          <span
-            className={cn("absolute inset-y-0 left-0 rounded-full", t.bar)}
-            style={{ width: `${clampPct(primary.percent)}%` }}
-          />
-        </span>
-        <span className={cn("text-xs font-semibold tabular-nums", t.text)}>
-          {Math.round(primary.percent)}%
-        </span>
-      </button>
+    <HoverCard
+      label={`${usage.provider === "codex" ? "Codex" : "Claude"} usage`}
+      width={248}
+      onOpenChange={setOpen}
+      // Stale means the last refresh failed and these numbers are the previous
+      // ones; the panel says so in words, and the whole gauge dims so you can
+      // see it without opening anything.
+      className={cn(GAUGE_TRIGGER, usage.stale && "opacity-70")}
+      card={() => (
+        <>
+          <div className="flex items-center gap-1.5 border-b border-line px-3 py-2">
+            <GaugeIcon className="size-3.5 text-muted" />
+            <span className="text-xs font-semibold tracking-tight text-primary">
+              {usage.provider === "codex" ? "Codex" : "Claude"} usage
+              {usage.planType && <span className="text-faint"> · {usage.planType}</span>}
+            </span>
+          </div>
 
-      {open &&
-        pos &&
-        createPortal(
-          <div
-            onMouseEnter={openNow}
-            onMouseLeave={closeSoon}
-            style={{ zIndex: LAYER.popover, top: pos.top, right: pos.right }}
-            className={cn(
-              "fixed w-[248px] overflow-hidden rounded-md border border-line-strong",
-              "bg-overlay/98 backdrop-blur-md shadow-[var(--shadow-pop)] cm-anim-rise",
-            )}
-          >
-            <div className="flex items-center gap-1.5 border-b border-line px-3 py-2">
-              <Gauge className="size-3.5 text-muted" />
-              <span className="text-xs font-semibold tracking-tight text-primary">
-                {usage.provider === "codex" ? "Codex" : "Claude"} usage
-                {usage.planType && <span className="text-faint"> · {usage.planType}</span>}
-              </span>
-            </div>
+          <div className="divide-y divide-line-soft">
+            <WindowRow label={usage.primaryLabel ?? "5-hour session"} win={usage.fiveHour} now={now} />
+            <WindowRow label={usage.secondaryLabel ?? "Weekly"} win={usage.sevenDay} now={now} />
+          </div>
 
-            <div className="divide-y divide-line-soft">
-              <WindowRow label={usage.primaryLabel ?? "5-hour session"} win={usage.fiveHour} now={now} />
-              <WindowRow label={usage.secondaryLabel ?? "Weekly"} win={usage.sevenDay} now={now} />
-            </div>
-
-            <div className="flex items-center justify-between gap-2 border-t border-line px-3 py-1.5">
-              <span className="text-2xs text-faint">
-                {usage.error === "rate_limited"
-                  ? "rate-limited · showing last"
-                  : usage.error === "unauthenticated"
-                    ? "sign-in needed"
-                    : `updated ${relTime(usage.fetchedAt, now)}`}
-              </span>
-              <button
-                onClick={() => void refresh()}
-                disabled={refreshing}
-                className="inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-2xs text-secondary transition-colors hover:bg-active hover:text-primary disabled:opacity-50 [&_svg]:size-3"
-              >
-                <RotateCw className={cn(refreshing && "cm-anim-spin")} />
-                Refresh
-              </button>
-            </div>
-          </div>,
-          document.body,
-        )}
-    </div>
+          <div className="flex items-center justify-between gap-2 border-t border-line px-3 py-1.5">
+            <span className="text-2xs text-faint">
+              {usage.error === "rate_limited"
+                ? "rate-limited · showing last"
+                : usage.error === "unauthenticated"
+                  ? "sign-in needed"
+                  : `updated ${relTime(usage.fetchedAt, now)}`}
+            </span>
+            <button
+              onClick={() => void refresh()}
+              disabled={refreshing}
+              className="inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-2xs text-secondary transition-colors hover:bg-active hover:text-primary disabled:opacity-50 [&_svg]:size-3"
+            >
+              <RotateCw className={cn(refreshing && "cm-anim-spin")} />
+              Refresh
+            </button>
+          </div>
+        </>
+      )}
+    >
+      <Gauge label={primaryLabel} value={`${Math.round(primary.percent)}%`} tone={t.text}>
+        <SplitBar size="xs" className="w-7" usedPct={primary.percent} tone={t.bar} />
+      </Gauge>
+    </HoverCard>
   );
 }
