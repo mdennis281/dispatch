@@ -61,6 +61,7 @@ function statusLine(usage: UsageSnapshot | undefined, now: number): string {
   if (!usage) return "loading…";
   if (usage.error === "rate_limited") return "rate-limited · showing last";
   if (usage.error === "unauthenticated") return "sign-in needed";
+  if (usage.error === "unavailable") return hasWindows(usage) ? "unavailable · showing last" : "unavailable";
   return `updated ${relTime(usage.fetchedAt, now)}`;
 }
 

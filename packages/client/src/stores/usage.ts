@@ -39,6 +39,29 @@ export const useUsage = create<UsageStore>((set, get) => {
   const put = (harness: HarnessKind, usage: UsageSnapshot) =>
     set((state) => ({ byProvider: { ...state.byProvider, [harness]: usage } }));
 
+  /**
+   * A read that failed before reaching the server (network, a proxy's 502) must
+   * still leave a snapshot behind. Only Claude's are pushed, so an empty slot
+   * for any other provider would read "Loading…" in the card indefinitely —
+   * Refresh included, since it fails the same way. The last windows are kept,
+   * marked stale, the way the server's own error snapshots do it.
+   */
+  const fail = (harness: HarnessKind) =>
+    set((state) => {
+      const last = state.byProvider[harness];
+      const failed: UsageSnapshot = last
+        ? { ...last, stale: true, error: "unavailable" }
+        : {
+            fiveHour: null,
+            sevenDay: null,
+            fetchedAt: Date.now(),
+            stale: true,
+            error: "unavailable",
+            provider: harness,
+          };
+      return { byProvider: { ...state.byProvider, [harness]: failed } };
+    });
+
   return {
     byProvider: {},
     refreshing: {},
@@ -51,15 +74,18 @@ export const useUsage = create<UsageStore>((set, get) => {
       const settings = requested ? null : await api.settings.get().catch(() => null);
       if (seq !== loadSeq) return;
       const harness = requested ?? settings?.harness?.defaultHarness ?? DEFAULT_HARNESS;
-      set({ harness });
       await get().loadProvider(harness);
+      // Move the gauge only once the new provider has a snapshot. Moving it
+      // first left `byProvider[harness]` empty, so the gauge unmounted — and an
+      // open card with it — for as long as a cold Codex read took.
+      if (seq === loadSeq) set({ harness });
     },
 
     loadProvider: async (harness) => {
       try {
         put(harness, await api.usage.get(harness));
       } catch {
-        // Best-effort: keep whatever this provider last showed (or nothing).
+        fail(harness);
       }
     },
 
@@ -71,7 +97,7 @@ export const useUsage = create<UsageStore>((set, get) => {
       try {
         put(harness, await api.usage.refresh(harness));
       } catch {
-        /* keep the last snapshot; the button just stops spinning */
+        fail(harness);
       } finally {
         flag(false);
       }

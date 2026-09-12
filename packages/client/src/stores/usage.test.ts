@@ -69,6 +69,49 @@ describe("usage store", () => {
     expect(useUsage.getState().harness).toBe("codex");
   });
 
+  it("the gauge keeps its reading until the next provider's first read lands", async () => {
+    // Moving `harness` before the fetch unmounted the gauge (no snapshot for
+    // the new key) for as long as a cold Codex app-server took to answer —
+    // up to its 25s probe timeout — and took an open card down with it.
+    usageGet.mockResolvedValueOnce(snap("claude", 40));
+    await useUsage.getState().load("claude");
+
+    let finish!: (v: UsageSnapshot) => void;
+    usageGet.mockReturnValueOnce(new Promise((r) => (finish = r)));
+    const switching = useUsage.getState().load("codex");
+    await Promise.resolve();
+    expect(useUsage.getState().harness).toBe("claude");
+
+    finish(snap("codex", 3));
+    await switching;
+    expect(useUsage.getState().harness).toBe("codex");
+  });
+
+  it("a failed first read settles into a stale snapshot, not an endless load", async () => {
+    // Nothing pushes Codex's windows, so an empty slot after a 502 would read
+    // "Loading…" in the card until it was closed.
+    usageGet.mockRejectedValue(new Error("502"));
+    await useUsage.getState().loadProvider("codex");
+
+    expect(useUsage.getState().byProvider.codex).toMatchObject({
+      fiveHour: null,
+      sevenDay: null,
+      stale: true,
+      error: "unavailable",
+      provider: "codex",
+    });
+  });
+
+  it("a failed read keeps the last windows, marked stale", async () => {
+    useUsage.setState({ byProvider: { codex: snap("codex", 61) } });
+    usageRefresh.mockRejectedValue(new Error("504"));
+    await useUsage.getState().refresh("codex");
+
+    const codex = useUsage.getState().byProvider.codex;
+    expect(codex?.fiveHour?.percent).toBe(61);
+    expect(codex).toMatchObject({ stale: true, error: "unavailable", fetchedAt: 1 });
+  });
+
   it("refresh is tracked and stored per provider", async () => {
     let finish!: (v: UsageSnapshot) => void;
     usageRefresh.mockReturnValue(new Promise((r) => (finish = r)));
