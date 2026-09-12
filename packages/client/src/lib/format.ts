@@ -51,6 +51,23 @@ export function untilShort(ts: number, now = Date.now()): string {
   return hr ? `${d}d ${hr}h` : `${d}d`;
 }
 
+/**
+ * "now", "3s", "12s" — a countdown for something SECONDS away.
+ *
+ * `untilShort` above floors everything under a minute to the literal "<1m",
+ * which is the right answer for a quota window resetting in 40 minutes and the
+ * wrong one for a socket retry: the reconnect backoff is capped at 10s
+ * (`MAX_BACKOFF` in lib/ws), so every value it will ever be handed rounds to
+ * "<1m" and a per-second ticker re-renders a constant. Falls through to
+ * `untilShort` past a minute so a caller cannot be surprised by "3600s".
+ */
+export function countdown(ts: number, now = Date.now()): string {
+  const s = Math.max(0, Math.round((ts - now) / 1000));
+  if (s < 1) return "now";
+  if (s < 60) return `${s}s`;
+  return untilShort(ts, now);
+}
+
 /** "HH:MM" 24h clock for transcript timestamps. */
 export function clock(ts: number): string {
   const d = new Date(ts);

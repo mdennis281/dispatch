@@ -674,6 +674,24 @@ test("the top bar's status line is the title bar, and the row below it is not", 
   await page.getByRole("button", { name: /^Connection/ }).hover();
   await expect(page.getByText("Reach", { exact: true })).toBeVisible();
 
+  // Reaching INTO a card must not dismiss it. The panel is portalled to
+  // `document.body`, so clicking a control inside it genuinely blurs the
+  // trigger — which used to arm the close grace and take the card away ~140ms
+  // later, with the refresh it had just started still in flight. See
+  // `blurLeavesCard`.
+  await page.getByRole("button", { name: /usage$/ }).hover();
+  const refresh = page.getByRole("button", { name: "Refresh" });
+  await refresh.click();
+  await page.waitForTimeout(400);
+  await expect(refresh, "the usage card closed under its own Refresh button").toBeVisible();
+
+  // A control that NAVIGATES does dismiss it, though — otherwise the 304px
+  // panel stays painted over the page it just sent you to.
+  await page.getByRole("button", { name: /^System resources/ }).hover();
+  const breakdown = page.getByRole("button", { name: /^Break down by chat/ });
+  await breakdown.click();
+  await expect(breakdown, "the resources card outlived the page it navigated to").toBeHidden();
+
   // And the palette still opens from the row below.
   await page.getByRole("button", { name: /^Search or run a command/ }).first().click();
   await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dur } from "./format.js";
+import { countdown, dur } from "./format.js";
 
 describe("dur", () => {
   it("keeps sub-second and sub-minute spans as they were", () => {
@@ -21,5 +21,29 @@ describe("dur", () => {
   it("rolls a rounded 60 up rather than printing it", () => {
     expect(dur(59_600)).toBe("1m");
     expect(dur(3_599_600)).toBe("1h");
+  });
+});
+
+describe("countdown", () => {
+  const now = 1_700_000_000_000;
+
+  it("counts in seconds, where `untilShort` only ever says <1m", () => {
+    // The whole reason it exists: the reconnect backoff is capped at 10s, so
+    // every value the connection card hands it used to render as "<1m" while a
+    // 1Hz ticker re-rendered that constant.
+    expect(countdown(now + 3_000, now)).toBe("3s");
+    expect(countdown(now + 10_000, now)).toBe("10s");
+    expect(countdown(now + 59_400, now)).toBe("59s");
+  });
+
+  it("says `now` rather than 0s, and never goes negative", () => {
+    expect(countdown(now + 400, now)).toBe("now");
+    expect(countdown(now, now)).toBe("now");
+    expect(countdown(now - 5_000, now)).toBe("now");
+  });
+
+  it("hands anything past a minute back to untilShort", () => {
+    expect(countdown(now + 90_000, now)).toBe("1m");
+    expect(countdown(now + 3_600_000, now)).toBe("1h");
   });
 });

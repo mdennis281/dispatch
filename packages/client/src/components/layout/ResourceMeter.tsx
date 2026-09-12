@@ -186,7 +186,7 @@ export function ResourceMeter() {
       width={304}
       onOpenChange={setOpen}
       className={GAUGE_TRIGGER}
-      card={() => (
+      card={(close) => (
         <>
           <div className="flex items-center gap-1.5 border-b border-line px-3 py-2">
             <Server className="size-3.5 shrink-0 text-muted" />
@@ -229,7 +229,12 @@ export function ResourceMeter() {
             size="sm"
             rightIcon={<ExternalLink className="size-3" />}
             onClick={() => {
-              setOpen(false);
+              // `close()`, not `setOpen(false)`: `open` here is only this
+              // component's mirror of the card's state, and all it gates is the
+              // snapshot poll. Setting it dismissed nothing — the 304px panel
+              // stayed painted over the Resources page you had just landed on
+              // until the pointer wandered off it.
+              close();
               setView("metrics");
               useView.getState().setMetricsSection("resources");
             }}

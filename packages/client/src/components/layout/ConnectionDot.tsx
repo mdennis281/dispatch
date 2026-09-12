@@ -6,7 +6,7 @@ import {
   isStaleBundle,
   type Reach,
 } from "../../lib/connectionDiagnosis.js";
-import { untilShort } from "../../lib/format.js";
+import { countdown } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
 import { HoverCard } from "../ui/HoverCard.js";
 import { StatusDot, type DotTone } from "../ui/StatusDot.js";
@@ -74,6 +74,9 @@ export function ConnectionDot({ className }: { className?: string }) {
 
   // The retry countdown is the only live number in the card, so it ticks only
   // while the card is open — and only while there is a retry to count down to.
+  // It counts in SECONDS (`countdown`, not `untilShort`): the backoff is capped
+  // at 10s, so a minute-granularity readout would print "<1m" for the whole
+  // reconnect and this interval would re-render a constant once a second.
   useEffect(() => {
     if (!open || !nextRetryAt) return;
     setNow(Date.now());
@@ -114,7 +117,7 @@ export function ConnectionDot({ className }: { className?: string }) {
             ) : (
               <>
                 <Row label="Socket">{describeClose(lastClose)}</Row>
-                {nextRetryAt && <Row label="Next try">{untilShort(nextRetryAt, now)}</Row>}
+                {nextRetryAt && <Row label="Next try">{countdown(nextRetryAt, now)}</Row>}
                 {attempts > 0 && <Row label="Attempts">{attempts}</Row>}
                 {!online && <Row label="Network">browser reports offline</Row>}
               </>
