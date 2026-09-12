@@ -2805,7 +2805,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       "tell: attach screenshots and/or the URL of a running dev server (start one with " +
       "run_subapp). The human skims this card, so the summary is capped at " +
       `${HUMAN_REVIEW_SUMMARY_MAX} characters: what changed and what you're unsure about, nothing ` +
-      "else. Act on the verdict you get back.",
+      "else. Act on the verdict you get back. If this call errors or times out before they " +
+      "answer, that is NOT a verdict: don't merge, say you're waiting on their review and end " +
+      "your turn. Their verdict still reaches you as a message when they give it.",
     {
       title: z
         .string()

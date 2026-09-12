@@ -55,24 +55,6 @@ interface PendingAsk {
 /** A dead app-server must not make session disposal wait forever. */
 const DISPOSE_RPC_TIMEOUT_MS = 250;
 
-/**
- * Codex's per-call deadline for Dispatch's own MCP servers, in seconds.
- *
- * Left unset, Codex cuts every `tools/call` off at its 300s default. Dispatch's
- * tools BLOCK by design: `watch_pr` and `wait_for_chat` for up to an hour, and
- * `ask_user` / `request_human_review` for as long as a human takes. So every
- * Codex chat that waited on CI, a peer, or the human got "timed out awaiting
- * tools/call after 300s" and carried on as if nothing had been decided. On
- * 2026-09-12 a review was answered three minutes after that and the verdict
- * went nowhere.
- *
- * A day rather than infinity: the bounded tools stop themselves at an hour,
- * and a human card still open past a day is abandoned. Its late answer then
- * reaches the chat as a message instead (see SessionBroker's abandoned-card
- * handling).
- */
-export const MANAGER_TOOL_TIMEOUT_SEC = 24 * 60 * 60;
-
 async function settleForDisposal(work: (signal: AbortSignal) => Promise<unknown>): Promise<void> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -687,11 +669,7 @@ export class CodexSession implements HarnessSession {
       // different path.
       const { token } = this.spec.managerMcp;
       for (const [name, url] of Object.entries(this.spec.managerMcp.urls)) {
-        servers[name] = {
-          url,
-          http_headers: { Authorization: `Bearer ${token}` },
-          tool_timeout_sec: MANAGER_TOOL_TIMEOUT_SEC,
-        };
+        servers[name] = { url, http_headers: { Authorization: `Bearer ${token}` } };
       }
     }
     if (Object.keys(servers).length) {
