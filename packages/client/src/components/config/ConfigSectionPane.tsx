@@ -17,6 +17,7 @@
  * `workflow` and `memory`) — the verb, the placeholder, the icon and the run
  * settings all come from that task's catalog entry.
  */
+import { PersonasPane } from "./PersonasPane.js";
 import { useState } from "react";
 import { FileCog, Plus, SquarePen, Trash2 } from "lucide-react";
 import {
@@ -64,6 +65,8 @@ export function ConfigSectionPane({
   // The TASK's icon, not the section's: they agree today, and when they don't
   // it's the task icon that the spawned chat will wear.
   const TaskIcon = task ? taskIcon(AGENT_TASKS[task].icon) : Icon;
+
+  if (section.id === "personas") return <PersonasPane projectId={projectId} />;
 
   return (
     <div className="space-y-3">

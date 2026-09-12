@@ -81,6 +81,12 @@ export async function listProjectItems(
       active: true,
     }));
   }
+  if (kind === "persona") {
+    return (await readInstructionsDir(join(config.sourceDir, "personas"))).map((f) => ({
+      kind, scope: "project" as const, name: f.name, description: f.description,
+      path: f.path, writable: true, active: true,
+    }));
+  }
   const registered = new Set(
     config.instructions
       .filter((i) => i.source === "file" && i.rel)
@@ -132,6 +138,14 @@ export async function writeProjectItem(
     return { path, registered: false, manifestPath: loaded.existed ? undefined : loaded.paths.manifestPath };
   }
 
+  if (kind === "persona") {
+    const dir = join(configDir, "personas");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, `${name}.md`);
+    await writeFile(path, `${body.trimEnd()}\n`, "utf8");
+    if (!loaded.existed) await saveManifest(loaded);
+    return { path, registered: false };
+  }
   const dirName = instructionsDirName(loaded.doc);
   const dir = join(configDir, dirName);
   await mkdir(dir, { recursive: true });
@@ -174,6 +188,12 @@ export async function deleteProjectItem(
     return removed;
   }
 
+  if (kind === "persona") {
+    const path = join(configDir, "personas", `${name}.md`);
+    const existed = existsSync(path);
+    if (existed) await rm(path);
+    return existed;
+  }
   const dirName = instructionsDirName(loaded.doc);
   const path = join(configDir, dirName, `${name}.md`);
   const unregistered = unregisterInstruction(loaded.doc, `${dirName}/${name}.md`, `${name}.md`);
@@ -198,7 +218,7 @@ export async function readProjectItem(
           join(configDir, skillsDirName(loaded.doc), name, "SKILL.md"),
           join(configDir, skillsDirName(loaded.doc), `${name}.md`),
         ]
-      : [join(configDir, instructionsDirName(loaded.doc), `${name}.md`)];
+      : [join(configDir, kind === "persona" ? "personas" : instructionsDirName(loaded.doc), `${name}.md`)];
   for (const path of candidates) {
     if (!existsSync(path)) continue;
     return { path, text: await readFile(path, "utf8") };

@@ -814,3 +814,13 @@ describe("buildTaskParts — pr:review", () => {
     expect(brief).toContain("do not guess");
   });
 });
+
+
+it("briefs persona quick actions with explicit scope and no automatic activation", () => {
+  const text = parts("config:personas", { params: { scope: "global", personaId: "product-owner" } }).map((p) => p.text).join("\n");
+  expect(text).toContain("scope:global");
+  expect(text).toContain("product-owner");
+  expect(text).toContain("config_read");
+  expect(text).toContain("kind:persona");
+  expect(text).toContain("off by default");
+});

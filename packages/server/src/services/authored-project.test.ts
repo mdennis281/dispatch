@@ -187,3 +187,15 @@ describe("listProjectItems", () => {
     expect(items.find((i) => i.name === "orphan")!.active).toBe(false);
   });
 });
+
+
+it("writes and deletes a persona without registering it as an always-on instruction", async () => {
+  const before = await readFile(join(repo, ".dispatch", "project.yaml"), "utf8");
+  const result = await writeProjectItem(repo, "persona", "product-owner", "# Product owner\nVerify scope.");
+  expect(result.path).toBe(join(repo, ".dispatch", "personas", "product-owner.md"));
+  expect(result.registered).toBe(false);
+  expect((await readProjectItem(repo, "persona", "product-owner"))?.text).toContain("Verify scope.");
+  expect(await readFile(join(repo, ".dispatch", "project.yaml"), "utf8")).toBe(before);
+  expect(await deleteProjectItem(repo, "persona", "product-owner")).toBe(true);
+  expect(await readProjectItem(repo, "persona", "product-owner")).toBeNull();
+});

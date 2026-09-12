@@ -127,3 +127,21 @@ describe("createAuthoringEditor", () => {
     expect(remaining?.scope).toBe("global");
   });
 });
+
+
+describe("persona authoring", () => {
+  it("overrides shipped at global then project scope and restores fallback after deletion", async () => {
+    const ed = editor();
+    expect((await ed.read("persona", "product-owner"))?.scope).toBe("shipped");
+    await ed.write({ kind: "persona", scope: "global", name: "product-owner", body: "# Product owner\nGlobal requirements" });
+    expect((await ed.read("persona", "product-owner"))?.text).toContain("Global requirements");
+    await ed.write({ kind: "persona", scope: "project", name: "product-owner", body: "# Product owner\nProject requirements" });
+    expect((await ed.read("persona", "product-owner"))?.scope).toBe("project");
+    expect((await ed.list("persona")).filter((p) => p.name === "product-owner")).toHaveLength(3);
+    expect(await authored.buildInjection()).not.toContain("Global requirements");
+    expect(await ed.remove("persona", "product-owner", "project")).toBe(true);
+    expect((await ed.read("persona", "product-owner"))?.scope).toBe("global");
+    expect(await ed.remove("persona", "product-owner", "global")).toBe(true);
+    expect((await ed.read("persona", "product-owner"))?.scope).toBe("shipped");
+  });
+});

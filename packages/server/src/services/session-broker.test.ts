@@ -23,6 +23,7 @@ import { GitHubService } from "./github.js";
 import { MemoryService } from "./memory.js";
 import { MetricsService } from "./metrics.js";
 import { MetricsBackfill } from "./metrics-backfill.js";
+import { AuthoredConfigService } from "./authored-config.js";
 import { ProjectConfigService } from "./project-config.js";
 
 describe("buildManagerToolsDirective", () => {
@@ -4535,5 +4536,83 @@ describe("interruptionSnapshot", () => {
     // Teardown overwrote the status with `done` and emptied the outbox. Read
     // here instead of before, auto-resume is silently a no-op forever.
     expect(broker.interruptionSnapshot()).toEqual([]);
+  });
+});
+
+
+describe("optional persona instructions", () => {
+  it("waits for a persona selection before starting an immediately submitted message", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const authored = new AuthoredConfigService({ globalRoot: join(dir, "global") });
+    const broker = makeBroker(fn, 6, { authored });
+    const chat = await store.saveChat(chatFor("fast-persona"));
+    broker.create(chat);
+    const selected = broker.setPersona(chat.id, "product-owner");
+    const idle = broker.waitFor(chat.id, "idle");
+    await broker.sendMessage(chat.id, "verify the scope");
+    await selected;
+    await idle;
+    expect(JSON.stringify(controllers[0]!.options?.systemPrompt)).toContain("principal-level product owner");
+  });
+
+  it("refuses to change roles during an active turn", async () => {
+    let finish!: () => void;
+    const paused = new Promise<void>((resolve) => { finish = resolve; });
+    const { fn } = makeFakeQuery(async (t) => {
+      await paused;
+      return [assistantText(t), resultMsg()];
+    });
+    const authored = new AuthoredConfigService({ globalRoot: join(dir, "global") });
+    const broker = makeBroker(fn, 6, { authored });
+    const chat = await store.saveChat(chatFor("busy-persona"));
+    broker.create(chat);
+    const running = broker.waitFor(chat.id, "running");
+    await broker.sendMessage(chat.id, "work");
+    await running;
+    await expect(broker.setPersona(chat.id, "product-owner")).rejects.toThrow("current turn");
+    const idle = broker.waitFor(chat.id, "idle");
+    finish();
+    await idle;
+    expect((await store.getChat(chat.id))!.personaId).toBeUndefined();
+  });
+
+  it("starts off, resumes with a selected persona, and removes it when turned off", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const authored = new AuthoredConfigService({ globalRoot: join(dir, "global") });
+    const broker = makeBroker(fn, 6, { authored });
+    const chat = await store.saveChat(chatFor("persona-chat"));
+    broker.create(chat);
+    async function turn(text: string) {
+      const idle = broker.waitFor(chat.id, "idle");
+      await broker.sendMessage(chat.id, text);
+      await idle;
+    }
+    await turn("first");
+    expect(JSON.stringify(controllers[0]!.options?.systemPrompt)).not.toContain("Selected persona:");
+    const sessionId = (await store.getChat(chat.id))!.sessionId;
+    await broker.setPersona(chat.id, "product-owner");
+    expect((await store.getChat(chat.id))!.personaId).toBe("product-owner");
+    await turn("second");
+    expect(controllers[1]!.options?.resume).toBe(sessionId);
+    expect(JSON.stringify(controllers[1]!.options?.systemPrompt)).toContain("principal-level product owner");
+    await broker.setPersona(chat.id, null);
+    await turn("third");
+    expect((await store.getChat(chat.id))!.personaId).toBeUndefined();
+    expect(JSON.stringify(controllers[2]!.options?.systemPrompt)).not.toContain("Selected persona:");
+    expect((await store.readMessages(chat.id)).filter((r) => r.kind === "user")).toHaveLength(3);
+  });
+
+  it("restores the persona from the saved chat and rejects an unknown selection", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const authored = new AuthoredConfigService({ globalRoot: join(dir, "global") });
+    const broker = makeBroker(fn, 6, { authored });
+    const chat = await store.saveChat({ ...chatFor("restored-persona"), personaId: "product-owner" });
+    broker.resume(chat);
+    await expect(broker.setPersona(chat.id, "missing")).rejects.toThrow("unavailable");
+    expect((await store.getChat(chat.id))!.personaId).toBe("product-owner");
+    const idle = broker.waitFor(chat.id, "idle");
+    await broker.sendMessage(chat.id, "continue");
+    await idle;
+    expect(JSON.stringify(controllers[0]!.options?.systemPrompt)).toContain("principal-level product owner");
   });
 });

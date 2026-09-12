@@ -25,6 +25,8 @@ import {
   type ImageRef,
   type WorktreeInfo,
 } from "@dispatch/shared";
+import { resolvePersona } from "../services/personas.js";
+import { configPathsFor } from "../services/config-location.js";
 import { COPILOT_LOGIN } from "../services/github.js";
 import { resolveReviewer } from "../services/reviewer.js";
 import type { Services } from "../services/container.js";
@@ -50,6 +52,7 @@ export interface CreateChatInput {
   title?: string;
   modeId?: string;
   agentId?: string;
+  personaId?: string;
   effort?: Effort;
   /** Runtime override; otherwise project → app → built-in default. */
   harness?: HarnessKind;
@@ -79,6 +82,10 @@ export async function createChat(
   const project = await store.getProject(input.projectId);
   if (!project) throw new Error(`project "${input.projectId}" not found`);
 
+  if (input.personaId) {
+    const paths = configPathsFor(project, store.projectConfigDir(project.id));
+    await resolvePersona(services.authored, input.personaId, paths?.configDir);
+  }
   const settings = await store.getSettings().catch(() => null);
   const harness = input.harness ?? project.harness ?? settings?.harness?.defaultHarness ?? "claude";
   const harnessDefaults = settings?.harness?.defaults?.[harness];
@@ -91,6 +98,7 @@ export async function createChat(
     agentId: (services.harnesses?.find(harness)?.capabilities.subagents ?? harness === "claude")
       ? input.agentId
       : undefined,
+    personaId: input.personaId,
     harness,
     effort: input.effort ?? harnessDefaults?.effort ?? "medium",
     ...((input.model ?? harnessDefaults?.model)

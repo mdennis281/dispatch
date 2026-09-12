@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
+import { AuthoredConfigService } from "../services/authored-config.js";
 import { createChat } from "./dispatch.js";
 import type { Services } from "../services/container.js";
 
@@ -108,4 +109,14 @@ describe("createChat defaults", () => {
 
     expect(chat.modeId).toBe("plan");
   });
+});
+
+
+it.each(["claude", "codex"] as const)("persists explicit personas for %s, defaulting to off", async (harness) => {
+  const deps = { ...services(), authored: new AuthoredConfigService({ globalRoot: join(root, "global") }) };
+  expect((await createChat(deps, { projectId: "p1", harness })).personaId).toBeUndefined();
+  const selected = await createChat(deps, { projectId: "p1", harness, personaId: "product-owner" });
+  expect((await store.getChat(selected.id))!.personaId).toBe("product-owner");
+  expect(selected.harness).toBe(harness);
+  await expect(createChat(deps, { projectId: "p1", harness, personaId: "missing" })).rejects.toThrow("unavailable");
 });

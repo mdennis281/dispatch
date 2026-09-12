@@ -532,6 +532,7 @@ export const ConfigSectionSchema = z.enum([
   "agents",
   "modes",
   "skills",
+  "personas",
   "mcp",
   "subApps",
   "memory",

@@ -799,6 +799,8 @@ export const ChatSchema = z.object({
    */
   costBaselineUsd: z.number().optional(),
   agentId: z.string().optional(),
+  /** Unset means off; independent of the provider and custom agent. */
+  personaId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional(),
   modeId: z.string(),
   effort: EffortSchema,
   /** SDK model id backing the session (unset = SDK/subscription default). */
