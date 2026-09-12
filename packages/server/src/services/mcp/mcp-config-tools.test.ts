@@ -30,6 +30,7 @@ const broker: ManagerMcpBroker = {
   compact: () => {},
   markPrWatched: () => {},
   askUser: async () => ({ status: "declined" }),
+  requestHumanReview: async () => ({ status: "dismissed" }),
 };
 
 function ctx(mcpConfig?: ManagerMcpConfig) {

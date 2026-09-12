@@ -14,12 +14,15 @@ import { PEER_MESSAGE_LIMIT } from "../chat-messenger.js";
 import { memorySimilarity } from "../memory.js";
 import {
   decodePrToolPayload,
+  HUMAN_REVIEW_ANSWERS,
+  HUMAN_REVIEW_SUMMARY_MAX,
   managerToolQualifiedName,
   type ManagerToolName,
 } from "@dispatch/shared";
 import {
   createManagerTools,
   createManagerMcpServers,
+  humanReviewQuestion,
   managerToolDescriptors,
   prLandingBlockers,
   overrideConsentPrompt,
@@ -74,6 +77,7 @@ function fakeBroker(states: Record<string, ChatStatus>): ManagerMcpBroker {
     compact: () => {},
     markPrWatched: () => {},
     askUser: async () => ({ status: "declined" }),
+    requestHumanReview: async () => ({ status: "dismissed" }),
   };
 }
 
@@ -189,6 +193,138 @@ describe("manager-mcp — ask_user", () => {
     expect(text).toContain("No live session");
     expect(text).not.toContain("declined");
     expect(res.isError).toBeFalsy();
+  });
+});
+
+/* ---------------------------------------------------- request_human_review */
+
+describe("manager-mcp — request_human_review", () => {
+  const args = {
+    title: "New review card",
+    summary: "Verdict buttons under the evidence.",
+    screenshots: ["C:/shots/card.png"],
+    previewUrl: "http://localhost:5173",
+    prUrl: undefined,
+  };
+
+  function reviewWith(result: Awaited<ReturnType<ManagerMcpBroker["requestHumanReview"]>>) {
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({ c1: "running" }),
+      requestHumanReview: async () => result,
+    };
+    return createManagerTools({ chatId: "c1", bus, broker }).requestHumanReview;
+  }
+
+  it("hands the evidence and the call's cancellation signal to the broker", async () => {
+    const controller = new AbortController();
+    let call: { chatId: string; request: unknown; signal?: AbortSignal } | undefined;
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({ c1: "running" }),
+      requestHumanReview: async (chatId, request, signal) => {
+        call = { chatId, request, signal };
+        return { status: "reviewed", verdict: "approve" };
+      },
+    };
+    const { requestHumanReview } = createManagerTools({ chatId: "c1", bus, broker });
+
+    await requestHumanReview.handler(args, { signal: controller.signal });
+
+    expect(call).toEqual({
+      chatId: "c1",
+      request: {
+        title: args.title,
+        summary: args.summary,
+        screenshots: args.screenshots,
+        previewUrl: args.previewUrl,
+        prUrl: undefined,
+      },
+      signal: controller.signal,
+    });
+  });
+
+  it("refuses a review with nothing to look at, before any card is raised", async () => {
+    let raised = false;
+    const broker: ManagerMcpBroker = {
+      ...fakeBroker({ c1: "running" }),
+      requestHumanReview: async () => {
+        raised = true;
+        return { status: "reviewed", verdict: "approve" };
+      },
+    };
+    const { requestHumanReview } = createManagerTools({ chatId: "c1", bus, broker });
+
+    const res = await requestHumanReview.handler(
+      { ...args, screenshots: undefined, previewUrl: undefined },
+      {},
+    );
+
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("needs something to look at");
+    expect(raised).toBe(false);
+  });
+
+  it("caps the summary in the schema the agent sees, so an essay is rejected rather than clipped", () => {
+    const tool = managerToolDescriptors().find((t) => t.name === "request_human_review")!;
+    const props = tool.inputSchema.properties as Record<string, { maxLength?: number }>;
+    expect(tool.category).toBe("confirm");
+    expect(props.summary?.maxLength).toBe(HUMAN_REVIEW_SUMMARY_MAX);
+    expect(tool.description).toContain(`${HUMAN_REVIEW_SUMMARY_MAX} characters`);
+  });
+
+  it("tells the agent what each verdict means, comment included", async () => {
+    const approved = resultText(
+      await reviewWith({ status: "reviewed", verdict: "approve", comment: "Ship it." }).handler(args, {}),
+    );
+    expect(approved).toContain("APPROVED");
+    expect(approved).toContain('"Ship it."');
+    // Approving the change is not a waiver of the landing gates.
+    expect(approved).toContain("waives nothing else");
+
+    const iterate = resultText(
+      await reviewWith({ status: "reviewed", verdict: "iterate", comment: "Bigger buttons." }).handler(args, {}),
+    );
+    expect(iterate).toContain("KEEP ITERATING");
+    expect(iterate).toContain('"Bigger buttons."');
+    expect(iterate).toContain("request_human_review again");
+
+    const stop = resultText(await reviewWith({ status: "reviewed", verdict: "stop" }).handler(args, {}));
+    expect(stop).toContain("STOP WORK");
+    expect(stop).toContain("don't merge");
+  });
+
+  it("never reads a dismissal as an approval", async () => {
+    const res = await reviewWith({ status: "dismissed", message: "Replied instead." }).handler(args, {});
+    const text = resultText(res);
+    expect(text).toContain("NOT an approval");
+    expect(text).toContain("Replied instead.");
+    expect(text).not.toContain("APPROVED");
+    expect(res.isError).toBeFalsy();
+  });
+
+  it("flags an unusable screenshot as an error the agent must fix", async () => {
+    const res = await reviewWith({
+      status: "invalid",
+      message: "Screenshot C:/shots/card.png does not exist.",
+    }).handler(args, {});
+    expect(res.isError).toBe(true);
+    expect(resultText(res)).toContain("does not exist");
+  });
+
+  it("builds a fallback question an older client can still answer with the same verdicts", () => {
+    const q = humanReviewQuestion({
+      title: "New review card",
+      summary: "Verdict buttons under the evidence.",
+      screenshots: [{ id: "s1", path: "assets/s1.png" }],
+      previewUrl: "http://localhost:5173",
+    });
+    expect(q.options.map((o) => o.label)).toEqual([
+      HUMAN_REVIEW_ANSWERS.approve,
+      HUMAN_REVIEW_ANSWERS.iterate,
+      HUMAN_REVIEW_ANSWERS.stop,
+    ]);
+    expect(q.header.length).toBeLessThanOrEqual(24);
+    expect(q.question).toContain("Preview: http://localhost:5173");
+    expect(q.question).toContain("1 screenshot attached.");
   });
 });
 

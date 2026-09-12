@@ -55,6 +55,11 @@
  *     human picks whether the grant covers one command or the rest of the chat,
  *     a refusal is final, and the grant dies with the live session. Offered only
  *     where the guard is actually enforcing.
+ *   - `mcp__dispatch-confirm__request_human_review({ title, summary, screenshots?, previewUrl?,
+ *     prUrl? })` — put a change in front of the human with its evidence and wait for a
+ *     verdict: approve, keep iterating, or stop work, each with an optional comment.
+ *     Rides the question channel, so it is the same Attention entry and teardown as
+ *     `ask_user`; the summary is capped because the human skims it.
  *   - `mcp__dispatch-chat__spawn_chat({ prompt, projectId?, … })` — start ANOTHER chat
  *     (via {@link ManagerMcpChats}), but only after the human says yes. The
  *     consent rides the broker's ordinary permission channel, so the request
@@ -95,6 +100,13 @@ import {
   AuthoredKindSchema,
   AuthoredScopeSchema,
   isWritableScope,
+  HTTP_URL_RE,
+  HUMAN_REVIEW_ANSWERS,
+  HUMAN_REVIEW_MAX_SCREENSHOTS,
+  HUMAN_REVIEW_SUMMARY_MAX,
+  HUMAN_REVIEW_TITLE_MAX,
+  type HumanReviewPayload,
+  type HumanReviewVerdict,
   type AuthoredItem,
   type AuthoredKind,
   type AuthoredScope,
@@ -209,6 +221,24 @@ export type ManagerAskResult =
 /** Longest inactivity timeout an agent may put on a question card. */
 export const ASK_USER_TIMEOUT_CAP_SECONDS = 3_600;
 
+/** What an agent puts in front of the human with `request_human_review`. */
+export interface ManagerHumanReviewRequest {
+  title: string;
+  summary: string;
+  /** Screenshot paths (or http(s) image URLs) exactly as the agent passed them. */
+  screenshots: string[];
+  previewUrl?: string;
+  prUrl?: string;
+}
+
+/** The human's verdict on a review card. */
+export type ManagerHumanReviewResult =
+  | { status: "reviewed"; verdict: HumanReviewVerdict; comment?: string }
+  | { status: "dismissed"; message?: string }
+  /** The card was never raised — a screenshot the agent named can't be shown. */
+  | { status: "invalid"; message: string }
+  | { status: "unavailable"; message: string };
+
 /**
  * Check conclusions that count as a FAILING check for `watch_pr` — the ones an
  * agent must react to (a red build, a required check it must satisfy). `neutral`,
@@ -252,6 +282,12 @@ export interface ManagerMcpBroker {
     timeoutSeconds?: number,
     signal?: AbortSignal,
   ): Promise<ManagerAskResult>;
+  /** Raise a review card (screenshots, preview, verdict buttons) and wait for the verdict. */
+  requestHumanReview(
+    chatId: string,
+    request: ManagerHumanReviewRequest,
+    signal?: AbortSignal,
+  ): Promise<ManagerHumanReviewResult>;
 }
 
 /**
@@ -1191,6 +1227,46 @@ export function readExemptionAnswer(answer: string | undefined): WorkflowExempti
   if (picked === EXEMPTION_ANSWERS.once) return "once";
   if (picked === EXEMPTION_ANSWERS.session) return "session";
   return null;
+}
+
+/**
+ * The plain question a review card is built on.
+ *
+ * The review card itself reads the `review` payload beside this and ignores the
+ * text, so the text is written for the OTHER reader: a client from before the
+ * review card existed, which renders it as an ordinary question. That card must
+ * still be answerable — same three verdicts as options, the summary and links
+ * in the body — or an out-of-date PWA would strand the agent on a card with
+ * nothing to press. It is also the key the answer comes back under.
+ */
+export function humanReviewQuestion(review: HumanReviewPayload): ManagerAskQuestion {
+  const lines = [review.title, review.summary];
+  const links = [
+    review.previewUrl ? `Preview: ${review.previewUrl}` : null,
+    review.prUrl ? `Pull request: ${review.prUrl}` : null,
+    review.screenshots.length
+      ? `${review.screenshots.length} screenshot${review.screenshots.length === 1 ? "" : "s"} attached.`
+      : null,
+  ].filter((line): line is string => line !== null);
+  if (links.length) lines.push(links.join("\n"));
+  return {
+    header: "Review",
+    question: lines.join("\n\n"),
+    options: [
+      {
+        label: HUMAN_REVIEW_ANSWERS.approve,
+        description: "Good to go — the agent finishes and lands it the normal way.",
+      },
+      {
+        label: HUMAN_REVIEW_ANSWERS.iterate,
+        description: "Not yet — the agent works through your comments and asks again.",
+      },
+      {
+        label: HUMAN_REVIEW_ANSWERS.stop,
+        description: "Drop it — the agent stops and makes no further changes.",
+      },
+    ],
+  };
 }
 
 /** Single-line clip for text quoted onto a consent card. */
@@ -2680,6 +2756,113 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         return textResult(`The question timed out without an answer. ${result.message}\n${JSON.stringify(result)}`);
       }
       return textResult(`The human answered:\n${JSON.stringify(result.answers, null, 2)}`);
+    },
+  );
+
+  const requestHumanReview = tool(
+    "request_human_review",
+    "Put your change in front of the human and WAIT for their verdict: Approve, Keep iterating, or " +
+      "Stop work — each can carry a comment. Use it when you aren't confident the change is right " +
+      "(anything visual especially), or when the human asked to see it before it merges — instead " +
+      "of merging, and instead of ending your turn with a link they may never open. SHOW, don't " +
+      "tell: attach screenshots and/or the URL of a running dev server (start one with " +
+      "run_subapp). The human skims this card, so the summary is capped at " +
+      `${HUMAN_REVIEW_SUMMARY_MAX} characters: what changed and what you're unsure about, nothing ` +
+      "else. Act on the verdict you get back.",
+    {
+      title: z
+        .string()
+        .min(1)
+        .max(HUMAN_REVIEW_TITLE_MAX)
+        .describe("Headline of what to review, e.g. 'Review card for human sign-off'."),
+      summary: z
+        .string()
+        .min(1)
+        .max(HUMAN_REVIEW_SUMMARY_MAX)
+        .describe(
+          `At most ${HUMAN_REVIEW_SUMMARY_MAX} characters — two or three sentences. What changed ` +
+            "and what you want a second opinion on. No changelog: the evidence carries the detail.",
+        ),
+      screenshots: z
+        .array(z.string().min(1))
+        .max(HUMAN_REVIEW_MAX_SCREENSHOTS)
+        .optional()
+        .describe(
+          "Absolute paths to screenshot files on this machine (PNG/JPEG/WebP/GIF — e.g. what " +
+            "browser_take_screenshot saved), or http(s) image URLs. Shown on the card.",
+        ),
+      previewUrl: z
+        .string()
+        .regex(HTTP_URL_RE)
+        .optional()
+        .describe("A running dev server the human can click through — the URL run_subapp gave you."),
+      prUrl: z
+        .string()
+        .regex(HTTP_URL_RE)
+        .optional()
+        .describe("The pull request, when there is one."),
+    },
+    async (args, extra): Promise<CallToolResult> => {
+      const screenshots = args.screenshots ?? [];
+      if (!screenshots.length && !args.previewUrl && !args.prUrl) {
+        // A summary alone asks the human to take your word for it — which is the
+        // thing this card exists to avoid. That's a question, and has a tool.
+        return textResult(
+          "request_human_review needs something to look at: screenshots, a previewUrl of a " +
+            "running dev server, or at least the prUrl. For a question that needs no evidence, " +
+            "use ask_user.",
+          true,
+        );
+      }
+      const result = await ctx.broker.requestHumanReview(
+        ctx.chatId,
+        {
+          title: args.title,
+          summary: args.summary,
+          screenshots,
+          previewUrl: args.previewUrl,
+          prUrl: args.prUrl,
+        },
+        combinedSignal(extraSignal(extra), ctx.signal),
+      );
+      if (result.status === "invalid") {
+        return textResult(`The review card was not shown. ${result.message}`, true);
+      }
+      if (result.status === "unavailable") {
+        return textResult(
+          `The review could not be shown to the human. ${result.message}\n${JSON.stringify(result)}`,
+        );
+      }
+      if (result.status === "dismissed") {
+        // Not a verdict, so not an approval. The usual cause is the human typing
+        // into the composer instead — and that message is what to act on.
+        return textResult(
+          "The human dismissed the review without a verdict" +
+            `${result.message ? ` (${result.message})` : ""}. This is NOT an approval — don't ` +
+            "merge on it. Follow whatever they said instead.\n" +
+            JSON.stringify(result),
+        );
+      }
+      const said = result.comment ? ` Their comment: "${result.comment}"` : "";
+      const next =
+        result.verdict === "approve"
+          ? "The human APPROVED this change." +
+            said +
+            "\nCarry on and land it the normal way. This approves the change itself; it waives " +
+            "nothing else — CI and any required code review still apply."
+          : result.verdict === "iterate"
+            ? "The human wants you to KEEP ITERATING — this is not approved yet." +
+              (said ||
+                " They left no comment, so tighten what you flagged as uncertain.") +
+              "\nMake the changes, verify them, then call request_human_review again with fresh " +
+              "evidence. Don't merge before an approval."
+            : "The human said STOP WORK on this change." +
+              said +
+              "\nMake no further changes, don't merge, and don't open anything new for it. " +
+              "Say briefly where you left it, and end your turn.";
+      return textResult(
+        `${next}\n${JSON.stringify({ verdict: result.verdict, comment: result.comment ?? null })}`,
+      );
     },
   );
 
@@ -6389,6 +6572,7 @@ ${look}` : "")
 
   return {
     askUser,
+    requestHumanReview,
     wait,
     waitForChat,
     contextUsage,
@@ -6455,6 +6639,7 @@ type ManagerToolKey = keyof ManagerTools;
  */
 const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   askUser: "ask_user",
+  requestHumanReview: "request_human_review",
   wait: "wait",
   waitForChat: "wait_for_chat",
   contextUsage: "context_usage",
@@ -6506,6 +6691,7 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
  */
 const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   ask_user: null,
+  request_human_review: null,
   wait: null,
   wait_for_chat: null,
   context_usage: null,
@@ -6581,6 +6767,7 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
   const github = Boolean(ctx.github);
   return {
     ask_user: true,
+    request_human_review: true,
     wait: true,
     wait_for_chat: true,
     context_usage: true,
@@ -6674,6 +6861,7 @@ const NOOP_DESCRIPTOR_CTX = {
     compact: () => {},
     markPrWatched: () => {},
     askUser: async () => ({ status: "declined" as const }),
+    requestHumanReview: async () => ({ status: "dismissed" as const }),
   } as ManagerMcpBroker,
 } satisfies ManagerMcpContext;
 

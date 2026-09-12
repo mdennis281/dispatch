@@ -155,6 +155,8 @@ describe("buildWorkflowDirective", () => {
     const out = buildWorkflowDirective(wf, ctx)!;
     expect(out).toContain("mcp__dispatch-github__approve_pr");
     expect(out).toContain("**Unless the user said otherwise.**");
+    // "Let me look first" gets a review card, not a PR link left in the transcript.
+    expect(out).toContain("mcp__dispatch-confirm__request_human_review");
     expect(out).toContain("`hold` label");
     // The hand-merge ban stays — approve_pr is the only sanctioned path.
     expect(out).toMatch(/Never merge by hand/);
