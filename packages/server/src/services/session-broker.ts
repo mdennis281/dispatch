@@ -169,6 +169,7 @@ import {
 import type { SpawnNestingVerdict } from "./chat-nesting.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { createAuthoringEditor } from "./mcp/authoring-editor.js";
+import { resolvePersona } from "./personas.js";
 import { configPathsFor } from "./config-location.js";
 import type { AuthoredConfigService } from "./authored-config.js";
 import type { SlashCommandService } from "./slash-commands.js";
@@ -1162,6 +1163,7 @@ export interface SessionView {
   modeId: string;
   effort: Effort;
   agentId?: string;
+  personaId?: string;
   sessionId?: string;
   started: boolean;
   pendingPermissionIds: string[];
@@ -1680,6 +1682,8 @@ interface LiveSession {
   worktreeCwd?: string;
   modeId: string;
   agentId?: string;
+  personaId?: string;
+  personaChange?: Promise<void>;
   effort: Effort;
   harnessKind: HarnessKind;
   /**
@@ -2035,6 +2039,7 @@ export class SessionBroker {
         worktreeCwd,
         modeId: chat.modeId,
         agentId: chat.agentId,
+        personaId: chat.personaId,
         effort: chat.effort,
         harnessKind: chat.harness ?? DEFAULT_HARNESS,
         effortByThread: new Map(),
@@ -2122,6 +2127,8 @@ export class SessionBroker {
     opts: SendOptions | MessagePriority = {},
   ): Promise<void> {
     const session = this.mustGet(chatId);
+    // A fast Send after selecting a persona must wait for the idle runtime to retire.
+    if (session.personaChange) await session.personaChange.catch(() => {});
     const o: SendOptions = typeof opts === "string" ? { priority: opts } : opts;
     if (o.effort) this.applyEffort(session, o.effort);
 
@@ -2191,6 +2198,10 @@ export class SessionBroker {
       ? await this.resolveImageSources(chatId, o.images)
       : undefined;
 
+    // A persona change can begin during memory, transcript, or image preparation.
+    // Wait again at the last async boundary: queueing into a retiring input loses
+    // the message even though its user row has already been persisted.
+    while (session.personaChange) await session.personaChange.catch(() => {});
     this.resolveIdleAttention(session);
     session.outbox.push({
       id,
@@ -2655,6 +2666,40 @@ export class SessionBroker {
       });
     }
     void this.patchChat(chatId, { effort });
+  }
+
+  async setPersona(chatId: string, personaId: string | null): Promise<void> {
+    const session = this.mustGet(chatId);
+    if (session.personaChange) throw new Error("A persona change is already in progress.");
+    const assertIdle = () => {
+      if (session.turnOpen || ["running", "queued", "waiting", "awaiting-input"].includes(session.status)) {
+        throw new Error("Wait for the current turn to finish before changing persona.");
+      }
+    };
+    assertIdle();
+    const change = (async () => {
+      if (personaId) {
+        if (!this.authored) throw new Error("Persona configuration is unavailable.");
+        const project = await this.projectForChat(chatId);
+        const paths = project ? configPathsFor(project, this.store.projectConfigDir(project.id)) : null;
+        await resolvePersona(this.authored, personaId, paths?.configDir);
+      }
+      // A message may have started while the definition was being read.
+      assertIdle();
+      // Instructions are fixed at provider startup. Retire the idle runtime and
+      // resume its transcript so selection changes reach both providers.
+      if (session.started) {
+        session.switching = true;
+        await this.stop(chatId);
+      }
+      const saved = await this.store.patchChat(chatId, { personaId: personaId ?? undefined });
+      if (!saved) throw new Error("Chat no longer exists.");
+      session.personaId = saved.personaId;
+      this.bus.publish({ type: "chat-update", chat: saved });
+    })();
+    session.personaChange = change;
+    try { await change; }
+    finally { session.personaChange = undefined; }
   }
 
   /** Switch the active agent (applies to the next turn / restart). */
@@ -6207,6 +6252,11 @@ export class SessionBroker {
     const projectConfigPaths = project
       ? configPathsFor(project, this.store.projectConfigDir(project.id))
       : null;
+    if (session.personaId) {
+      if (!this.authored) throw new Error("Persona configuration is unavailable.");
+      const persona = await resolvePersona(this.authored, session.personaId, projectConfigPaths?.configDir);
+      appends.push(`## Selected persona: ${persona.name}\n\n${persona.instructions}`);
+    }
     options.mcpServers = {
       ...(externalMcp as unknown as Record<string, SdkMcpServerConfig>),
       // Spread LAST so Dispatch's own servers are never clobbered — including by
@@ -6827,6 +6877,7 @@ export class SessionBroker {
       modeId: s.modeId,
       effort: s.effort,
       agentId: s.agentId,
+      personaId: s.personaId,
       sessionId: s.sessionId,
       started: s.started,
       pendingPermissionIds: [...s.pendingPermissions.keys()],

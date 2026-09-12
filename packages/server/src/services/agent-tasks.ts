@@ -187,7 +187,22 @@ const CONFIG_BRIEFS: Record<string, ConfigBrief> = {
 };
 
 /** The composed briefing for a config-authoring task. */
-function configBriefText(taskId: AgentTaskId, config: ProjectConfig | null): string {
+function configBriefText(taskId: AgentTaskId, config: ProjectConfig | null, params: Record<string, unknown>): string {
+  if (taskId === "config:personas") {
+    const scope = params.scope === "global" ? "global" : "project";
+    const name = typeof params.personaId === "string" ? params.personaId : undefined;
+    return [
+      `Create or update a persona in ${scope} scope.`,
+      "**How this config works**",
+      name ? `The selected persona is ${JSON.stringify(name)}. Preserve that identity when customizing it.` : "Use a concise kebab-case identity.",
+      "Use config_list with kind:persona, then config_read to inspect the existing definition before editing.",
+      `Use config_write with kind:persona and scope:${scope}. Read the target scope first. If no definition exists there, use the broader fallback as a starting point: project falls back to global then shipped; global falls back to shipped.`,
+      "Write a markdown role description with a level-one heading for its display name. Describe experience, responsibilities, working style, delegation, and appropriate verification. Keep it concise.",
+      "Personas are off by default. Saving a definition never enables it on a chat or changes model, provider, permissions, or skills. Only the selected persona is injected.",
+      "Project definitions live in the resolved project config directory under personas/<name>.md; global ones live in the global config directory under personas/<name>.md. They need no instruction manifest registration.",
+      "Read existing configuration and match its conventions. Follow the user's requested behavior and ask only questions that materially affect the result. Report what definition you changed and its scope.",
+    ].join("\n\n");
+  }
   const brief = CONFIG_BRIEFS[taskId]!;
   const dirs = dirsFor(config);
   const noun = AGENT_TASKS[taskId].noun;
@@ -1140,7 +1155,7 @@ export function buildTaskParts(ctx: BriefContext): MessagePart[] {
     parts.push({
       kind: "brief",
       label: `${meta.action} — how this config works`,
-      text: configBriefText(ctx.taskId, ctx.config),
+      text: configBriefText(ctx.taskId, ctx.config, ctx.params),
     });
   }
 

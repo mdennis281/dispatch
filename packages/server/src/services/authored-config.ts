@@ -287,6 +287,17 @@ export class AuthoredConfigService {
 
   /** Every app-level item of a kind (both `shipped` and `global`). */
   async list(kind: AuthoredKind): Promise<AuthoredItem[]> {
+    if (kind === "persona") {
+      const shipped = findPackageDir("personas");
+      return [
+        ...(shipped ? await readInstructionsDir(shipped) : []).map((f) => ({
+          ...toInstructionItem(f, "shipped"), kind: "persona" as const,
+        })),
+        ...(await readInstructionsDir(join(this.globalRoot, "personas"))).map((f) => ({
+          ...toInstructionItem(f, "global"), kind: "persona" as const,
+        })),
+      ];
+    }
     if (kind === "skill") {
       return [
         ...bundledSkills().map((s) => toSkillItem(s, "shipped")),
@@ -313,8 +324,9 @@ export class AuthoredConfigService {
       await writeFile(path, renderSkill(name, description, body), "utf8");
       return path;
     }
-    await mkdir(this.globalInstructionsDir(), { recursive: true });
-    const path = join(this.globalInstructionsDir(), `${name}.md`);
+    const dir = kind === "persona" ? join(this.globalRoot, "personas") : this.globalInstructionsDir();
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, `${name}.md`);
     await writeFile(path, `${body.trimEnd()}\n`, "utf8");
     return path;
   }
@@ -336,7 +348,7 @@ export class AuthoredConfigService {
     const targets =
       kind === "skill"
         ? [join(this.globalSkillsDir(), name), join(this.globalSkillsDir(), `${name}.md`)]
-        : [join(this.globalInstructionsDir(), `${name}.md`)];
+        : [join(kind === "persona" ? join(this.globalRoot, "personas") : this.globalInstructionsDir(), `${name}.md`)];
     let removed = false;
     for (const target of targets) {
       if (!existsSync(target)) continue;
@@ -407,7 +419,7 @@ export function renderSkill(name: string, description: string | undefined, body:
 
 /** Path a project-scope item is written to, relative to the config dir. */
 export function projectRelPath(kind: AuthoredKind, name: string): string {
-  return kind === "skill" ? `skills/${name}/SKILL.md` : `instructions/${name}.md`;
+  return kind === "skill" ? `skills/${name}/SKILL.md` : `${kind === "persona" ? "personas" : "instructions"}/${name}.md`;
 }
 
 /** Last path segment, tolerant of either separator. */

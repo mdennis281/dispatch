@@ -51,6 +51,7 @@ const files = [
   "packages/server/package.json",
   "packages/server/dist",
   "packages/server/skills",
+  "packages/server/personas",
   "packages/client/dist",
   "packages/shared/package.json",
   "packages/shared/dist",

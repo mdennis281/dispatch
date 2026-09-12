@@ -811,6 +811,7 @@ export function createServices(
       modeId: request.modeId,
       harness: provider,
       agentId: request.agentId,
+      personaId: request.personaId,
       effort: request.effort,
       model,
       // Built in shared, beside the parser that reads it back — the detached form

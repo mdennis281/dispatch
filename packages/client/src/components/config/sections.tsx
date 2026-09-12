@@ -105,6 +105,15 @@ export const SECTIONS: SectionDef[] = [
     noun: "agent",
   },
   {
+    id: "personas",
+    icon: Bot,
+    label: "Personas",
+    blurb: "Optional roles selected per chat",
+    explainer: "Personas describe how a chat approaches its work. They start off and work with either provider. Project definitions override global definitions of the same name.",
+    noun: "persona",
+    countable: false,
+  },
+  {
     id: "skills",
     icon: Wand2,
     label: "Skills",

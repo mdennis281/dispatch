@@ -29,7 +29,7 @@
 import * as z from "zod";
 
 /** Which authored-guidance kind a tool call is about. */
-export const AuthoredKindSchema = z.enum(["instruction", "skill"]);
+export const AuthoredKindSchema = z.enum(["instruction", "skill", "persona"]);
 export type AuthoredKind = z.infer<typeof AuthoredKindSchema>;
 
 /**
@@ -106,6 +106,15 @@ export function toAuthoredName(raw: string): string | null {
   while (slug.endsWith("-")) slug = slug.slice(0, -1);
   return AUTHORED_NAME_RE.test(slug) ? slug : null;
 }
+
+/** A resolved, opt-in role; definitions never change model or permissions. */
+export const PersonaSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  scope: AuthoredScopeSchema,
+  instructions: z.string(),
+});
+export type Persona = z.infer<typeof PersonaSchema>;
 
 /* ------------------------------------------------------------ / commands */
 

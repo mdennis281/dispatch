@@ -5,6 +5,7 @@
  * changing call sites.
  */
 import type {
+  Persona,
   GhCliStatus,
   SetupStatus,
   Project,
@@ -433,6 +434,10 @@ function qs(params: Record<string, string | number | boolean | undefined>): stri
 
 /** The typed REST surface, grouped by resource. */
 export const api = {
+  personas: {
+    list: (projectId: string) => get<Persona[]>(`/api/projects/${encodeURIComponent(projectId)}/personas`),
+    select: (chatId: string, personaId: string | null) => put<Chat>(`/api/chats/${encodeURIComponent(chatId)}/persona`, { personaId }),
+  },
   /* projects */
   projects: {
     list: () => get<Project[]>("/api/projects"),

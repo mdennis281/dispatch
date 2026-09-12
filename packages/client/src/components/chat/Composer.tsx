@@ -87,6 +87,7 @@ import {
 } from "../../lib/composerFit.js";
 import { EffortChip } from "../agents/runVisuals.js";
 import { ContextMeter, ContextHint, ContextPanelBody } from "./ContextMeter.js";
+import { PersonaControl } from "./PersonaControl.js";
 import { ModeControl, ModeMenu, modeLabel, modeIcon } from "./ModeControl.js";
 
 /** The markup editor pulls in two annotation engines — lazy so they stay out of
@@ -1363,6 +1364,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         <span className="sr-only" role="status" aria-live="polite">
           {dictation.listening ? "Dictating" : ""}
         </span>
+
+        <PersonaControl key={chat.id} chat={chat} />
 
         {/* toolbar — flex-nowrap + non-shrinking children so an over-wide full
             layout genuinely overflows (which `measure` detects and collapses to

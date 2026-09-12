@@ -560,6 +560,7 @@ export const CreateChatActionSchema = z.object({
   title: z.string().optional(),
   modeId: z.string().optional(),
   agentId: z.string().optional(),
+  personaId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional(),
   effort: EffortSchema.optional(),
   harness: HarnessKindSchema.optional(),
   model: z.string().optional(),

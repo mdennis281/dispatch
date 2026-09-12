@@ -1627,6 +1627,8 @@ export interface SpawnChatRequest {
   /** Runtime provider for the new chat; omitted inherits the parent chat's provider. */
   provider?: HarnessKind;
   agentId?: string;
+  /** Optional role, off when omitted, for either child or detached chats. */
+  personaId?: string;
   effort?: Effort;
   model?: string;
   /** Why the agent wants it — shown on the consent card, not sent to the chat. */
@@ -5429,7 +5431,12 @@ export function createManagerTools(ctx: ManagerMcpContext) {
       agentId: z
         .string()
         .optional()
-        .describe("Custom agent/persona id for the new chat. This does not select its provider."),
+        .describe("Custom agent id for the new chat. This does not select its provider or persona."),
+      personaId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional().describe(
+        "Optional persona for a child or detached chat, e.g. product-owner. Omit for off; " +
+          "never inherited. Use config_list kind:persona to discover definitions; " +
+          "project overrides global and shipped.",
+      ),
       effort: z
         .enum(["low", "medium", "high", "xhigh", "max"])
         .optional()
@@ -5475,6 +5482,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         modeId: typeof args.modeId === "string" ? args.modeId.trim() || undefined : undefined,
         provider: args.provider as HarnessKind | undefined,
         agentId: typeof args.agentId === "string" ? args.agentId.trim() || undefined : undefined,
+        personaId: typeof args.personaId === "string" ? args.personaId : undefined,
         effort: args.effort as Effort | undefined,
         model: typeof args.model === "string" ? args.model.trim() || undefined : undefined,
         reason: typeof args.reason === "string" ? args.reason.trim() || undefined : undefined,
@@ -5899,7 +5907,8 @@ ${look}` : "")
       "(house rules, conventions, gotchas). skill = an on-demand procedure the " +
       "model loads only when its description matches the task, and which the human " +
       "can invoke by typing /<name>. Prefer a SKILL for anything task-specific: an " +
-      "instruction costs prompt budget on every single turn, forever.",
+      "instruction costs prompt budget on every single turn, forever. persona = an optional " +
+      "role description injected only when selected on a chat; use global or project scope to customize it.",
   );
 
   const scopeArg = AuthoredScopeSchema.optional().describe(
@@ -5910,7 +5919,7 @@ ${look}` : "")
 
   const configList = tool(
     "config_list",
-    "List the INSTRUCTIONS and SKILLS in effect for this session — the authored " +
+    "List the INSTRUCTIONS, SKILLS and available PERSONAS for this session — the authored " +
       "guidance shaping how work is done here, across all three scopes (this repo's " +
       "committed `.dispatch/`, this machine's global config, and what Dispatch ships). " +
       "Call this before writing one so you extend what exists instead of adding a " +
@@ -5924,7 +5933,7 @@ ${look}` : "")
         return textResult("Config authoring is not available in this session.", true);
       }
       try {
-        const kinds: AuthoredKind[] = args.kind ? [args.kind] : ["instruction", "skill"];
+        const kinds: AuthoredKind[] = args.kind ? [args.kind] : ["instruction", "skill", "persona"];
         const sections: string[] = [];
         let total = 0;
         for (const kind of kinds) {
@@ -5937,11 +5946,12 @@ ${look}` : "")
             if (!i.writable) flags.push("read-only");
             // An instruction file the manifest doesn't list is never injected.
             // Saying so is the whole point — nothing else reports it.
+            if (i.kind === "persona") flags.push("opt-in");
             if (i.kind === "instruction" && !i.active) flags.push("INACTIVE: not listed in project.yaml");
             return `  • ${i.name} (${flags.join(", ")})${i.description ? ` — ${i.description}` : ""}`;
           });
           sections.push(
-            `${kind === "skill" ? "Skills" : "Instructions"} (${items.length}):\n` +
+            `${kind === "skill" ? "Skills" : kind === "persona" ? "Personas" : "Instructions"} (${items.length}):\n` +
               (lines.length ? lines.join("\n") : "  (none)"),
           );
         }
@@ -5961,7 +5971,7 @@ ${look}` : "")
 
   const configRead = tool(
     "config_read",
-    "Read one instruction or skill in full, by name. Use it before editing so a " +
+    "Read one instruction, skill or persona in full, by name. Use it before editing so a " +
       "`config_write` extends the existing text rather than silently replacing it — " +
       "a write REPLACES the whole file.",
     {
@@ -5999,7 +6009,7 @@ ${look}` : "")
 
   const configWrite = tool(
     "config_write",
-    "Create or REPLACE an instruction or skill. Reach for this when you've worked " +
+    "Create or REPLACE an instruction, skill or persona. Reach for this when you've worked " +
       "out a procedure worth keeping — the build-and-verify dance for this repo, the " +
       "steps to cut a release — so the next session is told instead of rediscovering " +
       "it. Writing an instruction also REGISTERS it in `project.yaml`, which is the " +

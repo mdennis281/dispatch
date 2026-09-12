@@ -4306,6 +4306,7 @@ function spawnArgs(over: Partial<SpawnChatRequest> & { prompt: string }) {
     modeId: undefined,
     provider: undefined,
     agentId: undefined,
+    personaId: undefined,
     effort: undefined,
     model: undefined,
     reason: undefined,
@@ -4315,6 +4316,13 @@ function spawnArgs(over: Partial<SpawnChatRequest> & { prompt: string }) {
 }
 
 describe("manager-mcp — spawn_chat", () => {
+  it.each([false, true])("passes explicit persona to child/detached spawn (%s)", async (detached) => {
+    const chats = fakeChats({});
+    const { spawnChat } = createManagerTools({ chatId: "c1", bus, broker: fakeBroker({}), chats: chats.binding });
+    const result = await spawnChat.handler(spawnArgs({ prompt: "Own requirements", detached, personaId: "product-owner" }), {});
+    expect(result.isError).toBeFalsy();
+    expect(chats.calls.spawned[0]).toMatchObject({ personaId: "product-owner", detached });
+  });
   it("asks for consent BEFORE creating anything, then spawns", async () => {
     const chats = fakeChats({});
     const { spawnChat } = createManagerTools({

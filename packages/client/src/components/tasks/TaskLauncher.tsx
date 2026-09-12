@@ -103,6 +103,7 @@ export function TaskLauncher({
   const meta = AGENT_TASKS[taskId];
   const Icon = taskIcon(meta.icon);
   const [instructions, setInstructions] = useState("");
+  const [personaScope, setPersonaScope] = useState(params?.scope === "global" ? "global" : "project");
   // Model + effort live in their own dialog and are remembered per task, seeded
   // from the catalog's defaults: a commit sweep starts deeper than a config file
   // because the grouping decision is genuinely harder. See lib/taskPrefs.
@@ -130,7 +131,7 @@ export function TaskLauncher({
         instructions: instructions.trim() || undefined,
         effort: prefs.effort,
         model: prefs.model,
-        params: { ...params, ...toggles },
+        params: { ...params, ...toggles, ...(taskId === "config:personas" ? { scope: personaScope } : {}) },
       });
       setInstructions("");
       setToggles(initialToggles(taskId));
@@ -172,6 +173,20 @@ export function TaskLauncher({
           bare ? "p-0" : dense ? "p-2" : "p-2.5",
         )}
       >
+        {taskId === "config:personas" && (
+          <label className="flex items-center gap-2 text-xs text-secondary">
+            Scope
+            <select
+              aria-label="Persona scope"
+              value={personaScope}
+              onChange={(e) => setPersonaScope(e.target.value)}
+              className="rounded border border-line bg-panel-2 px-2 py-1"
+            >
+              <option value="project">This project</option>
+              <option value="global">Global · all projects</option>
+            </select>
+          </label>
+        )}
         <textarea
           autoFocus={autoFocus}
           value={instructions}

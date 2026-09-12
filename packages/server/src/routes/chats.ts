@@ -44,12 +44,16 @@ export function registerChatRoutes(app: FastifyInstance): void {
     if (typeof body.projectId !== "string" || !body.projectId) {
       return reply.code(400).send({ error: "projectId required" });
     }
+    if (body.personaId !== undefined && !ChatSchema.shape.personaId.safeParse(body.personaId).success) {
+      return reply.code(400).send({ error: "personaId must be a persona name; omit it for off." });
+    }
     try {
       const chat = await createChat(app.services, {
         projectId: body.projectId,
         title: typeof body.title === "string" ? body.title : undefined,
         modeId: typeof body.modeId === "string" ? body.modeId : undefined,
         agentId: typeof body.agentId === "string" ? body.agentId : undefined,
+        personaId: typeof body.personaId === "string" ? body.personaId : undefined,
         effort: body.effort as never,
         harness: body.harness as never,
         model: typeof body.model === "string" ? body.model : undefined,
@@ -77,6 +81,7 @@ export function registerChatRoutes(app: FastifyInstance): void {
       const existing = await store.getChat(req.params.id);
       if (!existing) return reply.code(404).send({ error: "not found" });
       const body = (req.body ?? {}) as Record<string, unknown>;
+      if ("personaId" in body) return reply.code(400).send({ error: "Use the chat persona endpoint to change persona." });
       const merged = { ...existing, ...body } as Record<string, unknown>;
       // JSON cannot carry `undefined`; null is the explicit "inherit" command.
       if (body.shellFilter === null) delete merged.shellFilter;

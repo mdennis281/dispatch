@@ -2,6 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import type { Chat, PeerSender, WsServerEvent } from "@dispatch/shared";
 import type { ServerConfig } from "../config.js";
 import type { Store } from "../store/index.js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AuthoredConfigService } from "./authored-config.js";
 import { EventBus } from "../bus.js";
 import type { SpawnChatRequest } from "./mcp/manager-mcp.js";
 import {
@@ -235,6 +238,7 @@ describe("broker.spawnChat attribution", () => {
         config: { maxActiveSessions: 4 } as unknown as ServerConfig,
         store: stub<Store>({
           getProject: async () => ({ id: "p1", name: "Hivebreak" }),
+          projectConfigDir: () => join(tmpdir(), "dispatch-no-personas-spawn-config"),
           getSettings: async () => ({}),
           saveChat: async (c: Chat) => {
             saved.push(c);
@@ -251,6 +255,7 @@ describe("broker.spawnChat attribution", () => {
         // `has: true` so `ensureSession` short-circuits instead of trying to
         // start a real subprocess.
         broker: stub({ has: () => true, sendMessage }),
+        authored: new AuthoredConfigService({ globalRoot: join(tmpdir(), "dispatch-no-personas-spawn-global") }),
         terminals: stub(),
         memory: stub(),
         projectConfig: stub(),
@@ -275,6 +280,15 @@ describe("broker.spawnChat attribution", () => {
     });
     return { sendMessage, saved };
   }
+
+  it.each([false, true])("keeps persona explicit for spawned chats (detached=%s)", async (detached) => {
+    const parent = { id: PARENT, projectId: "p1", personaId: "product-owner" };
+    const off = await spawn(parent, { prompt: "Implement", detached });
+    expect(off.saved[0]!.personaId).toBeUndefined();
+    const selected = await spawn(parent, { prompt: "Own scope", detached, personaId: "product-owner" });
+    expect(selected.saved[0]!.personaId).toBe("product-owner");
+    expect(selected.saved[0]!.parentChatId).toBe(detached ? undefined : PARENT);
+  });
 
   it("stamps the opening prompt as coming from the chat that spawned it", async () => {
     const { sendMessage } = await spawn({

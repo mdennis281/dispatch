@@ -14,7 +14,10 @@ import type {
 import { HarnessRegistry } from "../harness/index.js";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
+import { AuthoredConfigService } from "./authored-config.js";
 import { SessionBroker } from "./session-broker.js";
+
+let specs: HarnessSessionSpec[];
 
 async function waitUntil(check: () => boolean | Promise<boolean>): Promise<void> {
   for (let i = 0; i < 100; i++) {
@@ -107,6 +110,7 @@ describe("SessionBroker neutral harness path", () => {
     store = new Store(dir);
     await store.init();
     session = new FakeHarnessSession();
+    specs = [];
     const codex: Harness = {
       kind: "codex",
       capabilities: {
@@ -127,12 +131,13 @@ describe("SessionBroker neutral harness path", () => {
       listModels: async () => [],
       readLimits: async () => null,
       generateText: async () => "title",
-      createSession: (_spec: HarnessSessionSpec) => session,
+      createSession: (spec: HarnessSessionSpec) => { specs.push(spec); return session; },
     };
     broker = new SessionBroker({
       store,
       bus: (bus = new EventBus()),
       harnesses: new HarnessRegistry({ harnesses: { codex } }),
+      authored: new AuthoredConfigService({ globalRoot: join(dir, "global") }),
       deps: { stopTimeoutMs: 5 },
     });
   });
@@ -141,6 +146,17 @@ describe("SessionBroker neutral harness path", () => {
     await broker.dispose();
     store.close();
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it("injects the selected persona for Codex and keeps it through provider switching", async () => {
+    const chat = await store.saveChat({ id: "persona", projectId: "p1", title: "PO", modeId: "plan", effort: "low", harness: "codex", personaId: "product-owner", worktrees: [], prs: [], createdAt: 1 });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "verify requirements");
+    await broker.waitFor(chat.id, "idle");
+    expect(specs[0]!.systemPromptAppends.join("\n")).toContain("principal-level product owner");
+    expect(specs[0]!.agent).toBeUndefined();
+    await broker.setHarness(chat.id, "claude");
+    expect((await store.getChat(chat.id))!.personaId).toBe("product-owner");
   });
 
   it("persists neutral Codex events and keeps the native thread id", async () => {
