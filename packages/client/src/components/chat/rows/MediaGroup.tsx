@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { Images } from "lucide-react";
 import type { ImageRef } from "@dispatch/shared";
 import { cn } from "../../../lib/cn.js";
@@ -23,6 +23,29 @@ import { MediaViewer } from "./MediaViewer.js";
  * Clicking any of them opens the viewer on the CHAT's whole gallery rather than
  * on this row's slice — see `useChatMedia` for why that is the useful sequence.
  */
+/**
+ * Layout for `fill` thumbnails: big while there are few, smaller as they add up,
+ * then more rows. There is no sideways scrolling. A swipeable strip hid every
+ * screenshot past the third behind a gesture nobody made.
+ *
+ * - One shot keeps its own aspect, up to a generous height.
+ * - Two or three share a row, shorter as the row fills.
+ * - After three, each row holds three and the rest wrap underneath.
+ *
+ * `auto-fill` with a floor on the column width is what drops a phone-width
+ * card to two per row instead of three unreadably narrow ones.
+ */
+function fillGrid(count: number): CSSProperties {
+  const cols = Math.min(count, 3);
+  const gap = "0.5rem";
+  return {
+    gridTemplateColumns:
+      `repeat(auto-fill, minmax(max(140px, calc((100% - ${cols - 1} * ${gap}) / ${cols})), 1fr))`,
+    ["--thumb-h" as string]: cols === 1 ? "auto" : cols === 2 ? "14rem" : "10rem",
+    ["--thumb-max-h" as string]: cols === 1 ? "22rem" : "none",
+  };
+}
+
 export function MediaGroup({
   chatId,
   assets,
@@ -66,14 +89,9 @@ export function MediaGroup({
         )}
         <div
           className={cn(
-            "flex",
-            // A strip is ONE swipeable row: wrapped, three phone-sized
-            // screenshots turn a review card into a page of scrolling before
-            // anyone reaches the buttons it exists for.
-            variant === "strip"
-              ? "cm-scroll cm-scroll-x gap-2 overflow-x-auto pb-1 [&>*]:shrink-0"
-              : cn("flex-wrap", tiled ? "gap-1.5" : "gap-2"),
+            variant === "fill" ? "grid gap-2" : cn("flex flex-wrap", tiled ? "gap-1.5" : "gap-2"),
           )}
+          style={variant === "fill" ? fillGrid(assets.length) : undefined}
         >
           {assets.map((asset, index) => (
             <Attachment
