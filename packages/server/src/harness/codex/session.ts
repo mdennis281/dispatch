@@ -55,6 +55,23 @@ interface PendingAsk {
 /** A dead app-server must not make session disposal wait forever. */
 const DISPOSE_RPC_TIMEOUT_MS = 250;
 
+/**
+ * Codex's per-call deadline for Dispatch's own MCP servers, in seconds.
+ *
+ * Left unset, Codex cuts every `tools/call` off at 300s. `watch_pr` and
+ * `wait_for_chat` then error at five minutes, when they should return their
+ * documented "timed out, call again" result. A review card answered after that
+ * cutoff lost its verdict on 2026-09-12.
+ *
+ * One minute past the longest any bounded Dispatch tool waits on its own (the
+ * hour `WAIT_CAP_SECONDS` / `ASK_USER_TIMEOUT_CAP_SECONDS` allow). Every one
+ * of them returns normally, and nothing blocks longer than about an hour. It
+ * was a day in #212, and Michael rejected that as far too long. A review or
+ * question card still open past the deadline doesn't lose its answer: the
+ * broker delivers it as a message.
+ */
+export const MANAGER_TOOL_TIMEOUT_SEC = 61 * 60;
+
 async function settleForDisposal(work: (signal: AbortSignal) => Promise<unknown>): Promise<void> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -669,7 +686,11 @@ export class CodexSession implements HarnessSession {
       // different path.
       const { token } = this.spec.managerMcp;
       for (const [name, url] of Object.entries(this.spec.managerMcp.urls)) {
-        servers[name] = { url, http_headers: { Authorization: `Bearer ${token}` } };
+        servers[name] = {
+          url,
+          http_headers: { Authorization: `Bearer ${token}` },
+          tool_timeout_sec: MANAGER_TOOL_TIMEOUT_SEC,
+        };
       }
     }
     if (Object.keys(servers).length) {
