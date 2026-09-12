@@ -8,6 +8,19 @@
 import type { FastifyInstance } from "fastify";
 import { HarnessKindSchema, type UsageSnapshot } from "@dispatch/shared";
 
+/**
+ * A rate-limit window's length as a person would say it. Codex reports its
+ * windows in raw minutes, and the usage card used to print "10080-minute
+ * window" for what is simply the weekly limit.
+ */
+export function windowLabel(minutes: number | undefined, fallback: string): string {
+  if (!minutes || minutes <= 0) return fallback;
+  if (minutes === 7 * 24 * 60) return "Weekly";
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)}-day window`;
+  if (minutes % 60 === 0) return `${minutes / 60}-hour window`;
+  return `${minutes}-minute window`;
+}
+
 async function snapshotFor(app: FastifyInstance, raw: string | undefined): Promise<UsageSnapshot> {
   const parsed = HarnessKindSchema.safeParse(raw ?? "claude");
   const kind = parsed.success ? parsed.data : "claude";
@@ -22,12 +35,8 @@ async function snapshotFor(app: FastifyInstance, raw: string | undefined): Promi
     sevenDay: win(limits?.secondary),
     fetchedAt: Date.now(),
     provider: kind,
-    primaryLabel: limits?.primary?.windowMinutes
-      ? `${limits.primary.windowMinutes}-minute window`
-      : "Primary window",
-    secondaryLabel: limits?.secondary?.windowMinutes
-      ? `${limits.secondary.windowMinutes}-minute window`
-      : "Secondary window",
+    primaryLabel: windowLabel(limits?.primary?.windowMinutes, "Primary window"),
+    secondaryLabel: windowLabel(limits?.secondary?.windowMinutes, "Secondary window"),
     planType: limits?.planType,
     ...(limits ? {} : { stale: true, error: "unavailable" }),
   };
