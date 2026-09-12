@@ -87,6 +87,23 @@ describe("usage store", () => {
     expect(useUsage.getState().harness).toBe("codex");
   });
 
+  it("the gauge does not move to a provider it cannot show", async () => {
+    // A rejected read (a proxy 502) or the server's own "unavailable" snapshot
+    // both leave a slot with no windows. Moving the gauge onto it unmounted
+    // the meter entirely — card included — with Claude's windows still live.
+    usageGet.mockResolvedValueOnce(snap("claude", 40));
+    await useUsage.getState().load("claude");
+
+    usageGet.mockRejectedValueOnce(new Error("502"));
+    await useUsage.getState().load("codex");
+    expect(useUsage.getState().harness).toBe("claude");
+    expect(useUsage.getState().byProvider.codex?.error).toBe("unavailable");
+
+    usageGet.mockResolvedValueOnce({ ...snap("codex", 0), fiveHour: null, stale: true });
+    await useUsage.getState().load("codex");
+    expect(useUsage.getState().harness).toBe("claude");
+  });
+
   it("a failed first read settles into a stale snapshot, not an endless load", async () => {
     // Nothing pushes Codex's windows, so an empty slot after a 502 would read
     // "Loading…" in the card until it was closed.

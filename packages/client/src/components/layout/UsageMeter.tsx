@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { RotateCw, Gauge as GaugeIcon } from "lucide-react";
 import type { HarnessKind, UsageSnapshot, UsageWindow } from "@dispatch/shared";
-import { useUsage } from "../../stores/usage.js";
+import { hasWindows, useUsage } from "../../stores/usage.js";
 import { useChats } from "../../stores/chats.js";
 import { useHarnesses } from "../../stores/harnesses.js";
 import { harnessLabel } from "../../lib/harness.js";
@@ -21,9 +21,6 @@ function tone(pct: number): { text: string; bar: string } {
 }
 
 const clampPct = (p: number) => Math.max(0, Math.min(100, p));
-
-const hasWindows = (u: UsageSnapshot | undefined): u is UsageSnapshot =>
-  !!u && (!!u.fiveHour || !!u.sevenDay);
 
 /** A labelled window row inside the dropdown (bar + percent + reset countdown). */
 function WindowRow({

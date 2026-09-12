@@ -34,6 +34,10 @@ interface UsageStore {
  */
 let loadSeq = 0;
 
+/** Does this snapshot have anything the gauge can draw? */
+export const hasWindows = (u: UsageSnapshot | undefined): u is UsageSnapshot =>
+  !!u && (!!u.fiveHour || !!u.sevenDay);
+
 /** Subscription usage (5h + weekly, or Codex's windows) — feeds the header usage meter. */
 export const useUsage = create<UsageStore>((set, get) => {
   const put = (harness: HarnessKind, usage: UsageSnapshot) =>
@@ -75,10 +79,13 @@ export const useUsage = create<UsageStore>((set, get) => {
       if (seq !== loadSeq) return;
       const harness = requested ?? settings?.harness?.defaultHarness ?? DEFAULT_HARNESS;
       await get().loadProvider(harness);
-      // Move the gauge only once the new provider has a snapshot. Moving it
-      // first left `byProvider[harness]` empty, so the gauge unmounted — and an
-      // open card with it — for as long as a cold Codex read took.
-      if (seq === loadSeq) set({ harness });
+      // Move the gauge only once the new provider has windows to show. The
+      // gauge renders nothing without them, so moving first unmounted it (and
+      // an open card) for as long as a cold Codex read took — and moving onto a
+      // failed read hid it for good, with Claude's windows still live and now
+      // unreachable. A provider that can't be read leaves the gauge where it
+      // was; the card still shows that provider as unavailable.
+      if (seq === loadSeq && hasWindows(get().byProvider[harness])) set({ harness });
     },
 
     loadProvider: async (harness) => {
