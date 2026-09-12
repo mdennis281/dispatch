@@ -100,6 +100,7 @@ describe("SessionBroker neutral harness path", () => {
   let store: Store;
   let broker: SessionBroker;
   let session: FakeHarnessSession;
+  let bus: EventBus;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "dispatch-harness-broker-"));
@@ -130,7 +131,7 @@ describe("SessionBroker neutral harness path", () => {
     };
     broker = new SessionBroker({
       store,
-      bus: new EventBus(),
+      bus: (bus = new EventBus()),
       harnesses: new HarnessRegistry({ harnesses: { codex } }),
       deps: { stopTimeoutMs: 5 },
     });
@@ -501,5 +502,162 @@ describe("SessionBroker neutral harness path", () => {
       status: "idle",
     });
     expect(saved?.sessionId).toBeUndefined();
+  });
+
+  describe("an answer to a card whose tool call the agent already gave up on", () => {
+    const REVIEW = "mcp__dispatch-confirm__request_human_review";
+    const ASK = "mcp__dispatch-confirm__ask_user";
+    const review = {
+      title: "Jellyfish drift",
+      summary: "Jellyfish tip sideways with the current.",
+      screenshots: [],
+      prUrl: "https://github.com/o/r/pull/1",
+    };
+
+    async function codexChat(id: string) {
+      session = new FakeHarnessSession(true);
+      const chat = await store.saveChat({
+        id,
+        projectId: "project-1",
+        title: "Codex review",
+        modeId: "auto",
+        effort: "low",
+        harness: "codex",
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+      broker.create(chat);
+      await broker.sendMessage(chat.id, "build it and ask me to review");
+      session.emit({ type: "init", sessionId: `thread-${id}`, model: "gpt-test" });
+      return chat.id;
+    }
+
+    function nextCard(): Promise<string> {
+      return new Promise((resolve) => {
+        const off = bus.on("permission-request", (e) => {
+          off();
+          resolve(e.request.id);
+        });
+      });
+    }
+
+    async function briefs(chatId: string) {
+      return (await store.readMessages(chatId)).flatMap((row) =>
+        row.kind === "user" ? (row.parts ?? []).filter((p) => p.kind === "brief") : [],
+      );
+    }
+
+    it("delivers the verdict as a message, and leaves the chat's other cards open", async () => {
+      const chatId = await codexChat("chat-late-review");
+      session.emit({ type: "tool-use", toolUseId: "review-1", name: REVIEW, input: review });
+      const reviewCard = nextCard();
+      const verdict = broker.requestHumanReview(chatId, review);
+      const reviewId = await reviewCard;
+      // An unrelated question the delivery must NOT dismiss on the human's behalf.
+      const askCard = nextCard();
+      void broker.askUser(chatId, [
+        { header: "Other", question: "Keep the old sliders?", options: [{ label: "Yes" }, { label: "No" }] },
+      ]);
+      const askId = await askCard;
+
+      // Codex drops the call at its deadline and reports the call failed. The
+      // bridge hears nothing, so the card is still up.
+      session.emit({
+        type: "tool-result",
+        toolUseId: "review-1",
+        ok: false,
+        content: "timed out awaiting tools/call after 300s",
+      });
+      await waitUntil(async () =>
+        (await store.readMessages(chatId)).some((row) => row.kind === "tool_result"),
+      );
+
+      expect(
+        broker.answerQuestion(reviewId, {
+          answer: "Keep iterating",
+          notes: "they are bundled together too tightly",
+        }),
+      ).toBe(true);
+      await expect(verdict).resolves.toMatchObject({ status: "reviewed", verdict: "iterate" });
+
+      await waitUntil(async () => (await briefs(chatId)).length > 0);
+      const [late] = await briefs(chatId);
+      expect(late).toMatchObject({ label: "Late review verdict" });
+      expect(late!.text).toContain("KEEP ITERATING");
+      expect(late!.text).toContain("they are bundled together too tightly");
+      // …and it reached the agent, not just the transcript.
+      expect(session.sent.some((input) => input.text.includes("KEEP ITERATING"))).toBe(true);
+      // The other card is still answerable.
+      expect(broker.answerQuestion(askId, { answer: "Yes" })).toBe(true);
+    });
+
+    it("sends nothing extra when the call was still waiting for the answer", async () => {
+      const chatId = await codexChat("chat-live-review");
+      session.emit({ type: "tool-use", toolUseId: "review-2", name: REVIEW, input: review });
+      const reviewCard = nextCard();
+      const verdict = broker.requestHumanReview(chatId, review);
+      broker.answerQuestion(await reviewCard, { answer: "Approve" });
+      await expect(verdict).resolves.toMatchObject({ status: "reviewed", verdict: "approve" });
+      session.emit({ type: "tool-result", toolUseId: "review-2", ok: true, content: "approved" });
+      await waitUntil(async () =>
+        (await store.readMessages(chatId)).some((row) => row.kind === "tool_result"),
+      );
+
+      expect(await briefs(chatId)).toEqual([]);
+    });
+
+    it("does not blame a live card for a call that failed without ever opening one", async () => {
+      const chatId = await codexChat("chat-parallel-fail");
+      // Two calls in one message: A is valid and puts its card up; B fails its
+      // schema before any card exists.
+      session.emit(
+        { type: "tool-use", toolUseId: "ask-a", name: ASK, input: {} },
+        { type: "tool-use", toolUseId: "ask-b", name: ASK, input: {} },
+      );
+      await waitUntil(async () =>
+        (await store.readMessages(chatId)).filter((row) => row.kind === "tool_use").length === 2,
+      );
+      const card = nextCard();
+      const answer = broker.askUser(chatId, [
+        { header: "Scope", question: "Which species first?", options: [{ label: "Jellyfish" }, { label: "Skate" }] },
+      ]);
+      const cardId = await card;
+      session.emit({ type: "tool-result", toolUseId: "ask-b", ok: false, content: "invalid arguments" });
+      await waitUntil(async () =>
+        (await store.readMessages(chatId)).some((row) => row.kind === "tool_result"),
+      );
+
+      broker.answerQuestion(cardId, { answer: "Skate" });
+      await expect(answer).resolves.toMatchObject({ status: "answered" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // A's live call got the answer; a second copy calling it "late" would be false.
+      expect(await briefs(chatId)).toEqual([]);
+    });
+
+    it("delivers a late ask_user answer the same way", async () => {
+      const chatId = await codexChat("chat-late-ask");
+      session.emit({ type: "tool-use", toolUseId: "ask-1", name: ASK, input: {} });
+      const card = nextCard();
+      const answer = broker.askUser(chatId, [
+        { header: "Scope", question: "Which species first?", options: [{ label: "Jellyfish" }, { label: "Skate" }] },
+      ]);
+      const cardId = await card;
+      session.emit({ type: "tool-result", toolUseId: "ask-1", ok: false, content: "timed out" });
+      await waitUntil(async () =>
+        (await store.readMessages(chatId)).some((row) => row.kind === "tool_result"),
+      );
+
+      broker.answerQuestion(cardId, { answer: "Skate" });
+      await expect(answer).resolves.toEqual({
+        status: "answered",
+        answers: { "Which species first?": "Skate" },
+      });
+      await waitUntil(async () => (await briefs(chatId)).length > 0);
+      const [late] = await briefs(chatId);
+      expect(late).toMatchObject({ label: "Late answer" });
+      expect(late!.text).toContain("Which species first?");
+      expect(late!.text).toContain("Skate");
+    });
   });
 });

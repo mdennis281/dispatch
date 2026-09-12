@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { CodexSession } from "./session.js";
+import { CodexSession, MANAGER_TOOL_TIMEOUT_SEC } from "./session.js";
 import type { CodexConnection, RpcFrame, ServerRequest } from "./rpc.js";
 import type { HarnessEvent, HarnessSessionSpec } from "../types.js";
 
@@ -437,13 +437,17 @@ describe("CodexSession lifecycle", () => {
             remote: { url: "https://example.com/mcp", http_headers: { "X-Test": "yes" } },
             // One Codex MCP server per category, all sharing the session's
             // single bearer token — the grant authorises a CHAT, not a category.
+            // …and a tool deadline long enough for tools that block on CI, a
+            // peer or the human. Codex's 300s default cut all of them off.
             "dispatch-session": {
               url: "http://127.0.0.1:4319/api/mcp/manager/session",
               http_headers: { Authorization: "Bearer secret" },
+              tool_timeout_sec: MANAGER_TOOL_TIMEOUT_SEC,
             },
             "dispatch-github": {
               url: "http://127.0.0.1:4319/api/mcp/manager/github",
               http_headers: { Authorization: "Bearer secret" },
+              tool_timeout_sec: MANAGER_TOOL_TIMEOUT_SEC,
             },
           },
         },

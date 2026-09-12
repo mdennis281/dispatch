@@ -99,6 +99,8 @@ import type {
 import {
   DEFAULT_HARNESS,
   DEFAULT_MAX_ACTIVE_SESSIONS,
+  composeMessageText,
+  parseMcpToolName,
   DEFAULT_IDLE_SESSION_MINUTES,
   EffortSchema,
   applyMcpEnablement,
@@ -147,6 +149,7 @@ import {
   createManagerMcpServers,
   exemptionConsentQuestion,
   humanReviewQuestion,
+  humanReviewVerdictText,
   overrideConsentPrompt,
   readExemptionAnswer,
   type ManagerAskQuestion,
@@ -1126,6 +1129,13 @@ export interface SendOptions {
    * undifferentiated wall attributed to the human.
    */
   parts?: MessagePart[];
+  /**
+   * Leave the chat's open question cards alone. An ordinary send dismisses them
+   * (the human replying instead of answering IS a dismissal), but a message
+   * Dispatch sends on the human's behalf for ONE card must not silently answer
+   * a different one "declined".
+   */
+  keepPendingQuestions?: boolean;
 }
 
 /** Host answer to a `permission-request`. */
@@ -1627,6 +1637,37 @@ interface PendingPermission {
   timeoutTimer?: ReturnType<typeof setTimeout>;
   /** Removes the manager tool-call cancellation listener when the card settles. */
   abortListener?: () => void;
+  /** The manager tool call waiting on this card, when one is. */
+  call?: ManagerCardCall;
+}
+
+/** The two manager tools whose whole call is a card the human answers. */
+type ManagerCardTool = "ask_user" | "request_human_review";
+
+/**
+ * One manager tool call blocked on a card, and whether the agent has already
+ * stopped waiting for it.
+ *
+ * `abandoned` exists because the agent's side can give up WITHOUT the bridge
+ * hearing about it. Codex's MCP client times a call out by dropping it, with no
+ * `notifications/cancelled` and no closed connection, so the abort path that
+ * withdraws a card never fires. The card stays answerable and the answer
+ * resolves a call nobody reads. That is exactly how a review verdict vanished
+ * on 2026-09-12. The one signal Dispatch does get is the failed tool result the
+ * harness reports for that call, which is what sets this flag.
+ */
+interface ManagerCardCall {
+  tool: ManagerCardTool;
+  abandoned: boolean;
+}
+
+/** The card tool a harness tool name refers to, if it is one of Dispatch's. */
+function managerCardTool(name: string): ManagerCardTool | undefined {
+  const parsed = parseMcpToolName(name);
+  if (!parsed || !isManagerServer(parsed.server)) return undefined;
+  return parsed.tool === "ask_user" || parsed.tool === "request_human_review"
+    ? parsed.tool
+    : undefined;
 }
 
 const questionTimeoutMessage = (timeoutMs: number): string =>
@@ -1663,6 +1704,8 @@ interface LiveSession {
   threadOfTool: Map<string, string>;
   /** Tool-use id to the turn that opened it; late results must not revive a settled turn. */
   toolTurn: Map<string, number>;
+  /** Tool-use ids of in-flight `ask_user` / `request_human_review` calls (see {@link ManagerCardCall}). */
+  cardCalls: Map<string, ManagerCardTool>;
   /** Guard hits whose runtime had to interrupt; consumed by the matching turn end. */
   guardRecoveries: HarnessGuardBlockedEvent[];
   /** A user-facing Stop is awaiting its terminal event and must win over guard recovery. */
@@ -1997,6 +2040,7 @@ export class SessionBroker {
         effortByThread: new Map(),
         threadOfTool: new Map(),
         toolTurn: new Map(),
+        cardCalls: new Map(),
         guardRecoveries: [],
         explicitInterruptPending: false,
         turnOpen: false,
@@ -2098,10 +2142,12 @@ export class SessionBroker {
 
     // A message sent while a question is pending is an implicit decline: unblock
     // the AskUserQuestion(s) so this message can be consumed as the real reply.
-    this.declinePendingQuestions(
-      session,
-      "The user dismissed this question and replied with a message instead.",
-    );
+    if (!o.keepPendingQuestions) {
+      this.declinePendingQuestions(
+        session,
+        "The user dismissed this question and replied with a message instead.",
+      );
+    }
 
     const steering = this.isActive(session);
     const id = this.genId();
@@ -3773,6 +3819,8 @@ export class SessionBroker {
         return;
       case "tool-use": {
         session.toolTurn.set(event.toolUseId, session.turn);
+        const cardTool = managerCardTool(event.name);
+        if (cardTool) session.cardCalls.set(event.toolUseId, cardTool);
         // The ledger row for this call. Classified the same way the transcript
         // import classifies a historical one (see metrics-classify), so a call
         // counts identically whether it was seen live or reconstructed later.
@@ -3817,6 +3865,9 @@ export class SessionBroker {
       case "tool-result": {
         const toolTurn = session.toolTurn.get(event.toolUseId);
         session.toolTurn.delete(event.toolUseId);
+        const cardTool = session.cardCalls.get(event.toolUseId);
+        session.cardCalls.delete(event.toolUseId);
+        if (cardTool && !event.ok) this.abandonCards(session, cardTool);
         session.activity.toolEnd(event.toolUseId, base.ts, { ok: event.ok });
         const persisted = await this.persistContentImages(session, event.content);
         await this.emit(session, {
@@ -4701,6 +4752,7 @@ export class SessionBroker {
       description?: string;
       timeoutMs?: number;
       signal?: AbortSignal;
+      call?: ManagerCardCall;
     },
   ): Promise<PermissionResult> {
     // A SELF-GATED tool asks for itself, in its own words, with its own card —
@@ -4749,6 +4801,7 @@ export class SessionBroker {
         request,
         attentionId,
         timeoutMs: opts.timeoutMs,
+        call: opts.call,
       };
       session.pendingPermissions.set(requestId, pending);
       if (opts.signal) {
@@ -4817,10 +4870,39 @@ export class SessionBroker {
     timeoutSeconds?: number,
     signal?: AbortSignal,
   ): Promise<ManagerAskResult> {
+    const result = await this.askQuestions(chatId, questions, timeoutSeconds, signal, "ask_user");
+    if (result.status === "answered" && result.late) {
+      const lines = Object.entries(result.answers).map(([q, a]) => `- **${q}** — ${a}`);
+      await this.deliverLateAnswer(
+        chatId,
+        "Late answer",
+        "The human answered your `ask_user` question after that call had already failed on " +
+          `your side, so the answer never reached you:\n\n${lines.join("\n")}\n\nAct on it now.`,
+      );
+    }
+    return result.status === "answered" ? { status: "answered", answers: result.answers } : result;
+  }
+
+  /**
+   * The question card behind `ask_user` — and behind consent cards like
+   * `request_exemption`, which call it without a `cardTool` because an answer
+   * that arrives after their call has gone can't grant anything any more.
+   */
+  private async askQuestions(
+    chatId: string,
+    questions: ManagerAskQuestion[],
+    timeoutSeconds?: number,
+    signal?: AbortSignal,
+    cardTool?: ManagerCardTool,
+  ): Promise<
+    | Exclude<ManagerAskResult, { status: "answered" }>
+    | { status: "answered"; answers: Record<string, string>; late: boolean }
+  > {
     const session = this.sessions.get(chatId);
     if (!session) {
       return { status: "unavailable", message: "No live session is available to ask through." };
     }
+    const call: ManagerCardCall | undefined = cardTool ? { tool: cardTool, abandoned: false } : undefined;
     const result = await this.handlePermission(
       session,
       "AskUserQuestion",
@@ -4829,6 +4911,7 @@ export class SessionBroker {
         displayName: "Question",
         timeoutMs: timeoutSeconds ? timeoutSeconds * 1_000 : undefined,
         signal,
+        call,
       },
     );
     if (result.behavior !== "allow") {
@@ -4848,7 +4931,59 @@ export class SessionBroker {
           ),
         )
       : {};
-    return { status: "answered", answers };
+    return { status: "answered", answers, late: call?.abandoned ?? false };
+  }
+
+  /**
+   * After a call of this kind FAILED: mark its card abandoned, but only when
+   * it is unambiguous which card that is (see {@link ManagerCardCall}).
+   *
+   * The bridge never learns a card's tool-use id, so this reasons from what is
+   * still in flight. Most failures never opened a card: a bad screenshot path,
+   * a schema error. If another call of the same tool is still running, the
+   * open card may be ITS card. Flagging it would send the human's answer twice,
+   * the second copy claiming the call had failed. So nothing is marked. Once no
+   * call of the tool is in flight, every card of it still open belongs to a call
+   * that already got its result, so they are all abandoned. That also covers two
+   * parallel reviews that both hit the deadline.
+   *
+   * The card is left up on purpose. The human may be mid-answer, and the
+   * answer is still worth having; it just has to travel as a message.
+   */
+  private abandonCards(session: LiveSession, tool: ManagerCardTool): void {
+    for (const inFlight of session.cardCalls.values()) {
+      if (inFlight === tool) return;
+    }
+    for (const pending of session.pendingPermissions.values()) {
+      if (pending.call?.tool === tool) pending.call.abandoned = true;
+    }
+  }
+
+  /**
+   * Hand an answer to the chat whose tool call can no longer receive it.
+   *
+   * A `brief`, not a human-typed turn: the words are Dispatch's, reporting what
+   * the human chose. It keeps the chat's other open cards open, because sending
+   * it is not the human dismissing them.
+   */
+  private async deliverLateAnswer(chatId: string, label: string, text: string): Promise<void> {
+    const session = this.sessions.get(chatId);
+    if (!session) return;
+    const parts: MessagePart[] = [{ kind: "brief", label, text }];
+    try {
+      await this.sendMessage(chatId, composeMessageText(parts), {
+        parts,
+        priority: this.isActive(session) ? "next" : undefined,
+        keepPendingQuestions: true,
+      });
+    } catch (err) {
+      this.bus.publish({
+        type: "error",
+        chatId,
+        message: "could not deliver a late answer to the chat",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
@@ -4884,11 +5019,12 @@ export class SessionBroker {
       ...(request.prUrl ? { prUrl: request.prUrl } : {}),
     };
     const question = humanReviewQuestion(review);
+    const call: ManagerCardCall = { tool: "request_human_review", abandoned: false };
     const result = await this.handlePermission(
       session,
       "AskUserQuestion",
       { questions: [question], review },
-      { displayName: "Review", signal },
+      { displayName: "Review", signal, call },
     );
     if (result.behavior !== "allow") return { status: "dismissed", message: result.message };
     // The card has exactly ONE question, so take its one answer rather than
@@ -4900,6 +5036,16 @@ export class SessionBroker {
     const verdict = parseHumanReviewAnswer(answer);
     if (!verdict) {
       return { status: "dismissed", message: "The card was answered without a verdict." };
+    }
+    if (call.abandoned) {
+      await this.deliverLateAnswer(
+        chatId,
+        "Late review verdict",
+        `The human reviewed "${review.title}" after your \`request_human_review\` call had ` +
+          "already failed on your side, so the verdict never reached you. Whatever you " +
+          "concluded from that failure, this is their real answer:\n\n" +
+          humanReviewVerdictText(verdict.verdict, verdict.comment),
+      );
     }
     return { status: "reviewed", ...verdict };
   }
@@ -5125,7 +5271,7 @@ export class SessionBroker {
     if (!session) return { granted: false, message: "no live session to ask through" };
 
     const question = exemptionConsentQuestion(input);
-    const result = await this.askUser(chatId, [question]);
+    const result = await this.askQuestions(chatId, [question]);
     if (result.status !== "answered") return { granted: false, message: result.message };
     const lifetime = readExemptionAnswer(result.answers[question.question]);
     if (!lifetime) {

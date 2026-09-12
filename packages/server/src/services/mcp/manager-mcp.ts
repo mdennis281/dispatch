@@ -1269,6 +1269,41 @@ export function humanReviewQuestion(review: HumanReviewPayload): ManagerAskQuest
   };
 }
 
+/**
+ * What a review verdict tells the agent to do.
+ *
+ * One function for both routes a verdict can take: the tool result of a live
+ * `request_human_review` call, and the message a late verdict is delivered as
+ * once that call has already failed on the agent's side. Two wordings would
+ * let "approve" mean slightly different things depending on how fast the human
+ * was.
+ */
+export function humanReviewVerdictText(verdict: HumanReviewVerdict, comment?: string): string {
+  const said = comment ? ` Their comment: "${comment}"` : "";
+  if (verdict === "approve") {
+    return (
+      "The human APPROVED this change." +
+      said +
+      "\nCarry on and land it the normal way. This approves the change itself; it waives " +
+      "nothing else — CI and any required code review still apply."
+    );
+  }
+  if (verdict === "iterate") {
+    return (
+      "The human wants you to KEEP ITERATING — this is not approved yet." +
+      (said || " They left no comment, so tighten what you flagged as uncertain.") +
+      "\nMake the changes, verify them, then call request_human_review again with fresh " +
+      "evidence. Don't merge before an approval."
+    );
+  }
+  return (
+    "The human said STOP WORK on this change." +
+    said +
+    "\nMake no further changes, don't merge, and don't open anything new for it. " +
+    "Say briefly where you left it, and end your turn."
+  );
+}
+
 /** Single-line clip for text quoted onto a consent card. */
 function clip(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
@@ -2843,25 +2878,9 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             JSON.stringify(result),
         );
       }
-      const said = result.comment ? ` Their comment: "${result.comment}"` : "";
-      const next =
-        result.verdict === "approve"
-          ? "The human APPROVED this change." +
-            said +
-            "\nCarry on and land it the normal way. This approves the change itself; it waives " +
-            "nothing else — CI and any required code review still apply."
-          : result.verdict === "iterate"
-            ? "The human wants you to KEEP ITERATING — this is not approved yet." +
-              (said ||
-                " They left no comment, so tighten what you flagged as uncertain.") +
-              "\nMake the changes, verify them, then call request_human_review again with fresh " +
-              "evidence. Don't merge before an approval."
-            : "The human said STOP WORK on this change." +
-              said +
-              "\nMake no further changes, don't merge, and don't open anything new for it. " +
-              "Say briefly where you left it, and end your turn.";
       return textResult(
-        `${next}\n${JSON.stringify({ verdict: result.verdict, comment: result.comment ?? null })}`,
+        `${humanReviewVerdictText(result.verdict, result.comment)}\n` +
+          JSON.stringify({ verdict: result.verdict, comment: result.comment ?? null }),
       );
     },
   );
