@@ -607,6 +607,34 @@ describe("SessionBroker neutral harness path", () => {
       expect(await briefs(chatId)).toEqual([]);
     });
 
+    it("does not blame a live card for a call that failed without ever opening one", async () => {
+      const chatId = await codexChat("chat-parallel-fail");
+      // Two calls in one message: A is valid and puts its card up; B fails its
+      // schema before any card exists.
+      session.emit(
+        { type: "tool-use", toolUseId: "ask-a", name: ASK, input: {} },
+        { type: "tool-use", toolUseId: "ask-b", name: ASK, input: {} },
+      );
+      await waitUntil(async () =>
+        (await store.readMessages(chatId)).filter((row) => row.kind === "tool_use").length === 2,
+      );
+      const card = nextCard();
+      const answer = broker.askUser(chatId, [
+        { header: "Scope", question: "Which species first?", options: [{ label: "Jellyfish" }, { label: "Skate" }] },
+      ]);
+      const cardId = await card;
+      session.emit({ type: "tool-result", toolUseId: "ask-b", ok: false, content: "invalid arguments" });
+      await waitUntil(async () =>
+        (await store.readMessages(chatId)).some((row) => row.kind === "tool_result"),
+      );
+
+      broker.answerQuestion(cardId, { answer: "Skate" });
+      await expect(answer).resolves.toMatchObject({ status: "answered" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // A's live call got the answer; a second copy calling it "late" would be false.
+      expect(await briefs(chatId)).toEqual([]);
+    });
+
     it("delivers a late ask_user answer the same way", async () => {
       const chatId = await codexChat("chat-late-ask");
       session.emit({ type: "tool-use", toolUseId: "ask-1", name: ASK, input: {} });

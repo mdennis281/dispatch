@@ -3867,7 +3867,7 @@ export class SessionBroker {
         session.toolTurn.delete(event.toolUseId);
         const cardTool = session.cardCalls.get(event.toolUseId);
         session.cardCalls.delete(event.toolUseId);
-        if (cardTool && !event.ok) this.abandonCard(session, cardTool);
+        if (cardTool && !event.ok) this.abandonCards(session, cardTool);
         session.activity.toolEnd(event.toolUseId, base.ts, { ok: event.ok });
         const persisted = await this.persistContentImages(session, event.content);
         await this.emit(session, {
@@ -4935,18 +4935,27 @@ export class SessionBroker {
   }
 
   /**
-   * Mark the oldest open card of this kind as abandoned: the harness has just
-   * reported its tool call FAILED, so whatever that call returns from now on is
-   * read by nobody (see {@link ManagerCardCall}). The card is left up on
-   * purpose. The human may be mid-answer, and their answer is still worth
-   * having; it just has to travel as a message instead.
+   * After a call of this kind FAILED: mark its card abandoned, but only when
+   * it is unambiguous which card that is (see {@link ManagerCardCall}).
+   *
+   * The bridge never learns a card's tool-use id, so this reasons from what is
+   * still in flight. Most failures never opened a card: a bad screenshot path,
+   * a schema error. If another call of the same tool is still running, the
+   * open card may be ITS card. Flagging it would send the human's answer twice,
+   * the second copy claiming the call had failed. So nothing is marked. Once no
+   * call of the tool is in flight, every card of it still open belongs to a call
+   * that already got its result, so they are all abandoned. That also covers two
+   * parallel reviews that both hit the deadline.
+   *
+   * The card is left up on purpose. The human may be mid-answer, and the
+   * answer is still worth having; it just has to travel as a message.
    */
-  private abandonCard(session: LiveSession, tool: ManagerCardTool): void {
+  private abandonCards(session: LiveSession, tool: ManagerCardTool): void {
+    for (const inFlight of session.cardCalls.values()) {
+      if (inFlight === tool) return;
+    }
     for (const pending of session.pendingPermissions.values()) {
-      if (pending.call?.tool === tool && !pending.call.abandoned) {
-        pending.call.abandoned = true;
-        return;
-      }
+      if (pending.call?.tool === tool) pending.call.abandoned = true;
     }
   }
 
