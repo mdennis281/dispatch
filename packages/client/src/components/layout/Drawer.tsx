@@ -109,7 +109,15 @@ export function Drawer({
     // Focus the panel itself rather than its first control: the first control in
     // the sidebar is the project switcher, and opening a drawer should not look
     // like you're about to change projects.
-    panelRef.current?.focus();
+    //
+    // `preventScroll`, because at this moment the panel is still parked at
+    // `translate-x-full` — outside the shell. A transformed box counts toward
+    // its container's scrollable overflow, and the shell's `overflow: hidden`
+    // is still programmatically scrollable, so a plain `focus()` scrolled the
+    // whole shell 360px sideways to "reveal" the md right panel. The main column
+    // slid out of frame for the length of the animation, then snapped back when
+    // the finished transform stopped overflowing and the scroll offset clamped.
+    panelRef.current?.focus({ preventScroll: true });
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
