@@ -2152,6 +2152,10 @@ export class SessionBroker {
       ? await this.resolveImageSources(chatId, o.images)
       : undefined;
 
+    // A persona change can begin during memory, transcript, or image preparation.
+    // Wait again at the last async boundary: queueing into a retiring input loses
+    // the message even though its user row has already been persisted.
+    while (session.personaChange) await session.personaChange.catch(() => {});
     this.resolveIdleAttention(session);
     session.outbox.push({
       id,

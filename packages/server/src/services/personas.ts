@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Persona } from "@dispatch/shared";
+import { AUTHORED_NAME_RE, type Persona } from "@dispatch/shared";
 import { type AuthoredConfigService, assertName, readInstructionsDir } from "./authored-config.js";
 
 /** Read broadest first, replacing by id so exactly one definition is injected. */
@@ -8,11 +8,13 @@ export async function listPersonas(authored: AuthoredConfigService, configDir?: 
   const byId = new Map<string, Persona>();
   const app = await authored.list("persona");
   for (const item of app) {
+    if (!AUTHORED_NAME_RE.test(item.name)) continue;
     const instructions = await readFile(item.path, "utf8");
     byId.set(item.name, toPersona(item.name, item.scope, instructions));
   }
   if (configDir) {
     for (const file of await readInstructionsDir(join(configDir, "personas"))) {
+      if (!AUTHORED_NAME_RE.test(file.name)) continue;
       byId.set(file.name, toPersona(file.name, "project", file.text));
     }
   }

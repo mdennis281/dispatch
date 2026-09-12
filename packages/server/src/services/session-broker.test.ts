@@ -4541,6 +4541,60 @@ describe("interruptionSnapshot", () => {
 
 
 describe("optional persona instructions", () => {
+  it.each([false, true])("holds an in-flight send until persona persistence completes (warm=%s)", async (warm) => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const authored = new AuthoredConfigService({ globalRoot: join(dir, "global") });
+    const broker = makeBroker(fn, 6, { authored });
+    const chat = await store.saveChat(chatFor("racing-persona"));
+    broker.create(chat);
+    if (warm) {
+      const idle = broker.waitFor(chat.id, "idle");
+      await broker.sendMessage(chat.id, "warm up");
+      await idle;
+    }
+    const sendPaused = deferred();
+    const allowSend = deferred();
+    const changePaused = deferred();
+    const allowChange = deferred();
+    const append = store.appendMessage.bind(store);
+    vi.spyOn(store, "appendMessage").mockImplementation(async (row) => {
+      const saved = await append(row);
+      if (row.kind === "user" && row.text === "race") {
+        sendPaused.resolve();
+        await allowSend.promise;
+      }
+      return saved;
+    });
+    const patch = store.patchChat.bind(store);
+    vi.spyOn(store, "patchChat").mockImplementation(async (id, value) => {
+      if (value.personaId === "product-owner") {
+        changePaused.resolve();
+        await allowChange.promise;
+      }
+      return patch(id, value);
+    });
+    const send = broker.sendMessage(chat.id, "race");
+    await sendPaused.promise;
+    const change = broker.setPersona(chat.id, "product-owner");
+    await changePaused.promise;
+    const idle = broker.waitFor(chat.id, "idle");
+    allowSend.resolve();
+    let early: boolean;
+    try {
+      early = await Promise.race([
+        send.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
+      ]);
+    } finally {
+      allowChange.resolve();
+    }
+    await Promise.all([send, change]);
+    await idle;
+    expect(early!).toBe(false);
+    expect(controllers.at(-1)!.pushed).toContain("race");
+    expect(JSON.stringify(controllers.at(-1)!.options?.systemPrompt)).toContain("principal-level product owner");
+  });
+
   it("waits for a persona selection before starting an immediately submitted message", async () => {
     const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
     const authored = new AuthoredConfigService({ globalRoot: join(dir, "global") });

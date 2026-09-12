@@ -34,3 +34,14 @@ it("resolves exactly one definition, project over global over shipped", async ()
   await expect(resolvePersona(authored, "missing", configDir)).rejects.toThrow("unavailable");
   await expect(resolvePersona(authored, "../escape", configDir)).rejects.toThrow("not a valid name");
 });
+
+
+it("does not advertise invalid filenames as selectable personas at either scope", async () => {
+  const configDir = join(root, "project");
+  for (const dir of [join(root, "global", "personas"), join(configDir, "personas")]) {
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "QA_lead.md"), "# QA lead\nReview.");
+    await writeFile(join(dir, "Reviewer.md"), "# Reviewer\nReview.");
+  }
+  expect((await listPersonas(authored, configDir)).map((p) => p.id)).toEqual(["product-owner"]);
+});
