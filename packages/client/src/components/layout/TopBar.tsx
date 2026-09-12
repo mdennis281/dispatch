@@ -22,8 +22,10 @@ import { useWindowControlsOverlay } from "../../lib/windowControls.js";
  * That is height the window hands over for free, and the bar spends it — as ONE
  * two-line surface rather than a strip stacked on a toolbar:
  *
- *   [mark]  Dispatch           CPU ╱╲╱╲ 37%   5H ▬▬▬▭ 42%          — ☐ ✕
- *   [    ]  ● localhost:4318   MEM ‾‾‾‾ 74%   [Attention 2]    ⌕ ▫▫▫▫▫
+ *   [mark]                 CPU ╱╲╱╲ 37%   5H ▬▬▬▭ 42%          — ☐ ✕
+ *   [    ]  Dispatch ●     MEM ‾‾‾‾ 74%   [Attention 2]    ⌕ ▫▫▫▫▫
+ *
+ * (the lockup is centred across both lines)
  *
  * Things that deserve height span both lines: the lockup at a 48px mark, and
  * the machine's readings, stacked so memory gets the chart CPU has. Things one

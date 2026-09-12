@@ -46,22 +46,16 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
  * pulse. It belongs WITH the brand, since "is Dispatch there" is a fact about
  * Dispatch, but NOT IN the mark: it was tried lighting the mark's junction node,
  * and a green node inside the logo reads as the logo recoloured, not as a
- * status beside it. So it sits on the lockup's text — in front of the host on
- * the title bar's second line, after the wordmark in a single row.
+ * status beside it. So it ends the wordmark: "Dispatch ●".
  *
- * ── WHAT THE LINES SAY ───────────────────────────────────────────────────────
+ * `tall` is the installed window's lockup, spanning both lines of the title bar
+ * with the mark at 48px. It does NOT print the host under the wordmark: that was
+ * tried, and an address permanently in the corner of the app is noise — it is
+ * one hover away, in the card.
  *
- * `tall` is the installed window's lockup, spanning both lines of the title bar:
- * the mark at 48px, the wordmark, and under it the dot and the HOST. An
- * installed window has no URL bar, and with a stable and a dev instance on
- * different ports — and Dispatch normally reached through a reverse proxy —
- * "which one am I looking at" is otherwise unanswerable without opening
- * something.
- *
- * THE WORD STAYS for every state except `open`: it replaces the host (or joins
- * the dot in a single row). "Reconnecting…" and "Offline" are what this
- * indicator exists for, and an amber dot on its own is easy to read as the
- * brand's own colour. Only the good news is allowed to be silent.
+ * THE WORD STAYS for every state except `open`, after the dot. "Reconnecting…"
+ * and "Offline" are what this indicator exists for, and an amber dot on its own
+ * is easy to read as the brand's own colour. Only the good news is silent.
  *
  * ── THE CARD ─────────────────────────────────────────────────────────────────
  *
@@ -155,33 +149,18 @@ export function BrandLockup({ size }: { size: LockupSize }) {
     >
       <DispatchMark className={cn("shrink-0", size === "tall" ? "size-12" : "size-8")} />
 
-      {size === "tall" ? (
-        <span className="flex min-w-0 flex-col gap-1.5">
-          <span className="text-xl font-semibold leading-none tracking-tight text-primary">
-            Dispatch
-          </span>
-          <span className="flex min-w-0 items-center gap-1.5">
-            <StatusDot tone={c.tone} pulse={c.pulse} size={6} />
-            {state === "open" ? (
-              <span className="cm-mono max-w-40 truncate text-2xs leading-none text-faint">{host}</span>
-            ) : (
-              <span className={cn("text-2xs font-medium leading-none", c.text)}>{c.label}</span>
-            )}
-          </span>
-        </span>
-      ) : (
-        <>
-          {/* The wordmark drops on a phone: the mark is the same brand in a
-              quarter of the width, and on a home-screen PWA the app's name is
-              already under the icon you tapped. */}
-          {size === "row" && (
-            <span className="text-base font-semibold tracking-tight text-primary">Dispatch</span>
-          )}
-          <StatusDot tone={c.tone} pulse={c.pulse} size={7} />
-          {state !== "open" && (
-            <span className={cn("text-xs font-medium", c.text)}>{c.label}</span>
-          )}
-        </>
+      {/* The wordmark drops on a phone: the mark is the same brand in a quarter
+          of the width, and on a home-screen PWA the app's name is already under
+          the icon you tapped. */}
+      {size === "tall" && (
+        <span className="text-xl font-semibold tracking-tight text-primary">Dispatch</span>
+      )}
+      {size === "row" && (
+        <span className="text-base font-semibold tracking-tight text-primary">Dispatch</span>
+      )}
+      <StatusDot tone={c.tone} pulse={c.pulse} size={size === "tall" ? 8 : 7} />
+      {state !== "open" && (
+        <span className={cn("text-xs font-medium", c.text)}>{c.label}</span>
       )}
     </HoverCard>
   );
