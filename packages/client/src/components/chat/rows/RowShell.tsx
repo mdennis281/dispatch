@@ -3,6 +3,7 @@ import { RotateCcw } from "lucide-react";
 import { cn } from "../../../lib/cn.js";
 import { clock } from "../../../lib/format.js";
 import { Tooltip } from "../../ui/Tooltip.js";
+import { COPY_BODY_ATTR } from "../../../lib/transcriptCopy.js";
 
 export interface RowShellProps {
   gutter: ReactNode;
@@ -109,7 +110,10 @@ export function RowShell({
             )}
           </div>
         )}
-        <div className={cn("min-w-0", right && "text-right")}>{children}</div>
+        {/* The copy clamp's target — see lib/transcriptCopy.ts. */}
+        <div {...{ [COPY_BODY_ATTR]: "" }} className={cn("min-w-0", right && "text-right")}>
+          {children}
+        </div>
       </div>
     </div>
   );
