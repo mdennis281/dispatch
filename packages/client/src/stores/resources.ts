@@ -53,9 +53,24 @@ const SYSTEM_POLL_MS = 2_000;
  */
 const SNAPSHOT_POLL_MS = 5_000;
 
+/**
+ * How many system readings the header's CPU sparkline keeps.
+ *
+ * 40 at the 2 s poll above is ~80 s of history — long enough to tell "a build
+ * is running" from "that was one spike", short enough that the line still
+ * reacts to something starting. Kept HERE rather than in the component because
+ * the poll is module-scoped and runs whether or not anything is mounted: a
+ * buffer owned by the widget would start empty every time the bar re-rendered
+ * from scratch (an auth gate, a theme change) and the line would vanish for the
+ * next minute and a half.
+ */
+const CPU_HISTORY_SAMPLES = 40;
+
 interface ResourceStore {
   /** The machine. Present as soon as the app has been open a moment. */
   system: SystemResources | null;
+  /** The last {@link CPU_HISTORY_SAMPLES} busy percentages, oldest → newest. */
+  cpuHistory: number[];
   /** Everything, including per-chat. `null` until the page asks for it. */
   snapshot: ResourceSnapshot | null;
   /** A row's per-process drill-down, keyed by chat. */
@@ -85,6 +100,7 @@ export const useResources = create<ResourceStore>((set, get) => {
 
   return {
     system: null,
+    cpuHistory: [],
     snapshot: null,
     details: {},
     loading: false,
@@ -95,7 +111,17 @@ export const useResources = create<ResourceStore>((set, get) => {
       // stale figure is off by one poll, an empty one reads as "no data" and
       // sends someone looking for a problem that isn't there.
       const res = await api.resources.system().catch(() => null);
-      if (res) set({ system: res });
+      if (!res) return;
+      // `cpuPct` is null until the server has two samples to derive a rate
+      // from, and a null must not enter the buffer as a zero — the sparkline
+      // would open every session with a dip to the floor that never happened.
+      set((s) => ({
+        system: res,
+        cpuHistory:
+          res.cpuPct === null
+            ? s.cpuHistory
+            : [...s.cpuHistory, res.cpuPct].slice(-CPU_HISTORY_SAMPLES),
+      }));
     },
 
     refreshSnapshot: async (fresh = false) => {

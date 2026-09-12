@@ -41,6 +41,17 @@
  */
 export const CPU_BAR = "bg-accent-2";
 
+/**
+ * The same violet as a STROKE, for the header's CPU sparkline.
+ *
+ * A pair rather than one token because the two utilities are different
+ * properties — `bg-*` fills a track, and a line has to come from
+ * `currentColor` — and they sit here together so a change of hue cannot move
+ * one without the other. That is the whole point of this module: the bar and
+ * the line are the same metric and must never disagree about its colour.
+ */
+export const CPU_LINE = "text-accent-2";
+
 /** Machine-scale memory pressure — the header pill and the page's hero card. */
 export function machineTone(p: number): { text: string; bar: string } {
   if (p >= 90) return { text: "text-danger", bar: "bg-danger" };
