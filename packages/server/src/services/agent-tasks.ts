@@ -49,6 +49,7 @@ import {
   type Chat,
   type Effort,
   type GitFileChange,
+  type HarnessKind,
   type GitStatus,
   type MessagePart,
   type Project,
@@ -1276,6 +1277,7 @@ export async function launchAgentTask(
     taskId: AgentTaskId;
     instructions?: string;
     effort?: Effort;
+    harness?: HarnessKind;
     model?: string;
     agentId?: string;
     params?: Record<string, unknown>;
@@ -1333,6 +1335,7 @@ export async function launchAgentTask(
     pr,
   });
   const prompt = composeMessageText(parts);
+  const run = runOn(input, project);
 
   const chat = await createChat(services, {
     projectId: input.projectId,
@@ -1353,7 +1356,8 @@ export async function launchAgentTask(
               : sweepSubject(status),
     ),
     effort: input.effort ?? meta.defaultEffort,
-    model: input.model ?? meta.defaultModel,
+    harness: run.harness,
+    model: run.model ?? meta.defaultModel,
     agentId: input.agentId,
     purpose: {
       kind: input.taskId,
@@ -1369,6 +1373,30 @@ export async function launchAgentTask(
   await ensureSession(services, chat.id);
   await services.broker.sendMessage(chat.id, prompt, { parts });
   return { chat, prompt, parts };
+}
+
+/**
+ * The provider and model a launch runs on.
+ *
+ * The caller's pick wins, and it wins as a PAIR. A PR review launched by hand
+ * ("Review with Dispatch") that names neither falls back to the reviewer the
+ * project configured, so the button and the automatic sweep agree on who
+ * reviews. But half a pick is never completed from the other side: a
+ * launcher-pinned `opus` paired with a project reviewer on `codex` would make a
+ * Codex chat wearing a Claude model id, which fails on its first turn.
+ *
+ * `resolveWorkflow` clamps the reviewer inert off the `review` rung, so a
+ * project that opens no PRs contributes nothing here.
+ */
+function runOn(
+  input: { taskId: AgentTaskId; harness?: HarnessKind; model?: string },
+  project: Project,
+): { harness?: HarnessKind; model?: string } {
+  if (input.harness || input.model || input.taskId !== "pr:review") {
+    return { harness: input.harness, model: input.model };
+  }
+  const reviewer = resolveWorkflow(project).pr.reviewAgent;
+  return { harness: reviewer.harness, model: reviewer.model };
 }
 
 /** The sidebar's one-line "what is this chat off doing". */

@@ -684,6 +684,7 @@ export function createServices(
             projectId,
             taskId: "pr:review",
             effort: policy.effort,
+            harness: policy.harness,
             model: policy.model,
             agentId: policy.agentId,
             params: {
