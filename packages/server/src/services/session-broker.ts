@@ -4891,9 +4891,13 @@ export class SessionBroker {
       { displayName: "Review", signal },
     );
     if (result.behavior !== "allow") return { status: "dismissed", message: result.message };
+    // The card has exactly ONE question, so take its one answer rather than
+    // looking it up by text: the answers map is keyed by a TRIMMED question, and
+    // a title with a leading space made the lookup miss — reporting a press of
+    // Approve to the agent as a dismissal.
     const raw = result.updatedInput?.answers as Record<string, unknown> | undefined;
-    const answer = raw?.[question.question];
-    const verdict = parseHumanReviewAnswer(typeof answer === "string" ? answer : undefined);
+    const answer = Object.values(raw ?? {}).find((v): v is string => typeof v === "string");
+    const verdict = parseHumanReviewAnswer(answer);
     if (!verdict) {
       return { status: "dismissed", message: "The card was answered without a verdict." };
     }
@@ -4919,7 +4923,22 @@ export class SessionBroker {
     ref: string,
   ): Promise<ImageRef | string> {
     const given = ref.trim();
-    if (HTTP_URL_RE.test(given)) return { id: this.genId(), path: given, alt: "screenshot" };
+    if (HTTP_URL_RE.test(given)) {
+      // Nothing to sniff — the browser fetches it. But the card picks image vs
+      // download chip from `mimeType`, and an untyped ref drew as a chip, so
+      // type it from the URL's extension. Only an EXTENSIONLESS URL (a render
+      // endpoint) is taken on trust as an image; an extension the table doesn't
+      // know — `report.html` — is refused, not assumed to be a PNG.
+      const name = basename(new URL(given).pathname) || "screenshot";
+      const mimeType = mediaTypeFromName(
+        name,
+        /\.[^.]+$/.test(name) ? "application/octet-stream" : "image/png",
+      );
+      if (mediaKind(mimeType) !== "image") {
+        return `Screenshot ${given} doesn't look like an image (${mimeType}).`;
+      }
+      return { id: this.genId(), path: given, mimeType, alt: name };
+    }
     const project = await this.projectForChat(session.chatId).catch(() => null);
     const base = session.worktreeCwd ?? project?.repoPath ?? process.cwd();
     const path = pathFromFileUri(given) ?? given;

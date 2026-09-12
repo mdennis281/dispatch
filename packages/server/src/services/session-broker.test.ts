@@ -1339,6 +1339,48 @@ describe("SessionBroker — permissions", () => {
       await rm(shots, { recursive: true, force: true });
     });
 
+    it("reads the verdict even when the title is padded with whitespace", async () => {
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+
+      const reqP = nextPermissionId();
+      const verdictP = broker.requestHumanReview("c1", { ...request, title: "  Padded title" });
+      broker.answerQuestion(await reqP, { answer: HUMAN_REVIEW_ANSWERS.approve });
+
+      await expect(verdictP).resolves.toEqual({ status: "reviewed", verdict: "approve" });
+    });
+
+    it("types an http(s) screenshot as an image so the card draws it, not a download chip", async () => {
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+
+      const reqP = nextPermissionId();
+      const verdictP = broker.requestHumanReview("c1", {
+        ...request,
+        screenshots: ["https://cdn.example/shots/card.webp", "https://render.example/shot?id=3"],
+      });
+      const reqId = await reqP;
+      const raised = events.find(
+        (e): e is Extract<WsServerEvent, { type: "permission-request" }> =>
+          e.type === "permission-request" && e.request.id === reqId,
+      );
+      const review = raised?.request.input.review as { screenshots: { mimeType?: string; alt?: string }[] };
+      expect(review.screenshots.map((s) => [s.mimeType, s.alt])).toEqual([
+        ["image/webp", "card.webp"],
+        ["image/png", "shot"],
+      ]);
+      broker.declineQuestion(reqId);
+      await verdictP;
+
+      const page = await broker.requestHumanReview("c1", {
+        ...request,
+        screenshots: ["https://example.com/report.html"],
+      });
+      expect(page.status === "invalid" && page.message).toContain("doesn't look like an image");
+    });
+
     it("reports unavailable without a live session", async () => {
       const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
       await expect(broker.requestHumanReview("nobody", request)).resolves.toEqual({
