@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { cn } from "../../lib/cn.js";
 
 export interface SparklineProps {
@@ -40,6 +41,10 @@ export function Sparkline({
   height = 10,
   title,
 }: SparklineProps) {
+  // Stripped to a plain token: React's ids carry `:` or `«»`, which a `url(#…)`
+  // reference would need escaped, and `CSS.escape` does not exist in the node
+  // environment the client's tests render in.
+  const fill = `spark${useId().replace(/[^\w-]/g, "")}`;
   // One point cannot be a line, and an empty buffer must not draw a flat zero —
   // that reads as a measured idle rather than as "no readings yet".
   if (values.length < 2) {
@@ -61,10 +66,20 @@ export function Sparkline({
       aria-hidden={title ? undefined : true}
     >
       {title && <title>{title}</title>}
-      {/* Area first, so the line draws over its own edge. `0.18` rather than a
-          border: the fill is there to give the line weight at 10px tall, and
-          anything stronger turns a sparkline into a filled chart. */}
-      <polygon points={`0,1 ${pts.join(" ")} 1,1`} className="fill-current opacity-20" />
+      {/* Area first, so the line draws over its own edge, FADING to nothing at
+          the floor. A flat 20% fill was fine under a jagged CPU line, but under
+          memory — which sits level for minutes — it drew a solid tinted slab
+          that read as a fat progress bar rather than as a chart. The gradient
+          keeps the weight at the line and lets the shape, not the area, carry
+          it. `useId` because gradients are referenced by document-wide id and
+          the header draws two of these. */}
+      <defs>
+        <linearGradient id={fill} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="currentColor" stopOpacity={0.32} />
+          <stop offset="1" stopColor="currentColor" stopOpacity={0} />
+        </linearGradient>
+      </defs>
+      <polygon points={`0,1 ${pts.join(" ")} 1,1`} fill={`url(#${fill})`} />
       <polyline
         points={pts.join(" ")}
         className="fill-none stroke-current"

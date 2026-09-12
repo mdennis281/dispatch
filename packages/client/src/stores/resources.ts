@@ -54,7 +54,7 @@ const SYSTEM_POLL_MS = 2_000;
 const SNAPSHOT_POLL_MS = 5_000;
 
 /**
- * How many system readings the header's CPU sparkline keeps.
+ * How many system readings the header's CPU and memory sparklines keep.
  *
  * 40 at the 2 s poll above is ~80 s of history — long enough to tell "a build
  * is running" from "that was one spike", short enough that the line still
@@ -64,13 +64,15 @@ const SNAPSHOT_POLL_MS = 5_000;
  * from scratch (an auth gate, a theme change) and the line would vanish for the
  * next minute and a half.
  */
-const CPU_HISTORY_SAMPLES = 40;
+const HISTORY_SAMPLES = 40;
 
 interface ResourceStore {
   /** The machine. Present as soon as the app has been open a moment. */
   system: SystemResources | null;
-  /** The last {@link CPU_HISTORY_SAMPLES} busy percentages, oldest → newest. */
+  /** The last {@link HISTORY_SAMPLES} busy percentages, oldest → newest. */
   cpuHistory: number[];
+  /** The last {@link HISTORY_SAMPLES} memory-in-use percentages, oldest → newest. */
+  memHistory: number[];
   /** Everything, including per-chat. `null` until the page asks for it. */
   snapshot: ResourceSnapshot | null;
   /** A row's per-process drill-down, keyed by chat. */
@@ -101,6 +103,7 @@ export const useResources = create<ResourceStore>((set, get) => {
   return {
     system: null,
     cpuHistory: [],
+    memHistory: [],
     snapshot: null,
     details: {},
     loading: false,
@@ -115,12 +118,17 @@ export const useResources = create<ResourceStore>((set, get) => {
       // `cpuPct` is null until the server has two samples to derive a rate
       // from, and a null must not enter the buffer as a zero — the sparkline
       // would open every session with a dip to the floor that never happened.
+      //
+      // Memory has no such warm-up — `freemem` is a level, not a rate — so every
+      // reading goes in, and the two buffers may differ by one sample at the
+      // start. Nothing lines them up point for point, so that costs nothing.
       set((s) => ({
         system: res,
         cpuHistory:
           res.cpuPct === null
             ? s.cpuHistory
-            : [...s.cpuHistory, res.cpuPct].slice(-CPU_HISTORY_SAMPLES),
+            : [...s.cpuHistory, res.cpuPct].slice(-HISTORY_SAMPLES),
+        memHistory: [...s.memHistory, share(res.usedBytes, res.totalBytes)].slice(-HISTORY_SAMPLES),
       }));
     },
 

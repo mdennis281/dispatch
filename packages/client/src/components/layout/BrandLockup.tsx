@@ -8,6 +8,7 @@ import {
 } from "../../lib/connectionDiagnosis.js";
 import { countdown } from "../../lib/format.js";
 import { cn } from "../../lib/cn.js";
+import { DispatchMark } from "../ui/DispatchMark.js";
 import { HoverCard } from "../ui/HoverCard.js";
 import { StatusDot, type DotTone } from "../ui/StatusDot.js";
 
@@ -35,33 +36,43 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 }
 
 /**
- * Whether the socket is up, as a dot — with the details a dot cannot carry on
- * hover.
+ * The brand, and whether it is connected — one control.
  *
- * IT USED TO BE A PILL: a bordered capsule with "Connected" in it, sitting in
- * the bar at all times. That is ~90px and a border spent on the word "yes",
- * repeating what a green dot already says — and the moment the answer is NOT
- * yes, the word was still all you got. So the dot is now the whole control, and
- * everything a pill could never fit is in the card behind it: which host this
- * tab is actually talking to, whether that is loopback, the LAN or a proxied
- * remote, the server's build, and how the socket last died.
+ * ── WHERE THE DOT GOES ───────────────────────────────────────────────────────
  *
- * The HOST and REACH rows are not filler. Dispatch is normally reached through a
- * reverse proxy, where "it isn't connecting" has causes that live in the tunnel
- * rather than in the app — and the first question is always which origin the tab
- * is pointed at. That is invisible in an installed window: there is no URL bar.
+ * The connection used to be a pill ("Connected", in a bordered capsule), then a
+ * bare dot with a strip of the title bar to itself — a 7px circle alone at the
+ * far left of an 800px band, reading as a stray pixel rather than as the app's
+ * pulse. It belongs WITH the brand, since "is Dispatch there" is a fact about
+ * Dispatch, but NOT IN the mark: it was tried lighting the mark's junction node,
+ * and a green node inside the logo reads as the logo recoloured, not as a
+ * status beside it. So it ends the wordmark: "Dispatch ●".
  *
- * THE WORD STAYS for every state except `open`. "Reconnecting…" and "Offline"
- * are what this indicator exists for — the states that explain why nothing on
- * screen is moving — and a pulsing amber dot on its own is easy to read as
- * decoration. Only the good news is allowed to be silent.
+ * `tall` is the installed window's lockup, spanning both lines of the title bar
+ * with the mark at 48px. It does NOT print the host under the wordmark: that was
+ * tried, and an address permanently in the corner of the app is noise — it is
+ * one hover away, in the card.
  *
- * Not `diagnose()`, deliberately: that produces a four-check table and a
- * recommended action for `ConnectingScreen`, which is a full-window takeover
- * shown once the app has given up. This is the glance before that — same facts,
- * same vocabulary (`describeClose`, `classifyReach`), a fifth of the pixels.
+ * THE WORD STAYS for every state except `open`, after the dot. "Reconnecting…"
+ * and "Offline" are what this indicator exists for, and an amber dot on its own
+ * is easy to read as the brand's own colour. Only the good news is silent.
+ *
+ * ── THE CARD ─────────────────────────────────────────────────────────────────
+ *
+ * Everything a dot could never carry: which host this tab is talking to, whether
+ * that is loopback, the LAN or a proxied remote, the server's build, and how the
+ * socket last died. Not `diagnose()`, deliberately: that is `ConnectingScreen`'s
+ * four-check table for once the app has given up. This is the glance before
+ * that — same vocabulary (`describeClose`, `classifyReach`), a fifth of the
+ * pixels.
+ *
+ * It opens on a DELAY (see `HoverCard.openDelay`), unlike the gauges: this is the
+ * top-left corner of the app, which the pointer crosses on its way to the
+ * sidebar constantly.
  */
-export function ConnectionDot({ className }: { className?: string }) {
+export type LockupSize = "tall" | "row" | "mark";
+
+export function BrandLockup({ size }: { size: LockupSize }) {
   const state = useConnection((s) => s.state);
   const attempts = useConnection((s) => s.attempts);
   const nextRetryAt = useConnection((s) => s.nextRetryAt);
@@ -94,10 +105,11 @@ export function ConnectionDot({ className }: { className?: string }) {
     <HoverCard
       label={`Connection: ${c.label}`}
       width={252}
+      openDelay={300}
       onOpenChange={setOpen}
       className={cn(
-        "flex items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-active",
-        className,
+        "flex shrink-0 items-center rounded-md text-left",
+        size === "tall" ? "gap-2.5 pl-2 pr-3" : "gap-2 pr-1",
       )}
       card={() => (
         <>
@@ -135,7 +147,18 @@ export function ConnectionDot({ className }: { className?: string }) {
         </>
       )}
     >
-      <StatusDot tone={c.tone} pulse={c.pulse} size={7} />
+      <DispatchMark className={cn("shrink-0", size === "tall" ? "size-12" : "size-8")} />
+
+      {/* The wordmark drops on a phone: the mark is the same brand in a quarter
+          of the width, and on a home-screen PWA the app's name is already under
+          the icon you tapped. */}
+      {size === "tall" && (
+        <span className="text-xl font-semibold tracking-tight text-primary">Dispatch</span>
+      )}
+      {size === "row" && (
+        <span className="text-base font-semibold tracking-tight text-primary">Dispatch</span>
+      )}
+      <StatusDot tone={c.tone} pulse={c.pulse} size={size === "tall" ? 8 : 7} />
       {state !== "open" && (
         <span className={cn("text-xs font-medium", c.text)}>{c.label}</span>
       )}

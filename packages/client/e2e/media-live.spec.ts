@@ -320,9 +320,9 @@ test.afterAll(async () => {
  */
 async function openChat(page: import("@playwright/test").Page): Promise<void> {
   await page.goto(`${BASE}/`);
-  // The socket being up is the connection DOT going green, not a word: the pill
-  // that used to print "Connected" is now a dot whose accessible name carries
-  // the state (see layout/ConnectionDot).
+  // The socket being up is the mark's junction going green, not a word: the
+  // brand lockup is the connection control, and its accessible name carries the
+  // state (see layout/BrandLockup).
   await expect(page.getByRole("button", { name: "Connection: Connected" })).toBeVisible();
 
   // A fresh config dir means a first run, which greets you with the "Protect
@@ -548,12 +548,17 @@ test("the viewer's toolbar clears the window controls overlay", async ({ page })
 });
 
 /**
- * In the installed window the top bar's STATUS LINE is the title bar.
+ * The installed window's top bar is a TWO-LINE title bar; a tab's is one row.
  *
- * The header is two bands: a status line as tall as the window buttons (the
- * drag region, holding the connection dot and the gauges) and an action row
- * below it that spans the full window width. Three things about that only exist
- * in an installed window, and each one is invisible everywhere else:
+ * The overlay hands the page the window's title bar height for free, so there
+ * the bar spends it: the lockup and the readings span two lines, and the
+ * actions sit on line two under the window buttons. Without the overlay the
+ * extra line would come out of the transcript, so the bar is a single row and
+ * must be SHORTER — the two modes are not supposed to match. An earlier version
+ * kept both bands in a tab "for consistency", and that was the complaint.
+ *
+ * Three things about the installed shape only exist in an installed window, and
+ * each is invisible everywhere else:
  *
  *   - a control under the window buttons: painted, and never pressable;
  *   - a control left inside the DRAG region: the OS takes the pointer first, so
@@ -561,24 +566,45 @@ test("the viewer's toolbar clears the window controls overlay", async ({ page })
  *     is the only reason this is checkable at all;
  *   - no drag region left: a title bar you cannot move the window by.
  *
- * The action row is deliberately NOT held to the no-drag rule: the buttons are
- * painted in the `titlebar-area` band and nowhere else, so that row is ordinary
- * page. Asserting it were `no-drag` would be asserting the bug this layout
- * exists to avoid — a second row that thinks it is title bar.
- *
  * `display-mode` is not something CDP can emulate, so the overlay is switched on
  * by answering `matchMedia` before the bundle runs (see `useWindowControlsOverlay`),
  * and the geometry is injected as above. The controls slab here is the REAL
  * Windows one, ~262px — Chromium's overlay toggle, extensions and app menu beside
- * the system three — because the 138 above would make the strip look roomier
- * than it is.
+ * the system three — because the 138 above would make the bar look roomier than
+ * it is.
  */
 const WCO_CHROMIUM_CONTROLS_W = 262;
 
-/** The mark is 32px; anything under this means it was shrunk to fit a strip. */
-const MARK_MIN = 28;
+/** The lockup's mark is 48px in the title bar; under 40 means it was shrunk. */
+const MARK_MIN = 40;
 
-test("the top bar's status line is the title bar, and the row below it is not", async ({ page }) => {
+/** The tab bar's ceiling: a 44px row plus its hairline. */
+const SLIM_MAX = 48;
+
+test("the top bar is a two-line title bar with the overlay, and one short row without", async ({
+  page,
+}) => {
+  await openChat(page);
+
+  // A tab first — no overlay yet.
+  const slim = await page.evaluate(() => {
+    const header = document.querySelector("header")!;
+    const mark = header.querySelector("svg.dispatch-mark");
+    return {
+      height: Math.round(header.getBoundingClientRect().height),
+      region: getComputedStyle(header).getPropertyValue("-webkit-app-region"),
+      mark: mark ? Math.round(mark.getBoundingClientRect().height) : 0,
+    };
+  });
+  expect(slim.height, "the tab bar should be one short row").toBeLessThanOrEqual(SLIM_MAX);
+  // Not a drag region in a tab: there is no window to drag by it.
+  expect(slim.region).not.toBe("drag");
+  expect(slim.mark).toBeGreaterThanOrEqual(28);
+  await page.screenshot({
+    path: join(artifacts, "topbar-tab.png"),
+    clip: { x: 0, y: 0, width: page.viewportSize()!.width, height: 80 },
+  });
+
   await page.addInitScript(() => {
     const real = window.matchMedia.bind(window);
     window.matchMedia = (q: string) =>
@@ -600,19 +626,18 @@ test("the top bar's status line is the title bar, and the row below it is not", 
     content: `:root {
       --cm-titlebar-h: ${WCO_STRIP_H}px;
       --cm-titlebar-x: 0px;
-      --cm-titlebar-w: calc(100% - ${WCO_CHROMIUM_CONTROLS_W}px);
+      --cm-titlebar-w: calc(100vw - ${WCO_CHROMIUM_CONTROLS_W}px);
     }`,
   });
 
-  // Down to the `md` floor, where the action row is at its most crowded.
+  // Down to the `md` floor, where the bar is at its most crowded.
   for (const width of [1440, 1095, 960, 800]) {
     await page.setViewportSize({ width, height: 900 });
     await page.waitForTimeout(150);
 
     const report = await page.evaluate(
-      ({ stripH, controlsW, markMin }) => {
+      ({ stripH, controlsW, markMin, slimMax }) => {
         const header = document.querySelector("header")!;
-        const strip = header.querySelector(".cm-titlebar")!;
         const vw = document.documentElement.clientWidth;
         const region = (el: Element) => getComputedStyle(el).getPropertyValue("-webkit-app-region");
         const name = (el: Element) => el.getAttribute("aria-label") ?? el.tagName;
@@ -620,47 +645,57 @@ test("the top bar's status line is the title bar, and the row below it is not", 
         const visible = (el: Element) => rect(el).width > 0;
 
         const mark = header.querySelector("svg.dispatch-mark");
-        const inStrip = Array.from(strip.querySelectorAll("button, a")).filter(visible);
-        const all = Array.from(header.querySelectorAll("button, a")).filter(visible);
+        const controls = Array.from(header.querySelectorAll("button, a")).filter(visible);
+        const h = rect(header);
 
-        // Largest run of the strip with nothing pressable in it: that is what
-        // you actually get to grab the window by.
-        const edges = inStrip.map((el) => rect(el)).sort((a, b) => a.left - b.left);
+        // The widest horizontal run with nothing pressable in it, at ANY height
+        // of the bar: that is what you actually get to grab the window by.
+        // Merged as intervals, because the gauges span both lines and a control
+        // on one line still blocks a drag started beside it on the other.
+        const spans = controls
+          .map((el) => [rect(el).left, rect(el).right] as const)
+          .sort((a, b) => a[0] - b[0]);
         let gap = 0;
-        for (let i = 1; i < edges.length; i += 1) {
-          gap = Math.max(gap, edges[i]!.left - edges[i - 1]!.right);
+        let reach = spans[0]?.[1] ?? 0;
+        for (const [left, right] of spans.slice(1)) {
+          gap = Math.max(gap, left - reach);
+          reach = Math.max(reach, right);
         }
 
         return {
-          // The strip is exactly the band the OS owns — the hairline under it is
-          // inside that height, not added to it.
-          stripH: Math.round(rect(strip).height),
-          // The identity is in the ACTION ROW, at full size — the two halves of
-          // what folding this bar into one line cost. "Taller than the strip"
-          // would not have caught it: that layout measured 34 against a 33px
-          // strip and passed.
-          markBelowStrip: !!mark && Math.round(rect(mark).top) >= Math.round(rect(strip).bottom),
-          stripRegion: region(strip),
-          underButtons: all
+          // Two lines, and at least as tall as two OS bands — the extra height
+          // is the point — where the tab bar was no taller than one row.
+          twoLines: h.height >= 2 * stripH && h.height > slimMax,
+          headerRegion: region(header),
+          // The mark spans BOTH lines at full size. A mark boxed into one line
+          // (below the band, or squeezed into it) is the layout this replaced.
+          markSpansLines: !!mark && rect(mark).top < stripH && rect(mark).bottom > stripH + 4,
+          markFullSize: !!mark && Math.round(rect(mark).height) >= markMin,
+          underButtons: controls
             .filter((el) => rect(el).right > vw - controlsW && rect(el).top < stripH)
             .map(name),
-          stripControlsDraggable: inStrip.filter((el) => region(el) !== "no-drag").map(name),
+          controlsDraggable: controls.filter((el) => region(el) !== "no-drag").map(name),
           gapAtLeast64: gap >= 64,
-          markFullSize: !!mark && Math.round(rect(mark).height) >= markMin,
-          settingsReachable: all.some((el) => name(el) === "Settings"),
+          // Not clipped off the right edge by readings that failed to yield.
+          settingsReachable: controls.some((el) => name(el) === "Settings" && rect(el).right <= vw),
         };
       },
-      { stripH: WCO_STRIP_H, controlsW: WCO_CHROMIUM_CONTROLS_W, markMin: MARK_MIN },
+      {
+        stripH: WCO_STRIP_H,
+        controlsW: WCO_CHROMIUM_CONTROLS_W,
+        markMin: MARK_MIN,
+        slimMax: SLIM_MAX,
+      },
     );
 
     expect(report, `at ${width}px`).toEqual({
-      stripH: WCO_STRIP_H,
-      markBelowStrip: true,
-      stripRegion: "drag",
-      underButtons: [],
-      stripControlsDraggable: [],
-      gapAtLeast64: true,
+      twoLines: true,
+      headerRegion: "drag",
+      markSpansLines: true,
       markFullSize: true,
+      underButtons: [],
+      controlsDraggable: [],
+      gapAtLeast64: true,
       settingsReachable: true,
     });
     await page.screenshot({
@@ -669,10 +704,15 @@ test("the top bar's status line is the title bar, and the row below it is not", 
     });
   }
 
-  // The readings in the strip are real controls, not pictures of them: the
-  // connection dot opens its card on hover, over a drag region.
+  // Back to a width with every reading on screen: at 800 the machine gauges have
+  // already yielded their room to the actions, which is the ladder working.
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // The lockup is a real control over a drag region, not a picture of one: it
+  // opens the connection card on hover, after its delay.
   await page.getByRole("button", { name: /^Connection/ }).hover();
   await expect(page.getByText("Reach", { exact: true })).toBeVisible();
+  await page.mouse.move(400, 600);
 
   // Reaching INTO a card must not dismiss it. The panel is portalled to
   // `document.body`, so clicking a control inside it genuinely blurs the
@@ -692,7 +732,7 @@ test("the top bar's status line is the title bar, and the row below it is not", 
   await breakdown.click();
   await expect(breakdown, "the resources card outlived the page it navigated to").toBeHidden();
 
-  // And the palette still opens from the row below.
+  // And the palette opens from its icon.
   await page.getByRole("button", { name: /^Search or run a command/ }).first().click();
   await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
 });

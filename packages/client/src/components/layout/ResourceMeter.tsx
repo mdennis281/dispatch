@@ -22,24 +22,25 @@
  * "CPU 37%, [bar], 74%" and the bar belonged to neither number it sat between.
  * Two metrics get two shapes now, each behind its own label (see `Gauge`).
  *
- * CPU is a SPARKLINE and memory is a bar, because the two readings are not the
- * same kind of fact. "CPU is at 37%" is never the interesting part — a build
- * pegs it, an idle machine doesn't — what a reader wants is whether it has been
- * like that for the last minute, and only a line can say so. Memory has no such
- * question: it is a level against a ceiling, which is what a bar is for.
+ * BOTH are sparklines, on the same 0–100 scale. CPU got one first because "CPU
+ * is at 37%" is never the interesting part — what a reader wants is whether it
+ * has been like that for the last minute. Memory started as a bar on the theory
+ * that it is a level against a ceiling, but a level is exactly what a line on a
+ * fixed scale draws — its height — and the line adds the part a bar cannot: a
+ * leak climbing, or a reap that just gave 4 GB back. Different hues (violet CPU,
+ * memory on its pressure ramp) keep two lines stacked a line apart from reading
+ * as one chart.
  *
  * NEITHER carries Dispatch's share, unlike every other bar in this feature.
  * That is the polling split above showing through: the trigger has only the free
  * reading, and the alternative — painting whatever share the last opened panel
  * happened to leave in the store — is a figure that silently ages for as long as
- * the tab stays open. The bar is drawn at full strength precisely so it cannot
- * be mistaken for one whose Dispatch slice is merely small. See `SplitBar`'s
- * `sharePct: null`.
+ * the tab stays open. The split lives in the card, where it is fetched fresh.
  *
  * TONE IS DRIVEN BY MEMORY, NOT CPU. Pegged CPU is what a working machine looks
  * like — agents compile things. Exhausted MEMORY is what makes it unusable, and
  * it is the one the reaper on the Resources page can actually do something
- * about, so it is the one that turns the pill amber.
+ * about, so it is the one whose line and figure climb the warn/danger ramp.
  */
 import { useEffect, useState } from "react";
 import { ExternalLink, Server } from "lucide-react";
@@ -59,7 +60,7 @@ import { Button } from "../ui/Button.js";
 import { HoverCard } from "../ui/HoverCard.js";
 import { Sparkline } from "../ui/Sparkline.js";
 import { SplitBar, SplitDot } from "../ui/SplitBar.js";
-import { GAUGE_TRIGGER, Gauge, GaugeSep } from "./Gauge.js";
+import { CHART, GAUGE_TRIGGER, Gauge, STACK_ROW, type GaugeLayout } from "./Gauge.js";
 
 /** One legend entry — swatch, what it is, how much of it. */
 function Leg({
@@ -145,9 +146,10 @@ function Meter({
   );
 }
 
-export function ResourceMeter() {
+export function ResourceMeter({ layout }: { layout: GaugeLayout }) {
   const system = useResources((s) => s.system);
   const cpuHistory = useResources((s) => s.cpuHistory);
+  const memHistory = useResources((s) => s.memHistory);
   const snapshot = useResources((s) => s.snapshot);
   const refreshSnapshot = useResources((s) => s.refreshSnapshot);
   const view = useView((s) => s.view);
@@ -185,7 +187,7 @@ export function ResourceMeter() {
       label={`System resources: CPU ${pct(system.cpuPct)}, memory ${Math.round(memPct)}%`}
       width={304}
       onOpenChange={setOpen}
-      className={GAUGE_TRIGGER}
+      className={GAUGE_TRIGGER[layout]}
       card={(close) => (
         <>
           <div className="flex items-center gap-1.5 border-b border-line px-3 py-2">
@@ -248,18 +250,23 @@ export function ResourceMeter() {
         </>
       )}
     >
-      {/* CPU is the half that goes when the strip runs out of room: memory is
-          the reading that decides whether the machine is still usable, and it is
-          the one the reaper on the Resources page can act on. Inert outside a
-          `statusline` container, i.e. everywhere but the header. */}
-      <span className="inline-flex items-center gap-2 @max-[26rem]/statusline:hidden">
-        <Gauge label="CPU" value={pct(system.cpuPct)} tone="text-secondary">
-          <Sparkline values={cpuHistory} className={CPU_LINE} width={30} height={11} />
-        </Gauge>
-        <GaugeSep />
-      </span>
-      <Gauge label="Mem" value={`${Math.round(memPct)}%`} tone={t.text}>
-        <SplitBar size="xs" className="w-7" usedPct={memPct} tone={t.bar} />
+      <Gauge
+        label="CPU"
+        value={pct(system.cpuPct)}
+        tone="text-secondary"
+        layout={layout}
+        className={layout === "stacked" ? STACK_ROW[0] : undefined}
+      >
+        <Sparkline values={cpuHistory} className={CPU_LINE} {...CHART[layout]} />
+      </Gauge>
+      <Gauge
+        label="Mem"
+        value={`${Math.round(memPct)}%`}
+        tone={t.text}
+        layout={layout}
+        className={layout === "stacked" ? STACK_ROW[1] : undefined}
+      >
+        <Sparkline values={memHistory} className={t.text} {...CHART[layout]} />
       </Gauge>
     </HoverCard>
   );

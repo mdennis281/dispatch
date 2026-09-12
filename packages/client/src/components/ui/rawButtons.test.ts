@@ -111,8 +111,12 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * were a bare `<button>` wrapped in the same open-on-hover, portal-a-panel,
  * re-place-on-scroll dance; that is now `ui/HoverCard`, which owns the button,
  * so the connection dot got the same behaviour without adding a third.
+ *
+ * 89 → 88: the top bar's 380px faux search field became an `IconButton`. It was
+ * a raw `<button>` styled as a text input, and its only behaviour was opening
+ * the palette modal, which has its own.
  */
-const BASELINE = 89;
+const BASELINE = 88;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

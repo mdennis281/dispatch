@@ -123,8 +123,8 @@ test("live cockpit: set up → create project → chat → send message → pane
 
   // The wizard is gone and the shell is live with the new project active.
   await expect(page.getByRole("heading", { name: "Your first project" })).toBeHidden();
-  // The connection dot, whose accessible name is the state — the top bar prints
-  // no "Connected" any more (see layout/ConnectionDot).
+  // The brand lockup, whose accessible name is the connection state — the top
+  // bar prints no "Connected" any more (see layout/BrandLockup).
   await expect(page.getByRole("button", { name: "Connection: Connected" })).toBeVisible();
   await expect(page.getByText(projectName)).toBeVisible();
 
