@@ -23,7 +23,7 @@
  * orphans the icon on old chats, so don't.
  */
 import * as z from "zod";
-import { EffortSchema, type Effort } from "./common.js";
+import { EffortSchema, HarnessKindSchema, type Effort } from "./common.js";
 
 /* -------------------------------------------------------------------- ids */
 
@@ -338,6 +338,12 @@ export const LaunchAgentTaskInputSchema = z.object({
   instructions: z.string().optional(),
   /** Overrides the task's `defaultEffort`. */
   effort: EffortSchema.optional(),
+  /**
+   * Provider the spawned chat runs on. Omitted = the project's provider — except
+   * for a PR review, where a launch that names neither this nor `model` runs on
+   * whatever the project configured its reviewer to run on.
+   */
+  harness: HarnessKindSchema.optional(),
   /**
    * Model to pin on the spawned chat. Omitted means "inherit" — the chat is
    * born unpinned and follows the project/runtime default, which is a different

@@ -175,6 +175,23 @@ describe("resolveWorkflow", () => {
     });
   });
 
+  it("carries the reviewer's provider and model through, and leaves both unset by default", () => {
+    const wf = resolveWorkflow({
+      workflow: {
+        profile: "review",
+        pr: { reviewAgent: { enabled: true, harness: "codex", model: "gpt-5.5" } },
+      },
+    });
+    expect(wf.pr.reviewAgent.harness).toBe("codex");
+    expect(wf.pr.reviewAgent.model).toBe("gpt-5.5");
+
+    // Unset means "the project's provider, that provider's default model" —
+    // resolving a concrete provider here would pin every reviewer to it.
+    const dflt = resolveWorkflow({ workflow: { profile: "review" } });
+    expect(dflt.pr.reviewAgent.harness).toBeUndefined();
+    expect(dflt.pr.reviewAgent.model).toBeUndefined();
+  });
+
   it("never resolves a reviewer login here, even asking for a dedicated account", () => {
     // The login lives with the TOKEN, in the config dir, because this file is
     // committed. This package cannot read that, so the server overlays it — and

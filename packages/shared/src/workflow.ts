@@ -27,7 +27,7 @@
  * so a repo can sit on `review` but (say) keep its own sync policy.
  */
 import * as z from "zod";
-import { EffortSchema } from "./common.js";
+import { EffortSchema, HarnessKindSchema } from "./common.js";
 import { ReviewerIdentitySchema } from "./reviewer.js";
 
 /* ------------------------------------------------------------------ profile */
@@ -141,6 +141,25 @@ export const WorkflowReviewAgentConfigSchema = z.object({
   identity: ReviewerIdentitySchema.optional(),
   /** Reasoning effort the reviewer runs at. Reviewing well is not a cheap job. */
   effort: EffortSchema.optional(),
+  /**
+   * The provider the reviewer runs on. Absent = the project's own provider.
+   *
+   * Without this the reviewer could only ever run where the project's chats do,
+   * so a project that builds on Codex could not have Claude review it, and the
+   * one knob that existed — `model` — was a model id for a provider this block
+   * had no way to name. A Codex model id handed to a Claude chat is a reviewer
+   * that fails on its first turn, which is exactly how `spawn_chat` children
+   * broke before they carried a provider of their own.
+   */
+  harness: HarnessKindSchema.optional(),
+  /**
+   * The model the reviewer runs on. Absent = that provider's default.
+   *
+   * Meaningful only beside `harness`: a model id belongs to one provider, and a
+   * pin that follows whatever provider the PROJECT is on today breaks the day
+   * the project switches. The Reviewer pane enforces that; a hand-written
+   * manifest with `model` and no `harness` keeps its old meaning.
+   */
   model: z.string().optional(),
   /** A configured agent (`.dispatch/agents/`) to run the review as. */
   agentId: z.string().optional(),
@@ -180,6 +199,7 @@ export const ResolvedReviewAgentSchema = z.object({
    */
   login: z.string().optional(),
   effort: EffortSchema,
+  harness: HarnessKindSchema.optional(),
   model: z.string().optional(),
   agentId: z.string().optional(),
   instructions: z.string().optional(),
@@ -605,6 +625,7 @@ function resolveReviewAgent(
     // package cannot read. See the field's docblock.
     login: undefined,
     effort: authored?.effort ?? base.effort,
+    harness: authored?.harness ?? base.harness,
     model: authored?.model ?? base.model,
     agentId: authored?.agentId ?? base.agentId,
     instructions: authored?.instructions ?? base.instructions,

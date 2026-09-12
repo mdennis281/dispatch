@@ -598,6 +598,60 @@ describe("launchAgentTask", () => {
     expect(inherited?.chat.model).toBeUndefined();
   });
 
+  it("runs on the requested provider", async () => {
+    const { svc } = services();
+    const out = await launchAgentTask(svc, {
+      projectId: "p1",
+      taskId: "config:agents",
+      instructions: "a reviewer",
+      harness: "codex",
+    });
+    expect(out?.chat.harness).toBe("codex");
+  });
+
+  describe("a PR review's provider and model", () => {
+    const reviewing = {
+      id: "p1",
+      repoPath: "/repo",
+      workflow: {
+        profile: "review",
+        pr: { reviewAgent: { enabled: true, harness: "codex", model: "gpt-5.5" } },
+      },
+    };
+
+    it("come from the project's reviewer when the launch names neither", async () => {
+      // The "Review with Dispatch" button sends no provider and, unless someone
+      // pinned one, no model — it must review on what the project configured,
+      // not on whatever the project's own chats happen to run on.
+      const { svc } = services({ project: reviewing });
+      const out = await launchAgentTask(svc, { projectId: "p1", taskId: "pr:review" });
+      expect(out?.chat.harness).toBe("codex");
+      expect(out?.chat.model).toBe("gpt-5.5");
+    });
+
+    it("are taken from the caller as a pair, never completed from the reviewer", async () => {
+      // A launcher-pinned Claude model beside a Codex reviewer would otherwise
+      // produce a Codex chat carrying a Claude model id.
+      const { svc } = services({ project: reviewing });
+      const out = await launchAgentTask(svc, {
+        projectId: "p1",
+        taskId: "pr:review",
+        model: "opus",
+      });
+      expect(out?.chat.harness).toBe("claude");
+      expect(out?.chat.model).toBe("opus");
+    });
+
+    it("are not read off a project that opens no PRs", async () => {
+      const { svc } = services({
+        project: { ...reviewing, workflow: { ...reviewing.workflow, profile: "none" } },
+      });
+      const out = await launchAgentTask(svc, { projectId: "p1", taskId: "pr:review" });
+      expect(out?.chat.harness).toBe("claude");
+      expect(out?.chat.model).toBeUndefined();
+    });
+  });
+
   it("launches at the requested effort, else the task's own default", async () => {
     const { svc: a } = services({ status: status() });
     const at = await launchAgentTask(a, {

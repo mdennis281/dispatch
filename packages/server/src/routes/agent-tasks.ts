@@ -38,6 +38,7 @@ export function registerAgentTaskRoutes(app: FastifyInstance): void {
           taskId: input.taskId,
           instructions: input.instructions,
           effort: input.effort,
+          harness: input.harness,
           model: input.model,
           agentId: input.agentId,
           params: input.params,

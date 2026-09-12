@@ -137,6 +137,7 @@ function savedWorkflow(project: Project | null): WorkflowConfig {
         effort: pr.reviewAgent.effort,
         maxRounds: pr.reviewAgent.maxRounds,
         post: pr.reviewAgent.post,
+        ...(pr.reviewAgent.harness ? { harness: pr.reviewAgent.harness } : {}),
         ...(pr.reviewAgent.model ? { model: pr.reviewAgent.model } : {}),
         ...(pr.reviewAgent.agentId ? { agentId: pr.reviewAgent.agentId } : {}),
         ...(pr.reviewAgent.instructions ? { instructions: pr.reviewAgent.instructions } : {}),
@@ -596,6 +597,7 @@ export function ProjectSettingsView() {
                 value={workflow}
                 onChange={setDraft}
                 projectId={projectId}
+                projectHarness={project.harness}
                 fromManifest={hasDir}
                 inRepo={inRepo}
                 disabled={saving}

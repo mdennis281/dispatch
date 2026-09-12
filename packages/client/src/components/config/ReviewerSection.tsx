@@ -28,6 +28,7 @@ import {
   AlertTriangle,
   Bot,
   Check,
+  Cpu,
   Gauge,
   Loader2,
   Plus,
@@ -43,6 +44,8 @@ import {
   COPILOT_LOGIN,
   resolveWorkflow,
   type Effort,
+  type HarnessKind,
+  type ModelOption,
   type ReviewerCheck,
   type ReviewerIdentity,
   type ReviewerRosterEntry,
@@ -50,7 +53,8 @@ import {
   type ReviewerVerify,
   type WorkflowConfig,
 } from "@dispatch/shared";
-import { api } from "../../lib/api.js";
+import { api, type HarnessInfo } from "../../lib/api.js";
+import { harnessLabel } from "../../lib/harness.js";
 import { EFFORT_OPTIONS } from "../../lib/efforts.js";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -112,11 +116,43 @@ const ROUND_OPTIONS = [
   ...[2, 3, 4, 6, 8, 12].map((n) => ({ value: String(n), label: `${n} rounds` })),
 ];
 
+const HARNESSES = ["claude", "codex"] as const;
+
+/**
+ * The provider list and each provider's model catalog, fetched when the pane
+ * mounts — the same two reads the app-wide Chat defaults make, and for the same
+ * reason: a provider installed since the last visit should show up without a
+ * reload, and "not installed" is worth saying before someone points a reviewer
+ * at it and waits for a review that fails on its first turn.
+ */
+function useProviderCatalogs() {
+  const [harnesses, setHarnesses] = useState<HarnessInfo[]>([]);
+  const [catalogs, setCatalogs] = useState<Partial<Record<HarnessKind, ModelOption[]>>>({});
+  useEffect(() => {
+    let live = true;
+    void api.harnesses
+      .list()
+      .then((h) => live && setHarnesses(h))
+      .catch(() => {});
+    for (const kind of HARNESSES) {
+      void api.models
+        .list(kind)
+        .then((models) => live && setCatalogs((current) => ({ ...current, [kind]: models })))
+        .catch(() => {});
+    }
+    return () => {
+      live = false;
+    };
+  }, []);
+  return { harnesses, catalogs };
+}
+
 export function ReviewerSection({
   value,
   onChange,
   projectId,
   repo,
+  projectHarness,
   fromManifest,
   inRepo,
   disabled,
@@ -125,6 +161,8 @@ export function ReviewerSection({
   onChange: (next: WorkflowConfig) => void;
   /** Lets the setup check ask GitHub whether the account can actually be requested here. */
   projectId?: string;
+  /** The project's own provider, when it pins one — what "Same as the project" means. */
+  projectHarness?: HarnessKind;
   /** `owner/name` when the view knows it — display only, for the setup steps. */
   repo?: string;
   fromManifest?: boolean;
@@ -145,6 +183,43 @@ export function ReviewerSection({
     onChange({ ...value, pr: { ...value.pr, ...p } });
   const patch = (p: Partial<NonNullable<NonNullable<WorkflowConfig["pr"]>["reviewAgent"]>>) =>
     patchPr({ reviewAgent: { ...value.pr?.reviewAgent, ...p } });
+
+  const { harnesses, catalogs } = useProviderCatalogs();
+  const providerOptions = [
+    {
+      value: "",
+      label: "Same as the project",
+      hint: projectHarness ? harnessLabel(projectHarness) : "follows it",
+    },
+    ...HARNESSES.map((kind) => {
+      const runtime = harnesses.find((h) => h.kind === kind)?.runtime;
+      return {
+        value: kind,
+        label: kind === "claude" ? "Claude Code" : "Codex",
+        // Only once the list has loaded: "not installed" flashing on every
+        // provider for the length of a fetch reads as a broken install.
+        hint: !harnesses.length
+          ? undefined
+          : runtime?.available
+            ? (runtime.version ?? runtime.source)
+            : "not installed",
+      };
+    }),
+  ];
+  // A model is only pinnable once the provider is: model ids belong to one
+  // provider, and a pin that followed the project's provider would name a model
+  // the reviewer's runtime doesn't have the day the project switched.
+  const catalog = resolved.harness ? (catalogs[resolved.harness] ?? []) : [];
+  const modelOptions = [
+    { value: "", label: "Provider default", hint: "unpinned" },
+    ...catalog.map((m) => ({ value: m.value, label: m.label, hint: m.hint })),
+    // A pin the catalog no longer lists (a retired model, a hand-edited id) is
+    // still what the manifest says; render it rather than showing a blank chip
+    // that implies the reviewer is unpinned.
+    ...(resolved.model && !catalog.some((m) => m.value === resolved.model)
+      ? [{ value: resolved.model, label: resolved.model, hint: "not in catalog" }]
+      : []),
+  ];
 
   return (
     <div className="space-y-4">
@@ -213,6 +288,36 @@ export function ReviewerSection({
             <div className="space-y-2.5 border-t border-line-soft px-3 py-2.5">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                 <label className="flex items-center gap-2">
+                  <span className="text-2xs text-faint">Provider</span>
+                  <Select
+                    options={providerOptions}
+                    value={resolved.harness ?? ""}
+                    // Switching provider drops the model with it — carrying a
+                    // Claude model id onto Codex is the mismatch this pairing
+                    // exists to prevent. Re-picking the same one keeps it.
+                    onChange={(v) => {
+                      const harness = (v || undefined) as HarnessKind | undefined;
+                      if (harness === resolved.harness) return;
+                      patch({ harness, model: undefined });
+                    }}
+                    leftIcon={<Cpu />}
+                    width={220}
+                  />
+                </label>
+                {resolved.harness && (
+                  <label className="flex items-center gap-2">
+                    <span className="text-2xs text-faint">Model</span>
+                    <Select
+                      options={modelOptions}
+                      value={resolved.model ?? ""}
+                      onChange={(v) => patch({ model: v || undefined })}
+                      width={220}
+                    />
+                  </label>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <label className="flex items-center gap-2">
                   <span className="text-2xs text-faint">Effort</span>
                   <Select
                     options={EFFORT_OPTIONS}
@@ -233,7 +338,9 @@ export function ReviewerSection({
                 </label>
               </div>
               <p className="text-2xs leading-snug text-faint">
-                Reviewing well is a reading job, so it defaults to high effort. The cap bounds
+                The reviewer can run on a different provider than the project&rsquo;s own chats —
+                a second model reading the diff catches what the first one wrote past. Reviewing
+                well is a reading job, so it defaults to high effort. The cap bounds
                 the fix-and-re-request cycle: a review is only spent on the code it read, so a
                 push re-arms it — the cap is what stops a PR that never converges.
               </p>
