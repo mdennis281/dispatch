@@ -30,6 +30,7 @@ import { Spinner } from "../ui/Spinner.js";
 import { ChatHeaderBadges } from "./ChatHeaderBadges.js";
 import { MessageList } from "./MessageList.js";
 import { StreamingTail } from "./StreamingTail.js";
+import { clampSelectionToMessage } from "../../lib/transcriptCopy.js";
 import { TodosStrip } from "./TodosStrip.js";
 import { Composer } from "./Composer.js";
 import { DeleteChatDialog } from "./DeleteChatDialog.js";
@@ -731,6 +732,7 @@ export function ChatView({ chat }: { chat: Chat }) {
                 <div
                   ref={transcriptRef}
                   className="flex flex-col divide-y divide-line-soft/70"
+                  onCopy={(e) => clampSelectionToMessage(e.currentTarget)}
                 >
                   <MessageList chatId={chat.id} messages={messages} />
                   <StreamingTail
