@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn.js";
+import { FOCUSABLE } from "../../lib/focusable.js";
 import { LAYER } from "../../lib/layers.js";
 
 /** Gap between trigger and panel, and the margin it keeps from a window edge. */
@@ -51,6 +52,32 @@ export function blurLeavesCard(
   return true;
 }
 
+/**
+ * Should this blur dismiss the card, given HOW it was opened?
+ *
+ * `blurLeavesCard` treats a `null` relatedTarget as staying, and for a card the
+ * pointer opened that is right — the pointer is still on it and `mouseleave`
+ * is the event that should close it. A card opened from the KEYBOARD was never
+ * under the pointer, so no `mouseleave` is ever coming: Tab past the last
+ * control inside it (the panel is the last child of `<body>`, so the next tab
+ * stop is browser chrome) or click any non-focusable page content, and both
+ * report `relatedTarget: null` — leaving a 252px card painted over the app with
+ * Escape as its only way out.
+ *
+ * So the same blur means different things depending on how the card got here,
+ * which is exactly the sort of thing to write down once and test rather than
+ * spread across two handlers.
+ */
+export function blurDismisses(
+  related: EventTarget | null,
+  trigger: Node | null,
+  panel: Node | null,
+  byKeyboard: boolean,
+): boolean {
+  if (blurLeavesCard(related, trigger, panel)) return true;
+  return !related && byKeyboard;
+}
+
 export interface HoverCardProps {
   /** Accessible name: the trigger is glyphs and numbers, with no sentence in it. */
   label: string;
@@ -90,8 +117,10 @@ export interface HoverCardProps {
  * and because the panel is at the end of `<body>`, Tab from the trigger would
  * walk past it into the rest of the bar, leaving a card open that its owner
  * could never reach. So a card opened from the keyboard takes focus itself
- * (`tabIndex={-1}`), which puts its own controls next in the tab order, and
- * Escape closes it and hands focus back to the trigger.
+ * (`tabIndex={-1}`) WHEN IT HAS CONTROLS IN IT, which puts them next in the tab
+ * order; Escape closes it and hands focus back to the trigger. A card that is
+ * only a readout leaves focus alone, because there is nothing in there to reach
+ * and moving focus would only cost the user their place.
  *
  * NOT the `Popover` component: that one is click-to-open, traps focus and owns
  * dismissal, which is right for a menu you act inside and wrong for a reading
@@ -175,12 +204,25 @@ export function HoverCard({
   // The panel only mounts once it has been placed, so `pos` is part of the
   // condition rather than just `open`: focusing on the open render would find
   // nothing there.
+  //
+  // Both guards inside are load-bearing. `pos` is a NEW OBJECT on every
+  // `place()`, and `place()` runs on every scroll (in capture, so the
+  // transcript auto-scrolling on an incoming message counts) and every resize
+  // — so without the containment check this effect re-ran and yanked focus off
+  // whatever control the user had tabbed to inside the card, back onto the
+  // panel container. And a card with nothing focusable in it (the connection
+  // dot's) has nothing to put next in the tab order, so taking focus there is
+  // pure cost: leaving it on the trigger means Tab moves on normally and the
+  // ordinary blur path dismisses the card.
   useEffect(() => {
     if (!open) {
       byKeyboard.current = false;
       return;
     }
-    if (byKeyboard.current) panelRef.current?.focus();
+    if (!byKeyboard.current) return;
+    const panel = panelRef.current;
+    if (!panel || panel.contains(document.activeElement)) return;
+    if (panel.querySelector(FOCUSABLE)) panel.focus();
   }, [open, pos]);
 
   useEffect(() => () => void (closeTimer.current && clearTimeout(closeTimer.current)), []);
@@ -203,7 +245,8 @@ export function HoverCard({
           openNow();
         }}
         onBlur={(e) => {
-          if (blurLeavesCard(e.relatedTarget, btnRef.current, panelRef.current)) closeSoon();
+          if (blurDismisses(e.relatedTarget, btnRef.current, panelRef.current, byKeyboard.current))
+            closeSoon();
         }}
         className={className}
       >
@@ -227,7 +270,10 @@ export function HoverCard({
             onMouseDown={openNow}
             onFocusCapture={openNow}
             onBlur={(e) => {
-              if (blurLeavesCard(e.relatedTarget, btnRef.current, panelRef.current)) closeSoon();
+              if (
+                blurDismisses(e.relatedTarget, btnRef.current, panelRef.current, byKeyboard.current)
+              )
+                closeSoon();
             }}
             style={{ zIndex: LAYER.popover, top: pos.top, left: pos.left, width }}
             className={cn(

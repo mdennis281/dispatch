@@ -14,7 +14,7 @@
  * ask two nodes whether they own the thing focus went to.
  */
 import { describe, expect, it } from "vitest";
-import { blurLeavesCard } from "./HoverCard.js";
+import { blurDismisses, blurLeavesCard } from "./HoverCard.js";
 
 /** A node that claims the given descendants, like a real element would. */
 function owner(...children: unknown[]): Node {
@@ -54,5 +54,29 @@ describe("blurLeavesCard", () => {
 
   it("closes when there is no panel mounted to move into", () => {
     expect(blurLeavesCard(elsewhere as EventTarget, trigger, null)).toBe(true);
+  });
+});
+
+describe("blurDismisses", () => {
+  it("leaves a HOVER-opened card alone when focus goes nowhere focusable", () => {
+    // The pointer is still on it; `mouseleave` is what should close it.
+    expect(blurDismisses(null, trigger, panel, false)).toBe(false);
+  });
+
+  it("dismisses a KEYBOARD-opened card when focus goes nowhere focusable", () => {
+    // Tab past the last control inside the card and the next stop is browser
+    // chrome, reported as `null`. No `mouseleave` is ever coming for a card the
+    // pointer never touched, so this is its only dismissal.
+    expect(blurDismisses(null, trigger, panel, true)).toBe(true);
+  });
+
+  it("still keeps a keyboard-opened card open while focus is inside it", () => {
+    expect(blurDismisses(refreshButton as EventTarget, trigger, panel, true)).toBe(false);
+    expect(blurDismisses(trigger as unknown as EventTarget, trigger, panel, true)).toBe(false);
+  });
+
+  it("dismisses either kind when focus lands somewhere else entirely", () => {
+    expect(blurDismisses(elsewhere as EventTarget, trigger, panel, false)).toBe(true);
+    expect(blurDismisses(elsewhere as EventTarget, trigger, panel, true)).toBe(true);
   });
 });
