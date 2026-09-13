@@ -45,6 +45,13 @@ describe("parseGitRemote", () => {
     });
   });
 
+  it("trims slashes around the path, and stays fast on a pathological run of them", () => {
+    expect(parseGitRemote("https://github.com//acme/api.git//")).toEqual({ host: "github.com", path: "acme/api" });
+    const started = Date.now();
+    parseGitRemote(`https://github.com/${"/".repeat(100_000)}x`);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
   it("refuses a local path", () => {
     expect(parseGitRemote("C:\\repos\\api")).not.toMatchObject({ path: "acme/api" });
     expect(parseGitRemote("")).toBeNull();

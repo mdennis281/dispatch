@@ -88,7 +88,15 @@ export function parseGitRemote(url: string): { host: string; path: string } | nu
     return null;
   }
   if (!host) return null;
-  path = path.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
+  // Index scans, not `/^\/+|\/+$/`: the anchored-at-end alternative backtracks
+  // quadratically on a long run of slashes, and a remote URL is input we don't
+  // control (CodeQL js/polynomial-redos).
+  let start = 0;
+  let end = path.length;
+  while (start < end && path[start] === "/") start++;
+  while (end > start && path[end - 1] === "/") end--;
+  path = path.slice(start, end);
+  if (path.toLowerCase().endsWith(".git")) path = path.slice(0, -4);
   return path ? { host: host.toLowerCase(), path } : null;
 }
 
