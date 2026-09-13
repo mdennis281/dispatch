@@ -25,6 +25,7 @@ describe("widestSizes", () => {
     expect(s.effort).toBe("lg");
     // The controls with no wide form start where their ladder starts, not at `lg`.
     expect(s.context).toBe("md");
+    expect(s.persona).toBe("md");
     expect(s.attach).toBe("sm");
     expect(s.dictate).toBe("sm");
   });
@@ -63,8 +64,8 @@ describe("demote", () => {
         if (states[i]![c.id] === "off" && states[i - 1]![c.id] !== "off") order.push(c.id);
       }
     }
-    // context(1) → attach(2) → effort(3) → brain(4) → mode(5) → dictate(6).
-    expect(order).toEqual(["context", "attach", "effort", "brain", "mode", "dictate"]);
+    // persona(0) → context(1) → attach(2) → effort(3) → brain(4) → mode(5) → dictate(6).
+    expect(order).toEqual(["persona", "context", "attach", "effort", "brain", "mode", "dictate"]);
   });
 
   it("bottoms out with everything off rather than looping", () => {
