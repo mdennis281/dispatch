@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { Project } from "@dispatch/shared";
 import type { ExecaLike, ExecResult } from "../github.js";
@@ -44,8 +45,36 @@ describe("GitHubIssueProvider", () => {
     expect(issues[0]).toMatchObject({ authorTrust: "collaborator", labels: ["bug"], body: "", authorIsBot: false });
     expect(calls[0].args).toEqual([
       "api", "-X", "GET", "repos/acme/api/issues",
-      "-f", "state=open", "-f", "sort=created", "-f", "direction=desc", "-f", "per_page=100",
+      "-f", "state=open", "-f", "sort=created", "-f", "direction=desc", "-f", "per_page=100", "-f", "page=1",
     ]);
+  });
+
+  it("keeps paging past a first page that is all pull requests", async () => {
+    const prs = Array.from({ length: 100 }, (_, i) => rawIssue({ number: 1000 - i, pull_request: {} }));
+    const { exec, calls } = fakeExec((c) => ({
+      stdout: JSON.stringify(c.args.includes("page=1") ? prs : [rawIssue({ number: 12 }), rawIssue({ number: 11 })]),
+    }));
+    const issues = await new GitHubIssueProvider(exec).list(src, { limit: 1 });
+    expect(issues.map((i) => i.number)).toEqual([12]);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("stops paging at the cap on a repo that is nothing but pull requests", async () => {
+    const prs = Array.from({ length: 100 }, (_, i) => rawIssue({ number: i + 1, pull_request: {} }));
+    const { exec, calls } = fakeExec(() => ({ stdout: JSON.stringify(prs) }));
+    expect(await new GitHubIssueProvider(exec).list(src)).toEqual([]);
+    expect(calls).toHaveLength(GitHubIssueProvider.MAX_LIST_PAGES);
+  });
+
+  it("reads the latest comments from the last page, reaching back a page when it is short", async () => {
+    const page = (from: number, n: number) =>
+      Array.from({ length: n }, (_, i) => ({ id: from + i, body: `c${from + i}`, user: { login: "a" } }));
+    const { exec, calls } = fakeExec((c) => ({
+      stdout: JSON.stringify(c.args.includes("page=2") ? page(101, 3) : page(1, 100)),
+    }));
+    const out = await new GitHubIssueProvider(exec).comments(src, 3, 10, 103);
+    expect(out.map((c) => c.id)).toEqual(["94", "95", "96", "97", "98", "99", "100", "101", "102", "103"]);
+    expect(calls.map((c) => c.args.find((a) => a.startsWith("page=")))).toEqual(["page=2", "page=1"]);
   });
 
   it("reaches an Enterprise source with --hostname", async () => {
@@ -78,10 +107,19 @@ describe("GitHubIssueProvider", () => {
     await expect(new GitHubIssueProvider(exec).get(src, 9)).rejects.toThrow("Bad credentials");
   });
 
-  it("passes a comment body as a raw field, so a leading @ is never read as a file", async () => {
-    const { exec, calls } = fakeExec(() => ({ stdout: JSON.stringify({ id: 11, html_url: "u" }) }));
-    expect(await new GitHubIssueProvider(exec).comment(src, 3, "@/etc/passwd")).toEqual({ id: "11", url: "u" });
-    expect(calls[0].args).toEqual(["api", "-X", "POST", "repos/acme/api/issues/3/comments", "-f", "body=@/etc/passwd"]);
+  it("sends a comment body through an --input file: never argv, never read as a path, then cleaned up", async () => {
+    const body = `@/etc/passwd ${"x".repeat(40_000)}`;
+    let sent: unknown;
+    const { exec, calls } = fakeExec((c) => {
+      sent = JSON.parse(readFileSync(c.args[c.args.indexOf("--input") + 1]!, "utf8"));
+      return { stdout: JSON.stringify({ id: 11, html_url: "u" }) };
+    });
+    expect(await new GitHubIssueProvider(exec).comment(src, 3, body)).toEqual({ id: "11", url: "u" });
+    expect(sent).toEqual({ body });
+    expect(calls[0].args.slice(0, 4)).toEqual(["api", "--method", "POST", "repos/acme/api/issues/3/comments"]);
+    // The argv stays short however long the comment is — Windows' 32K cap.
+    expect(calls[0].args.join(" ").length).toBeLessThan(500);
+    expect(existsSync(calls[0].args[calls[0].args.indexOf("--input") + 1]!)).toBe(false);
   });
 
   it("applies a patch as separate calls and tolerates removing an absent label", async () => {

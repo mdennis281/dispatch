@@ -33,8 +33,12 @@ export interface IssueProvider {
   list(source: IssueSource, query?: IssueListQuery): Promise<Issue[]>;
   /** Null when there is no such issue (or the number is a pull request). */
   get(source: IssueSource, number: number): Promise<Issue | null>;
-  /** The most recent `limit` comments, oldest first. */
-  comments(source: IssueSource, number: number, limit?: number): Promise<IssueComment[]>;
+  /**
+   * The most recent `limit` comments, oldest first. `total` is the issue's
+   * comment count when the caller has it — it lets a paging tracker go straight
+   * to the last page instead of returning the first page's tail.
+   */
+  comments(source: IssueSource, number: number, limit?: number, total?: number): Promise<IssueComment[]>;
   comment(source: IssueSource, number: number, body: string): Promise<{ id: string; url?: string }>;
   /** Apply a patch and return the issue as it now stands. */
   update(source: IssueSource, number: number, patch: IssuePatch): Promise<Issue>;

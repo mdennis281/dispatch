@@ -11,6 +11,9 @@
  * GitHub); those carry a `pull_request` key and are dropped here, so nothing
  * above the provider ever mistakes a PR for an issue to handle.
  */
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   ISSUE_REPO_RE,
   type Issue,
@@ -99,17 +102,31 @@ export class GitHubIssueProvider implements IssueProvider {
 
   async list(source: IssueSource, query: IssueListQuery = {}): Promise<Issue[]> {
     const limit = Math.min(Math.max(query.limit ?? 30, 1), 100);
-    const args = [
-      "-X", "GET", this.path(source, "issues"),
-      "-f", `state=${query.state ?? "open"}`,
-      "-f", "sort=created",
-      "-f", "direction=desc",
-      "-f", `per_page=${limit}`,
-    ];
-    if (query.labels?.length) args.push("-f", `labels=${query.labels.join(",")}`);
-    const raw = await this.json<RawIssue[]>(source, args);
-    return (raw ?? []).filter((r) => !r.pull_request).map(toIssue);
+    const out: Issue[] = [];
+    // Page until `limit` REAL issues: `/issues` interleaves PRs, so one page of
+    // `limit` items can be all PRs — on this repo the newest 30 of `state=all`
+    // are — and a single fetch would report "(none)" with confidence. Full pages
+    // of 100 minimise calls; the page cap bounds a repo that is nearly all PRs,
+    // where the search API (lagging index, 30 req/min) would be the worse trade.
+    for (let page = 1; page <= GitHubIssueProvider.MAX_LIST_PAGES && out.length < limit; page++) {
+      const args = [
+        "-X", "GET", this.path(source, "issues"),
+        "-f", `state=${query.state ?? "open"}`,
+        "-f", "sort=created",
+        "-f", "direction=desc",
+        "-f", "per_page=100",
+        "-f", `page=${page}`,
+      ];
+      if (query.labels?.length) args.push("-f", `labels=${query.labels.join(",")}`);
+      const raw = (await this.json<RawIssue[]>(source, args)) ?? [];
+      out.push(...raw.filter((r) => !r.pull_request).map(toIssue));
+      if (raw.length < 100) break;
+    }
+    return out.slice(0, limit);
   }
+
+  /** Pages `list` will read looking for issues among PRs — 500 items. */
+  static readonly MAX_LIST_PAGES = 5;
 
   async get(source: IssueSource, number: number): Promise<Issue | null> {
     const raw = await this.json<RawIssue>(source, [this.path(source, `issues/${this.num(number)}`)], {
@@ -118,15 +135,23 @@ export class GitHubIssueProvider implements IssueProvider {
     return raw && !raw.pull_request ? toIssue(raw) : null;
   }
 
-  async comments(source: IssueSource, number: number, limit = 20): Promise<IssueComment[]> {
-    // Oldest-first and one page: an issue with more than 100 comments shows its
-    // first 100's tail. Paginating to find the newest would cost a call per page
-    // on exactly the issues whose history an agent needs least.
-    const raw = await this.json<RawComment[]>(source, [
-      "-X", "GET", this.path(source, `issues/${this.num(number)}/comments`),
-      "-f", "per_page=100",
-    ]);
-    return (raw ?? []).slice(-Math.max(1, limit)).map((c) => ({
+  async comments(source: IssueSource, number: number, limit = 20, total?: number): Promise<IssueComment[]> {
+    // The endpoint is oldest-first, so "the latest N" lives on the LAST page.
+    // With the total known that is one call (two when N straddles a page
+    // boundary); the tail of page 1 would show comments 91–100 of 150 as if they
+    // were the newest, and hide the owner's closing word from the agent.
+    const want = Math.min(Math.max(1, limit), 100);
+    const perPage = 100;
+    const fetchPage = async (page: number) =>
+      (await this.json<RawComment[]>(source, [
+        "-X", "GET", this.path(source, `issues/${this.num(number)}/comments`),
+        "-f", `per_page=${perPage}`,
+        "-f", `page=${page}`,
+      ])) ?? [];
+    const last = Math.max(1, Math.ceil((total ?? 0) / perPage));
+    let raw = await fetchPage(last);
+    if (raw.length < want && last > 1) raw = [...(await fetchPage(last - 1)), ...raw];
+    return raw.slice(-want).map((c) => ({
       id: String(c.id),
       author: c.user?.login ?? "ghost",
       authorTrust: trustOf(c.author_association),
@@ -137,11 +162,22 @@ export class GitHubIssueProvider implements IssueProvider {
   }
 
   async comment(source: IssueSource, number: number, body: string): Promise<{ id: string; url?: string }> {
-    const raw = await this.json<RawComment>(source, [
-      "-X", "POST", this.path(source, `issues/${this.num(number)}/comments`),
-      "-f", `body=${body}`,
-    ]);
-    return { id: String(raw?.id ?? ""), url: raw?.html_url };
+    // The body goes through a file, never argv: Windows caps a whole command line
+    // at 32,767 chars, so a long comment would die as `spawn ENAMETOOLONG`
+    // before reaching GitHub. `--input` is read as JSON, so a body starting with
+    // `@` is still text rather than a path to read.
+    const dir = await mkdtemp(join(tmpdir(), "dispatch-issue-"));
+    try {
+      const file = join(dir, "comment.json");
+      await writeFile(file, JSON.stringify({ body }), "utf8");
+      const raw = await this.json<RawComment>(source, [
+        "--method", "POST", this.path(source, `issues/${this.num(number)}/comments`),
+        "--input", file,
+      ]);
+      return { id: String(raw?.id ?? ""), url: raw?.html_url };
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   async update(source: IssueSource, number: number, patch: IssuePatch): Promise<Issue> {

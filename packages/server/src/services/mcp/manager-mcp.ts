@@ -6853,7 +6853,7 @@ ${look}` : "")
           return textResult(`No issue #${number} in ${issueSourceLabel(t.source)} (or it is a pull request).`, true);
         }
         const want = comments ?? 10;
-        const thread = want > 0 && issue.commentCount > 0 ? await t.comments(number, want) : [];
+        const thread = want > 0 && issue.commentCount > 0 ? await t.comments(number, want, issue.commentCount) : [];
         const parts = [
           issueLine(issue),
           issue.url,

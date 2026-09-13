@@ -34,7 +34,7 @@ export interface BoundIssueTracker {
   from: IssueSourceOrigin;
   list(query?: IssueListQuery): Promise<Issue[]>;
   get(number: number): Promise<Issue | null>;
-  comments(number: number, limit?: number): Promise<IssueComment[]>;
+  comments(number: number, limit?: number, total?: number): Promise<IssueComment[]>;
   comment(number: number, body: string): Promise<{ id: string; url?: string }>;
   update(number: number, patch: IssuePatch): Promise<Issue>;
 }
@@ -106,7 +106,7 @@ export class IssueService {
       from,
       list: (q) => p.list(source, q),
       get: (n) => p.get(source, n),
-      comments: (n, limit) => p.comments(source, n, limit),
+      comments: (n, limit, total) => p.comments(source, n, limit, total),
       comment: (n, body) => p.comment(source, n, body),
       update: (n, patch) => p.update(source, n, patch),
     };
