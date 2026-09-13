@@ -429,6 +429,28 @@
     contain-intrinsic-size: auto 90px;
   }
 
+  /*
+   * ...except where the browser can't anchor, which is iOS Safari before 27.
+   *
+   * A row nobody has looked at yet is a 90px placeholder, and it becomes its
+   * real height as you scroll up to it — ABOVE what you're reading. Chrome's
+   * scroll anchoring absorbs that; WebKit didn't ship scroll anchoring until
+   * Safari 27, so on an iPhone every row you scrolled up into shoved the
+   * transcript by the difference, and it only went smooth once every row had
+   * been seen once and `auto` had its real size to remember. Paying for layout
+   * of rows off screen is the lesser cost: the window is bounded, and iOS
+   * scrolls on the compositor either way.
+   *
+   * Keyed on the anchoring feature itself rather than on a user agent, so
+   * Safari 27 gets the skipping back the moment it can absorb it.
+   */
+  @supports not (overflow-anchor: auto) {
+    .cm-row-cv {
+      content-visibility: visible;
+      contain-intrinsic-size: none;
+    }
+  }
+
   .cm-panel {
     background: var(--p-panel);
     border: 1px solid var(--p-line);
