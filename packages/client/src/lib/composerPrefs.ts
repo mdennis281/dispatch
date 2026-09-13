@@ -96,6 +96,10 @@ export const COMPOSER_CONTROLS = [
     sizes: ["lg", "md", "sm"],
     priority: 4,
   },
+  // Persona is set once per chat and off by default, so it is the first to
+  // shrink and the first to leave. `md` is the persona's name; with none set it
+  // draws as its icon even at `md`, so an off persona never spends a label.
+  { id: "persona", label: "Persona", hint: "chat role", sizes: ["md", "sm"], priority: 0 },
   { id: "context", label: "Context meter", hint: "window usage", sizes: ["md", "sm"], priority: 1 },
 ] as const satisfies readonly ControlDef[];
 

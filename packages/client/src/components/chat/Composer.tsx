@@ -32,6 +32,7 @@ import {
   FileSearch,
   FileCode2,
   Mic,
+  Drama,
 } from "lucide-react";
 import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef } from "@dispatch/shared";
 import { DEFAULT_MODEL, findModel, chatRoot } from "@dispatch/shared";
@@ -87,7 +88,7 @@ import {
 } from "../../lib/composerFit.js";
 import { EffortChip } from "../agents/runVisuals.js";
 import { ContextMeter, ContextHint, ContextPanelBody } from "./ContextMeter.js";
-import { PersonaControl } from "./PersonaControl.js";
+import { usePersonaPicker, PersonaRows, PersonaConfigureDialog } from "./PersonaControl.js";
 import { ModeControl, ModeMenu, modeLabel, modeIcon } from "./ModeControl.js";
 
 /** The markup editor pulls in two annotation engines — lazy so they stay out of
@@ -300,6 +301,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const fileDrag = useFileDrag();
   const [over, setOver] = useState<DropIntent>(null);
   const [error, setError] = useState<string | null>(null);
+  const persona = usePersonaPicker(chat);
   // Where the file picker opens: this chat's own working directory, so the
   // paths it inserts are paths the agent for THIS chat can open.
   //
@@ -911,6 +913,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     chat.agentId,
     chat.effort,
     currentAgent?.name,
+    persona.label,
     modeLabel(modes, chat.modeId),
     visible,
   ]);
@@ -1114,6 +1117,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
       );
     if (moreView === "effort") return effortRows(close, dense);
     if (moreView === "brain") return <div className="flex flex-col">{brainRows(close, dense)}</div>;
+    if (moreView === "persona") return <PersonaRows picker={persona} close={close} dense={dense} />;
     if (moreView === "context")
       return <ContextPanelBody chatId={chat.id} model={model} close={close} />;
     if (moreView === "customize") return customizeRows(dense);
@@ -1170,6 +1174,17 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         </MenuItem>
         <MenuItem
           dense={dense}
+          icon={<Drama />}
+          hint={persona.label ?? "off"}
+          onClick={() => {
+            void persona.refresh();
+            setMoreView("persona");
+          }}
+        >
+          Persona
+        </MenuItem>
+        <MenuItem
+          dense={dense}
           icon={<Gauge />}
           hint={<ContextHint chatId={chat.id} model={model} />}
           onClick={() => setMoreView("context")}
@@ -1194,6 +1209,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     mode: "Mode & posture",
     effort: "Effort",
     brain: "Model / agent",
+    persona: "Persona",
     context: "Context",
     customize: "Composer controls",
   };
@@ -1339,6 +1355,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           </div>
         )}
 
+        {/* Persona failures get their own slot for the same reason. */}
+        {persona.error && (
+          <div className="flex items-center gap-2 px-3 pt-2 text-xs text-danger" role="alert">
+            <span className="min-w-0 flex-1">{persona.error}</span>
+            <IconButton tip="Dismiss" onClick={persona.dismissError} className="shrink-0">
+              <X />
+            </IconButton>
+          </div>
+        )}
+
         {/* editor */}
         <div className="cm-prose px-3 py-2.5">
           <EditorContent editor={editor} />
@@ -1364,8 +1390,6 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         <span className="sr-only" role="status" aria-live="polite">
           {dictation.listening ? "Dictating" : ""}
         </span>
-
-        <PersonaControl key={chat.id} chat={chat} />
 
         {/* toolbar — flex-nowrap + non-shrinking children so an over-wide full
             layout genuinely overflows (which `measure` detects and collapses to
@@ -1549,6 +1573,53 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           </Popover>
           )}
 
+          {/* Persona sits beside the brain because it is the same kind of
+              choice — who is answering — and its icon borrows the agent's violet
+              when one is set. Off is the normal case, so off is just the icon. */}
+          {sizes.persona !== "off" && (
+          <Popover
+            align="start"
+            width={240}
+            className="p-1"
+            trigger={({ open, toggle }) => {
+              const onClick = () => {
+                if (!open) void persona.refresh();
+                toggle();
+              };
+              // Colour on the svg, not the button: `cn` doesn't resolve class
+              // conflicts, so a text colour beside the primitive's own is a coin
+              // toss on Tailwind's emit order.
+              const icon = <Drama className={cn(persona.label && "text-accent-2-hi")} />;
+              return sizes.persona === "md" && persona.label ? (
+                <Tooltip label={`Persona — ${persona.label}`}>
+                  <Button
+                    variant="subtle"
+                    size={phone ? "md" : "sm"}
+                    leftIcon={icon}
+                    aria-expanded={open}
+                    aria-label={`Persona: ${persona.label}`}
+                    onClick={onClick}
+                  >
+                    <span className="max-w-[96px] truncate">{persona.label}</span>
+                  </Button>
+                </Tooltip>
+              ) : (
+                <IconButton
+                  size={phone ? "md" : "sm"}
+                  tip={persona.label ? `Persona — ${persona.label}` : "Persona — off"}
+                  active={open}
+                  aria-expanded={open}
+                  onClick={onClick}
+                >
+                  {icon}
+                </IconButton>
+              );
+            }}
+          >
+            {(close) => <PersonaRows picker={persona} close={close} dense={!phone} />}
+          </Popover>
+          )}
+
           <div className="ml-auto flex items-center gap-2">
             {/* The options menu, and the one control that is never optional: it
                 holds every control at every width, so it is both the way back
@@ -1686,6 +1757,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           </div>
         </Drawer>
       )}
+
+      <PersonaConfigureDialog picker={persona} />
 
       {editing && editingSrc && (
         <Suspense fallback={null}>
