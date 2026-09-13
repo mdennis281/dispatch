@@ -64,6 +64,7 @@ import {
   type BrowserMcpConfig,
   type McpServerConfig,
   type WorkflowConfig,
+  type IssueConfig,
   migrateToolList,
   isManagerServer,
   MANAGER_SERVER_PREFIX,
@@ -449,6 +450,11 @@ export class ProjectConfigService {
     return this.cache.get(projectId)?.config?.spawnChat?.maxDepth ?? null;
   }
 
+  /** This project's authored `issues:` block, or null when it has none (→ off). */
+  getIssues(projectId: string): IssueConfig | null {
+    return this.cache.get(projectId)?.config?.issues ?? null;
+  }
+
   /* ----------------------------------------------------- agent/mode registry */
 
   /**
@@ -798,6 +804,7 @@ export class ProjectConfigService {
       shipCmd: manifest.ship,
       workflow: manifest.workflow,
       spawnChat: manifest.spawnChat,
+      issues: manifest.issues,
       browser: manifest.browser,
       defaults: manifest.defaults,
       instructions,

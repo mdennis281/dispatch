@@ -145,6 +145,7 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     const bindings: Record<ManagerToolBinding, boolean> = {
       github: !!services.github,
       secrets: !!services.secrets,
+      issues: !!services.issues,
       terminals: !!services.terminals,
       memory: !!services.memory,
       runner: !!services.runner,

@@ -174,7 +174,9 @@ function numberArg(use: ToolUseRow, key: string): number | undefined {
 
 function subjectFor(use: ToolUseRow, tool: string): string | undefined {
   const pr = numberArg(use, "number");
-  if (pr !== undefined) return `PR #${pr}`;
+  // Issue tools take the same `number` argument; labelling one "PR #12" names
+  // the wrong kind of thing on the one line the reader actually looks at.
+  if (pr !== undefined) return tool.startsWith("issue_") ? `issue #${pr}` : `PR #${pr}`;
   const subApp = stringArg(use, "subApp");
   const branch = stringArg(use, "branch");
   if (subApp) return branch ? `${subApp} · ${branch}` : subApp;
@@ -195,6 +197,10 @@ const DISPATCH_COPY: Record<string, { title: string; activity: string; category:
   secret_request: { title: "Request secret", activity: "Waiting for a secret", category: "config" },
   secret_list: { title: "List secrets", activity: "Listing secrets", category: "config" },
   secret_delete: { title: "Delete secret", activity: "Deleting secret", category: "config" },
+  issue_list: { title: "List issues", activity: "Listing issues", category: "pr" },
+  issue_read: { title: "Read issue", activity: "Reading issue", category: "pr" },
+  issue_comment: { title: "Comment on issue", activity: "Commenting", category: "pr" },
+  issue_update: { title: "Update issue", activity: "Updating issue", category: "pr" },
   wait: { title: "Wait", activity: "Waiting", category: "wait" },
   wait_for_chat: { title: "Wait for chat", activity: "Watching chat", category: "wait" },
   terminal_output: { title: "Terminal output", activity: "Reading terminal", category: "terminal" },

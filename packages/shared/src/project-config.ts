@@ -25,6 +25,7 @@ import {
 } from "./common.js";
 import { SubAppSchema, AgentConfigSchema } from "./domain.js";
 import { WorkflowConfigSchema } from "./workflow.js";
+import { IssueConfigSchema } from "./issues.js";
 
 /* ------------------------------------------------------------ dir defaults */
 
@@ -358,6 +359,8 @@ export const ProjectManifestSchema = z.object({
   workflow: WorkflowConfigSchema.optional(),
   /** Per-project spawn-chat consent policy (see {@link ManifestSpawnChatSchema}). */
   spawnChat: ManifestSpawnChatSchema.optional(),
+  /** Issue-triggered chats (see {@link IssueConfigSchema}). Off unless authored. */
+  issues: IssueConfigSchema.optional(),
   defaults: ManifestDefaultsSchema.optional(),
   instructions: z.array(ManifestInstructionSchema).optional(),
   subApps: z.array(ManifestSubAppSchema).optional(),
@@ -477,6 +480,8 @@ export const ProjectConfigSchema = z.object({
   workflow: WorkflowConfigSchema.optional(),
   /** From manifest `spawnChat` — this project's spawn-consent override. */
   spawnChat: ManifestSpawnChatSchema.optional(),
+  /** From manifest `issues` — issue-triggered chats for this project. */
+  issues: IssueConfigSchema.optional(),
   defaults: ProjectConfigDefaultsSchema.optional(),
   /** Resolved instructions in load order (files read + inline text). */
   instructions: z.array(NormalizedInstructionSchema).default([]),

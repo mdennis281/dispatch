@@ -39,6 +39,7 @@ export const MANAGER_CATEGORIES = [
   "session",
   "project",
   "secrets",
+  "issues",
 ] as const;
 
 /** One category of Dispatch tool — also the suffix of its server's name. */
@@ -175,6 +176,14 @@ export const MANAGER_TOOL_CATEGORY = {
   secret_request: "secrets",
   secret_list: "secrets",
   secret_delete: "secrets",
+
+  /* issues — the project's issue tracker, whichever provider hosts it. Its own
+     category rather than `github`: that server is the PR loop, and issues are
+     meant to outlive GitHub being the only tracker. */
+  issue_list: "issues",
+  issue_read: "issues",
+  issue_comment: "issues",
+  issue_update: "issues",
 } as const satisfies Record<string, ManagerCategory>;
 
 /** Bare name of every tool Dispatch serves. */

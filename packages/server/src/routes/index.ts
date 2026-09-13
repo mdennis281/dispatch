@@ -29,6 +29,7 @@ import { registerPushRoutes } from "./push.js";
 import { registerSettingsRoutes } from "./settings.js";
 import { registerReviewerRoutes } from "./reviewer.js";
 import { registerSecretRoutes } from "./secrets.js";
+import { registerIssueRoutes } from "./issues.js";
 import { registerUsageRoutes } from "./usage.js";
 import { registerMetricsRoutes } from "./metrics.js";
 import { registerResourceRoutes } from "./resources.js";
@@ -68,6 +69,7 @@ export function registerRoutes(app: FastifyInstance): void {
   registerSettingsRoutes(app);
   registerReviewerRoutes(app);
   registerSecretRoutes(app);
+  registerIssueRoutes(app);
   registerUsageRoutes(app);
   registerMetricsRoutes(app);
   registerResourceRoutes(app);

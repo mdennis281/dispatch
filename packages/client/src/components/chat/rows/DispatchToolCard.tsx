@@ -78,6 +78,7 @@ function promptFor(tool: string, category: DispatchToolCategory): string {
   if (tool === "ask_user") return "ask";
   if (tool === "request_human_review") return "review";
   if (tool.startsWith("secret_")) return "secret";
+  if (tool.startsWith("issue_")) return "issue";
   if (tool === "wait") return "sleep";
   if (tool === "recall") return "recall";
   if (tool === "remember") return "remember";
@@ -134,6 +135,13 @@ function commandPreview(use: ToolUseRow, tool: string, subject: string | undefin
   if (tool === "request_human_review") return textInput(use, "title") ?? activity;
   if (tool === "run_subapp") return `${use.input.stop === true ? "stop" : "start"} ${subject ?? "app"}`;
   if (tool === "terminal_output") return `read ${subject ?? "terminal"}`;
+  if (tool === "issue_list") return `list ${textInput(use, "state") ?? "open"}`;
+  if (tool === "issue_read") return `read ${subject ?? "issue"}`;
+  if (tool === "issue_comment") return `comment ${subject ?? "issue"}`;
+  if (tool === "issue_update") {
+    const state = textInput(use, "state");
+    return `${state === "closed" ? "close" : state === "open" ? "reopen" : "update"} ${subject ?? "issue"}`;
+  }
   return subject ?? activity;
 }
 

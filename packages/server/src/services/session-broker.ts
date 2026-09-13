@@ -174,6 +174,7 @@ import {
   type ManagerSecretRequestResult,
 } from "./mcp/manager-mcp.js";
 import { expandSecretsInMcpServers, type SecretKey, type SecretsService } from "./secrets.js";
+import type { IssueService } from "./issues/service.js";
 import type { SecretRefresher } from "./secret-refresh.js";
 import type { SpawnNestingVerdict } from "./chat-nesting.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
@@ -234,6 +235,7 @@ export function buildManagerToolsDirective(caps: {
   authoring?: boolean;
   inspect?: boolean;
   secrets?: boolean;
+  issues?: boolean;
   bundledServers?: readonly string[];
   projectServers?: readonly string[];
 }): string {
@@ -264,6 +266,9 @@ export function buildManagerToolsDirective(caps: {
       "- `dispatch-secrets` — ask the human for an API key/token on a card (never in chat) and " +
         "reference it as `${secret:NAME}` in config.",
     );
+  }
+  if (caps.issues) {
+    lines.push("- `dispatch-issues` — read, comment on, label and close this project's tracker issues.");
   }
   if (caps.authoring) lines.push("- `dispatch-config` — author injected instructions and reusable skills.");
   if (caps.mcpConfig) lines.push("- `dispatch-mcp` — inspect and configure project MCP servers.");
@@ -1092,6 +1097,8 @@ export interface SessionBrokerOptions {
    */
   secrets?: SecretsService;
   secretRefresher?: () => SecretRefresher | undefined;
+  /** The project's issue tracker behind `mcp__dispatch-issues__*`. */
+  issues?: IssueService;
   /** Git history of the memory dir: backs `mcp__dispatch-memory__memory_history`. Optional —
    *  without it that one tool reports itself unavailable and the rest still work. */
   memoryHistory?: MemoryHistoryService;
@@ -1906,6 +1913,7 @@ export class SessionBroker {
   private readonly terminals?: TerminalService;
   private readonly memory?: MemoryService;
   private readonly secrets?: SecretsService;
+  private readonly issues?: IssueService;
   private readonly secretRefresher?: () => SecretRefresher | undefined;
   private readonly memoryHistory?: MemoryHistoryService;
   private readonly authored?: AuthoredConfigService;
@@ -2037,6 +2045,7 @@ export class SessionBroker {
     this.terminals = opts.terminals;
     this.memory = opts.memory;
     this.secrets = opts.secrets;
+    this.issues = opts.issues;
     this.secretRefresher = opts.secretRefresher;
     this.memoryHistory = opts.memoryHistory;
     this.authored = opts.authored;
@@ -6541,6 +6550,10 @@ export class SessionBroker {
             : undefined,
         // Bind the memory runner to this session's project, so remember/recall/
         // forget just name the fact (scoped to the chat's project).
+        issues:
+          this.issues && projectId
+            ? { tracker: () => this.issues!.forProject(projectId) }
+            : undefined,
         secrets: this.secrets
           ? {
               request: (input, signal) => this.requestSecret(session.chatId, input, signal),
@@ -6870,6 +6883,7 @@ export class SessionBroker {
         worktrees: Boolean(this.worktrees && session.projectId),
         memory: Boolean(this.memory && session.projectId),
         secrets: Boolean(this.secrets),
+        issues: Boolean(this.issues && session.projectId),
         runner: Boolean(this.runner && this.worktrees),
         mcpConfig: Boolean(session.projectId),
         authoring: Boolean(this.authored),
