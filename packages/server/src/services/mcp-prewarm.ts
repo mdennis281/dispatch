@@ -69,6 +69,8 @@ export class McpPrewarmService {
     private readonly deps: {
       /** Config-sourced servers, layered over the `.data` record by the caller. */
       getMcpServers: (projectId: string) => Record<string, McpServerConfig>;
+      /** Fills `${secret:NAME}` for the servers about to run; config keeps placeholders. */
+      expandSecrets?: (projectId: string, servers: Record<string, McpServerConfig>) => Record<string, McpServerConfig>;
       leases?: McpPortLeaseService;
       spawn?: PrewarmSpawn;
     },
@@ -87,8 +89,9 @@ export class McpPrewarmService {
     const wanted = Object.entries(configured).filter(([, c]) => c.prewarm);
     if (!wanted.length) return [];
 
+    const wantedServers = Object.fromEntries(wanted);
     const resolved = await resolveMcpServers(
-      Object.fromEntries(wanted),
+      this.deps.expandSecrets?.(project.id, wantedServers) ?? wantedServers,
       {
         projectId: project.id,
         cwd: worktreePath,

@@ -402,7 +402,7 @@ export function ProjectSettingsView() {
         icon: s.icon,
         label: s.label,
         blurb: s.blurb,
-        count: s.id === "workflow" || s.id === "personas" ? null : sectionItems(s.id, config, memories).length,
+        count: s.id === "workflow" || s.id === "personas" || s.id === "secrets" ? null : sectionItems(s.id, config, memories).length,
         // Both panes edit ONE draft behind ONE Save, so the warn dot belongs on
         // both. Marking only Workflow meant reviewer edits looked saved from the
         // rail — the section you were just editing was the one not flagged.

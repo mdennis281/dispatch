@@ -204,6 +204,12 @@ export interface RunnerDeps {
   maxLogLines?: number;
   /** Env a child starts from, before scrubbing + overlay. Injectable for tests. */
   parentEnv?: NodeJS.ProcessEnv;
+  /**
+   * Expands `${secret:NAME}` in a subApp's `env` for the project it runs in.
+   * Applied at LAUNCH, never stored: the runner record is persisted, and a
+   * secret has no business in `state.db`.
+   */
+  expandSecrets?: (projectId: string | undefined, value: string) => string;
 }
 
 /* -------------------------------------------------------------- default wiring */
@@ -327,6 +333,8 @@ interface LiveRunner {
   urlTemplate?: string;
   /** Port parsed from the child's own output (reconciled once, then latched). */
   detectedPort?: number;
+  /** What `start()` was called with, so {@link RunnerService.restart} can do it again. */
+  launch?: { worktreePath: string; subApp: SubApp; ctx: { projectId?: string; chatId?: string; branch?: string } };
 }
 
 const TERMINAL: ReadonlySet<RunnerStatus> = new Set<RunnerStatus>([
@@ -349,6 +357,7 @@ export class RunnerService {
   private readonly genId: () => string;
   private readonly maxLogLines: number;
   private readonly parentEnv: NodeJS.ProcessEnv;
+  private readonly expandSecrets: RunnerDeps["expandSecrets"];
 
   private readonly live = new Map<string, LiveRunner>();
 
@@ -364,6 +373,7 @@ export class RunnerService {
     this.genId = deps.genId ?? (() => nanoid());
     this.maxLogLines = deps.maxLogLines ?? 2000;
     this.parentEnv = deps.parentEnv ?? process.env;
+    this.expandSecrets = deps.expandSecrets;
   }
 
   /* --------------------------------------------------------------- lifecycle */
@@ -436,6 +446,7 @@ export class RunnerService {
       stopping: false,
       logs: [],
       urlTemplate: subApp.url,
+      launch: { worktreePath, subApp, ctx },
     };
     this.live.set(id, live);
 
@@ -474,7 +485,7 @@ export class RunnerService {
     // placeholders substituted) is overlaid on top so a tool that reads a
     // differently-named var — Vite's `CLIENT_PORT`, a server's `SERVER_PORT` —
     // gets its port too, and can even override `PORT`.
-    const overlay = portOverlay(primary, ports, subApp.env);
+    const overlay = portOverlay(primary, ports, this.secretEnv(ctx.projectId, subApp.env));
     live.overlay = overlay;
 
     // The child's whole environment: what we inherited MINUS the manager's own
@@ -616,6 +627,37 @@ export class RunnerService {
       }
       this.live.delete(instanceId);
     }
+  }
+
+  /**
+   * Stop a running instance and launch it again with the same worktree and
+   * context — onto `subApp` when given (a freshly loaded definition), else the
+   * one it was started with. Used when a secret its env references changed, so
+   * the process picks up the new value instead of running on the old one until
+   * someone notices. Null when this process never launched it (nothing to
+   * re-run from).
+   */
+  async restart(instanceId: string, subApp?: SubApp): Promise<RunnerInstance | null> {
+    const launch = this.live.get(instanceId)?.launch;
+    if (!launch) return null;
+    await this.stop(instanceId);
+    return this.start(launch.worktreePath, subApp ?? launch.subApp, launch.ctx);
+  }
+
+  /** Instances this process is running that were launched from a given subApp. */
+  runningFor(projectId: string, subAppId: string): string[] {
+    return [...this.live]
+      .filter(([, l]) => !l.stopping && l.launch?.ctx.projectId === projectId && l.launch.subApp.id === subAppId)
+      .map(([id]) => id);
+  }
+
+  private secretEnv(
+    projectId: string | undefined,
+    env: Record<string, string> | undefined,
+  ): Record<string, string> | undefined {
+    const expand = this.expandSecrets;
+    if (!env || !expand) return env;
+    return Object.fromEntries(Object.entries(env).map(([k, v]) => [k, expand(projectId, v)]));
   }
 
   /** Stop every live runner (server teardown / test cleanup). */
@@ -817,7 +859,7 @@ export class RunnerService {
         /* unreadable project — fall through to PORT alone */
       }
     }
-    return portOverlay(runner.port, ports, env);
+    return portOverlay(runner.port, ports, this.secretEnv(runner.projectId, env));
   }
 
   /** Persist a terminal `stopped` (unless already terminal) and prune the live entry. */

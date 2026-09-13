@@ -87,6 +87,7 @@ describe("mcp-catalog — builder", () => {
         messaging: true,
         prewarm: true,
         exemptions: true,
+        secrets: true,
       },
     });
 
@@ -140,6 +141,7 @@ describe("mcp-catalog — builder", () => {
     // own state, or on the project's config as a whole) carry an empty schema;
     // every other tool has flattened params.
     const NO_ARG_TOOLS = new Set([
+      "secret_list",
       "context_usage",
       "compact_context",
       "mcp_list",
@@ -494,7 +496,7 @@ describe("GET /api/projects/:projectId/mcp", () => {
       manager.tools.every(
         (t) =>
           t.params.length > 0 ||
-          ["context_usage", "compact_context", "mcp_list", "prewarm_mcp"].includes(t.name),
+          ["context_usage", "compact_context", "mcp_list", "prewarm_mcp", "secret_list"].includes(t.name),
       ),
     ).toBe(true);
 
@@ -514,6 +516,7 @@ describe("GET /api/projects/:projectId/mcp", () => {
       "chat_find",
       "chat_read",
       "project_info",
+      "secret_request",
     ]) {
       expect(manager.tools.find((t) => t.name === name)).toMatchObject({ name, available: true });
     }

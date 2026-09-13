@@ -192,6 +192,9 @@ function subjectFor(use: ToolUseRow, tool: string): string | undefined {
 const DISPATCH_COPY: Record<string, { title: string; activity: string; category: DispatchToolCategory }> = {
   ask_user: { title: "Ask user", activity: "Waiting for an answer", category: "chat" },
   request_human_review: { title: "Human review", activity: "Waiting for your review", category: "chat" },
+  secret_request: { title: "Request secret", activity: "Waiting for a secret", category: "config" },
+  secret_list: { title: "List secrets", activity: "Listing secrets", category: "config" },
+  secret_delete: { title: "Delete secret", activity: "Deleting secret", category: "config" },
   wait: { title: "Wait", activity: "Waiting", category: "wait" },
   wait_for_chat: { title: "Wait for chat", activity: "Watching chat", category: "wait" },
   terminal_output: { title: "Terminal output", activity: "Reading terminal", category: "terminal" },

@@ -21,6 +21,7 @@ import {
   Brain,
   FileCog,
   GitPullRequest,
+  KeyRound,
   ScanEye,
   ScrollText,
   ShieldCheck,
@@ -78,6 +79,20 @@ export const SECTIONS: SectionDef[] = [
       "goes out under: yours, or a machine account with its own.",
     noun: "reviewer",
     manifestBacked: true,
+    countable: false,
+  },
+  {
+    id: "secrets",
+    icon: KeyRound,
+    label: "Secrets",
+    blurb: "API keys and tokens, referenced as ${secret:NAME}",
+    explainer:
+      "Credentials MCP servers and sub-apps need, kept out of the repo and out of every " +
+      "transcript. Write ${secret:NAME} in an MCP server's env or headers, or a sub-app's env, " +
+      "and Dispatch fills it in. Values are encrypted on this machine and never shown again — " +
+      "not here, not to agents. Saving one reloads whatever uses it: MCP servers reconnect in " +
+      "live chats and running sub-apps restart.",
+    noun: "secret",
     countable: false,
   },
   {
@@ -146,7 +161,7 @@ export const SECTIONS: SectionDef[] = [
       "Model Context Protocol servers hand agents tools this app doesn't ship — your issue " +
       "tracker, a database, a browser. Declared here, they're passed to every session in the " +
       "project and committed with the repo, so a teammate gets the same tools without any " +
-      "setup. Secrets belong in as ${VAR} placeholders, never literals.",
+      "setup. Keys belong in as ${secret:NAME} (see Secrets) or ${VAR} placeholders, never literals.",
     noun: "MCP server",
     manifestBacked: true,
   },

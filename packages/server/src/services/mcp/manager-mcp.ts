@@ -109,6 +109,12 @@ import {
   HUMAN_REVIEW_SUMMARY_MAX,
   HUMAN_REVIEW_TITLE_MAX,
   type HumanReviewPayload,
+  SECRET_WHY_MAX,
+  SECRET_SCOPES,
+  SecretNameSchema,
+  type SecretRefreshReport,
+  type SecretScope,
+  type SecretSummary,
   type HumanReviewVerdict,
   type AuthoredItem,
   type AuthoredKind,
@@ -349,6 +355,55 @@ export interface ManagerMcpWorktrees {
  * the session has no project (then the `remember` / `recall` / `forget` tools
  * aren't offered).
  */
+export type ManagerSecretRequestResult =
+  | { status: "saved"; name: string; scope: SecretScope; replaced: boolean; refresh: SecretRefreshReport }
+  | { status: "skipped"; message?: string }
+  | { status: "unavailable"; message: string };
+
+export type ManagerSecretDeleteResult =
+  | { status: "deleted"; refresh: SecretRefreshReport }
+  | { status: "not_found" }
+  | { status: "declined"; message?: string };
+
+/** One secret as the agent may see it: its name, where it lives, and who uses it. */
+export type ManagerSecretListing = SecretSummary & { usedBy: string[] };
+
+/**
+ * The secret surface a session is bound to. Every method names secrets and
+ * none reads one: an agent that needs a credential asks the human for it
+ * through `request`, and uses it as `${secret:NAME}` in config.
+ */
+export interface ManagerMcpSecrets {
+  request(
+    input: { name: string; scope: SecretScope; why: string },
+    signal?: AbortSignal,
+  ): Promise<ManagerSecretRequestResult>;
+  list(): Promise<{
+    secrets: ManagerSecretListing[];
+    /** Referenced by this project's config with no stored value anywhere. */
+    missing: Array<{ name: string; usedBy: string[] }>;
+  }>;
+  remove(input: { name: string; scope: SecretScope }): Promise<ManagerSecretDeleteResult>;
+}
+
+/** One line per refreshed thing, for the agent — or the fact nothing uses it yet. */
+function refreshText(r: SecretRefreshReport, name: string): string {
+  const lines: string[] = [];
+  if (r.mcpServers.length) lines.push(`MCP servers reloaded: ${r.mcpServers.join(", ")}`);
+  if (r.chatsRefreshed.length) lines.push(`live chats reconnected: ${r.chatsRefreshed.length}`);
+  if (r.chatsOnNextSession.length) {
+    lines.push(`chats that pick it up on their next session: ${r.chatsOnNextSession.length}`);
+  }
+  if (r.subAppsRestarted.length) lines.push(`sub-apps restarted: ${r.subAppsRestarted.join(", ")}`);
+  if (!lines.length) {
+    return (
+      `Nothing references it yet. Use \`\${secret:${name}}\` in an MCP server's env/headers ` +
+      "(mcp_add) or a sub-app's env, and it is filled in there."
+    );
+  }
+  return lines.join("\n");
+}
+
 export interface ManagerMcpMemory {
   remember(input: {
     name: string;
@@ -1844,6 +1899,11 @@ export interface ManagerMcpContext {
    * the tools work exactly as before and their cards fall back to prose.
    */
   prRegistry?: ManagerMcpPrRegistry;
+  /**
+   * The secret store, bound to this session's project (omitted → no secret
+   * tools). Nothing on it returns a value — see `secrets.ts` in shared.
+   */
+  secrets?: ManagerMcpSecrets;
   /** SubApp launcher for this session (omitted → no `run_subapp` tool). */
   runner?: ManagerMcpRunner;
   /**
@@ -6605,7 +6665,99 @@ ${look}` : "")
     },
   );
 
+  const secretRequest = tool(
+    "secret_request",
+    "Ask the human to store a secret (API key, token, password) under a NAME, and wait. The " +
+      "value is typed into a card and saved straight to Dispatch's encrypted store: it never " +
+      "passes through this conversation, and no tool can read it back. So NEVER ask the human " +
+      "to paste a secret into chat, and never write one into config — reference it as " +
+      "`${secret:NAME}` in an MCP server's env/headers or a sub-app's env instead. Saving (or " +
+      "replacing) it refreshes everything that references it: the project config reloads, " +
+      "affected MCP servers reconnect in live chats, and running sub-apps restart. Check " +
+      "secret_list first — it may already exist.",
+    {
+      name: SecretNameSchema.describe("Env-style name, e.g. LINEAR_API_KEY."),
+      scope: z
+        .enum(SECRET_SCOPES)
+        .optional()
+        .describe(
+          "'project' (default) — only this project resolves it; 'global' — every project " +
+            "does, unless a project defines its own of the same name.",
+        ),
+      why: z
+        .string()
+        .min(1)
+        .max(SECRET_WHY_MAX)
+        .describe("One sentence the human reads on the card: what needs it, and where to get it."),
+    },
+    async ({ name, scope, why }, extra): Promise<CallToolResult> => {
+      const secrets = ctx.secrets;
+      if (!secrets) return textResult("Secrets aren't available in this session.", true);
+      const result = await secrets.request(
+        { name, scope: scope ?? "project", why },
+        combinedSignal(extraSignal(extra), ctx.signal),
+      );
+      if (result.status === "unavailable") return textResult(result.message, true);
+      if (result.status === "skipped") {
+        return textResult(
+          `The human did not provide ${name}${result.message ? ` (${result.message})` : ""}. ` +
+            "Don't ask for the value in chat instead — carry on without it or say what's blocked.",
+        );
+      }
+      return textResult(
+        `${result.replaced ? "Replaced" : "Stored"} ${result.scope} secret ${result.name}. ` +
+          `Reference it as \${secret:${result.name}}.\n${refreshText(result.refresh, result.name)}`,
+      );
+    },
+  );
+
+  const secretList = tool(
+    "secret_list",
+    "List the secrets this project can resolve — names, scope and what references each — plus " +
+      "any `${secret:NAME}` the project's config uses that has no value yet. Never returns values.",
+    {},
+    async (): Promise<CallToolResult> => {
+      const secrets = ctx.secrets;
+      if (!secrets) return textResult("Secrets aren't available in this session.", true);
+      const { secrets: rows, missing } = await secrets.list();
+      const lines = rows.map(
+        (r) =>
+          `- ${r.name} (${r.scope})${r.usedBy.length ? ` — used by ${r.usedBy.join(", ")}` : " — unused"}`,
+      );
+      for (const m of missing) lines.push(`- ${m.name} — MISSING, referenced by ${m.usedBy.join(", ")}`);
+      return textResult(
+        `${lines.length ? lines.join("\n") : "No secrets stored or referenced."}\n` +
+          JSON.stringify({ secrets: rows, missing }),
+      );
+    },
+  );
+
+  const secretDelete = tool(
+    "secret_delete",
+    "Delete a stored secret. The human confirms on a card first. Anything referencing it is " +
+      "refreshed and will see an empty value.",
+    {
+      name: SecretNameSchema,
+      scope: z.enum(SECRET_SCOPES).optional().describe("Default 'project'."),
+    },
+    async ({ name, scope }): Promise<CallToolResult> => {
+      const secrets = ctx.secrets;
+      if (!secrets) return textResult("Secrets aren't available in this session.", true);
+      const result = await secrets.remove({ name, scope: scope ?? "project" });
+      if (result.status === "not_found") {
+        return textResult(`No ${scope ?? "project"} secret named ${name}.`, true);
+      }
+      if (result.status === "declined") {
+        return textResult(`The human declined deleting ${name}${result.message ? `: ${result.message}` : "."}`);
+      }
+      return textResult(`Deleted ${name}.\n${refreshText(result.refresh, name)}`);
+    },
+  );
+
   return {
+    secretRequest,
+    secretList,
+    secretDelete,
     askUser,
     requestHumanReview,
     wait,
@@ -6673,6 +6825,9 @@ type ManagerToolKey = keyof ManagerTools;
  * *different* valid name.
  */
 const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
+  secretRequest: "secret_request",
+  secretList: "secret_list",
+  secretDelete: "secret_delete",
   askUser: "ask_user",
   requestHumanReview: "request_human_review",
   wait: "wait",
@@ -6765,6 +6920,9 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   chat_reply: "messaging",
   chat_state: "messaging",
   project_info: "inspect",
+  secret_request: "secrets",
+  secret_list: "secrets",
+  secret_delete: "secrets",
 };
 
 /** The session bindings that gate manager tools. */
@@ -6782,7 +6940,8 @@ export type ManagerToolBinding =
   | "mcpConfig"
   | "authoring"
   | "inspect"
-  | "messaging";
+  | "messaging"
+  | "secrets";
 
 /** Which bindings a session has — decides which tools are offered/available. */
 export type ManagerToolBindings = Partial<Record<ManagerToolBinding, boolean>>;
@@ -6858,6 +7017,9 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_find: Boolean(ctx.inspect),
     chat_read: Boolean(ctx.inspect),
     project_info: Boolean(ctx.inspect),
+    secret_request: Boolean(ctx.secrets),
+    secret_list: Boolean(ctx.secrets),
+    secret_delete: Boolean(ctx.secrets),
     // Cross-chat MESSAGING — the write path. All four together: a chat that can
     // ask must be able to reply, or the other half of every conversation is a
     // chat holding an askId with no tool that takes one.
