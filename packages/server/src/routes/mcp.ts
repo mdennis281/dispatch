@@ -40,6 +40,7 @@ import {
 } from "../services/mcp/browser-mcp.js";
 
 import { resolveMcpServers } from "../services/mcp-session.js";
+import { expandSecretsInMcpServers } from "../services/secrets.js";
 import { configPathsFor } from "../services/config-location.js";
 
 /** How long an assembled catalog is reused before a re-probe. */
@@ -106,11 +107,16 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     // checkout it can honestly describe. Without resolving, a server whose
     // port is written `{mcpPort}` would be probed with the placeholder still
     // in its env and report a startup failure that no session would ever hit.
+    // Secrets filled in for the PROBE only — the catalog strips env/headers from
+    // what it returns, and the config it reads keeps the placeholders.
     const mcpServers = await resolveMcpServers(
-      {
-        ...(project.mcpServers ?? {}),
-        ...services.projectConfig.getMcpServers(project.id),
-      },
+      expandSecretsInMcpServers(
+        {
+          ...(project.mcpServers ?? {}),
+          ...services.projectConfig.getMcpServers(project.id),
+        },
+        services.secrets?.resolverFor(project.id),
+      ),
       {
         projectId: project.id,
         cwd: project.repoPath,

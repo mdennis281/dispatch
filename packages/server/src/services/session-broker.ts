@@ -173,7 +173,7 @@ import {
   type ManagerSecretDeleteResult,
   type ManagerSecretRequestResult,
 } from "./mcp/manager-mcp.js";
-import type { SecretKey, SecretsService } from "./secrets.js";
+import { expandSecretsInMcpServers, type SecretKey, type SecretsService } from "./secrets.js";
 import type { SecretRefresher } from "./secret-refresh.js";
 import type { SpawnNestingVerdict } from "./chat-nesting.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
@@ -2013,6 +2013,7 @@ export class SessionBroker {
       const pc = opts.projectConfig;
       this.mcpPrewarm = new McpPrewarmService({
         getMcpServers: (id: string) => pc.getMcpServers(id) as Record<string, McpServerConfig>,
+        expandSecrets: (id, servers) => expandSecretsInMcpServers(servers, opts.secrets?.resolverFor(id)),
         leases: this.mcpPorts,
       });
     }
@@ -5326,7 +5327,10 @@ export class SessionBroker {
     for (const session of this.sessions.values()) {
       if (session.projectId !== projectId) continue;
       const enabled = applyMcpEnablement(
-        Object.fromEntries(serverNames.filter((n) => fresh[n]).map((n) => [n, fresh[n]!])),
+        expandSecretsInMcpServers(
+          Object.fromEntries(serverNames.filter((n) => fresh[n]).map((n) => [n, fresh[n]!])),
+          this.secrets?.resolverFor(projectId),
+        ),
         {
           app: appSettings?.mcpEnabled,
           project: this.projectConfig.getMcpEnabled?.(projectId),
@@ -6431,9 +6435,12 @@ export class SessionBroker {
             `resolved — its tools will be missing from this session.`,
         ),
     });
-    const declaredMcp = applyMcpEnablement(
-      { ...browserMcp, ...(project?.mcpServers ?? {}), ...configMcp },
-      mcpEnablement,
+    const declaredMcp = expandSecretsInMcpServers(
+      applyMcpEnablement({ ...browserMcp, ...(project?.mcpServers ?? {}), ...configMcp }, mcpEnablement),
+      // Filled in HERE, at the hand-off to the runtime, and nowhere upstream:
+      // the config and project record carry the placeholder because they are
+      // persisted and broadcast.
+      projectId ? this.secrets?.resolverFor(projectId) : undefined,
     );
     const externalMcp =
       projectId && cwd

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SecretsService, plainKeyProtector, type SecretKey } from "./secrets.js";
+import { SecretsService, expandSecretsInMcpServers, plainKeyProtector, type SecretKey } from "./secrets.js";
 
 let dir: string;
 const svc = () => new SecretsService({ configDir: dir, protector: plainKeyProtector });
@@ -89,5 +89,19 @@ describe("SecretsService", () => {
     const fresh = svc();
     await fresh.start();
     expect(fresh.resolve(undefined, "STOLEN")).toBeUndefined();
+  });
+});
+
+describe("expandSecretsInMcpServers", () => {
+  it("fills every string field a runtime reads, leaves ${VAR} and the input untouched", () => {
+    const servers = {
+      remote: { type: "http", url: "https://x/${secret:PATH}", headers: { Authorization: "Bearer ${secret:K}" } },
+      local: { type: "stdio", command: "npx", args: ["--key", "${secret:K}"], env: { A: "${secret:K}", B: "${HOME}" } },
+    };
+    const before = JSON.stringify(servers);
+    const out = expandSecretsInMcpServers(servers as never, (n) => ({ K: "v", PATH: "p" })[n]);
+    expect(out.remote).toMatchObject({ url: "https://x/p", headers: { Authorization: "Bearer v" } });
+    expect(out.local).toMatchObject({ args: ["--key", "v"], env: { A: "v", B: "${HOME}" } });
+    expect(JSON.stringify(servers)).toBe(before);
   });
 });

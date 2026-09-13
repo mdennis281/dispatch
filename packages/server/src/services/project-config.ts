@@ -279,14 +279,13 @@ function transportToMcpConfig(
   },
   missing?: Set<string>,
   extras?: Pick<McpServerConfig, "ports" | "portRange" | "prewarm">,
-  secrets?: { lookup: (name: string) => string | undefined; missing: Set<string> },
 ): McpServerConfig {
-  const opts = {
-    onMissing: (name: string) => missing?.add(name),
-    ...(secrets
-      ? { secrets: secrets.lookup, onMissingSecret: (name: string) => secrets.missing.add(name) }
-      : {}),
-  };
+  // No `secrets` lookup on purpose: `${secret:NAME}` stays a PLACEHOLDER in the
+  // loaded config. This result is persisted onto the project record, broadcast
+  // to every open tab and served by `GET /api/projects` — substituting here put
+  // the plaintext in all three. It is filled in where a definition is handed to
+  // a runtime instead (see `expandSecretsInMcpServers`).
+  const opts = { onMissing: (name: string) => missing?.add(name) };
   const str = (v: string | undefined): string | undefined =>
     v === undefined ? undefined : expandEnvVars(v, opts);
   const dispatchOnly = {
@@ -755,12 +754,16 @@ export class ProjectConfigService {
       // worth SHOWING (the server will just fail to authenticate otherwise), but
       // not worth failing the load over — so it lands in `errors`, not a throw.
       const missing = new Set<string>();
-      const missingSecrets = new Set<string>();
-      mcpServers[server.name] = transportToMcpConfig(
-        server.transport,
-        missing,
-        { ports: server.ports, portRange: server.portRange, prewarm: server.prewarm },
-        secretLookup ? { lookup: secretLookup, missing: missingSecrets } : undefined,
+      mcpServers[server.name] = transportToMcpConfig(server.transport, missing, {
+        ports: server.ports,
+        portRange: server.portRange,
+        prewarm: server.prewarm,
+      });
+      // Checked, never substituted — see `transportToMcpConfig`.
+      const missingSecrets = new Set(
+        secretLookup
+          ? [...(refs.get(`mcp:${server.name}`) ?? [])].filter((n) => !secretLookup(n))
+          : [],
       );
       if (missingSecrets.size) {
         errors.push({

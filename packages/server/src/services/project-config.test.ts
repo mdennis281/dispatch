@@ -991,7 +991,7 @@ describe("ProjectConfigService — ${secret:NAME}", () => {
     "",
   ].join("\n");
 
-  it("expands stored secrets into MCP definitions and records who references what", async () => {
+  it("keeps the placeholder in config, persists and broadcasts no value, and records who references what", async () => {
     const project = await seedProject();
     await writeConfig("project.yaml", MANIFEST);
     const values: Record<string, string> = { LINEAR: "lin-123" };
@@ -1000,9 +1000,14 @@ describe("ProjectConfigService — ${secret:NAME}", () => {
       bus,
       secrets: { resolverFor: (pid) => (name) => (pid === "p1" ? values[name] : undefined) },
     });
-    const result = await svc.load(project);
+    const result = await svc.reload("p1");
 
-    expect(result.config!.mcpServers.linear).toMatchObject({ headers: { Authorization: "Bearer lin-123" } });
+    // The loaded config is persisted onto the project record and pushed to every
+    // browser, so it must carry the PLACEHOLDER — the value is filled in only at
+    // the hand-off to a runtime (expandSecretsInMcpServers).
+    expect(result.config!.mcpServers.linear).toMatchObject({ headers: { Authorization: "Bearer ${secret:LINEAR}" } });
+    expect(JSON.stringify(await store.getProject("p1"))).not.toContain("lin-123");
+    expect(JSON.stringify(events)).not.toContain("lin-123");
     expect(result.errors).toEqual([]);
     expect(svc.secretConsumers("p1", "LINEAR")).toEqual(["mcp:linear"]);
     expect(svc.secretConsumers("p1", "STRIPE")).toEqual(["subapp:web"]);

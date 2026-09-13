@@ -1427,6 +1427,28 @@ describe("SessionBroker — permissions", () => {
       expect(JSON.stringify(events)).not.toContain("lin-top-secret");
     });
 
+    it("fills the secret in at the hand-off to the session, from a config that holds only the placeholder", async () => {
+      const { broker, secrets } = await withSecrets();
+      const repo = await mkdtemp(join(tmpdir(), "cm-secret-repo-"));
+      tempDirs.push(repo);
+      await store.saveProject({
+        id: "p1", name: "P", repoPath: repo, worktreeRoot: join(repo, "..", "wt"),
+        defaultBranch: "main", subApps: [], createdAt: 1,
+      });
+      await secrets.set({ name: "K", scope: "project", projectId: "p1" }, "live-value");
+      (broker as unknown as { projectConfig?: unknown }).projectConfig = {
+        getAgent: () => null,
+        getMode: () => null,
+        buildInstructionsInjection: () => null,
+        getMcpServers: () => ({ remote: { type: "http", url: "https://x/mcp", headers: { Authorization: "Bearer ${secret:K}" } } }),
+        getSkills: () => [],
+      };
+      const session = (broker as unknown as { sessions: Map<string, unknown> }).sessions.get("c1");
+      const options = await (broker as unknown as { buildOptions(s: unknown): Promise<{ mcpServers: Record<string, unknown> }> })
+        .buildOptions(session);
+      expect(options.mcpServers.remote).toMatchObject({ headers: { Authorization: "Bearer live-value" } });
+    });
+
     it("reads a bare 'Saved' with no stored value as skipped — an old card can't fake a save", async () => {
       const { broker } = await withSecrets();
       const reqP = nextPermissionId();

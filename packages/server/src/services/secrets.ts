@@ -26,6 +26,8 @@ import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import * as z from "zod";
 import {
+  expandSecretsOnly,
+  type McpServerConfig,
   SECRET_SCOPES,
   SecretNameSchema,
   type SecretScope,
@@ -179,8 +181,8 @@ export class SecretsService {
 
   /**
    * The value `${secret:NAME}` expands to for a project — the project's own
-   * secret first, then the global one. SYNC on purpose: config expansion runs
-   * inside a synchronous transform, so this reads the cache `sync()` maintains.
+   * secret first, then the global one. SYNC on purpose: it is called while a
+   * session's options are assembled, so it reads the cache `sync()` maintains.
    */
   resolve(projectId: string | undefined, name: string): string | undefined {
     if (projectId) {
@@ -344,6 +346,36 @@ export class SecretsService {
       }
     }
   }
+}
+
+/**
+ * Fill `${secret:NAME}` into MCP server definitions — ONLY at the moment they
+ * are handed to something that runs them (a session, a live swap, a prewarm, a
+ * catalog probe). Everything upstream of that keeps the placeholder, because
+ * upstream is persisted to `state.db` and pushed to browsers.
+ */
+export function expandSecretsInMcpServers(
+  servers: Record<string, McpServerConfig>,
+  lookup: ((name: string) => string | undefined) | undefined,
+): Record<string, McpServerConfig> {
+  if (!lookup) return servers;
+  const str = (v: string | undefined) => (v === undefined ? undefined : expandSecretsOnly(v, lookup));
+  const rec = (r: Record<string, string> | undefined) =>
+    r ? Object.fromEntries(Object.entries(r).map(([k, v]) => [k, expandSecretsOnly(v, lookup)])) : r;
+  return Object.fromEntries(
+    Object.entries(servers).map(([name, cfg]) => {
+      const c = cfg as McpServerConfig & Record<string, unknown>;
+      const out: Record<string, unknown> = { ...c };
+      if (typeof c.command === "string") out.command = str(c.command);
+      if (Array.isArray(c.args)) out.args = (c.args as string[]).map((a) => expandSecretsOnly(a, lookup));
+      if (c.env) out.env = rec(c.env as Record<string, string>);
+      if (c.headers) out.headers = rec(c.headers as Record<string, string>);
+      if (typeof c.url === "string") out.url = str(c.url);
+      if (typeof c.cwd === "string") out.cwd = str(c.cwd);
+      if (typeof c.prewarm === "string") out.prewarm = str(c.prewarm);
+      return [name, out as McpServerConfig];
+    }),
+  );
 }
 
 function normalize(key: SecretKey): SecretKey {
