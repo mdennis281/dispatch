@@ -19,8 +19,16 @@ import {
   MessageSquare,
   X,
 } from "lucide-react";
-import type { CheckRun, PrReviewer, PrSnapshot, ReviewThread } from "@dispatch/shared";
+import {
+  prReviewAgentView,
+  type CheckRun,
+  type PrReviewAgentState,
+  type PrReviewer,
+  type PrSnapshot,
+  type ReviewThread,
+} from "@dispatch/shared";
 import { Chip, type Tone } from "../../ui/Chip.js";
+import { ReviewAgentChip } from "../../pr/ReviewAgentChip.js";
 import { cn } from "../../../lib/cn.js";
 
 /* ------------------------------------------------------------------ pieces */
@@ -266,10 +274,23 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-/** The full picture: everything the strip shows, plus the detail it cannot. */
-export function PrStatePanel({ pr }: { pr: PrSnapshot }) {
+/**
+ * The full picture: everything the strip shows, plus the detail it cannot.
+ *
+ * `reviewAgent` is passed separately because it lives on the registry ROW, not
+ * the snapshot — a frozen tool result never carries it, so only a live card can
+ * say what Dispatch's own reviewer is doing.
+ */
+export function PrStatePanel({
+  pr,
+  reviewAgent,
+}: {
+  pr: PrSnapshot;
+  reviewAgent?: PrReviewAgentState;
+}) {
   const unresolved = unresolvedThreads(pr.threads);
   const link = pr.url && pr.url !== "#" ? pr.url : undefined;
+  const failing = foldChecks(pr.checks).fail;
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1.5">
@@ -293,22 +314,35 @@ export function PrStatePanel({ pr }: { pr: PrSnapshot }) {
         <p className="cm-mono !text-2xs text-faint">
           {pr.branch} → {pr.baseBranch || "?"}
           {pr.author ? ` · by ${pr.author}` : ""}
+          {pr.headRefOid ? ` · ${pr.headRefOid.slice(0, 7)}` : ""}
         </p>
         <PrStateStrip pr={pr} />
+        {pr.labels.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {pr.labels.map((l) => (
+              <Chip key={l} tone="muted">
+                {l}
+              </Chip>
+            ))}
+          </div>
+        )}
       </div>
 
-      <Section title="Checks">
+      <Section
+        title={`Checks${pr.checks.length ? ` (${pr.checks.length}${failing ? `, ${failing} failing` : ""})` : ""}`}
+      >
         <ChecksSection checks={pr.checks} />
       </Section>
 
       <Section title="Reviewers">
-        {pr.reviewers.length === 0 ? (
+        {pr.reviewers.length === 0 && !prReviewAgentView(reviewAgent) ? (
           <p className="text-xs text-muted">Nobody is queued to review this PR.</p>
         ) : (
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             {pr.reviewers.map((r) => (
               <ReviewerChip key={r.login} reviewer={r} />
             ))}
+            <ReviewAgentChip state={reviewAgent} />
           </div>
         )}
       </Section>

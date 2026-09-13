@@ -20,11 +20,15 @@
  * question with one answer, and giving each tool its own dialect of it was the
  * thing worth avoiding.
  */
-import { memo, useMemo, useState } from "react";
-import { Check, Circle, GitPullRequest, X } from "lucide-react";
+import { memo, useMemo, useState, type ReactNode } from "react";
+import { Check, ChevronRight, Circle, Eye, GitPullRequest, X } from "lucide-react";
 import {
   decodePrToolPayload,
   prRecordKey,
+  WATCH_PR_DEFAULT_TIMEOUT_SECONDS,
+  WATCH_PR_POLL_INTERVAL_MS,
+  WATCH_PR_TIMEOUT_CAP_SECONDS,
+  type PrRecord,
   type PrSnapshot,
   type PrToolPayload,
   type TaskStatusRow,
@@ -41,9 +45,11 @@ import { Chip } from "../../ui/Chip.js";
 import { OverflowTooltip } from "../../ui/OverflowTooltip.js";
 import { Spinner } from "../../ui/Spinner.js";
 import { cn } from "../../../lib/cn.js";
-import { dur, parseMcpName, safeJson } from "../../../lib/format.js";
+import { dur, parseMcpName, relTime, safeJson, untilShort } from "../../../lib/format.js";
 import { hydrateFullRows } from "../../../stores/index.js";
+import { useNowTick } from "../../../stores/agentRun.js";
 import { usePrs } from "../../../stores/prs.js";
+import { useChats } from "../../../stores/chats.js";
 import { displayResultText } from "../../../lib/toolPresentations.js";
 import { toolCallState } from "../../../lib/toolState.js";
 import type { ToolDetailState } from "../ToolDetailModal.js";
@@ -71,6 +77,41 @@ function StateMark({ state }: { state: ToolDetailState }) {
   return <Check className="text-success" />;
 }
 
+/** The PR a `watch_pr` call names in its input — all a still-running watch has. */
+function watchTarget(input: Record<string, unknown>): { number: number; repo?: string } | null {
+  const number = typeof input.number === "number" ? input.number : Number.NaN;
+  if (!Number.isInteger(number) || number <= 0) return null;
+  const repo = typeof input.repo === "string" && input.repo.trim() ? input.repo.trim() : undefined;
+  return { number, repo };
+}
+
+/**
+ * Find the registry row for a PR named by number and maybe repo.
+ *
+ * `watch_pr` usually omits `repo` (it defaults to the chat's checkout), and the
+ * store is keyed `owner/repo#number` because numbers restart per repository. So
+ * a bare number resolves to the row THIS chat opened first, then to the one row
+ * with that number in the watching chat's PROJECT — the server resolves it
+ * against that project's checkout. Never across the whole catalog: low numbers
+ * collide between projects, and a card confidently drawing another repo's #12
+ * as `live` is worse than drawing nothing. `PrRecord.chatId` is the chat that
+ * OPENED the PR, so a parent watching its child's PR only matches by project.
+ * Returns the stored object, so it is safe to select directly.
+ */
+function findRecord(
+  byKey: Record<string, PrRecord>,
+  target: { number: number; repo?: string },
+  chatId: string,
+  projectId: string | undefined,
+): PrRecord | undefined {
+  if (target.repo) return byKey[prRecordKey(target.repo, target.number)];
+  const rows = Object.values(byKey).filter((r) => r.number === target.number);
+  const owned = rows.find((r) => r.chatId === chatId);
+  if (owned || !projectId) return owned;
+  const inProject = rows.filter((r) => r.projectId === projectId);
+  return inProject.length === 1 ? inProject[0] : undefined;
+}
+
 /**
  * The PR a card should draw, and whether it is live.
  *
@@ -78,14 +119,29 @@ function StateMark({ state }: { state: ToolDetailState }) {
  * PR is NOW, and a watch card showing a two-minute-old snapshot while the
  * roster three feet away shows the merge is the kind of disagreement that makes
  * people stop trusting both. Everything else takes the frozen copy.
+ *
+ * A watch still in flight has no result, hence no frozen snapshot, and used to
+ * draw "No pull-request state was recorded" for the whole half hour it blocked —
+ * exactly when someone opens it to ask what it is waiting on. So the row is
+ * resolved from the call's INPUT when there is no result to read it from.
  */
-function useCardPr(payload: PrToolPayload | null): { pr: PrSnapshot | null; live: boolean } {
+function useCardPr(
+  entry: PrRunEntry,
+  tool: string,
+  payload: PrToolPayload | null,
+): { pr: PrSnapshot | null; record?: PrRecord; live: boolean } {
   const frozen = payload?.pr ?? null;
-  const wantsLive = payload?.tool === "watch_pr" && !!frozen;
-  const liveRow = usePrs((s) =>
-    wantsLive && frozen ? s.byKey[prRecordKey(frozen.repo, frozen.number)] : undefined,
+  const target =
+    tool !== "watch_pr"
+      ? null
+      : frozen
+        ? { number: frozen.number, repo: frozen.repo }
+        : watchTarget(entry.use.input);
+  const projectId = useChats((s) => s.byId[entry.use.chatId]?.projectId);
+  const record = usePrs((s) =>
+    target ? findRecord(s.byKey, target, entry.use.chatId, projectId) : undefined,
   );
-  if (wantsLive && liveRow) return { pr: liveRow, live: true };
+  if (record) return { pr: record, record, live: true };
   return { pr: frozen, live: false };
 }
 
@@ -95,7 +151,7 @@ function PrToolCard({ entry }: { entry: PrRunEntry }) {
   const state = toolCallState(entry.result, entry.task);
   const raw = entry.result ? displayResultText(entry.result.content) : "";
   const { payload, text } = useMemo(() => decodePrToolPayload(raw), [raw]);
-  const { pr, live } = useCardPr(payload);
+  const { pr, record, live } = useCardPr(entry, tool, payload);
 
   const summary =
     payload?.outcome.summary ??
@@ -154,39 +210,219 @@ function PrToolCard({ entry }: { entry: PrRunEntry }) {
         open={open}
         onClose={() => setOpen(false)}
         width={640}
-        icon={<GitPullRequest />}
-        title={payload?.outcome.summary ?? (VERB[tool] ?? tool)}
-        description={pr ? `${pr.repo}#${pr.number}${live ? " · live" : " · as of this call"}` : tool}
+        icon={tool === "watch_pr" ? <Eye /> : <GitPullRequest />}
+        title={modalTitle(tool, state, payload, pr, entry.use.input)}
+        description={
+          pr ? `${pr.repo}#${pr.number}${live ? " · live" : " · as of this call"}` : tool
+        }
       >
         <div className="flex flex-col gap-4">
-          {payload && payload.outcome.details.length > 0 && (
-            <ul className="flex flex-col gap-1">
-              {payload.outcome.details.map((line, i) => (
-                <li key={i} className="text-xs leading-snug text-secondary">
-                  · {line}
-                </li>
-              ))}
-            </ul>
+          {tool === "watch_pr" ? (
+            <WatchStatus
+              entry={entry}
+              state={failed ? "failed" : state}
+              payload={payload}
+              record={record}
+            />
+          ) : (
+            payload && <OutcomeCard payload={payload} elapsed={elapsed} />
           )}
           {pr ? (
-            <PrStatePanel pr={pr} />
+            <PrStatePanel pr={pr} reviewAgent={record?.reviewAgent} />
           ) : (
             <p className="text-xs text-muted">
-              No pull-request state was recorded for this call.
+              {state === "running"
+                ? "Dispatch's PR catalog has no row for this PR in this project, so its state appears when the watch returns."
+                : "The tool could not read this pull request, so there is no state to show."}
             </p>
           )}
-          <details className="rounded-md border border-line bg-inset">
-            <summary className="cursor-pointer px-2.5 py-1.5 text-2xs uppercase tracking-wide text-faint">
-              Raw exchange
-            </summary>
-            <div className="flex flex-col gap-2 p-2.5 pt-0">
-              <CodeBlock code={safeJson(entry.use.input)} language="json" />
-              <CodeBlock code={text || "No response"} />
-            </div>
-          </details>
+          <RawExchange input={entry.use.input} response={text} running={state === "running"} />
         </div>
       </Modal>
     </>
+  );
+}
+
+/** "Watching PR #367" while it blocks; the outcome headline once it answers. */
+function modalTitle(
+  tool: string,
+  state: ToolDetailState,
+  payload: PrToolPayload | null,
+  pr: PrSnapshot | null,
+  input: Record<string, unknown>,
+): string {
+  if (payload) return payload.outcome.summary;
+  const number = pr?.number ?? watchTarget(input)?.number;
+  if (tool === "watch_pr" && state === "running") {
+    return number ? `Watching PR #${number}` : "Watching a pull request";
+  }
+  const verb = VERB[tool] ?? tool;
+  return number ? `${verb} PR #${number}` : verb;
+}
+
+function Fact({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-0.5">
+      <dt className="text-2xs uppercase tracking-wide text-faint">{label}</dt>
+      <dd className="min-w-0 truncate cm-mono !text-xs text-secondary">{children}</dd>
+    </div>
+  );
+}
+
+function DetailLines({ lines }: { lines: string[] }) {
+  if (lines.length === 0) return null;
+  return (
+    <ul className="flex flex-col gap-1 border-t border-line-soft pt-2">
+      {lines.map((line, i) => (
+        <li key={i} className="text-xs leading-snug text-secondary">
+          {line}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** What a one-shot PR tool did — the headline, whether it worked, and why. */
+function OutcomeCard({ payload, elapsed }: { payload: PrToolPayload; elapsed?: number }) {
+  const ok = payload.outcome.ok;
+  return (
+    <div
+      className={cn(
+        "flex flex-col gap-2 rounded-md border bg-inset px-3 py-2.5",
+        ok ? "border-line" : "border-danger/40",
+      )}
+    >
+      <div className="flex items-center gap-2 [&_svg]:size-3.5">
+        {ok ? <Check className="text-success" /> : <X className="text-danger" />}
+        <span className={cn("min-w-0 flex-1 text-sm", ok ? "text-primary" : "text-danger")}>
+          {payload.outcome.summary}
+        </span>
+        {elapsed !== undefined && (
+          <span className="shrink-0 cm-mono !text-2xs text-faint">{dur(elapsed)}</span>
+        )}
+      </div>
+      <DetailLines lines={payload.outcome.details} />
+    </div>
+  );
+}
+
+/**
+ * The watch itself: how long it has blocked, when it gives up, and whether the
+ * polls behind it are landing.
+ *
+ * The deadline is re-derived from the call's input with the server's own
+ * default and cap (shared constants), because a running call has nothing else
+ * to read.
+ *
+ * It shows the row's last CHANGE, not its last poll, on purpose: a quiet poll is
+ * persisted but never published (announcing one would wake every client every
+ * 30s), so a client-side `lastPolledAt` freezes at the last change and a healthy
+ * quiet watch would read "last poll 15m ago" as if it had stalled. Poll failures
+ * ARE published, so `pollError` is trustworthy.
+ */
+function WatchStatus({
+  entry,
+  state,
+  payload,
+  record,
+}: {
+  entry: PrRunEntry;
+  state: ToolDetailState;
+  payload: PrToolPayload | null;
+  record?: PrRecord;
+}) {
+  const running = state === "running";
+  const now = useNowTick(running);
+  const requested = entry.use.input.timeoutSeconds;
+  const timeoutMs =
+    Math.min(
+      Math.max(
+        typeof requested === "number" && Number.isFinite(requested)
+          ? requested
+          : WATCH_PR_DEFAULT_TIMEOUT_SECONDS,
+        0,
+      ),
+      WATCH_PR_TIMEOUT_CAP_SECONDS,
+    ) * 1000;
+  const elapsed = running
+    ? now - entry.use.ts
+    : (entry.task?.durationMs ?? entry.result?.durationMs);
+  const ok = state !== "failed" && payload?.outcome.ok !== false;
+  const headline = running
+    ? "Waiting for something actionable"
+    : (payload?.outcome.summary ?? (state === "stopped" ? "Watch stopped" : "Watch returned"));
+
+  return (
+    <div
+      className={cn(
+        "flex flex-col gap-2.5 rounded-md border bg-inset px-3 py-2.5",
+        running ? "border-accent/40" : ok ? "border-line" : "border-danger/40",
+      )}
+    >
+      <div className="flex items-center gap-2 [&_svg]:size-3.5">
+        <StateMark state={state} />
+        <span className={cn("min-w-0 flex-1 text-sm", ok ? "text-primary" : "text-danger")}>
+          {headline}
+        </span>
+      </div>
+
+      <dl className="grid grid-cols-4 gap-x-4 gap-y-2">
+        <Fact label={running ? "Watching for" : "Watched for"}>{dur(elapsed) ?? "—"}</Fact>
+        <Fact label={running ? "Gives up in" : "Quiet window"}>
+          {running ? untilShort(entry.use.ts + timeoutMs, now) : dur(timeoutMs)}
+        </Fact>
+        <Fact label="Polls every">{dur(WATCH_PR_POLL_INTERVAL_MS)}</Fact>
+        <Fact label="Last change">
+          {record?.lastChangedAt ? relTime(record.lastChangedAt, now) : "—"}
+        </Fact>
+      </dl>
+
+      {running && record?.pollError && (
+        <p className="text-xs text-danger">Last poll failed: {record.pollError}</p>
+      )}
+
+      {running ? (
+        <p className="border-t border-line-soft pt-2 text-xs leading-snug text-muted">
+          Returns the moment a check fails, every check passes, a new review comment lands, no
+          reviewer is left queued, or the PR merges or closes. If nothing happens for{" "}
+          {dur(timeoutMs)} it returns anyway and the agent calls it again.
+        </p>
+      ) : (
+        payload && <DetailLines lines={payload.outcome.details} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The call as the model saw it, collapsed. Labelled Request/Response because the
+ * prose answer is not code — the block's default language used to call it
+ * "TypeScript".
+ */
+function RawExchange({
+  input,
+  response,
+  running,
+}: {
+  input: Record<string, unknown>;
+  response: string;
+  running: boolean;
+}) {
+  return (
+    <details className="group rounded-md border border-line-soft">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-md px-2.5 py-1.5 text-2xs uppercase tracking-wide text-faint outline-none hover:text-secondary focus-visible:ring-1 focus-visible:ring-accent [&::-webkit-details-marker]:hidden">
+        <ChevronRight className="size-3 transition-transform group-open:rotate-90" />
+        Raw exchange
+      </summary>
+      <div className="flex flex-col px-2.5 pb-1">
+        <CodeBlock code={safeJson(input)} language="json" filename="Request" />
+        <CodeBlock
+          code={response || (running ? "No response yet — the watch is still running." : "No response")}
+          language="text"
+          filename="Response"
+        />
+      </div>
+    </details>
   );
 }
 

@@ -18,6 +18,20 @@
 import * as z from "zod";
 import { PrSnapshotSchema } from "./domain.js";
 
+/**
+ * `watch_pr`'s cadence, shared because the card draws it.
+ *
+ * A watch that is still RUNNING has no result yet, so the drilldown can only say
+ * when it will return by re-deriving it from the call's input — and a client
+ * with its own copy of "30 minutes, polled every 20s" would keep promising that
+ * after the server changed its mind.
+ */
+export const WATCH_PR_POLL_INTERVAL_MS = 20_000;
+/** Default quiet window of one `watch_pr` call, before it returns `timedOut`. */
+export const WATCH_PR_DEFAULT_TIMEOUT_SECONDS = 1800;
+/** The most `timeoutSeconds` a single `watch_pr` call is allowed. */
+export const WATCH_PR_TIMEOUT_CAP_SECONDS = 3600;
+
 /** Which tool produced the payload — decides what the card's body says. */
 export const PrToolKindSchema = z.enum([
   "create_pr",
