@@ -31,6 +31,7 @@ import { ChatHeaderBadges } from "./ChatHeaderBadges.js";
 import { MessageList } from "./MessageList.js";
 import { StreamingTail } from "./StreamingTail.js";
 import { clampSelectionToMessage } from "../../lib/transcriptCopy.js";
+import { measurePageAnchor, restoredScrollTop, type PageAnchor } from "./pageAnchor.js";
 import { TodosStrip } from "./TodosStrip.js";
 import { Composer } from "./Composer.js";
 import { DeleteChatDialog } from "./DeleteChatDialog.js";
@@ -322,6 +323,9 @@ export function ChatView({ chat }: { chat: Chat }) {
     setAtBottom(b);
     // Clear of the top again → the reader is driving, so allow a fresh chain.
     if (el.scrollTop > OLDER_PAGE_TRIGGER_PX * 2) autoChainRef.current = 0;
+    // A page is in flight and the reader is still moving: keep the anchor at
+    // where they are NOW, or the restore puts them back where they asked.
+    if (anchorRef.current) anchorRef.current = measurePageAnchor(el, anchorRef.current.row);
     maybeLoadOlder(el);
   };
 
@@ -373,9 +377,8 @@ export function ChatView({ chat }: { chat: Chat }) {
   // The transcript is a WINDOW (newest N rows). Scrolling to the top pages the
   // previous chunk in — so an old chat opens at a bounded size and grows only as
   // far back as the reader actually goes.
-  // Scroll metrics captured the instant we ASK for an older page, so the restore
-  // below can pin the viewport to the row the reader was looking at.
-  const anchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  // Where the reader is while an older page is in flight — see pageAnchor.ts.
+  const anchorRef = useRef<PageAnchor | null>(null);
   const firstRowIdRef = useRef<string | undefined>(messages[0]?.id);
   /** Pages auto-loaded without the reader moving clear of the top (runaway guard). */
   const autoChainRef = useRef(0);
@@ -404,7 +407,7 @@ export function ChatView({ chat }: { chat: Chat }) {
     autoChainRef.current += 1;
     // Captured only when a load will really happen, so the restore below can't
     // act on metrics from a scroll that fetched nothing.
-    anchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+    anchorRef.current = measurePageAnchor(el, transcriptRef.current?.firstElementChild ?? null);
     void loadOlderMessages(chat.id);
   };
 
@@ -415,7 +418,7 @@ export function ChatView({ chat }: { chat: Chat }) {
     autoChainRef.current = 0;
     const page = useMessages.getState().pages[chat.id];
     if (!page?.hasMore || page.loadingOlder) return;
-    anchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+    anchorRef.current = measurePageAnchor(el, transcriptRef.current?.firstElementChild ?? null);
     void loadOlderMessages(chat.id);
   };
 
@@ -440,23 +443,30 @@ export function ChatView({ chat }: { chat: Chat }) {
 
   // Prepending rows above the viewport shifts everything down by the new
   // content's height; without this the reader gets yanked back to the top on
-  // every page. The delta can be NEGATIVE — a page carrying a `Task` row folds
-  // its already-loaded child rows into a single subagent card, so the transcript
-  // can end up shorter than before — hence the clamp: keep the reader off the
-  // very top so the next scroll still has somewhere to go.
+  // every page (and on iOS, which has no native scroll anchoring before Safari
+  // 27, nothing else will correct it).
   useLayoutEffect(() => {
     const firstId = messages[0]?.id;
     const prevFirstId = firstRowIdRef.current;
     firstRowIdRef.current = firstId;
-    if (!prevFirstId || firstId === prevFirstId) return;
+    if (!prevFirstId || firstId === prevFirstId) {
+      // A page that failed or came back empty never changes the first row. Drop
+      // its anchor, or a later trim (which does) would "restore" to it.
+      if (!loadingOlder) anchorRef.current = null;
+      return;
+    }
     const el = scrollRef.current;
     const anchor = anchorRef.current;
     anchorRef.current = null;
     if (!el || !anchor) return;
-    const target = el.scrollHeight - anchor.scrollHeight + anchor.scrollTop;
-    const maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
-    el.scrollTop = Math.min(Math.max(target, 0), maxTop);
-  }, [messages]);
+    const row = anchor.row?.isConnected ? anchor.row : null;
+    el.scrollTop = restoredScrollTop(anchor, {
+      rowTop: row ? row.getBoundingClientRect().top - el.getBoundingClientRect().top : null,
+      scrollTop: el.scrollTop,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    });
+  }, [messages, loadingOlder]);
 
   // A chat switch re-anchors: the new transcript's first row isn't a "prepend".
   useEffect(() => {
