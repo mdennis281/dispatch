@@ -38,6 +38,7 @@ export const MANAGER_CATEGORIES = [
   "mcp",
   "session",
   "project",
+  "secrets",
 ] as const;
 
 /** One category of Dispatch tool — also the suffix of its server's name. */
@@ -167,6 +168,13 @@ export const MANAGER_TOOL_CATEGORY = {
 
   /* project — what Dispatch knows about a project as a whole. */
   project_info: "project",
+
+  /* secrets — asking the human for a credential and naming the ones stored. No
+     tool here returns a value: `secret_request` collects one on a card that
+     never shows it to the model, and consumers refer to it as `${secret:NAME}`. */
+  secret_request: "secrets",
+  secret_list: "secrets",
+  secret_delete: "secrets",
 } as const satisfies Record<string, ManagerCategory>;
 
 /** Bare name of every tool Dispatch serves. */
@@ -286,7 +294,7 @@ export interface ToolListMigration {
  * they just click through it. So the rename has to carry the allowlists with it.
  *
  * A whole-server permission — the bare server name, its `__` form, or a `__*`
- * wildcard — expands to one entry per category, because the eight servers
+ * wildcard — expands to one entry per category, because the category servers
  * together are what the one server used to be. Collapsing it to a single
  * category would REVOKE seven eighths of a permission the human granted.
  */

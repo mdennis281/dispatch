@@ -4,6 +4,7 @@ import {
   expandEnvRecord,
   expandEnvList,
   referencedEnvVars,
+  referencedSecrets,
 } from "./env-expand.js";
 
 const env = { TOKEN: "s3cret", EMPTY: "", REGION: "eu-west-1" };
@@ -73,5 +74,39 @@ describe("referencedEnvVars", () => {
 
   it("returns nothing for a plain string", () => {
     expect(referencedEnvVars("no placeholders $HERE")).toEqual([]);
+  });
+});
+
+describe("${secret:NAME}", () => {
+  const secrets = (name: string) => ({ API_KEY: "k-123", TRICKY: "${TOKEN}" } as Record<string, string>)[name];
+
+  it("expands from the secret lookup alongside env placeholders", () => {
+    expect(expandEnvVars("Bearer ${secret:API_KEY} in ${REGION}", { env, secrets })).toBe(
+      "Bearer k-123 in eu-west-1",
+    );
+  });
+
+  it("reports a missing secret and expands it to empty", () => {
+    const missing: string[] = [];
+    expect(
+      expandEnvVars("${secret:NOPE}", { env, secrets, onMissingSecret: (n) => missing.push(n) }),
+    ).toBe("");
+    expect(missing).toEqual(["NOPE"]);
+  });
+
+  it("never re-scans a secret's VALUE as a placeholder", () => {
+    expect(expandEnvVars("${secret:TRICKY}", { env, secrets })).toBe("${TOKEN}");
+  });
+
+  it("leaves secret placeholders untouched without a lookup, and does not report them as env", () => {
+    const missing: string[] = [];
+    expect(expandEnvVars("${secret:API_KEY}", { env, onMissing: (n) => missing.push(n) })).toBe(
+      "${secret:API_KEY}",
+    );
+    expect(missing).toEqual([]);
+  });
+
+  it("referencedSecrets collects distinct names", () => {
+    expect(referencedSecrets("${secret:A} ${B} ${secret:A} ${secret:C}").sort()).toEqual(["A", "C"]);
   });
 });

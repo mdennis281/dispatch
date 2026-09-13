@@ -28,6 +28,7 @@ import { registerAttentionRoutes } from "./attention.js";
 import { registerPushRoutes } from "./push.js";
 import { registerSettingsRoutes } from "./settings.js";
 import { registerReviewerRoutes } from "./reviewer.js";
+import { registerSecretRoutes } from "./secrets.js";
 import { registerUsageRoutes } from "./usage.js";
 import { registerMetricsRoutes } from "./metrics.js";
 import { registerResourceRoutes } from "./resources.js";
@@ -66,6 +67,7 @@ export function registerRoutes(app: FastifyInstance): void {
   registerPushRoutes(app);
   registerSettingsRoutes(app);
   registerReviewerRoutes(app);
+  registerSecretRoutes(app);
   registerUsageRoutes(app);
   registerMetricsRoutes(app);
   registerResourceRoutes(app);

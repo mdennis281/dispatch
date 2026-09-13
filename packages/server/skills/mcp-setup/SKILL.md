@@ -87,8 +87,26 @@ expanded. An unset variable expands to an empty string and surfaces as a config
 warning rather than breaking the project — so if a server authenticates as
 anonymous, check that its variable is actually set where the manager runs.
 
-If the user pastes a real key at you, put the placeholder in the config and tell
-them which variable to export. Don't write the literal key into `project.yaml`.
+### Prefer a Dispatch secret over an env var
+
+`${VAR}` needs the key exported where the manager runs, which the user usually
+can't do from a chat. `${secret:NAME}` reads Dispatch's own encrypted store
+instead, works in MCP `env`/`headers` and a sub-app's `env`, and is set without
+the value ever touching the conversation:
+
+```bash
+cm mcp add linear --transport http --url https://mcp.linear.app/mcp \
+  -H 'Authorization: Bearer ${secret:LINEAR_API_KEY}'
+```
+
+Then call `mcp__dispatch-secrets__secret_request({ name: "LINEAR_API_KEY", why: "…" })`.
+The human types the value into a card; saving it reloads the config, reconnects
+the server in live chats and restarts sub-apps that use it. `secret_list` shows
+what exists and which referenced secrets are still missing. No tool returns a
+value.
+
+If the user pastes a real key at you anyway, don't write it anywhere — put the
+placeholder in the config and ask for it again with `secret_request`.
 
 > **`${VAR}` is resolved ONCE, when config loads** — from the manager's own
 > environment, shared by every chat in the project. It is the right tool for a

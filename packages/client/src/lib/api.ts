@@ -84,6 +84,10 @@ import type {
   FsMutation,
   FsMutationResult,
   ReviewerStatus,
+  SecretDelete,
+  SecretPut,
+  SecretRefreshReport,
+  SecretSummary,
   ReviewerVerify,
   ResourceSnapshot,
   SystemResources,
@@ -1107,6 +1111,21 @@ export const api = {
    * committed. The token is WRITE-ONLY across this boundary; nothing here ever
    * returns it, so a session that didn't set it can't read it back.
    */
+  /**
+   * The secret store (see routes/secrets.ts). Write-only: nothing here returns a
+   * value, and there is deliberately no way to ask for one.
+   */
+  secrets: {
+    list: (projectId?: string) =>
+      get<{
+        secrets: Array<SecretSummary & { usedBy: string[] }>;
+        missing: Array<{ name: string; usedBy: string[] }>;
+      }>(`/api/secrets${qs({ projectId })}`),
+    put: (body: SecretPut) =>
+      put<{ secret: SecretSummary; refresh: SecretRefreshReport }>("/api/secrets", body),
+    remove: (body: SecretDelete) =>
+      del<{ deleted: boolean; refresh: SecretRefreshReport | null }>("/api/secrets", body),
+  },
   reviewer: {
     get: () => get<ReviewerStatus>("/api/reviewer"),
     /** Verified before it is stored — a rejected token is a 400, not a saved one. */

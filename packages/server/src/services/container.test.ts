@@ -71,6 +71,7 @@ describe("createServices().start() resilience", () => {
       // Stubbed like the rest: the real PushService resolves its two file paths
       // from `config`, and this test's config is a bare `{ maxActiveSessions }`.
       push: stub(),
+      secrets: stub(),
       attention: stub(),
       usage: stub({
         start: () => {
@@ -134,6 +135,7 @@ describe("createServices().start() resilience", () => {
         github: stub(),
         notifier: stub(),
         push: stub(),
+        secrets: stub(),
         attention: stub(),
         usage: stub(),
       },
@@ -188,6 +190,7 @@ describe("createServices().start() resilience", () => {
         github: stub(),
         notifier: stub(),
         push: stub(),
+        secrets: stub(),
         attention: stub(),
         usage: stub(),
       },
@@ -269,6 +272,7 @@ describe("broker.spawnChat attribution", () => {
         github: stub(),
         notifier: stub(),
         push: stub(),
+        secrets: stub(),
         attention: stub(),
         usage: stub(),
       },

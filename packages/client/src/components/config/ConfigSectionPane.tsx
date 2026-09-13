@@ -18,6 +18,7 @@
  * settings all come from that task's catalog entry.
  */
 import { PersonasPane } from "./PersonasPane.js";
+import { SecretsPane } from "./SecretsPane.js";
 import { useState } from "react";
 import { FileCog, Plus, SquarePen, Trash2 } from "lucide-react";
 import {
@@ -67,6 +68,7 @@ export function ConfigSectionPane({
   const TaskIcon = task ? taskIcon(AGENT_TASKS[task].icon) : Icon;
 
   if (section.id === "personas") return <PersonasPane projectId={projectId} />;
+  if (section.id === "secrets") return <SecretsPane projectId={projectId} />;
 
   return (
     <div className="space-y-3">

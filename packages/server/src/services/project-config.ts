@@ -45,6 +45,7 @@ import {
   expandEnvVars,
   expandEnvList,
   expandEnvRecord,
+  referencedSecrets,
   DEFAULT_INSTRUCTIONS_DIR,
   DEFAULT_AGENTS_DIR,
   DEFAULT_MODES_DIR,
@@ -91,6 +92,11 @@ export interface ProjectConfigServiceOptions {
    * factory that just calls `onChange()` is saying "something changed".
    */
   watch?: (dir: string, onChange: (file?: string) => void) => ConfigWatcher | null;
+  /**
+   * Resolves `${secret:NAME}` for a project. Absent (tests, or a build without
+   * the store) leaves secret placeholders verbatim rather than blanking them.
+   */
+  secrets?: { resolverFor(projectId: string): (name: string) => string | undefined };
 }
 
 /* ------------------------------------------------------------------ helpers */
@@ -273,8 +279,14 @@ function transportToMcpConfig(
   },
   missing?: Set<string>,
   extras?: Pick<McpServerConfig, "ports" | "portRange" | "prewarm">,
+  secrets?: { lookup: (name: string) => string | undefined; missing: Set<string> },
 ): McpServerConfig {
-  const opts = { onMissing: (name: string) => missing?.add(name) };
+  const opts = {
+    onMissing: (name: string) => missing?.add(name),
+    ...(secrets
+      ? { secrets: secrets.lookup, onMissingSecret: (name: string) => secrets.missing.add(name) }
+      : {}),
+  };
   const str = (v: string | undefined): string | undefined =>
     v === undefined ? undefined : expandEnvVars(v, opts);
   const dispatchOnly = {
@@ -319,12 +331,21 @@ export class ProjectConfigService {
   private readonly watchers = new Map<string, ConfigWatcher>();
   /** projectId → debounce timer for a pending watcher-triggered reload. */
   private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly secrets: ProjectConfigServiceOptions["secrets"];
+  /**
+   * projectId → consumer (`mcp:<server>` / `subapp:<id>`) → secret names it
+   * references. Recorded from the RAW manifest at load, because after expansion
+   * the placeholder is gone — and this is what lets a secret change refresh only
+   * what actually uses it.
+   */
+  private readonly secretRefs = new Map<string, Map<string, Set<string>>>();
 
   constructor(opts: ProjectConfigServiceOptions) {
     this.store = opts.store;
     this.bus = opts.bus;
     this.now = opts.now ?? (() => Date.now());
     this.debounceMs = opts.debounceMs ?? 250;
+    this.secrets = opts.secrets;
     this.watchFactory =
       opts.watch ??
       ((dir, onChange) => {
@@ -540,6 +561,27 @@ export class ProjectConfigService {
    * `.data` record (config wins on id; `.data`-only sub-apps survive) into the
    * project the RunnerService + Apps panel consume.
    */
+  /** Consumers in a project that reference a secret, e.g. `["mcp:linear", "subapp:web"]`. */
+  secretConsumers(projectId: string, name: string): string[] {
+    const refs = this.secretRefs.get(projectId);
+    if (!refs) return [];
+    return [...refs].filter(([, names]) => names.has(name)).map(([consumer]) => consumer);
+  }
+
+  /** Every secret a project's config references → the consumers referencing it. */
+  secretReferences(projectId: string): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    for (const [consumer, names] of this.secretRefs.get(projectId) ?? []) {
+      for (const n of names) (out[n] ??= []).push(consumer);
+    }
+    return out;
+  }
+
+  /** Projects whose loaded config references a secret at all. */
+  projectsReferencingSecret(name: string): string[] {
+    return [...this.secretRefs].filter(([, refs]) => [...refs.values()].some((n) => n.has(name))).map(([id]) => id);
+  }
+
   getSubApps(projectId: string): SubApp[] {
     return [...(this.getConfig(projectId)?.subApps ?? [])];
   }
@@ -657,6 +699,22 @@ export class ProjectConfigService {
     const skills = await this.loadSkills(skillsDir, errors);
 
     // --- subApps (cwd → path, docker → dockerCompose) ---
+    const refs = new Map<string, Set<string>>();
+    const noteRefs = (consumer: string, values: unknown): void => {
+      const names = new Set<string>();
+      const walk = (v: unknown): void => {
+        if (typeof v === "string") for (const n of referencedSecrets(v)) names.add(n);
+        else if (Array.isArray(v)) v.forEach(walk);
+        else if (v && typeof v === "object") Object.values(v).forEach(walk);
+      };
+      walk(values);
+      if (names.size) refs.set(consumer, names);
+    };
+    for (const s of manifest.subApps ?? []) noteRefs(`subapp:${s.id}`, s.env);
+    for (const m of manifest.mcpServers ?? []) noteRefs(`mcp:${m.name}`, [m.transport, m.prewarm]);
+    this.secretRefs.set(project.id, refs);
+    const secretLookup = this.secrets?.resolverFor(project.id);
+
     const subApps: SubApp[] = (manifest.subApps ?? []).map((s) => ({
       id: s.id,
       name: s.name,
@@ -697,11 +755,23 @@ export class ProjectConfigService {
       // worth SHOWING (the server will just fail to authenticate otherwise), but
       // not worth failing the load over — so it lands in `errors`, not a throw.
       const missing = new Set<string>();
-      mcpServers[server.name] = transportToMcpConfig(server.transport, missing, {
-        ports: server.ports,
-        portRange: server.portRange,
-        prewarm: server.prewarm,
-      });
+      const missingSecrets = new Set<string>();
+      mcpServers[server.name] = transportToMcpConfig(
+        server.transport,
+        missing,
+        { ports: server.ports, portRange: server.portRange, prewarm: server.prewarm },
+        secretLookup ? { lookup: secretLookup, missing: missingSecrets } : undefined,
+      );
+      if (missingSecrets.size) {
+        errors.push({
+          scope: "manifest",
+          file: MANIFEST_FILE,
+          message:
+            `MCP server "${server.name}" references secret(s) Dispatch doesn't have: ` +
+            `${[...missingSecrets].join(", ")}. Add them in Settings → Secrets, or have ` +
+            "an agent ask for them with secret_request.",
+        });
+      }
       if (missing.size) {
         errors.push({
           scope: "manifest",

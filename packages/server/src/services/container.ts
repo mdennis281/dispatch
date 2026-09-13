@@ -25,8 +25,11 @@ import {
   type PRRef,
   type PrRecord,
   type PrSnapshot,
+  expandSecretsOnly,
 } from "@dispatch/shared";
 import { launchAgentTask } from "./agent-tasks.js";
+import { SecretsService } from "./secrets.js";
+import { SecretRefresher } from "./secret-refresh.js";
 import { resolveReviewer } from "./reviewer.js";
 import type { EventBus } from "../bus.js";
 import { createChat, ensureSession } from "../routes/dispatch.js";
@@ -84,6 +87,7 @@ export interface ServiceBase {
 
 /** Injectable service overrides (tests supply fakes; prod omits them). */
 export interface ServiceOverrides {
+  secrets?: SecretsService;
   harnesses?: HarnessRegistry;
   managerMcp?: ManagerMcpBridge;
   broker?: SessionBroker;
@@ -134,6 +138,10 @@ export interface Services extends ServiceBase {
   /** HTTP front door used by runtimes that cannot consume in-process MCP. */
   managerMcp: ManagerMcpBridge;
   broker: SessionBroker;
+  /** Encrypted app-wide + per-project secrets behind `${secret:NAME}`. */
+  secrets: SecretsService;
+  /** Pushes a changed secret through config, live chats and running sub-apps. */
+  secretRefresher: SecretRefresher;
   terminals: TerminalService;
   memory: MemoryService;
   /** App-level (shipped + user-global) instructions and skills. */
@@ -262,8 +270,13 @@ export function createServices(
   const metrics = overrides.metrics ?? new MetricsService({ db: store.stateDb });
   const metricsBackfill =
     overrides.metricsBackfill ?? new MetricsBackfill({ store, metrics });
+  // Secrets live in the CONFIG root beside reviewer.json, so both instances
+  // resolve the same `${secret:NAME}`. Constructed before project config, which
+  // expands them into MCP server definitions at load.
+  const secrets =
+    overrides.secrets ?? new SecretsService({ configDir: config.configDir ?? config.dataDir });
   const projectConfig =
-    overrides.projectConfig ?? new ProjectConfigService({ store, bus });
+    overrides.projectConfig ?? new ProjectConfigService({ store, bus, secrets });
   // Per-project durable agent memory: injected at session start + exposed to the
   // agent as `mcp__dispatch-memory__remember|recall|forget`, and curated in the UI. Reads
   // from the project config dir's `memory/` when it has one (source of truth),
@@ -336,7 +349,13 @@ export function createServices(
   const git = overrides.git ?? new GitService();
   const commitMessage =
     overrides.commitMessage ?? new CommitMessageService({ git });
-  const runner = overrides.runner ?? new RunnerService({ store, bus });
+  const runner =
+    overrides.runner ??
+    new RunnerService({
+      store,
+      bus,
+      expandSecrets: (projectId, value) => expandSecretsOnly(value, secrets.resolverFor(projectId)),
+    });
   // OS-level port/pid inspector + bulk kill: reaps orphaned dev-server
   // grandchildren the runner records lost track of (server restart, half-killed
   // tree) and surfaces what's actually squatting a project's ports.
@@ -354,6 +373,9 @@ export function createServices(
       idleSessionMinutes: config.idleSessionMinutes,
       terminals,
       memory,
+      secrets,
+      // Built below, after the broker it depends on; only ever called from a tool.
+      secretRefresher: (): SecretRefresher => secretRefresher,
       memoryHistory,
       authored,
       slashCommands,
@@ -850,6 +872,11 @@ export function createServices(
     };
   };
 
+  const secretRefresher: SecretRefresher = new SecretRefresher({ projectConfig, broker, runner });
+  // A secret saved by the OTHER instance (they share config/) refreshes this
+  // one's consumers too; our own saves are refreshed by whoever made them.
+  secrets.onExternalChange((keys) => void secretRefresher.refresh(keys).catch(() => {}));
+
   let offCheckpoint: (() => void) | undefined;
   let offTitle: (() => void) | undefined;
   let offReap: (() => void) | undefined;
@@ -862,6 +889,8 @@ export function createServices(
     harnesses,
     managerMcp,
     broker,
+    secrets,
+    secretRefresher,
     terminals,
     memory,
     authored,
@@ -935,6 +964,8 @@ export function createServices(
       // Discover + sync every project's `.dispatch/` config FIRST so the
       // store reflects authored overrides before the detector/broker read it.
       // Best-effort — a bad config surfaces as a structured error, never a block.
+      // Before project config: its first load expands `${secret:NAME}`.
+      await secrets.start({ watch: true });
       await projectConfig.start().catch(() => {});
 
       // Best-effort background services. A throw in any ONE of these must not
@@ -1094,6 +1125,7 @@ export function createServices(
     },
 
     async dispose(): Promise<void> {
+      secrets.stop();
       offCheckpoint?.();
       offCheckpoint = undefined;
       offTitle?.();

@@ -38,4 +38,5 @@ export * from "./metrics.js";
 export * from "./pr-tools.js";
 export * from "./manager-tools.js";
 export * from "./human-review.js";
+export * from "./secrets.js";
 export * from "./authoring.js";

@@ -113,6 +113,10 @@ import {
   QUESTION_NOTES_SEPARATOR,
   readHumanReview,
   type HumanReviewPayload,
+  EMPTY_REFRESH_REPORT,
+  SECRET_ANSWERS,
+  type SecretRequestPayload,
+  type SecretScope,
   prReviewAgentView,
   resolveWorkflow,
   type McpEnablementLayers,
@@ -165,7 +169,12 @@ import {
   type SpawnChatRequest,
   type SpawnChatTarget,
   type SpawnedChat,
+  type ManagerMcpSecrets,
+  type ManagerSecretDeleteResult,
+  type ManagerSecretRequestResult,
 } from "./mcp/manager-mcp.js";
+import type { SecretKey, SecretsService } from "./secrets.js";
+import type { SecretRefresher } from "./secret-refresh.js";
 import type { SpawnNestingVerdict } from "./chat-nesting.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { createAuthoringEditor } from "./mcp/authoring-editor.js";
@@ -224,6 +233,7 @@ export function buildManagerToolsDirective(caps: {
   mcpConfig?: boolean;
   authoring?: boolean;
   inspect?: boolean;
+  secrets?: boolean;
   bundledServers?: readonly string[];
   projectServers?: readonly string[];
 }): string {
@@ -249,6 +259,12 @@ export function buildManagerToolsDirective(caps: {
     lines.push("- `dispatch-workspace` — managed terminals, worktrees, and live app previews.");
   }
   if (caps.memory) lines.push("- `dispatch-memory` — durable project facts and memory curation.");
+  if (caps.secrets) {
+    lines.push(
+      "- `dispatch-secrets` — ask the human for an API key/token on a card (never in chat) and " +
+        "reference it as `${secret:NAME}` in config.",
+    );
+  }
   if (caps.authoring) lines.push("- `dispatch-config` — author injected instructions and reusable skills.");
   if (caps.mcpConfig) lines.push("- `dispatch-mcp` — inspect and configure project MCP servers.");
   if (caps.inspect) lines.push("- `dispatch-project` — read Dispatch's project-level context.");
@@ -1026,6 +1042,8 @@ export interface BrokerProjectConfig {
    *  or `{}`. The more specific of the two layers — it wins over the app's own
    *  pins (see `mcp-enablement.ts`). Optional so older fakes stay valid. */
   getMcpEnabled?(projectId: string): Record<string, boolean>;
+  /** Secret name → consumers referencing it in this project's config. Optional for older fakes. */
+  secretReferences?(projectId: string): Record<string, string[]>;
   /** A project's bundled-browser block, or undefined when the manifest says
    *  nothing — which means the `auto` default, NOT off. Optional so older fakes
    *  stay valid. */
@@ -1067,6 +1085,13 @@ export interface SessionBrokerOptions {
   terminals?: TerminalService;
   /** Per-project agent memory: injected at start + exposed as `mcp__dispatch-memory__remember|recall|forget`. */
   memory?: MemoryService;
+  /**
+   * The secret store behind `mcp__dispatch-secrets__*`, and the refresher its
+   * saves go through. A getter for the refresher because it is built AFTER the
+   * broker — it needs the broker to reconnect live chats.
+   */
+  secrets?: SecretsService;
+  secretRefresher?: () => SecretRefresher | undefined;
   /** Git history of the memory dir: backs `mcp__dispatch-memory__memory_history`. Optional —
    *  without it that one tool reports itself unavailable and the rest still work. */
   memoryHistory?: MemoryHistoryService;
@@ -1880,6 +1905,8 @@ export class SessionBroker {
   private idleSweep?: ReturnType<typeof setInterval>;
   private readonly terminals?: TerminalService;
   private readonly memory?: MemoryService;
+  private readonly secrets?: SecretsService;
+  private readonly secretRefresher?: () => SecretRefresher | undefined;
   private readonly memoryHistory?: MemoryHistoryService;
   private readonly authored?: AuthoredConfigService;
   private readonly slashCommands?: SlashCommandService;
@@ -2008,6 +2035,8 @@ export class SessionBroker {
     }
     this.terminals = opts.terminals;
     this.memory = opts.memory;
+    this.secrets = opts.secrets;
+    this.secretRefresher = opts.secretRefresher;
     this.memoryHistory = opts.memoryHistory;
     this.authored = opts.authored;
     this.slashCommands = opts.slashCommands;
@@ -5273,6 +5302,181 @@ export class SessionBroker {
       : { approved: false, message: result.message };
   }
 
+  /**
+   * Swap freshly loaded definitions of some external MCP servers into every
+   * live chat of a project — how a changed `${secret:…}` reaches a chat that is
+   * already running, instead of waiting for its next session.
+   *
+   * Only the named servers are recomputed, and through the same enablement and
+   * per-session resolution `buildOptions` applies at start, so a refreshed
+   * server lands with this chat's cwd and ports rather than the primary
+   * checkout's. A chat whose runtime can't swap servers mid-session is reported
+   * rather than restarted: interrupting someone's turn to rotate a key is not a
+   * trade to make on their behalf.
+   */
+  async refreshMcpServers(
+    projectId: string,
+    serverNames: string[],
+  ): Promise<{ refreshed: string[]; nextSession: string[] }> {
+    const out = { refreshed: [] as string[], nextSession: [] as string[] };
+    if (!serverNames.length || !this.projectConfig) return out;
+    const project = await this.store.getProject(projectId).catch(() => null);
+    const appSettings = await this.store.getSettings().catch(() => undefined);
+    const fresh = this.projectConfig.getMcpServers(projectId);
+    for (const session of this.sessions.values()) {
+      if (session.projectId !== projectId) continue;
+      const enabled = applyMcpEnablement(
+        Object.fromEntries(serverNames.filter((n) => fresh[n]).map((n) => [n, fresh[n]!])),
+        {
+          app: appSettings?.mcpEnabled,
+          project: this.projectConfig.getMcpEnabled?.(projectId),
+        },
+      );
+      if (!Object.keys(enabled).length) continue;
+      const harness = session.harnessSession;
+      if (!harness?.updateMcpServers) {
+        out.nextSession.push(session.chatId);
+        continue;
+      }
+      const cwd = session.worktreeCwd ?? project?.repoPath;
+      const resolved = cwd
+        ? await resolveMcpServers(
+            enabled,
+            {
+              projectId,
+              cwd,
+              repoRoot: project?.repoPath ?? cwd,
+              chatId: session.chatId,
+              branch: session.worktreeCwd ? basename(session.worktreeCwd) : undefined,
+            },
+            this.mcpPorts,
+          )
+        : enabled;
+      try {
+        await harness.updateMcpServers(resolved);
+        out.refreshed.push(session.chatId);
+      } catch (err) {
+        console.warn(
+          `[Dispatch] could not refresh MCP servers in chat ${session.chatId}: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+        out.nextSession.push(session.chatId);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Put a secret card in front of the human — the broker half of
+   * `mcp__dispatch-secrets__secret_request`.
+   *
+   * A QUESTION card with a `secret` payload, like the review card, so it inherits
+   * the Attention Queue, notifications and restore-on-reload. The value does NOT
+   * ride the answer: the card PUTs it to `/api/secrets` and answers with a bare
+   * "Saved". So "Saved" alone proves nothing — an older client's plain question
+   * card can press it having sent no value — and the store's own timestamp is
+   * what decides whether anything was saved.
+   */
+  async requestSecret(
+    chatId: string,
+    input: { name: string; scope: SecretScope; why: string },
+    signal?: AbortSignal,
+  ): Promise<ManagerSecretRequestResult> {
+    const session = this.sessions.get(chatId);
+    const secrets = this.secrets;
+    if (!session) return { status: "unavailable", message: "No live session is available to ask through." };
+    if (!secrets) return { status: "unavailable", message: "The secret store isn't available." };
+    if (input.scope === "project" && !session.projectId) {
+      return { status: "unavailable", message: "This chat has no project; use scope 'global'." };
+    }
+    const key: SecretKey =
+      input.scope === "project"
+        ? { name: input.name, scope: "project", projectId: session.projectId }
+        : { name: input.name, scope: "global" };
+    const existing = await secrets.get(key);
+    const project = session.projectId ? await this.store.getProject(session.projectId).catch(() => null) : null;
+    const payload: SecretRequestPayload = {
+      name: key.name,
+      scope: key.scope,
+      ...(key.projectId ? { projectId: key.projectId } : {}),
+      ...(project?.name ? { projectName: project.name } : {}),
+      why: input.why,
+      exists: Boolean(existing),
+      requestedAt: Date.now(),
+    };
+    const result = await this.handlePermission(
+      session,
+      "AskUserQuestion",
+      {
+        questions: [
+          {
+            header: "Secret",
+            question: `${existing ? "Replace" : "Provide"} ${key.name}: ${input.why}`,
+            multiSelect: false,
+            options: [
+              { label: SECRET_ANSWERS.saved, description: "Stored in Settings → Secrets." },
+              { label: SECRET_ANSWERS.skip, description: "Don't provide it." },
+            ],
+          },
+        ],
+        secret: payload,
+      },
+      { displayName: "Secret", signal },
+    );
+    const after = await secrets.get(key);
+    const saved = Boolean(after && after.updatedAt >= payload.requestedAt);
+    if (!saved) {
+      return {
+        status: "skipped",
+        ...(result.behavior !== "allow" && result.message ? { message: result.message } : {}),
+      };
+    }
+    const refresh =
+      this.secretRefresher?.()?.lastReport(key) ??
+      (await this.secretRefresher?.()?.refresh([key])) ??
+      EMPTY_REFRESH_REPORT;
+    return { status: "saved", name: key.name, scope: key.scope, replaced: Boolean(existing), refresh };
+  }
+
+  /** `secret_delete`: confirm on a card, delete, refresh what referenced it. */
+  async deleteSecret(
+    chatId: string,
+    input: { name: string; scope: SecretScope },
+  ): Promise<ManagerSecretDeleteResult> {
+    const session = this.sessions.get(chatId);
+    const secrets = this.secrets;
+    if (!session || !secrets) return { status: "declined", message: "no live session or secret store" };
+    const key: SecretKey =
+      input.scope === "project"
+        ? { name: input.name, scope: "project", projectId: session.projectId }
+        : { name: input.name, scope: "global" };
+    if (!(await secrets.get(key))) return { status: "not_found" };
+    const { approved, message } = await this.requestApproval(chatId, {
+      toolName: "secret_delete",
+      title: `Delete the ${key.scope} secret ${key.name}?`,
+      description: "Anything referencing it is refreshed and sees an empty value.",
+      input: { name: key.name, scope: key.scope },
+    });
+    if (!approved) return { status: "declined", message };
+    await secrets.delete(key);
+    const refresh = (await this.secretRefresher?.()?.refresh([key])) ?? EMPTY_REFRESH_REPORT;
+    return { status: "deleted", refresh };
+  }
+
+  /** `secret_list`: names, scopes and consumers for this chat's project. */
+  async listSecrets(chatId: string): Promise<Awaited<ReturnType<ManagerMcpSecrets["list"]>>> {
+    const session = this.sessions.get(chatId);
+    const projectId = session?.projectId;
+    const rows = (await this.secrets?.list(projectId)) ?? [];
+    const refs = projectId ? (this.projectConfig?.secretReferences?.(projectId) ?? {}) : {};
+    const secrets = rows.map((r) => ({ ...r, usedBy: refs[r.name] ?? [] }));
+    const have = new Set(rows.map((r) => r.name));
+    const missing = Object.entries(refs)
+      .filter(([name]) => !have.has(name))
+      .map(([name, usedBy]) => ({ name, usedBy }));
+    return { secrets, missing };
+  }
+
   /* --------------------------------------------------- guard exemptions */
 
   /**
@@ -6330,6 +6534,13 @@ export class SessionBroker {
             : undefined,
         // Bind the memory runner to this session's project, so remember/recall/
         // forget just name the fact (scoped to the chat's project).
+        secrets: this.secrets
+          ? {
+              request: (input, signal) => this.requestSecret(session.chatId, input, signal),
+              list: () => this.listSecrets(session.chatId),
+              remove: (input) => this.deleteSecret(session.chatId, input),
+            }
+          : undefined,
         memory:
           memory && projectId
             ? {
@@ -6651,6 +6862,7 @@ export class SessionBroker {
         terminals: Boolean(this.terminals),
         worktrees: Boolean(this.worktrees && session.projectId),
         memory: Boolean(this.memory && session.projectId),
+        secrets: Boolean(this.secrets),
         runner: Boolean(this.runner && this.worktrees),
         mcpConfig: Boolean(session.projectId),
         authoring: Boolean(this.authored),

@@ -138,6 +138,7 @@ export function registerMcpRoutes(app: FastifyInstance): void {
     // Spelling the record out makes that a compile error instead.
     const bindings: Record<ManagerToolBinding, boolean> = {
       github: !!services.github,
+      secrets: !!services.secrets,
       terminals: !!services.terminals,
       memory: !!services.memory,
       runner: !!services.runner,

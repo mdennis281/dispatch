@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { ShieldQuestion, Check, X, ShieldCheck, Pencil } from "lucide-react";
-import { readHumanReview, type PermissionRow } from "@dispatch/shared";
+import { readHumanReview, readSecretRequest, type PermissionRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { QuestionCard } from "./QuestionCard.js";
 import { ReviewCard } from "./ReviewCard.js";
+import { SecretCard } from "./SecretCard.js";
 import { PlanCard } from "./PlanCard.js";
 import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
@@ -51,6 +52,8 @@ export function PermissionCard({ row }: PermissionCardProps) {
   // JSON dump of their payload is unreadable — each gets a purpose-built card.
   // A human review is a question with a `review` payload beside it.
   if (row.toolName === "AskUserQuestion") {
+    const secret = readSecretRequest(row.input);
+    if (secret) return <SecretCard row={row} secret={secret} />;
     const review = readHumanReview(row.input);
     return review ? <ReviewCard row={row} review={review} /> : <QuestionCard row={row} />;
   }

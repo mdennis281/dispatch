@@ -964,3 +964,62 @@ describe("ProjectConfigService — a reserved MCP server name", () => {
     expect(result.errors.filter((e) => /reserved/i.test(e.message))).toEqual([]);
   });
 });
+
+/* ------------------------------------------------ mcpServers ${secret:NAME} */
+
+describe("ProjectConfigService — ${secret:NAME}", () => {
+  const MANIFEST = [
+    "name: Configured",
+    "subApps:",
+    "  - id: web",
+    "    name: web",
+    "    cwd: apps/web",
+    "    dev: pnpm dev",
+    "    env:",
+    "      STRIPE_KEY: ${secret:STRIPE}",
+    "mcpServers:",
+    "  - name: linear",
+    "    transport:",
+    "      type: http",
+    "      url: https://mcp.linear.app/mcp",
+    "      headers:",
+    "        Authorization: Bearer ${secret:LINEAR}",
+    "  - name: plain",
+    "    transport:",
+    "      type: stdio",
+    "      command: npx",
+    "",
+  ].join("\n");
+
+  it("expands stored secrets into MCP definitions and records who references what", async () => {
+    const project = await seedProject();
+    await writeConfig("project.yaml", MANIFEST);
+    const values: Record<string, string> = { LINEAR: "lin-123" };
+    const svc = new ProjectConfigService({
+      store,
+      bus,
+      secrets: { resolverFor: (pid) => (name) => (pid === "p1" ? values[name] : undefined) },
+    });
+    const result = await svc.load(project);
+
+    expect(result.config!.mcpServers.linear).toMatchObject({ headers: { Authorization: "Bearer lin-123" } });
+    expect(result.errors).toEqual([]);
+    expect(svc.secretConsumers("p1", "LINEAR")).toEqual(["mcp:linear"]);
+    expect(svc.secretConsumers("p1", "STRIPE")).toEqual(["subapp:web"]);
+    expect(svc.projectsReferencingSecret("LINEAR")).toEqual(["p1"]);
+    expect(svc.projectsReferencingSecret("NOBODY")).toEqual([]);
+    expect(svc.secretReferences("p1")).toEqual({ LINEAR: ["mcp:linear"], STRIPE: ["subapp:web"] });
+    // A sub-app's env is expanded at LAUNCH by the runner, never baked into config.
+    expect(result.config!.subApps[0]!.env).toEqual({ STRIPE_KEY: "${secret:STRIPE}" });
+  });
+
+  it("reports a missing secret as a config error pointing at where to set it", async () => {
+    const project = await seedProject();
+    await writeConfig("project.yaml", MANIFEST);
+    const svc = new ProjectConfigService({ store, bus, secrets: { resolverFor: () => () => undefined } });
+    const result = await svc.load(project);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]!.message).toContain("LINEAR");
+    expect(result.errors[0]!.message).toContain("secret_request");
+  });
+});

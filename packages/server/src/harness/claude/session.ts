@@ -25,7 +25,7 @@ import type {
   HookJSONOutput,
   McpServerConfig as SdkMcpServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { Effort, PermissionMode, SlashCommandInfo } from "@dispatch/shared";
+import type { Effort, McpServerConfig, PermissionMode, SlashCommandInfo } from "@dispatch/shared";
 import { EffortSchema } from "@dispatch/shared";
 import type {
   HarnessEvent,
@@ -143,7 +143,7 @@ export interface ClaudeSessionOpts {
 }
 
 export class ClaudeSession implements HarnessSession {
-  private readonly spec: HarnessSessionSpec;
+  private spec: HarnessSessionSpec;
   private readonly queryFn: QueryFn;
   private readonly genId: () => string;
   private readonly decoder: ClaudeStreamDecoder;
@@ -409,6 +409,13 @@ export class ClaudeSession implements HarnessSession {
       };
     }
 
+    options.mcpServers = this.mcpServerSet();
+
+    return options;
+  }
+
+  /** The full server set handed to the SDK — at start, and again on every swap. */
+  private mcpServerSet(): Record<string, SdkMcpServerConfig> {
     const servers: Record<string, SdkMcpServerConfig> = {
       ...(this.spec.mcpServers as unknown as Record<string, SdkMcpServerConfig>),
     };
@@ -420,9 +427,20 @@ export class ClaudeSession implements HarnessSession {
         servers[name] = server as SdkMcpServerConfig;
       }
     }
-    options.mcpServers = servers;
+    return servers;
+  }
 
-    return options;
+  /**
+   * `setMcpServers` REPLACES the whole dynamic set, so it gets every server —
+   * Dispatch's in-process ones included. That is safe mid-tool-call: the SDK
+   * keeps an in-process instance it already has under the same name connected,
+   * and only hands process servers to the CLI, which reconnects the ones whose
+   * definition changed. Omitting the manager servers would disconnect them,
+   * including the one whose tool call triggered this refresh.
+   */
+  async updateMcpServers(servers: Record<string, McpServerConfig>): Promise<void> {
+    this.spec = { ...this.spec, mcpServers: { ...this.spec.mcpServers, ...servers } };
+    await this.query?.setMcpServers(this.mcpServerSet());
   }
 
   /** Reads the runtime's reported effort off every PreToolUse input. */

@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { Store } from "../store/index.js";
 import { EventBus } from "../bus.js";
 import type { WsServerEvent, Chat, Project } from "@dispatch/shared";
-import { HUMAN_REVIEW_ANSWERS, isPrSettledIdle } from "@dispatch/shared";
+import { EMPTY_REFRESH_REPORT, HUMAN_REVIEW_ANSWERS, SECRET_ANSWERS, isPrSettledIdle } from "@dispatch/shared";
+import { SecretsService, plainKeyProtector } from "./secrets.js";
 import { EXEMPTION_ANSWERS } from "./mcp/manager-mcp.js";
 import {
   buildManagerToolsDirective,
@@ -1388,6 +1389,50 @@ describe("SessionBroker — permissions", () => {
         status: "unavailable",
         message: "No live session is available to ask through.",
       });
+    });
+  });
+
+  describe("requestSecret", () => {
+    async function withSecrets() {
+      const dir = await mkdtemp(join(tmpdir(), "cm-secrets-"));
+      const secrets = new SecretsService({ configDir: dir, protector: plainKeyProtector });
+      const refresher = { lastReport: vi.fn(() => undefined), refresh: vi.fn(async () => EMPTY_REFRESH_REPORT) };
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn, 6, {
+        secrets,
+        secretRefresher: () => refresher as never,
+      });
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+      return { broker, secrets, refresher };
+    }
+
+    it("puts a secret card up and carries NO value in the answer or the result", async () => {
+      const { broker, secrets } = await withSecrets();
+      const reqP = nextPermissionId();
+      const resultP = broker.requestSecret("c1", { name: "LINEAR", scope: "project", why: "Linear MCP needs it." });
+      const reqId = await reqP;
+      const raised = events.find(
+        (e): e is Extract<WsServerEvent, { type: "permission-request" }> =>
+          e.type === "permission-request" && e.request.id === reqId,
+      );
+      expect(raised?.request.input.secret).toMatchObject({ name: "LINEAR", scope: "project", exists: false });
+
+      // What the card does: store the value through the API, THEN answer "Saved".
+      await secrets.set({ name: "LINEAR", scope: "project", projectId: chatFor("c1").projectId }, "lin-top-secret");
+      broker.answerQuestion(reqId, { optionId: SECRET_ANSWERS.saved, answer: SECRET_ANSWERS.saved });
+
+      const result = await resultP;
+      expect(result).toMatchObject({ status: "saved", name: "LINEAR", replaced: false });
+      expect(JSON.stringify(result)).not.toContain("lin-top-secret");
+      expect(JSON.stringify(events)).not.toContain("lin-top-secret");
+    });
+
+    it("reads a bare 'Saved' with no stored value as skipped — an old card can't fake a save", async () => {
+      const { broker } = await withSecrets();
+      const reqP = nextPermissionId();
+      const resultP = broker.requestSecret("c1", { name: "LINEAR", scope: "global", why: "x" });
+      broker.answerQuestion(await reqP, { optionId: SECRET_ANSWERS.saved, answer: SECRET_ANSWERS.saved });
+      await expect(resultP).resolves.toMatchObject({ status: "skipped" });
     });
   });
 

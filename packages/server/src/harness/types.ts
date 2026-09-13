@@ -508,6 +508,14 @@ export interface HarnessSession {
   setEffort(effort: Effort): Promise<void>;
   /** Compact the context in place, where supported. */
   compact(): Promise<void>;
+  /**
+   * Replace some of the session's EXTERNAL MCP server definitions in place —
+   * the ones whose `${secret:…}` changed — without restarting the chat. Merged
+   * over the servers the session started with; Dispatch's own servers are kept.
+   * Optional: a runtime that can't swap servers mid-session simply lacks it,
+   * and the change applies from the chat's next session instead.
+   */
+  updateMcpServers?(servers: Record<string, McpServerConfig>): Promise<void>;
   /** Answer a pending permission request. */
   resolvePermission(requestId: string, resolution: HarnessPermissionResolution): void;
   /** Answer a pending question. */
