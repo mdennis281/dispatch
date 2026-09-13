@@ -88,6 +88,7 @@ describe("mcp-catalog — builder", () => {
         prewarm: true,
         exemptions: true,
         secrets: true,
+        issues: true,
       },
     });
 
@@ -134,6 +135,10 @@ describe("mcp-catalog — builder", () => {
         "chat_reply",
         "chat_state",
         "project_info",
+        "issue_list",
+        "issue_read",
+        "issue_comment",
+        "issue_update",
       ]),
     );
 

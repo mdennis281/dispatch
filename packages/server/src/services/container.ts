@@ -60,6 +60,7 @@ import { ChatProcessService } from "./chat-processes.js";
 import { ProcTableCache } from "./proc-table-cache.js";
 import { ResourceService } from "./resources.js";
 import { GitHubService } from "./github.js";
+import { IssueService } from "./issues/service.js";
 import { Notifier } from "./notifier.js";
 import { PushService } from "./push.js";
 import { AttentionQueue } from "./attention.js";
@@ -88,6 +89,7 @@ export interface ServiceBase {
 /** Injectable service overrides (tests supply fakes; prod omits them). */
 export interface ServiceOverrides {
   secrets?: SecretsService;
+  issues?: IssueService;
   harnesses?: HarnessRegistry;
   managerMcp?: ManagerMcpBridge;
   broker?: SessionBroker;
@@ -140,6 +142,8 @@ export interface Services extends ServiceBase {
   broker: SessionBroker;
   /** Encrypted app-wide + per-project secrets behind `${secret:NAME}`. */
   secrets: SecretsService;
+  /** Which tracker a project's issues live in, and a provider-neutral handle on it. */
+  issues: IssueService;
   /** Pushes a changed secret through config, live chats and running sub-apps. */
   secretRefresher: SecretRefresher;
   terminals: TerminalService;
@@ -341,6 +345,12 @@ export function createServices(
   // GitHub control plane (PRs + Actions). Constructed before the broker so it can
   // back the session MCP's `watch_pr` checks / review-thread / merge-state polls.
   const github = overrides.github ?? new GitHubService({ bus, store });
+  const issues =
+    overrides.issues ??
+    new IssueService({
+      getProject: (id) => store.getProject(id),
+      getConfig: (id) => projectConfig.getIssues(id),
+    });
   // Worktrees + subApp runner are constructed BEFORE the broker so the session
   // MCP's `run_subapp` tool can launch apps (and resolve/create worktrees).
   const worktrees = overrides.worktrees ?? new WorktreeService({ bus, store });
@@ -374,6 +384,7 @@ export function createServices(
       terminals,
       memory,
       secrets,
+      issues,
       // Built below, after the broker it depends on; only ever called from a tool.
       secretRefresher: (): SecretRefresher => secretRefresher,
       memoryHistory,
@@ -890,6 +901,7 @@ export function createServices(
     managerMcp,
     broker,
     secrets,
+    issues,
     secretRefresher,
     terminals,
     memory,
