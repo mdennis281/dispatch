@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Drama, Settings2 } from "lucide-react";
 import type { Chat, Persona } from "@dispatch/shared";
 import { api } from "../../lib/api.js";
@@ -7,6 +7,8 @@ import { MenuItem } from "../ui/Popover.js";
 import { TaskLauncherDialog } from "../tasks/TaskLauncherDialog.js";
 
 const BUSY_STATUSES = ["running", "queued", "waiting", "awaiting-input"];
+
+const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 export type PersonaPicker = ReturnType<typeof usePersonaPicker>;
 
@@ -17,15 +19,30 @@ export type PersonaPicker = ReturnType<typeof usePersonaPicker>;
  * default. It is a toolbar control now, which means two surfaces (the toolbar
  * popover and the options menu) share these rows, so the state lives in a hook
  * rather than inside either one.
+ *
+ * Its error is its own, not the composer's send/upload slot: sharing that slot
+ * let a successful pick wipe an unrelated "Image upload failed". And because the
+ * composer is not keyed per chat, everything per-chat here resets on a chat
+ * switch, and a save that lands after one is dropped rather than reported in the
+ * chat you moved to.
  */
-export function usePersonaPicker(chat: Chat, onError: (message: string | null) => void) {
+export function usePersonaPicker(chat: Chat) {
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [configuring, setConfiguring] = useState(false);
+  const chatIdRef = useRef(chat.id);
+  chatIdRef.current = chat.id;
   const active = personas.find((p) => p.id === chat.personaId);
   const busy = saving || BUSY_STATUSES.includes(chat.status ?? "idle");
   // Before the list loads, a set persona still has a name to show: its id.
   const label = active?.name ?? chat.personaId ?? null;
+
+  useEffect(() => {
+    setSaving(false);
+    setError(null);
+    setConfiguring(false);
+  }, [chat.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -36,33 +53,35 @@ export function usePersonaPicker(chat: Chat, onError: (message: string | null) =
         if (!cancelled) setPersonas(items);
       })
       .catch((err) => {
-        if (!cancelled) onError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) setError(messageOf(err));
       });
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- onError is a stable setState
   }, [chat.projectId]);
 
   /** Re-read on open, so a persona authored in another tab shows up. */
   async function refresh() {
     try {
       setPersonas(await api.personas.list(chat.projectId));
+      setError(null);
     } catch (err) {
-      onError(err instanceof Error ? err.message : String(err));
+      setError(messageOf(err));
     }
   }
 
   async function select(personaId: string | null) {
+    const chatId = chat.id;
     setSaving(true);
     try {
-      const saved = await api.personas.select(chat.id, personaId);
+      const saved = await api.personas.select(chatId, personaId);
+      // The store is keyed by id, so this is right even after a chat switch.
       useChats.getState().upsertChat(saved);
-      onError(null);
+      if (chatIdRef.current === chatId) setError(null);
     } catch (err) {
-      onError(err instanceof Error ? err.message : String(err));
+      if (chatIdRef.current === chatId) setError(messageOf(err));
     } finally {
-      setSaving(false);
+      if (chatIdRef.current === chatId) setSaving(false);
     }
   }
 
@@ -72,6 +91,8 @@ export function usePersonaPicker(chat: Chat, onError: (message: string | null) =
     active,
     busy,
     label,
+    error,
+    dismissError: () => setError(null),
     refresh,
     select,
     configuring,

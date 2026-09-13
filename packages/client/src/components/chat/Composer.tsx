@@ -301,7 +301,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const fileDrag = useFileDrag();
   const [over, setOver] = useState<DropIntent>(null);
   const [error, setError] = useState<string | null>(null);
-  const persona = usePersonaPicker(chat, setError);
+  const persona = usePersonaPicker(chat);
   // Where the file picker opens: this chat's own working directory, so the
   // paths it inserts are paths the agent for THIS chat can open.
   //
@@ -1352,6 +1352,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             >
               <X />
             </button>
+          </div>
+        )}
+
+        {/* Persona failures get their own slot for the same reason. */}
+        {persona.error && (
+          <div className="flex items-center gap-2 px-3 pt-2 text-xs text-danger" role="alert">
+            <span className="min-w-0 flex-1">{persona.error}</span>
+            <IconButton tip="Dismiss" onClick={persona.dismissError} className="shrink-0">
+              <X />
+            </IconButton>
           </div>
         )}
 
