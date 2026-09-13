@@ -90,6 +90,9 @@ import {
   ManifestMcpTransportSchema,
   MERGE_HOLD_LABEL,
   encodePrToolPayload,
+  WATCH_PR_DEFAULT_TIMEOUT_SECONDS,
+  WATCH_PR_POLL_INTERVAL_MS,
+  WATCH_PR_TIMEOUT_CAP_SECONDS,
   WorkflowExemptionScopeSchema,
   WorkflowMergeMethodSchema,
   describeExemptionScope,
@@ -161,14 +164,15 @@ import {
 export const WAIT_CAP_SECONDS = 3600;
 
 /** How often `watch_pr` re-polls a PR's checks / review threads / merge state. */
-export const PR_POLL_INTERVAL_MS = 20_000;
+export const PR_POLL_INTERVAL_MS = WATCH_PR_POLL_INTERVAL_MS;
 
 /**
  * Default per-call `watch_pr` timeout (30 min); still capped at
- * {@link WAIT_CAP_SECONDS}. The agent re-calls after each returned batch, so the
+ * {@link WATCH_PR_TIMEOUT_CAP_SECONDS}. Both live in shared because the card
+ * draws a running watch's deadline from them. The agent re-calls after each returned batch, so the
  * effective watch is unbounded — this only bounds a single quiet poll window.
  */
-export const WATCH_PR_DEFAULT_TIMEOUT_SECONDS = 1800;
+export { WATCH_PR_DEFAULT_TIMEOUT_SECONDS };
 
 /**
  * How long a watch tolerates a PR with NO checks at all before saying so once.
@@ -3079,7 +3083,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .optional()
         .describe(
           `Max quiet window before returning with no new activity (default ` +
-            `${WATCH_PR_DEFAULT_TIMEOUT_SECONDS}s, cap ${WAIT_CAP_SECONDS}s). On a quiet ` +
+            `${WATCH_PR_DEFAULT_TIMEOUT_SECONDS}s, cap ${WATCH_PR_TIMEOUT_CAP_SECONDS}s). On a quiet ` +
             `timeout you get done:false/timedOut:true — just call watch_pr again to resume.`,
         ),
     },
@@ -3096,7 +3100,7 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         typeof args.repo === "string" && args.repo.trim() ? args.repo.trim() : undefined;
       const timeoutSeconds = clampSeconds(
         args.timeoutSeconds ?? WATCH_PR_DEFAULT_TIMEOUT_SECONDS,
-        WAIT_CAP_SECONDS,
+        WATCH_PR_TIMEOUT_CAP_SECONDS,
       );
 
       const key = `${repo ?? ""}#${number}`;
