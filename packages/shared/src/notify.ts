@@ -32,7 +32,7 @@ const TimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
  * the filter passes when ANY of them is enabled. Dropping a bundled item because
  * one of its reasons is muted would lose the reason that wasn't.
  */
-export const REVIEW_KINDS = ["check", "comment", "review", "settled"] as const;
+export const REVIEW_KINDS = ["check", "passed", "comment", "review", "settled"] as const;
 export type ReviewKind = (typeof REVIEW_KINDS)[number];
 
 export const NotificationPrefsSchema = z.object({
@@ -53,6 +53,7 @@ export const NotificationPrefsSchema = z.object({
   reviewKinds: z
     .object({
       check: z.boolean().default(true),
+      passed: z.boolean().default(true),
       comment: z.boolean().default(true),
       review: z.boolean().default(true),
       settled: z.boolean().default(true),

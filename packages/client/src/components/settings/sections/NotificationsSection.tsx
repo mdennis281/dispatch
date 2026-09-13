@@ -100,6 +100,7 @@ const REVIEW_ROWS: Array<{
   hint: string;
 }> = [
   { key: "check", label: "Check failed", hint: "CI went red" },
+  { key: "passed", label: "CI passed", hint: "every check finished green" },
   { key: "comment", label: "Review comment", hint: "a new unresolved thread" },
   { key: "review", label: "Review submitted", hint: "approved / changes requested" },
   { key: "settled", label: "PR merged or closed", hint: "the PR reached its end state" },
