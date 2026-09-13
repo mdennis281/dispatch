@@ -416,7 +416,7 @@ export const AttentionItemSchema = z.object({
    * a failed check but not for a nit" is the distinction people actually want,
    * and `kind` alone cannot express it. See `shouldNotify` in shared/notify.ts.
    */
-  reviewKinds: z.array(z.enum(["check", "comment", "review", "settled"])).optional(),
+  reviewKinds: z.array(z.enum(["check", "passed", "comment", "review", "settled"])).optional(),
   createdAt: z.number().int(),
 });
 export type AttentionItem = z.infer<typeof AttentionItemSchema>;

@@ -12,8 +12,8 @@
  * So the noticing has to happen where nothing has to remember to ask. This
  * service polls the PRs recorded on chats (`Chat.prs` — the ownership record
  * `create_pr` writes) and raises a `review` attention item when something
- * actually new lands: a submitted review, a new unresolved review thread, or a
- * failing check.
+ * actually new lands: a submitted review, a new unresolved review thread, a
+ * failing check, or CI going green.
  *
  * Two policies are deliberate, not incidental:
  *
@@ -177,6 +177,35 @@ interface SeenState {
   checks: Map<string, string>;
   /** `${author}:${state}` of every submitted review already surfaced. */
   reviews: Set<string>;
+  /**
+   * Fingerprint of the green CI run last seen; `null` while CI is not green;
+   * `undefined` until this PR has been observed at all. Reset to null on every
+   * pending/red pass so a re-run that goes red→green on the SAME sha re-fires,
+   * and keyed to the head sha so a fix push that went green entirely between two
+   * sweeps (pending window never observed) still counts as a new pass.
+   *
+   * The `undefined` state is what keeps a server restart quiet: this memory is
+   * in-process, and without it the first sweep after every restart would wake
+   * each chat whose PR was already sitting green.
+   */
+  green?: string | null;
+}
+
+/**
+ * The fingerprint of an all-green CI run, or undefined when it isn't one.
+ *
+ * Same definition `watch_pr` uses for `checksPassing`: at least one check, all
+ * completed, none failing. Zero checks is NOT a pass — on a repo with no CI that
+ * would wake every PR's chat to tell it nothing.
+ */
+function greenFingerprint(snap: PrPollSnapshot): string | undefined {
+  const checks = snap.checks ?? [];
+  if (!checks.length) return undefined;
+  for (const c of checks) {
+    if (c.status !== "completed") return undefined;
+    if (c.conclusion && FAILING_CONCLUSIONS.has(c.conclusion)) return undefined;
+  }
+  return snap.headRefOid ?? checks.map((c) => `${c.name}:${c.conclusion}`).sort().join(",");
 }
 
 /** One round of new activity on one PR. */
@@ -351,6 +380,8 @@ export class PrReviewWatcher {
       if (r.state === "PENDING") continue;
       st.reviews.add(`${r.author}:${r.state}`);
     }
+    // A PR already green when it's armed has told the chat nothing new.
+    st.green = greenFingerprint(snap) ?? null;
     // The catalog gets the arming poll too — a PR opened seconds ago should show
     // its real state, not sit blank until the first sweep comes round.
     await this.registry
@@ -650,6 +681,16 @@ export class PrReviewWatcher {
       st.checks.set(c.name, fingerprint);
     }
 
+    // The other half of "the agent went idle waiting on CI": a chat that stopped
+    // calling `watch_pr` was woken for a red build but never for the green one,
+    // so a landable PR sat there with nobody landing it.
+    const green = greenFingerprint(snap) ?? null;
+    if (green && st.green !== undefined && st.green !== green) {
+      reasons.push(`CI passed (${checks.length} check${checks.length === 1 ? "" : "s"})`);
+      reviewKinds.add("passed");
+    }
+    st.green = green;
+
     for (const t of threads ?? []) {
       if (t.isResolved || t.isOutdated) continue;
       if (st.threads.has(t.id)) continue;
@@ -689,15 +730,29 @@ export class PrReviewWatcher {
 
     // ONLY the owning chat is woken — see the module docblock. `chat` here IS the
     // owner by construction: we found this PR by walking ITS `prs`.
-    await this.wake(chat.id, ref, reasons);
+    await this.wake(chat.id, ref, reasons, reviewKinds);
     return { chatId: chat.id, ref, reasons };
   }
 
   /** Nudge the owning chat to work the round, unless it's already busy. */
-  private async wake(chatId: string, ref: PRRef, reasons: string[]): Promise<void> {
+  private async wake(
+    chatId: string,
+    ref: PRRef,
+    reasons: string[],
+    kinds: ReadonlySet<ReviewKind>,
+  ): Promise<void> {
     if (!this.resumeFn || this.isBusy(chatId)) return;
-    const prompt =
-      `New activity on your PR #${ref.number}${ref.url ? ` (${ref.url})` : ""}: ` +
+    const head = `PR #${ref.number}${ref.url ? ` (${ref.url})` : ""}`;
+    // A green build alone is not a review round: "address what it reports" with
+    // nothing to address sends the agent hunting for work. It gets its own
+    // instruction — confirm nothing is outstanding, then land.
+    const onlyPassed = kinds.size === 1 && kinds.has("passed");
+    const prompt = onlyPassed
+      ? `CI passed on your ${head}.\n\n` +
+        "Call `mcp__dispatch-github__watch_pr` to confirm nothing else is outstanding " +
+        "(open review threads, a reviewer still on the hook). If the PR is landable, land " +
+        "it the way this project lands changes — unless the user asked to look first."
+      : `New activity on your ${head}: ` +
       `${reasons.join("; ")}.\n\n` +
       "Work this review round: call `mcp__dispatch-github__watch_pr` for the details, address " +
       "what it reports, call `mcp__dispatch-github__resolve_thread` for each thread you actually " +
@@ -711,7 +766,11 @@ export class PrReviewWatcher {
     // `composeMessageText` of a lone brief is the text verbatim, so the model
     // receives exactly the prompt it always did.
     const parts: MessagePart[] = [
-      { kind: "brief", label: `PR #${ref.number} — new review activity`, text: prompt },
+      {
+        kind: "brief",
+        label: onlyPassed ? `PR #${ref.number} — CI passed` : `PR #${ref.number} — new review activity`,
+        text: prompt,
+      },
     ];
     await this.resumeFn(chatId, prompt, parts).catch((err: unknown) => {
       // Leave the badge standing — the human can still act on it.

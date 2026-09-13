@@ -331,6 +331,114 @@ describe("PrReviewWatcher — dedup", () => {
   });
 });
 
+describe("PrReviewWatcher — CI passed", () => {
+  type Check = { name: string; status: string; conclusion?: string | null };
+  const PENDING: Check[] = [
+    { name: "build", status: "in_progress", conclusion: null },
+    { name: "test", status: "completed", conclusion: "success" },
+  ];
+  const GREEN: Check[] = [
+    { name: "build", status: "completed", conclusion: "success" },
+    { name: "test", status: "completed", conclusion: "skipped" },
+  ];
+
+  async function scripted(initial: Check[], sha = "abc") {
+    await makeChat("owner", [REF]);
+    const state = { checks: initial, sha };
+    const sent: Array<{ text: string; parts?: MessagePart[] }> = [];
+    const watcher = new PrReviewWatcher({
+      store,
+      bus,
+      github: {
+        pollPrState: (repo, n) =>
+          fakeGitHub({
+            prChecks: async () => state.checks,
+            patch: { headRefOid: state.sha },
+          }).pollPrState(repo, n),
+      },
+      resume: async (_chatId, text, parts) => {
+        sent.push({ text, parts });
+      },
+    });
+    return { watcher, state, sent };
+  }
+
+  it("fires once when pending CI goes green, and wakes the owner to land it", async () => {
+    const { watcher, state, sent } = await scripted(PENDING);
+    expect(await watcher.sweep()).toEqual([]);
+    state.checks = GREEN;
+
+    const raised = await watcher.sweep();
+    expect(raised).toHaveLength(1);
+    expect(raised[0]!.reasons).toEqual(["CI passed (2 checks)"]);
+    expect(reviewItems()[0]!.reviewKinds).toEqual(["passed"]);
+    // Its own brief, not the "work this review round" one — there is nothing to address.
+    expect(sent[0]!.parts?.[0]).toMatchObject({ kind: "brief", label: "PR #42 — CI passed" });
+    expect(sent[0]!.text).toMatch(/watch_pr/);
+    expect(sent[0]!.text).not.toMatch(/Work this review round/);
+
+    expect(await watcher.sweep()).toEqual([]);
+  });
+
+  it("fires after a failure is fixed, including a re-run on the same sha", async () => {
+    const { watcher, state } = await scripted(PENDING);
+    await watcher.sweep();
+    state.checks = [{ name: "build", status: "completed", conclusion: "failure" }];
+    expect((await watcher.sweep())[0]!.reasons).toEqual(['check "build" failure']);
+    state.checks = GREEN;
+    expect((await watcher.sweep())[0]!.reasons).toEqual(["CI passed (2 checks)"]);
+  });
+
+  it("fires for a new head sha even if the pending window was never observed", async () => {
+    const { watcher, state } = await scripted(PENDING);
+    await watcher.sweep();
+    state.checks = GREEN;
+    expect(await watcher.sweep()).toHaveLength(1);
+    state.sha = "def";
+    expect(await watcher.sweep()).toHaveLength(1);
+  });
+
+  it("stays quiet on the first sighting of an already-green PR (server restart)", async () => {
+    const { watcher, sent } = await scripted(GREEN);
+    expect(await watcher.sweep()).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it("is not armed into firing: green at create_pr time is not news", async () => {
+    const { watcher } = await scripted(GREEN);
+    await watcher.arm("owner", REF);
+    expect(await watcher.sweep()).toEqual([]);
+  });
+
+  it("never treats a PR with no checks as passing", async () => {
+    const { watcher, state } = await scripted(PENDING);
+    await watcher.sweep();
+    state.checks = [];
+    expect(await watcher.sweep()).toEqual([]);
+  });
+
+  it("uses the review-round prompt when the pass arrives bundled with a comment", async () => {
+    await makeChat("owner", [REF]);
+    let checks: Check[] = PENDING;
+    let threads: Array<{ id: string; isResolved: boolean }> = [];
+    const prompts: string[] = [];
+    const watcher = new PrReviewWatcher({
+      store,
+      bus,
+      github: fakeGitHub({ prChecks: async () => checks, reviewThreads: async () => threads }),
+      resume: async (_c, text) => {
+        prompts.push(text);
+      },
+    });
+    await watcher.sweep();
+    checks = GREEN;
+    threads = [{ id: "T_1", isResolved: false }];
+    await watcher.sweep();
+    expect(prompts[0]).toMatch(/Work this review round/);
+    expect(prompts[0]).toMatch(/CI passed/);
+  });
+});
+
 describe("PrReviewWatcher — auto-resume", () => {
   it("wakes ONLY the chat whose own `prs` carries the PR", async () => {
     // Chosen deliberately over blanket auto-resume: `Chat.prs` is the ownership
