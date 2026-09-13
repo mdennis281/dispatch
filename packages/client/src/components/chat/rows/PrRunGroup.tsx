@@ -49,6 +49,7 @@ import { dur, parseMcpName, relTime, safeJson, untilShort } from "../../../lib/f
 import { hydrateFullRows } from "../../../stores/index.js";
 import { useNowTick } from "../../../stores/agentRun.js";
 import { usePrs } from "../../../stores/prs.js";
+import { useChats } from "../../../stores/chats.js";
 import { displayResultText } from "../../../lib/toolPresentations.js";
 import { toolCallState } from "../../../lib/toolState.js";
 import type { ToolDetailState } from "../ToolDetailModal.js";
@@ -89,18 +90,26 @@ function watchTarget(input: Record<string, unknown>): { number: number; repo?: s
  *
  * `watch_pr` usually omits `repo` (it defaults to the chat's checkout), and the
  * store is keyed `owner/repo#number` because numbers restart per repository. So
- * a bare number resolves to the row THIS chat owns first — a chat has one
- * checkout — and to any row only when exactly one repo has that number.
+ * a bare number resolves to the row THIS chat opened first, then to the one row
+ * with that number in the watching chat's PROJECT — the server resolves it
+ * against that project's checkout. Never across the whole catalog: low numbers
+ * collide between projects, and a card confidently drawing another repo's #12
+ * as `live` is worse than drawing nothing. `PrRecord.chatId` is the chat that
+ * OPENED the PR, so a parent watching its child's PR only matches by project.
  * Returns the stored object, so it is safe to select directly.
  */
 function findRecord(
   byKey: Record<string, PrRecord>,
   target: { number: number; repo?: string },
   chatId: string,
+  projectId: string | undefined,
 ): PrRecord | undefined {
   if (target.repo) return byKey[prRecordKey(target.repo, target.number)];
   const rows = Object.values(byKey).filter((r) => r.number === target.number);
-  return rows.find((r) => r.chatId === chatId) ?? (rows.length === 1 ? rows[0] : undefined);
+  const owned = rows.find((r) => r.chatId === chatId);
+  if (owned || !projectId) return owned;
+  const inProject = rows.filter((r) => r.projectId === projectId);
+  return inProject.length === 1 ? inProject[0] : undefined;
 }
 
 /**
@@ -128,8 +137,9 @@ function useCardPr(
       : frozen
         ? { number: frozen.number, repo: frozen.repo }
         : watchTarget(entry.use.input);
+  const projectId = useChats((s) => s.byId[entry.use.chatId]?.projectId);
   const record = usePrs((s) =>
-    target ? findRecord(s.byKey, target, entry.use.chatId) : undefined,
+    target ? findRecord(s.byKey, target, entry.use.chatId, projectId) : undefined,
   );
   if (record) return { pr: record, record, live: true };
   return { pr: frozen, live: false };
@@ -222,7 +232,7 @@ function PrToolCard({ entry }: { entry: PrRunEntry }) {
           ) : (
             <p className="text-xs text-muted">
               {state === "running"
-                ? "This PR isn't in Dispatch's catalog yet — its state appears here once the watch's first poll lands."
+                ? "Dispatch's PR catalog has no row for this PR in this project, so its state appears when the watch returns."
                 : "The tool could not read this pull request, so there is no state to show."}
             </p>
           )}
@@ -302,8 +312,13 @@ function OutcomeCard({ payload, elapsed }: { payload: PrToolPayload; elapsed?: n
  *
  * The deadline is re-derived from the call's input with the server's own
  * default and cap (shared constants), because a running call has nothing else
- * to read. Last poll comes from the registry row, which `watch_pr` bumps on
- * every poll — so a watch whose polls fail says so instead of just ticking.
+ * to read.
+ *
+ * It shows the row's last CHANGE, not its last poll, on purpose: a quiet poll is
+ * persisted but never published (announcing one would wake every client every
+ * 30s), so a client-side `lastPolledAt` freezes at the last change and a healthy
+ * quiet watch would read "last poll 15m ago" as if it had stalled. Poll failures
+ * ARE published, so `pollError` is trustworthy.
  */
 function WatchStatus({
   entry,
@@ -357,8 +372,8 @@ function WatchStatus({
           {running ? untilShort(entry.use.ts + timeoutMs, now) : dur(timeoutMs)}
         </Fact>
         <Fact label="Polls every">{dur(WATCH_PR_POLL_INTERVAL_MS)}</Fact>
-        <Fact label="Last poll">
-          {record?.lastPolledAt ? relTime(record.lastPolledAt, now) : "—"}
+        <Fact label="Last change">
+          {record?.lastChangedAt ? relTime(record.lastChangedAt, now) : "—"}
         </Fact>
       </dl>
 
