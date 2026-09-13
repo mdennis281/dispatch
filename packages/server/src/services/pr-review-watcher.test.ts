@@ -680,6 +680,38 @@ describe("PrReviewWatcher — the PR catalog", () => {
     expect((await registry.list())[0]!.lastPolledAt).toBeGreaterThan(0);
   });
 
+  it("does not wake for a green the owner already saw through watch_pr", async () => {
+    // watch_pr's polls keep the row un-due, so the sweep never polls it itself.
+    // Once the row falls due the sweep must not mistake that old green for news:
+    // the owner may have left the PR open on purpose, and this wake says "land it".
+    await makeChat("c1", [REF]);
+    let checks = [{ name: "build", status: "in_progress", conclusion: null as string | null }];
+    const woken: string[] = [];
+    let now = 1_000_000;
+    const registry = new PrRegistry({ store, bus, now: () => now });
+    const github = fakeGitHub({ prChecks: async () => checks, patch: { headRefOid: "abc" } });
+    const watcher = new PrReviewWatcher({
+      store,
+      bus,
+      github,
+      registry,
+      now: () => now,
+      resume: async (chatId) => {
+        woken.push(chatId);
+      },
+    });
+
+    await watcher.arm("c1", REF);
+    checks = [{ name: "build", status: "completed", conclusion: "success" }];
+    // What watch_pr's poll does: record the snapshot, leaving the row un-due.
+    await registry.record((await github.pollPrState("octo/repo", 42))!, { chatId: "c1" });
+    expect(await watcher.sweep()).toEqual([]);
+
+    now += PR_POLL_HOT_MS;
+    expect(await watcher.sweep()).toEqual([]);
+    expect(woken).toEqual([]);
+  });
+
   it("honours the catalog's cadence — a parked PR is not re-polled every sweep", async () => {
     await makeChat("c1", [REF]);
     let polls = 0;

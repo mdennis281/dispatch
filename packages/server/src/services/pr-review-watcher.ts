@@ -198,7 +198,9 @@ interface SeenState {
  * completed, none failing. Zero checks is NOT a pass — on a repo with no CI that
  * would wake every PR's chat to tell it nothing.
  */
-function greenFingerprint(snap: PrPollSnapshot): string | undefined {
+function greenFingerprint(
+  snap: Pick<PrPollSnapshot, "checks" | "headRefOid">,
+): string | undefined {
   const checks = snap.checks ?? [];
   if (!checks.length) return undefined;
   for (const c of checks) {
@@ -513,14 +515,8 @@ export class PrReviewWatcher {
    * what lets it run on every sweep for every open PR regardless of the poll
    * cadence, which is the whole point: see the bug at {@link checkOne}.
    */
-  private async maybeSpawnReviewFromRow(
-    repo: string,
-    number: number,
-    scope: PrScope,
-  ): Promise<void> {
-    if (!this.reviewAgent || !this.registry) return;
-    const row = await this.registry.snapshot(repo, number).catch(() => null);
-    if (!row) return;
+  private async maybeSpawnReviewFromRow(row: PrSnapshot | null, scope: PrScope): Promise<void> {
+    if (!this.reviewAgent || !this.registry || !row) return;
     await this.maybeSpawnReview(
       {
         repo: row.repo,
@@ -639,7 +635,15 @@ export class PrReviewWatcher {
     // the-salesman#138: 13 minutes in `watch_pr`, `dispatch-review` sitting in
     // the queue the whole time, zero rounds spent, merged unreviewed.
     if (due && !due.has(`${repo}#${ref.number}`)) {
-      await this.maybeSpawnReviewFromRow(repo, ref.number, scope).catch(() => undefined);
+      const row = (await this.registry?.snapshot(repo, ref.number).catch(() => null)) ?? null;
+      // The same starvation, for the green memory: while the owner loops
+      // `watch_pr` this branch is all the sweep ever runs, so without syncing here
+      // the green it already saw through `watch_pr` looks brand-new once the row
+      // falls due — and wakes a chat that deliberately left its PR open (hold, a
+      // denied override, "just open it") with "land it". A row this pass skipped
+      // was recorded by a poll someone already acted on, so it is taken silently.
+      if (row) this.stateFor(chat.id, ref).green = greenFingerprint(row) ?? null;
+      await this.maybeSpawnReviewFromRow(row, scope).catch(() => undefined);
       return null;
     }
 
