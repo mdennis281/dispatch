@@ -2,6 +2,7 @@
  * REST for subscription usage (the header meter).
  *   GET  /api/usage          → latest UsageSnapshot (polls once if never fetched)
  *   POST /api/usage/refresh  → force a fresh fetch now (the "refresh" button)
+ *   GET  /api/usage/subscriptions[?refresh=1] → every logged-in account's windows (the card)
  * Both take `?subscription=<id>` (whose windows) and/or `?harness=<provider>`
  * (that provider's default account when no subscription is named).
  * The server polls this on a timer too and pushes `usage-update` over the bus;
@@ -12,10 +13,14 @@ import {
   DEFAULT_HARNESS,
   HarnessKindSchema,
   findSubscription,
+  accountLabel,
   subscriptionFor,
+  usageWindowsOf,
+  type SubscriptionUsage,
+  type UsageOverview,
   type UsageSnapshot,
 } from "@dispatch/shared";
-import { accountOf } from "../services/subscriptions.js";
+import { accountOf, subscriptionStatuses } from "../services/subscriptions.js";
 
 /**
  * A rate-limit window's length as a person would say it. Codex reports its
@@ -67,6 +72,10 @@ async function snapshotFor(
     value && typeof value.usedPercent === "number"
       ? { percent: value.usedPercent, resetsAt: value.resetsAt ?? null }
       : null;
+  const windows = limits?.windows?.flatMap((w) => {
+    const shown = win(w);
+    return shown ? [{ ...shown, title: w.title }] : [];
+  });
   return {
     fiveHour: win(limits?.primary),
     sevenDay: win(limits?.secondary),
@@ -76,11 +85,65 @@ async function snapshotFor(
     primaryLabel: windowLabel(limits?.primary?.windowMinutes, "Primary window"),
     secondaryLabel: windowLabel(limits?.secondary?.windowMinutes, "Secondary window"),
     planType: limits?.planType,
+    ...(windows ? { windows } : {}),
     ...(limits ? {} : { stale: true, error: "unavailable" }),
   };
 }
 
+/**
+ * Every logged-in account of an installed provider, read at once.
+ *
+ * One request for the whole card rather than one per account the client picks:
+ * the card used to switch accounts with tabs, and reaching for a tab moved the
+ * pointer off the hover card, which closed it. A stacked list needs every
+ * account's windows up front.
+ *
+ * Accounts are read in parallel and each failure stays on its own row — a Codex
+ * app-server that won't answer must not cost the Claude rows their numbers.
+ */
+async function overview(app: FastifyInstance, refresh: boolean): Promise<UsageOverview> {
+  const settings = await app.cm.store.getSettings().catch(() => null);
+  const installed = new Set(
+    app.services.harnesses
+      .list()
+      .filter((h) => h.runtime().available)
+      .map((h) => h.kind),
+  );
+  const accounts = subscriptionStatuses(settings).filter(
+    (s) => s.loggedIn && installed.has(s.provider),
+  );
+  const subscriptions = await Promise.all(
+    accounts.map(async (sub): Promise<SubscriptionUsage> => {
+      const base = { subscriptionId: sub.id, name: accountLabel(sub), provider: sub.provider };
+      try {
+        const snap = await snapshotFor(app, { subscription: sub.id }, refresh);
+        return {
+          ...base,
+          windows: usageWindowsOf(snap),
+          fetchedAt: snap.fetchedAt,
+          ...(snap.planType ? { planType: snap.planType } : {}),
+          ...(snap.stale ? { stale: true } : {}),
+          ...(snap.error ? { error: snap.error } : {}),
+        };
+      } catch (err) {
+        return {
+          ...base,
+          windows: [],
+          fetchedAt: Date.now(),
+          stale: true,
+          error: err instanceof Error ? err.message : "unavailable",
+        };
+      }
+    }),
+  );
+  return { fetchedAt: Date.now(), subscriptions };
+}
+
 export function registerUsageRoutes(app: FastifyInstance): void {
+  app.get<{ Querystring: { refresh?: string } }>("/api/usage/subscriptions", async (req) =>
+    overview(app, req.query.refresh === "1"),
+  );
+
   app.get<{ Querystring: UsageQuery }>("/api/usage", async (req) =>
     snapshotFor(app, req.query, false),
   );
