@@ -53,6 +53,24 @@ export interface ProviderDescriptor {
    * `materializeSkills` writes them.
    */
   skillsDir: string;
+  /**
+   * How a login account is selected for this runtime. Every provider Dispatch
+   * drives keeps its login in a config directory the CLI's own login flow
+   * writes, and picks that directory from an env var — which is what lets a
+   * subscription be nothing more than a directory, with no token ever passing
+   * through Dispatch.
+   */
+  account: {
+    /** Env var naming the config dir, e.g. `CLAUDE_CONFIG_DIR`. */
+    configDirEnv: string;
+    /** The config dir when that var is unset, relative to the home directory. */
+    defaultConfigDir: string;
+    /**
+     * File whose presence in the config dir means a login exists. Only ever
+     * checked for EXISTENCE by the settings pane — never read for display.
+     */
+    loginFile: string;
+  };
 }
 
 /**
@@ -119,6 +137,11 @@ export const PROVIDERS = {
     efforts: ["low", "medium", "high", "xhigh", "max"],
     subagents: true,
     skillsDir: ".claude",
+    account: {
+      configDirEnv: "CLAUDE_CONFIG_DIR",
+      defaultConfigDir: ".claude",
+      loginFile: ".credentials.json",
+    },
   },
   codex: {
     id: "codex",
@@ -131,6 +154,11 @@ export const PROVIDERS = {
     // definitions with their own prompt/model/effort.
     subagents: false,
     skillsDir: ".agents",
+    account: {
+      configDirEnv: "CODEX_HOME",
+      defaultConfigDir: ".codex",
+      loginFile: "auth.json",
+    },
   },
 } as const satisfies Record<HarnessKind, ProviderDescriptor>;
 

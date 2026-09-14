@@ -21,6 +21,7 @@
  * The generator, `now` and `sleep` are injectable so tests run without a native
  * provider, the network, or real backoff waits.
  */
+import { accountOf, chatSubscription } from "./subscriptions.js";
 import { stripTitleMarks, titlePrefixOf, withTitlePrefix } from "@dispatch/shared";
 import type { Chat, ChatMessage } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
@@ -178,12 +179,16 @@ export class TitleService {
     this.bus = opts.bus;
     if (opts.generateText) this.generateText = opts.generateText;
     else if (opts.harnesses) {
-      this.generateText = (chat, prompt, timeoutMs) =>
-        opts.harnesses!.resolve(chat.harness).harness.generateText({
-          prompt,
-          purpose: "title",
-          timeoutMs,
-        });
+      this.generateText = async (chat, prompt, timeoutMs) => {
+        const { harness } = opts.harnesses!.resolve(chat.harness);
+        // Spent on the chat's OWN account: a title for a chat on a second
+        // subscription must not draw down the first one's budget.
+        const settings = await opts.store.getSettings().catch(() => null);
+        const account = accountOf(
+          chatSubscription(settings, { harness: harness.kind, subscriptionId: chat.subscriptionId }),
+        );
+        return harness.generateText({ prompt, purpose: "title", timeoutMs, account });
+      };
     } else {
       throw new Error("TitleService requires harnesses or generateText");
     }

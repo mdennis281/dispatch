@@ -41,6 +41,11 @@ export const HarnessDefaultsSchema = z.object({
   model: z.string().trim().min(1).optional(),
   effort: EffortSchema.optional(),
   /**
+   * The subscription a new chat on this provider starts under. Absent means the
+   * first one listed for the provider (see `subscriptionFor`).
+   */
+  subscriptionId: z.string().optional(),
+  /**
    * What Dispatch's PR reviewer runs at on this provider when the project's
    * `workflow.pr.reviewAgent` block doesn't pin it.
    *

@@ -250,6 +250,28 @@ describe("acquireCodexConnection", () => {
     b.release();
   });
 
+  it("gives each login account its own process", async () => {
+    // One app-server reads one CODEX_HOME at spawn; sharing it across accounts
+    // would silently spend whichever account spawned it.
+    const spawnProcess = () => fakeProcess().proc;
+    const base = acquireCodexConnection({ exePath: "codex", spawnProcess });
+    const other = acquireCodexConnection({
+      exePath: "codex",
+      spawnProcess,
+      env: { CODEX_HOME: "/h/.codex2" },
+    });
+    const again = acquireCodexConnection({
+      exePath: "codex",
+      spawnProcess,
+      env: { CODEX_HOME: "/h/.codex2" },
+    });
+    expect(other.conn).not.toBe(base.conn);
+    expect(again.conn).toBe(other.conn);
+    base.release();
+    other.release();
+    again.release();
+  });
+
   it("does not hand out a dead connection", async () => {
     const spawnProcess = () => fakeProcess().proc;
     const first = acquireCodexConnection({ exePath: "codex", spawnProcess });

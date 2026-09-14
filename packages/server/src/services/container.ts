@@ -19,6 +19,8 @@ import type { ServerConfig } from "../config.js";
 import { Store } from "../store/index.js";
 import {
   DEFAULT_HARNESS,
+  findSubscription,
+  pinnedIdOf,
   PrSnapshotSchema,
   prRecordKey,
   resolveWorkflow,
@@ -67,7 +69,8 @@ import { IssueService } from "./issues/service.js";
 import { Notifier } from "./notifier.js";
 import { PushService } from "./push.js";
 import { AttentionQueue } from "./attention.js";
-import { UsageService } from "./usage.js";
+import { UsageRegistry, UsageService } from "./usage.js";
+import { chatSubscription } from "./subscriptions.js";
 import { ReleaseService } from "./release.js";
 import { ResumeScheduler } from "./resume-scheduler.js";
 import { RestartResumeService } from "./restart-resume.js";
@@ -193,6 +196,8 @@ export interface Services extends ServiceBase {
   push: PushService;
   attention: AttentionQueue;
   usage: UsageService;
+  /** Per-account Claude usage pollers; `usage` is its default-account member. */
+  accountUsage: UsageRegistry;
   /** Knows whether a newer Dispatch release exists, and can launch the installer. */
   release: ReleaseService;
   /** Schedules a chat to continue itself once a usage limit lifts. */
@@ -551,6 +556,15 @@ export function createServices(
   // Subscription usage (5h + weekly) for the header meter. Polls the account
   // OAuth usage endpoint once (server-side) and fans snapshots to every client.
   const usage = overrides.usage ?? new UsageService({ bus });
+  const accountUsage = new UsageRegistry(
+    usage,
+    (account) =>
+      new UsageService({
+        bus,
+        configDir: account.configDir,
+        subscriptionId: account.subscriptionId,
+      }),
+  );
   // "Is there a newer Dispatch than this one." Inert on a payload built from
   // source: with no release-manifest.json there is nothing to compare against.
   // The channel subscription is read/written through the settings store because
@@ -861,7 +875,31 @@ export function createServices(
     // Legacy chats predate the persisted harness field; those chats are Claude,
     // which was the only provider when their rows were written.
     const parentProvider = parent ? (parent.harness ?? DEFAULT_HARNESS) : undefined;
-    const provider = request.provider ?? parentProvider;
+    const settings = await store.getSettings().catch(() => null);
+    const named = findSubscription(settings, request.subscription);
+    if (request.subscription && !named) {
+      throw new Error(`No subscription "${request.subscription}".`);
+    }
+    if (named && request.provider && named.provider !== request.provider) {
+      throw new Error(
+        `Subscription "${named.id}" is a ${named.provider} account, not ${request.provider}.`,
+      );
+    }
+    // An account names its provider, so it selects one when `provider` doesn't.
+    const provider = request.provider ?? named?.provider ?? parentProvider;
+    // The same inheritance as the model below, for the same reason: an account
+    // belongs to one provider, so the parent's is inherited only when the child
+    // stays on it. The parent's is RESOLVED rather than copied, so a legacy
+    // parent with no pin hands down the account it actually runs under.
+    const inherited =
+      named ??
+      (parent && parentProvider && provider === parentProvider
+        ? chatSubscription(settings, {
+            harness: parentProvider,
+            subscriptionId: parent.subscriptionId,
+          })
+        : undefined);
+    const subscriptionId = inherited ? pinnedIdOf(inherited) : undefined;
     // A model id belongs to one provider's catalogue. When the provider is
     // explicitly changed, let that provider choose its configured default
     // unless the request also names a model for it.
@@ -873,6 +911,7 @@ export function createServices(
       title: request.title,
       modeId: request.modeId,
       harness: provider,
+      subscriptionId,
       agentId: request.agentId,
       personaId: request.personaId,
       effort: request.effort,
@@ -962,6 +1001,7 @@ export function createServices(
     push,
     attention,
     usage,
+    accountUsage,
     release,
     resume,
     chatMessenger,
@@ -1204,6 +1244,7 @@ export function createServices(
       prReviewWatcher.dispose();
       await prReviewWatcher.drain().catch(() => {});
       usage.stop();
+      accountUsage.stop();
       release.stop();
       // Disarm first so nothing new fires, then let an in-flight resume land
       // before the broker goes away under it.

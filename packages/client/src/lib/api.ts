@@ -98,7 +98,12 @@ import type {
   SystemResources,
   ChatProcessDetail,
 } from "@dispatch/shared";
-import { DEFAULT_HARNESS, type HarnessDefaults } from "@dispatch/shared";
+import {
+  DEFAULT_HARNESS,
+  type HarnessDefaults,
+  type Subscription,
+  type SubscriptionStatus,
+} from "@dispatch/shared";
 import { sessionFetch } from "../stores/auth.js";
 
 /**
@@ -205,6 +210,18 @@ export interface AppSettingsDefaults {
   maxActiveSessions: number;
   /** Effective idle window when `AppSettings.idleSessionMinutes` is unset. */
   idleSessionMinutes: number;
+}
+
+/** Whose usage: an account, and/or the provider whose default account to read. */
+export interface UsageTarget {
+  harness: HarnessKind;
+  subscriptionId?: string;
+}
+
+function usageQuery(target: UsageTarget): string {
+  const q = new URLSearchParams({ harness: target.harness });
+  if (target.subscriptionId) q.set("subscription", target.subscriptionId);
+  return q.toString();
 }
 
 export interface HarnessInfo {
@@ -568,6 +585,15 @@ export const api = {
   },
   harnesses: {
     list: () => get<HarnessInfo[]>("/api/harnesses"),
+  },
+
+  /* login accounts, several per provider — see shared subscriptions.ts */
+  subscriptions: {
+    /** Every account in effect, implicit ones included, with login presence. */
+    list: () => get<SubscriptionStatus[]>("/api/subscriptions"),
+    /** Replace the stored list; answers with the new statuses. */
+    save: (subscriptions: Subscription[]) =>
+      put<SubscriptionStatus[]>("/api/subscriptions", { subscriptions }),
   },
 
   /* self-contained project config (the repo's `.dispatch/`, or the external one) */
@@ -1199,11 +1225,12 @@ export const api = {
 
   /* subscription usage (5h + weekly) for the header meter */
   usage: {
-    get: (harness: HarnessKind = DEFAULT_HARNESS) =>
-      get<UsageSnapshot>(`/api/usage?harness=${encodeURIComponent(harness)}`),
+    /** One ACCOUNT's windows; a bare provider means that provider's default account. */
+    get: (target: UsageTarget = { harness: DEFAULT_HARNESS }) =>
+      get<UsageSnapshot>(`/api/usage?${usageQuery(target)}`),
     /** Force a fresh fetch now (the "refresh" button). */
-    refresh: (harness: HarnessKind = DEFAULT_HARNESS) =>
-      post<UsageSnapshot>(`/api/usage/refresh?harness=${encodeURIComponent(harness)}`),
+    refresh: (target: UsageTarget = { harness: DEFAULT_HARNESS }) =>
+      post<UsageSnapshot>(`/api/usage/refresh?${usageQuery(target)}`),
   },
 
   /* the usage ledger behind the Metrics view.

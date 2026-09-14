@@ -61,6 +61,11 @@ export interface CodexConnectionOpts {
   onStderr?: (line: string) => void;
   /** Client identity sent at initialize. */
   clientInfo?: { name: string; title?: string; version: string };
+  /**
+   * Env overlaid on the app-server process — how a login account (`CODEX_HOME`)
+   * is selected. Part of the connection's identity: see `acquireCodexConnection`.
+   */
+  env?: Record<string, string>;
 }
 
 /** How long to wait for the initialize handshake before giving up. */
@@ -107,6 +112,9 @@ export class CodexConnection {
       (spawn(this.opts.exePath, ["app-server", ...(this.opts.configOverrides ?? [])], {
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
+        ...(this.opts.env && Object.keys(this.opts.env).length
+          ? { env: { ...process.env, ...this.opts.env } }
+          : {}),
       }) as unknown as ChildProcessWithoutNullStreams as unknown as CodexProcess);
     this.proc = proc;
 
@@ -317,26 +325,33 @@ export class CodexConnection {
 
 /* ------------------------------------------------------- shared, ref-counted */
 
-let shared: { conn: CodexConnection; refs: number } | undefined;
+const sharedByAccount = new Map<string, { conn: CodexConnection; refs: number }>();
 
 /**
- * Borrow the process-wide connection, spawning it on first use.
+ * Borrow the process-wide connection FOR ONE ACCOUNT, spawning it on first use.
  *
  * Ref-counted because Codex threads are cheap but the process is not: opening a
  * seventh chat should not mean a seventh app server. Call the returned
  * `release` when a session is done; the process dies when the count hits zero.
+ *
+ * One process per account rather than one overall, because an app-server reads
+ * its login from `CODEX_HOME` once, at spawn: a chat on a second account that
+ * borrowed the first account's process would silently spend the first account.
  */
 export function acquireCodexConnection(opts: CodexConnectionOpts): {
   conn: CodexConnection;
   release: () => void;
 } {
+  const key = opts.env?.CODEX_HOME ?? "";
+  let shared = sharedByAccount.get(key);
   if (shared?.conn.isClosed()) shared = undefined;
   if (!shared) {
     const conn = new CodexConnection(opts);
     shared = { conn, refs: 0 };
+    sharedByAccount.set(key, shared);
     // A dead process must not stay cached, or every later session inherits it.
     conn.events.once("close", () => {
-      if (shared?.conn === conn) shared = undefined;
+      if (sharedByAccount.get(key)?.conn === conn) sharedByAccount.delete(key);
     });
   }
   shared.refs += 1;
@@ -348,16 +363,16 @@ export function acquireCodexConnection(opts: CodexConnectionOpts): {
       if (released) return;
       released = true;
       held.refs -= 1;
-      if (held.refs <= 0 && shared === held) {
-        shared = undefined;
+      if (held.refs <= 0 && sharedByAccount.get(key) === held) {
+        sharedByAccount.delete(key);
         held.conn.dispose();
       }
     },
   };
 }
 
-/** Drop the shared connection (process teardown, tests). */
+/** Drop every shared connection (process teardown, tests). */
 export function disposeSharedCodexConnection(): void {
-  shared?.conn.dispose();
-  shared = undefined;
+  for (const { conn } of sharedByAccount.values()) conn.dispose();
+  sharedByAccount.clear();
 }

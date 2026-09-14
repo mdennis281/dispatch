@@ -161,6 +161,14 @@ export const actions = {
   setHarness(chatId: string, harness: HarnessKind): void {
     ws.send({ type: "set-harness", chatId, harness });
   },
+  /**
+   * Move this chat to another login account. Same provider keeps the native
+   * session when the server can carry it; another provider's account is a
+   * provider move.
+   */
+  setSubscription(chatId: string, subscriptionId: string): void {
+    ws.send({ type: "set-subscription", chatId, subscriptionId });
+  },
 
   /* ---------------------------------------------------------------- title */
 

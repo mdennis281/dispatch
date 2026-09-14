@@ -18,6 +18,7 @@ import {
 } from "@dispatch/shared";
 import type {
   Harness,
+  HarnessAccount,
   HarnessCapabilities,
   HarnessLimits,
   HarnessRuntimeInfo,
@@ -79,11 +80,13 @@ export class CodexHarness implements Harness {
   private readonly genId: () => string;
   private readonly now: () => number;
 
-  private modelCache?: { at: number; models: ModelOption[] };
-  private modelProbe?: Promise<ModelOption[] | null>;
+  /** Keyed by account (see `accountKey`) — a plan decides which models a login gets. */
+  private modelCache = new Map<string, { at: number; models: ModelOption[] }>();
+  private modelProbe = new Map<string, Promise<ModelOption[] | null>>();
   /** Per-model effort support, learned from the catalogue. */
   private efforts = new Map<string, string[]>();
-  private limitsCache?: HarnessLimits | null;
+  /** Keyed by account: limits belong to a login, not to the provider. */
+  private limitsCache = new Map<string, HarnessLimits | null>();
 
   constructor(opts: CodexHarnessOpts = {}) {
     this.opts = opts;
@@ -96,15 +99,19 @@ export class CodexHarness implements Harness {
     return this.opts.runtime ?? codexRuntime();
   }
 
-  /** Borrow the shared connection, or throw when Codex isn't installed. */
-  private connect(): { conn: CodexConnection; release: () => void } {
+  /** Borrow the shared connection for an account, or throw when Codex isn't installed. */
+  private connect(account?: HarnessAccount): { conn: CodexConnection; release: () => void } {
     const rt = this.runtime();
     if (!rt.available || !rt.path) {
       throw new Error(
         "Codex is not installed. Install the Codex CLI, or set DISPATCH_CODEX_PATH to its binary.",
       );
     }
-    return this.acquire({ exePath: rt.path, onStderr: this.opts.onStderr });
+    return this.acquire({
+      exePath: rt.path,
+      onStderr: this.opts.onStderr,
+      ...(account && Object.keys(account.env).length ? { env: account.env } : {}),
+    });
   }
 
   /** Reject once `ms` elapses so an unresponsive runtime can't pin a request. */
@@ -116,24 +123,28 @@ export class CodexHarness implements Harness {
     });
   }
 
-  async listModels(opts: { refresh?: boolean } = {}): Promise<ModelOption[]> {
-    if (!opts.refresh && this.modelCache && this.now() - this.modelCache.at < CACHE_TTL_MS) {
-      return this.modelCache.models;
+  async listModels(
+    opts: { refresh?: boolean; account?: HarnessAccount } = {},
+  ): Promise<ModelOption[]> {
+    const key = accountKey(opts.account);
+    const hit = this.modelCache.get(key);
+    if (!opts.refresh && hit && this.now() - hit.at < CACHE_TTL_MS) return hit.models;
+    let probe = this.modelProbe.get(key);
+    if (!probe) {
+      probe = this.probeModels(opts.account).finally(() => this.modelProbe.delete(key));
+      this.modelProbe.set(key, probe);
     }
-    this.modelProbe ??= this.probeModels().finally(() => {
-      this.modelProbe = undefined;
-    });
-    const models = await this.modelProbe;
+    const models = await probe;
     // Never throw: a picker with a stale list beats a picker that errored.
-    if (!models) return this.modelCache?.models ?? fallbackModels("codex");
-    this.modelCache = { at: this.now(), models };
+    if (!models) return this.modelCache.get(key)?.models ?? fallbackModels("codex");
+    this.modelCache.set(key, { at: this.now(), models });
     return models;
   }
 
-  private async probeModels(): Promise<ModelOption[] | null> {
+  private async probeModels(account?: HarnessAccount): Promise<ModelOption[] | null> {
     let held: { conn: CodexConnection; release: () => void } | undefined;
     try {
-      held = this.connect();
+      held = this.connect(account);
       const res = await this.withTimeout(
         held.conn.call<{ data?: CodexModel[] }>("model/list", { limit: 100 }),
       );
@@ -159,17 +170,19 @@ export class CodexHarness implements Harness {
     return this.efforts.get(model) ?? [];
   }
 
-  async readLimits(): Promise<HarnessLimits | null> {
+  async readLimits(account?: HarnessAccount): Promise<HarnessLimits | null> {
+    const key = accountKey(account);
     let held: { conn: CodexConnection; release: () => void } | undefined;
     try {
-      held = this.connect();
+      held = this.connect(account);
       const res = await this.withTimeout(
         held.conn.call<{ rateLimits?: CodexRateLimitSnapshot }>("account/rateLimits/read", undefined),
       );
-      this.limitsCache = res.rateLimits ? toHarnessLimits(res.rateLimits) : null;
-      return this.limitsCache;
+      const limits = res.rateLimits ? toHarnessLimits(res.rateLimits) : null;
+      this.limitsCache.set(key, limits);
+      return limits;
     } catch {
-      return this.limitsCache ?? null;
+      return this.limitsCache.get(key) ?? null;
     } finally {
       held?.release();
     }
@@ -178,9 +191,9 @@ export class CodexHarness implements Harness {
   async generateText(request: HarnessTextRequest): Promise<string> {
     // Provider-owned model choice is the point of this seam: TitleService does
     // not need to know that Codex has concrete ids while Claude has aliases.
-    const models = await this.listModels();
+    const models = await this.listModels({ account: request.account });
     const model = models.find((m) => m.hint === "fast")?.value;
-    const held = this.connect();
+    const held = this.connect(request.account);
     let threadId: string | undefined;
     let off: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -247,13 +260,14 @@ export class CodexHarness implements Harness {
   }
 
   createSession(spec: HarnessSessionSpec): HarnessSession {
-    const held = this.connect();
+    const key = accountKey(spec.account);
+    const held = this.connect(spec.account);
     // Keep the account snapshot warm so a usage-limit turn end can carry an
     // exact reset time without a blocking round trip at the worst moment.
     held.conn.onGlobal((frame) => {
       if (frame.method !== "account/rateLimits/updated") return;
       const snap = (frame.params as { rateLimits?: CodexRateLimitSnapshot } | undefined)?.rateLimits;
-      if (snap) this.limitsCache = toHarnessLimits(snap);
+      if (snap) this.limitsCache.set(key, toHarnessLimits(snap));
     });
     return new CodexSession({
       spec,
@@ -261,10 +275,15 @@ export class CodexHarness implements Harness {
       release: held.release,
       genId: this.genId,
       supportedEfforts: (m) => this.supportedEfforts(m),
-      limitsSnapshot: () => this.limitsCache ?? null,
+      limitsSnapshot: () => this.limitsCache.get(key) ?? null,
       threadConfig: this.opts.threadConfig,
     });
   }
+}
+
+/** The cache key for an account: "" for the default, so both spellings share. */
+function accountKey(account: HarnessAccount | undefined): string {
+  return account?.env.CODEX_HOME ?? "";
 }
 
 /* ------------------------------------------------------------ projections */

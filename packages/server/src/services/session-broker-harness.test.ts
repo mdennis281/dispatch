@@ -17,6 +17,8 @@ import { EventBus } from "../bus.js";
 import { AuthoredConfigService } from "./authored-config.js";
 import { SessionBroker } from "./session-broker.js";
 
+let transfers: unknown[][] = [];
+let transferResult: Promise<boolean> = Promise.resolve(false);
 let specs: HarnessSessionSpec[];
 
 async function waitUntil(check: () => boolean | Promise<boolean>): Promise<void> {
@@ -132,7 +134,13 @@ describe("SessionBroker neutral harness path", () => {
       readLimits: async () => null,
       generateText: async () => "title",
       createSession: (spec: HarnessSessionSpec) => { specs.push(spec); return session; },
+      transferSession: (...args) => {
+        transfers.push(args);
+        return transferResult;
+      },
     };
+    transfers = [];
+    transferResult = Promise.resolve(false);
     broker = new SessionBroker({
       store,
       bus: (bus = new EventBus()),
@@ -493,6 +501,110 @@ describe("SessionBroker neutral harness path", () => {
       { id: "image-2", path: "docs/repo-relative.png", mimeType: "image/png" },
       { id: "image-3", path: "assets/..", mimeType: "image/png" },
     ]);
+  });
+
+  describe("switching login accounts", () => {
+    async function withAccounts() {
+      await store.saveSettings({
+        theme: "dark",
+        subscriptions: [
+          { id: "codex1", name: "Codex one", provider: "codex" },
+          { id: "codex2", name: "Codex two", provider: "codex", configDir: join(dir, "codex2") },
+          { id: "claude2", name: "Claude two", provider: "claude", configDir: join(dir, "claude2") },
+        ],
+      });
+    }
+
+    async function pinned(subscriptionId: string | undefined, sessionId?: string) {
+      const chat = await store.saveChat({
+        id: `acct-${subscriptionId ?? "none"}`,
+        projectId: "project-1",
+        title: "Accounts",
+        modeId: "plan",
+        effort: "low",
+        harness: "codex",
+        ...(subscriptionId ? { subscriptionId } : {}),
+        ...(sessionId ? { sessionId } : {}),
+        worktrees: [],
+        prs: [],
+        createdAt: 1,
+      });
+      broker.create(chat);
+      return chat;
+    }
+
+    it("runs a chat under its account's config dir, and the default account with no overlay", async () => {
+      await withAccounts();
+      const second = await pinned("codex2");
+      await broker.sendMessage(second.id, "hi");
+      await broker.waitFor(second.id, "idle");
+      expect(specs[0]!.account).toMatchObject({
+        subscriptionId: "codex2",
+        env: { CODEX_HOME: join(dir, "codex2") },
+      });
+
+      session = new FakeHarnessSession();
+      const first = await pinned("codex1");
+      await broker.sendMessage(first.id, "hi");
+      await broker.waitFor(first.id, "idle");
+      // Empty, so a default-account spawn is exactly what it was before accounts.
+      expect(specs[1]!.account).toMatchObject({ subscriptionId: "codex1", env: {} });
+    });
+
+    it("keeps the native session when the provider carries it across", async () => {
+      await withAccounts();
+      transferResult = Promise.resolve(true);
+      const chat = await pinned("codex1", "thread-1");
+      await broker.setSubscription(chat.id, "codex2");
+
+      expect(transfers[0]![0]).toBe("thread-1");
+      expect(transfers[0]![2]).toMatchObject({ configDir: join(dir, "codex2") });
+      const saved = await store.getChat(chat.id);
+      expect(saved).toMatchObject({ subscriptionId: "codex2", sessionId: "thread-1" });
+      expect(saved?.harnessHandoff).toBeUndefined();
+
+      // And the next turn actually RESUMES it, on the new account — keeping the
+      // id on the record is worthless if the session is rebuilt without it.
+      await broker.sendMessage(chat.id, "continue");
+      await broker.waitFor(chat.id, "idle");
+      expect(specs.at(-1)).toMatchObject({
+        resumeSessionId: "thread-1",
+        account: { subscriptionId: "codex2" },
+      });
+    });
+
+    it("falls back to a transcript handoff when it can't", async () => {
+      await withAccounts();
+      const chat = await pinned("codex1", "thread-1");
+      await broker.setSubscription(chat.id, "codex2");
+
+      const saved = await store.getChat(chat.id);
+      // The old id is only resumable from the old account's directory.
+      expect(saved?.sessionId).toBeUndefined();
+      expect(saved).toMatchObject({
+        subscriptionId: "codex2",
+        harnessHandoff: {
+          from: "codex",
+          to: "codex",
+          fromSubscription: "codex1",
+          toSubscription: "codex2",
+        },
+      });
+    });
+
+    it("moves provider when the account belongs to another one", async () => {
+      await withAccounts();
+      const chat = await pinned("codex1", "thread-1");
+      await broker.setSubscription(chat.id, "claude2");
+
+      const saved = await store.getChat(chat.id);
+      expect(saved).toMatchObject({
+        harness: "claude",
+        subscriptionId: "claude2",
+        harnessHandoff: { from: "codex", to: "claude" },
+      });
+      expect(transfers).toHaveLength(0);
+    });
   });
 
   it("switches providers without reusing an incompatible native session", async () => {

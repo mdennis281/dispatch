@@ -1692,6 +1692,11 @@ export interface SpawnChatRequest {
   modeId?: string;
   /** Runtime provider for the new chat; omitted inherits the parent chat's provider. */
   provider?: HarnessKind;
+  /**
+   * Login account id. Omitted inherits the parent's account when the child stays
+   * on the parent's provider, else that provider's default account.
+   */
+  subscription?: string;
   agentId?: string;
   /** Optional role, off when omitted, for either child or detached chats. */
   personaId?: string;
@@ -5561,6 +5566,14 @@ export function createManagerTools(ctx: ManagerMcpContext) {
             "model, except that changing provider uses the new provider's configured default. " +
             "This does not select the provider.",
         ),
+      subscription: z
+        .string()
+        .optional()
+        .describe(
+          "Login account (subscription id) for the new chat. Omit to inherit this chat's " +
+            "account, or the provider's default account when provider changes. An account " +
+            "belongs to one provider, so naming one without `provider` also picks its provider.",
+        ),
       reason: z
         .string()
         .optional()
@@ -5597,6 +5610,8 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         personaId: typeof args.personaId === "string" ? args.personaId : undefined,
         effort: args.effort as Effort | undefined,
         model: typeof args.model === "string" ? args.model.trim() || undefined : undefined,
+        subscription:
+          typeof args.subscription === "string" ? args.subscription.trim() || undefined : undefined,
         reason: typeof args.reason === "string" ? args.reason.trim() || undefined : undefined,
         detached: args.detached === true,
       };

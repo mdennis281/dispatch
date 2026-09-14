@@ -39,6 +39,7 @@ import { catchToolGuard } from "../guard.js";
 import { ClaudeStreamDecoder, QUESTION_TOOL } from "./stream.js";
 import { buildQuestionAnswer, neutralQuestions } from "./questions.js";
 import { claudeExecutableOption } from "../../services/runtime.js";
+import { envWithAccount } from "../../services/subscriptions.js";
 import { spawnWithPid } from "./spawn.js";
 
 /** The subset of the SDK `query` signature this session calls. */
@@ -357,6 +358,11 @@ export class ClaudeSession implements HarnessSession {
     };
     if (this.spec.cwd) options.cwd = this.spec.cwd;
     if (this.modelOverride) options.model = this.modelOverride;
+    // The login account: `CLAUDE_CONFIG_DIR` on the subprocess. The SDK's `env`
+    // REPLACES the inherited environment rather than overlaying it, hence the
+    // merge — and it stays unset for the default account.
+    const env = envWithAccount(this.spec.account);
+    if (env) options.env = env;
 
     options.settings = {
       autoCompactEnabled: this.spec.autoCompact ?? true,

@@ -40,6 +40,7 @@ import { useConfig } from "./config.js";
 import { useCheckpoints } from "./checkpoints.js";
 import { useNotices } from "./notices.js";
 import { useUsage } from "./usage.js";
+import { useSubscriptions } from "./subscriptions.js";
 import { useUpdate } from "./update.js";
 import { useRestartResume } from "./restartResume.js";
 import { useModels } from "./models.js";
@@ -80,6 +81,7 @@ export { useCheckpoints, useHasCheckpoint } from "./checkpoints.js";
 export { useNotices } from "./notices.js";
 export type { Toast, NoticeLevel } from "./notices.js";
 export { useUsage } from "./usage.js";
+export { useSubscriptions } from "./subscriptions.js";
 export { useUpdate } from "./update.js";
 export { useRestartResume } from "./restartResume.js";
 export { useModels } from "./models.js";
@@ -453,6 +455,10 @@ export async function hydrateFromServer(): Promise<boolean> {
     .list()
     .then((h) => useHarnesses.getState().setHarnesses(h))
     .catch(() => {});
+  // The login accounts behind the composer's account picker and the usage
+  // gauge. Best-effort for the same reason: without it both simply stay on the
+  // provider's default account.
+  void useSubscriptions.getState().load();
   // Same treatment for the app settings the transcript consults (the
   // injected-context default): best-effort, never gating, and it falls back to
   // "off" — which is also what the setting defaults to server-side.

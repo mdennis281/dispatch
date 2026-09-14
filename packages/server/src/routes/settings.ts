@@ -61,6 +61,9 @@ export function registerSettingsRoutes(app: FastifyInstance): void {
       // install has never been set up" and puts the wizard back over a working
       // app. Changing your theme must not un-install you.
       ...(current.setup ? { setup: current.setup } : {}),
+      // And the account list, owned by PUT /api/subscriptions — a draft loaded
+      // before an account was added must not delete it on save.
+      ...(current.subscriptions ? { subscriptions: current.subscriptions } : {}),
     });
     // The concurrency cap is held by the LIVE broker, not re-read per turn, so a
     // save has to hand it over or the new number means nothing until a restart —

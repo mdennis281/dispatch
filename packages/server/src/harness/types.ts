@@ -157,6 +157,26 @@ export interface HarnessLimitHit {
   reason: string;
 }
 
+/* ------------------------------------------------------------------ account */
+
+/**
+ * Which login a runtime call runs under — a subscription, resolved.
+ *
+ * Only ever a directory and the env that selects it. The login itself was made
+ * by the provider's CLI; an adapter applies `env` to what it spawns and must
+ * never read a credential out of `configDir`.
+ */
+export interface HarnessAccount {
+  subscriptionId: string;
+  /** The provider config dir in effect, resolved (never absent). */
+  configDir: string;
+  /**
+   * Env to overlay on the runtime's process. Empty for the provider's default
+   * account, so a chat on it inherits the server's env exactly as before.
+   */
+  env: Record<string, string>;
+}
+
 /* --------------------------------------------------------------- session in */
 
 /** A subagent definition, neutral across runtimes. */
@@ -250,6 +270,8 @@ export interface HarnessSessionSpec {
   contextTokenLimit?: number;
   /** Aborts the session. */
   abortSignal?: AbortSignal;
+  /** The login account to run under; absent means the provider's default. */
+  account?: HarnessAccount;
 }
 
 /** A message pushed into a live session. */
@@ -276,6 +298,8 @@ export interface HarnessTextRequest {
   purpose: "title";
   /** Wall-clock budget for the complete native request. */
   timeoutMs?: number;
+  /** The login account to spend it on; absent means the provider's default. */
+  account?: HarnessAccount;
 }
 
 /* -------------------------------------------------------------- session out */
@@ -567,10 +591,24 @@ export interface Harness {
   readonly capabilities: HarnessCapabilities;
   /** Runtime resolution, for the boot log and the settings pane. */
   runtime(): HarnessRuntimeInfo;
-  /** Models for the picker. Never throws — degrades to a static list. */
-  listModels(opts?: { refresh?: boolean }): Promise<ModelOption[]>;
+  /**
+   * Models for the picker. Never throws — degrades to a static list. Per
+   * account, because which models a login may use is a fact about its plan.
+   */
+  listModels(opts?: { refresh?: boolean; account?: HarnessAccount }): Promise<ModelOption[]>;
   /** Account usage state, or null when this harness can't report it. */
-  readLimits(): Promise<HarnessLimits | null>;
+  readLimits(account?: HarnessAccount): Promise<HarnessLimits | null>;
+  /**
+   * Carry a native session from one account of this provider to another, so a
+   * chat switching accounts resumes with its context instead of a transcript
+   * handoff. Resolves false when it can't (no session file, unsupported); the
+   * broker then falls back to the handoff. Optional: absent means "can't".
+   */
+  transferSession?(
+    sessionId: string,
+    from: HarnessAccount,
+    to: HarnessAccount,
+  ): Promise<boolean>;
   /** Run a stateless one-shot text request without opening a chat session. */
   generateText(request: HarnessTextRequest): Promise<string>;
   /** Open a session (lazily — nothing spawns until the first send). */

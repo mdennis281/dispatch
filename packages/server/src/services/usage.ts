@@ -23,9 +23,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { UsageSnapshot, UsageWindow } from "@dispatch/shared";
 import type { EventBus } from "../bus.js";
+import type { HarnessAccount } from "../harness/types.js";
 
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
-const CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
 
 /** Default 5-min poll (the endpoint punishes anything much faster). */
 const DEFAULT_POLL_MS = 5 * 60_000;
@@ -57,8 +57,12 @@ export interface UsageServiceDeps {
   bus: EventBus;
   /** Injectable for tests (defaults to global fetch). */
   fetchImpl?: typeof fetch;
-  /** Injectable token source (defaults to reading ~/.claude/.credentials.json). */
+  /** Injectable token source (defaults to reading `<configDir>/.credentials.json`). */
   readToken?: () => Promise<string | null>;
+  /** The account's Claude config dir. Absent = `~/.claude`, the default login. */
+  configDir?: string;
+  /** Stamped on every snapshot, so a client can tell whose windows they are. */
+  subscriptionId?: string;
   /** Injectable clock (tests). */
   now?: () => number;
   /** Poll interval override (tests / DISPATCH_USAGE_POLL_MS). */
@@ -73,10 +77,10 @@ function pollIntervalFromEnv(): number {
   return Number.isFinite(n) && n >= 60_000 ? n : DEFAULT_POLL_MS;
 }
 
-/** Read the Claude Code OAuth access token from the credential store (or null). */
-async function readClaudeOauthToken(): Promise<string | null> {
+/** Read an account's Claude Code OAuth access token from its credential store (or null). */
+async function readClaudeOauthToken(configDir: string): Promise<string | null> {
   try {
-    const raw = await readFile(CREDENTIALS_PATH, "utf8");
+    const raw = await readFile(join(configDir, ".credentials.json"), "utf8");
     const parsed = JSON.parse(raw) as {
       claudeAiOauth?: { accessToken?: string };
     };
@@ -106,6 +110,11 @@ export class UsageService {
   private readonly readToken: () => Promise<string | null>;
   private readonly now: () => number;
   private readonly pollMs: number;
+  /**
+   * Mutable: the registry re-stamps it on every lookup, because a subscription
+   * can be renamed out from under a poller that is still watching its directory.
+   */
+  subscriptionId?: string;
 
   private latest: UsageSnapshot | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -118,7 +127,9 @@ export class UsageService {
   constructor(deps: UsageServiceDeps) {
     this.bus = deps.bus;
     this.fetchImpl = deps.fetchImpl ?? fetch;
-    this.readToken = deps.readToken ?? readClaudeOauthToken;
+    const configDir = deps.configDir ?? join(homedir(), ".claude");
+    this.readToken = deps.readToken ?? (() => readClaudeOauthToken(configDir));
+    this.subscriptionId = deps.subscriptionId;
     this.now = deps.now ?? Date.now;
     this.pollMs = deps.pollMs ?? pollIntervalFromEnv();
   }
@@ -201,6 +212,7 @@ export class UsageService {
         sevenDay: toWindow(data.seven_day),
         fetchedAt: this.now(),
         provider: "claude",
+        ...(this.subscriptionId ? { subscriptionId: this.subscriptionId } : {}),
         primaryLabel: "5-hour session",
         secondaryLabel: "Weekly",
       });
@@ -221,6 +233,7 @@ export class UsageService {
       stale: true,
       error,
       provider: "claude",
+      ...(this.subscriptionId ? { subscriptionId: this.subscriptionId } : {}),
       primaryLabel: "5-hour session",
       secondaryLabel: "Weekly",
     };
@@ -231,5 +244,59 @@ export class UsageService {
     this.latest = snapshot;
     this.bus.publish({ type: "usage-update", usage: snapshot });
     return snapshot;
+  }
+}
+
+/**
+ * One {@link UsageService} per Claude account.
+ *
+ * The default account keeps the service the container always started, so an
+ * install with one login polls exactly what it did before. Any other account
+ * gets its own poller the first time something asks about it — each has its own
+ * token, its own 429 bucket and its own windows, which is the whole reason the
+ * meter has to follow the chat's account rather than the provider's.
+ */
+export class UsageRegistry {
+  private readonly others = new Map<string, UsageService>();
+
+  constructor(
+    private readonly base: UsageService,
+    private readonly make: (account: HarnessAccount) => UsageService,
+  ) {}
+
+  /** The poller for an account; absent or default means the base service. */
+  for(account: HarnessAccount | undefined): UsageService {
+    if (!account || !Object.keys(account.env).length) {
+      if (account) this.base.subscriptionId = account.subscriptionId;
+      return this.base;
+    }
+    let svc = this.others.get(account.configDir);
+    if (!svc) {
+      svc = this.make(account);
+      svc.start();
+      this.others.set(account.configDir, svc);
+    }
+    svc.subscriptionId = account.subscriptionId;
+    return svc;
+  }
+
+  /**
+   * Stop the pollers for accounts that no longer exist. Without this an account
+   * removed from the list keeps being polled — spending its token's rate-limit
+   * bucket and pushing snapshots nobody can select — until the server restarts.
+   */
+  retain(configDirs: readonly string[]): void {
+    const keep = new Set(configDirs);
+    for (const [dir, svc] of this.others) {
+      if (keep.has(dir)) continue;
+      svc.stop();
+      this.others.delete(dir);
+    }
+  }
+
+  /** Stop every poller this registry started (the base is the container's). */
+  stop(): void {
+    for (const svc of this.others.values()) svc.stop();
+    this.others.clear();
   }
 }

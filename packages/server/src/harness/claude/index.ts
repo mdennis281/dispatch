@@ -17,8 +17,10 @@ import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { listAvailableModels } from "../../services/models.js";
 import { claudeExecutableOption, claudeRuntime } from "../../services/runtime.js";
+import { envWithAccount, transferClaudeSession } from "../../services/subscriptions.js";
 import { parseSessionLimit, type ModelOption } from "@dispatch/shared";
 import type {
+  HarnessAccount,
   Harness,
   HarnessCapabilities,
   HarnessLimitHit,
@@ -80,8 +82,12 @@ export class ClaudeHarness implements Harness {
     };
   }
 
-  listModels(opts: { refresh?: boolean } = {}): Promise<ModelOption[]> {
-    return listAvailableModels({ refresh: opts.refresh });
+  listModels(opts: { refresh?: boolean; account?: HarnessAccount } = {}): Promise<ModelOption[]> {
+    return listAvailableModels({ refresh: opts.refresh, account: opts.account });
+  }
+
+  transferSession(sessionId: string, from: HarnessAccount, to: HarnessAccount): Promise<boolean> {
+    return transferClaudeSession(sessionId, from.configDir, to.configDir);
   }
 
   async readLimits(): Promise<HarnessLimits | null> {
@@ -103,6 +109,7 @@ export class ClaudeHarness implements Harness {
           maxTurns: 1,
           abortController: abort,
           ...claudeExecutableOption(),
+          ...(envWithAccount(request.account) ? { env: envWithAccount(request.account) } : {}),
         },
       });
       for await (const raw of stream) {

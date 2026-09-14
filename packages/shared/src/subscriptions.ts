@@ -1,0 +1,176 @@
+/**
+ * Subscriptions — named login accounts, several per provider.
+ *
+ * A subscription is deliberately NOTHING BUT a pointer at a provider config
+ * directory. The login inside it was made by that provider's own CLI login flow
+ * (`claude /login` with `CLAUDE_CONFIG_DIR` set, `codex login` with `CODEX_HOME`
+ * set); Dispatch never collects, stores or forwards a token. Selecting an
+ * account for a chat is setting one env var on the runtime it spawns.
+ *
+ * Single-user by design: the accounts are one person's own, on one machine.
+ * Nothing here is shareable, and nothing should grow to make it so.
+ *
+ * An install that has never listed any gets one IMPLICIT subscription per
+ * provider, pointing at that provider's default directory — so a chat with no
+ * `subscriptionId`, on an install with no list, runs exactly as it did before
+ * subscriptions existed.
+ */
+import * as z from "zod";
+import { HarnessKindSchema, type HarnessKind } from "./common.js";
+import { PROVIDER_IDS, providerFor } from "./providers.js";
+
+/** Lowercase slug: stable in URLs, chat records and MCP arguments. */
+export const SubscriptionIdSchema = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]{0,39}$/, "lowercase letters, digits and dashes, 1-40 chars");
+
+export const SubscriptionSchema = z.object({
+  id: SubscriptionIdSchema,
+  /** Freeform display name — "Personal Max", "claude2". */
+  name: z.string().trim().min(1).max(80),
+  provider: HarnessKindSchema,
+  /**
+   * The provider config directory holding this account's login. Absent means
+   * the provider's default (its env var if the server was started with one,
+   * else `~/<defaultConfigDir>`), which is what the implicit subscriptions use.
+   */
+  configDir: z.string().trim().min(1).optional(),
+});
+export type Subscription = z.infer<typeof SubscriptionSchema>;
+
+/**
+ * The stored list. Ids must be unique; everything else about validity (does
+ * the dir exist, is it logged in) is a runtime fact the settings pane shows
+ * rather than a reason to refuse the save.
+ */
+export const SubscriptionListSchema = z
+  .array(SubscriptionSchema)
+  .max(32)
+  .refine((list) => new Set(list.map((s) => s.id)).size === list.length, "duplicate subscription id");
+
+/** A subscription as the rest of the app sees it: explicit or implicit. */
+export interface ResolvedSubscription extends Subscription {
+  /** Synthesized for a provider the stored list says nothing about. */
+  implicit?: boolean;
+}
+
+/** The shape of settings this module reads, kept structural for both packages. */
+export interface SubscriptionSettings {
+  subscriptions?: Subscription[];
+  harness?: {
+    defaults?: Partial<Record<HarnessKind, { subscriptionId?: string }>>;
+  };
+}
+
+/**
+ * Every subscription in effect: the stored list, plus an implicit default for
+ * each provider that has none. Per provider rather than "list or nothing", so
+ * listing two Claude accounts does not quietly make Codex unusable.
+ */
+export function resolveSubscriptions(
+  settings: SubscriptionSettings | null | undefined,
+): ResolvedSubscription[] {
+  const stored = settings?.subscriptions ?? [];
+  const out: ResolvedSubscription[] = [...stored];
+  const taken = new Set(stored.map((s) => s.id));
+  for (const provider of PROVIDER_IDS) {
+    if (stored.some((s) => s.provider === provider)) continue;
+    // The provider id is the natural implicit id. Suffixed only when a stored
+    // subscription of ANOTHER provider already took it, which is legal and rare.
+    let id: string = provider;
+    for (let n = 2; taken.has(id); n += 1) id = `${provider}-${n}`;
+    taken.add(id);
+    out.push({ id, name: providerFor(provider).label, provider, implicit: true });
+  }
+  return out;
+}
+
+/**
+ * The subscription a chat on `provider` runs under.
+ *
+ * `wanted` wins when it names a subscription OF THAT PROVIDER. A missing one
+ * (removed since the chat was pinned) or one on another provider (a stale pin
+ * after a provider move) falls to the provider's default rather than failing:
+ * a chat whose account was deleted must still open, and a Codex chat must never
+ * be handed a Claude config dir.
+ */
+export function subscriptionFor(
+  settings: SubscriptionSettings | null | undefined,
+  provider: HarnessKind,
+  wanted?: string | null,
+): ResolvedSubscription {
+  const all = resolveSubscriptions(settings);
+  const mine = all.filter((s) => s.provider === provider);
+  const pinned = wanted ? mine.find((s) => s.id === wanted) : undefined;
+  if (pinned) return pinned;
+  const preferred = settings?.harness?.defaults?.[provider]?.subscriptionId;
+  // `resolveSubscriptions` guarantees at least one per provider.
+  return mine.find((s) => s.id === preferred) ?? mine[0]!;
+}
+
+/**
+ * The id to PIN on a chat for this subscription — none for an implicit one.
+ *
+ * An implicit id is a name for "the provider's default directory" that stops
+ * existing the moment a real list mentions that provider. Pinning it would turn
+ * the first saved account into a silent re-home: the stale pin falls to the
+ * provider default, which may be a different directory from the one holding the
+ * chat's session. Unpinned, the chat keeps resolving by directory instead.
+ */
+export function pinnedIdOf(sub: ResolvedSubscription): string | undefined {
+  return sub.implicit ? undefined : sub.id;
+}
+
+/** Find a subscription by id across every provider. */
+export function findSubscription(
+  settings: SubscriptionSettings | null | undefined,
+  id: string | null | undefined,
+): ResolvedSubscription | undefined {
+  return id ? resolveSubscriptions(settings).find((s) => s.id === id) : undefined;
+}
+
+/** A subscription plus what the server can tell about its directory. */
+export interface SubscriptionStatus extends ResolvedSubscription {
+  /** The config dir actually in effect (the default resolved when unset). */
+  resolvedConfigDir: string;
+  /** The directory exists. */
+  dirExists: boolean;
+  /** The provider's login file exists in it. Existence only — never contents. */
+  loggedIn: boolean;
+  /** This is the provider's default subscription. */
+  isDefault: boolean;
+  /**
+   * Its directory IS the provider's default config dir — where every session a
+   * chat wrote before subscriptions existed lives. See {@link chatAccountOf}.
+   */
+  atDefaultDir: boolean;
+}
+
+/**
+ * The account a chat runs under, read off the server's status list — the
+ * client's copy of the server's `chatSubscription`, which it can't call because
+ * "the provider's default directory" is a fact about the server's machine. The
+ * statuses carry that fact as `atDefaultDir`, so the two rules agree exactly.
+ *
+ * Pinned → that account while it is still one of the chat's provider's. Unpinned,
+ * or a pin that no longer resolves → the account at the default dir, else the
+ * provider default.
+ */
+export function chatAccountOf(
+  statuses: readonly SubscriptionStatus[],
+  chat: { harness?: HarnessKind; subscriptionId?: string },
+  provider: HarnessKind,
+): SubscriptionStatus | undefined {
+  const mine = statuses.filter((s) => s.provider === provider);
+  const pinned = chat.subscriptionId ? mine.find((s) => s.id === chat.subscriptionId) : undefined;
+  return pinned ?? mine.find((s) => s.atDefaultDir) ?? mine.find((s) => s.isDefault) ?? mine[0];
+}
+
+/**
+ * How to name an account in a picker: its own name, except an implicit one,
+ * whose synthesized name is the provider's product name — "Claude" reads better
+ * beside a model list than "Claude Code".
+ */
+export function accountLabel(sub: Pick<ResolvedSubscription, "name" | "provider" | "implicit">): string {
+  return sub.implicit ? providerFor(sub.provider).shortLabel : sub.name;
+}

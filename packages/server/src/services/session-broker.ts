@@ -199,6 +199,7 @@ import {
 import { AgentCwdTracker } from "./agent-cwd.js";
 import { claudeExecutableOption } from "./runtime.js";
 import type {
+  HarnessAccount,
   HarnessEvent,
   HarnessGuardBlockedEvent,
   HarnessQuestion,
@@ -208,10 +209,14 @@ import type {
 } from "../harness/types.js";
 import { guardRecoveryInput } from "../harness/guard.js";
 import type { HarnessRegistry } from "../harness/index.js";
+import { accountOf, chatSubscription, envWithAccount } from "./subscriptions.js";
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
 import { managerMcpContextOf } from "./mcp/manager-mcp.js";
 import {
   DEFAULT_SPAWN_MAX_DEPTH,
+  findSubscription,
+  pinnedIdOf,
+  subscriptionFor,
   providerDefaults,
   providerFor,
   isManagerServer,
@@ -1724,6 +1729,13 @@ interface LiveSession {
   personaChange?: Promise<void>;
   effort: Effort;
   harnessKind: HarnessKind;
+  /** The chat's pinned subscription id, as of this session's creation. */
+  subscriptionId?: string;
+  /**
+   * The login account this session was last BUILT with — resolved in
+   * `buildOptions`, so the harness spec and the Claude env agree on it.
+   */
+  account?: HarnessAccount;
   /**
    * Effort the session's own agent definition pins, when it pins one. The main
    * loop then runs at THIS level rather than `effort` (which stays the chat's
@@ -2089,6 +2101,7 @@ export class SessionBroker {
         personaId: chat.personaId,
         effort: chat.effort,
         harnessKind: chat.harness ?? DEFAULT_HARNESS,
+        subscriptionId: chat.subscriptionId,
         effortByThread: new Map(),
         threadOfTool: new Map(),
         toolTurn: new Map(),
@@ -2800,11 +2813,14 @@ export class SessionBroker {
    * providers, so the new provider starts a fresh native session and receives a
    * bounded, provider-neutral transcript handoff on its first turn.
    */
-  async setHarness(chatId: string, harness: HarnessKind): Promise<void> {
+  async setHarness(chatId: string, harness: HarnessKind, subscriptionId?: string): Promise<void> {
     const chat = await this.store.getChat(chatId);
     if (!chat) throw new Error(`chat "${chatId}" not found`);
     const previous = chat.harness ?? DEFAULT_HARNESS;
-    if (previous === harness) return;
+    if (previous === harness) {
+      if (subscriptionId) await this.setSubscription(chatId, subscriptionId);
+      return;
+    }
 
     const existing = this.sessions.get(chatId);
     if (existing) {
@@ -2819,6 +2835,10 @@ export class SessionBroker {
       ...chat,
       harness,
       harnessHandoff: { from: previous, to: harness, at: this.now() },
+      // Pinned on the new provider exactly as a new chat is: the named account
+      // when it belongs to that provider, else that provider's default. The old
+      // pin cannot carry over — it names the previous provider's login.
+      subscriptionId: pinnedIdOf(subscriptionFor(settings, harness, subscriptionId)),
       sessionId: undefined,
       agentId: (this.harnesses?.find(harness)?.capabilities.subagents ??
         providerFor(harness).subagents)
@@ -2838,6 +2858,104 @@ export class SessionBroker {
       chatId,
       level: "info",
       text: `Switched from ${previous} to ${harness}. The next turn will receive a transcript handoff.`,
+    });
+  }
+
+  /**
+   * Move a chat to another login account.
+   *
+   * Another provider's account is a provider move, so it goes through
+   * `setHarness` and its transcript handoff. Another account of the SAME
+   * provider keeps the conversation native when it can: the session is stopped,
+   * the provider copies its session file into the target account's config dir,
+   * and the next turn resumes it there — full context, no summary. When the
+   * copy can't be made (no session yet on disk, a provider that can't transfer,
+   * an I/O failure) it degrades to the same handoff a provider move uses, so a
+   * switch never leaves a chat unable to continue.
+   */
+  async setSubscription(chatId: string, subscriptionId: string): Promise<void> {
+    const chat = await this.store.getChat(chatId);
+    if (!chat) throw new Error(`chat "${chatId}" not found`);
+    const settings = await this.store.getSettings().catch(() => undefined);
+    const target = findSubscription(settings, subscriptionId);
+    if (!target) throw new Error(`subscription "${subscriptionId}" not found`);
+    const provider = chat.harness ?? DEFAULT_HARNESS;
+    if (target.provider !== provider) {
+      await this.setHarness(chatId, target.provider, target.id);
+      return;
+    }
+    const current = chatSubscription(settings, {
+      harness: provider,
+      subscriptionId: chat.subscriptionId,
+    });
+    if (current.id === target.id) {
+      // Nothing to move, but make an implicit resolution explicit so a later
+      // change of default can't re-home this chat underneath its session.
+      if (!target.implicit && chat.subscriptionId !== target.id) {
+        const saved = await this.store.saveChat({ ...chat, subscriptionId: target.id });
+        const live = this.sessions.get(chatId);
+        if (live) live.subscriptionId = target.id;
+        this.bus.publish({ type: "chat-update", chat: saved });
+      }
+      return;
+    }
+
+    const existing = this.sessions.get(chatId);
+    if (existing) {
+      existing.switching = true;
+      await this.stop(chatId);
+      this.sessions.delete(chatId);
+    }
+
+    const from = accountOf(current);
+    const to = accountOf(target);
+    const harness = this.harnesses?.find(provider);
+    const carried =
+      Boolean(chat.sessionId) &&
+      (await (harness?.transferSession?.(chat.sessionId!, from, to) ?? Promise.resolve(false)).catch(
+        () => false,
+      ));
+
+    const updated: Chat = carried
+      ? { ...chat, subscriptionId: pinnedIdOf(target), status: "idle", updatedAt: this.now() }
+      : {
+          ...chat,
+          subscriptionId: pinnedIdOf(target),
+          // A session that exists only in the old account's dir is unresumable
+          // from the new one — resuming it would fail on the first turn.
+          sessionId: undefined,
+          ...(chat.sessionId
+            ? {
+                harnessHandoff: {
+                  from: provider,
+                  to: provider,
+                  at: this.now(),
+                  fromSubscription: current.id,
+                  toSubscription: target.id,
+                },
+              }
+            : {}),
+          status: "idle",
+          updatedAt: this.now(),
+        };
+    const saved = await this.store.saveChat(updated);
+    const project = await this.store.getProject(saved.projectId).catch(() => null);
+    // `resume`, not `create`, when the session came across: `create` arms no
+    // resume id, so the next turn would open a FRESH session on the new account
+    // and the copied transcript would sit there unread — caught on a live run,
+    // where the chat answered "this appears to be the start of our conversation".
+    if (carried) this.resume(saved, project, saved.worktrees[0]);
+    else this.create(saved, project, saved.worktrees[0]);
+    this.bus.publish({ type: "chat-update", chat: saved });
+    this.bus.publish({
+      type: "notice",
+      chatId,
+      level: "info",
+      text: carried
+        ? `Switched to ${target.name}. The conversation continues on that account with its full context.`
+        : chat.sessionId
+          ? `Switched to ${target.name}. The session couldn't be carried across, so the next turn receives a transcript handoff.`
+          : `Switched to ${target.name}.`,
     });
   }
 
@@ -3682,6 +3800,7 @@ export class SessionBroker {
         autoCompactWindow: appSettings?.autoCompact?.window,
         contextTokenLimit,
         abortSignal: session.abortController.signal,
+        account: session.account,
         toolGuard: (toolName, input) => {
           if (toolName !== "Bash" || session.workflow?.guard === "off") return null;
           const command = typeof input.command === "string" ? input.command : "";
@@ -6137,6 +6256,19 @@ export class SessionBroker {
       ...claudeExecutableOption(),
     };
     if (cwd) options.cwd = cwd;
+    // The login account. Resolved per build, not snapshotted at creation, so an
+    // edited config dir applies from the next session start. `env` REPLACES the
+    // subprocess environment in the SDK, so the overlay is merged onto ours —
+    // and left unset entirely for the default account.
+    const accountSettings = await this.store.getSettings().catch(() => undefined);
+    session.account = accountOf(
+      chatSubscription(accountSettings, {
+        harness: session.harnessKind,
+        subscriptionId: session.subscriptionId,
+      }),
+    );
+    const accountEnv = envWithAccount(session.account);
+    if (accountEnv) options.env = accountEnv;
     // A user-chosen model pins the query; unset falls back to the SDK default.
     // (Kept separate from `session.model`, which mirrors the model the SDK
     // *reports* at init and would otherwise feed the "[1m]" display id back in.)
@@ -7022,7 +7154,11 @@ export class SessionBroker {
     }
     return [
       "# Provider handoff",
-      `This Dispatch chat previously ran on ${chat.harnessHandoff.from} and now runs on ${chat.harnessHandoff.to}.`,
+      chat.harnessHandoff.from === chat.harnessHandoff.to && chat.harnessHandoff.toSubscription
+        ? `This Dispatch chat previously ran on ${chat.harnessHandoff.from} under another login ` +
+          `account (${chat.harnessHandoff.fromSubscription ?? "unknown"}) and now runs under ` +
+          `${chat.harnessHandoff.toSubscription}.`
+        : `This Dispatch chat previously ran on ${chat.harnessHandoff.from} and now runs on ${chat.harnessHandoff.to}.`,
       "The transcript below is historical context, not a claim that old tool processes or approvals remain live. Continue the same user task and verify mutable state before acting.",
       kept.length < rendered.length ? "(Older transcript entries were omitted to fit the handoff budget.)" : "",
       "",
