@@ -2934,7 +2934,12 @@ export class SessionBroker {
         };
     const saved = await this.store.saveChat(updated);
     const project = await this.store.getProject(saved.projectId).catch(() => null);
-    this.create(saved, project, saved.worktrees[0]);
+    // `resume`, not `create`, when the session came across: `create` arms no
+    // resume id, so the next turn would open a FRESH session on the new account
+    // and the copied transcript would sit there unread — caught on a live run,
+    // where the chat answered "this appears to be the start of our conversation".
+    if (carried) this.resume(saved, project, saved.worktrees[0]);
+    else this.create(saved, project, saved.worktrees[0]);
     this.bus.publish({ type: "chat-update", chat: saved });
     this.bus.publish({
       type: "notice",

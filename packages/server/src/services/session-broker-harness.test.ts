@@ -562,6 +562,15 @@ describe("SessionBroker neutral harness path", () => {
       const saved = await store.getChat(chat.id);
       expect(saved).toMatchObject({ subscriptionId: "codex2", sessionId: "thread-1" });
       expect(saved?.harnessHandoff).toBeUndefined();
+
+      // And the next turn actually RESUMES it, on the new account — keeping the
+      // id on the record is worthless if the session is rebuilt without it.
+      await broker.sendMessage(chat.id, "continue");
+      await broker.waitFor(chat.id, "idle");
+      expect(specs.at(-1)).toMatchObject({
+        resumeSessionId: "thread-1",
+        account: { subscriptionId: "codex2" },
+      });
     });
 
     it("falls back to a transcript handoff when it can't", async () => {
