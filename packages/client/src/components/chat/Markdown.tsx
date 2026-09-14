@@ -1,7 +1,8 @@
-import { useContext, type ReactNode } from "react";
+import { memo, useContext, useMemo, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CodeBlock } from "./CodeBlock.js";
+import { splitStreaming } from "./streamingBlocks.js";
 import {
   CodeRefContext,
   CodeRefChip,
@@ -140,6 +141,54 @@ export function Markdown({
         <MediaRefContext.Provider value={chatId ?? null}>
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
             {children}
+          </ReactMarkdown>
+        </MediaRefContext.Provider>
+      </CodeRefContext.Provider>
+    </div>
+  );
+}
+
+/**
+ * One finished block of a streaming reply. `memo` is the entire point: its
+ * text never changes once cut (see `splitStreaming`), so React skips it on
+ * every subsequent token and frame, and micromark never sees it again.
+ */
+const SettledBlock = memo(function SettledBlock({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      {text}
+    </ReactMarkdown>
+  );
+});
+
+/**
+ * `Markdown` for a buffer that is still arriving.
+ *
+ * Renders the same DOM as `Markdown` would for the whole text — `ReactMarkdown`
+ * emits a fragment, so settled blocks and the live tail land as siblings under
+ * one wrapper, and the `first:`/`last:` paragraph margins and margin collapsing
+ * behave exactly as they do on the finalised row — but parses only the last
+ * block per render instead of the whole reply.
+ *
+ * That difference is what this exists for. The live row re-renders per token
+ * and per animation frame of its typewriter trail; before this, each of those
+ * re-parsed and re-highlighted the entire message, so cost grew with every
+ * character the agent had already said. Profiled at ~35 ms a render on a 12 kB
+ * reply — a renderer process pinned past a full core for as long as any chat
+ * on screen was talking.
+ */
+export function StreamingMarkdown({ children, chatId }: { children: string; chatId?: string }) {
+  const { settled, tail } = useMemo(() => splitStreaming(children), [children]);
+  return (
+    <div className="text-base text-primary/95">
+      <CodeRefContext.Provider value={null}>
+        <MediaRefContext.Provider value={chatId ?? null}>
+          {settled.map((block, i) => (
+            // Index keys are safe: blocks only ever append, never reorder.
+            <SettledBlock key={i} text={block} />
+          ))}
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+            {tail}
           </ReactMarkdown>
         </MediaRefContext.Provider>
       </CodeRefContext.Provider>
