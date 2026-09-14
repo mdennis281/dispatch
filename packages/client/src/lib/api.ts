@@ -52,6 +52,7 @@ import type {
   ProjectConfigResult,
   ProjectConfigLocation,
   UsageSnapshot,
+  UsageOverview,
   ChatRuntimeResponse,
   MetricDimension,
   MetricEvent,
@@ -1231,6 +1232,9 @@ export const api = {
     /** Force a fresh fetch now (the "refresh" button). */
     refresh: (target: UsageTarget = { harness: DEFAULT_HARNESS }) =>
       post<UsageSnapshot>(`/api/usage/refresh?${usageQuery(target)}`),
+    /** Every logged-in account's windows at once — the card's stacked list. */
+    overview: (refresh = false) =>
+      get<UsageOverview>(`/api/usage/subscriptions${refresh ? "?refresh=1" : ""}`),
   },
 
   /* the usage ledger behind the Metrics view.

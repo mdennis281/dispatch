@@ -7,7 +7,7 @@ import { api, type UsageTarget } from "../lib/api.js";
 vi.mock("../lib/api.js", () => ({
   api: {
     settings: { get: vi.fn() },
-    usage: { get: vi.fn(), refresh: vi.fn() },
+    usage: { get: vi.fn(), refresh: vi.fn(), overview: vi.fn() },
     subscriptions: { list: vi.fn(), save: vi.fn() },
   },
 }));
@@ -34,7 +34,13 @@ const answer = (percentOf: (t: UsageTarget) => number) => async (t: UsageTarget 
   snap(t!, percentOf(t!));
 
 beforeEach(() => {
-  useUsage.setState({ bySubscription: {}, refreshing: {}, target: { harness: "claude" } });
+  useUsage.setState({
+    bySubscription: {},
+    refreshing: {},
+    target: { harness: "claude" },
+    overview: null,
+    overviewLoading: false,
+  });
   useSubscriptions.setState({ list: [], loaded: false });
   settingsGet.mockReset();
   usageGet.mockReset();
@@ -53,6 +59,31 @@ describe("usage store", () => {
     expect(target).toEqual(CLAUDE1);
     expect(bySubscription.claude1?.fiveHour?.percent).toBe(12);
     expect(bySubscription.claude2?.fiveHour?.percent).toBe(90);
+  });
+
+  it("patches a pushed poll into the open card's row for that account only", () => {
+    useUsage.setState({
+      overview: {
+        fetchedAt: 1,
+        subscriptions: [
+          { subscriptionId: "claude1", name: "claude1", provider: "claude", windows: [], fetchedAt: 1 },
+          { subscriptionId: "codex1", name: "codex1", provider: "codex", windows: [], fetchedAt: 1 },
+        ],
+      },
+    });
+    useUsage.getState().set({ ...snap(CLAUDE1, 63), fetchedAt: 9 });
+    const [claude, codex] = useUsage.getState().overview!.subscriptions;
+    expect(claude).toMatchObject({ fetchedAt: 9, windows: [{ percent: 63 }] });
+    expect(codex).toMatchObject({ fetchedAt: 1, windows: [] });
+  });
+
+  it("a failed overview read keeps the last list", async () => {
+    const list = { fetchedAt: 1, subscriptions: [] };
+    useUsage.setState({ overview: list });
+    vi.mocked(api.usage.overview).mockRejectedValueOnce(new Error("502"));
+    await useUsage.getState().loadOverview(true);
+    expect(useUsage.getState().overview).toBe(list);
+    expect(useUsage.getState().overviewLoading).toBe(false);
   });
 
   it("keeps Claude's pushed updates while the gauge reads Codex", async () => {

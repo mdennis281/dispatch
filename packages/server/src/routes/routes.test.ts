@@ -335,6 +335,28 @@ describe("routes — REST CRUD", () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  it("GET /api/usage/subscriptions lists only logged-in accounts, each with a window list", async () => {
+    // A directory with no login must not become a row of "unavailable" — the
+    // card lists accounts you can actually spend.
+    await app.inject({
+      method: "PUT",
+      url: "/api/subscriptions",
+      payload: {
+        subscriptions: [
+          { id: "ghost", name: "Ghost", provider: "claude", configDir: "/nowhere/.ghost" },
+        ],
+      },
+    });
+    const res = await app.inject({ method: "GET", url: "/api/usage/subscriptions" });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(typeof body.fetchedAt).toBe("number");
+    expect(body.subscriptions.map((s: { subscriptionId: string }) => s.subscriptionId)).not.toContain(
+      "ghost",
+    );
+    for (const row of body.subscriptions) expect(Array.isArray(row.windows)).toBe(true);
+  });
+
   it("PUT /api/settings hands the concurrency cap to the LIVE broker", async () => {
     // The cap is held in memory and never re-read per turn, so a save that only
     // reached config.json would be a setting that does nothing until the next

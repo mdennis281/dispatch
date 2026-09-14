@@ -136,6 +136,12 @@ export interface HarnessLimits {
   secondary?: HarnessLimitWindow;
   /** Plan name the runtime reports, for display only. */
   planType?: string;
+  /**
+   * Every window, named, for a runtime with more than a primary and secondary.
+   * When present it is what the usage card shows; `primary`/`secondary` stay
+   * the ones the resume scheduler and gauge read.
+   */
+  windows?: Array<HarnessLimitWindow & { title: string }>;
   /** True when the account is currently OUT of budget, not merely near it. */
   reached?: boolean;
   /** Machine-readable reason when `reached`, e.g. "usage_limit_reached". */

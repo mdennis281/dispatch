@@ -17,6 +17,13 @@ export const UsageWindowSchema = z.object({
 });
 export type UsageWindow = z.infer<typeof UsageWindowSchema>;
 
+/** A window with its own name — the provider-neutral unit the usage card draws. */
+export const TitledUsageWindowSchema = UsageWindowSchema.extend({
+  /** As the provider names it: "5-hour session", "Weekly", "3-day window". */
+  title: z.string(),
+});
+export type TitledUsageWindow = z.infer<typeof TitledUsageWindowSchema>;
+
 /**
  * A point-in-time snapshot of the account's usage. `fiveHour`/`sevenDay` are null
  * when the source didn't report that window (or the fetch failed). `error` marks
@@ -41,8 +48,54 @@ export const UsageSnapshotSchema = z.object({
   primaryLabel: z.string().optional(),
   secondaryLabel: z.string().optional(),
   planType: z.string().optional(),
+  /**
+   * Every window this account has, when the provider reports more (or other)
+   * than the two named slots above. Absent means read `fiveHour`/`sevenDay` —
+   * see {@link usageWindowsOf}, the one place that decides.
+   */
+  windows: z.array(TitledUsageWindowSchema).optional(),
 });
 export type UsageSnapshot = z.infer<typeof UsageSnapshotSchema>;
+
+/**
+ * A snapshot's windows as a list, in the provider's order.
+ *
+ * `fiveHour`/`sevenDay` are Claude's two windows given slot names, and every
+ * consumer used to hard-code exactly those two rows. A list is what lets Codex
+ * show its one window and a future provider its N without the card changing.
+ */
+export function usageWindowsOf(snapshot: UsageSnapshot): TitledUsageWindow[] {
+  if (snapshot.windows) return snapshot.windows;
+  const out: TitledUsageWindow[] = [];
+  if (snapshot.fiveHour) {
+    out.push({ ...snapshot.fiveHour, title: snapshot.primaryLabel ?? "5-hour session" });
+  }
+  if (snapshot.sevenDay) {
+    out.push({ ...snapshot.sevenDay, title: snapshot.secondaryLabel ?? "Weekly" });
+  }
+  return out;
+}
+
+/** One account's usage, as the usage card stacks it. */
+export const SubscriptionUsageSchema = z.object({
+  subscriptionId: z.string(),
+  /** Display name — the account's own, or its provider's for an implicit one. */
+  name: z.string(),
+  provider: HarnessKindSchema,
+  planType: z.string().optional(),
+  windows: z.array(TitledUsageWindowSchema),
+  fetchedAt: z.number().int(),
+  stale: z.boolean().optional(),
+  error: z.string().optional(),
+});
+export type SubscriptionUsage = z.infer<typeof SubscriptionUsageSchema>;
+
+/** Every logged-in account's usage at once — `GET /api/usage/subscriptions`. */
+export const UsageOverviewSchema = z.object({
+  fetchedAt: z.number().int(),
+  subscriptions: z.array(SubscriptionUsageSchema),
+});
+export type UsageOverview = z.infer<typeof UsageOverviewSchema>;
 
 /* ------------------------------------------------- per-chat context window */
 

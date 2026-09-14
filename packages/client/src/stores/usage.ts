@@ -1,5 +1,10 @@
 import { create } from "zustand";
-import { DEFAULT_HARNESS, type UsageSnapshot } from "@dispatch/shared";
+import {
+  DEFAULT_HARNESS,
+  usageWindowsOf,
+  type UsageOverview,
+  type UsageSnapshot,
+} from "@dispatch/shared";
 import { api, type UsageTarget } from "../lib/api.js";
 import { useSubscriptions } from "./subscriptions.js";
 
@@ -26,6 +31,16 @@ interface UsageStore {
   refreshing: Record<string, boolean>;
   /** The account the header gauge reads: the active chat's, else the app default's. */
   target: UsageTarget;
+  /**
+   * Every logged-in account's windows, for the card. Null until the card first
+   * opens — the gauge never needs it, and reading every account (a Codex
+   * app-server included) just to draw one bar would be waste.
+   */
+  overview: UsageOverview | null;
+  /** An overview read is in flight — `refresh` spins the card's one button. */
+  overviewLoading: false | "load" | "refresh";
+  /** Read every account; `refresh` forces each one past its cache. */
+  loadOverview: (refresh?: boolean) => Promise<void>;
   /** Apply a `usage-update` bus event. */
   set: (usage: UsageSnapshot) => void;
   /** Point the gauge at an account — the app default provider's when omitted — and load it. */
@@ -90,6 +105,21 @@ export const useUsage = create<UsageStore>((set, get) => {
     bySubscription: {},
     refreshing: {},
     target: { harness: DEFAULT_HARNESS },
+    overview: null,
+    overviewLoading: false,
+
+    loadOverview: async (refresh = false) => {
+      if (get().overviewLoading) return;
+      set({ overviewLoading: refresh ? "refresh" : "load" });
+      try {
+        set({ overview: await api.usage.overview(refresh) });
+      } catch {
+        // Keep the last list: a card that blanks on one failed read (a proxy's
+        // 502) would hide numbers that were right a minute ago.
+      } finally {
+        set({ overviewLoading: false });
+      }
+    },
 
     set: (usage) => {
       const harness = usage.provider ?? DEFAULT_HARNESS;
@@ -99,6 +129,27 @@ export const useUsage = create<UsageStore>((set, get) => {
         usage.subscriptionId ??
         useSubscriptions.getState().list.find((s) => s.provider === harness && s.atDefaultDir)?.id;
       put({ harness, subscriptionId }, usage);
+      // Keep the open card live too: a pushed Claude poll replaces that row's
+      // windows in place rather than waiting for the next overview read.
+      const overview = get().overview;
+      if (overview && subscriptionId) {
+        set({
+          overview: {
+            ...overview,
+            subscriptions: overview.subscriptions.map((row) =>
+              row.subscriptionId === subscriptionId
+                ? {
+                    ...row,
+                    windows: usageWindowsOf(usage),
+                    fetchedAt: usage.fetchedAt,
+                    stale: usage.stale,
+                    error: usage.error,
+                  }
+                : row,
+            ),
+          },
+        });
+      }
     },
 
     load: async (requested) => {
