@@ -178,6 +178,16 @@ export function UsageMeter({ layout }: { layout: GaugeLayout }) {
     void load(activeHarness ? { harness: activeHarness, subscriptionId: activeAccount } : undefined);
   }, [load, activeHarness, activeAccount]);
 
+  // The gauge's own account came back with no reading (rate-limited, say): read
+  // the rest ONCE, so the meter can still appear for the accounts that do have
+  // numbers. Only after that first read has landed empty — never on first paint.
+  const targetUsage = bySubscription[usageKey(target)];
+  useEffect(() => {
+    if (targetUsage && !hasWindows(targetUsage) && !overview && !overviewLoading) {
+      void loadOverview();
+    }
+  }, [targetUsage, overview, overviewLoading, loadOverview]);
+
   // Countdowns tick only while the panel is open, and every opening re-reads the
   // list — nothing pushes Codex's windows, so the copy is only as fresh as the
   // last time someone looked.
@@ -190,12 +200,16 @@ export function UsageMeter({ layout }: { layout: GaugeLayout }) {
   }, [open, loadOverview]);
 
   const usage = bySubscription[usageKey(target)];
-  // Hidden only when there is nothing to open: no reading for this account AND
-  // no logged-in account at all (an API-key-only install). An account that is
-  // merely rate-limited used to hide the whole meter — and with it the card
-  // showing every OTHER account's perfectly good numbers.
-  const anyLoggedIn = accounts.some((a) => a.loggedIn);
-  if (!hasWindows(usage) && !anyLoggedIn) return null;
+  // Hidden only when NO account has a reading. An account that is merely
+  // rate-limited used to hide the whole meter — and with it the card holding
+  // every OTHER account's good numbers. "Some account has windows" is the test,
+  // not "some account is logged in": a Codex API-key login writes the same
+  // auth file and reports no windows at all, and a `—` gauge over a card of
+  // "No usage reported" is worse than no gauge.
+  const anyReading =
+    Object.values(bySubscription).some(hasWindows) ||
+    Boolean(overview?.subscriptions.some((row) => row.windows.length));
+  if (!anyReading) return null;
 
   // The gauge shows the 5-hour window (falls back to weekly if only that exists).
   const primary = hasWindows(usage) ? (usage.fiveHour ?? usage.sevenDay!) : null;
