@@ -29,10 +29,14 @@
  * one reading. This service keeps the previous sample and differences against
  * it, which has two consequences worth stating rather than hiding:
  *
- *   1. The FIRST snapshot after startup has no percentages at all. They are
- *      `null`, not 0 — a real 0 means "measured, idle", and showing that for
- *      "not yet measured" is the reading that makes someone stop looking.
- *   2. The window is however long since the last call, because sampling is
+ *   1. A reading with NO USABLE BASELINE — the first after startup, or the
+ *      first after a quiet stretch — pays for a second scan a second later
+ *      inside the same request, so it can still answer with a real rate. See
+ *      {@link ResourceService.rates} for why a stale baseline is worse than
+ *      none: it was the bug that read "Dispatch 1.2%" on a box where Dispatch
+ *      held half the cores. Figures that still cannot be measured are `null`,
+ *      not 0 — a real 0 means "measured, idle".
+ *   2. The window is however long since the last scan, because sampling is
  *      DEMAND-DRIVEN. Nothing runs on a timer here; a standing sampler would
  *      burn a `powershell.exe` spawn every few seconds forever, on a machine
  *      whose problem is that it is out of headroom. So `windowMs` is reported
@@ -59,7 +63,7 @@ import type {
   SystemResources,
 } from "@dispatch/shared";
 import type { ProcRow, TerminalRoots } from "./processes.js";
-import type { ProcTableCache } from "./proc-table-cache.js";
+import type { ProcTableCache, ProcTableSnapshot } from "./proc-table-cache.js";
 
 export interface ResourceDeps {
   /** The shared table read. See {@link ProcTableCache}. */
@@ -72,6 +76,8 @@ export interface ResourceDeps {
   serverPid?: number;
   /** Injectable clock (tests). */
   now?: () => number;
+  /** Injectable wait, for the re-prime delay (tests). */
+  sleep?: (ms: number) => Promise<void>;
   /** Injectable `os` reads (tests). */
   cpus?: () => os.CpuInfo[];
   freemem?: () => number;
@@ -111,6 +117,30 @@ interface SysSample {
  */
 const MIN_WINDOW_MS = 250;
 
+/**
+ * Above this, a CPU baseline is STALE and gets thrown away.
+ *
+ * The baseline only advances when someone asks for a snapshot, so the first
+ * hover on the header pill after a quiet stretch differenced against a scan
+ * from minutes — on a live install, nine minutes; after an idle evening, hours
+ * — earlier. Two things go wrong at once over a window that long: every
+ * process spawned since is "new" and skipped entirely (that was six chats'
+ * worth of headless Chrome, each pinning a core), and whatever survived is
+ * averaged over the whole stretch. The pill read "Dispatch 1.2%" against a
+ * machine at 96%, when the tree held ~50% of it. Three times the table TTL:
+ * a live poll never trips it, anything older is a different session.
+ */
+const MAX_WINDOW_MS = 30_000;
+
+/**
+ * How long to wait between the two scans of a re-prime.
+ *
+ * Long enough that a scheduling quantum is noise against it (see
+ * {@link MIN_WINDOW_MS}), short enough that the first open of the panel still
+ * feels like a fetch rather than a hang. The scan itself adds ~800 ms on top.
+ */
+const PRIME_DELAY_MS = 1_000;
+
 
 export class ResourceService {
   private readonly procTable: ProcTableCache;
@@ -118,6 +148,7 @@ export class ResourceService {
   private readonly terminals?: TerminalRoots;
   private readonly serverPid: number;
   private readonly now: () => number;
+  private readonly sleep: (ms: number) => Promise<void>;
   private readonly cpus: () => os.CpuInfo[];
   private readonly freemem: () => number;
   private readonly totalmem: () => number;
@@ -128,6 +159,8 @@ export class ResourceService {
   private lastSysCpu: number | null = null;
   /** The rates computed for one table scan, shared by every reader of it. */
   private computed?: { tableAt: number; byPid: Map<number, number>; windowMs: number };
+  /** The re-prime in flight, so concurrent first readers share one extra scan. */
+  private priming?: Promise<ProcTableSnapshot>;
 
   constructor(deps: ResourceDeps) {
     this.procTable = deps.procTable;
@@ -135,6 +168,7 @@ export class ResourceService {
     this.terminals = deps.terminals;
     this.serverPid = deps.serverPid ?? process.pid;
     this.now = deps.now ?? (() => Date.now());
+    this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.cpus = deps.cpus ?? (() => os.cpus());
     this.freemem = deps.freemem ?? (() => os.freemem());
     this.totalmem = deps.totalmem ?? (() => os.totalmem());
@@ -203,7 +237,7 @@ export class ResourceService {
     // `fresh` bypasses the shared table cache. Only an explicit human Reload
     // sets it: it costs a full ~800 ms scan, which is exactly the price the
     // automatic poll exists to avoid paying every time.
-    const snap = await this.procTable.read(fresh);
+    const snap = await this.primedRead(fresh);
     const rows = snap.rows;
     const at = this.now();
     const system = this.system();
@@ -250,6 +284,53 @@ export class ResourceService {
   }
 
   /**
+   * The table, re-scanned once after a short wait when there is nothing
+   * usable to difference it against.
+   *
+   * A snapshot is a RATE, and a rate needs two scans a known interval apart.
+   * Rather than hand the first caller `null`s and let the client's 5 s poll
+   * find a baseline eventually — behind a 10 s table TTL, that is fifteen
+   * seconds of a panel that either says "measuring" or, before this existed,
+   * said something confidently wrong — take the second scan here, now, and
+   * answer the call that asked. It costs one extra ~800 ms scan and a one
+   * second wait, once per quiet stretch, on the reader who opened the panel.
+   *
+   * Shared across concurrent callers for the same reason the table cache is:
+   * two tabs opening together must not each spawn their own re-prime.
+   */
+  private async primedRead(fresh: boolean): Promise<ProcTableSnapshot> {
+    const snap = await this.procTable.read(fresh);
+    if (this.hasBaselineFor(snap.at)) return snap;
+    if (!this.priming) {
+      this.priming = (async () => {
+        // Records `snap` as the baseline and computes nothing — see `rates`.
+        this.rates(snap.rows, snap.at, this.cpus().length);
+        await this.sleep(PRIME_DELAY_MS);
+        // `fresh`: the cached table IS the baseline just taken.
+        return this.procTable.read(true);
+      })().finally(() => {
+        this.priming = undefined;
+      });
+    }
+    return this.priming;
+  }
+
+  /** Whether `rates()` for a scan taken at `tableAt` has something to give. */
+  private hasBaselineFor(tableAt: number): boolean {
+    // Rates already exist for this exact scan — unless they are the empty
+    // record a re-prime writes for its first half, in which case the caller
+    // should join that re-prime rather than be handed the nulls.
+    if (this.computed?.tableAt === tableAt) return this.computed.windowMs > 0;
+    const prev = this.previous;
+    if (!prev) return false;
+    const windowMs = tableAt - prev.at;
+    if (windowMs > MAX_WINDOW_MS) return false;
+    // A window too SHORT is fine when a previous answer exists: `rates` serves
+    // that. Only the absent or stale baseline has nothing at all to offer.
+    return windowMs >= MIN_WINDOW_MS || this.computed !== undefined;
+  }
+
+  /**
    * Per-pid CPU rates for one table scan, computed once and memoised.
    *
    * ── WHY THIS IS KEYED ON THE SCAN AND NOT ON THE CALLER ─────────────────────
@@ -291,7 +372,9 @@ export class ResourceService {
     const windowMs = prev ? tableAt - prev.at : 0;
     const byPid = new Map<number, number>();
 
-    if (prev && windowMs >= MIN_WINDOW_MS) {
+    // A stale baseline is treated exactly like none: recorded, not differenced.
+    // See MAX_WINDOW_MS for the reading it produced when it was used instead.
+    if (prev && windowMs >= MIN_WINDOW_MS && windowMs <= MAX_WINDOW_MS) {
       for (const row of rows) {
         const was = prev.byPid.get(row.pid);
         // A pid absent from the previous sample is NEW. Its lifetime CPU is not
@@ -304,9 +387,10 @@ export class ResourceService {
         if (delta < 0) continue;
         byPid.set(row.pid, clampPct((100 * delta) / windowMs, 100 * cores));
       }
-    } else if (cached) {
+    } else if (cached && windowMs <= MAX_WINDOW_MS) {
       // Too short to measure, but we HAVE measured recently. Serving the last
       // real answer beats blanking the column over a scheduling accident.
+      // (A STALE window falls through instead: it has to become the baseline.)
       return { byPid: cached.byPid, windowMs: cached.windowMs };
     }
 
@@ -322,7 +406,7 @@ export class ResourceService {
 
   /** Every process one chat holds, individually. The drill-down. */
   async chatDetail(chatId: string): Promise<ChatProcessDetail> {
-    const snap = await this.procTable.read();
+    const snap = await this.primedRead(false);
     const rows = snap.rows;
     const at = this.now();
     const cores = this.cpus().length;
