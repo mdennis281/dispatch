@@ -9,9 +9,11 @@ import {
   ShieldOff,
   Check,
   ChevronsUpDown,
+  RotateCcw,
 } from "lucide-react";
 import type { ModeConfig } from "@dispatch/shared";
 import { Popover, MenuItem } from "../ui/Popover.js";
+import type { SelectInherit } from "../ui/Select.js";
 import { Tooltip } from "../ui/Tooltip.js";
 import { cn } from "../../lib/cn.js";
 import { useLayoutMode } from "../../stores/layout.js";
@@ -112,21 +114,28 @@ export function ModeMenu({
   onChange,
   close,
   dense = true,
+  inherit,
 }: {
   modes: ModeConfig[];
+  /** The EFFECTIVE mode — a pin, or the inherited answer when `inherit.active`. */
   value: string;
   onChange: (modeId: string) => void;
   close: () => void;
   dense?: boolean;
+  /** The way back to inheriting project → app; see `SelectInherit`. */
+  inherit?: SelectInherit;
 }) {
   const postures = posturesOf(modes);
+  // With an inherit row, only a PIN wears the check; the inherited value is
+  // marked on its own row so the menu never shows two.
+  const pinned = (id: string) => id === value && !inherit?.active;
   const row = (o: { id: string; name: string; icon: ReactNode; hint?: string }) => (
     <MenuItem
       key={o.id}
       icon={o.icon}
       hint={o.hint}
       dense={dense}
-      active={o.id === value}
+      active={pinned(o.id)}
       onClick={() => {
         onChange(o.id);
         close();
@@ -134,12 +143,32 @@ export function ModeMenu({
     >
       <span className="flex items-center gap-2">
         {o.name}
-        {o.id === value && <Check className="size-3 text-accent" />}
+        {pinned(o.id) && <Check className="size-3 text-accent" />}
       </span>
     </MenuItem>
   );
   return (
     <div className="flex flex-col">
+      {inherit && (
+        <>
+          <MenuItem
+            icon={<RotateCcw />}
+            hint={inherit.hint}
+            dense={dense}
+            active={inherit.active}
+            onClick={() => {
+              inherit.onSelect();
+              close();
+            }}
+          >
+            <span className="flex items-center gap-2">
+              {inherit.label}
+              {inherit.active && <Check className="size-3 text-accent" />}
+            </span>
+          </MenuItem>
+          <div className="my-1 h-px bg-line" />
+        </>
+      )}
       <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">Mode</div>
       {PRIMARY_MODE_IDS.map((id) =>
         row({
@@ -174,9 +203,11 @@ export function modeIcon(modes: ModeConfig[], modeId: string): ReactNode {
 
 export interface ModeControlProps {
   modes: ModeConfig[];
-  /** The chat's `modeId` — a primary mode or a posture, they share the field. */
+  /** The chat's EFFECTIVE mode — a primary mode or a posture, they share the field. */
   value: string;
   onChange: (modeId: string) => void;
+  /** The way back to inheriting project → app; see `SelectInherit`. */
+  inherit?: SelectInherit;
   /**
    * How much room the toolbar has granted this control (see lib/composerFit):
    * `lg` icon + mode name + chevron, `md` icon + mode name, `sm` icon only with
@@ -185,7 +216,7 @@ export interface ModeControlProps {
   size?: "lg" | "md" | "sm";
 }
 
-export function ModeControl({ modes, value, onChange, size = "lg" }: ModeControlProps) {
+export function ModeControl({ modes, value, onChange, size = "lg", inherit }: ModeControlProps) {
   // Touch gets the taller box and the roomier menu; `Tooltip` is hover/focus, so
   // at `sm` on a phone the tap-to-open menu is what tells you the current mode.
   const phone = useLayoutMode() === "sm";
@@ -195,6 +226,9 @@ export function ModeControl({ modes, value, onChange, size = "lg" }: ModeControl
 
   const isPosture = !PRIMARY_MODE_IDS.includes(value);
   const label = modeLabel(modes, value);
+  // The source rides in the tooltip/aria when inherited, so an icon-only
+  // control still says where its mode came from on hover.
+  const tip = inherit?.active && inherit.hint ? `Mode — ${label} · ${inherit.hint}` : `Mode — ${label}`;
   const icon = isPosture
     ? (postures.find((p) => p.id === value)?.icon ?? <SlidersHorizontal />)
     : (MODE_ICONS[value] ?? <SlidersHorizontal />);
@@ -209,7 +243,7 @@ export function ModeControl({ modes, value, onChange, size = "lg" }: ModeControl
           <button
             onClick={toggle}
             aria-expanded={open}
-            aria-label={`Mode — ${label}`}
+            aria-label={tip}
             className={cn(
               "inline-flex items-center gap-1.5 rounded-md border text-sm font-medium " +
                 "transition-colors [&_svg]:size-3.5",
@@ -236,11 +270,18 @@ export function ModeControl({ modes, value, onChange, size = "lg" }: ModeControl
             )}
           </button>
         );
-        return size === "lg" ? btn : <Tooltip label={`Mode — ${label}`}>{btn}</Tooltip>;
+        return size === "lg" ? btn : <Tooltip label={tip}>{btn}</Tooltip>;
       }}
     >
       {(close) => (
-        <ModeMenu modes={modes} value={value} onChange={onChange} close={close} dense={!phone} />
+        <ModeMenu
+          modes={modes}
+          value={value}
+          onChange={onChange}
+          close={close}
+          dense={!phone}
+          inherit={inherit}
+        />
       )}
     </Popover>
   );

@@ -35,6 +35,7 @@ import {
   Mic,
   Drama,
   KeyRound,
+  RotateCcw,
 } from "lucide-react";
 import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef } from "@dispatch/shared";
 import {
@@ -49,6 +50,7 @@ import {
   type SubscriptionStatus,
 } from "@dispatch/shared";
 import { api, type IndexedFile } from "../../lib/api.js";
+import { postureSourceLabel, useChatPosture } from "../../lib/chatPosture.js";
 import { pathsFromDrop, basenameOf, dropIntent, type DropIntent } from "../../lib/dropPaths.js";
 import { useFileDrag } from "../../lib/useFileDrag.js";
 import { useDictation, PTT_LABEL } from "../../lib/useDictation.js";
@@ -66,7 +68,7 @@ import { useFsRoots } from "../../stores/fsRoots.js";
 import { useProjects } from "../../stores/projects.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Button } from "../ui/Button.js";
-import { Select, type SelectOption } from "../ui/Select.js";
+import { Select, type SelectInherit, type SelectOption } from "../ui/Select.js";
 import { EffortGauge } from "../ui/EffortGauge.js";
 import { Chip } from "../ui/Chip.js";
 import { Tooltip } from "../ui/Tooltip.js";
@@ -292,6 +294,12 @@ type ConfigView = "root" | ComposerControl | "customize";
 export function Composer({ chat, agents, modes }: ComposerProps) {
   const upsertChat = useChats((s) => s.upsertChat);
   const harness = chat.harness ?? DEFAULT_HARNESS;
+  // What this chat RUNS as. `chat.effort` / `chat.modeId` / `chat.model` are
+  // pins and may be absent; the resolved values below are what every control
+  // displays, and each carries where it came from for the inherit rows.
+  const posture = useChatPosture(chat.id);
+  const effort = posture.effort.effective;
+  const modeId = posture.modeId.effective;
   const harnesses = useHarnesses((s) => s.harnesses);
   const capabilities = harnesses.find((h) => h.kind === harness)?.capabilities;
 
@@ -337,7 +345,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === chat.projectId));
   const pickerRoot = project ? chatRoot(chat, project) : chat.worktrees[0];
   const [model, setModelState] = useState<string>(
-    () => modelByChat.get(chat.id) ?? chat.model ?? defaultModelFor(harness) ?? "",
+    () => modelByChat.get(chat.id) ?? posture.model.effective ?? defaultModelFor(harness) ?? "",
   );
   // Selectable models come from the server (the live Claude Code runtime list,
   // or a static fallback), seeded so the picker is never empty. `findModel`
@@ -535,7 +543,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     setUploading(0);
     setError(null);
     setIsEmpty(editor.isEmpty);
-    setModelState(modelByChat.get(chat.id) ?? chat.model ?? defaultModelFor(harness) ?? "");
+    setModelState(modelByChat.get(chat.id) ?? posture.model.effective ?? defaultModelFor(harness) ?? "");
 
     // Land the caret in the composer so an opened chat — brand new, picked from
     // the sidebar, or jumped to from the palette — is typeable immediately. Every
@@ -838,26 +846,57 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     return true;
   };
 
-  const setMode = (modeId: string) => {
-    upsertChat({ ...chat, modeId });
-    actions.setMode(chat.id, modeId);
+  // `null` clears the pin: the chat goes back to inheriting project → app.
+  // Optimistic on the row (`undefined` IS the unpinned state), then the server.
+  const setMode = (next: string | null) => {
+    upsertChat({ ...chat, modeId: next ?? undefined });
+    actions.setMode(chat.id, next);
   };
-  const setEffort = (effort: Effort) => {
-    upsertChat({ ...chat, effort });
-    actions.setEffort(chat.id, effort);
+  const setEffort = (next: Effort | null) => {
+    upsertChat({ ...chat, effort: next ?? undefined });
+    actions.setEffort(chat.id, next);
   };
   const setAgent = (id: string) => {
     const agentId = id === "" ? null : id;
     upsertChat({ ...chat, agentId: agentId ?? undefined });
     actions.setAgent(chat.id, agentId);
   };
-  const chooseModel = (m: string) => {
-    modelByChat.set(chat.id, m);
-    setModelState(m);
+  const chooseModel = (m: string | null) => {
+    if (m === null) modelByChat.delete(chat.id);
+    else modelByChat.set(chat.id, m);
+    setModelState(m ?? posture.model.inherited ?? defaultModelFor(harness) ?? "");
+    upsertChat({ ...chat, model: m ?? undefined });
     actions.setModel(chat.id, m);
     // A plain model and a custom agent are mutually-exclusive "brains" here —
     // picking a model drops any custom agent so the model actually takes effect.
     if (chat.agentId) setAgent("");
+  };
+
+  /* ------------------------------------------------------------ inherit rows */
+
+  // One "inherit" row per layered control, built the same way so the effort
+  // picker, the mode menu and the model list all say "Inherit · X · from …"
+  // and all offer the same way back. `active` when the chat has no pin.
+  const effortLabelOf = (e: Effort) => effortOptions.find((o) => o.value === e)?.label ?? e;
+  const effortInherit: SelectInherit = {
+    label: `${posture.effort.source === "chat" ? "Use default" : "Inherit"} · ${effortLabelOf(posture.effort.inherited)}`,
+    hint: postureSourceLabel(posture.effort.inheritedSource),
+    active: posture.effort.source !== "chat",
+    onSelect: () => setEffort(null),
+  };
+  const modeInherit: SelectInherit = {
+    label: `${posture.modeId.source === "chat" ? "Use default" : "Inherit"} · ${modeLabel(modes, posture.modeId.inherited)}`,
+    hint: postureSourceLabel(posture.modeId.inheritedSource),
+    active: posture.modeId.source !== "chat",
+    onSelect: () => setMode(null),
+  };
+  const modelInherit: SelectInherit = {
+    label: `${posture.model.source === "chat" ? "Use default" : "Inherit"} · ${
+      posture.model.inherited ? modelLabelOf(posture.model.inherited) : "Provider default"
+    }`,
+    hint: postureSourceLabel(posture.model.inheritedSource, "provider's own pick"),
+    active: posture.model.source !== "chat",
+    onSelect: () => chooseModel(null),
   };
 
   /* ------------------------------------------------------------- agent wiring */
@@ -940,14 +979,14 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     // got — the layout has to be re-derived when a turn starts and ends.
     running,
     model,
-    chat.modeId,
+    modeId,
     chat.agentId,
-    chat.effort,
+    effort,
     currentAgent?.name,
     persona.label,
     accountName,
     multiAccount,
-    modeLabel(modes, chat.modeId),
+    modeLabel(modes, modeId),
     fitVisible,
   ]);
 
@@ -995,6 +1034,21 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
       <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
         Model · {harness}
       </div>
+      <MenuItem
+        icon={<RotateCcw />}
+        hint={modelInherit.hint}
+        dense={dense}
+        active={modelInherit.active}
+        onClick={() => {
+          modelInherit.onSelect();
+          close();
+        }}
+      >
+        <span className="flex items-center gap-2">
+          {modelInherit.label}
+          {modelInherit.active && <Check className="size-3 text-accent" />}
+        </span>
+      </MenuItem>
       {models.map((m) => (
         <MenuItem
           key={m.value}
@@ -1002,7 +1056,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           hint={m.hint}
           title={m.description}
           dense={dense}
-          active={m === selectedModel}
+          active={m === selectedModel && !modelInherit.active}
           onClick={() => {
             chooseModel(m.value);
             close();
@@ -1010,7 +1064,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         >
           <span className="flex items-center gap-2">
             {m.label}
-            {m === selectedModel && <Check className="size-3 text-accent" />}
+            {m === selectedModel && !modelInherit.active && <Check className="size-3 text-accent" />}
           </span>
         </MenuItem>
       ))}
@@ -1043,13 +1097,29 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   /** The effort list, shared by the toolbar's own Select and the options menu. */
   const effortRows = (close: () => void, dense: boolean) => (
     <div className="flex flex-col">
+      <MenuItem
+        icon={<RotateCcw />}
+        hint={effortInherit.hint}
+        dense={dense}
+        active={effortInherit.active}
+        onClick={() => {
+          effortInherit.onSelect();
+          close();
+        }}
+      >
+        <span className="flex items-center gap-2">
+          {effortInherit.label}
+          {effortInherit.active && <Check className="size-3 text-accent" />}
+        </span>
+      </MenuItem>
+      <div className="my-1 h-px bg-line" />
       {effortOptions.map((o) => (
         <MenuItem
           key={o.value}
           dense={dense}
           icon={<EffortGauge effort={o.value} />}
           hint={o.hint}
-          active={o.value === chat.effort}
+          active={o.value === effort && !effortInherit.active}
           onClick={() => {
             setEffort(o.value);
             close();
@@ -1057,12 +1127,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         >
           <span className="flex items-center gap-2">
             {o.label}
-            {o.value === chat.effort && <Check className="size-3 text-accent" />}
+            {o.value === effort && !effortInherit.active && <Check className="size-3 text-accent" />}
           </span>
         </MenuItem>
       ))}
       {/* The same "what actually ran" disclosure the wide toolbar makes inline. */}
-      {effectiveEffort && effectiveEffort !== chat.effort && (
+      {effectiveEffort && effectiveEffort !== effort && (
         <div className="px-3 py-2">
           <EffortChip effort={effectiveEffort} label="running at" />
         </div>
@@ -1207,7 +1277,14 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     if (moreView === "account") return <div className="flex flex-col">{accountRows(close, dense)}</div>;
     if (moreView === "mode")
       return (
-        <ModeMenu modes={modes} value={chat.modeId} onChange={setMode} close={close} dense={dense} />
+        <ModeMenu
+          modes={modes}
+          value={modeId}
+          onChange={setMode}
+          close={close}
+          dense={dense}
+          inherit={modeInherit}
+        />
       );
     if (moreView === "effort") return effortRows(close, dense);
     if (moreView === "brain") return <div className="flex flex-col">{brainRows(close, dense)}</div>;
@@ -1244,16 +1321,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         </MenuItem>
         <MenuItem
           dense={dense}
-          icon={modeIcon(modes, chat.modeId)}
-          hint={modeLabel(modes, chat.modeId)}
+          icon={modeIcon(modes, modeId)}
+          hint={modeLabel(modes, modeId)}
           onClick={() => setMoreView("mode")}
         >
           Mode &amp; posture
         </MenuItem>
         <MenuItem
           dense={dense}
-          icon={<EffortGauge effort={chat.effort} />}
-          hint={effortOptions.find((o) => o.value === chat.effort)?.label ?? chat.effort}
+          icon={<EffortGauge effort={effort} />}
+          hint={effortLabelOf(effort)}
           onClick={() => setMoreView("effort")}
         >
           Effort
@@ -1584,9 +1661,10 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
           {sizes.mode !== "off" && (
             <ModeControl
               modes={modes}
-              value={chat.modeId}
+              value={modeId}
               onChange={setMode}
               size={sizes.mode as "lg" | "md" | "sm"}
+              inherit={modeInherit}
             />
           )}
 
@@ -1594,11 +1672,12 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             <>
               <Select
                 options={effortOptions}
-                value={chat.effort}
+                value={effort}
                 onChange={setEffort}
-                leftIcon={<EffortGauge effort={chat.effort} />}
+                inherit={effortInherit}
+                leftIcon={<EffortGauge effort={effort} />}
                 label="effort"
-                width={172}
+                width={196}
                 size={sizes.effort as "lg" | "md" | "sm"}
                 touch={phone}
               />
@@ -1608,7 +1687,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
                   otherwise, so the row stays quiet in the normal case. Dropped
                   once effort itself is down to an icon: it is a disclosure, and a
                   row this cramped has no width to spend on one. */}
-              {sizes.effort === "lg" && effectiveEffort && effectiveEffort !== chat.effort && (
+              {sizes.effort === "lg" && effectiveEffort && effectiveEffort !== effort && (
                 <EffortChip effort={effectiveEffort} label="running at" />
               )}
             </>

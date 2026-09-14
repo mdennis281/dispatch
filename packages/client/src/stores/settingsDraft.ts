@@ -15,8 +15,8 @@
  * make you decide anything at the moment you were trying to do something else.
  */
 import { create } from "zustand";
-import type { ShellTranscriptFilter, WorkflowConfig } from "@dispatch/shared";
-import type { AppSettings } from "../lib/api.js";
+import type { Effort, HarnessKind, ShellTranscriptFilter, WorkflowConfig } from "@dispatch/shared";
+import type { AppSettings, ProjectDefaultsPatch } from "../lib/api.js";
 
 /* ---------------------------------------------------------------- app */
 
@@ -111,6 +111,38 @@ export function appSettingsDirty(s: AppDraftPair): boolean {
 
 /* ------------------------------------------------------------ project */
 
+/**
+ * The project LAYER of the chat-posture settings, as the pane edits it: one
+ * key per manifest `defaults.*` key plus `spawnChat.autoApprove`, where
+ * `undefined` means "inherit from the app". The same shape whether it came
+ * from the loaded config or from the pane, so "did anything change?" is a
+ * plain comparison and the save can be diffed into a patch (`null` for a key
+ * that went back to inheriting).
+ */
+export interface ChatDefaultsDraft {
+  harness?: HarnessKind;
+  mode?: string;
+  effort?: Effort;
+  model?: string;
+  showInjectedContext?: boolean;
+  autoApprove?: boolean;
+}
+
+/** The manifest patch that turns `saved` into `draft` — only the keys that moved. */
+export function chatDefaultsPatch(
+  saved: ChatDefaultsDraft,
+  draft: ChatDefaultsDraft,
+): ProjectDefaultsPatch {
+  const out: ProjectDefaultsPatch = {};
+  const moved = <K extends keyof ChatDefaultsDraft>(key: K) => saved[key] !== draft[key];
+  const value = <K extends keyof ChatDefaultsDraft>(key: K) => draft[key] ?? null;
+  for (const key of ["harness", "mode", "effort", "model", "showInjectedContext"] as const) {
+    if (moved(key)) (out.defaults ??= {})[key] = value(key) as never;
+  }
+  if (moved("autoApprove")) out.spawnChat = { autoApprove: value("autoApprove") };
+  return out;
+}
+
 interface ProjectDraftStore {
   /** Which project these edits belong to — switching projects drops them
    *  rather than carrying one project's workflow into another. */
@@ -120,9 +152,12 @@ interface ProjectDraftStore {
   workflow: WorkflowConfig | null;
   /** null = untouched; `undefined` is a deliberate reset to app inheritance. */
   shellFilter: ShellTranscriptFilter | undefined | null;
+  /** null = untouched, like `workflow`. */
+  chatDefaults: ChatDefaultsDraft | null;
   bind: (projectId: string | null) => void;
   setWorkflow: (workflow: WorkflowConfig) => void;
   setShellFilter: (filter: ShellTranscriptFilter | undefined) => void;
+  setChatDefaults: (draft: ChatDefaultsDraft) => void;
   discard: () => void;
 }
 
@@ -130,13 +165,15 @@ export const useProjectSettingsDraft = create<ProjectDraftStore>((set) => ({
   projectId: null,
   workflow: null,
   shellFilter: null,
+  chatDefaults: null,
   bind: (projectId) =>
     set((s) =>
       s.projectId === projectId
         ? s
-        : { projectId, workflow: null, shellFilter: null },
+        : { projectId, workflow: null, shellFilter: null, chatDefaults: null },
     ),
   setWorkflow: (workflow) => set({ workflow }),
   setShellFilter: (shellFilter) => set({ shellFilter }),
-  discard: () => set({ workflow: null, shellFilter: null }),
+  setChatDefaults: (chatDefaults) => set({ chatDefaults }),
+  discard: () => set({ workflow: null, shellFilter: null, chatDefaults: null }),
 }));

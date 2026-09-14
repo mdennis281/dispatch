@@ -47,7 +47,6 @@ import {
   resolveWorkflow,
   type Effort,
   type HarnessKind,
-  type ModelOption,
   type ReviewerCheck,
   type ReviewerIdentity,
   type ReviewerRosterEntry,
@@ -55,8 +54,9 @@ import {
   type ReviewerVerify,
   type WorkflowConfig,
 } from "@dispatch/shared";
-import { api, type HarnessInfo } from "../../lib/api.js";
+import { api } from "../../lib/api.js";
 import { harnessLabel } from "../../lib/harness.js";
+import { useProviderCatalogs } from "../../lib/useProviderCatalogs.js";
 import { EFFORT_OPTIONS } from "../../lib/efforts.js";
 import { Button } from "../ui/Button.js";
 import { IconButton } from "../ui/IconButton.js";
@@ -119,35 +119,6 @@ const ROUND_OPTIONS = [
 ];
 
 const HARNESSES = PROVIDER_IDS;
-
-/**
- * The provider list and each provider's model catalog, fetched when the pane
- * mounts — the same two reads the app-wide Chat defaults make, and for the same
- * reason: a provider installed since the last visit should show up without a
- * reload, and "not installed" is worth saying before someone points a reviewer
- * at it and waits for a review that fails on its first turn.
- */
-function useProviderCatalogs() {
-  const [harnesses, setHarnesses] = useState<HarnessInfo[]>([]);
-  const [catalogs, setCatalogs] = useState<Partial<Record<HarnessKind, ModelOption[]>>>({});
-  useEffect(() => {
-    let live = true;
-    void api.harnesses
-      .list()
-      .then((h) => live && setHarnesses(h))
-      .catch(() => {});
-    for (const kind of HARNESSES) {
-      void api.models
-        .list(kind)
-        .then((models) => live && setCatalogs((current) => ({ ...current, [kind]: models })))
-        .catch(() => {});
-    }
-    return () => {
-      live = false;
-    };
-  }, []);
-  return { harnesses, catalogs };
-}
 
 export function ReviewerSection({
   value,

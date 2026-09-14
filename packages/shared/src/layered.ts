@@ -47,6 +47,8 @@ export interface Layered<T> extends Layers<T> {
    * to `effective` when nothing more specific than the project is set.
    */
   inherited: T;
+  /** Which layer `inherited` comes from. Equal to `source` when no chat pin. */
+  inheritedSource: LayerSource;
 }
 
 /** One entry of an explicit chain: a named layer and what it says, if anything. */
@@ -66,11 +68,13 @@ export function resolveChain<S extends string, T>(
   source: S | "default";
   /** The value BENEATH the answering layer — what clearing that pin reveals. */
   inherited: T;
+  inheritedSource: S | "default";
 } {
   let effective: T = fallback;
   let source: S | "default" = "default";
   let found = false;
   let inherited: T = fallback;
+  let inheritedSource: S | "default" = "default";
   let inheritedFound = false;
   for (const [scope, value] of entries) {
     if (value === undefined) continue;
@@ -82,11 +86,12 @@ export function resolveChain<S extends string, T>(
     }
     if (!inheritedFound) {
       inherited = value;
+      inheritedSource = scope;
       inheritedFound = true;
       break;
     }
   }
-  return { effective, source, inherited };
+  return { effective, source, inherited, inheritedSource };
 }
 
 /**
@@ -97,7 +102,7 @@ export function resolveChain<S extends string, T>(
  * resolving project → app) just omit `chat`.
  */
 export function resolveLayered<T>(layers: Layers<T>, fallback: T): Layered<T> {
-  const { effective, source, inherited } = resolveChain<LayerScope, T>(
+  const { effective, source, inherited, inheritedSource } = resolveChain<LayerScope, T>(
     [
       ["chat", layers.chat],
       ["project", layers.project],
@@ -115,6 +120,7 @@ export function resolveLayered<T>(layers: Layers<T>, fallback: T): Layered<T> {
     // "If the CHAT's pin were cleared", not "the layer under whichever answered":
     // a project-sourced value has no chat pin to clear, so it inherits itself.
     inherited: source === "chat" ? inherited : effective,
+    inheritedSource: source === "chat" ? inheritedSource : source,
   };
 }
 

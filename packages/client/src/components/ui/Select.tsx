@@ -1,4 +1,4 @@
-import { ChevronsUpDown, Check } from "lucide-react";
+import { ChevronsUpDown, Check, RotateCcw } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "../../lib/cn.js";
 import { Popover, MenuItem } from "./Popover.js";
@@ -11,10 +11,29 @@ export interface SelectOption<T extends string> {
   hint?: string;
 }
 
+/**
+ * The "inherit" row of a select over a LAYERED value — one whose `value` may be
+ * a pin the human set or the answer inherited from the project / app. Rendered
+ * first, above the options, so the way back to inheriting is as reachable as
+ * any pin: a layered control with no such row is a one-way door (see
+ * `showInjectedContext`, which had exactly that bug).
+ */
+export interface SelectInherit {
+  /** e.g. "Inherit · High" or "Use default · Plan". */
+  label: string;
+  /** Where the inherited value comes from, e.g. "from your app settings". */
+  hint?: string;
+  /** True when `value` IS the inherited one (no pin), so this row is the active one. */
+  active: boolean;
+  onSelect: () => void;
+}
+
 export interface SelectProps<T extends string> {
   options: SelectOption<T>[];
   value: T;
   onChange: (v: T) => void;
+  /** Present for a layered value — see {@link SelectInherit}. */
+  inherit?: SelectInherit;
   label?: string;
   leftIcon?: ReactNode;
   className?: string;
@@ -46,9 +65,14 @@ export function Select<T extends string>({
   width = 180,
   size = "lg",
   touch = false,
+  inherit,
 }: SelectProps<T>) {
   const current = options.find((o) => o.value === value);
-  const tip = [label, current?.label ?? value].filter(Boolean).join(" · ");
+  // The source rides in the tooltip when the value is inherited, so a cramped
+  // control still says "High · from your app settings" on hover.
+  const tip = [label, current?.label ?? value, inherit?.active ? inherit.hint : undefined]
+    .filter(Boolean)
+    .join(" · ");
   const iconOnly = size === "sm";
   return (
     <Popover
@@ -99,12 +123,33 @@ export function Select<T extends string>({
     >
       {(close) => (
         <div className="flex flex-col">
+          {inherit && (
+            <>
+              <MenuItem
+                icon={<RotateCcw />}
+                hint={inherit.hint}
+                active={inherit.active}
+                onClick={() => {
+                  inherit.onSelect();
+                  close();
+                }}
+              >
+                <span className="flex items-center gap-2">
+                  {inherit.label}
+                  {inherit.active && <Check className="size-3 text-accent" />}
+                </span>
+              </MenuItem>
+              <div className="my-1 h-px bg-line" />
+            </>
+          )}
           {options.map((o) => (
             <MenuItem
               key={o.value}
               icon={o.icon}
               hint={o.hint}
-              active={o.value === value}
+              // With an inherit row, only a PIN is "active": the inherited value
+              // is marked on its own row, so the list never shows two checks.
+              active={o.value === value && !inherit?.active}
               onClick={() => {
                 onChange(o.value);
                 close();
@@ -112,7 +157,7 @@ export function Select<T extends string>({
             >
               <span className="flex items-center gap-2">
                 {o.label}
-                {o.value === value && <Check className="size-3 text-accent" />}
+                {o.value === value && !inherit?.active && <Check className="size-3 text-accent" />}
               </span>
             </MenuItem>
           ))}

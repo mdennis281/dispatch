@@ -33,8 +33,12 @@ describe("resolveLayered", () => {
     });
   });
 
-  it("reports what the chat would inherit if its pin were cleared", () => {
-    expect(resolveLayered({ chat: "c", app: "a" }, "d").inherited).toBe("a");
+  it("reports what the chat would inherit if its pin were cleared, and from where", () => {
+    expect(resolveLayered({ chat: "c", app: "a" }, "d")).toMatchObject({
+      inherited: "a",
+      inheritedSource: "app",
+    });
+    expect(resolveLayered({ project: "p" }, "d")).toMatchObject({ inheritedSource: "project" });
     expect(resolveLayered({ chat: "c" }, "d").inherited).toBe("d");
     // Nothing more specific than the project: inherited IS the effective value.
     expect(resolveLayered({ project: "p", app: "a" }, "d").inherited).toBe("p");
@@ -56,7 +60,7 @@ describe("resolveChain", () => {
       ],
       0,
     );
-    expect(r).toEqual({ effective: 2, source: "b", inherited: 3 });
+    expect(r).toEqual({ effective: 2, source: "b", inherited: 3, inheritedSource: "c" });
   });
 });
 

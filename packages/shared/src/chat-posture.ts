@@ -55,6 +55,8 @@ export interface PostureValue<T> {
   source: PostureSource;
   /** What this field falls back to if the chat's own pin were cleared. */
   inherited: T;
+  /** Which layer `inherited` comes from. Equal to `source` when no chat pin. */
+  inheritedSource: PostureSource;
 }
 
 /** The chat layer: what the row pins, or what a create request asked for. */
@@ -132,11 +134,16 @@ export function projectHarnessOf(
 }
 
 function field<T>(entries: readonly LayerEntry<PostureSource, T>[], fallback: T): PostureValue<T> {
-  const { effective, source, inherited } = resolveChain<PostureSource, T>(entries, fallback);
+  const { effective, source, inherited, inheritedSource } = resolveChain<PostureSource, T>(
+    entries,
+    fallback,
+  );
   // `inherited` from the chain is "the next layer down from whichever answered".
   // For the UI's reset affordance we want "what applies if the CHAT's pin goes",
   // which is the same thing when the chat answered and `effective` otherwise.
-  return { effective, source, inherited: source === "chat" ? inherited : effective };
+  return source === "chat"
+    ? { effective, source, inherited, inheritedSource }
+    : { effective, source, inherited: effective, inheritedSource: source };
 }
 
 /** Resolve every posture field for a chat. Pure; safe with every layer absent. */
@@ -174,14 +181,24 @@ export function resolveChatPosture(layers: PostureLayers): ChatPosture {
       : appDefaults.subscriptionId && subscriptionEffective.id === appDefaults.subscriptionId
         ? "app"
         : "default";
-  const subscription: PostureValue<ResolvedSubscription> = {
-    effective: subscriptionEffective,
-    source: subscriptionSource,
-    inherited:
-      subscriptionSource === "chat"
-        ? subscriptionFor(settings, provider, parentAccountId)
-        : subscriptionEffective,
-  };
+  const subscription: PostureValue<ResolvedSubscription> =
+    subscriptionSource === "chat"
+      ? {
+          effective: subscriptionEffective,
+          source: "chat",
+          inherited: subscriptionFor(settings, provider, parentAccountId),
+          inheritedSource: parentAccountId
+            ? "parent"
+            : appDefaults.subscriptionId
+              ? "app"
+              : "default",
+        }
+      : {
+          effective: subscriptionEffective,
+          source: subscriptionSource,
+          inherited: subscriptionEffective,
+          inheritedSource: subscriptionSource,
+        };
 
   const modeId = field<string>(
     [

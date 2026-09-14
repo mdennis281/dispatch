@@ -13,6 +13,7 @@ import {
   EyeOff,
   ArrowRightLeft,
   Search,
+  RotateCcw,
 } from "lucide-react";
 import { DEFAULT_HARNESS, PROVIDER_IDS, providerFor } from "@dispatch/shared";
 import type {
@@ -200,6 +201,13 @@ export function ChatView({ chat }: { chat: Chat }) {
     useChats.getState().upsertChat({ ...chat, showInjectedContext: next });
     void api.chats.update(chat.id, { showInjectedContext: next }).catch(() => {});
   }, [chat, injected.show]);
+  // The way BACK: clear the chat's pin so it follows the project / app again.
+  // `null` is the wire form of "unset" — see `api.chats.update`. Without this
+  // a chat that had toggled once could never inherit again.
+  const inheritInjected = useCallback(() => {
+    useChats.getState().upsertChat({ ...chat, showInjectedContext: undefined });
+    void api.chats.update(chat.id, { showInjectedContext: null }).catch(() => {});
+  }, [chat]);
 
   const pushToast = useNotices((s) => s.push);
   const copyId = useCopyId();
@@ -646,6 +654,18 @@ export function ChatView({ chat }: { chat: Chat }) {
                   >
                     {injected.show ? "Hide sent context" : "Show sent context"}
                   </MenuItem>
+                  {injected.source === "chat" && (
+                    <MenuItem
+                      icon={<RotateCcw />}
+                      title={`Inherit — ${injected.inherited ? "shown" : "hidden"} ${injectedContextSourceLabel(injected.inheritedSource)}`}
+                      onClick={() => {
+                        inheritInjected();
+                        close();
+                      }}
+                    >
+                      Inherit context visibility ({injected.inherited ? "shown" : "hidden"})
+                    </MenuItem>
+                  )}
                   <div className="my-1 h-px bg-line" />
                   {/* A long chat can be holding several dev servers by now, on
                       ports nothing else in the UI mentions. The roster is the

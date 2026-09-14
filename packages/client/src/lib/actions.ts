@@ -144,17 +144,19 @@ export const actions = {
 
   /* ------------------------------------------------ mode / agent / effort */
 
-  setMode(chatId: string, modeId: string): void {
+  /** `null` clears the chat's pin: it inherits project → app from then on. */
+  setMode(chatId: string, modeId: string | null): void {
     ws.send({ type: "set-mode", chatId, modeId });
   },
   setAgent(chatId: string, agentId: string | null): void {
     ws.send({ type: "set-agent", chatId, agentId });
   },
-  setEffort(chatId: string, effort: Effort): void {
+  /** `null` clears the pin, as in {@link setMode}. */
+  setEffort(chatId: string, effort: Effort | null): void {
     ws.send({ type: "set-effort", chatId, effort });
   },
-  /** Switch the model backing the chat's session (applies live + persists). */
-  setModel(chatId: string, model: string): void {
+  /** Switch the model backing the chat's session (applies live + persists). `null` clears the pin. */
+  setModel(chatId: string, model: string | null): void {
     ws.send({ type: "set-model", chatId, model });
   },
   /** Continue this transcript on another runtime through a neutral handoff. */
