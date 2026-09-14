@@ -45,6 +45,18 @@ const EMPTY: StreamingSplit = { settled: [], tail: "" };
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 /** A bullet or ordered list marker followed by whitespace. */
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])\s/;
+/**
+ * A line that is nothing but the START of a possible list marker — `-`, `1`,
+ * `12.` — with the space that would complete it not yet arrived.
+ *
+ * The cut has to wait for these exactly as it waits for an indent. `- a\n\n-`
+ * is one character short of continuing a loose list; cutting `- a` there and
+ * un-cutting it a token later would unmount and remount the settled block
+ * (dropping a code block's local state with it) and re-parse the whole list as
+ * tail for those two ticks — the shrink-and-regrow the memo promises never
+ * happens. Caught by the reviewer's char-by-char sweep of a loose list.
+ */
+const LIST_ITEM_PREFIX = /^ {0,3}(?:[-*+]|\d{0,9}[.)]?)$/;
 
 function closesFence(line: string, open: string): boolean {
   const m = FENCE.exec(line);
@@ -83,8 +95,10 @@ export function splitStreaming(text: string): StreamingSplit {
       const nextLineEnd = text.indexOf("\n", probe);
       const nextLine = text.slice(probe, nextLineEnd === -1 ? text.length : nextLineEnd);
       if (probe >= text.length) break;
-      if (nextLine.trim() === "") {
-        // Whitespace-only line still being typed (or a run of them).
+      if (nextLine.trim() === "" || LIST_ITEM_PREFIX.test(nextLine)) {
+        // Still being typed: a whitespace-only line (or a run of them), or a
+        // list marker missing its trailing space. Either could still turn into
+        // something that belongs to the block above, so don't cut yet.
         lineStart = next;
         continue;
       }
