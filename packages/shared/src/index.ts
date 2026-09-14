@@ -4,6 +4,7 @@
  * from its schema so validation and typing can never drift.
  */
 export * from "./common.js";
+export * from "./providers.js";
 export * from "./runtime-config.js";
 export * from "./registry.js";
 export * from "./worktree-cleanup.js";

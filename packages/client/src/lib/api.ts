@@ -93,6 +93,7 @@ import type {
   SystemResources,
   ChatProcessDetail,
 } from "@dispatch/shared";
+import { DEFAULT_HARNESS, type HarnessDefaults } from "@dispatch/shared";
 import { sessionFetch } from "../stores/auth.js";
 
 /**
@@ -179,7 +180,7 @@ export interface AppSettings {
   idleSessionMinutes?: number;
   harness?: {
     defaultHarness?: HarnessKind;
-    defaults?: Partial<Record<HarnessKind, { model?: string; effort?: Effort }>>;
+    defaults?: Partial<Record<HarnessKind, HarnessDefaults>>;
     contextLimits?: {
       perChatTokens?: number;
       overallTokens?: number;
@@ -557,7 +558,7 @@ export const api = {
 
   /* available session models (live from the Claude Code runtime, or static fallback) */
   models: {
-    list: (harness: HarnessKind = "claude") =>
+    list: (harness: HarnessKind = DEFAULT_HARNESS) =>
       get<ModelOption[]>(`/api/models?harness=${encodeURIComponent(harness)}`),
   },
   harnesses: {
@@ -1170,10 +1171,10 @@ export const api = {
 
   /* subscription usage (5h + weekly) for the header meter */
   usage: {
-    get: (harness: HarnessKind = "claude") =>
+    get: (harness: HarnessKind = DEFAULT_HARNESS) =>
       get<UsageSnapshot>(`/api/usage?harness=${encodeURIComponent(harness)}`),
     /** Force a fresh fetch now (the "refresh" button). */
-    refresh: (harness: HarnessKind = "claude") =>
+    refresh: (harness: HarnessKind = DEFAULT_HARNESS) =>
       post<UsageSnapshot>(`/api/usage/refresh?harness=${encodeURIComponent(harness)}`),
   },
 

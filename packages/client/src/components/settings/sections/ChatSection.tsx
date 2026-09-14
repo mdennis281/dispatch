@@ -1,6 +1,11 @@
 import { Cpu } from "lucide-react";
-import { SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
-import type { Effort, HarnessKind, ProjectConfigLocation } from "@dispatch/shared";
+import {
+  AGENT_TASKS,
+  DEFAULT_HARNESS,
+  SHELL_TRANSCRIPT_CATEGORIES,
+  listProviders,
+} from "@dispatch/shared";
+import type { Effort, HarnessDefaults, HarnessKind, ProjectConfigLocation } from "@dispatch/shared";
 import { Field } from "../../sidebar/Modal.js";
 import { Select, type SelectOption } from "../../ui/Select.js";
 import { SectionLabel } from "../../ui/Panel.js";
@@ -36,7 +41,7 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
   const modes = useProjects((s) => s.modes);
   const harness = draft.harness ?? {};
 
-  const patchHarnessDefault = (kind: HarnessKind, p: { model?: string; effort?: Effort }) =>
+  const patchHarnessDefault = (kind: HarnessKind, p: HarnessDefaults) =>
     patch({
       harness: {
         ...harness,
@@ -49,11 +54,11 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
     ...modes.map((m) => ({ value: m.id, label: m.name, hint: m.permissionMode })),
   ];
 
-  const harnessOptions: SelectOption<HarnessKind>[] = (["claude", "codex"] as const).map((kind) => {
-    const runtime = harnesses.find((h) => h.kind === kind)?.runtime;
+  const harnessOptions: SelectOption<HarnessKind>[] = listProviders().map((provider) => {
+    const runtime = harnesses.find((h) => h.kind === provider.id)?.runtime;
     return {
-      value: kind,
-      label: kind === "claude" ? "Claude Code" : "Codex",
+      value: provider.id,
+      label: provider.label,
       hint: runtime?.available ? runtime.version ?? runtime.source : "not installed",
     };
   });
@@ -66,7 +71,7 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
           <Select
             width={280}
             align="start"
-            value={harness.defaultHarness ?? "claude"}
+            value={harness.defaultHarness ?? DEFAULT_HARNESS}
             onChange={(defaultHarness) => patch({ harness: { ...harness, defaultHarness } })}
             options={harnessOptions}
           />
@@ -96,11 +101,11 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
         {/* One card per provider — the model and the effort are one decision,
             and they're a different decision for each. */}
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          {(["claude", "codex"] as const).map((kind) => {
+          {listProviders().map(({ id: kind, label, efforts: seedEfforts }) => {
             const defaults = harness.defaults?.[kind] ?? {};
             const efforts =
-              harnesses.find((h) => h.kind === kind)?.capabilities.efforts ??
-              EFFORT_OPTIONS.map((o) => o.value);
+              harnesses.find((h) => h.kind === kind)?.capabilities.efforts ?? seedEfforts;
+            const effortOptions = EFFORT_OPTIONS.filter((o) => efforts.includes(o.value));
             const modelOptions: SelectOption<string>[] = [
               { value: "", label: "Provider default", hint: "unpinned" },
               ...(catalogs[kind] ?? []).map((m) => ({
@@ -111,8 +116,8 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
             ];
             return (
               <div key={kind} className="rounded-md border border-line bg-inset/40 p-2.5">
-                <div className="mb-2 flex items-center gap-1.5 text-xs font-medium capitalize text-secondary [&_svg]:size-3.5">
-                  <Cpu /> {kind}
+                <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-secondary [&_svg]:size-3.5">
+                  <Cpu /> {label}
                 </div>
                 <div className="space-y-2">
                   <Field label="Model">
@@ -130,7 +135,43 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
                       className="w-full"
                       value={defaults.effort ?? "medium"}
                       onChange={(effort) => patchHarnessDefault(kind, { effort })}
-                      options={EFFORT_OPTIONS.filter((o) => efforts.includes(o.value))}
+                      options={effortOptions}
+                    />
+                  </Field>
+                  {/* Per provider, beside the chat defaults, because a reviewer
+                      model is a model id and belongs to one catalogue. A
+                      project's own reviewer block still wins over both. */}
+                  <Field label="Reviewer model" hint="when the project doesn't pin one">
+                    <Select
+                      width={210}
+                      className="w-full"
+                      value={defaults.reviewer?.model ?? ""}
+                      onChange={(model) =>
+                        patchHarnessDefault(kind, {
+                          reviewer: { ...defaults.reviewer, model: model || undefined },
+                        })
+                      }
+                      options={modelOptions}
+                    />
+                  </Field>
+                  <Field label="Reviewer effort">
+                    <Select<Effort | "">
+                      width={180}
+                      className="w-full"
+                      value={defaults.reviewer?.effort ?? ""}
+                      onChange={(effort) =>
+                        patchHarnessDefault(kind, {
+                          reviewer: { ...defaults.reviewer, effort: effort || undefined },
+                        })
+                      }
+                      options={[
+                        {
+                          value: "",
+                          label: "Task default",
+                          hint: AGENT_TASKS["pr:review"].defaultEffort,
+                        },
+                        ...effortOptions,
+                      ]}
                     />
                   </Field>
                 </div>

@@ -15,6 +15,7 @@ import type {
   WorkflowRun,
   AttentionItem,
 } from "@dispatch/shared";
+import { DEFAULT_HARNESS } from "@dispatch/shared";
 
 import { api } from "../lib/api.js";
 import {
@@ -445,8 +446,8 @@ export async function hydrateFromServer(): Promise<boolean> {
   // fetch above because that read spawns a short-lived probe subprocess and must
   // never block the app — the store keeps its fallback seed on failure.
   void api.models
-    .list("claude")
-    .then((m) => useModels.getState().setModels(m, "claude"))
+    .list(DEFAULT_HARNESS)
+    .then((m) => useModels.getState().setModels(m, DEFAULT_HARNESS))
     .catch(() => {});
   void api.harnesses
     .list()
@@ -459,7 +460,7 @@ export async function hydrateFromServer(): Promise<boolean> {
     .get()
     .then((s) => {
       useSettings.getState().apply(s);
-      const harness = s.harness?.defaultHarness ?? "claude";
+      const harness = s.harness?.defaultHarness ?? DEFAULT_HARNESS;
       return api.models
         .list(harness)
         .then((models) => useModels.getState().setModels(models, harness));

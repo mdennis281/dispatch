@@ -34,7 +34,7 @@ import { join, dirname } from "node:path";
 import { cp, mkdir, writeFile, rm, readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import type { SkillConfig } from "@dispatch/shared";
+import { DEFAULT_HARNESS, PROVIDERS, type SkillConfig } from "@dispatch/shared";
 import { excludePathsFromGit, unexcludePathsFromGit } from "./git-exclude.js";
 
 /** Stamp file marking a skill dir as ours to delete. Holds the writing server's id. */
@@ -52,7 +52,10 @@ export const MATERIALIZED_MARKER = ".dispatch-materialized";
 const RUN_ID = `${process.pid}-${randomUUID()}`;
 
 /** The effective skills directory the SDK discovers under a session cwd. */
-export function skillsTargetDir(cwd: string, providerDir: ".claude" | ".agents" = ".claude"): string {
+export function skillsTargetDir(
+  cwd: string,
+  providerDir: string = PROVIDERS[DEFAULT_HARNESS].skillsDir,
+): string {
   return join(cwd, providerDir, "skills");
 }
 
@@ -147,7 +150,7 @@ export async function reclaimOrphans(base: string): Promise<ReclaimResult> {
 export async function materializeSkills(
   cwd: string,
   skills: SkillConfig[],
-  providerDir: ".claude" | ".agents" = ".claude",
+  providerDir: string = PROVIDERS[DEFAULT_HARNESS].skillsDir,
 ): Promise<string[]> {
   if (!skills.length) return [];
   const base = skillsTargetDir(cwd, providerDir);

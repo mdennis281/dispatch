@@ -14,6 +14,7 @@ import {
   ArrowRightLeft,
   Search,
 } from "lucide-react";
+import { DEFAULT_HARNESS, PROVIDER_IDS, providerFor } from "@dispatch/shared";
 import type {
   AgentActivity,
   Chat,
@@ -208,12 +209,14 @@ export function ChatView({ chat }: { chat: Chat }) {
   const rename = useChatRename(chat);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmMove, setConfirmMove] = useState<HarnessKind | null>(null);
-  const currentHarness = chat.harness ?? "claude";
-  const moveTarget: HarnessKind = currentHarness === "claude" ? "codex" : "claude";
-  const moveRuntime = useHarnesses((s) =>
-    s.harnesses.find((candidate) => candidate.kind === moveTarget),
-  );
-  const moveAvailable = moveRuntime?.runtime.available !== false;
+  const currentHarness = chat.harness ?? DEFAULT_HARNESS;
+  // Every OTHER registered provider, not "the other one": with two providers a
+  // toggle was indistinguishable from a list, and a third would have been
+  // unreachable from here.
+  const moveTargets = PROVIDER_IDS.filter((kind) => kind !== currentHarness);
+  const harnessRuntimes = useHarnesses((s) => s.harnesses);
+  const moveAvailable = (kind: HarnessKind) =>
+    harnessRuntimes.find((candidate) => candidate.kind === kind)?.runtime.available !== false;
 
   const moveChat = useCallback(() => {
     if (!confirmMove) return;
@@ -222,7 +225,7 @@ export function ChatView({ chat }: { chat: Chat }) {
       harness: confirmMove,
       sessionId: undefined,
       model: undefined,
-      agentId: confirmMove === "codex" ? undefined : chat.agentId,
+      agentId: providerFor(confirmMove).subagents ? chat.agentId : undefined,
       status: "idle",
     });
     actions.setHarness(chat.id, confirmMove);
@@ -587,21 +590,24 @@ export function ChatView({ chat }: { chat: Chat }) {
                     Regenerate title
                   </MenuItem>
                   <div className="my-1 h-px bg-line" />
-                  <MenuItem
-                    icon={<ArrowRightLeft />}
-                    disabled={!moveAvailable}
-                    title={
-                      moveAvailable
-                        ? "Keeps this transcript and hands recent context to the new provider"
-                        : `${harnessLabel(moveTarget)} is not installed`
-                    }
-                    onClick={() => {
-                      setConfirmMove(moveTarget);
-                      close();
-                    }}
-                  >
-                    Move chat to {harnessLabel(moveTarget)}…
-                  </MenuItem>
+                  {moveTargets.map((moveTarget) => (
+                    <MenuItem
+                      key={moveTarget}
+                      icon={<ArrowRightLeft />}
+                      disabled={!moveAvailable(moveTarget)}
+                      title={
+                        moveAvailable(moveTarget)
+                          ? "Keeps this transcript and hands recent context to the new provider"
+                          : `${harnessLabel(moveTarget)} is not installed`
+                      }
+                      onClick={() => {
+                        setConfirmMove(moveTarget);
+                        close();
+                      }}
+                    >
+                      Move chat to {harnessLabel(moveTarget)}…
+                    </MenuItem>
+                  ))}
                   <div className="my-1 h-px bg-line" />
                   {/* The id used to ride in the header as a chip, which cost a
                       permanent slice of the title bar to show a string nobody
@@ -787,7 +793,7 @@ export function ChatView({ chat }: { chat: Chat }) {
         onClose={() => setConfirmMove(null)}
         width={440}
         icon={<ArrowRightLeft />}
-        title={`Move chat to ${harnessLabel(confirmMove ?? moveTarget)}`}
+        title={`Move chat to ${harnessLabel(confirmMove ?? moveTargets[0])}`}
         description={chat.title}
         footer={
           <>
@@ -795,7 +801,7 @@ export function ChatView({ chat }: { chat: Chat }) {
               Cancel
             </Button>
             <Button variant="primary" onClick={moveChat}>
-              Move to {harnessLabel(confirmMove ?? moveTarget)}
+              Move to {harnessLabel(confirmMove ?? moveTargets[0])}
             </Button>
           </>
         }
@@ -803,7 +809,7 @@ export function ChatView({ chat }: { chat: Chat }) {
         <div className="space-y-3 text-base leading-relaxed text-secondary">
           <p>
             Dispatch keeps the complete chat transcript. On your next message,
-            {" "}{harnessLabel(confirmMove ?? moveTarget)} receives the recent conversation as a handoff.
+            {" "}{harnessLabel(confirmMove ?? moveTargets[0])} receives the recent conversation as a handoff.
           </p>
           <p className="text-sm text-muted">
             The current native session cannot move between providers. A running turn will stop,

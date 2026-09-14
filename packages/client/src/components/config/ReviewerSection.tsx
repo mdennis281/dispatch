@@ -40,7 +40,9 @@ import {
   X,
 } from "lucide-react";
 import {
+  PROVIDER_IDS,
   authorReviewerRoster,
+  providerFor,
   COPILOT_LOGIN,
   resolveWorkflow,
   type Effort,
@@ -116,7 +118,7 @@ const ROUND_OPTIONS = [
   ...[2, 3, 4, 6, 8, 12].map((n) => ({ value: String(n), label: `${n} rounds` })),
 ];
 
-const HARNESSES = ["claude", "codex"] as const;
+const HARNESSES = PROVIDER_IDS;
 
 /**
  * The provider list and each provider's model catalog, fetched when the pane
@@ -195,7 +197,7 @@ export function ReviewerSection({
       const runtime = harnesses.find((h) => h.kind === kind)?.runtime;
       return {
         value: kind,
-        label: kind === "claude" ? "Claude Code" : "Codex",
+        label: providerFor(kind).label,
         // Only once the list has loaded: "not installed" flashing on every
         // provider for the length of a fetch reads as a broken install.
         hint: !harnesses.length

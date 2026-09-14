@@ -6,7 +6,7 @@
  * these routes cover initial load + manual refresh.
  */
 import type { FastifyInstance } from "fastify";
-import { HarnessKindSchema, type UsageSnapshot } from "@dispatch/shared";
+import { DEFAULT_HARNESS, HarnessKindSchema, type UsageSnapshot } from "@dispatch/shared";
 
 /**
  * A rate-limit window's length as a person would say it. Codex reports its
@@ -22,8 +22,8 @@ export function windowLabel(minutes: number | undefined, fallback: string): stri
 }
 
 async function snapshotFor(app: FastifyInstance, raw: string | undefined): Promise<UsageSnapshot> {
-  const parsed = HarnessKindSchema.safeParse(raw ?? "claude");
-  const kind = parsed.success ? parsed.data : "claude";
+  const parsed = HarnessKindSchema.safeParse(raw ?? DEFAULT_HARNESS);
+  const kind = parsed.success ? parsed.data : DEFAULT_HARNESS;
   if (kind === "claude") return app.services.usage.get();
   const limits = await app.services.harnesses.find(kind)!.readLimits();
   const win = (value: { usedPercent?: number; resetsAt?: number } | null | undefined) =>
@@ -50,7 +50,7 @@ export function registerUsageRoutes(app: FastifyInstance): void {
   );
 
   app.post<{ Querystring: { harness?: string } }>("/api/usage/refresh", async (req) => {
-    const parsed = HarnessKindSchema.safeParse(req.query.harness ?? "claude");
+    const parsed = HarnessKindSchema.safeParse(req.query.harness ?? DEFAULT_HARNESS);
     return parsed.success && parsed.data === "claude"
       ? usage.refresh()
       : snapshotFor(app, req.query.harness);

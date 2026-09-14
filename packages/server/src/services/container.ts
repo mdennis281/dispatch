@@ -18,6 +18,7 @@ import type { ServerConfig } from "../config.js";
 // second Store over the installed instance's roots for `instance: "stable"`.
 import { Store } from "../store/index.js";
 import {
+  DEFAULT_HARNESS,
   PrSnapshotSchema,
   prRecordKey,
   resolveWorkflow,
@@ -713,10 +714,15 @@ export function createServices(
           return { policy, problem };
         },
         spawn: async ({ projectId, repo, number, round, policy }) => {
+          // The project's OWN effort pin, not `policy.effort`: the resolved value
+          // is never empty (it bottoms out at the profile's "high"), so passing it
+          // would shadow the app's per-provider reviewer default every time.
+          // Unpinned, `launchAgentTask` walks provider default → task default.
+          const project = await store.getProject(projectId).catch(() => null);
           const out = await launchAgentTask(services, {
             projectId,
             taskId: "pr:review",
-            effort: policy.effort,
+            effort: project?.workflow?.pr?.reviewAgent?.effort,
             harness: policy.harness,
             model: policy.model,
             agentId: policy.agentId,
@@ -830,7 +836,7 @@ export function createServices(
     const parent = await store.getChat(parentChatId).catch(() => null);
     // Legacy chats predate the persisted harness field; those chats are Claude,
     // which was the only provider when their rows were written.
-    const parentProvider = parent ? (parent.harness ?? "claude") : undefined;
+    const parentProvider = parent ? (parent.harness ?? DEFAULT_HARNESS) : undefined;
     const provider = request.provider ?? parentProvider;
     // A model id belongs to one provider's catalogue. When the provider is
     // explicitly changed, let that provider choose its configured default
@@ -878,7 +884,7 @@ export function createServices(
       title: chat.title,
       projectId: chat.projectId,
       projectName: project.name,
-      provider: chat.harness ?? "claude",
+      provider: chat.harness ?? DEFAULT_HARNESS,
       model: chat.model,
     };
   };

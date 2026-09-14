@@ -6,6 +6,7 @@
  * it.
  */
 import * as z from "zod";
+import { HarnessKindSchema } from "./common.js";
 
 /** One rate-limit window: how much of the quota is used + when it resets. */
 export const UsageWindowSchema = z.object({
@@ -31,7 +32,7 @@ export const UsageSnapshotSchema = z.object({
   stale: z.boolean().optional(),
   /** Coarse failure reason: "unauthenticated" | "rate_limited" | "unavailable" | message. */
   error: z.string().optional(),
-  provider: z.enum(["claude", "codex"]).optional(),
+  provider: HarnessKindSchema.optional(),
   primaryLabel: z.string().optional(),
   secondaryLabel: z.string().optional(),
   planType: z.string().optional(),

@@ -12,7 +12,6 @@ import { seedDefaultsIfEmpty } from "./seed.js";
 import { ensureSetupState } from "./services/setup.js";
 import { installShutdown } from "./shutdown.js";
 import { installCrashNet, attachCrashBus } from "./crash-log.js";
-import { claudeRuntime } from "./services/runtime.js";
 
 /** Wildcard binds that answer on every interface — print real addresses instead. */
 const WILDCARD = new Set(["0.0.0.0", "::", "::0"]);
@@ -100,14 +99,6 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
       `)` +
       (dev ? "  — SPA + HMR served here" : ""),
   );
-  for (const runtime of app.services.harnesses.runtimes()) {
-    if (runtime.kind === "claude") continue;
-    // eslint-disable-next-line no-console
-    console.log(
-      `[dispatch] ${runtime.kind} runtime ${runtime.version ?? "unknown"} (${runtime.source})` +
-        (runtime.path ? ` — ${runtime.path}` : ""),
-    );
-  }
   if (WILDCARD.has(config.host)) {
     const lan = lanUrls();
     const authEnabled = await app.auth.enabled();
@@ -118,13 +109,18 @@ export async function start({ dev = false }: { dev?: boolean } = {}): Promise<vo
         : `[dispatch] host mode — bound to every interface, but this box has no non-loopback IPv4 address`,
     );
   }
-  // Which `claude` binary every session runs on. Worth a line: it decides which
+  // Which binary each provider's sessions run on. Worth a line: it decides which
   // models the picker can offer, so "why is Opus 5 missing" is answered here.
-  // eslint-disable-next-line no-console
-  console.log(
-    `[dispatch] claude runtime ${claudeRuntime.version ?? "unknown"} (${claudeRuntime.source})` +
-      (claudeRuntime.path ? ` — ${claudeRuntime.path}` : ""),
-  );
+  // Every registered provider, the default included — Claude used to be logged
+  // from its own module on a separate line, which a third provider would have
+  // silently not had.
+  for (const runtime of app.services.harnesses.runtimes()) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[dispatch] ${runtime.kind} runtime ${runtime.version ?? "unknown"} (${runtime.source})` +
+        (runtime.path ? ` — ${runtime.path}` : ""),
+    );
+  }
   // The desktop shell waits for this exact line before showing its window.
   if (envVar(process.env, "IPC") === "1") {
     // eslint-disable-next-line no-console

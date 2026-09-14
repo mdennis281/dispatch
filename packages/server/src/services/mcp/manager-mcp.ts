@@ -146,6 +146,8 @@ import {
   type WorkflowExemptionScope,
   type WorkflowMergeMethod,
   type WorktreeInfo,
+  HarnessKindSchema,
+  PROVIDER_IDS,
 } from "@dispatch/shared";
 import type { EventBus } from "../../bus.js";
 import type { SpawnNestingVerdict } from "../chat-nesting.js";
@@ -5534,13 +5536,10 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .optional()
         .describe("Project to spawn in. Defaults to this chat's own project."),
       modeId: z.string().optional().describe("Mode id for the new chat (default: your project's)."),
-      provider: z
-        .enum(["claude", "codex"])
-        .optional()
-        .describe(
-          "Provider/runtime for the new chat. Choose claude or codex; omit to inherit " +
-            "this chat's current provider. Model does not select the provider.",
-        ),
+      provider: HarnessKindSchema.optional().describe(
+        `Provider/runtime for the new chat. Choose ${PROVIDER_IDS.join(" or ")}; omit to ` +
+          "inherit this chat's current provider. Model does not select the provider.",
+      ),
       agentId: z
         .string()
         .optional()

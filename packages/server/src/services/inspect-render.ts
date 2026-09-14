@@ -12,6 +12,7 @@
  * the ids it prints are exactly what `chat_read`'s `beforeId`/`afterId` cursors
  * take — the output of one call is the input to the next.
  */
+import { DEFAULT_HARNESS } from "@dispatch/shared";
 import type {
   ChatSummary,
   FindChatsResult,
@@ -135,7 +136,7 @@ export function renderRead(result: ReadChatResult): string {
   lines.push(
     `# ${c.title}`,
     `${c.id} · ${c.projectName ?? c.projectId} · ${c.status ?? "idle"}${c.archived ? " · archived" : ""}`,
-    `${c.harness ?? "claude"}${c.model ? ` · ${c.model}` : ""} · created ${when(c.createdAt)} · last active ${when(c.updatedAt)}`,
+    `${c.harness ?? DEFAULT_HARNESS}${c.model ? ` · ${c.model}` : ""} · created ${when(c.createdAt)} · last active ${when(c.updatedAt)}`,
     `${result.totalRows} rows (${size(c.transcriptBytes)}) — ${kinds}`,
   );
   if (c.worktrees?.length) lines.push(`worktrees: ${c.worktrees.join(", ")}`);
@@ -190,7 +191,7 @@ export function renderProject(result: ProjectInfoResult): string {
   const lines: string[] = [
     `# ${p.name}`,
     `${p.id} · ${p.repoPath}`,
-    `workflow: ${p.workflow ?? "default"} · harness: ${p.harness ?? "claude"} · default branch: ${p.defaultBranch ?? "main"}`,
+    `workflow: ${p.workflow ?? "default"} · harness: ${p.harness ?? DEFAULT_HARNESS} · default branch: ${p.defaultBranch ?? "main"}`,
     `worktree root: ${p.worktreeRoot ?? "(unset)"}`,
     "",
   ];

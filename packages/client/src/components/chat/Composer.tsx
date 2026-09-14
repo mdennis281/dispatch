@@ -35,7 +35,7 @@ import {
   Drama,
 } from "lucide-react";
 import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef } from "@dispatch/shared";
-import { DEFAULT_MODEL, findModel, chatRoot } from "@dispatch/shared";
+import { DEFAULT_HARNESS, defaultModelFor, findModel, chatRoot } from "@dispatch/shared";
 import { api, type IndexedFile } from "../../lib/api.js";
 import { pathsFromDrop, basenameOf, dropIntent, type DropIntent } from "../../lib/dropPaths.js";
 import { useFileDrag } from "../../lib/useFileDrag.js";
@@ -278,7 +278,7 @@ type ConfigView = "root" | ComposerControl | "customize";
 /** The chat composer: TipTap input + attachments + effort/mode/agent + send/steer. */
 export function Composer({ chat, agents, modes }: ComposerProps) {
   const upsertChat = useChats((s) => s.upsertChat);
-  const harness = chat.harness ?? "claude";
+  const harness = chat.harness ?? DEFAULT_HARNESS;
   const harnesses = useHarnesses((s) => s.harnesses);
   const capabilities = harnesses.find((h) => h.kind === harness)?.capabilities;
 
@@ -314,7 +314,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === chat.projectId));
   const pickerRoot = project ? chatRoot(chat, project) : chat.worktrees[0];
   const [model, setModelState] = useState<string>(
-    () => modelByChat.get(chat.id) ?? chat.model ?? DEFAULT_MODEL,
+    () => modelByChat.get(chat.id) ?? chat.model ?? defaultModelFor(harness) ?? "",
   );
   // Selectable models come from the server (the live Claude Code runtime list,
   // or a static fallback), seeded so the picker is never empty. `findModel`
@@ -504,7 +504,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     setUploading(0);
     setError(null);
     setIsEmpty(editor.isEmpty);
-    setModelState(modelByChat.get(chat.id) ?? chat.model ?? DEFAULT_MODEL);
+    setModelState(modelByChat.get(chat.id) ?? chat.model ?? defaultModelFor(harness) ?? "");
 
     // Land the caret in the composer so an opened chat — brand new, picked from
     // the sidebar, or jumped to from the palette — is typeable immediately. Every

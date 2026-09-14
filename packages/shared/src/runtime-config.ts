@@ -7,7 +7,7 @@
  * inventing a slightly different interpretation of "the Codex config".
  */
 import * as z from "zod";
-import { EffortSchema, HarnessKindSchema } from "./common.js";
+import { DEFAULT_HARNESS, EffortSchema, HarnessKindSchema, type HarnessKind } from "./common.js";
 
 /**
  * How many chats may hold an execution slot at once when nothing says otherwise.
@@ -40,6 +40,20 @@ export const HarnessDefaultsSchema = z.object({
   /** Omitted means let the runtime choose its current recommended model. */
   model: z.string().trim().min(1).optional(),
   effort: EffortSchema.optional(),
+  /**
+   * What Dispatch's PR reviewer runs at on this provider when the project's
+   * `workflow.pr.reviewAgent` block doesn't pin it.
+   *
+   * Per provider for the same reason `model` is: a model id belongs to one
+   * catalogue, so an app-wide "reviewer model" would hand a Codex reviewer a
+   * Claude id the day a project switched providers.
+   */
+  reviewer: z
+    .object({
+      model: z.string().trim().min(1).optional(),
+      effort: EffortSchema.optional(),
+    })
+    .optional(),
 });
 export type HarnessDefaults = z.infer<typeof HarnessDefaultsSchema>;
 
@@ -53,13 +67,23 @@ export const HarnessContextLimitsSchema = z.object({
 export type HarnessContextLimits = z.infer<typeof HarnessContextLimitsSchema>;
 
 export const HarnessSettingsSchema = z.object({
-  defaultHarness: HarnessKindSchema.default("claude"),
-  defaults: z
-    .object({
-      claude: HarnessDefaultsSchema.optional(),
-      codex: HarnessDefaultsSchema.optional(),
-    })
-    .default({}),
+  defaultHarness: HarnessKindSchema.default(DEFAULT_HARNESS),
+  /**
+   * Keyed by provider id rather than a field per provider, so registering a
+   * provider (see `providers.ts`) is enough for it to have defaults.
+   */
+  defaults: z.partialRecord(HarnessKindSchema, HarnessDefaultsSchema).default({}),
   contextLimits: HarnessContextLimitsSchema.optional(),
 });
 export type HarnessSettings = z.infer<typeof HarnessSettingsSchema>;
+
+/**
+ * One provider's defaults out of a settings record — the only way anything
+ * should read `harness.defaults`, so no caller re-derives the fallback chain.
+ */
+export function providerDefaults(
+  harness: { defaults?: Partial<Record<HarnessKind, HarnessDefaults>> } | undefined | null,
+  provider: HarnessKind,
+): HarnessDefaults {
+  return harness?.defaults?.[provider] ?? {};
+}
