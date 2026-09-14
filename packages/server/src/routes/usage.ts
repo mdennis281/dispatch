@@ -57,7 +57,10 @@ async function snapshotFor(
   // polling/429 discipline no `readLimits()` call could keep.
   if (!harness.capabilities.usageLimits) {
     const poller = app.services.accountUsage.for(account);
-    return refresh ? poller.refresh() : poller.get();
+    // Stamped here as well as by the poller: the default account's service polls
+    // at boot, before anything has told it which subscription it is serving, so
+    // its cached snapshot can predate the id.
+    return { ...(await (refresh ? poller.refresh() : poller.get())), subscriptionId: sub.id };
   }
   const limits = await harness.readLimits(account);
   const win = (value: { usedPercent?: number; resetsAt?: number } | null | undefined) =>
