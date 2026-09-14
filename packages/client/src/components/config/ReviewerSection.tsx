@@ -321,10 +321,16 @@ export function ReviewerSection({
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                 <label className="flex items-center gap-2">
                   <span className="text-2xs text-faint">Effort</span>
-                  <Select
-                    options={EFFORT_OPTIONS}
-                    value={resolved.effort}
-                    onChange={(v: Effort) => patch({ effort: v })}
+                  {/* Unset is a real choice: it defers to Settings → Chat's reviewer
+                      effort for whichever provider the review runs on. Reads the
+                      AUTHORED value — `resolved.effort` is never empty. */}
+                  <Select<Effort | "">
+                    options={[
+                      { value: "", label: "App default", hint: "per provider" },
+                      ...EFFORT_OPTIONS,
+                    ]}
+                    value={value.pr?.reviewAgent?.effort ?? ""}
+                    onChange={(v) => patch({ effort: v || undefined })}
                     leftIcon={<Gauge />}
                     width={170}
                   />
@@ -342,7 +348,8 @@ export function ReviewerSection({
               <p className="text-2xs leading-snug text-faint">
                 The reviewer can run on a different provider than the project&rsquo;s own chats —
                 a second model reading the diff catches what the first one wrote past. Reviewing
-                well is a reading job, so it defaults to high effort. The cap bounds
+                well is a reading job, so unless an effort is picked here or in Settings → Chat
+                it runs at high. The cap bounds
                 the fix-and-re-request cycle: a review is only spent on the code it read, so a
                 push re-arms it — the cap is what stops a PR that never converges.
               </p>

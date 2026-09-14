@@ -134,7 +134,13 @@ function savedWorkflow(project: Project | null): WorkflowConfig {
       reviewAgent: {
         enabled: pr.reviewAgent.enabled,
         identity: pr.reviewAgent.identity,
-        effort: pr.reviewAgent.effort,
+        // Only when the project AUTHORED one, like `model` below. The resolved
+        // value is never empty (it bottoms out at "high"), so persisting it made
+        // every save pin the effort and silently shadow the app's per-provider
+        // reviewer default for good.
+        ...(project?.workflow?.pr?.reviewAgent?.effort
+          ? { effort: project.workflow.pr.reviewAgent.effort }
+          : {}),
         maxRounds: pr.reviewAgent.maxRounds,
         post: pr.reviewAgent.post,
         ...(pr.reviewAgent.harness ? { harness: pr.reviewAgent.harness } : {}),
