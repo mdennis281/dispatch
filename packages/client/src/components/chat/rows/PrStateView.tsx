@@ -30,6 +30,8 @@ import {
 import { Chip, type Tone } from "../../ui/Chip.js";
 import { ReviewAgentChip } from "../../pr/ReviewAgentChip.js";
 import { cn } from "../../../lib/cn.js";
+import { dur } from "../../../lib/format.js";
+import { useNowTick } from "../../../stores/agentRun.js";
 
 /* ------------------------------------------------------------------ pieces */
 
@@ -199,7 +201,44 @@ export function PrStateStrip({ pr, live }: { pr: PrSnapshot; live?: boolean }) {
 
 /* ------------------------------------------------------------------- panel */
 
-function JobRow({ check }: { check: CheckRun }) {
+/**
+ * When a job started and stopped, in epoch ms.
+ *
+ * A job still in flight ends at `now` only when the panel is LIVE. A frozen
+ * snapshot's running job stopped being observed when the tool returned, so
+ * ticking it forward would invent a runtime nobody measured. It gets no end,
+ * and draws no duration.
+ */
+function jobSpan(check: CheckRun, now: number | null): { start: number; end?: number } | null {
+  const start = check.startedAt ? Date.parse(check.startedAt) : Number.NaN;
+  if (Number.isNaN(start)) return null;
+  const done = check.completedAt ? Date.parse(check.completedAt) : Number.NaN;
+  if (!Number.isNaN(done)) return { start, end: done };
+  return { start, end: check.status !== "completed" && now !== null ? now : undefined };
+}
+
+/**
+ * Wall-clock runtime of a set of jobs: first start to last finish.
+ *
+ * Not the sum. Jobs in a workflow run in parallel, and four parallel jobs
+ * summed into "CI took 11m" is a wait nobody sat through. Undefined when a job
+ * has no end yet on a frozen snapshot, rather than a total that quietly leaves
+ * the slowest job out.
+ */
+function wallClock(checks: CheckRun[], now: number | null): number | undefined {
+  let first = Infinity;
+  let last = -Infinity;
+  for (const check of checks) {
+    const span = jobSpan(check, now);
+    if (!span) continue;
+    if (span.end === undefined) return undefined;
+    first = Math.min(first, span.start);
+    last = Math.max(last, span.end);
+  }
+  return last >= first ? last - first : undefined;
+}
+
+function JobRow({ check, now }: { check: CheckRun; now: number | null }) {
   const done = check.status === "completed";
   const failed =
     done &&
@@ -214,12 +253,25 @@ function JobRow({ check }: { check: CheckRun }) {
   ) : (
     <Check className="size-3 shrink-0 text-success" />
   );
+  const span = jobSpan(check, now);
+  const runtime = span?.end !== undefined ? dur(Math.max(0, span.end - span.start)) : null;
   const body = (
     <>
       {icon}
       <span className={cn("min-w-0 flex-1 truncate", failed && "text-danger")}>{check.name}</span>
       <span className="shrink-0 cm-mono !text-2xs text-faint">
         {done ? (check.conclusion ?? "done") : check.status.replace("_", " ")}
+      </span>
+      {/* Fixed width so durations line up into a column down the list:
+          comparing job times is the reason to show them at all. */}
+      <span
+        className={cn(
+          "w-14 shrink-0 text-right cm-mono !text-2xs tabular-nums",
+          done ? "text-muted" : "text-accent-hi",
+        )}
+        title={check.startedAt ? `Started ${new Date(check.startedAt).toLocaleString()}` : undefined}
+      >
+        {runtime ?? "—"}
       </span>
     </>
   );
@@ -231,12 +283,15 @@ function JobRow({ check }: { check: CheckRun }) {
       <ExternalLink className="size-3 shrink-0 text-faint" />
     </a>
   ) : (
-    <div className={className}>{body}</div>
+    <div className={className}>
+      {body}
+      <span className="size-3 shrink-0" />
+    </div>
   );
 }
 
 /** Jobs grouped under their workflow, the way the Actions tab groups them. */
-function ChecksSection({ checks }: { checks: CheckRun[] }) {
+function ChecksSection({ checks, now }: { checks: CheckRun[]; now: number | null }) {
   if (checks.length === 0) {
     return <p className="text-xs text-muted">No checks are reporting on this PR.</p>;
   }
@@ -249,26 +304,46 @@ function ChecksSection({ checks }: { checks: CheckRun[] }) {
   }
   return (
     <div className="flex flex-col gap-2">
-      {[...groups.entries()].map(([workflow, jobs]) => (
-        <div key={workflow || "ungrouped"}>
-          {workflow && (
-            <p className="mb-0.5 cm-mono !text-2xs uppercase tracking-wide text-faint">{workflow}</p>
-          )}
-          <div className="flex flex-col">
-            {jobs.map((job) => (
-              <JobRow key={`${workflow}:${job.name}`} check={job} />
-            ))}
+      {[...groups.entries()].map(([workflow, jobs]) => {
+        const total = wallClock(jobs, now);
+        return (
+          <div key={workflow || "ungrouped"}>
+            {workflow && (
+              <p className="mb-0.5 flex items-center gap-2 px-1.5 cm-mono !text-2xs uppercase tracking-wide text-faint">
+                <span className="min-w-0 flex-1 truncate">{workflow}</span>
+                {total !== undefined && (
+                  <span className="shrink-0 normal-case tabular-nums">{dur(total)}</span>
+                )}
+                <span className="size-3 shrink-0" />
+              </p>
+            )}
+            <div className="flex flex-col">
+              {jobs.map((job) => (
+                <JobRow key={`${workflow}:${job.name}`} check={job} now={now} />
+              ))}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({
+  title,
+  aside,
+  children,
+}: {
+  title: string;
+  aside?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <div className="flex flex-col gap-1.5">
-      <p className="text-2xs font-medium uppercase tracking-wide text-faint">{title}</p>
+      <p className="flex items-center gap-2 text-2xs font-medium uppercase tracking-wide text-faint">
+        <span className="min-w-0 flex-1">{title}</span>
+        {aside}
+      </p>
       {children}
     </div>
   );
@@ -284,13 +359,21 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 export function PrStatePanel({
   pr,
   reviewAgent,
+  live = false,
 }: {
   pr: PrSnapshot;
   reviewAgent?: PrReviewAgentState;
+  /** Whether `pr` is the registry's current row, which lets running jobs tick. */
+  live?: boolean;
 }) {
   const unresolved = unresolvedThreads(pr.threads);
   const link = pr.url && pr.url !== "#" ? pr.url : undefined;
-  const failing = foldChecks(pr.checks).fail;
+  const { fail: failing, running } = foldChecks(pr.checks);
+  // Ticks only while something is running on a live row, so a settled panel
+  // does not re-render every second for a number that can no longer change.
+  const tick = useNowTick(live && running > 0);
+  const now = live ? tick : null;
+  const ciTotal = wallClock(pr.checks, now);
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1.5">
@@ -330,8 +413,18 @@ export function PrStatePanel({
 
       <Section
         title={`Checks${pr.checks.length ? ` (${pr.checks.length}${failing ? `, ${failing} failing` : ""})` : ""}`}
+        aside={
+          ciTotal !== undefined && (
+            <span
+              className="shrink-0 pr-[1.625rem] cm-mono !text-2xs normal-case tracking-normal tabular-nums text-muted"
+              title="Wall clock from the first job starting to the last one finishing"
+            >
+              {dur(ciTotal)}
+            </span>
+          )
+        }
       >
-        <ChecksSection checks={pr.checks} />
+        <ChecksSection checks={pr.checks} now={now} />
       </Section>
 
       <Section title="Reviewers">
