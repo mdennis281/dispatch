@@ -122,6 +122,7 @@ export function subscriptionStatuses(
       dirExists: existsSync(dir),
       loggedIn: existsSync(join(dir, providerFor(sub.provider).account.loginFile)),
       isDefault: subscriptionFor(settings, sub.provider).id === sub.id,
+      atDefaultDir: sameDir(dir, defaultConfigDir(sub.provider, machine)),
     };
   });
 }

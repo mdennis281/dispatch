@@ -126,4 +126,39 @@ export interface SubscriptionStatus extends ResolvedSubscription {
   loggedIn: boolean;
   /** This is the provider's default subscription. */
   isDefault: boolean;
+  /**
+   * Its directory IS the provider's default config dir — where every session a
+   * chat wrote before subscriptions existed lives. See {@link chatAccountOf}.
+   */
+  atDefaultDir: boolean;
+}
+
+/**
+ * The account a chat runs under, read off the server's status list — the
+ * client's copy of the server's `chatSubscription`, which it can't call because
+ * "the provider's default directory" is a fact about the server's machine. The
+ * statuses carry that fact as `atDefaultDir`, so the two rules agree exactly.
+ *
+ * Pinned → that account when it is still one of the chat's provider's, else the
+ * provider default. Unpinned (a legacy chat) → the account at the default dir,
+ * else the provider default.
+ */
+export function chatAccountOf(
+  statuses: readonly SubscriptionStatus[],
+  chat: { harness?: HarnessKind; subscriptionId?: string },
+  provider: HarnessKind,
+): SubscriptionStatus | undefined {
+  const mine = statuses.filter((s) => s.provider === provider);
+  const fallback = mine.find((s) => s.isDefault) ?? mine[0];
+  if (chat.subscriptionId) return mine.find((s) => s.id === chat.subscriptionId) ?? fallback;
+  return mine.find((s) => s.atDefaultDir) ?? fallback;
+}
+
+/**
+ * How to name an account in a picker: its own name, except an implicit one,
+ * whose synthesized name is the provider's product name — "Claude" reads better
+ * beside a model list than "Claude Code".
+ */
+export function accountLabel(sub: Pick<ResolvedSubscription, "name" | "provider" | "implicit">): string {
+  return sub.implicit ? providerFor(sub.provider).shortLabel : sub.name;
 }
