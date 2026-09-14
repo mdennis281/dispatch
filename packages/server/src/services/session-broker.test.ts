@@ -25,6 +25,7 @@ import { MemoryService } from "./memory.js";
 import { MetricsService } from "./metrics.js";
 import { MetricsBackfill } from "./metrics-backfill.js";
 import { AuthoredConfigService } from "./authored-config.js";
+import { HouseRulesService } from "./house-rules.js";
 import { ProjectConfigService } from "./project-config.js";
 
 describe("buildManagerToolsDirective", () => {
@@ -2400,6 +2401,39 @@ describe("SessionBroker — project memory injection", () => {
     expect(append).toContain("how we ship to prod");
     // Bounded — the full body is not injected.
     expect(append).not.toContain("the bot merges");
+  });
+
+  it("injects house rules ahead of memory, and no longer injects a rule memory's body", async () => {
+    const { fn, controllers } = makeFakeQuery((t) => [assistantText(t), resultMsg()]);
+    const memory = new MemoryService({ store, bus });
+    await memory.write("p1", {
+      name: "be-terse",
+      description: "keep peer messages short",
+      type: "feedback",
+      body: "FEEDBACK BODY must stay out of the prompt",
+    });
+    const houseRules = new HouseRulesService({
+      globalRoot: join(dir, "global"),
+      projectDir: (id) => join(dir, "house", id),
+    });
+    await houseRules.write("global", "GLOBAL RULE: ask before upgrading stable.");
+    await houseRules.write("project", "PROJECT RULE: ship through a PR.", "p1");
+    const broker = makeBroker(fn, 6, { memory, houseRules });
+    await store.saveChat(chatFor("c1", "p1"));
+    broker.create(chatFor("c1", "p1"));
+
+    const idleP = broker.waitFor("c1", "idle");
+    await broker.sendMessage("c1", "hi");
+    await idleP;
+
+    const opts = controllers[0]!.options as { systemPrompt?: { append?: string } };
+    const append = opts.systemPrompt?.append ?? "";
+    expect(append).toContain("## House rules");
+    expect(append).toContain("GLOBAL RULE: ask before upgrading stable.");
+    expect(append).toContain("PROJECT RULE: ship through a PR.");
+    expect(append.indexOf("## House rules")).toBeLessThan(append.indexOf("Project memory"));
+    expect(append).toContain("be-terse");
+    expect(append).not.toContain("FEEDBACK BODY must stay out of the prompt");
   });
 
   it("injects nothing for a project with no memories", async () => {

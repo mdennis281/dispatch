@@ -212,31 +212,31 @@ describe("MemoryService — injection + recall", () => {
   });
 });
 
-describe("MemoryService — tiered injection (rules vs facts)", () => {
-  it("injects standing rules in full (user before feedback) and never a fact body", async () => {
+describe("MemoryService — catalogue injection", () => {
+  it("never injects a body — user/feedback memories are catalogued like any fact", async () => {
     await memory.write("p1", { name: "always-watch-prs", description: "watch PRs to merge", type: "feedback", body: "FEEDBACK BODY: after shipping, watch it through." });
     await memory.write("p1", { name: "michael-iterates", description: "iterates and reverts", type: "user", body: "USER BODY: expect churn." });
     await memory.write("p1", { name: "steam-login", description: "how steam login works", type: "project", body: "FACT BODY should never inject" });
 
     const inj = (await memory.buildInjection("p1"))!;
-    expect(inj).toContain("### Standing rules & preferences");
-    // Rules carry their (clamped) bodies…
-    expect(inj).toContain("**michael-iterates** — iterates and reverts");
-    expect(inj).toContain("USER BODY: expect churn.");
-    expect(inj).toContain("FEEDBACK BODY: after shipping");
-    // …ordered user before feedback.
-    expect(inj.indexOf("michael-iterates")).toBeLessThan(inj.indexOf("always-watch-prs"));
-    // A lookup fact's BODY is never injected (only its name/description in the sample).
+    // The always-on tier is gone: house rules own that now.
+    expect(inj).not.toContain("Standing rules");
+    expect(inj).not.toContain("USER BODY");
+    expect(inj).not.toContain("FEEDBACK BODY");
     expect(inj).not.toContain("FACT BODY should never inject");
+    // All three are counted and sampled as one-liners.
+    expect(inj).toContain("3 recorded memories");
+    expect(inj).toContain("`michael-iterates` — iterates and reverts");
+    expect(inj).toContain("`always-watch-prs` — watch PRs to merge");
   });
 
-  it("caps the facts sample so a large catalogue can't flood; the topic map still counts all", async () => {
+  it("caps the sample so a large catalogue can't flood; the topic map still counts all", async () => {
     // 8 facts written oldest→newest across 3 areas; sample caps at 6.
     for (const n of ["a-1", "a-2", "a-3", "b-1", "b-2", "c-1", "c-2", "c-3"]) {
       await memory.write("p1", { name: n, description: `d ${n}`, type: "project", body: "x" });
     }
     const inj = (await memory.buildInjection("p1"))!;
-    expect(inj).toContain("8 recorded facts");
+    expect(inj).toContain("8 recorded memories");
     expect(inj).toContain("Recently recorded:"); // nothing accessed yet
     // Newest 6 shown as one-liners; the two OLDEST are omitted from the sample…
     expect(inj).toContain("`c-3` — d c-3");
@@ -247,17 +247,8 @@ describe("MemoryService — tiered injection (rules vs facts)", () => {
     expect(inj).toContain("c (3)");
   });
 
-  it("omits the rules section when there are none and the facts section when there are none", async () => {
-    await memory.write("p1", { name: "only-fact", description: "a fact", type: "project", body: "b" });
-    let inj = (await memory.buildInjection("p1"))!;
-    expect(inj).not.toContain("Standing rules");
-    expect(inj).toContain("Recorded facts");
-
-    await memory.delete("p1", "only-fact");
-    await memory.write("p1", { name: "only-rule", description: "a rule", type: "feedback", body: "b" });
-    inj = (await memory.buildInjection("p1"))!;
-    expect(inj).toContain("Standing rules");
-    expect(inj).not.toContain("Recorded facts");
+  it("injects nothing for an empty project", async () => {
+    expect(await memory.buildInjection("p1")).toBeNull();
   });
 });
 

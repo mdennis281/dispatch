@@ -182,6 +182,7 @@ import { createAuthoringEditor } from "./mcp/authoring-editor.js";
 import { resolvePersona } from "./personas.js";
 import { configPathsFor } from "./config-location.js";
 import type { AuthoredConfigService } from "./authored-config.js";
+import type { HouseRulesService } from "./house-rules.js";
 import type { SlashCommandService } from "./slash-commands.js";
 import { materializeSkills, cleanupMaterializedSkills } from "./skill-materializer.js";
 import { bundledSkills } from "./bundled-skills.js";
@@ -1108,6 +1109,9 @@ export interface SessionBrokerOptions {
    *  surface behind `mcp__dispatch-config__config_write`. Optional — without it
    *  the `config_*` tools are simply not offered. */
   authored?: AuthoredConfigService;
+  /** The human's always-on house rules (global + project). Optional — without
+   *  it no house-rules section is injected. */
+  houseRules?: HouseRulesService;
   /** The composer's `/` menu — given each live session's command list to cache. */
   slashCommands?: SlashCommandService;
   /** GitHub control plane: backs `mcp__dispatch-github__watch_pr`'s checks/threads/merge polls. */
@@ -1919,6 +1923,7 @@ export class SessionBroker {
   private readonly secretRefresher?: () => SecretRefresher | undefined;
   private readonly memoryHistory?: MemoryHistoryService;
   private readonly authored?: AuthoredConfigService;
+  private readonly houseRules?: HouseRulesService;
   private readonly slashCommands?: SlashCommandService;
   private readonly github?: GitHubService;
   private readonly runner?: RunnerService;
@@ -2051,6 +2056,7 @@ export class SessionBroker {
     this.secretRefresher = opts.secretRefresher;
     this.memoryHistory = opts.memoryHistory;
     this.authored = opts.authored;
+    this.houseRules = opts.houseRules;
     this.slashCommands = opts.slashCommands;
     this.github = opts.github;
     this.runner = opts.runner;
@@ -6323,6 +6329,23 @@ export class SessionBroker {
 
     if (mode?.instructions) appends.push(mode.instructions);
 
+    // House rules lead: they're the one human-owned, size-capped block that
+    // ALWAYS applies, so they go ahead of every instruction layer. Best-effort
+    // like the rest — an unreadable file must never block a turn.
+    if (this.houseRules) {
+      try {
+        const rules = await this.houseRules.buildInjection(session.projectId ?? undefined);
+        if (rules) {
+          appends.push(rules);
+          for (const id of await this.houseRules.listInjected(session.projectId ?? undefined)) {
+            this.recordUse(session, { category: "instruction", identifier: id });
+          }
+        }
+      } catch {
+        /* no house rules this turn */
+      }
+    }
+
     // App-level instructions (Dispatch-shipped, then this machine's global dir)
     // go in BEFORE the project's own — broadest first, so a project instruction
     // is the last word on anything the two disagree about. Best-effort: a read
@@ -6360,9 +6383,9 @@ export class SessionBroker {
       }
     }
 
-    // Read-at-start: inject the project's durable memory (index + one-line
-    // descriptions, bounded — never full bodies) so every session begins knowing
-    // the team's recorded facts. Empty project → nothing injected. Best-effort: a
+    // Read-at-start: inject the project's durable memory as a bounded catalogue
+    // (topic map + a one-line sample — never bodies) so every session begins
+    // knowing what the team has recorded. Empty project → nothing injected. Best-effort: a
     // read failure must never block a turn from starting.
     if (this.memory && session.projectId) {
       try {

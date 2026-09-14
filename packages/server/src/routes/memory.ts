@@ -10,10 +10,21 @@
  *   POST   /api/projects/:projectId/memory         → create/update (dedupe by name)
  *   PUT    /api/projects/:projectId/memory/:name   → update (name from the path)
  *   DELETE /api/projects/:projectId/memory/:name   → 204 | 404
+ *
+ * House rules — the human-owned, size-capped always-on block:
+ *   GET    /api/house-rules[?projectId=]                  → HouseRules
+ *   PUT    /api/house-rules/:scope  { text, projectId? }  → HouseRulesFile | 400
+ *
+ * Claude Code's own auto-memory for the project's repo:
+ *   GET    /api/projects/:projectId/claude-memory         → ClaudeMemoryListing
+ *   PUT    /api/projects/:projectId/claude-memory/:file   → ClaudeMemoryFile (edit)
+ *   DELETE /api/projects/:projectId/claude-memory/:file   → 204
  */
 import type { FastifyInstance } from "fastify";
 import * as z from "zod";
-import { MemoryTypeSchema } from "@dispatch/shared";
+import { HouseRulesScopeSchema, MemoryTypeSchema } from "@dispatch/shared";
+import { ClaudeMemoryError } from "../services/claude-memory.js";
+import { HouseRulesError } from "../services/house-rules.js";
 
 const MemoryBodySchema = z.object({
   name: z.string().optional(),
@@ -24,7 +35,7 @@ const MemoryBodySchema = z.object({
 
 export function registerMemoryRoutes(app: FastifyInstance): void {
   const { store } = app.cm;
-  const { memory } = app.services;
+  const { memory, houseRules, claudeMemory } = app.services;
 
   /** 404 unless the project entity exists (also guards a stray projectId). */
   async function ensureProject(projectId: string): Promise<boolean> {
@@ -131,6 +142,86 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
       const removed = await memory.delete(req.params.projectId, req.params.name);
       if (!removed) return reply.code(404).send({ error: "not found" });
       return reply.code(204).send();
+    },
+  );
+
+  /* ------------------------------------------------------------ house rules */
+
+  app.get<{ Querystring: { projectId?: string } }>("/api/house-rules", async (req, reply) => {
+    const projectId = req.query.projectId || undefined;
+    if (projectId && !(await ensureProject(projectId))) {
+      return reply.code(404).send({ error: "project not found" });
+    }
+    return houseRules.read(projectId);
+  });
+
+  app.put<{ Params: { scope: string } }>("/api/house-rules/:scope", async (req, reply) => {
+    const scope = HouseRulesScopeSchema.safeParse(req.params.scope);
+    const body = z
+      .object({ text: z.string(), projectId: z.string().optional() })
+      .safeParse(req.body ?? {});
+    if (!scope.success) return reply.code(400).send({ error: "scope must be global or project" });
+    if (!body.success) return reply.code(400).send({ error: body.error.message });
+    const { text, projectId } = body.data;
+    if (scope.data === "project" && !(projectId && (await ensureProject(projectId)))) {
+      return reply.code(404).send({ error: "project not found" });
+    }
+    try {
+      return await houseRules.write(scope.data, text, projectId);
+    } catch (err) {
+      if (err instanceof HouseRulesError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
+  });
+
+  /* ----------------------------------------------------- Claude Code memory */
+
+  async function repoPathOf(projectId: string): Promise<string | null> {
+    const project = await store.getProject(projectId).catch(() => null);
+    return project?.repoPath ?? null;
+  }
+
+  app.get<{ Params: { projectId: string } }>(
+    "/api/projects/:projectId/claude-memory",
+    async (req, reply) => {
+      const repoPath = await repoPathOf(req.params.projectId);
+      if (!repoPath) return reply.code(404).send({ error: "project not found" });
+      return claudeMemory.list(repoPath);
+    },
+  );
+
+  app.put<{ Params: { projectId: string; file: string } }>(
+    "/api/projects/:projectId/claude-memory/:file",
+    async (req, reply) => {
+      const repoPath = await repoPathOf(req.params.projectId);
+      if (!repoPath) return reply.code(404).send({ error: "project not found" });
+      const body = z.object({ content: z.string() }).safeParse(req.body ?? {});
+      if (!body.success) return reply.code(400).send({ error: body.error.message });
+      try {
+        return await claudeMemory.write(repoPath, req.params.file, body.data.content);
+      } catch (err) {
+        if (err instanceof ClaudeMemoryError) {
+          return reply.code(err.status).send({ error: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  app.delete<{ Params: { projectId: string; file: string } }>(
+    "/api/projects/:projectId/claude-memory/:file",
+    async (req, reply) => {
+      const repoPath = await repoPathOf(req.params.projectId);
+      if (!repoPath) return reply.code(404).send({ error: "project not found" });
+      try {
+        await claudeMemory.delete(repoPath, req.params.file);
+        return reply.code(204).send();
+      } catch (err) {
+        if (err instanceof ClaudeMemoryError) {
+          return reply.code(err.status).send({ error: err.message });
+        }
+        throw err;
+      }
     },
   );
 }

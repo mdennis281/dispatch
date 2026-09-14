@@ -56,10 +56,6 @@ const INDEX_FILE = "MEMORY.md";
 
 /* -------------------------------------------------- start-of-session injection */
 
-/** Per-rule body clamp (chars) in the injected "Standing rules" section. */
-const RULE_BODY_MAX = 700;
-/** Total budget (chars) for rule BODIES before later rules degrade to one-liners. */
-const RULES_BODY_BUDGET = 4000;
 /** How many lookup facts to show as a visible sample (most-used, then recent). */
 const FACTS_SAMPLE = 6;
 /** Topic-map areas shown before collapsing the tail into "+N more". */
@@ -1293,16 +1289,16 @@ export class MemoryService {
   }
 
   /**
-   * The bounded start-of-session injection for a project. Two tiers, so the
-   * catalogue can grow to hundreds of facts without flooding every session:
+   * The bounded start-of-session injection for a project: a lookup catalogue,
+   * never bodies. A topic map (areas + counts) plus a small most-used sample, so
+   * the store can grow to hundreds of facts without flooding every session; the
+   * relevant ones arrive in full via auto-surface and the rest via `recall`.
    *
-   *  - **Standing rules** (`user` + `feedback`) — behavioural guidance that
-   *    can't wait to be keyword-matched, so it's ALWAYS present, with its body
-   *    (clamped + budget-bounded). These are "how this team works".
-   *  - **Recorded facts** (`project` + `reference`) — a lookup catalogue, so
-   *    rather than dump every one-liner it injects a topic map (areas + counts)
-   *    plus a small most-used sample. The relevant facts arrive in full via
-   *    auto-surface, and the agent pulls the rest on demand with `recall`.
+   * Every type is catalogued the same way. `user`/`feedback` memories used to be
+   * a "standing rules" tier injected in full under a 4KB budget — ordered by
+   * name, so the first few long rules ate it and the rest were silently cut to
+   * one-liners, and any agent's `remember` could grow what every chat paid for.
+   * What is always-on is now the human's call: see `house-rules.ts`.
    *
    * Null when the project has no memories (an empty project injects nothing).
    */
@@ -1310,8 +1306,6 @@ export class MemoryService {
     const memories = await this.list(projectId);
     if (!memories.length) return null;
 
-    const rules = memories.filter((m) => m.type === "user" || m.type === "feedback");
-    const facts = memories.filter((m) => m.type === "project" || m.type === "reference");
     const stats = await this.stats
       .get(projectId)
       .catch(() => ({}) as Record<string, MemoryStat>);
@@ -1319,9 +1313,9 @@ export class MemoryService {
     const out: string[] = [
       "## Project memory",
       "",
-      "Durable facts your team recorded for THIS project. The standing rules below " +
-        "ALWAYS apply. Everything else is a lookup catalogue: as you work, the facts " +
-        "that clearly bear on the current turn arrive in full automatically, and " +
+      "Durable facts, preferences and corrections your team recorded for THIS project — " +
+        "a lookup catalogue, not always-on rules (those are the House rules). As you work, " +
+        "the facts that clearly bear on the current turn arrive in full automatically, and " +
         "near-misses arrive as a name + one-line description — when one of those looks " +
         "relevant, pull it with `mcp__dispatch-memory__recall({ query: \"<name>\" })` rather than " +
         "guessing. You can also search by topic the same way. Consult it before asking " +
@@ -1329,54 +1323,32 @@ export class MemoryService {
       "",
     ];
 
-    // --- Tier 1: standing rules & preferences (always in full, budget-bounded).
-    if (rules.length) {
-      out.push("### Standing rules & preferences", "");
-      const rank: MemoryType[] = ["user", "feedback"];
-      const sorted = [...rules].sort(
-        (a, b) => rank.indexOf(a.type) - rank.indexOf(b.type) || a.name.localeCompare(b.name),
-      );
-      let budget = RULES_BODY_BUDGET;
-      for (const m of sorted) {
-        out.push(`- **${m.name}** — ${m.description || "(no description)"}`);
-        const body = m.body.trim();
-        if (body && budget > 0) {
-          const clamped = clampBody(body, Math.min(RULE_BODY_MAX, budget));
-          budget -= clamped.length;
-          out.push(clamped.split("\n").map((l) => `  ${l}`).join("\n"));
-        }
-      }
-      out.push("");
-    }
+    // A topic map + a most-used sample — never the full one-line dump, which is
+    // what floods a large project's every turn.
+    out.push("### Recorded memories — retrieved on demand", "");
+    out.push(
+      `${memories.length} recorded ${memories.length === 1 ? "memory" : "memories"}. ` +
+        "The relevant ones auto-surface as you work; call " +
+        "`mcp__dispatch-memory__recall({ query })` to pull any by topic.",
+      "",
+    );
+    const areas = clusterAreas(memories);
+    if (areas) out.push(`By area: ${areas}`, "");
 
-    // --- Tier 2: recorded facts as a topic map + a most-used sample (never the
-    //     full one-line dump — that's what floods a large project's every turn).
-    if (facts.length) {
-      out.push("### Recorded facts — retrieved on demand", "");
-      out.push(
-        `${facts.length} recorded ${facts.length === 1 ? "fact" : "facts"} (project + ` +
-          "reference). The relevant ones auto-surface as you work; call " +
-          "`mcp__dispatch-memory__recall({ query })` to pull any by topic.",
-        "",
-      );
-      const areas = clusterAreas(facts);
-      if (areas) out.push(`By area: ${areas}`, "");
-
-      const sample = [...facts]
-        .sort(
-          (a, b) =>
-            usefulness(stats[b.name]) - usefulness(stats[a.name]) ||
-            (b.updatedAt ?? 0) - (a.updatedAt ?? 0) ||
-            a.name.localeCompare(b.name),
-        )
-        .slice(0, FACTS_SAMPLE);
-      const anyUsed = sample.some((m) => usefulness(stats[m.name]) > 0);
-      out.push(anyUsed ? "Most-used lately:" : "Recently recorded:");
-      for (const m of sample) {
-        out.push(`- \`${m.name}\` — ${m.description || "(no description)"}`);
-      }
-      out.push("");
+    const sample = [...memories]
+      .sort(
+        (a, b) =>
+          usefulness(stats[b.name]) - usefulness(stats[a.name]) ||
+          (b.updatedAt ?? 0) - (a.updatedAt ?? 0) ||
+          a.name.localeCompare(b.name),
+      )
+      .slice(0, FACTS_SAMPLE);
+    const anyUsed = sample.some((m) => usefulness(stats[m.name]) > 0);
+    out.push(anyUsed ? "Most-used lately:" : "Recently recorded:");
+    for (const m of sample) {
+      out.push(`- \`${m.name}\` — ${m.description || "(no description)"}`);
     }
+    out.push("");
 
     out.push(
       "When you learn a durable fact — a preference, a correction, an architecture " +
