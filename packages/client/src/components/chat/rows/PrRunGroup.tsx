@@ -228,7 +228,7 @@ function PrToolCard({ entry }: { entry: PrRunEntry }) {
             payload && <OutcomeCard payload={payload} elapsed={elapsed} />
           )}
           {pr ? (
-            <PrStatePanel pr={pr} reviewAgent={record?.reviewAgent} />
+            <PrStatePanel pr={pr} reviewAgent={record?.reviewAgent} live={live} />
           ) : (
             <p className="text-xs text-muted">
               {state === "running"
