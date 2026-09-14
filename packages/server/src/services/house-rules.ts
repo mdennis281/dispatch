@@ -28,15 +28,32 @@ import {
   type HouseRules,
   type HouseRulesFile,
   type HouseRulesScope,
+  type Project,
 } from "@dispatch/shared";
+import { resolveConfigDir } from "./config-location.js";
 
 export const HOUSE_RULES_FILE = "house-rules.md";
+
+/**
+ * Where a project's house rules live: its config dir as resolved from the
+ * PROJECT (repo `.dispatch/` or the external dir), falling back to the external
+ * dir. Deliberately not `projectConfig.getConfig()?.sourceDir` — that is null
+ * whenever `project.yaml` fails to parse, so a typo there would move the one
+ * always-on block to the fallback dir and it would silently stop injecting.
+ */
+export function houseRulesDirFor(project: Project | null, externalDir: string): string {
+  return project ? resolveConfigDir(project, externalDir).dir : externalDir;
+}
 
 export interface HouseRulesOptions {
   /** The user-global root — `<configDir>/global`. */
   globalRoot: string;
-  /** A project's config dir (where its house-rules file lives). */
-  projectDir: (projectId: string) => string;
+  /**
+   * A project's config dir (where its house-rules file lives). Must not depend
+   * on the manifest PARSING: a typo in `project.yaml` would otherwise move the
+   * file to the fallback dir, and the one always-on block would silently vanish.
+   */
+  projectDir: (projectId: string) => string | Promise<string>;
 }
 
 export class HouseRulesError extends Error {}
@@ -48,14 +65,14 @@ function normalize(text: string): string {
 export class HouseRulesService {
   constructor(private readonly opts: HouseRulesOptions) {}
 
-  path(scope: HouseRulesScope, projectId?: string): string {
+  async path(scope: HouseRulesScope, projectId?: string): Promise<string> {
     if (scope === "global") return join(this.opts.globalRoot, HOUSE_RULES_FILE);
     if (!projectId) throw new HouseRulesError("project house rules need a projectId");
-    return join(this.opts.projectDir(projectId), HOUSE_RULES_FILE);
+    return join(await this.opts.projectDir(projectId), HOUSE_RULES_FILE);
   }
 
   private async readFile(scope: HouseRulesScope, projectId?: string): Promise<HouseRulesFile> {
-    const path = this.path(scope, projectId);
+    const path = await this.path(scope, projectId);
     let text = "";
     try {
       if (existsSync(path)) text = normalize(await readFile(path, "utf8"));
@@ -85,7 +102,7 @@ export class HouseRulesService {
         `house rules are capped at ${HOUSE_RULES_MAX_CHARS} characters (got ${next.length})`,
       );
     }
-    const path = this.path(scope, projectId);
+    const path = await this.path(scope, projectId);
     if (!next) {
       await rm(path, { force: true });
     } else {
