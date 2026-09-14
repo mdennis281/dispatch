@@ -14,17 +14,15 @@
 import { nanoid } from "nanoid";
 import { resolve as resolvePath } from "node:path";
 import {
-  DEFAULT_HARNESS,
-  findSubscription,
-  pinnedIdOf,
-  subscriptionFor,
-  providerDefaults,
+  pinnedPostureFields,
   providerFor,
   prRecordKey,
   composeMessageText,
+  resolveChatPosture,
   type WsClientAction,
   type Chat,
   type ChatPurpose,
+  type PostureParent,
   type Project,
   type Effort,
   type HarnessKind,
@@ -52,12 +50,16 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** `{ subscriptionId }` when there is one to pin, so an unpinned chat stores no key. */
-function optionalPin(subscriptionId: string | undefined): { subscriptionId?: string } {
-  return subscriptionId ? { subscriptionId } : {};
-}
-
-/** Input accepted by chat creation (WS `create-chat` + REST POST /api/chats). */
+/**
+ * Input accepted by chat creation (WS `create-chat` + REST POST /api/chats).
+ *
+ * `modeId`, `effort` and `model` are PINS. A caller passes one only when the
+ * human (or the spawning agent) actually chose it — anything passed here wins
+ * the whole chain and is frozen onto the chat, so a call site that "helpfully"
+ * fills in today's default silently disables every setting beneath it. That
+ * was the bug behind Settings → Chat → Effort never applying (PR #114), and
+ * the reason the client's two new-chat buttons no longer pin `modeId`.
+ */
 export interface CreateChatInput {
   projectId: string;
   title?: string;
@@ -85,11 +87,24 @@ export interface CreateChatInput {
   reviewOf?: string;
   /** The chat that spawned this one, so the sidebar can file it. See `Chat.parentChatId`. */
   parentChatId?: string;
+  /**
+   * What the spawning chat runs as, for a `spawn_chat` child. Sits between the
+   * request and the project in the posture chain — see `resolveChatPosture`.
+   * Distinct from `parentChatId`, which is the sidebar's display edge and is
+   * omitted for a detached spawn that still inherits its parent's posture.
+   */
+  parent?: PostureParent;
 }
 
 /**
  * Create + persist a Chat, register a (lazy) broker session for it, and publish
- * `chat-update`. Mode/effort fall back to app settings / sane defaults.
+ * `chat-update`.
+ *
+ * The posture — harness, account, mode, effort, model — comes from ONE resolver
+ * (`resolveChatPosture`), the same one the broker consults at session start,
+ * so what a chat starts as and what it runs as cannot disagree. Only the
+ * harness, the account, and whatever the request or the parent pinned are
+ * written to the row; the rest keeps inheriting project → app live.
  */
 export async function createChat(
   services: Services,
@@ -104,34 +119,30 @@ export async function createChat(
     await resolvePersona(services.authored, input.personaId, paths?.configDir);
   }
   const settings = await store.getSettings().catch(() => null);
-  const requestedSubscription = findSubscription(settings, input.subscriptionId);
-  const harness =
-    input.harness ??
-    requestedSubscription?.provider ??
-    project.harness ??
-    settings?.harness?.defaultHarness ??
-    DEFAULT_HARNESS;
-  const harnessDefaults = providerDefaults(settings?.harness, harness);
+  const posture = resolveChatPosture({
+    chat: {
+      harness: input.harness,
+      subscriptionId: input.subscriptionId,
+      modeId: input.modeId,
+      effort: input.effort,
+      model: input.model,
+    },
+    parent: input.parent,
+    project: services.projectConfig?.getDefaults(project.id),
+    settings,
+  });
+  const harness = posture.harness.effective;
   const now = Date.now();
   const chat: Chat = {
     id: nanoid(),
     projectId: input.projectId,
     title: input.title?.trim() || "New chat",
-    modeId: input.modeId ?? settings?.defaultModeId ?? "default",
     agentId: (services.harnesses?.find(harness)?.capabilities.subagents ??
       providerFor(harness).subagents)
       ? input.agentId
       : undefined,
     personaId: input.personaId,
-    harness,
-    // Pinned at creation, like `harness`: the native session this chat is about
-    // to write lives in THIS account's config dir, so a later change of default
-    // account must not move the chat away from it.
-    ...optionalPin(pinnedIdOf(subscriptionFor(settings, harness, input.subscriptionId))),
-    effort: input.effort ?? harnessDefaults.effort ?? "medium",
-    ...((input.model ?? harnessDefaults.model)
-      ? { model: input.model ?? harnessDefaults.model }
-      : {}),
+    ...pinnedPostureFields(posture),
     worktrees: [],
     prs: [],
     status: "idle",

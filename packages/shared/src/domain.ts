@@ -70,13 +70,12 @@ export const ProjectSchema = z.object({
   shellFilter: ShellTranscriptFilterSchema.optional(),
   /** MCP servers passed through to every session in this project. */
   mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
-  /**
-   * Which agent runtime new chats in this project start on. Absent means
-   * `DEFAULT_HARNESS` — left optional rather than defaulted so an untouched
-   * project record round-trips byte-identical and existing installs don't all
-   * show as edited on first read.
-   */
-  harness: HarnessKindSchema.optional(),
+  // `harness` used to live here. It moved to the manifest as `defaults.harness`
+  // (see `ManifestDefaultsSchema`) and is read from the loaded project config
+  // only. Deliberately NOT kept as an optional key: an old row still parses —
+  // `z.object` strips keys it doesn't declare — while a reader of
+  // `project.harness` fails to compile instead of silently reading a value that
+  // no longer means anything.
   subApps: z.array(SubAppSchema).default([]),
   /** Default branch for diff-vs-base / PR base (default "main"). */
   defaultBranch: z.string().optional(),
@@ -814,9 +813,18 @@ export const ChatSchema = z.object({
   agentId: z.string().optional(),
   /** Unset means off; independent of the provider and custom agent. */
   personaId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional(),
-  modeId: z.string(),
-  effort: EffortSchema,
-  /** SDK model id backing the session (unset = SDK/subscription default). */
+  /**
+   * Mode, effort and model are tri-state PINS: set means "this chat chose",
+   * absent means inherit live — project manifest `defaults`, then the app's
+   * per-provider defaults, then the built-in floor — resolved by
+   * `resolveChatPosture` at the moment the value is needed. They used to be
+   * required and snapshotted at creation, which froze whatever the app default
+   * was that day into every chat and made Settings → Chat → Effort a setting
+   * that only ever reached chats not yet created.
+   */
+  modeId: z.string().optional(),
+  effort: EffortSchema.optional(),
+  /** SDK model id pinned on the session; unset inherits (see `modeId`). */
   model: z.string().optional(),
   /** Worktree paths this chat has created/owns. */
   worktrees: z.array(z.string()).default([]),

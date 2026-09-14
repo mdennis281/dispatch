@@ -213,15 +213,20 @@ import { accountOf, chatSubscription, envWithAccount } from "./subscriptions.js"
 import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
 import { managerMcpContextOf } from "./mcp/manager-mcp.js";
 import {
+  DEFAULT_EFFORT,
+  DEFAULT_MODE_ID,
   DEFAULT_SPAWN_MAX_DEPTH,
   findSubscription,
   pinnedIdOf,
   subscriptionFor,
-  providerDefaults,
   providerFor,
   isManagerServer,
   managerToolQualifiedName,
+  resolveChatPosture,
+  resolveLayered,
+  type ChatPosture,
   type ManagerToolName,
+  type ProjectConfigDefaults,
 } from "@dispatch/shared";
 
 /**
@@ -1068,6 +1073,10 @@ export interface BrokerProjectConfig {
   /** A project's authored spawn-chat consent override, or null when it has none
    *  (then the app setting decides). Optional so older fakes stay valid. */
   getSpawnAutoApprove?(projectId: string): boolean | null;
+  /** A project's authored `defaults:` block — the project layer of the chat
+   *  posture chain — or null when it has none. Optional so older fakes stay
+   *  valid; absent just means the app layer answers. */
+  getDefaults?(projectId: string): ProjectConfigDefaults | null;
   /** A project's authored chat-nesting cap, or null when it has none (then
    *  `DEFAULT_SPAWN_MAX_DEPTH` applies). Optional so older fakes stay valid. */
   getSpawnMaxDepth?(projectId: string): number | null;
@@ -1723,11 +1732,26 @@ interface LiveSession {
   projectId: string;
   project: Project | null;
   worktreeCwd?: string;
+  /**
+   * The EFFECTIVE mode — the chat's pin when it has one, else whatever the
+   * project → app → built-in chain says as of the last `refreshInheritedPosture`.
+   * Readers below never need to know which; `pins` does.
+   */
   modeId: string;
   agentId?: string;
   personaId?: string;
   personaChange?: Promise<void>;
+  /** The effective effort, on the same terms as {@link modeId}. */
   effort: Effort;
+  /**
+   * What the chat ROW pins, as distinct from what the session runs at. A field
+   * absent here is inherited live: it is re-resolved through
+   * `resolveChatPosture` every time a session is built, so a project manifest
+   * edit or a changed app default reaches the next turn of an unpinned chat
+   * without anybody touching the chat. Set by `setMode`/`setEffort`/`setModel`
+   * (`null` clears one), never by the inherited chain.
+   */
+  pins: { modeId?: string; effort?: Effort; model?: string };
   harnessKind: HarnessKind;
   /** The chat's pinned subscription id, as of this session's creation. */
   subscriptionId?: string;
@@ -1802,7 +1826,11 @@ interface LiveSession {
   exemptions: WorkflowExemption[];
   /** Model the SDK reported for the live session (display only). */
   model?: string;
-  /** Model explicitly chosen by the user (pins new/resumed queries via options.model). */
+  /**
+   * The effective model to REQUEST — the chat's pin, else the inherited one —
+   * as `options.model` on new/resumed queries. Undefined leaves the runtime to
+   * its own default. See {@link pins} for which of the two this is.
+   */
   modelOverride?: string;
   status: ChatStatus;
   /**
@@ -2096,10 +2124,17 @@ export class SessionBroker {
         projectId: chat.projectId,
         project: project ?? null,
         worktreeCwd,
-        modeId: chat.modeId,
+        // Placeholders until the first `buildOptions`, which resolves the
+        // inherited chain asynchronously — `create` is sync and only has the row.
+        modeId: chat.modeId ?? DEFAULT_MODE_ID,
         agentId: chat.agentId,
         personaId: chat.personaId,
-        effort: chat.effort,
+        effort: chat.effort ?? DEFAULT_EFFORT,
+        pins: {
+          ...(chat.modeId !== undefined ? { modeId: chat.modeId } : {}),
+          ...(chat.effort !== undefined ? { effort: chat.effort } : {}),
+          ...(chat.model !== undefined ? { model: chat.model } : {}),
+        },
         harnessKind: chat.harness ?? DEFAULT_HARNESS,
         subscriptionId: chat.subscriptionId,
         effortByThread: new Map(),
@@ -2680,11 +2715,21 @@ export class SessionBroker {
     }
   }
 
-  /** Switch the chat's mode; applies live via `setPermissionMode` if running. */
-  async setMode(chatId: string, modeId: string): Promise<PermissionMode> {
+  /**
+   * Switch the chat's mode; applies live via `setPermissionMode` if running.
+   * `null` clears the chat's pin: the session drops to whatever the project /
+   * app chain says right now and keeps tracking it from then on.
+   */
+  async setMode(chatId: string, modeId: string | null): Promise<PermissionMode> {
     const session = this.mustGet(chatId);
-    session.modeId = modeId;
-    const mode = await this.resolvePermissionMode(modeId);
+    if (modeId === null) {
+      delete session.pins.modeId;
+      session.modeId = (await this.resolvePosture(session)).modeId.effective;
+    } else {
+      session.pins.modeId = modeId;
+      session.modeId = modeId;
+    }
+    const mode = await this.resolvePermissionMode(session.modeId);
     if (session.harnessSession) {
       await session.harnessSession.setPermissionMode(mode).catch((err) => {
         this.bus.publish({
@@ -2707,16 +2752,29 @@ export class SessionBroker {
         });
       }
     }
-    void this.patchChat(chatId, { modeId });
+    // `undefined` is how the store drops a key — `patchChat` spreads the patch
+    // over the row and JSON serialisation omits it — so this really unpins.
+    void this.patchChat(chatId, { modeId: modeId ?? undefined });
     return mode;
   }
 
-  /** Set reasoning effort; applies live via the flag-settings layer if running. */
-  async setEffort(chatId: string, effort: Effort): Promise<void> {
+  /**
+   * Set reasoning effort; applies live via the flag-settings layer if running.
+   * `null` clears the pin, as in {@link setMode}.
+   */
+  async setEffort(chatId: string, effort: Effort | null): Promise<void> {
     const session = this.mustGet(chatId);
-    this.applyEffort(session, effort);
+    let next: Effort;
+    if (effort === null) {
+      delete session.pins.effort;
+      next = (await this.resolvePosture(session)).effort.effective;
+    } else {
+      session.pins.effort = effort;
+      next = effort;
+    }
+    this.applyEffort(session, next);
     if (session.harnessSession) {
-      void session.harnessSession.setEffort(effort).catch((err) => {
+      void session.harnessSession.setEffort(next).catch((err) => {
         this.bus.publish({
           type: "error",
           chatId,
@@ -2725,7 +2783,7 @@ export class SessionBroker {
         });
       });
     }
-    void this.patchChat(chatId, { effort });
+    void this.patchChat(chatId, { effort: effort ?? undefined });
   }
 
   async setPersona(chatId: string, personaId: string | null): Promise<void> {
@@ -2772,12 +2830,21 @@ export class SessionBroker {
   /**
    * Switch the model backing the chat. Applies live via `Query.setModel` when a
    * turn is running, pins new/resumed queries via `options.model`, and persists
-   * `chat.model` (emitting `chat-update`). Passing an empty string clears the
-   * override, reverting to the SDK/subscription default on the next query.
+   * `chat.model` (emitting `chat-update`). `null` or an empty string clears the
+   * PIN — the session then runs whatever model the project / app chain names,
+   * or the runtime's own default when neither does.
    */
-  async setModel(chatId: string, model: string): Promise<void> {
+  async setModel(chatId: string, model: string | null): Promise<void> {
     const session = this.mustGet(chatId);
-    const next = model.trim() || undefined;
+    const pin = model?.trim() || undefined;
+    let next: string | undefined;
+    if (pin === undefined) {
+      delete session.pins.model;
+      next = (await this.resolvePosture(session)).model.effective;
+    } else {
+      session.pins.model = pin;
+      next = pin;
+    }
     session.modelOverride = next;
     session.model = next; // reflect the choice on subsequent transcript rows
     if (session.harnessSession && next) {
@@ -2802,7 +2869,7 @@ export class SessionBroker {
         });
       }
     }
-    void this.patchChat(chatId, { model: next });
+    void this.patchChat(chatId, { model: pin });
     // A model switch can change the context window (e.g. 200k ↔ 1M variant);
     // relearn it so the meter's denominator follows the new model.
     if (session.query) void this.refreshContextWindow(session);
@@ -2830,7 +2897,8 @@ export class SessionBroker {
     }
 
     const settings = await this.store.getSettings().catch(() => undefined);
-    const defaults = providerDefaults(settings?.harness, harness);
+    const efforts =
+      this.harnesses?.find(harness)?.capabilities.efforts ?? providerFor(harness).efforts;
     const updated: Chat = {
       ...chat,
       harness,
@@ -2844,8 +2912,13 @@ export class SessionBroker {
         providerFor(harness).subagents)
         ? chat.agentId
         : undefined,
-      model: defaults?.model,
-      effort: defaults?.effort ?? chat.effort,
+      // A model pin names the OLD provider's catalogue, so it is dropped — the
+      // chat then inherits the new provider's project/app default live. An
+      // effort pin is provider-neutral and survives, unless the new provider
+      // has no such level, in which case it is dropped for the same reason
+      // rather than clamped into a pin the human never chose.
+      model: undefined,
+      effort: chat.effort && efforts.includes(chat.effort) ? chat.effort : undefined,
       status: "idle",
       updatedAt: this.now(),
     };
@@ -5345,13 +5418,12 @@ export class SessionBroker {
     request: SpawnChatRequest,
     target: SpawnChatTarget,
   ): Promise<SpawnChatConsent> {
-    const projectPolicy = this.projectConfig?.getSpawnAutoApprove?.(target.id) ?? null;
-    const auto =
-      projectPolicy ??
-      (await this.store
-        .getSettings()
-        .then((s) => s.spawnChat?.autoApprove ?? false)
-        .catch(() => false));
+    const projectPolicy = this.projectConfig?.getSpawnAutoApprove?.(target.id) ?? undefined;
+    const appPolicy = await this.store
+      .getSettings()
+      .then((s) => s.spawnChat?.autoApprove)
+      .catch(() => undefined);
+    const auto = resolveLayered({ project: projectPolicy, app: appPolicy }, false).effective;
     if (auto) return { approved: true, auto: true };
 
     const { approved, message } = await this.requestApproval(chatId, {
@@ -6191,7 +6263,45 @@ export class SessionBroker {
     return this.store.getProject(chat.projectId).catch(() => null);
   }
 
+  /**
+   * The chat's posture as the shared resolver sees it right now: the session's
+   * pins over the project manifest's `defaults` over the app's per-provider
+   * defaults. The SAME function `createChat` used to decide what the row pins,
+   * so a chat starts as, and runs as, one answer.
+   */
+  private async resolvePosture(session: LiveSession): Promise<ChatPosture> {
+    const settings = await this.store.getSettings().catch(() => undefined);
+    return resolveChatPosture({
+      chat: {
+        harness: session.harnessKind,
+        subscriptionId: session.subscriptionId,
+        ...session.pins,
+      },
+      project: this.projectConfig?.getDefaults?.(session.projectId),
+      settings,
+    });
+  }
+
+  /**
+   * Re-read every UNPINNED posture field from the layers beneath the chat.
+   *
+   * Called at the top of `buildOptions`, i.e. every time a session is (re)built
+   * — a fresh chat, a resume after an idle purge, a restart. That is what makes
+   * "absent means inherit" LIVE: an unpinned chat picks up a changed app default
+   * or an edited manifest on its next session start, where it used to carry the
+   * value `createChat` had copied in on the day it was made.
+   */
+  private async refreshInheritedPosture(session: LiveSession): Promise<void> {
+    const { pins } = session;
+    if (pins.modeId !== undefined && pins.effort !== undefined && pins.model !== undefined) return;
+    const posture = await this.resolvePosture(session);
+    if (pins.modeId === undefined) session.modeId = posture.modeId.effective;
+    if (pins.effort === undefined) session.effort = posture.effort.effective;
+    if (pins.model === undefined) session.modelOverride = posture.model.effective;
+  }
+
   private async buildOptions(session: LiveSession): Promise<Options> {
+    await this.refreshInheritedPosture(session);
     const permissionMode = await this.resolvePermissionMode(session.modeId);
     const project =
       session.project ??

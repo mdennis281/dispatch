@@ -8,6 +8,7 @@ import { resolveWorkflow, type Project } from "@dispatch/shared";
 import { ProjectConfigService } from "./project-config.js";
 import {
   isManifestBacked,
+  saveProjectDefaults,
   saveProjectShellFilter,
   saveProjectWorkflow,
 } from "./workflow-writer.js";
@@ -297,5 +298,65 @@ describe("workflow-writer", () => {
     expect(yaml).not.toContain("shellFilter");
     expect(yaml).toContain("model: test-model");
     expect((await store.getProject("p1"))?.shellFilter).toBeUndefined();
+  });
+});
+
+describe("saveProjectDefaults", () => {
+  it("writes the project layer of every layered setting to the manifest and reloads it", async () => {
+    await writeManifest("name: Seed\n# keep me\nworkflow:\n  profile: commit\n");
+    await seedProject();
+
+    await saveProjectDefaults(deps(), "p1", {
+      defaults: { harness: "codex", mode: "plan", effort: "high", model: "gpt-5.6", showInjectedContext: true },
+      spawnChat: { autoApprove: true },
+    });
+
+    const yaml = await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8");
+    expect(yaml).toContain("# keep me");
+    expect(yaml).toContain("harness: codex");
+    expect(yaml).toContain("mode: plan");
+    expect(yaml).toContain("autoApprove: true");
+    // Read back through the loader — the only reader these keys have.
+    expect(projectConfig.getDefaults("p1")).toMatchObject({
+      harness: "codex",
+      mode: "plan",
+      effort: "high",
+      model: "gpt-5.6",
+      showInjectedContext: true,
+    });
+    expect(projectConfig.getSpawnAutoApprove("p1")).toBe(true);
+    // And NOT mirrored into the row: the whole point of the move.
+    expect((await store.getProject("p1")) as Record<string, unknown>).not.toHaveProperty("harness");
+  });
+
+  it("null removes a key (inherit) and an emptied block goes with it", async () => {
+    await writeManifest("name: Seed\ndefaults:\n  harness: codex\n  effort: low\n");
+    await seedProject();
+
+    await saveProjectDefaults(deps(), "p1", { defaults: { harness: null } });
+    let yaml = await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8");
+    expect(yaml).not.toContain("harness");
+    expect(yaml).toContain("effort: low");
+    expect(projectConfig.getDefaults("p1")?.harness).toBeUndefined();
+
+    await saveProjectDefaults(deps(), "p1", { defaults: { effort: null } });
+    yaml = await readFile(join(repoDir, ".dispatch", "project.yaml"), "utf8");
+    expect(yaml).not.toContain("defaults");
+  });
+
+  it("leaves keys it was not asked about alone", async () => {
+    await writeManifest("name: Seed\ndefaults:\n  mode: plan\n");
+    await seedProject();
+
+    await saveProjectDefaults(deps(), "p1", { defaults: { effort: "max" } });
+
+    expect(projectConfig.getDefaults("p1")).toMatchObject({ mode: "plan", effort: "max" });
+  });
+
+  it("refuses rather than writing to .data when the project has no manifest", async () => {
+    await seedProject();
+    await expect(
+      saveProjectDefaults(deps(), "p1", { defaults: { harness: "codex" } }),
+    ).rejects.toThrow(/no config dir/);
   });
 });

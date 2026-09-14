@@ -1,18 +1,22 @@
 /**
  * The posture a NEW chat starts in.
  *
- * `createChat` is the bottom of a fallback chain — explicit input, then the
- * app's per-provider defaults, then a hardcoded floor — and the whole chain is
- * dead weight if a caller pins a value it could have omitted. The UI's new-chat
- * buttons used to send `effort: "medium"` unconditionally, which meant Settings
- * → Chat → Effort was configurable, persisted, displayed, and never once
- * applied. These lock both halves: the chain resolves, and an omitted field
- * really is omitted rather than defaulted client-side.
+ * `createChat` walks ONE chain — the request, then (for a spawn) the parent,
+ * then the project manifest's `defaults`, then the app's per-provider defaults,
+ * then a built-in floor — and only PINS what the request or the parent chose.
+ * Everything the project or app answered is left off the row so the chat keeps
+ * inheriting it live. The whole chain is dead weight if a caller pins a value
+ * it could have omitted: the UI's new-chat buttons used to send
+ * `effort: "medium"` (and later `modeId: "auto"`) unconditionally, which meant
+ * Settings → Chat → Effort was configurable, persisted, displayed, and never
+ * once applied. These lock both halves: the chain resolves, and an omitted
+ * field really is omitted rather than defaulted client-side.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ProjectConfigDefaults } from "@dispatch/shared";
 import { EventBus } from "../bus.js";
 import { Store } from "../store/index.js";
 import { AuthoredConfigService } from "../services/authored-config.js";
@@ -24,14 +28,19 @@ let bus: EventBus;
 let store: Store;
 
 /**
- * createChat only reaches for the store, the bus and the harness registry — the
- * last of which is absent here (a unit test installs no runtime, and the lookup
- * is already guarded). `satisfies` keeps the two fields it DOES provide
- * type-checked, so renaming either breaks the build rather than the run.
+ * createChat only reaches for the store, the bus, the harness registry and the
+ * project config's `defaults` — the registry is absent here (a unit test
+ * installs no runtime, and the lookup is already guarded) and the config is a
+ * one-method fake. `satisfies` keeps the fields it DOES provide type-checked,
+ * so renaming any of them breaks the build rather than the run.
  */
-function services(): Services {
+function services(defaults: ProjectConfigDefaults | null = null): Services {
   const partial = { store, bus } satisfies Pick<Services, "store" | "bus">;
-  return { ...partial, harnesses: undefined } as unknown as Services;
+  const projectConfig = { getDefaults: () => defaults } satisfies Pick<
+    Services["projectConfig"],
+    "getDefaults"
+  >;
+  return { ...partial, projectConfig, harnesses: undefined } as unknown as Services;
 }
 
 beforeEach(async () => {
@@ -56,9 +65,13 @@ afterEach(async () => {
 });
 
 describe("createChat defaults", () => {
-  it("takes effort and model from the app's defaults for the chat's harness", async () => {
+  // The app default is no longer COPIED onto the row: an unpinned chat keeps
+  // inheriting it live, so a later change in Settings reaches existing chats
+  // too. What the row must NOT do is carry a snapshot of today's default.
+  it("leaves effort, model and mode unpinned when only the app configures them", async () => {
     await store.saveSettings({
       theme: "dark",
+      defaultModeId: "plan",
       harness: {
         defaultHarness: "claude",
         defaults: { claude: { effort: "high", model: "claude-opus-5" } },
@@ -67,47 +80,111 @@ describe("createChat defaults", () => {
 
     const chat = await createChat(services(), { projectId: "p1" });
 
-    expect(chat.effort).toBe("high");
-    expect(chat.model).toBe("claude-opus-5");
+    expect(chat.effort).toBeUndefined();
+    expect(chat.model).toBeUndefined();
+    expect(chat.modeId).toBeUndefined();
+    expect(chat.harness).toBe("claude");
   });
 
-  it("reads the defaults of the harness the chat actually starts on", async () => {
-    await store.saveSettings({
-      theme: "dark",
-      harness: {
-        defaultHarness: "claude",
-        defaults: { claude: { effort: "low" }, codex: { effort: "xhigh" } },
-      },
+  it("leaves them unpinned when the project manifest configures them", async () => {
+    const chat = await createChat(services({ mode: "edit", effort: "low", model: "m" }), {
+      projectId: "p1",
     });
 
-    const chat = await createChat(services(), { projectId: "p1", harness: "codex" });
-
-    expect(chat.effort).toBe("xhigh");
+    expect(chat.effort).toBeUndefined();
+    expect(chat.model).toBeUndefined();
+    expect(chat.modeId).toBeUndefined();
   });
 
-  it("lets an explicit effort win over the app default", async () => {
+  it("pins exactly what the request chose", async () => {
     await store.saveSettings({
       theme: "dark",
       harness: { defaultHarness: "claude", defaults: { claude: { effort: "high" } } },
     });
 
-    const chat = await createChat(services(), { projectId: "p1", effort: "max" });
+    const chat = await createChat(services(), {
+      projectId: "p1",
+      effort: "max",
+      modeId: "plan",
+      model: "claude-haiku-4-5",
+    });
 
     expect(chat.effort).toBe("max");
-  });
-
-  it("falls back to medium only when nothing is configured", async () => {
-    const chat = await createChat(services(), { projectId: "p1" });
-
-    expect(chat.effort).toBe("medium");
-  });
-
-  it("takes the default mode from settings", async () => {
-    await store.saveSettings({ theme: "dark", defaultModeId: "plan" });
-
-    const chat = await createChat(services(), { projectId: "p1" });
-
     expect(chat.modeId).toBe("plan");
+    expect(chat.model).toBe("claude-haiku-4-5");
+  });
+
+  it("pins nothing at all when nothing is configured", async () => {
+    const chat = await createChat(services(), { projectId: "p1" });
+
+    expect(chat.effort).toBeUndefined();
+    expect(chat.modeId).toBeUndefined();
+    expect(chat.model).toBeUndefined();
+  });
+
+  describe("harness", () => {
+    it("comes from the project manifest before the app default", async () => {
+      await store.saveSettings({ theme: "dark", harness: { defaultHarness: "claude", defaults: {} } });
+
+      const chat = await createChat(services({ harness: "codex" }), { projectId: "p1" });
+
+      expect(chat.harness).toBe("codex");
+    });
+
+    it("comes from the app default when the manifest says nothing", async () => {
+      await store.saveSettings({ theme: "dark", harness: { defaultHarness: "codex", defaults: {} } });
+
+      const chat = await createChat(services(), { projectId: "p1" });
+
+      expect(chat.harness).toBe("codex");
+    });
+
+    it("an explicit request wins over both", async () => {
+      await store.saveSettings({ theme: "dark", harness: { defaultHarness: "codex", defaults: {} } });
+
+      const chat = await createChat(services({ harness: "codex" }), {
+        projectId: "p1",
+        harness: "claude",
+      });
+
+      expect(chat.harness).toBe("claude");
+    });
+  });
+
+  describe("spawned children", () => {
+    it("inherit the parent's mode, effort and model as pins", async () => {
+      const chat = await createChat(services({ mode: "plan", effort: "low" }), {
+        projectId: "p1",
+        parent: { harness: "claude", modeId: "edit", effort: "max", model: "claude-opus-5" },
+      });
+
+      expect(chat.modeId).toBe("edit");
+      expect(chat.effort).toBe("max");
+      expect(chat.model).toBe("claude-opus-5");
+    });
+
+    it("drop the parent's model, but not its effort or mode, on a provider change", async () => {
+      const chat = await createChat(services(), {
+        projectId: "p1",
+        harness: "codex",
+        parent: { harness: "claude", modeId: "edit", effort: "max", model: "claude-opus-5" },
+      });
+
+      expect(chat.harness).toBe("codex");
+      expect(chat.model).toBeUndefined();
+      expect(chat.effort).toBe("max");
+      expect(chat.modeId).toBe("edit");
+    });
+
+    it("inherit nothing from an unpinned parent, so they inherit live too", async () => {
+      const chat = await createChat(services(), {
+        projectId: "p1",
+        parent: { harness: "claude" },
+      });
+
+      expect(chat.effort).toBeUndefined();
+      expect(chat.modeId).toBeUndefined();
+    });
   });
 });
 

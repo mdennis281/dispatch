@@ -83,8 +83,13 @@ export function registerChatRoutes(app: FastifyInstance): void {
       const body = (req.body ?? {}) as Record<string, unknown>;
       if ("personaId" in body) return reply.code(400).send({ error: "Use the chat persona endpoint to change persona." });
       const merged = { ...existing, ...body } as Record<string, unknown>;
-      // JSON cannot carry `undefined`; null is the explicit "inherit" command.
-      if (body.shellFilter === null) delete merged.shellFilter;
+      // JSON cannot carry `undefined`, so `null` is the wire form of "clear this
+      // pin and inherit" — for EVERY tri-state field, not a per-field special
+      // case. `shellFilter` alone used to get this treatment, which is why a
+      // chat that had once toggled `showInjectedContext` could never go back to
+      // inheriting its project's answer. The chain that then applies is
+      // `resolveChatPosture` / `resolveLayered`; the row just stops answering.
+      for (const key of Object.keys(body)) if (body[key] === null) delete merged[key];
       const parsed = ChatSchema.safeParse({
         ...merged,
         id: req.params.id,

@@ -19,6 +19,7 @@
 import * as z from "zod";
 import {
   EffortSchema,
+  HarnessKindSchema,
   McpServerConfigSchema,
   PermissionModeSchema,
   ShellTranscriptFilterSchema,
@@ -266,10 +267,30 @@ export const ManifestBrowserSchema = z.preprocess(
           : v,
   BrowserMcpConfigSchema,
 );
-/** Default session posture for chats started under this project. */
+/**
+ * Default session posture for chats started under this project.
+ *
+ * Every key is one layer of the chat → project → app → built-in chain that
+ * `resolveChatPosture` (shared/chat-posture.ts) walks, and every key is
+ * optional because ABSENT means "inherit from the app". None of them is
+ * mirrored into the stored `Project` record: the config service is the only
+ * reader, so a project's posture is whatever its manifest says and nothing else.
+ */
 export const ManifestDefaultsSchema = z.object({
+  /**
+   * The runtime new chats in this project start on. Lives here rather than in
+   * the per-instance `.data` row it used to occupy, because "this repo runs on
+   * Codex" is a statement about the repo: it should travel with a checkout and
+   * agree between the stable and dev instances, which the `.data` row never did.
+   */
+  harness: HarnessKindSchema.optional(),
   mode: z.string().optional(),
   effort: EffortSchema.optional(),
+  /**
+   * A model id for the provider this project resolves to (`harness` above, else
+   * the app default). Skipped, not carried, when a chat lands on another
+   * provider — a model id is only meaningful inside one catalogue.
+   */
   model: z.string().optional(),
   /**
    * Whether chats in this project show the context Dispatch attaches on the
@@ -402,6 +423,7 @@ export type NormalizedInstruction = z.infer<typeof NormalizedInstructionSchema>;
 
 /** Normalized default session posture. */
 export const ProjectConfigDefaultsSchema = z.object({
+  harness: HarnessKindSchema.optional(),
   mode: z.string().optional(),
   effort: EffortSchema.optional(),
   model: z.string().optional(),

@@ -655,11 +655,11 @@ export const DeclineQuestionActionSchema = z.object({
   requestId: z.string(),
 });
 
-/** Switch the chat's mode mid-run. */
+/** Switch the chat's mode mid-run. `null` clears the chat's pin (inherit). */
 export const SetModeActionSchema = z.object({
   type: z.literal("set-mode"),
   chatId: z.string(),
-  modeId: z.string(),
+  modeId: z.string().nullable(),
 });
 
 /** Switch the chat's agent. */
@@ -669,19 +669,22 @@ export const SetAgentActionSchema = z.object({
   agentId: z.string().nullable(),
 });
 
-/** Set the chat's reasoning effort. */
+/** Set the chat's reasoning effort. `null` clears the chat's pin (inherit). */
 export const SetEffortActionSchema = z.object({
   type: z.literal("set-effort"),
   chatId: z.string(),
-  effort: EffortSchema,
+  effort: EffortSchema.nullable(),
 });
 
 /** Switch the model backing the chat's session (applies live + persists). */
 export const SetModelActionSchema = z.object({
   type: z.literal("set-model"),
   chatId: z.string(),
-  /** SDK model id, e.g. "claude-opus-4-8" / "claude-sonnet-4-6" / "claude-haiku-4-5". */
-  model: z.string(),
+  /**
+   * SDK model id, e.g. "claude-opus-4-8" / "claude-sonnet-4-6" / "claude-haiku-4-5".
+   * `null` (or an empty string, the older spelling) clears the pin.
+   */
+  model: z.string().nullable(),
 });
 
 /** Move an existing transcript to another runtime through a neutral handoff. */

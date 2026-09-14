@@ -65,6 +65,7 @@ import {
   type McpServerConfig,
   type WorkflowConfig,
   type IssueConfig,
+  type ProjectConfigDefaults,
   migrateToolList,
   isManagerServer,
   MANAGER_SERVER_PREFIX,
@@ -448,6 +449,17 @@ export class ProjectConfigService {
    */
   getSpawnMaxDepth(projectId: string): number | null {
     return this.cache.get(projectId)?.config?.spawnChat?.maxDepth ?? null;
+  }
+
+  /**
+   * This project's authored `defaults:` block — the project layer of the chat
+   * posture chain (`resolveChatPosture`) — or null when it has none. The ONLY
+   * place `defaults.harness/mode/effort/model` are read from: none of them is
+   * mirrored into the stored project row, so a reader that reaches for the row
+   * instead of this gets a project that never authored anything.
+   */
+  getDefaults(projectId: string): ProjectConfigDefaults | null {
+    return this.cache.get(projectId)?.config?.defaults ?? null;
   }
 
   /** This project's authored `issues:` block, or null when it has none (→ off). */
