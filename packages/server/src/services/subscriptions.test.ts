@@ -60,6 +60,17 @@ describe("chatSubscription", () => {
     expect(sub.id).toBe("claude1");
   });
 
+  it("sends a pin that no longer resolves back to the default DIRECTORY", () => {
+    // Pinned `claude` (an implicit id) before a list existed; the saved list
+    // dropped that id. The session is in ~/.claude, so that is where it runs.
+    const sub = chatSubscription(
+      settings(),
+      { harness: "claude", subscriptionId: "claude" },
+      { env: {}, home },
+    );
+    expect(sub.id).toBe("claude1");
+  });
+
   it("honours a pin", () => {
     const sub = chatSubscription(
       settings(),
@@ -114,13 +125,17 @@ describe("transferClaudeSession", () => {
     expect(existsSync(join(to, "projects", "C--repo", id, "subagents", "a.jsonl"))).toBe(true);
   });
 
-  it("never overwrites a copy the target account already has", async () => {
-    const from = join(home, ".claude");
-    const to = join(home, ".claude2");
-    await seed(from, "old");
-    await seed(to, "newer");
+  it("replaces a stale copy when switching BACK to an account the chat left", async () => {
+    // The source is where the chat last ran, so it holds the newest turns; the
+    // target's leftover copy predates them.
+    const from = join(home, ".claude2");
+    const to = join(home, ".claude");
+    await seed(to, "stale, from before the switch");
+    await seed(from, "with the turns taken since");
     expect(await transferClaudeSession(id, from, to)).toBe(true);
-    expect(await readFile(join(to, "projects", "C--repo", `${id}.jsonl`), "utf8")).toBe("newer");
+    expect(await readFile(join(to, "projects", "C--repo", `${id}.jsonl`), "utf8")).toBe(
+      "with the turns taken since",
+    );
   });
 
   it("reports false when there is nothing to carry", async () => {

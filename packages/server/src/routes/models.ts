@@ -68,6 +68,8 @@ export function registerModelRoutes(app: FastifyInstance): void {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
     const current = await store.getSettings();
     const saved = await store.saveSettings({ ...current, subscriptions: parsed.data });
-    return subscriptionStatuses(saved);
+    const statuses = subscriptionStatuses(saved);
+    app.services.accountUsage.retain(statuses.map((s) => s.resolvedConfigDir));
+    return statuses;
   });
 }

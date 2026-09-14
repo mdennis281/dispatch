@@ -89,23 +89,25 @@ export function accountOf(sub: ResolvedSubscription, machine: MachineEnv = {}): 
 /**
  * The subscription a CHAT runs under.
  *
- * A chat pinned to one gets it (see `subscriptionFor` for the stale-pin rules).
- * A chat with NO pin predates subscriptions, so every native session it has was
- * written into the provider's DEFAULT DIRECTORY — it resolves to the subscription
- * pointing there, not to whatever the provider's default subscription is today.
- * Otherwise re-pointing the default at a second account would strand every old
- * chat's resume in a directory it is no longer run from.
+ * A chat pinned to an account of its provider gets it. A chat with NO pin — one
+ * predating subscriptions, or one created on an implicit account (see
+ * `pinnedIdOf`) — has every native session in the provider's DEFAULT DIRECTORY,
+ * so it resolves to the subscription pointing there, not to whatever the
+ * provider's default subscription is today. A pin that no longer resolves (its
+ * account was removed) takes the same directory rule before the provider
+ * default: re-pointing the default at a second account must not strand a chat's
+ * resume in a directory it is no longer run from.
  */
 export function chatSubscription(
   settings: SubscriptionSettings | null | undefined,
   chat: Pick<Chat, "harness" | "subscriptionId"> & { harness: HarnessKind },
   machine: MachineEnv = {},
 ): ResolvedSubscription {
-  if (chat.subscriptionId) return subscriptionFor(settings, chat.harness, chat.subscriptionId);
+  const mine = resolveSubscriptions(settings).filter((s) => s.provider === chat.harness);
+  const pinned = chat.subscriptionId ? mine.find((s) => s.id === chat.subscriptionId) : undefined;
+  if (pinned) return pinned;
   const home = defaultConfigDir(chat.harness, machine);
-  const legacy = resolveSubscriptions(settings).find(
-    (s) => s.provider === chat.harness && sameDir(configDirOf(s, machine), home),
-  );
+  const legacy = mine.find((s) => sameDir(configDirOf(s, machine), home));
   return legacy ?? subscriptionFor(settings, chat.harness);
 }
 
@@ -139,9 +141,11 @@ export function subscriptionStatuses(
  * the wrong slug dir is a resume that silently starts a blank session. Whatever
  * directory the file really is in, the copy goes to the same name.
  *
- * Never overwrites: a target that already has the session (a switch back to an
- * account the chat ran on before) is left alone — the target's copy is the one
- * that account last wrote, and clobbering it would lose its later turns.
+ * OVERWRITES the target's copy. A chat runs on one account at a time and a
+ * resume keeps appending to the same session id, so the SOURCE is always the
+ * newest copy — a switch back to an account the chat ran on before must replace
+ * that account's stale file, or the resume there silently loses every turn taken
+ * since it left.
  */
 export async function transferClaudeSession(
   sessionId: string,
@@ -162,12 +166,10 @@ export async function transferClaudeSession(
   const target = join(toDir, "projects", slug);
   try {
     await mkdir(target, { recursive: true });
-    if (!existsSync(join(target, file))) {
-      await cp(join(fromProjects, slug, file), join(target, file), { errorOnExist: false });
-    }
+    await cp(join(fromProjects, slug, file), join(target, file), { force: true });
     const sidecar = join(fromProjects, slug, sessionId);
-    if (existsSync(sidecar) && !existsSync(join(target, sessionId))) {
-      await cp(sidecar, join(target, sessionId), { recursive: true, errorOnExist: false });
+    if (existsSync(sidecar)) {
+      await cp(sidecar, join(target, sessionId), { recursive: true, force: true });
     }
     return existsSync(join(target, file));
   } catch {

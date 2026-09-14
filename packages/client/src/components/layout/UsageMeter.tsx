@@ -201,7 +201,9 @@ export function UsageMeter({ layout }: { layout: GaugeLayout }) {
   return (
     <HoverCard
       label={`${labelFor(target, accounts)} usage`}
-      width={248}
+      // Wider once accounts share the strip: three names squeezed the title to
+      // an ellipsis at the provider-era width.
+      width={targets.length > 2 ? 320 : 248}
       onOpenChange={(next) => {
         setOpen(next);
         // Every opening starts on the gauge's provider, so the card never

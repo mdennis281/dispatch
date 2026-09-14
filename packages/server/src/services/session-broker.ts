@@ -214,6 +214,7 @@ import { managerMcpContextOf } from "./mcp/manager-mcp.js";
 import {
   DEFAULT_SPAWN_MAX_DEPTH,
   findSubscription,
+  pinnedIdOf,
   subscriptionFor,
   providerDefaults,
   providerFor,
@@ -2831,7 +2832,7 @@ export class SessionBroker {
       // Pinned on the new provider exactly as a new chat is: the named account
       // when it belongs to that provider, else that provider's default. The old
       // pin cannot carry over — it names the previous provider's login.
-      subscriptionId: subscriptionFor(settings, harness, subscriptionId).id,
+      subscriptionId: pinnedIdOf(subscriptionFor(settings, harness, subscriptionId)),
       sessionId: undefined,
       agentId: (this.harnesses?.find(harness)?.capabilities.subagents ??
         providerFor(harness).subagents)
@@ -2884,7 +2885,7 @@ export class SessionBroker {
     if (current.id === target.id) {
       // Nothing to move, but make an implicit resolution explicit so a later
       // change of default can't re-home this chat underneath its session.
-      if (chat.subscriptionId !== target.id) {
+      if (!target.implicit && chat.subscriptionId !== target.id) {
         const saved = await this.store.saveChat({ ...chat, subscriptionId: target.id });
         const live = this.sessions.get(chatId);
         if (live) live.subscriptionId = target.id;
@@ -2910,10 +2911,10 @@ export class SessionBroker {
       ));
 
     const updated: Chat = carried
-      ? { ...chat, subscriptionId: target.id, status: "idle", updatedAt: this.now() }
+      ? { ...chat, subscriptionId: pinnedIdOf(target), status: "idle", updatedAt: this.now() }
       : {
           ...chat,
-          subscriptionId: target.id,
+          subscriptionId: pinnedIdOf(target),
           // A session that exists only in the old account's dir is unresumable
           // from the new one — resuming it would fail on the first turn.
           sessionId: undefined,

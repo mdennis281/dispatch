@@ -20,6 +20,7 @@ import { Store } from "../store/index.js";
 import {
   DEFAULT_HARNESS,
   findSubscription,
+  pinnedIdOf,
   PrSnapshotSchema,
   prRecordKey,
   resolveWorkflow,
@@ -866,14 +867,15 @@ export function createServices(
     // belongs to one provider, so the parent's is inherited only when the child
     // stays on it. The parent's is RESOLVED rather than copied, so a legacy
     // parent with no pin hands down the account it actually runs under.
-    const subscriptionId =
-      named?.id ??
+    const inherited =
+      named ??
       (parent && parentProvider && provider === parentProvider
         ? chatSubscription(settings, {
             harness: parentProvider,
             subscriptionId: parent.subscriptionId,
-          }).id
+          })
         : undefined);
+    const subscriptionId = inherited ? pinnedIdOf(inherited) : undefined;
     // A model id belongs to one provider's catalogue. When the provider is
     // explicitly changed, let that provider choose its configured default
     // unless the request also names a model for it.

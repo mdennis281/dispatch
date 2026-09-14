@@ -79,6 +79,7 @@ describe("usage store", () => {
   });
 
   it("files a bare-provider read under both the ask and the account it resolved to", async () => {
+    settingsGet.mockResolvedValue({ harness: { defaultHarness: "claude" } } as never);
     usageGet.mockResolvedValue(snap(CLAUDE1, 7));
     await useUsage.getState().load();
     const { bySubscription, target } = useUsage.getState();

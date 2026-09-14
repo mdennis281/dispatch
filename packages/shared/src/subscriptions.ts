@@ -108,6 +108,19 @@ export function subscriptionFor(
   return mine.find((s) => s.id === preferred) ?? mine[0]!;
 }
 
+/**
+ * The id to PIN on a chat for this subscription — none for an implicit one.
+ *
+ * An implicit id is a name for "the provider's default directory" that stops
+ * existing the moment a real list mentions that provider. Pinning it would turn
+ * the first saved account into a silent re-home: the stale pin falls to the
+ * provider default, which may be a different directory from the one holding the
+ * chat's session. Unpinned, the chat keeps resolving by directory instead.
+ */
+export function pinnedIdOf(sub: ResolvedSubscription): string | undefined {
+  return sub.implicit ? undefined : sub.id;
+}
+
 /** Find a subscription by id across every provider. */
 export function findSubscription(
   settings: SubscriptionSettings | null | undefined,
@@ -139,9 +152,9 @@ export interface SubscriptionStatus extends ResolvedSubscription {
  * "the provider's default directory" is a fact about the server's machine. The
  * statuses carry that fact as `atDefaultDir`, so the two rules agree exactly.
  *
- * Pinned → that account when it is still one of the chat's provider's, else the
- * provider default. Unpinned (a legacy chat) → the account at the default dir,
- * else the provider default.
+ * Pinned → that account while it is still one of the chat's provider's. Unpinned,
+ * or a pin that no longer resolves → the account at the default dir, else the
+ * provider default.
  */
 export function chatAccountOf(
   statuses: readonly SubscriptionStatus[],
@@ -149,9 +162,8 @@ export function chatAccountOf(
   provider: HarnessKind,
 ): SubscriptionStatus | undefined {
   const mine = statuses.filter((s) => s.provider === provider);
-  const fallback = mine.find((s) => s.isDefault) ?? mine[0];
-  if (chat.subscriptionId) return mine.find((s) => s.id === chat.subscriptionId) ?? fallback;
-  return mine.find((s) => s.atDefaultDir) ?? fallback;
+  const pinned = chat.subscriptionId ? mine.find((s) => s.id === chat.subscriptionId) : undefined;
+  return pinned ?? mine.find((s) => s.atDefaultDir) ?? mine.find((s) => s.isDefault) ?? mine[0];
 }
 
 /**

@@ -16,6 +16,7 @@ import { resolve as resolvePath } from "node:path";
 import {
   DEFAULT_HARNESS,
   findSubscription,
+  pinnedIdOf,
   subscriptionFor,
   providerDefaults,
   providerFor,
@@ -49,6 +50,11 @@ function emitError(
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** `{ subscriptionId }` when there is one to pin, so an unpinned chat stores no key. */
+function optionalPin(subscriptionId: string | undefined): { subscriptionId?: string } {
+  return subscriptionId ? { subscriptionId } : {};
 }
 
 /** Input accepted by chat creation (WS `create-chat` + REST POST /api/chats). */
@@ -121,7 +127,7 @@ export async function createChat(
     // Pinned at creation, like `harness`: the native session this chat is about
     // to write lives in THIS account's config dir, so a later change of default
     // account must not move the chat away from it.
-    subscriptionId: subscriptionFor(settings, harness, input.subscriptionId).id,
+    ...optionalPin(pinnedIdOf(subscriptionFor(settings, harness, input.subscriptionId))),
     effort: input.effort ?? harnessDefaults.effort ?? "medium",
     ...((input.model ?? harnessDefaults.model)
       ? { model: input.model ?? harnessDefaults.model }

@@ -280,6 +280,20 @@ export class UsageRegistry {
     return svc;
   }
 
+  /**
+   * Stop the pollers for accounts that no longer exist. Without this an account
+   * removed from the list keeps being polled — spending its token's rate-limit
+   * bucket and pushing snapshots nobody can select — until the server restarts.
+   */
+  retain(configDirs: readonly string[]): void {
+    const keep = new Set(configDirs);
+    for (const [dir, svc] of this.others) {
+      if (keep.has(dir)) continue;
+      svc.stop();
+      this.others.delete(dir);
+    }
+  }
+
   /** Stop every poller this registry started (the base is the container's). */
   stop(): void {
     for (const svc of this.others.values()) svc.stop();
