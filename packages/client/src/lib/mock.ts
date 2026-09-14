@@ -258,8 +258,10 @@ export const MOCK_CHATS: Chat[] = [
     projectId: "hivebreak",
     title: "Scratch — flow-field notes",
     agentId: "build",
-    modeId: "plan",
-    effort: "low",
+    // No mode, effort or model on purpose: the ONE unpinned chat in the fixture,
+    // so the composer's "Inherit · …" state is reachable in a screenshot. Every
+    // other row pins all three, which is what a chat made before the pins
+    // became optional looks like.
     worktrees: [],
     prs: [],
     status: "idle",

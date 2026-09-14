@@ -2,6 +2,7 @@ import { Cpu } from "lucide-react";
 import {
   AGENT_TASKS,
   DEFAULT_HARNESS,
+  DEFAULT_MODE_ID,
   SHELL_TRANSCRIPT_CATEGORIES,
   accountLabel,
   listProviders,
@@ -12,6 +13,7 @@ import { Select, type SelectOption } from "../../ui/Select.js";
 import { SectionLabel } from "../../ui/Panel.js";
 import { Switch } from "../../ui/Switch.js";
 import { ShellFilterPanel } from "../../chat/ShellFilterPanel.js";
+import { modeLabel } from "../../chat/ModeControl.js";
 import { EFFORT_OPTIONS } from "../../../lib/efforts.js";
 import { useProjects } from "../../../stores/projects.js";
 import { useSubscriptions } from "../../../stores/subscriptions.js";
@@ -52,8 +54,11 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
       },
     });
 
+  // The floor of the mode chain is `auto` (see DEFAULT_MODE_ID) — what every
+  // new-chat button used to pin by hand — so "unset" here means Auto, not the
+  // SDK's own "ask about everything".
   const modeOptions: SelectOption<string>[] = [
-    { value: "", label: "None (SDK default)", hint: "no fixed mode" },
+    { value: "", label: `Built-in (${modeLabel(modes, DEFAULT_MODE_ID)})`, hint: "unpinned" },
     ...modes.map((m) => ({ value: m.id, label: m.name, hint: m.permissionMode })),
   ];
 

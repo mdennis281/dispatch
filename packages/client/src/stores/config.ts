@@ -1,6 +1,7 @@
+import { useEffect } from "react";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { ProjectConfigResult } from "@dispatch/shared";
+import type { ProjectConfigDefaults, ProjectConfigResult } from "@dispatch/shared";
 import { api } from "../lib/api.js";
 
 interface ConfigStore {
@@ -76,6 +77,31 @@ export const useConfig = create<ConfigStore>((set, get) => ({
 
   reset: () => set({ byProject: {}, loading: {}, error: {} }),
 }));
+
+/**
+ * The PROJECT layer of the layered settings — the manifest's `defaults` block
+ * and `spawnChat` — for a project, loading it on first use.
+ *
+ * The config store is otherwise only filled when the Project config page opens
+ * or a `project-config-update` event arrives, so a chat opened cold would
+ * resolve its effort as though the manifest said nothing, then flip once the
+ * page was visited. Every resolver hook goes through here so the layer is
+ * fetched the first time anything asks. `undefined` while it loads (and for a
+ * project with no config dir) reads as "the project says nothing", which is
+ * the right answer for both.
+ */
+export function useProjectLayer(
+  projectId: string | null | undefined,
+): (ProjectConfigDefaults & { spawnChat?: { autoApprove?: boolean } }) | undefined {
+  const entry = useConfig((s) => (projectId ? s.byProject[projectId] : undefined));
+  const known = entry !== undefined;
+  useEffect(() => {
+    if (projectId && !known) void useConfig.getState().load(projectId);
+  }, [projectId, known]);
+  const config = entry?.config;
+  if (!config) return undefined;
+  return { ...(config.defaults ?? {}), ...(config.spawnChat ? { spawnChat: config.spawnChat } : {}) };
+}
 
 /** Selector: one project's config result + load state (stable tuple). */
 export function useProjectConfig(projectId: string | null): {

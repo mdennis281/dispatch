@@ -1,5 +1,7 @@
 import {
   SHELL_TRANSCRIPT_CATEGORIES,
+  resolveLayered,
+  type LayerSource,
   type ShellTranscriptCategory,
   type ShellTranscriptFilter,
 } from "@dispatch/shared";
@@ -45,7 +47,7 @@ export interface ResolvedShellFilter {
   app: ShellTranscriptFilter;
   project?: ShellTranscriptFilter;
   chat?: ShellTranscriptFilter;
-  source: "chat" | "project" | "app";
+  source: LayerSource;
   projectId?: string;
 }
 
@@ -72,14 +74,21 @@ export function useShellFilter(chatId: string): ResolvedShellFilter {
   const project = useProjects((s) =>
     projectId ? s.projects.find((candidate) => candidate.id === projectId) : undefined,
   );
-  const app = useSettings((s) => s.shellFilter);
-  const projectFilter = project?.shellFilter;
+  const app = useSettings((s) => s.app.shellFilter);
+  // The project's value comes off the project ROW, which `mergeProject` keeps
+  // in sync with the manifest's `defaults.shellFilter` — the row is always
+  // loaded, the config store is not, and a shell group must not flash the
+  // wrong filter while a lazy load is in flight.
+  const r = resolveLayered(
+    { chat: chatFilter, project: project?.shellFilter, app },
+    ALL_CATEGORIES,
+  );
   return {
-    enabled: chatFilter ?? projectFilter ?? app ?? ALL_CATEGORIES,
+    enabled: r.effective,
     app: app ?? ALL_CATEGORIES,
-    project: projectFilter,
-    chat: chatFilter,
-    source: chatFilter ? "chat" : projectFilter ? "project" : "app",
+    project: r.project,
+    chat: r.chat,
+    source: r.source,
     projectId,
   };
 }

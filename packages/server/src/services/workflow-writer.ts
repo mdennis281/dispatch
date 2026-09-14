@@ -19,7 +19,12 @@
  * written atomically before this returns.
  */
 import { loadManifest, saveManifest, type LoadedManifest } from "@dispatch/cli/core";
+import * as z from "zod";
+import { isMap } from "yaml";
 import {
+  EffortSchema,
+  HarnessKindSchema,
+  ShellTranscriptFilterSchema,
   WorkflowConfigSchema,
   type Project,
   type ShellTranscriptFilter,
@@ -205,6 +210,85 @@ export async function saveProjectShellFilter(
   const loaded = await loadManifest(paths);
   if (shellFilter === undefined) loaded.doc.deleteIn(["defaults", "shellFilter"]);
   else loaded.doc.setIn(["defaults", "shellFilter"], shellFilter);
+  const manifestPath = await saveManifest(loaded);
+  await deps.projectConfig.reload(projectId);
+  const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
+  return { target: "manifest", project: project2, manifestPath };
+}
+
+/**
+ * A patch to the project layer of every layered setting: the manifest's
+ * `defaults:` block plus `spawnChat.autoApprove`. Three states per key, and
+ * all three matter:
+ *
+ *   - absent    — not mentioned; leave the file's answer alone
+ *   - `null`    — REMOVE the key, so the project inherits from the app again
+ *   - a value   — pin it for this repo
+ *
+ * `null` is the wire form of "inherit" for the same reason it is on
+ * `PUT /api/chats/:id`: JSON cannot carry `undefined`, so absence and deletion
+ * need different spellings or a partial payload becomes a deletion request.
+ */
+export const ProjectDefaultsPatchSchema = z.object({
+  defaults: z
+    .object({
+      harness: HarnessKindSchema.nullable().optional(),
+      mode: z.string().trim().min(1).nullable().optional(),
+      effort: EffortSchema.nullable().optional(),
+      model: z.string().trim().min(1).nullable().optional(),
+      showInjectedContext: z.boolean().nullable().optional(),
+      shellFilter: ShellTranscriptFilterSchema.nullable().optional(),
+    })
+    .optional(),
+  spawnChat: z
+    .object({
+      autoApprove: z.boolean().nullable().optional(),
+    })
+    .optional(),
+});
+export type ProjectDefaultsPatch = z.infer<typeof ProjectDefaultsPatchSchema>;
+
+/**
+ * Write the project layer of the layered settings to `project.yaml`.
+ *
+ * Manifest ONLY — there is deliberately no `.data` fallback like the workflow
+ * and shell-filter writers have. Those two are mirrored into the stored project
+ * row (`mergeProject`), which is how the stable and dev instances came to
+ * disagree about a project's harness: each had its own row. These keys are
+ * read from the loaded config and nowhere else, so a project without a
+ * manifest has nowhere to hold them, and the caller is told so rather than
+ * handed a write that the next config reload would not know about.
+ */
+export async function saveProjectDefaults(
+  deps: { store: Store; projectConfig: ProjectConfigService },
+  projectId: string,
+  patch: ProjectDefaultsPatch,
+): Promise<ProjectSettingSaveResult | null> {
+  const project = await deps.store.getProject(projectId).catch(() => null);
+  if (!project) return null;
+  const externalDir = deps.store.projectConfigDir(projectId);
+  const paths = isManifestBacked(project, externalDir) ? configPathsFor(project, externalDir) : null;
+  if (!paths) {
+    throw new Error(
+      "This project has no config dir yet. Create one (Project config → Create config) " +
+        "and these defaults will be written to its project.yaml.",
+    );
+  }
+  const loaded = await loadManifest(paths);
+  const apply = (path: string[], value: unknown) => {
+    if (value === undefined) return;
+    if (value === null) loaded.doc.deleteIn(path);
+    else loaded.doc.setIn(path, value);
+  };
+  for (const [key, value] of Object.entries(patch.defaults ?? {})) apply(["defaults", key], value);
+  for (const [key, value] of Object.entries(patch.spawnChat ?? {})) apply(["spawnChat", key], value);
+  // An emptied block is removed outright: `defaults: {}` left behind reads as
+  // authored config in the file and as nothing in the loader, which is the kind
+  // of gap a hand-editor then "fixes" by guessing at keys.
+  for (const block of ["defaults", "spawnChat"]) {
+    const node = loaded.doc.get(block, true);
+    if (isMap(node) && node.items.length === 0) loaded.doc.delete(block);
+  }
   const manifestPath = await saveManifest(loaded);
   await deps.projectConfig.reload(projectId);
   const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;

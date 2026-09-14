@@ -3,6 +3,7 @@
  *
  *   GET  /api/projects/:id/config          → { sourceDir, config, errors }
  *   PUT  /api/projects/:id/config/workflow  → save the workflow block (manifest or .data)
+ *   PUT  /api/projects/:id/config/defaults  → patch `defaults.*` / `spawnChat.autoApprove` (manifest only)
  *   DELETE /api/projects/:id/config/item    → delete one config file (path-guarded)
  *   POST /api/projects/:id/config/reload    → re-read from disk (sync + emit)
  *   POST /api/projects/:id/config/scaffold  → derive a config dir from .data
@@ -28,7 +29,12 @@ import {
   ShellTranscriptFilterSchema,
   WorkflowConfigSchema,
 } from "@dispatch/shared";
-import { saveProjectShellFilter, saveProjectWorkflow } from "../services/workflow-writer.js";
+import {
+  ProjectDefaultsPatchSchema,
+  saveProjectDefaults,
+  saveProjectShellFilter,
+  saveProjectWorkflow,
+} from "../services/workflow-writer.js";
 import { safeArchivePath } from "../services/project-config-archive.js";
 
 export function registerProjectConfigRoutes(app: FastifyInstance): void {
@@ -92,6 +98,26 @@ export function registerProjectConfigRoutes(app: FastifyInstance): void {
           req.params.id,
           parsed.data,
         );
+        if (!out) return reply.code(404).send({ error: "project not found" });
+        app.services.bus.publish({ type: "project-update", project: out.project });
+        return out;
+      } catch (err) {
+        return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
+
+  // The project layer of every layered setting — `defaults.{harness,mode,effort,
+  // model,showInjectedContext,shellFilter}` and `spawnChat.autoApprove` — as one
+  // patch. `null` per key removes it (inherit from the app). Manifest-only: see
+  // `saveProjectDefaults` for why there is no `.data` fallback here.
+  app.put<{ Params: { id: string } }>(
+    "/api/projects/:id/config/defaults",
+    async (req, reply) => {
+      const parsed = ProjectDefaultsPatchSchema.safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+      try {
+        const out = await saveProjectDefaults({ store, projectConfig }, req.params.id, parsed.data);
         if (!out) return reply.code(404).send({ error: "project not found" });
         app.services.bus.publish({ type: "project-update", project: out.project });
         return out;

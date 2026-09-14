@@ -69,10 +69,15 @@ import { useProjectMemories } from "../../stores/memory.js";
 import { useNotices } from "../../stores/notices.js";
 import { useSettings } from "../../stores/settings.js";
 import { useView } from "../../stores/view.js";
-import { useProjectSettingsDraft } from "../../stores/settingsDraft.js";
+import {
+  chatDefaultsPatch,
+  useProjectSettingsDraft,
+  type ChatDefaultsDraft,
+} from "../../stores/settingsDraft.js";
 import { api } from "../../lib/api.js";
 import { WorkflowProfilePicker } from "./WorkflowProfilePicker.js";
 import { ReviewerSection } from "./ReviewerSection.js";
+import { ChatDefaultsSection } from "./ChatDefaultsSection.js";
 import { ConfigSectionPane } from "./ConfigSectionPane.js";
 import { sectionItems } from "./configItems.js";
 import { SECTIONS } from "./sections.js";
@@ -189,21 +194,39 @@ export function ProjectSettingsView() {
 
   const draft = useProjectSettingsDraft((s) => s.workflow);
   const filterDraft = useProjectSettingsDraft((s) => s.shellFilter);
+  const chatDraft = useProjectSettingsDraft((s) => s.chatDefaults);
   const setDraft = useProjectSettingsDraft((s) => s.setWorkflow);
   const setFilterDraft = useProjectSettingsDraft((s) => s.setShellFilter);
+  const setChatDraft = useProjectSettingsDraft((s) => s.setChatDefaults);
   const discard = useProjectSettingsDraft((s) => s.discard);
 
+  const config = result?.config ?? null;
   const saved = savedWorkflow(project);
   const workflow = draft ?? saved;
   const savedFilter = project?.shellFilter;
   const shellFilter = filterDraft === null ? savedFilter : filterDraft;
   const appShellFilter = useSettings((s) => s.shellFilter);
+  // The project layer as the LOADED config has it — never the project row,
+  // which doesn't carry these (see `saveProjectDefaults`).
+  const savedChat = useMemo<ChatDefaultsDraft>(() => {
+    const d = config?.defaults ?? {};
+    const out: ChatDefaultsDraft = {};
+    if (d.harness !== undefined) out.harness = d.harness;
+    if (d.mode !== undefined) out.mode = d.mode;
+    if (d.effort !== undefined) out.effort = d.effort;
+    if (d.model !== undefined) out.model = d.model;
+    if (d.showInjectedContext !== undefined) out.showInjectedContext = d.showInjectedContext;
+    if (config?.spawnChat?.autoApprove !== undefined) out.autoApprove = config.spawnChat.autoApprove;
+    return out;
+  }, [config]);
+  const chatDefaults = chatDraft ?? savedChat;
   const workflowDirty = draft !== null && JSON.stringify(draft) !== JSON.stringify(saved);
   const filterDirty =
     filterDraft !== null && JSON.stringify(filterDraft) !== JSON.stringify(savedFilter);
-  const dirty = workflowDirty || filterDirty;
+  const chatDirty =
+    chatDraft !== null && JSON.stringify(chatDraft) !== JSON.stringify(savedChat);
+  const dirty = workflowDirty || filterDirty || chatDirty;
 
-  const config = result?.config ?? null;
   const errors = result?.errors ?? [];
   const hasDir = !!result?.sourceDir;
   const activeSection = SECTIONS.find((s) => s.id === section) ?? SECTIONS[0]!;
@@ -257,6 +280,15 @@ export function ProjectSettingsView() {
         target = out.target;
         manifestPath = out.manifestPath;
       }
+      if (chatDirty && chatDraft) {
+        const out = await api.projectConfig.saveDefaults(
+          projectId,
+          chatDefaultsPatch(savedChat, chatDraft),
+        );
+        useProjects.getState().upsertProject(out.project);
+        target = out.target;
+        manifestPath = out.manifestPath;
+      }
       discard();
       pushToast({
         level: "info",
@@ -270,7 +302,20 @@ export function ProjectSettingsView() {
     } finally {
       setSaving(false);
     }
-  }, [projectId, dirty, saving, workflowDirty, draft, filterDirty, filterDraft, discard, pushToast]);
+  }, [
+    projectId,
+    dirty,
+    saving,
+    workflowDirty,
+    draft,
+    filterDirty,
+    filterDraft,
+    chatDirty,
+    chatDraft,
+    savedChat,
+    discard,
+    pushToast,
+  ]);
 
   // Open a config file in the editor. Saving there writes it back and the
   // config watcher reloads it, refreshing this view in place.
@@ -408,11 +453,14 @@ export function ProjectSettingsView() {
         icon: s.icon,
         label: s.label,
         blurb: s.blurb,
-        count: s.id === "workflow" || s.id === "personas" || s.id === "secrets" ? null : sectionItems(s.id, config, memories).length,
-        // Both panes edit ONE draft behind ONE Save, so the warn dot belongs on
-        // both. Marking only Workflow meant reviewer edits looked saved from the
+        count: s.countable === false || s.id === "personas" || s.id === "secrets" ? null : sectionItems(s.id, config, memories).length,
+        // Every pane that edits a draft behind the ONE Save gets the warn dot.
+        // Marking only Workflow meant reviewer edits looked saved from the
         // rail — the section you were just editing was the one not flagged.
-        dirty: (s.id === "workflow" || s.id === "reviewer") && dirty,
+        dirty:
+          (s.id === "workflow" && (workflowDirty || filterDirty)) ||
+          (s.id === "reviewer" && workflowDirty) ||
+          (s.id === "chat" && chatDirty),
       }))}
       active={section}
       onSelect={setSection}
@@ -594,6 +642,19 @@ export function ProjectSettingsView() {
               </div>
             )}
 
+            {/* The project layer of the chat settings. Its own draft, saved
+                through the same bar — the manifest write is a separate patch
+                because these keys are manifest-only where the workflow block
+                has a `.data` fallback. */}
+            {activeSection.id === "chat" && project && (
+              <ChatDefaultsSection
+                value={chatDefaults}
+                onChange={setChatDraft}
+                hasDir={hasDir}
+                disabled={saving}
+              />
+            )}
+
             {/* Reads and writes the SAME workflow draft as the section above —
                 the reviewer is `workflow.pr.reviewAgent`, so both save through
                 one manifest write. Only the account half talks to the server on
@@ -603,7 +664,7 @@ export function ProjectSettingsView() {
                 value={workflow}
                 onChange={setDraft}
                 projectId={projectId}
-                projectHarness={project.harness}
+                projectHarness={config?.defaults?.harness}
                 fromManifest={hasDir}
                 inRepo={inRepo}
                 disabled={saving}

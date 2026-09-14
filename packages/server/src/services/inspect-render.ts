@@ -191,7 +191,7 @@ export function renderProject(result: ProjectInfoResult): string {
   const lines: string[] = [
     `# ${p.name}`,
     `${p.id} · ${p.repoPath}`,
-    `workflow: ${p.workflow ?? "default"} · harness: ${p.harness ?? DEFAULT_HARNESS} · default branch: ${p.defaultBranch ?? "main"}`,
+    `workflow: ${p.workflow ?? "default"} · default branch: ${p.defaultBranch ?? "main"}`,
     `worktree root: ${p.worktreeRoot ?? "(unset)"}`,
     "",
   ];

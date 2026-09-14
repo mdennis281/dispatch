@@ -16,10 +16,24 @@ import { create } from "zustand";
 import type { AppSettings } from "../lib/api.js";
 import { SHELL_TRANSCRIPT_CATEGORIES, type ShellTranscriptFilter } from "@dispatch/shared";
 
+/**
+ * The app LAYER of every layered setting, exactly as the server stores it —
+ * `undefined` where the app says nothing, so `resolveLayered` /
+ * `resolveChatPosture` can tell "the app turned it off" from "nobody said".
+ * (`showInjectedContext` / `shellFilter` above are the pre-resolved reading
+ * the transcript wants; these are the raw layer the resolvers want.)
+ */
+export type AppLayer = Pick<
+  AppSettings,
+  "showInjectedContext" | "shellFilter" | "defaultModeId" | "harness" | "spawnChat"
+>;
+
 interface SettingsStore {
   /** App-wide default for showing Dispatch-attached context in transcripts. */
   showInjectedContext: boolean;
   shellFilter: ShellTranscriptFilter;
+  /** The raw app layer for the resolvers. */
+  app: AppLayer;
   /** Apply a freshly-fetched or freshly-saved AppSettings payload. */
   apply: (settings: Partial<AppSettings>) => void;
 }
@@ -27,9 +41,17 @@ interface SettingsStore {
 export const useSettings = create<SettingsStore>((set) => ({
   showInjectedContext: false,
   shellFilter: [...SHELL_TRANSCRIPT_CATEGORIES],
+  app: {},
   apply: (settings) =>
     set({
       showInjectedContext: settings.showInjectedContext ?? false,
       shellFilter: settings.shellFilter ?? [...SHELL_TRANSCRIPT_CATEGORIES],
+      app: {
+        showInjectedContext: settings.showInjectedContext,
+        shellFilter: settings.shellFilter,
+        defaultModeId: settings.defaultModeId,
+        harness: settings.harness,
+        spawnChat: settings.spawnChat,
+      },
     }),
 }));

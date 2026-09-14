@@ -17,12 +17,13 @@
  * model receives — the context was attached either way, and this decides only
  * whether the transcript admits it.
  */
+import { layerSourceLabel, resolveLayered, type LayerSource } from "@dispatch/shared";
 import { useChats } from "../stores/chats.js";
-import { useConfig } from "../stores/config.js";
+import { useProjectLayer } from "../stores/config.js";
 import { useSettings } from "../stores/settings.js";
 
 /** One level of the chain, for UI that explains where a value came from. */
-export type InjectedContextSource = "chat" | "project" | "app" | "default";
+export type InjectedContextSource = LayerSource;
 
 export interface InjectedContextSetting {
   /** The resolved answer the transcript uses. */
@@ -31,38 +32,33 @@ export interface InjectedContextSetting {
   source: InjectedContextSource;
   /** What this chat would fall back to if its own override were cleared. */
   inherited: boolean;
+  /** Which level `inherited` comes from. */
+  inheritedSource: InjectedContextSource;
 }
 
-/** Resolve the chain for a chat. Safe to call with a chat that doesn't exist. */
+/**
+ * Resolve the chain for a chat. Safe to call with a chat that doesn't exist.
+ * Through `resolveLayered`, so this answers exactly what every other layered
+ * setting answers — and so the app's explicit `false` is a pin, not an absence.
+ */
 export function useInjectedContext(chatId: string | null): InjectedContextSetting {
   const chatValue = useChats((s) =>
     chatId ? s.byId[chatId]?.showInjectedContext : undefined,
   );
   const projectId = useChats((s) => (chatId ? s.byId[chatId]?.projectId : undefined));
-  const projectValue = useConfig((s) =>
-    projectId ? s.byProject[projectId]?.config?.defaults?.showInjectedContext : undefined,
-  );
-  const appValue = useSettings((s) => s.showInjectedContext);
+  const projectValue = useProjectLayer(projectId)?.showInjectedContext;
+  const appValue = useSettings((s) => s.app.showInjectedContext);
 
-  const inheritedSource: InjectedContextSource =
-    projectValue !== undefined ? "project" : appValue ? "app" : "default";
-  const inherited = projectValue ?? appValue ?? false;
-
-  return chatValue === undefined
-    ? { show: inherited, source: inheritedSource, inherited }
-    : { show: chatValue, source: "chat", inherited };
+  const r = resolveLayered({ chat: chatValue, project: projectValue, app: appValue }, false);
+  return {
+    show: r.effective,
+    source: r.source,
+    inherited: r.inherited,
+    inheritedSource: r.inheritedSource,
+  };
 }
 
 /** Human label for where the current answer came from. */
 export function injectedContextSourceLabel(source: InjectedContextSource): string {
-  switch (source) {
-    case "chat":
-      return "set for this chat";
-    case "project":
-      return "from this project's config";
-    case "app":
-      return "from your app settings";
-    default:
-      return "off by default";
-  }
+  return layerSourceLabel(source, "off by default");
 }

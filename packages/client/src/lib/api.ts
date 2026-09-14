@@ -107,6 +107,29 @@ import {
 } from "@dispatch/shared";
 import { sessionFetch } from "../stores/auth.js";
 
+/** The pins on a chat that `null` un-sets — see `api.chats.update`. */
+export type ChatTriState = "shellFilter" | "showInjectedContext" | "effort" | "model" | "modeId";
+export type ChatPatch = Omit<Partial<Chat>, ChatTriState> & {
+  [K in ChatTriState]?: Chat[K] | null;
+};
+
+/**
+ * The project layer of every layered setting, as ONE patch to the manifest:
+ * absent = untouched, `null` = remove the key (inherit from the app), a value
+ * = pin it for the repo. Mirrors `ProjectDefaultsPatchSchema` server-side.
+ */
+export interface ProjectDefaultsPatch {
+  defaults?: {
+    harness?: HarnessKind | null;
+    mode?: string | null;
+    effort?: Effort | null;
+    model?: string | null;
+    showInjectedContext?: boolean | null;
+    shellFilter?: ShellTranscriptFilter | null;
+  };
+  spawnChat?: { autoApprove?: boolean | null };
+}
+
 /**
  * Global app settings — mirrors the server `AppSettingsSchema`
  * (packages/server/src/store/index.ts). The client never imports the server
@@ -491,11 +514,12 @@ export const api = {
     get: (id: string) => get<Chat>(`/api/chats/${id}`),
     create: (body: { projectId: string; title?: string; modeId?: string; agentId?: string }) =>
       post<Chat>("/api/chats", body),
-    update: (
-      id: string,
-      body: Omit<Partial<Chat>, "shellFilter"> & { shellFilter?: ShellTranscriptFilter | null },
-    ) =>
-      put<Chat>(`/api/chats/${id}`, body),
+    /**
+     * Merge metadata onto a chat. Every tri-state field — the pins that inherit
+     * project → app when absent — takes `null` to CLEAR the pin; JSON has no
+     * `undefined`, so absence alone can only mean "leave it".
+     */
+    update: (id: string, body: ChatPatch) => put<Chat>(`/api/chats/${id}`, body),
     remove: (id: string) => del<void>(`/api/chats/${id}`),
     /**
      * Every image in the chat, in transcript order.
@@ -619,6 +643,16 @@ export const api = {
       put<{ target: "manifest" | "store"; project: Project; manifestPath?: string }>(
         `/api/projects/${projectId}/config/shell-filter`,
         { shellFilter: shellFilter ?? null },
+      ),
+    /**
+     * Patch the manifest's `defaults` / `spawnChat.autoApprove` — the project
+     * layer. Manifest-only: a project with no config dir is refused, and the
+     * pane says so, rather than the write landing somewhere a reload ignores.
+     */
+    saveDefaults: (projectId: string, patch: ProjectDefaultsPatch) =>
+      put<{ target: "manifest"; project: Project; manifestPath?: string }>(
+        `/api/projects/${projectId}/config/defaults`,
+        patch,
       ),
     /** Derive a config dir from the project's `.data` record. */
     scaffold: (projectId: string, force?: boolean) =>

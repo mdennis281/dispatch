@@ -868,9 +868,13 @@ export function createServices(
     });
   broker.spawnChat = async ({ request, project, parentChatId }) => {
     // A spawned chat is an extension of the chat that asked for it, so the
-    // parent's provider/model are the least-surprising defaults. Project/app
-    // defaults are for chats started from the UI, not for a child silently
-    // changing runtimes underneath its parent.
+    // parent's posture is the least-surprising default: `resolveChatPosture`
+    // puts the parent layer between the request and the project, for provider,
+    // account, model, effort and mode alike. (Effort and mode used to be left
+    // out and fell straight to the app defaults, so a child of a `plan`/`max`
+    // parent came up `auto`/`medium`.) Project/app defaults are for chats
+    // started from the UI, not for a child silently changing runtimes
+    // underneath its parent.
     const parent = await store.getChat(parentChatId).catch(() => null);
     // Legacy chats predate the persisted harness field; those chats are Claude,
     // which was the only provider when their rows were written.
@@ -885,37 +889,35 @@ export function createServices(
         `Subscription "${named.id}" is a ${named.provider} account, not ${request.provider}.`,
       );
     }
-    // An account names its provider, so it selects one when `provider` doesn't.
-    const provider = request.provider ?? named?.provider ?? parentProvider;
-    // The same inheritance as the model below, for the same reason: an account
-    // belongs to one provider, so the parent's is inherited only when the child
-    // stays on it. The parent's is RESOLVED rather than copied, so a legacy
-    // parent with no pin hands down the account it actually runs under.
-    const inherited =
-      named ??
-      (parent && parentProvider && provider === parentProvider
-        ? chatSubscription(settings, {
-            harness: parentProvider,
-            subscriptionId: parent.subscriptionId,
-          })
-        : undefined);
-    const subscriptionId = inherited ? pinnedIdOf(inherited) : undefined;
-    // A model id belongs to one provider's catalogue. When the provider is
-    // explicitly changed, let that provider choose its configured default
-    // unless the request also names a model for it.
-    const model =
-      request.model ??
-      (!request.provider || request.provider === parentProvider ? parent?.model : undefined);
     const chat = await createChat(services, {
       projectId: project.id,
       title: request.title,
       modeId: request.modeId,
-      harness: provider,
-      subscriptionId,
+      harness: request.provider,
+      subscriptionId: named?.id,
       agentId: request.agentId,
       personaId: request.personaId,
       effort: request.effort,
-      model,
+      model: request.model,
+      // The parent's account is RESOLVED rather than copied, so a legacy parent
+      // with no pin hands down the account it actually runs under. The resolver
+      // drops it — and the parent's model — when the child lands on another
+      // provider, since both belong to one provider's catalogue.
+      parent:
+        parent && parentProvider
+          ? {
+              harness: parentProvider,
+              subscriptionId: pinnedIdOf(
+                chatSubscription(settings, {
+                  harness: parentProvider,
+                  subscriptionId: parent.subscriptionId,
+                }),
+              ),
+              modeId: parent.modeId,
+              effort: parent.effort,
+              model: parent.model,
+            }
+          : undefined,
       // Built in shared, beside the parser that reads it back — the detached form
       // deliberately does NOT match that parser, and two prose literals in two
       // packages would only agree by luck. See `spawnedPurposeLabel`.

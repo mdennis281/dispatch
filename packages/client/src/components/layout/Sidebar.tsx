@@ -1584,11 +1584,13 @@ export function Sidebar() {
     if (!project) return;
     setView("chat");
     dismissLeftDrawer();
-    // Deterministic default: "auto" is always a valid primary segment (both the
-    // broker's mode-fallback map and the composer understand it without a stored
-    // ModeConfig), so a fresh chat opens on Auto — never on whichever mode file
-    // happened to enumerate first on disk (readdir order is arbitrary).
-    createChatAndFocus({ projectId: project.id, modeId: "auto" });
+    // Nothing but the project. Mode, effort and model resolve SERVER-SIDE
+    // through project.yaml `defaults` → app settings → built-in (`auto`), and a
+    // value passed here would pin the chat and shadow all of that — which is
+    // how `modeId: "auto"` kept Settings → Chat → Default mode from ever
+    // reaching the `+` button, and how `effort: "medium"` did the same to the
+    // effort default before it (PR #114).
+    createChatAndFocus({ projectId: project.id });
   };
 
   const attentionByChat = useMemo(() => {

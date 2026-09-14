@@ -37,9 +37,9 @@ import {
   DEFAULT_SKILLS_DIR,
   LEGACY_CONFIG_DIR_NAME,
   MANIFEST_FILE,
-  DEFAULT_HARNESS,
   composeMessageText,
   prRecordKey,
+  projectHarnessOf,
   providerDefaults,
   reviewingPurposeLabel,
   projectToManifest,
@@ -1423,7 +1423,8 @@ async function runOn(
   // default cannot.
   const settings = await services.store.getSettings().catch(() => null);
   const provider =
-    picked.harness ?? project.harness ?? settings?.harness?.defaultHarness ?? DEFAULT_HARNESS;
+    picked.harness ??
+    projectHarnessOf(services.projectConfig?.getDefaults(project.id), settings);
   const defaults = providerDefaults(settings?.harness, provider).reviewer;
   return { ...picked, model: picked.model ?? defaults?.model, effort: defaults?.effort };
 }

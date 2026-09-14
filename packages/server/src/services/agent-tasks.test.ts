@@ -541,7 +541,11 @@ function services(
   const svc = {
     store,
     bus: { publish: () => {} },
-    projectConfig: { get: () => ({ config: config() }), reload: async () => null },
+    projectConfig: {
+      get: () => ({ config: config() }),
+      getDefaults: () => config()?.defaults ?? null,
+      reload: async () => null,
+    },
     git: { status: async () => over.status ?? null },
     memory: { inventory: async () => over.memory ?? [] },
     broker: {

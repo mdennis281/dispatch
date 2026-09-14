@@ -22,6 +22,7 @@ import {
   FileCog,
   GitPullRequest,
   KeyRound,
+  MessagesSquare,
   ScanEye,
   ScrollText,
   ShieldCheck,
@@ -64,6 +65,19 @@ export const SECTIONS: SectionDef[] = [
       "it's enforced, not just suggested: the same profile drives the injected rules and the " +
       "guard that refuses a push to the trunk.",
     noun: "workflow",
+    countable: false,
+  },
+  {
+    id: "chat",
+    icon: MessagesSquare,
+    label: "Chat defaults",
+    blurb: "What a new chat here starts as",
+    explainer:
+      "The project layer of the chat settings: provider, model, effort, mode, whether sent " +
+      "context is shown, and whether spawned chats need your approval. Each one is inherited " +
+      "from your app settings until this repo pins it, and every chat can still override it " +
+      "for itself. Committed with the repo, so the whole team's chats start the same way.",
+    noun: "default",
     countable: false,
   },
   {
