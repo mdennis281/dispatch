@@ -7,6 +7,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -43,6 +44,7 @@ import {
   defaultModelFor,
   findModel,
   chatRoot,
+  PROVIDER_IDS,
   providerFor,
   type SubscriptionStatus,
 } from "@dispatch/shared";
@@ -314,11 +316,14 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const [error, setError] = useState<string | null>(null);
   const persona = usePersonaPicker(chat);
   // The login account this chat runs under. Only a real choice once some
-  // provider has more than one account; an install on implicit accounts alone
-  // never draws the control.
+  // provider has more than one account — counted PER provider, because one
+  // stored account beside the implicit ones for other providers is still one
+  // account each, and switching provider is the model menu's job.
   const accounts = useSubscriptions((s) => s.list);
   const account = chatAccountOf(accounts, chat, harness);
-  const multiAccount = accounts.some((a) => !a.implicit) && accounts.length > 1;
+  const multiAccount = PROVIDER_IDS.some(
+    (p) => accounts.filter((a) => a.provider === p).length > 1,
+  );
   const accountName = account ? accountLabel(account) : undefined;
   // Where the file picker opens: this chat's own working directory, so the
   // paths it inserts are paths the agent for THIS chat can open.
@@ -367,10 +372,18 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const toggleControl = useComposerPrefs((s) => s.toggle);
   const showAllControls = useComposerPrefs((s) => s.showAll);
   const hidden = hiddenCount(visible);
+  // What the FIT sees: the preference, minus a control with nothing to draw. The
+  // account picker renders nothing on a single-account install, and letting the
+  // fit walk it to `off` anyway counted a control that doesn't exist into the
+  // "N won't fit" tooltip and the menu's eviction line.
+  const fitVisible = useMemo(
+    () => ({ ...visible, account: visible.account && multiAccount }),
+    [visible, multiAccount],
+  );
   // How big each control is currently drawn — derived from measurement, never
   // stored. Starts at everything's widest and gets walked down by `fit` below.
-  const [sizes, setSizes] = useState<ComposerSizes>(() => widestSizes(visible));
-  const evicted = evictedCount(sizes, visible);
+  const [sizes, setSizes] = useState<ComposerSizes>(() => widestSizes(fitVisible));
+  const evicted = evictedCount(sizes, fitVisible);
   // Phone still matters, but only for TOUCH now: taller boxes, roomier menu
   // rows, a circular Send. Which controls the row carries is decided by the
   // same measurement at every width — a phone simply ends up with icons,
@@ -390,8 +403,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const blockedWidthRef = useRef(0);
   // `step` is memoized with no deps (the ResizeObserver must not be torn down and
   // rebuilt on every preference change), so it reads visibility through a ref.
-  const visibleRef = useRef(visible);
-  visibleRef.current = visible;
+  const visibleRef = useRef(fitVisible);
+  visibleRef.current = fitVisible;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Latest submit/upload closures, so the (once-configured) TipTap key/paste
@@ -918,7 +931,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // changes the natural width without changing the box.
   useLayoutEffect(() => {
     blockedWidthRef.current = 0;
-    setSizes((cur) => reconcile(cur, visible));
+    setSizes((cur) => reconcile(cur, fitVisible));
     step();
   }, [
     step,
@@ -935,7 +948,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     accountName,
     multiAccount,
     modeLabel(modes, chat.modeId),
-    visible,
+    fitVisible,
   ]);
 
   /* ------------------------------------------------------- shared menu bodies */
