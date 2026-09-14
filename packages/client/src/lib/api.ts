@@ -37,6 +37,11 @@ import type {
   ProjectMemory,
   SlashCommandCatalog,
   MemoryType,
+  HouseRules,
+  HouseRulesFile,
+  HouseRulesScope,
+  ClaudeMemoryFile,
+  ClaudeMemoryListing,
   McpCatalog,
   McpEnablementScope,
   GitStatus,
@@ -667,6 +672,29 @@ export const api = {
       ),
     remove: (projectId: string, name: string) =>
       del<void>(`/api/projects/${projectId}/memory/${encodeURIComponent(name)}`),
+  },
+
+  /* house rules — the human-owned, size-capped block every session gets */
+  houseRules: {
+    get: (projectId?: string) =>
+      get<HouseRules>(
+        `/api/house-rules${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+      ),
+    save: (scope: HouseRulesScope, text: string, projectId?: string) =>
+      put<HouseRulesFile>(`/api/house-rules/${scope}`, { text, projectId }),
+  },
+
+  /* Claude Code's own auto-memory dir for a project's repo */
+  claudeMemory: {
+    list: (projectId: string) =>
+      get<ClaudeMemoryListing>(`/api/projects/${projectId}/claude-memory`),
+    update: (projectId: string, file: string, content: string) =>
+      put<ClaudeMemoryFile>(
+        `/api/projects/${projectId}/claude-memory/${encodeURIComponent(file)}`,
+        { content },
+      ),
+    remove: (projectId: string, file: string) =>
+      del<void>(`/api/projects/${projectId}/claude-memory/${encodeURIComponent(file)}`),
   },
 
   /* MCP catalog — every tool endpoint (custom manager + external) per project */

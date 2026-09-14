@@ -543,8 +543,8 @@ function worktreeSnapshot(status: GitStatus): string | null {
  * so, and the dedup nudge on write is a hint an agent may ignore. After a few
  * months a real store is 140 facts of which a third are the same three facts
  * written five different ways, and the cost lands on every single session: the
- * standing-rules tier is injected in full, and the auto-surface picks between
- * near-identical candidates on lexical noise.
+ * catalogue's sample and topic map fill with duplicates, and the auto-surface
+ * picks between near-identical candidates on lexical noise.
  *
  * The failure modes this is written against, in the order they actually happen:
  *

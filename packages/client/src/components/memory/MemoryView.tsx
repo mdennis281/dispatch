@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Brain, Plus, Pencil, Trash2, Search, Sparkles, X } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Brain, Plus, Pencil, Trash2, Search, Sparkles, X, ScrollText, Bot } from "lucide-react";
 import type { ProjectMemory } from "@dispatch/shared";
 import { TaskLauncherDialog } from "../tasks/TaskLauncherDialog.js";
 import { useMemory, useProjectMemories } from "../../stores/memory.js";
@@ -12,7 +12,11 @@ import { Chip } from "../ui/Chip.js";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { Markdown } from "../chat/Markdown.js";
 import { cn } from "../../lib/cn.js";
+import { SegmentedControl } from "../ui/SegmentedControl.js";
 import { MemoryForm, TYPE_META } from "./MemoryForm.js";
+import { MemoryListRow } from "./MemoryListRow.js";
+import { HouseRulesPanel } from "./HouseRulesPanel.js";
+import { ClaudeMemoryPanel } from "./ClaudeMemoryPanel.js";
 
 /* ------------------------------------------------------------------ relevance */
 
@@ -79,15 +83,7 @@ function MemoryRow({
 }) {
   const meta = TYPE_META[memory.type];
   return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "flex w-full flex-col gap-0.5 rounded-md border px-2.5 py-2 text-left transition-colors",
-        active
-          ? "border-line-strong bg-accent-ghost"
-          : "border-transparent hover:border-line hover:bg-panel-2/50",
-      )}
-    >
+    <MemoryListRow active={active} onClick={onClick}>
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate cm-mono !text-xs font-medium text-primary">
           {memory.name}
@@ -97,7 +93,7 @@ function MemoryRow({
       {memory.description && (
         <span className="truncate text-2xs text-faint">{memory.description}</span>
       )}
-    </button>
+    </MemoryListRow>
   );
 }
 
@@ -147,12 +143,65 @@ function MemoryViewer({
 
 /* ----------------------------------------------------------------------- view */
 
-/** The top-level, chat-independent Memory browser: a searchable list (sidebar 2)
- *  on the left and a viewer/editor for the selected memory on the right. Scoped
- *  to the active project — reuses the existing project-memory store + REST. */
+type MemorySection = "project" | "house" | "claude";
+
+const SECTIONS = [
+  { value: "project" as const, label: "Project", icon: <Brain /> },
+  { value: "house" as const, label: "House rules", icon: <ScrollText /> },
+  { value: "claude" as const, label: "Claude", icon: <Bot /> },
+];
+
+/** The top-level, chat-independent Memory browser, in three sections that share
+ *  one list/detail layout: Dispatch's project memory, the always-on house rules,
+ *  and Claude Code's own auto-memory for the repo. Scoped to the active project. */
 export function MemoryView() {
   const project = useActiveProject();
   const projectId = project?.id ?? null;
+  const [section, setSection] = useState<MemorySection>("project");
+
+  if (!projectId) {
+    return (
+      <div className="flex h-full flex-1 flex-col items-center justify-center bg-app text-center">
+        <Brain className="mb-2 size-6 text-faint" />
+        <p className="text-base font-medium text-secondary">No project selected</p>
+        <p className="mt-0.5 text-xs text-muted">Pick a project to browse its memory.</p>
+      </div>
+    );
+  }
+
+  const tabs = (
+    <div className="px-2 pt-2">
+      <SegmentedControl
+        segments={SECTIONS}
+        value={section}
+        onChange={setSection}
+        className="flex w-full [&>button]:flex-1 [&>button]:justify-center"
+      />
+    </div>
+  );
+
+  if (section === "house") {
+    return <HouseRulesPanel projectId={projectId} header={<SectionHeader title="House rules">{tabs}</SectionHeader>} />;
+  }
+  if (section === "claude") {
+    return <ClaudeMemoryPanel projectId={projectId} header={<SectionHeader title="Claude memory">{tabs}</SectionHeader>} />;
+  }
+  return <ProjectMemorySection projectId={projectId} tabs={tabs} />;
+}
+
+function SectionHeader({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <>
+      <div className="flex h-12 shrink-0 items-center gap-2 px-3 cm-hairline-b">
+        <Brain className="size-4 text-muted" />
+        <span className="flex-1 text-base font-semibold text-primary">{title}</span>
+      </div>
+      {children}
+    </>
+  );
+}
+
+function ProjectMemorySection({ projectId, tabs }: { projectId: string; tabs: ReactNode }) {
   const memories = useProjectMemories(projectId);
   const loaded = useMemory((s) => (projectId ? s.loaded[projectId] : false));
 
@@ -201,16 +250,6 @@ export function MemoryView() {
     });
   };
 
-  if (!projectId) {
-    return (
-      <div className="flex h-full flex-1 flex-col items-center justify-center bg-app text-center">
-        <Brain className="mb-2 size-6 text-faint" />
-        <p className="text-base font-medium text-secondary">No project selected</p>
-        <p className="mt-0.5 text-xs text-muted">Pick a project to browse its memory.</p>
-      </div>
-    );
-  }
-
   return (
     <div className="flex min-w-0 flex-1 bg-app">
       {/* sidebar 2 — searchable memory list */}
@@ -237,6 +276,7 @@ export function MemoryView() {
             <Plus />
           </IconButton>
         </div>
+        {tabs}
 
         <div className="p-2">
           <div className="flex items-center gap-1.5 rounded-md border border-line bg-inset px-2">

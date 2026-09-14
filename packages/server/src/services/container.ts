@@ -38,6 +38,8 @@ import { SessionBroker } from "./session-broker.js";
 import { TerminalService } from "./terminal.js";
 import { MemoryService } from "./memory.js";
 import { AuthoredConfigService } from "./authored-config.js";
+import { HouseRulesService } from "./house-rules.js";
+import { ClaudeMemoryService } from "./claude-memory.js";
 import { SlashCommandService } from "./slash-commands.js";
 import { MemoryCommitter } from "./memory-committer.js";
 import { MemoryHistoryService } from "./memory-history.js";
@@ -96,6 +98,8 @@ export interface ServiceOverrides {
   terminals?: TerminalService;
   memory?: MemoryService;
   authored?: AuthoredConfigService;
+  houseRules?: HouseRulesService;
+  claudeMemory?: ClaudeMemoryService;
   slashCommands?: SlashCommandService;
   memoryCommitter?: MemoryCommitter;
   memoryHistory?: MemoryHistoryService;
@@ -150,6 +154,10 @@ export interface Services extends ServiceBase {
   memory: MemoryService;
   /** App-level (shipped + user-global) instructions and skills. */
   authored: AuthoredConfigService;
+  /** The human's always-on, size-capped house rules (global + per project). */
+  houseRules: HouseRulesService;
+  /** Claude Code's own auto-memory dir for a project, surfaced for curation. */
+  claudeMemory: ClaudeMemoryService;
   /** What the composer's `/` menu offers for a chat. */
   slashCommands: SlashCommandService;
   /** Lands memory writes as commits on the primary checkout (profile-driven). */
@@ -294,6 +302,17 @@ export function createServices(
   // read on every session launch, so it is constructed once and shared.
   const authored =
     overrides.authored ?? new AuthoredConfigService({ globalRoot: store.globalConfigDir() });
+  // Project house rules sit in the same dir as the project's config — its
+  // `.dispatch/` when it has one, else the external config dir — so they travel
+  // with the instructions they sit above.
+  const houseRules =
+    overrides.houseRules ??
+    new HouseRulesService({
+      globalRoot: store.globalConfigDir(),
+      projectDir: (projectId) =>
+        projectConfig.getConfig(projectId)?.sourceDir ?? store.projectConfigDir(projectId),
+    });
+  const claudeMemory = overrides.claudeMemory ?? new ClaudeMemoryService();
   // The `/` command menu. Holds the process-wide snapshot of the runtime's
   // built-in commands, so it must be a singleton — see `slash-commands.ts`.
   const slashCommands =
@@ -389,6 +408,7 @@ export function createServices(
       secretRefresher: (): SecretRefresher => secretRefresher,
       memoryHistory,
       authored,
+      houseRules,
       slashCommands,
       github,
       runner,
@@ -906,6 +926,8 @@ export function createServices(
     terminals,
     memory,
     authored,
+    houseRules,
+    claudeMemory,
     slashCommands,
     memoryCommitter,
     memoryHistory,

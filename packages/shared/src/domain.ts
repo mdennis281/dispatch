@@ -1218,6 +1218,70 @@ export const ProjectMemorySchema = z.object({
 });
 export type ProjectMemory = z.infer<typeof ProjectMemorySchema>;
 
+/**
+ * Hard cap (chars) on ONE house-rules file. House rules are the only guidance
+ * injected into every session unconditionally, so the cap is what keeps them
+ * from growing back into the 4KB "standing rules" tier they replaced — where
+ * whichever rules sorted first alphabetically ate the budget and the rest were
+ * silently reduced to one-liners.
+ */
+export const HOUSE_RULES_MAX_CHARS = 1000;
+
+export const HouseRulesScopeSchema = z.enum(["global", "project"]);
+export type HouseRulesScope = z.infer<typeof HouseRulesScopeSchema>;
+
+/** One house-rules file — machine-wide (`global`) or one project's. */
+export const HouseRulesFileSchema = z.object({
+  scope: HouseRulesScopeSchema,
+  /** Current text ("" when the file doesn't exist yet). */
+  text: z.string(),
+  /** Absolute path the text is read from / written to. */
+  path: z.string(),
+  /** Character cap for this file. */
+  limit: z.number().int(),
+});
+export type HouseRulesFile = z.infer<typeof HouseRulesFileSchema>;
+
+export const HouseRulesSchema = z.object({
+  global: HouseRulesFileSchema,
+  /** Null when no project was asked about. */
+  project: HouseRulesFileSchema.nullable(),
+});
+export type HouseRules = z.infer<typeof HouseRulesSchema>;
+
+/**
+ * One file from Claude Code's OWN auto-memory for a project
+ * (`~/.claude/projects/<slug>/memory/`). Separate from {@link ProjectMemory}:
+ * Dispatch doesn't write these, Claude Code does, and the frontmatter shape is
+ * Claude Code's (`metadata.type`), so they're surfaced raw rather than coerced.
+ */
+export const ClaudeMemoryFileSchema = z.object({
+  /** File name within the memory dir (e.g. "MEMORY.md", "my-fact.md"). */
+  file: z.string(),
+  /** Frontmatter `name`, else the file name without `.md`. */
+  name: z.string(),
+  description: z.string(),
+  /** Frontmatter `type` / `metadata.type` when present. */
+  type: z.string().optional(),
+  /** The markdown body (frontmatter stripped). */
+  body: z.string(),
+  /** The whole file as it is on disk — what the editor edits. */
+  content: z.string(),
+  /** True for the `MEMORY.md` index Claude Code loads into every session. */
+  isIndex: z.boolean(),
+  updatedAt: z.number().optional(),
+});
+export type ClaudeMemoryFile = z.infer<typeof ClaudeMemoryFileSchema>;
+
+export const ClaudeMemoryListingSchema = z.object({
+  /** The directory Claude Code reads for this project's repo path. */
+  dir: z.string(),
+  exists: z.boolean(),
+  /** Index first, then name-sorted. */
+  files: z.array(ClaudeMemoryFileSchema),
+});
+export type ClaudeMemoryListing = z.infer<typeof ClaudeMemoryListingSchema>;
+
 /** A tracked GitHub workflow-dispatch job initiated from the UI. */
 export const WorkflowRunRequestSchema = z.object({
   id: z.string(),
