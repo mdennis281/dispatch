@@ -1935,6 +1935,104 @@ describe("SessionBroker — live controls", () => {
     await broker.waitFor("c1", "idle");
   });
 
+  // The tri-state pins. A chat row with no `effort`/`modeId`/`model` inherits
+  // project → app → built-in AT SESSION BUILD, so a setting changed after the
+  // chat was created still reaches its next session — the exact thing the old
+  // create-time snapshot could not do.
+  describe("inherited posture", () => {
+    const unpinned = (): Chat => {
+      const c = chatFor("c1");
+      delete (c as Partial<Chat>).effort;
+      delete (c as Partial<Chat>).modeId;
+      return c;
+    };
+
+    it("resolves an unpinned chat's effort, mode and model from the app defaults at start", async () => {
+      await store.saveSettings({
+        theme: "dark",
+        defaultModeId: "plan",
+        harness: { defaultHarness: "claude", defaults: { claude: { effort: "high", model: "claude-opus-5" } } },
+      });
+      const gate = deferred();
+      const { fn, controllers } = makeFakeQuery(async () => {
+        await gate.promise;
+        return [assistantText("x"), resultMsg()];
+      });
+      const broker = makeBroker(fn);
+      await store.saveChat(unpinned());
+      broker.create(unpinned());
+
+      await broker.sendMessage("c1", "go");
+      await until(() => controllers.length === 1);
+
+      const ctl = controllers[0]!;
+      expect(ctl.options?.effort).toBe("high");
+      expect(ctl.options?.model).toBe("claude-opus-5");
+      expect(ctl.options?.permissionMode).toBe("plan");
+      gate.resolve();
+      await broker.waitFor("c1", "idle");
+    });
+
+    it("lets the project manifest's defaults win over the app's", async () => {
+      await store.saveSettings({
+        theme: "dark",
+        defaultModeId: "plan",
+        harness: { defaultHarness: "claude", defaults: { claude: { effort: "high" } } },
+      });
+      const gate = deferred();
+      const { fn, controllers } = makeFakeQuery(async () => {
+        await gate.promise;
+        return [assistantText("x"), resultMsg()];
+      });
+      const broker = makeBroker(fn, 6, {
+        projectConfig: {
+          getAgent: () => null,
+          getMode: () => null,
+          buildInstructionsInjection: () => null,
+          getMcpServers: () => ({}),
+          getSkills: () => [],
+          getDefaults: () => ({ effort: "low", mode: "edit" }),
+        },
+      });
+      await store.saveChat(unpinned());
+      broker.create(unpinned());
+
+      await broker.sendMessage("c1", "go");
+      await until(() => controllers.length === 1);
+
+      expect(controllers[0]!.options?.effort).toBe("low");
+      expect(controllers[0]!.options?.permissionMode).toBe("acceptEdits");
+      gate.resolve();
+      await broker.waitFor("c1", "idle");
+    });
+
+    it("setEffort(null) clears the pin, drops to the inherited level, and persists the absence", async () => {
+      await store.saveSettings({
+        theme: "dark",
+        harness: { defaultHarness: "claude", defaults: { claude: { effort: "xhigh" } } },
+      });
+      const gate = deferred();
+      const { fn, controllers } = makeFakeQuery(async () => {
+        await gate.promise;
+        return [assistantText("x"), resultMsg()];
+      });
+      const broker = makeBroker(fn);
+      await store.saveChat(chatFor("c1")); // pinned medium
+      broker.create(chatFor("c1"));
+      await broker.sendMessage("c1", "go");
+      await until(() => controllers.length === 1);
+      expect(controllers[0]!.options?.effort).toBe("medium");
+
+      await broker.setEffort("c1", null);
+      expect(broker.getSession("c1")?.effort).toBe("xhigh");
+      expect(controllers[0]!.calls.applyFlagSettings).toContainEqual({ effortLevel: "xhigh" });
+      await until(async () => (await store.getChat("c1"))?.effort === undefined);
+
+      gate.resolve();
+      await broker.waitFor("c1", "idle");
+    });
+  });
+
   it("falls back to the thinking budget when the runtime has no flag-settings control", async () => {
     const gate = deferred();
     const { fn, controllers } = makeFakeQuery(

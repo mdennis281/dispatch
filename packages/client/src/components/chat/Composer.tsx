@@ -50,7 +50,7 @@ import {
   type SubscriptionStatus,
 } from "@dispatch/shared";
 import { api, type IndexedFile } from "../../lib/api.js";
-import { postureSourceLabel, useChatPosture } from "../../lib/chatPosture.js";
+import { postureSourceShort, useChatPosture } from "../../lib/chatPosture.js";
 import { pathsFromDrop, basenameOf, dropIntent, type DropIntent } from "../../lib/dropPaths.js";
 import { useFileDrag } from "../../lib/useFileDrag.js";
 import { useDictation, PTT_LABEL } from "../../lib/useDictation.js";
@@ -880,13 +880,13 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const effortLabelOf = (e: Effort) => effortOptions.find((o) => o.value === e)?.label ?? e;
   const effortInherit: SelectInherit = {
     label: `${posture.effort.source === "chat" ? "Use default" : "Inherit"} · ${effortLabelOf(posture.effort.inherited)}`,
-    hint: postureSourceLabel(posture.effort.inheritedSource),
+    hint: postureSourceShort(posture.effort.inheritedSource),
     active: posture.effort.source !== "chat",
     onSelect: () => setEffort(null),
   };
   const modeInherit: SelectInherit = {
     label: `${posture.modeId.source === "chat" ? "Use default" : "Inherit"} · ${modeLabel(modes, posture.modeId.inherited)}`,
-    hint: postureSourceLabel(posture.modeId.inheritedSource),
+    hint: postureSourceShort(posture.modeId.inheritedSource),
     active: posture.modeId.source !== "chat",
     onSelect: () => setMode(null),
   };
@@ -894,7 +894,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     label: `${posture.model.source === "chat" ? "Use default" : "Inherit"} · ${
       posture.model.inherited ? modelLabelOf(posture.model.inherited) : "Provider default"
     }`,
-    hint: postureSourceLabel(posture.model.inheritedSource, "provider's own pick"),
+    hint: postureSourceShort(posture.model.inheritedSource, "provider"),
     active: posture.model.source !== "chat",
     onSelect: () => chooseModel(null),
   };

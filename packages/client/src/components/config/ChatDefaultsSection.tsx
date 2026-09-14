@@ -17,8 +17,6 @@
  */
 import { Cpu, MessagesSquare } from "lucide-react";
 import {
-  DEFAULT_EFFORT,
-  DEFAULT_MODE_ID,
   listProviders,
   projectHarnessOf,
   resolveChatPosture,
@@ -28,7 +26,7 @@ import {
   type LayerSource,
   type PostureSource,
 } from "@dispatch/shared";
-import { postureSourceLabel } from "../../lib/chatPosture.js";
+import { postureSourceShort } from "../../lib/chatPosture.js";
 import { EFFORT_OPTIONS } from "../../lib/efforts.js";
 import { harnessLabel } from "../../lib/harness.js";
 import { useProviderCatalogs } from "../../lib/useProviderCatalogs.js";
@@ -83,6 +81,12 @@ export function ChatDefaultsSection({
     { project: value.autoApprove, app: app.spawnChat?.autoApprove },
     false,
   );
+  // `Layered.inherited` answers "if the CHAT's pin were cleared"; this pane IS
+  // the project layer, so what its reset reveals is the app layer alone. (The
+  // first cut used `inherited` here and offered "Inherit Automatic" on a
+  // project that had just pinned Automatic.)
+  const injectedBeneath = resolveLayered({ app: app.showInjectedContext }, false);
+  const autoApproveBeneath = resolveLayered({ app: app.spawnChat?.autoApprove }, false);
 
   const harnessOptions: SelectOption<HarnessKind>[] = listProviders().map((p) => {
     const runtime = harnesses.find((h) => h.kind === p.id)?.runtime;
@@ -112,6 +116,9 @@ export function ChatDefaultsSection({
   }
   const catalog = catalogs[provider] ?? [];
   const modelOptions: SelectOption<string>[] = [
+    // The chip has to say SOMETHING when no model is pinned anywhere; picking
+    // this row is the same as the inherit row, so it wears the same hint.
+    { value: "", label: "Provider default", hint: "unpinned" },
     ...catalog.map((m) => ({ value: m.value, label: m.label, hint: m.hint })),
     ...(posture.model.effective && !catalog.some((m) => m.value === posture.model.effective)
       ? [{ value: posture.model.effective, label: posture.model.effective, hint: "not in catalog" }]
@@ -165,7 +172,7 @@ export function ChatDefaultsSection({
               options={harnessOptions}
               inherit={{
                 label: `Inherit · ${harnessLabel(beneath.harness.effective)}`,
-                hint: postureSourceLabel(beneath.harness.source),
+                hint: postureSourceShort(beneath.harness.source),
                 active: value.harness === undefined,
                 onSelect: () => patch({ harness: undefined, model: undefined }),
               }}
@@ -190,7 +197,7 @@ export function ChatDefaultsSection({
               options={modelOptions}
               inherit={{
                 label: `Inherit · ${modelLabelOf(modelInherited.effective)}`,
-                hint: postureSourceLabel(modelInherited.source, "provider's own pick"),
+                hint: postureSourceShort(modelInherited.source, "provider"),
                 active: value.model === undefined,
                 onSelect: () => patch({ model: undefined }),
               }}
@@ -215,7 +222,7 @@ export function ChatDefaultsSection({
               options={effortOptions.length ? effortOptions : EFFORT_OPTIONS}
               inherit={{
                 label: `Inherit · ${effortLabelOf(beneath.effort.effective)}`,
-                hint: postureSourceLabel(beneath.effort.source, `built-in ${DEFAULT_EFFORT}`),
+                hint: postureSourceShort(beneath.effort.source),
                 active: value.effort === undefined,
                 onSelect: () => patch({ effort: undefined }),
               }}
@@ -247,7 +254,7 @@ export function ChatDefaultsSection({
               options={modeOptions}
               inherit={{
                 label: `Inherit · ${modeLabel(modes, beneath.modeId.effective)}`,
-                hint: postureSourceLabel(beneath.modeId.source, `built-in ${DEFAULT_MODE_ID}`),
+                hint: postureSourceShort(beneath.modeId.source),
                 active: value.mode === undefined,
                 onSelect: () => patch({ mode: undefined }),
               }}
@@ -259,8 +266,8 @@ export function ChatDefaultsSection({
             description="Reveal what Dispatch attaches to turns on your behalf. Rendering only; the agent receives it either way."
             pinned={value.showInjectedContext !== undefined}
             source={injected.source}
-            inheritedLabel={injected.inherited ? "Shown" : "Hidden"}
-            inheritedSource={injected.inheritedSource}
+            inheritedLabel={injectedBeneath.effective ? "Shown" : "Hidden"}
+            inheritedSource={injectedBeneath.source}
             onReset={() => patch({ showInjectedContext: undefined })}
             disabled={off}
           >
@@ -277,8 +284,8 @@ export function ChatDefaultsSection({
             description="Whether an agent's spawn_chat starts unattended here. Off, every spawn waits on your approval."
             pinned={value.autoApprove !== undefined}
             source={autoApprove.source}
-            inheritedLabel={autoApprove.inherited ? "Automatic" : "Ask me"}
-            inheritedSource={autoApprove.inheritedSource}
+            inheritedLabel={autoApproveBeneath.effective ? "Automatic" : "Ask me"}
+            inheritedSource={autoApproveBeneath.source}
             onReset={() => patch({ autoApprove: undefined })}
             disabled={off}
           >

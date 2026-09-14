@@ -17,6 +17,7 @@
 import {
   DEFAULT_HARNESS,
   layerSourceLabel,
+  layerSourceShort,
   resolveChatPosture,
   type ChatPosture,
   type PostureSource,
@@ -52,4 +53,9 @@ export function useChatPosture(chatId: string | null): ChatPosture {
  */
 export function postureSourceLabel(source: PostureSource, defaultLabel = "built-in default"): string {
   return source === "parent" ? "inherited from the parent chat" : layerSourceLabel(source, defaultLabel);
+}
+
+/** The one-word form for a menu row's trailing hint — see `layerSourceShort`. */
+export function postureSourceShort(source: PostureSource, defaultLabel = "built-in"): string {
+  return source === "parent" ? "parent" : layerSourceShort(source, defaultLabel);
 }

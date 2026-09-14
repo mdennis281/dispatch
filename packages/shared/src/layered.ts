@@ -141,3 +141,22 @@ export function layerSourceLabel(source: LayerSource, defaultLabel = "built-in d
       return defaultLabel;
   }
 }
+
+/**
+ * The one-word form, for a menu row's trailing hint. `MenuItem` hints don't
+ * shrink, so the full sentence above pushed "Inherit · High" down to "Inheri…"
+ * in a 200px popover; the sentence belongs in the tooltip and the provenance
+ * line, this belongs beside a label.
+ */
+export function layerSourceShort(source: LayerSource, defaultLabel = "built-in"): string {
+  switch (source) {
+    case "chat":
+      return "chat";
+    case "project":
+      return "project";
+    case "app":
+      return "app";
+    default:
+      return defaultLabel;
+  }
+}
