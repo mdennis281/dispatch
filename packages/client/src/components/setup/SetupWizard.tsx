@@ -43,6 +43,7 @@ import {
   ShieldCheck,
   TriangleAlert,
 } from "lucide-react";
+import { providerFor } from "@dispatch/shared";
 import type { AuthSessionResponse, GhCliStatus, HarnessKind } from "@dispatch/shared";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
@@ -429,11 +430,6 @@ function GithubStep({ onBack, onDone }: { onBack: () => void; onDone: () => void
 
 /* ------------------------------------------------------------ step: harness */
 
-const HARNESS_LABEL: Record<HarnessKind, string> = { claude: "Claude Code", codex: "Codex" };
-const HARNESS_BLURB: Record<HarnessKind, string> = {
-  claude: "Anthropic's agent CLI. Subagents, skills and the full MCP tool surface.",
-  codex: "OpenAI's agent CLI, driven over its app-server protocol.",
-};
 
 /**
  * Version AND source, not just version.
@@ -613,11 +609,11 @@ function HarnessStep({ onBack, onDone }: { onBack: () => void; onDone: () => voi
               </span>
               <span className="min-w-0 flex-1">
                 <span className="flex items-baseline gap-2">
-                  <span className="text-sm font-medium text-primary">{HARNESS_LABEL[h.kind]}</span>
+                  <span className="text-sm font-medium text-primary">{providerFor(h.kind).label}</span>
                   <span className="truncate text-2xs text-faint">{runtimeHint(h.runtime)}</span>
                 </span>
                 <span className="mt-0.5 block text-xs leading-relaxed text-muted">
-                  {HARNESS_BLURB[h.kind]}
+                  {providerFor(h.kind).blurb}
                 </span>
                 {usable && h.runtime.path && (
                   <span className="mt-1 block truncate font-mono text-2xs text-faint">

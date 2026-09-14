@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import {
-  FALLBACK_MODELS,
+  DEFAULT_HARNESS,
   fallbackModels,
   type HarnessKind,
   type ModelOption,
@@ -22,10 +22,10 @@ interface ModelsStore {
  * than blanking the picker.
  */
 export const useModels = create<ModelsStore>((set) => ({
-  models: FALLBACK_MODELS,
-  activeHarness: "claude",
-  byHarness: { claude: FALLBACK_MODELS },
-  setModels: (models, harness = "claude") =>
+  models: fallbackModels(DEFAULT_HARNESS),
+  activeHarness: DEFAULT_HARNESS,
+  byHarness: { [DEFAULT_HARNESS]: fallbackModels(DEFAULT_HARNESS) },
+  setModels: (models, harness = DEFAULT_HARNESS) =>
     set((state) => {
       const next = models.length ? models : fallbackModels(harness);
       return {

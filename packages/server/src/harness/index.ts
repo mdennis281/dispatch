@@ -11,7 +11,7 @@
  * still open, because the alternative is a project the user cannot get into to
  * change the setting.
  */
-import { DEFAULT_HARNESS, type HarnessKind } from "@dispatch/shared";
+import { DEFAULT_HARNESS, PROVIDER_IDS, type HarnessKind } from "@dispatch/shared";
 import type { Harness, HarnessRuntimeInfo } from "./types.js";
 import { ClaudeHarness } from "./claude/index.js";
 import { CodexHarness } from "./codex/index.js";
@@ -27,12 +27,23 @@ export interface HarnessRegistryOpts {
   harnesses?: Partial<Record<HarnessKind, Harness>>;
 }
 
+/**
+ * How to build each provider's runtime adapter — the server half of registering
+ * a provider (the shared half is `PROVIDERS`). Typed as a full record so a new
+ * `HarnessKind` fails to compile until it has an adapter here.
+ */
+const HARNESS_FACTORIES: Record<HarnessKind, () => Harness> = {
+  claude: () => new ClaudeHarness(),
+  codex: () => new CodexHarness(),
+};
+
 export class HarnessRegistry {
   private readonly map = new Map<HarnessKind, Harness>();
 
   constructor(opts: HarnessRegistryOpts = {}) {
-    this.map.set("claude", opts.harnesses?.claude ?? new ClaudeHarness());
-    this.map.set("codex", opts.harnesses?.codex ?? new CodexHarness());
+    for (const kind of PROVIDER_IDS) {
+      this.map.set(kind, opts.harnesses?.[kind] ?? HARNESS_FACTORIES[kind]());
+    }
   }
 
   /** Every registered harness, for the settings pane and the boot log. */

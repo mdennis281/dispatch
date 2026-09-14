@@ -19,7 +19,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SlidersHorizontal, Save, Undo2 } from "lucide-react";
-import { SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
+import { DEFAULT_HARNESS, PROVIDER_IDS, SHELL_TRANSCRIPT_CATEGORIES } from "@dispatch/shared";
 import type { HarnessKind, ModelOption } from "@dispatch/shared";
 import { InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
@@ -89,7 +89,7 @@ function normalize(s: AppSettings): AppSettings {
       graceMinutes: s.worktreeCleanup?.graceMinutes,
     },
     harness: {
-      defaultHarness: s.harness?.defaultHarness ?? "claude",
+      defaultHarness: s.harness?.defaultHarness ?? DEFAULT_HARNESS,
       defaults: s.harness?.defaults ?? {},
       contextLimits: s.harness?.contextLimits ?? {},
     },
@@ -158,7 +158,7 @@ export function AppSettingsView() {
   useEffect(() => {
     void api.settings.defaults().then(setServerDefaults).catch(() => setServerDefaults(null));
     void api.harnesses.list().then(setHarnesses).catch(() => setHarnesses([]));
-    for (const kind of ["claude", "codex"] as const) {
+    for (const kind of PROVIDER_IDS) {
       void api.models
         .list(kind)
         .then((models) => setCatalogs((current) => ({ ...current, [kind]: models })))
@@ -191,7 +191,7 @@ export function AppSettingsView() {
       autoCompact: { ...draft.autoCompact, window: draft.autoCompact?.window || undefined },
       harness: {
         ...draft.harness,
-        defaultHarness: draft.harness?.defaultHarness ?? "claude",
+        defaultHarness: draft.harness?.defaultHarness ?? DEFAULT_HARNESS,
         defaults: draft.harness?.defaults ?? {},
         contextLimits: normalizeContextLimits(draft.harness?.contextLimits ?? {}),
       },

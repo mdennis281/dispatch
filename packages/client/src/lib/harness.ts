@@ -1,7 +1,7 @@
-import type { HarnessKind } from "@dispatch/shared";
+import { providerFor, type HarnessKind } from "@dispatch/shared";
 
 export function harnessLabel(kind: HarnessKind | undefined): string {
-  return kind === "codex" ? "Codex" : "Claude";
+  return providerFor(kind).shortLabel;
 }
 
 /**

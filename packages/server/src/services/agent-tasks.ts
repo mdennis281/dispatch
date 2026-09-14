@@ -37,8 +37,10 @@ import {
   DEFAULT_SKILLS_DIR,
   LEGACY_CONFIG_DIR_NAME,
   MANIFEST_FILE,
+  DEFAULT_HARNESS,
   composeMessageText,
   prRecordKey,
+  providerDefaults,
   reviewingPurposeLabel,
   projectToManifest,
   renderManifestYaml,
@@ -1350,7 +1352,7 @@ export async function launchAgentTask(
     pr,
   });
   const prompt = composeMessageText(parts);
-  const run = runOn(input, project);
+  const run = await runOn(services, input, project);
 
   const chat = await createChat(services, {
     projectId: input.projectId,
@@ -1370,7 +1372,7 @@ export async function launchAgentTask(
               ? prSubject(pr)
               : sweepSubject(status),
     ),
-    effort: input.effort ?? meta.defaultEffort,
+    effort: input.effort ?? run.effort ?? meta.defaultEffort,
     harness: run.harness,
     model: run.model ?? meta.defaultModel,
     agentId: input.agentId,
@@ -1403,15 +1405,27 @@ export async function launchAgentTask(
  * `resolveWorkflow` clamps the reviewer inert off the `review` rung, so a
  * project that opens no PRs contributes nothing here.
  */
-function runOn(
+async function runOn(
+  services: Services,
   input: { taskId: AgentTaskId; harness?: HarnessKind; model?: string },
   project: Project,
-): { harness?: HarnessKind; model?: string } {
-  if (input.harness || input.model || input.taskId !== "pr:review") {
-    return { harness: input.harness, model: input.model };
-  }
-  const reviewer = resolveWorkflow(project).pr.reviewAgent;
-  return { harness: reviewer.harness, model: reviewer.model };
+): Promise<{ harness?: HarnessKind; model?: string; effort?: Effort }> {
+  if (input.taskId !== "pr:review") return { harness: input.harness, model: input.model };
+  const picked =
+    input.harness || input.model
+      ? { harness: input.harness, model: input.model }
+      : (({ harness, model }) => ({ harness, model }))(resolveWorkflow(project).pr.reviewAgent);
+  // What's still unpinned comes from the app's reviewer defaults for the
+  // provider the review will ACTUALLY run on — resolved down the same chain
+  // `createChat` walks, so the model filled in here is always from that
+  // provider's catalogue. This is not the half-pick completion the pair rule
+  // above forbids: that rule stops a model crossing providers, and a per-provider
+  // default cannot.
+  const settings = await services.store.getSettings().catch(() => null);
+  const provider =
+    picked.harness ?? project.harness ?? settings?.harness?.defaultHarness ?? DEFAULT_HARNESS;
+  const defaults = providerDefaults(settings?.harness, provider).reviewer;
+  return { ...picked, model: picked.model ?? defaults?.model, effort: defaults?.effort };
 }
 
 /** The sidebar's one-line "what is this chat off doing". */

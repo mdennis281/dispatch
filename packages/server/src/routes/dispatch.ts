@@ -14,6 +14,9 @@
 import { nanoid } from "nanoid";
 import { resolve as resolvePath } from "node:path";
 import {
+  DEFAULT_HARNESS,
+  providerDefaults,
+  providerFor,
   prRecordKey,
   composeMessageText,
   type WsClientAction,
@@ -87,22 +90,24 @@ export async function createChat(
     await resolvePersona(services.authored, input.personaId, paths?.configDir);
   }
   const settings = await store.getSettings().catch(() => null);
-  const harness = input.harness ?? project.harness ?? settings?.harness?.defaultHarness ?? "claude";
-  const harnessDefaults = settings?.harness?.defaults?.[harness];
+  const harness =
+    input.harness ?? project.harness ?? settings?.harness?.defaultHarness ?? DEFAULT_HARNESS;
+  const harnessDefaults = providerDefaults(settings?.harness, harness);
   const now = Date.now();
   const chat: Chat = {
     id: nanoid(),
     projectId: input.projectId,
     title: input.title?.trim() || "New chat",
     modeId: input.modeId ?? settings?.defaultModeId ?? "default",
-    agentId: (services.harnesses?.find(harness)?.capabilities.subagents ?? harness === "claude")
+    agentId: (services.harnesses?.find(harness)?.capabilities.subagents ??
+      providerFor(harness).subagents)
       ? input.agentId
       : undefined,
     personaId: input.personaId,
     harness,
-    effort: input.effort ?? harnessDefaults?.effort ?? "medium",
-    ...((input.model ?? harnessDefaults?.model)
-      ? { model: input.model ?? harnessDefaults?.model }
+    effort: input.effort ?? harnessDefaults.effort ?? "medium",
+    ...((input.model ?? harnessDefaults.model)
+      ? { model: input.model ?? harnessDefaults.model }
       : {}),
     worktrees: [],
     prs: [],

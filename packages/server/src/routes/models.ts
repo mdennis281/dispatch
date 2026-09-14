@@ -7,12 +7,12 @@
  * subscription auth with no API key. See services/models.ts.
  */
 import type { FastifyInstance } from "fastify";
-import { HarnessKindSchema } from "@dispatch/shared";
+import { DEFAULT_HARNESS, HarnessKindSchema } from "@dispatch/shared";
 
 export function registerModelRoutes(app: FastifyInstance): void {
   app.get<{ Querystring: { refresh?: string; harness?: string } }>("/api/models", async (req) => {
-    const parsed = HarnessKindSchema.safeParse(req.query.harness ?? "claude");
-    const kind = parsed.success ? parsed.data : "claude";
+    const parsed = HarnessKindSchema.safeParse(req.query.harness ?? DEFAULT_HARNESS);
+    const kind = parsed.success ? parsed.data : DEFAULT_HARNESS;
     const harness = app.services.harnesses.find(kind)!;
     return harness.listModels({ refresh: req.query.refresh === "1" });
   });

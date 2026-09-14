@@ -524,13 +524,14 @@ function services(
     status?: GitStatus | null;
     project?: Record<string, unknown>;
     memory?: MemoryInventoryEntry[];
+    settings?: Record<string, unknown>;
   } = {},
 ) {
   const saved: Chat[] = [];
   const sent: { chatId: string; text: string; parts?: unknown }[] = [];
   const store = {
     getProject: async () => over.project ?? { id: "p1", repoPath: "/repo" },
-    getSettings: async () => ({ theme: "dark" }),
+    getSettings: async () => over.settings ?? { theme: "dark" },
     saveChat: async (c: Chat) => {
       saved.push(c);
       return c;
@@ -640,6 +641,44 @@ describe("launchAgentTask", () => {
       });
       expect(out?.chat.harness).toBe("claude");
       expect(out?.chat.model).toBe("opus");
+    });
+
+    it("fill an unpinned model and effort from the app's defaults for THAT provider", async () => {
+      const settings = {
+        theme: "dark",
+        harness: {
+          defaults: {
+            claude: { reviewer: { model: "opus", effort: "max" } },
+            codex: { reviewer: { model: "gpt-6-astra", effort: "xhigh" } },
+          },
+        },
+      };
+      const codexNoModel = {
+        ...reviewing,
+        workflow: { profile: "review", pr: { reviewAgent: { enabled: true, harness: "codex" } } },
+      };
+      const { svc } = services({ project: codexNoModel, settings });
+      const out = await launchAgentTask(svc, { projectId: "p1", taskId: "pr:review" });
+      // Codex's reviewer default — never Claude's, which is the id a flat
+      // app-wide "reviewer model" would have handed a Codex chat.
+      expect(out?.chat.harness).toBe("codex");
+      expect(out?.chat.model).toBe("gpt-6-astra");
+      expect(out?.chat.effort).toBe("xhigh");
+    });
+
+    it("never override what the project or the launcher pinned", async () => {
+      const settings = {
+        theme: "dark",
+        harness: { defaults: { codex: { reviewer: { model: "gpt-6-astra", effort: "low" } } } },
+      };
+      const { svc } = services({ project: reviewing, settings });
+      const out = await launchAgentTask(svc, {
+        projectId: "p1",
+        taskId: "pr:review",
+        effort: "high",
+      });
+      expect(out?.chat.model).toBe("gpt-5.5");
+      expect(out?.chat.effort).toBe("high");
     });
 
     it("are not read off a project that opens no PRs", async () => {

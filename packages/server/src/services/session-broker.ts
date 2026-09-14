@@ -211,6 +211,8 @@ import type { ManagerMcpBridge, ManagerMcpGrant } from "./mcp/manager-http.js";
 import { managerMcpContextOf } from "./mcp/manager-mcp.js";
 import {
   DEFAULT_SPAWN_MAX_DEPTH,
+  providerDefaults,
+  providerFor,
   isManagerServer,
   managerToolQualifiedName,
   type ManagerToolName,
@@ -2806,13 +2808,14 @@ export class SessionBroker {
     }
 
     const settings = await this.store.getSettings().catch(() => undefined);
-    const defaults = settings?.harness?.defaults?.[harness];
+    const defaults = providerDefaults(settings?.harness, harness);
     const updated: Chat = {
       ...chat,
       harness,
       harnessHandoff: { from: previous, to: harness, at: this.now() },
       sessionId: undefined,
-      agentId: this.harnesses?.find(harness)?.capabilities.subagents
+      agentId: (this.harnesses?.find(harness)?.capabilities.subagents ??
+        providerFor(harness).subagents)
         ? chat.agentId
         : undefined,
       model: defaults?.model,
@@ -6925,7 +6928,7 @@ export class SessionBroker {
           session.materializedSkillDirs = await materializeSkills(
             cwd,
             skills,
-            session.harnessKind === "codex" ? ".agents" : ".claude",
+            providerFor(session.harnessKind).skillsDir,
           );
         } catch {
           /* best-effort: a copy failure must never block a turn from starting */
