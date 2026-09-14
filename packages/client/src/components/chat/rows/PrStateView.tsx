@@ -222,24 +222,53 @@ function jobSpan(check: CheckRun, now: number | null): { start: number; end?: nu
 }
 
 /**
- * Wall-clock runtime of a set of jobs: first start to last finish.
+ * How long a set of jobs actually spent running: the UNION of their spans.
  *
- * Not the sum. Jobs in a workflow run in parallel, and four parallel jobs
- * summed into "CI took 11m" is a wait nobody sat through. Undefined when a job
- * has no end yet on a frozen snapshot, rather than a total that quietly leaves
- * the slowest job out.
+ * Not the sum. Jobs run in parallel, and four parallel jobs summed into "CI
+ * took 11m" is a wait nobody sat through. Not first-start-to-last-finish either:
+ * the rollup keeps passed jobs at their original timestamps when a failed one
+ * is re-run hours later, and a separately triggered workflow can start long
+ * after the rest, so that span reads "4h 3m" across an idle afternoon. Merging
+ * overlapping spans counts the busy stretches and drops the gaps between them.
+ *
+ * `partial` means a job has not finished. The number then covers only what has
+ * run so far, and the header says so with a `+` rather than passing it off as
+ * CI's total. On a frozen snapshot there is no total at all, because an
+ * unfinished job there has no end to count up to.
  */
-function wallClock(checks: CheckRun[], now: number | null): number | undefined {
-  let first = Infinity;
-  let last = -Infinity;
+export function checksRuntime(
+  checks: CheckRun[],
+  now: number | null,
+): { ms: number; partial: boolean } | undefined {
+  const spans: Array<{ start: number; end: number }> = [];
+  let partial = false;
   for (const check of checks) {
+    if (check.status !== "completed") {
+      if (now === null) return undefined;
+      partial = true;
+    }
     const span = jobSpan(check, now);
-    if (!span) continue;
-    if (span.end === undefined) return undefined;
-    first = Math.min(first, span.start);
-    last = Math.max(last, span.end);
+    if (span?.end !== undefined) spans.push({ start: span.start, end: span.end });
   }
-  return last >= first ? last - first : undefined;
+  if (spans.length === 0) return undefined;
+  spans.sort((a, b) => a.start - b.start);
+  let ms = 0;
+  let [cur] = spans;
+  for (const span of spans.slice(1)) {
+    if (span.start <= cur!.end) {
+      cur = { start: cur!.start, end: Math.max(cur!.end, span.end) };
+    } else {
+      ms += cur!.end - cur!.start;
+      cur = span;
+    }
+  }
+  ms += cur!.end - cur!.start;
+  return { ms: Math.max(0, ms), partial };
+}
+
+/** `4m 12s`, or `4m 12s+` while some job has yet to finish. */
+function runtimeLabel(r: { ms: number; partial: boolean }): string {
+  return `${dur(r.ms)}${r.partial ? "+" : ""}`;
 }
 
 function JobRow({ check, now }: { check: CheckRun; now: number | null }) {
@@ -309,14 +338,14 @@ function ChecksSection({ checks, now }: { checks: CheckRun[]; now: number | null
   return (
     <div className="flex flex-col gap-2">
       {[...groups.entries()].map(([workflow, jobs]) => {
-        const total = wallClock(jobs, now);
+        const total = checksRuntime(jobs, now);
         return (
           <div key={workflow || "ungrouped"}>
             {workflow && (
               <p className="mb-0.5 flex items-center gap-2 px-1.5 cm-mono !text-2xs uppercase tracking-wide text-faint">
                 <span className="min-w-0 flex-1 truncate">{workflow}</span>
                 {total !== undefined && (
-                  <span className="shrink-0 normal-case tabular-nums">{dur(total)}</span>
+                  <span className="shrink-0 normal-case tabular-nums">{runtimeLabel(total)}</span>
                 )}
                 <span className="size-3 shrink-0" />
               </p>
@@ -377,7 +406,7 @@ export function PrStatePanel({
   // does not re-render every second for a number that can no longer change.
   const tick = useNowTick(live && running > 0);
   const now = live ? tick : null;
-  const ciTotal = wallClock(pr.checks, now);
+  const ciTotal = checksRuntime(pr.checks, now);
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1.5">
@@ -421,9 +450,9 @@ export function PrStatePanel({
           ciTotal !== undefined && (
             <span
               className="shrink-0 pr-[1.625rem] cm-mono !text-2xs normal-case tracking-normal tabular-nums text-muted"
-              title="Wall clock from the first job starting to the last one finishing"
+              title="Time jobs spent running, with overlapping jobs counted once and idle gaps (re-runs, later triggers) left out"
             >
-              {dur(ciTotal)}
+              {runtimeLabel(ciTotal)}
             </span>
           )
         }
