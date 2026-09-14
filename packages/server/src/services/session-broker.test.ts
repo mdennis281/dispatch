@@ -1973,6 +1973,27 @@ describe("SessionBroker — live controls", () => {
       await broker.waitFor("c1", "idle");
     });
 
+    // Caught in review: the user row is written BEFORE the session is built,
+    // so turn one of an unpinned chat was stamped with `create()`'s placeholder
+    // while the session started at the resolved level.
+    it("stamps the FIRST user row of a session with the resolved effort, not the placeholder", async () => {
+      await store.saveSettings({
+        theme: "dark",
+        harness: { defaultHarness: "claude", defaults: { claude: { effort: "high" } } },
+      });
+      const { fn } = makeFakeQuery(async () => [assistantText("x"), resultMsg()]);
+      const broker = makeBroker(fn);
+      await store.saveChat(unpinned());
+      broker.create(unpinned());
+
+      await broker.sendMessage("c1", "go");
+      await broker.waitFor("c1", "idle");
+
+      const rows = await store.readMessages("c1");
+      const user = rows.find((r) => r.kind === "user");
+      expect(user && "effort" in user ? user.effort : undefined).toBe("high");
+    });
+
     it("lets the project manifest's defaults win over the app's", async () => {
       await store.saveSettings({
         theme: "dark",

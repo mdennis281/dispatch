@@ -2224,6 +2224,12 @@ export class SessionBroker {
     const session = this.mustGet(chatId);
     // A fast Send after selecting a persona must wait for the idle runtime to retire.
     if (session.personaChange) await session.personaChange.catch(() => {});
+    // Before the user row is written, not only in `buildOptions`: the row below
+    // is stamped `effort: session.effort`, and on an unpinned chat's FIRST turn
+    // of a session that was still `create()`'s placeholder — so the transcript
+    // said `medium` while the session started at the app's `high`. Cheap: it
+    // returns at once when every field is pinned.
+    await this.refreshInheritedPosture(session);
     const o: SendOptions = typeof opts === "string" ? { priority: opts } : opts;
     if (o.effort) this.applyEffort(session, o.effort);
 

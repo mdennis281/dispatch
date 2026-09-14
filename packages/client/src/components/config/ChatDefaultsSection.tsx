@@ -69,9 +69,14 @@ export function ChatDefaultsSection({
     project: { harness: value.harness, mode: value.mode, effort: value.effort, model: value.model },
     settings: app,
   });
-  // What each field would inherit if its pin were cleared — the project layer
-  // removed, everything else the same.
-  const beneath = resolveChatPosture({ settings: app });
+  // What each field would inherit if ITS pin were cleared. Effort and model read
+  // the app's per-provider block, so the layer beneath them keeps the project's
+  // provider pin — resolving with no project layer at all named the app-default
+  // provider's levels: "Inheriting High" under a Select showing XHigh, on a
+  // project pinned to codex. The provider field is the one exception: what it
+  // inherits is the app layer alone.
+  const beneath = resolveChatPosture({ project: { harness: value.harness }, settings: app });
+  const beneathHarness = resolveChatPosture({ settings: app });
   const provider = projectHarnessOf({ harness: value.harness }, app);
   const injected = resolveLayered(
     { project: value.showInjectedContext, app: app.showInjectedContext },
@@ -126,16 +131,6 @@ export function ChatDefaultsSection({
   ];
   const modelLabelOf = (m: string | undefined) =>
     m ? (catalog.find((c) => c.value === m)?.label ?? m) : "Provider default";
-  // The model this project would inherit for ITS provider once its own pin is
-  // cleared: the app's per-provider default for THAT provider — not for the
-  // app's default provider, which is what `beneath` resolves when the project
-  // pins a different runtime.
-  const modelInherited =
-    beneath.harness.effective === provider
-      ? beneath.model
-      : app.harness?.defaults?.[provider]?.model !== undefined
-        ? { effective: app.harness.defaults[provider]!.model, source: "app" as const }
-        : { effective: undefined, source: "default" as const };
 
   return (
     <div className="space-y-4">
@@ -156,8 +151,8 @@ export function ChatDefaultsSection({
             description="Which agent runtime new chats in this repo start on. Existing chats keep theirs."
             pinned={value.harness !== undefined}
             source={layerOf(posture.harness.source)}
-            inheritedLabel={harnessLabel(beneath.harness.effective)}
-            inheritedSource={layerOf(beneath.harness.source)}
+            inheritedLabel={harnessLabel(beneathHarness.harness.effective)}
+            inheritedSource={layerOf(beneathHarness.harness.source)}
             onReset={() => patch({ harness: undefined, model: undefined })}
             disabled={off}
           >
@@ -171,8 +166,8 @@ export function ChatDefaultsSection({
               onChange={(harness) => patch({ harness, model: undefined })}
               options={harnessOptions}
               inherit={{
-                label: `Inherit · ${harnessLabel(beneath.harness.effective)}`,
-                hint: postureSourceShort(beneath.harness.source),
+                label: `Inherit · ${harnessLabel(beneathHarness.harness.effective)}`,
+                hint: postureSourceShort(beneathHarness.harness.source),
                 active: value.harness === undefined,
                 onSelect: () => patch({ harness: undefined, model: undefined }),
               }}
@@ -183,9 +178,9 @@ export function ChatDefaultsSection({
             label="Model"
             description={`From ${harnessLabel(provider)}'s catalogue — the provider this project resolves to.`}
             pinned={value.model !== undefined}
-            source={value.model !== undefined ? "project" : layerOf(modelInherited.source)}
-            inheritedLabel={modelLabelOf(modelInherited.effective)}
-            inheritedSource={layerOf(modelInherited.source)}
+            source={value.model !== undefined ? "project" : layerOf(beneath.model.source)}
+            inheritedLabel={modelLabelOf(beneath.model.effective)}
+            inheritedSource={layerOf(beneath.model.source)}
             onReset={() => patch({ model: undefined })}
             disabled={off}
           >
@@ -196,8 +191,8 @@ export function ChatDefaultsSection({
               onChange={(model) => patch({ model: model || undefined })}
               options={modelOptions}
               inherit={{
-                label: `Inherit · ${modelLabelOf(modelInherited.effective)}`,
-                hint: postureSourceShort(modelInherited.source, "provider"),
+                label: `Inherit · ${modelLabelOf(beneath.model.effective)}`,
+                hint: postureSourceShort(beneath.model.source, "provider"),
                 active: value.model === undefined,
                 onSelect: () => patch({ model: undefined }),
               }}
