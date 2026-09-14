@@ -14,7 +14,7 @@ import { RowShell } from "./RowShell.js";
 import { TypingPulse } from "../../ui/Spinner.js";
 import { Chip } from "../../ui/Chip.js";
 import { Tooltip } from "../../ui/Tooltip.js";
-import { Markdown } from "../Markdown.js";
+import { StreamingMarkdown } from "../Markdown.js";
 import { cn } from "../../../lib/cn.js";
 import { turnFooter } from "../../../lib/turnFooter.js";
 import { useTypewriter } from "../../../lib/useTypewriter.js";
@@ -75,7 +75,7 @@ export function StreamingRow({
         <div className="min-w-0">
           {/* chatId so an image the agent embeds resolves while it is still
               streaming, rather than only once the turn finalizes. */}
-          <Markdown chatId={chatId}>{shown}</Markdown>
+          <StreamingMarkdown chatId={chatId}>{shown}</StreamingMarkdown>
           <span className="mt-0.5 inline-flex align-middle">
             <TypingPulse />
           </span>
