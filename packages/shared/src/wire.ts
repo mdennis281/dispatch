@@ -564,6 +564,8 @@ export const CreateChatActionSchema = z.object({
   effort: EffortSchema.optional(),
   harness: HarnessKindSchema.optional(),
   model: z.string().optional(),
+  /** Login account; otherwise the chosen provider's default subscription. */
+  subscriptionId: z.string().optional(),
 });
 
 /** Subscribe / unsubscribe a socket to a chat's fine-grained stream. */
@@ -687,6 +689,17 @@ export const SetHarnessActionSchema = z.object({
   type: z.literal("set-harness"),
   chatId: z.string(),
   harness: HarnessKindSchema,
+});
+
+/**
+ * Move a chat to another login account. Same provider: the native session is
+ * carried across when it can be, else a transcript handoff. Another provider:
+ * exactly `set-harness`, landing on the named account.
+ */
+export const SetSubscriptionActionSchema = z.object({
+  type: z.literal("set-subscription"),
+  chatId: z.string(),
+  subscriptionId: z.string(),
 });
 
 /** (Re)generate the chat's AI title from its recent messages. */
@@ -820,6 +833,7 @@ export const WsClientActionSchema = z.discriminatedUnion("type", [
   SetEffortActionSchema,
   SetModelActionSchema,
   SetHarnessActionSchema,
+  SetSubscriptionActionSchema,
   RegenerateTitleActionSchema,
   SetTitleActionSchema,
   InterruptActionSchema,

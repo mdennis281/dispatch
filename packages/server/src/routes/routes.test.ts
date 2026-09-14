@@ -307,6 +307,34 @@ describe("routes — REST CRUD", () => {
     expect(att.json()).toEqual([]);
   });
 
+  it("owns the account list at /api/subscriptions and keeps it through a settings PUT", async () => {
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/subscriptions",
+      payload: {
+        subscriptions: [
+          { id: "claude2", name: "Second", provider: "claude", configDir: "/nowhere/.claude2" },
+        ],
+      },
+    });
+    expect(put.statusCode).toBe(200);
+    // The stored account plus an implicit one for the provider it didn't mention.
+    expect(put.json().map((s: { id: string }) => s.id)).toEqual(["claude2", "codex"]);
+    expect(put.json()[0]).toMatchObject({ loggedIn: false, dirExists: false, isDefault: true });
+
+    // A settings draft loaded before the account existed must not delete it.
+    await app.inject({ method: "PUT", url: "/api/settings", payload: { theme: "light" } });
+    const listed = await app.inject({ method: "GET", url: "/api/subscriptions" });
+    expect(listed.json().map((s: { id: string }) => s.id)).toContain("claude2");
+
+    const bad = await app.inject({
+      method: "PUT",
+      url: "/api/subscriptions",
+      payload: { subscriptions: [{ id: "Bad Id", name: "x", provider: "claude" }] },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
   it("PUT /api/settings hands the concurrency cap to the LIVE broker", async () => {
     // The cap is held in memory and never re-read per turn, so a save that only
     // reached config.json would be a setting that does nothing until the next

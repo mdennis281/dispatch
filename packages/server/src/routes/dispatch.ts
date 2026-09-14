@@ -15,6 +15,8 @@ import { nanoid } from "nanoid";
 import { resolve as resolvePath } from "node:path";
 import {
   DEFAULT_HARNESS,
+  findSubscription,
+  subscriptionFor,
   providerDefaults,
   providerFor,
   prRecordKey,
@@ -60,6 +62,12 @@ export interface CreateChatInput {
   /** Runtime override; otherwise project → app → built-in default. */
   harness?: HarnessKind;
   /**
+   * Login account. Names its provider too when `harness` is absent — an account
+   * belongs to exactly one — and is ignored when it names a different provider
+   * than an explicit `harness`, which then gets its own default account.
+   */
+  subscriptionId?: string;
+  /**
    * SDK model id to pin on the new chat. Omitted leaves it unpinned, which is
    * NOT the same as pinning today's default: an unpinned chat keeps tracking
    * the project/runtime recommendation as it changes.
@@ -90,8 +98,13 @@ export async function createChat(
     await resolvePersona(services.authored, input.personaId, paths?.configDir);
   }
   const settings = await store.getSettings().catch(() => null);
+  const requestedSubscription = findSubscription(settings, input.subscriptionId);
   const harness =
-    input.harness ?? project.harness ?? settings?.harness?.defaultHarness ?? DEFAULT_HARNESS;
+    input.harness ??
+    requestedSubscription?.provider ??
+    project.harness ??
+    settings?.harness?.defaultHarness ??
+    DEFAULT_HARNESS;
   const harnessDefaults = providerDefaults(settings?.harness, harness);
   const now = Date.now();
   const chat: Chat = {
@@ -105,6 +118,10 @@ export async function createChat(
       : undefined,
     personaId: input.personaId,
     harness,
+    // Pinned at creation, like `harness`: the native session this chat is about
+    // to write lives in THIS account's config dir, so a later change of default
+    // account must not move the chat away from it.
+    subscriptionId: subscriptionFor(settings, harness, input.subscriptionId).id,
     effort: input.effort ?? harnessDefaults.effort ?? "medium",
     ...((input.model ?? harnessDefaults.model)
       ? { model: input.model ?? harnessDefaults.model }
@@ -468,6 +485,10 @@ export async function dispatchClientAction(
 
       case "set-harness":
         await broker.setHarness(action.chatId, action.harness);
+        return;
+
+      case "set-subscription":
+        await broker.setSubscription(action.chatId, action.subscriptionId);
         return;
 
       case "regenerate-title":

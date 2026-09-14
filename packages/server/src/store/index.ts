@@ -101,6 +101,7 @@ import {
 } from "@dispatch/shared";
 import {
   HarnessSettingsSchema,
+  SubscriptionListSchema,
   ReviewerCredentialSchema,
   UpdateChannelSchema,
   type ReviewerCredential,
@@ -125,6 +126,13 @@ export const AppSettingsSchema = z.object({
   defaultModeId: z.string().optional(),
   /** App-wide runtime selection, per-runtime defaults, and context budgets. */
   harness: HarnessSettingsSchema.optional(),
+  /**
+   * Named login accounts, several per provider (see shared `subscriptions.ts`).
+   * Unset = one implicit account per provider at its default config dir, which
+   * is exactly how every install before this field ran. Owned by
+   * PUT /api/subscriptions; the settings PUT preserves it.
+   */
+  subscriptions: SubscriptionListSchema.optional(),
   /**
    * How many chats may hold an execution slot at once — running, waiting on a
    * tool, or awaiting input (idle chats are free). Over the cap a new turn parks

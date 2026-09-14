@@ -784,8 +784,21 @@ export const ChatSchema = z.object({
       from: HarnessKindSchema,
       to: HarnessKindSchema,
       at: z.number().int(),
+      /**
+       * Set when the move was between two ACCOUNTS of one provider whose native
+       * session could not be carried across — the handoff then reads as an
+       * account switch rather than "moved from claude to claude".
+       */
+      fromSubscription: z.string().optional(),
+      toSubscription: z.string().optional(),
     })
     .optional(),
+  /**
+   * The login account (see `subscriptions.ts`) this chat runs under. Absent, or
+   * naming one that no longer exists, means the provider's default — resolve it
+   * with `subscriptionFor`, never by reading this directly.
+   */
+  subscriptionId: z.string().optional(),
   /** Runtime session id captured from the init event (for resume/fork). */
   sessionId: z.string().optional(),
   /**

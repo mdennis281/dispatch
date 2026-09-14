@@ -4309,6 +4309,7 @@ function spawnArgs(over: Partial<SpawnChatRequest> & { prompt: string }) {
     personaId: undefined,
     effort: undefined,
     model: undefined,
+    subscription: undefined,
     reason: undefined,
     detached: undefined,
     ...over,

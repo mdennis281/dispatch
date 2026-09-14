@@ -5,6 +5,7 @@
  */
 export * from "./common.js";
 export * from "./providers.js";
+export * from "./subscriptions.js";
 export * from "./runtime-config.js";
 export * from "./registry.js";
 export * from "./worktree-cleanup.js";

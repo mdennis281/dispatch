@@ -33,6 +33,11 @@ export const UsageSnapshotSchema = z.object({
   /** Coarse failure reason: "unauthenticated" | "rate_limited" | "unavailable" | message. */
   error: z.string().optional(),
   provider: HarnessKindSchema.optional(),
+  /**
+   * Whose windows these are. Limits belong to an ACCOUNT, not a provider, so a
+   * snapshot without this is ambiguous the moment there are two Claude logins.
+   */
+  subscriptionId: z.string().optional(),
   primaryLabel: z.string().optional(),
   secondaryLabel: z.string().optional(),
   planType: z.string().optional(),

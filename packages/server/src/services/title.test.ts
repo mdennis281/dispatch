@@ -42,6 +42,7 @@ function makeStore(initial: Chat | null, messages: ChatMessage[]) {
   const saves: Chat[] = [];
   const store = {
     getChat: async () => current,
+    getSettings: async () => ({ theme: "dark" }),
     readMessages: async () => messages,
     saveChat: async (c: Chat) => {
       current = c;
@@ -106,7 +107,7 @@ describe("TitleService.maybeGenerateInitialTitle", () => {
     const { store, saves } = makeStore(current, [user("inspect child agents")]);
     const generateText = vi.fn(async () => "Codex Agent Detail");
     const resolve = vi.fn(() => ({
-      harness: { generateText },
+      harness: { kind: "codex", generateText },
       fellBack: false,
     }));
     const svc = new TitleService({
@@ -120,7 +121,12 @@ describe("TitleService.maybeGenerateInitialTitle", () => {
 
     expect(resolve).toHaveBeenCalledWith("codex");
     expect(generateText).toHaveBeenCalledWith(
-      expect.objectContaining({ purpose: "title", prompt: expect.any(String) }),
+      expect.objectContaining({
+        purpose: "title",
+        prompt: expect.any(String),
+        // Spent on the chat's own account — the default one here.
+        account: expect.objectContaining({ subscriptionId: "codex" }),
+      }),
     );
     expect(saves[0]?.title).toBe("Codex Agent Detail");
   });

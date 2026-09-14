@@ -23,6 +23,8 @@ import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelInfo, Options, Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { FALLBACK_MODELS, type ModelOption } from "@dispatch/shared";
 import { claudeExecutableOption } from "./runtime.js";
+import type { HarnessAccount } from "../harness/types.js";
+import { envWithAccount } from "./subscriptions.js";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 /** Cap on the probe subprocess — a hung runtime must not hang the HTTP route. */
@@ -34,9 +36,13 @@ export type ModelsQueryFn = (params: {
   options?: Options;
 }) => Query;
 
-let cache: { at: number; models: ModelOption[] } | null = null;
-/** In-flight probe, so a burst of callers spawns ONE subprocess, not N. */
-let inFlight: Promise<ModelOption[] | null> | null = null;
+/**
+ * Per ACCOUNT, keyed by config dir: which models a login may pick is a fact about
+ * its plan, so one account's list must not be served for another's picker.
+ */
+const cache = new Map<string, { at: number; models: ModelOption[] }>();
+/** In-flight probe per account, so a burst of callers spawns ONE subprocess, not N. */
+const inFlight = new Map<string, Promise<ModelOption[] | null>>();
 
 /** An input channel that never yields — we want the control channel, not a turn. */
 const SILENT_PROMPT: AsyncIterable<SDKUserMessage> = {
@@ -85,12 +91,21 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
  * `settingSources: []` keeps the probe from loading repo settings or starting
  * project MCP servers — it only needs the control channel.
  */
-async function probe(query: ModelsQueryFn): Promise<ModelOption[] | null> {
+async function probe(
+  query: ModelsQueryFn,
+  account: HarnessAccount | undefined,
+): Promise<ModelOption[] | null> {
   const abort = new AbortController();
   try {
+    const env = envWithAccount(account);
     const q = query({
       prompt: SILENT_PROMPT,
-      options: { settingSources: [], abortController: abort, ...claudeExecutableOption() },
+      options: {
+        settingSources: [],
+        abortController: abort,
+        ...claudeExecutableOption(),
+        ...(env ? { env } : {}),
+      },
     });
     const models = await withTimeout(q.supportedModels(), PROBE_TIMEOUT_MS);
     if (!models?.length) return null;
@@ -108,6 +123,8 @@ export interface ListModelsOptions {
   query?: ModelsQueryFn;
   /** Skip the cache and re-probe the runtime (the `?refresh=1` route param). */
   refresh?: boolean;
+  /** Whose list; absent means the default account. */
+  account?: HarnessAccount;
 }
 
 /**
@@ -120,20 +137,28 @@ export async function listAvailableModels(opts: ListModelsOptions = {}): Promise
   // the timeout on every request. Serve the static list directly.
   if (process.env.DISPATCH_FAKE_SDK === "1") return FALLBACK_MODELS;
 
-  if (!opts.refresh && cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.models;
+  // The default account keys as "" whatever its dir is, so a chat that names
+  // it and a caller that names nothing share one probe.
+  const key = opts.account && Object.keys(opts.account.env).length ? opts.account.configDir : "";
+  const hit = cache.get(key);
+  if (!opts.refresh && hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.models;
 
   const query = opts.query ?? (sdkQuery as unknown as ModelsQueryFn);
-  inFlight ??= probe(query).finally(() => {
-    inFlight = null;
-  });
-  const models = await inFlight;
-  if (!models) return cache?.models ?? FALLBACK_MODELS;
-  cache = { at: Date.now(), models };
+  let pending = inFlight.get(key);
+  if (!pending) {
+    pending = probe(query, opts.account).finally(() => {
+      inFlight.delete(key);
+    });
+    inFlight.set(key, pending);
+  }
+  const models = await pending;
+  if (!models) return cache.get(key)?.models ?? FALLBACK_MODELS;
+  cache.set(key, { at: Date.now(), models });
   return models;
 }
 
-/** Drop the cached list (tests; also lets a process force a cold read). */
+/** Drop the cached lists (tests; also lets a process force a cold read). */
 export function resetModelsCache(): void {
-  cache = null;
-  inFlight = null;
+  cache.clear();
+  inFlight.clear();
 }
