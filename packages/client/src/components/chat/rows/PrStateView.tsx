@@ -210,6 +210,10 @@ export function PrStateStrip({ pr, live }: { pr: PrSnapshot; live?: boolean }) {
  * and draws no duration.
  */
 function jobSpan(check: CheckRun, now: number | null): { start: number; end?: number } | null {
+  // GitHub stamps `startedAt` on a job the moment it is QUEUED (seen on this
+  // repo's own PRs), so a queued job's "runtime" would be time spent waiting
+  // for a runner. It has not run; it gets no span.
+  if (check.status === "queued") return null;
   const start = check.startedAt ? Date.parse(check.startedAt) : Number.NaN;
   if (Number.isNaN(start)) return null;
   const done = check.completedAt ? Date.parse(check.completedAt) : Number.NaN;
