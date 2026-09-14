@@ -11,15 +11,12 @@ import {
   Trash2,
   Eye,
   EyeOff,
-  ArrowRightLeft,
   Search,
   RotateCcw,
 } from "lucide-react";
-import { DEFAULT_HARNESS, PROVIDER_IDS, providerFor } from "@dispatch/shared";
 import type {
   AgentActivity,
   Chat,
-  HarnessKind,
   WorkflowExemption,
   WorktreeInfo,
 } from "@dispatch/shared";
@@ -38,13 +35,10 @@ import { TodosStrip } from "./TodosStrip.js";
 import { Composer } from "./Composer.js";
 import { DeleteChatDialog } from "./DeleteChatDialog.js";
 import { TranscriptSearch } from "./TranscriptSearch.js";
-import { Modal } from "../sidebar/Modal.js";
-import { Button } from "../ui/Button.js";
 import { useChatRename } from "./useChatRename.js";
 import { useChatMessages, useChatPage, useMessages } from "../../stores/messages.js";
 import { loadExemptions, loadOlderMessages } from "../../stores/index.js";
 import { useChats } from "../../stores/chats.js";
-import { useHarnesses } from "../../stores/harnesses.js";
 import { useProjects } from "../../stores/projects.js";
 import { usePanels } from "../../stores/panels.js";
 import { useLayoutMode } from "../../stores/layout.js";
@@ -56,7 +50,6 @@ import { useCopyId } from "../../lib/useCopyId.js";
 import { actions } from "../../lib/actions.js";
 import { api } from "../../lib/api.js";
 import { cn } from "../../lib/cn.js";
-import { harnessLabel } from "../../lib/harness.js";
 import {
   useInjectedContext,
   injectedContextSourceLabel,
@@ -216,30 +209,6 @@ export function ChatView({ chat }: { chat: Chat }) {
   // so a chat renames and deletes the same way wherever you reach for it.
   const rename = useChatRename(chat);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [confirmMove, setConfirmMove] = useState<HarnessKind | null>(null);
-  const currentHarness = chat.harness ?? DEFAULT_HARNESS;
-  // Every OTHER registered provider, not "the other one": with two providers a
-  // toggle was indistinguishable from a list, and a third would have been
-  // unreachable from here.
-  const moveTargets = PROVIDER_IDS.filter((kind) => kind !== currentHarness);
-  const harnessRuntimes = useHarnesses((s) => s.harnesses);
-  const moveAvailable = (kind: HarnessKind) =>
-    harnessRuntimes.find((candidate) => candidate.kind === kind)?.runtime.available !== false;
-
-  const moveChat = useCallback(() => {
-    if (!confirmMove) return;
-    useChats.getState().upsertChat({
-      ...chat,
-      harness: confirmMove,
-      sessionId: undefined,
-      model: undefined,
-      agentId: providerFor(confirmMove).subagents ? chat.agentId : undefined,
-      status: "idle",
-    });
-    actions.setHarness(chat.id, confirmMove);
-    setConfirmMove(null);
-  }, [chat, confirmMove]);
-
   // What this chat still has running — its live shells plus every listener that
   // descends from them. Read here so the menu can put the COUNT on the item:
   // "kill the processes" with no number is a click nobody can calibrate.
@@ -354,7 +323,6 @@ export function ChatView({ chat }: { chat: Chat }) {
     setAtBottom(true);
     rename.cancel();
     setConfirmDelete(false);
-    setConfirmMove(null);
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [chat.id, rename.cancel]);
@@ -598,25 +566,6 @@ export function ChatView({ chat }: { chat: Chat }) {
                     Regenerate title
                   </MenuItem>
                   <div className="my-1 h-px bg-line" />
-                  {moveTargets.map((moveTarget) => (
-                    <MenuItem
-                      key={moveTarget}
-                      icon={<ArrowRightLeft />}
-                      disabled={!moveAvailable(moveTarget)}
-                      title={
-                        moveAvailable(moveTarget)
-                          ? "Keeps this transcript and hands recent context to the new provider"
-                          : `${harnessLabel(moveTarget)} is not installed`
-                      }
-                      onClick={() => {
-                        setConfirmMove(moveTarget);
-                        close();
-                      }}
-                    >
-                      Move chat to {harnessLabel(moveTarget)}…
-                    </MenuItem>
-                  ))}
-                  <div className="my-1 h-px bg-line" />
                   {/* The id used to ride in the header as a chip, which cost a
                       permanent slice of the title bar to show a string nobody
                       reads — only copies. Here it costs nothing until wanted.
@@ -807,36 +756,6 @@ export function ChatView({ chat }: { chat: Chat }) {
         open={confirmDelete}
         onClose={() => setConfirmDelete(false)}
       />
-
-      <Modal
-        open={confirmMove !== null}
-        onClose={() => setConfirmMove(null)}
-        width={440}
-        icon={<ArrowRightLeft />}
-        title={`Move chat to ${harnessLabel(confirmMove ?? moveTargets[0])}`}
-        description={chat.title}
-        footer={
-          <>
-            <Button className="ml-auto" variant="ghost" onClick={() => setConfirmMove(null)}>
-              Cancel
-            </Button>
-            <Button variant="primary" onClick={moveChat}>
-              Move to {harnessLabel(confirmMove ?? moveTargets[0])}
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-3 text-base leading-relaxed text-secondary">
-          <p>
-            Dispatch keeps the complete chat transcript. On your next message,
-            {" "}{harnessLabel(confirmMove ?? moveTargets[0])} receives the recent conversation as a handoff.
-          </p>
-          <p className="text-sm text-muted">
-            The current native session cannot move between providers. A running turn will stop,
-            and open processes stay attached to this Dispatch chat.
-          </p>
-        </div>
-      </Modal>
     </div>
   );
 }
