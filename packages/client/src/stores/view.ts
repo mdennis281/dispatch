@@ -35,6 +35,7 @@ export type AppView =
 export type AppSettingsSection =
   | "appearance"
   | "chat"
+  | "accounts"
   | "context"
   | "notifications"
   | "auth"

@@ -42,6 +42,7 @@ import {
 import { SettingsShell } from "./SettingsShell.js";
 import { APP_SECTIONS, APP_SECTION_BY_ID } from "./appSections.js";
 import { AppearanceSection } from "./sections/AppearanceSection.js";
+import { AccountsSection } from "./sections/AccountsSection.js";
 import { ChatSection } from "./sections/ChatSection.js";
 import { ContextSection, normalizeContextLimits } from "./sections/ContextSection.js";
 import { NotificationsSection } from "./sections/NotificationsSection.js";
@@ -227,8 +228,8 @@ export function AppSettingsView() {
         label: s.label,
         blurb: s.blurb,
         // Per section, so the dot points at what you actually edited. Auth,
-        // updates and system never appear here — they act immediately and have
-        // nothing to save.
+        // accounts, updates and system never appear here — they save through
+        // their own endpoints and have nothing in the draft.
         dirty: dirtySections.has(s.id),
       }))}
       active={section}
@@ -285,6 +286,8 @@ export function AppSettingsView() {
           <UpdateBanner />
         ) : section === "system" ? (
           <StopDispatch />
+        ) : section === "accounts" ? (
+          <AccountsSection />
         ) : !paneProps ? (
           <InlineError message={error ?? "Settings could not be loaded."} />
         ) : section === "appearance" ? (
