@@ -326,8 +326,10 @@ export class ResourceService {
     const windowMs = tableAt - prev.at;
     if (windowMs > MAX_WINDOW_MS) return false;
     // A window too SHORT is fine when a previous answer exists: `rates` serves
-    // that. Only the absent or stale baseline has nothing at all to offer.
-    return windowMs >= MIN_WINDOW_MS || this.computed !== undefined;
+    // that. Only the absent or stale baseline has nothing at all to offer —
+    // and neither does the empty first-half record (`windowMs: 0`), which a
+    // forced read landing ~100 ms behind a cold one would otherwise be served.
+    return windowMs >= MIN_WINDOW_MS || (this.computed?.windowMs ?? 0) > 0;
   }
 
   /**
