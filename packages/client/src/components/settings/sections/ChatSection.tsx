@@ -3,6 +3,7 @@ import {
   AGENT_TASKS,
   DEFAULT_HARNESS,
   SHELL_TRANSCRIPT_CATEGORIES,
+  accountLabel,
   listProviders,
 } from "@dispatch/shared";
 import type { Effort, HarnessDefaults, HarnessKind, ProjectConfigLocation } from "@dispatch/shared";
@@ -13,6 +14,7 @@ import { Switch } from "../../ui/Switch.js";
 import { ShellFilterPanel } from "../../chat/ShellFilterPanel.js";
 import { EFFORT_OPTIONS } from "../../../lib/efforts.js";
 import { useProjects } from "../../../stores/projects.js";
+import { useSubscriptions } from "../../../stores/subscriptions.js";
 import type { AppPaneProps } from "./types.js";
 
 /**
@@ -39,6 +41,7 @@ const configLocationOptions: SelectOption<ProjectConfigLocation>[] = [
 
 export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps) {
   const modes = useProjects((s) => s.modes);
+  const accounts = useSubscriptions((s) => s.list);
   const harness = draft.harness ?? {};
 
   const patchHarnessDefault = (kind: HarnessKind, p: HarnessDefaults) =>
@@ -141,6 +144,31 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
                   {/* Per provider, beside the chat defaults, because a reviewer
                       model is a model id and belongs to one catalogue. A
                       project's own reviewer block still wins over both. */}
+                  {/* Only once the provider HAS a choice of account — the implicit
+                      one alone is not a decision anyone needs to see. */}
+                  {accounts.filter((a) => a.provider === kind).length > 1 && (
+                    <Field label="Account" hint="new chats start on it">
+                      <Select
+                        width={210}
+                        className="w-full"
+                        value={
+                          defaults.subscriptionId ??
+                          accounts.find((a) => a.provider === kind && a.isDefault)?.id ??
+                          ""
+                        }
+                        onChange={(subscriptionId) =>
+                          patchHarnessDefault(kind, { subscriptionId: subscriptionId || undefined })
+                        }
+                        options={accounts
+                          .filter((a) => a.provider === kind)
+                          .map((a) => ({
+                            value: a.id,
+                            label: accountLabel(a),
+                            hint: a.loggedIn ? undefined : "not logged in",
+                          }))}
+                      />
+                    </Field>
+                  )}
                   <Field label="Reviewer model" hint="when the project doesn't pin one">
                     <Select
                       width={210}

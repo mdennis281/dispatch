@@ -100,6 +100,10 @@ export const COMPOSER_CONTROLS = [
   // shrink and the first to leave. `md` is the persona's name; with none set it
   // draws as its icon even at `md`, so an off persona never spends a label.
   { id: "persona", label: "Persona", hint: "chat role", sizes: ["md", "sm"], priority: 0 },
+  // The login account: also set rarely, and absent entirely on an install with
+  // one account per provider — so it leaves right after persona. `md` is the
+  // account's name, which is the only thing worth a label once there are two.
+  { id: "account", label: "Account", hint: "login subscription", sizes: ["md", "sm"], priority: 0.5 },
   { id: "context", label: "Context meter", hint: "window usage", sizes: ["md", "sm"], priority: 1 },
 ] as const satisfies readonly ControlDef[];
 

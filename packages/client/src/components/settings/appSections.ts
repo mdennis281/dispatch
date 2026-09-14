@@ -12,6 +12,7 @@
  */
 import {
   Bell,
+  KeyRound,
   Layers,
   MessageSquare,
   Palette,
@@ -52,6 +53,16 @@ export const APP_SECTIONS: AppSectionDef[] = [
       "The bottom of every inheritance chain in the app: a project can override these for " +
       "everyone working in its repo, and a single chat can override both. Nothing here changes " +
       "a chat that already exists.",
+  },
+  {
+    id: "accounts",
+    icon: KeyRound,
+    label: "Accounts",
+    blurb: "Several logins per provider",
+    explainer:
+      "Each account is a provider config directory holding a login made by that provider's " +
+      "own CLI. A chat runs under one account, picked from its composer; switching keeps the " +
+      "conversation. Which account a new chat starts on is set per provider under Chat.",
   },
   {
     id: "context",

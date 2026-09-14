@@ -7,6 +7,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -33,9 +34,20 @@ import {
   FileCode2,
   Mic,
   Drama,
+  KeyRound,
 } from "lucide-react";
 import type { Chat, Effort, AgentConfig, ModeConfig, ImageRef } from "@dispatch/shared";
-import { DEFAULT_HARNESS, defaultModelFor, findModel, chatRoot } from "@dispatch/shared";
+import {
+  DEFAULT_HARNESS,
+  accountLabel,
+  chatAccountOf,
+  defaultModelFor,
+  findModel,
+  chatRoot,
+  PROVIDER_IDS,
+  providerFor,
+  type SubscriptionStatus,
+} from "@dispatch/shared";
 import { api, type IndexedFile } from "../../lib/api.js";
 import { pathsFromDrop, basenameOf, dropIntent, type DropIntent } from "../../lib/dropPaths.js";
 import { useFileDrag } from "../../lib/useFileDrag.js";
@@ -65,6 +77,7 @@ import { composerPlaceholder } from "../../lib/submitHint.js";
 import { useChats } from "../../stores/chats.js";
 import { useModels } from "../../stores/models.js";
 import { useHarnesses } from "../../stores/harnesses.js";
+import { useSubscriptions } from "../../stores/subscriptions.js";
 import { useLayoutMode } from "../../stores/layout.js";
 import { Drawer } from "../layout/Drawer.js";
 import { actions, uploadChatImage } from "../../lib/actions.js";
@@ -302,6 +315,16 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const [over, setOver] = useState<DropIntent>(null);
   const [error, setError] = useState<string | null>(null);
   const persona = usePersonaPicker(chat);
+  // The login account this chat runs under. Only a real choice once some
+  // provider has more than one account — counted PER provider, because one
+  // stored account beside the implicit ones for other providers is still one
+  // account each, and switching provider is the model menu's job.
+  const accounts = useSubscriptions((s) => s.list);
+  const account = chatAccountOf(accounts, chat, harness);
+  const multiAccount = PROVIDER_IDS.some(
+    (p) => accounts.filter((a) => a.provider === p).length > 1,
+  );
+  const accountName = account ? accountLabel(account) : undefined;
   // Where the file picker opens: this chat's own working directory, so the
   // paths it inserts are paths the agent for THIS chat can open.
   //
@@ -349,10 +372,18 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const toggleControl = useComposerPrefs((s) => s.toggle);
   const showAllControls = useComposerPrefs((s) => s.showAll);
   const hidden = hiddenCount(visible);
+  // What the FIT sees: the preference, minus a control with nothing to draw. The
+  // account picker renders nothing on a single-account install, and letting the
+  // fit walk it to `off` anyway counted a control that doesn't exist into the
+  // "N won't fit" tooltip and the menu's eviction line.
+  const fitVisible = useMemo(
+    () => ({ ...visible, account: visible.account && multiAccount }),
+    [visible, multiAccount],
+  );
   // How big each control is currently drawn — derived from measurement, never
   // stored. Starts at everything's widest and gets walked down by `fit` below.
-  const [sizes, setSizes] = useState<ComposerSizes>(() => widestSizes(visible));
-  const evicted = evictedCount(sizes, visible);
+  const [sizes, setSizes] = useState<ComposerSizes>(() => widestSizes(fitVisible));
+  const evicted = evictedCount(sizes, fitVisible);
   // Phone still matters, but only for TOUCH now: taller boxes, roomier menu
   // rows, a circular Send. Which controls the row carries is decided by the
   // same measurement at every width — a phone simply ends up with icons,
@@ -372,8 +403,8 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   const blockedWidthRef = useRef(0);
   // `step` is memoized with no deps (the ResizeObserver must not be torn down and
   // rebuilt on every preference change), so it reads visibility through a ref.
-  const visibleRef = useRef(visible);
-  visibleRef.current = visible;
+  const visibleRef = useRef(fitVisible);
+  visibleRef.current = fitVisible;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Latest submit/upload closures, so the (once-configured) TipTap key/paste
@@ -900,7 +931,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
   // changes the natural width without changing the box.
   useLayoutEffect(() => {
     blockedWidthRef.current = 0;
-    setSizes((cur) => reconcile(cur, visible));
+    setSizes((cur) => reconcile(cur, fitVisible));
     step();
   }, [
     step,
@@ -914,8 +945,10 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     chat.effort,
     currentAgent?.name,
     persona.label,
+    accountName,
+    multiAccount,
     modeLabel(modes, chat.modeId),
-    visible,
+    fitVisible,
   ]);
 
   /* ------------------------------------------------------- shared menu bodies */
@@ -1109,8 +1142,69 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
    * in place. Both the desktop popover and the phone sheet render this same
    * function, so the two surfaces cannot drift apart.
    */
+  /**
+   * Every account, grouped by provider. Picking one on ANOTHER provider moves
+   * the chat there (the server treats it as a provider switch), so the rows say
+   * which provider each group is rather than hiding the others.
+   */
+  const chooseAccount = (target: SubscriptionStatus) => {
+    if (!target.loggedIn || target.id === account?.id) return;
+    const movesProvider = target.provider !== harness;
+    if (movesProvider) {
+      modelByChat.delete(chat.id);
+      setModelState("");
+    }
+    // Optimistic, mirroring what the server will write: an implicit account is
+    // never pinned (see `pinnedIdOf`), and a provider move drops the native
+    // session and model the way `setHarness` does.
+    upsertChat({
+      ...chat,
+      subscriptionId: target.implicit ? undefined : target.id,
+      ...(movesProvider
+        ? { harness: target.provider, sessionId: undefined, model: undefined, status: "idle" }
+        : {}),
+    });
+    actions.setSubscription(chat.id, target.id);
+  };
+
+  const accountRows = (close: () => void, dense: boolean) => (
+    <>
+      {[...new Set(accounts.map((a) => a.provider))].map((provider, i) => (
+        <div key={provider} className="flex flex-col">
+          {i > 0 && <div className="my-1 h-px bg-line" />}
+          <div className="px-2 py-1 text-2xs uppercase tracking-wide text-faint">
+            {providerFor(provider).label}
+          </div>
+          {accounts
+            .filter((a) => a.provider === provider)
+            .map((a) => (
+              <MenuItem
+                key={a.id}
+                icon={<KeyRound />}
+                dense={dense}
+                active={a.id === account?.id}
+                disabled={!a.loggedIn}
+                hint={!a.loggedIn ? "not logged in" : a.isDefault ? "default" : undefined}
+                title={a.resolvedConfigDir}
+                onClick={() => {
+                  chooseAccount(a);
+                  close();
+                }}
+              >
+                <span className="flex items-center gap-2">
+                  {accountLabel(a)}
+                  {a.id === account?.id && <Check className="size-3 text-accent" />}
+                </span>
+              </MenuItem>
+            ))}
+        </div>
+      ))}
+    </>
+  );
+
   const configSurface = (close: () => void, dense: boolean) => {
     if (moreView === "attach") return attachRows(close, dense);
+    if (moreView === "account") return <div className="flex flex-col">{accountRows(close, dense)}</div>;
     if (moreView === "mode")
       return (
         <ModeMenu modes={modes} value={chat.modeId} onChange={setMode} close={close} dense={dense} />
@@ -1183,6 +1277,19 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
         >
           Persona
         </MenuItem>
+        {multiAccount && (
+          <MenuItem
+            dense={dense}
+            icon={<KeyRound />}
+            hint={accountName ?? "default"}
+            onClick={() => {
+              void useSubscriptions.getState().load();
+              setMoreView("account");
+            }}
+          >
+            Account
+          </MenuItem>
+        )}
         <MenuItem
           dense={dense}
           icon={<Gauge />}
@@ -1210,6 +1317,7 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
     effort: "Effort",
     brain: "Model / agent",
     persona: "Persona",
+    account: "Account",
     context: "Context",
     customize: "Composer controls",
   };
@@ -1617,6 +1725,51 @@ export function Composer({ chat, agents, modes }: ComposerProps) {
             }}
           >
             {(close) => <PersonaRows picker={persona} close={close} dense={!phone} />}
+          </Popover>
+          )}
+
+          {/* The account sits with the other "who is answering" choices. It draws
+              nothing until some provider has a second account to choose. */}
+          {sizes.account !== "off" && multiAccount && (
+          <Popover
+            align="start"
+            width={240}
+            className="p-1"
+            trigger={({ open, toggle }) => {
+              const onClick = () => {
+                // Re-read on open: whether an account is logged in is a fact
+                // about a directory, and it changes when someone runs a login.
+                if (!open) void useSubscriptions.getState().load();
+                toggle();
+              };
+              const tip = `Account — ${accountName ?? "default"}`;
+              return sizes.account === "md" && accountName ? (
+                <Tooltip label={tip}>
+                  <Button
+                    variant="subtle"
+                    size={phone ? "md" : "sm"}
+                    leftIcon={<KeyRound />}
+                    aria-expanded={open}
+                    aria-label={`Account: ${accountName}`}
+                    onClick={onClick}
+                  >
+                    <span className="max-w-[96px] truncate">{accountName}</span>
+                  </Button>
+                </Tooltip>
+              ) : (
+                <IconButton
+                  size={phone ? "md" : "sm"}
+                  tip={tip}
+                  active={open}
+                  aria-expanded={open}
+                  onClick={onClick}
+                >
+                  <KeyRound />
+                </IconButton>
+              );
+            }}
+          >
+            {(close) => <div className="flex flex-col">{accountRows(close, !phone)}</div>}
           </Popover>
           )}
 
