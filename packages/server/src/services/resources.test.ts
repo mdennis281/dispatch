@@ -25,6 +25,8 @@ interface Harness {
   setTable: (rows: ProcRow[]) => void;
   /** Add tick counts to the fake cores: `burn(idle, busy)` per core. */
   burn: (idle: number, busy: number) => void;
+  /** How many times the table source has been scanned. */
+  scans: () => number;
 }
 
 function harness(
@@ -33,14 +35,23 @@ function harness(
     sessionPids?: Map<string, number>;
     terminals?: { chatId: string; name: string; terminalId: string; pid: number }[];
     serverPid?: number;
+    /**
+     * Runs during a re-prime's wait, between its two scans. The default leaves
+     * the table alone, so a re-prime measures every process at 0%.
+     */
+    whilePriming?: (h: Omit<Harness, "svc">) => void;
   } = {},
 ): Harness {
   const c = clock();
   let table = rows;
   let idle = 1000;
   let busy = 1000;
+  let scans = 0;
   const cache = new ProcTableCache({
-    read: async () => table,
+    read: async () => {
+      scans += 1;
+      return table;
+    },
     now: c.now,
     // No caching: each test call should see the table it just set.
     ttlMs: 0,
@@ -51,19 +62,26 @@ function harness(
     terminals: opts.terminals ? { livePids: () => opts.terminals! } : undefined,
     serverPid: opts.serverPid ?? 1,
     now: c.now,
+    // The re-prime's wait moves the fake clock instead of the real one, so a
+    // primed window is exactly the delay and the tests stay instant.
+    sleep: async (ms) => {
+      c.advance(ms);
+      opts.whilePriming?.(rest);
+    },
     cpus: () => cores(4, idle, busy),
     freemem: () => 4_000,
     totalmem: () => 10_000,
   });
-  return {
-    svc,
+  const rest: Omit<Harness, "svc"> = {
     advance: c.advance,
     setTable: (r) => (table = r),
     burn: (i, b) => {
       idle += i;
       busy += b;
     },
+    scans: () => scans,
   };
+  return { svc, ...rest };
 }
 
 const row = (pid: number, ppid: number, over: Partial<ProcRow> = {}): ProcRow => ({
@@ -158,10 +176,12 @@ describe("ResourceService.snapshot", () => {
       sessionPids: new Map([["chat-a", 10]]),
     });
 
-    // First snapshot: no baseline, so no rate.
+    // First snapshot: no baseline, so it takes a second scan a second later
+    // and differences those. The process did nothing in between: a real 0.
     const first = await h.svc.snapshot();
-    expect(first.chats[0].cpuPct).toBeNull();
-    expect(first.windowMs).toBe(0);
+    expect(first.chats[0].cpuPct).toBe(0);
+    expect(first.windowMs).toBe(1000);
+    expect(h.scans()).toBe(2);
 
     // 1000 ms later the process has burned 500 ms of CPU — half a core.
     h.advance(1000);
@@ -196,19 +216,20 @@ describe("ResourceService.snapshot", () => {
     expect((await h.svc.snapshot()).chats[0].cpuPct).toBeNull();
   });
 
-  it("suppresses rates when two scans land too close together", async () => {
+  it("serves the last answer rather than dividing by a too-short window", async () => {
     const h = harness([row(1, 0), row(10, 1, { cpuMs: 0 })], {
       sessionPids: new Map([["chat-a", 10]]),
     });
     await h.svc.snapshot();
 
     // 40 ms apart, one scheduling quantum of drift: dividing by that window
-    // yields percentages in the hundreds for a process that did nothing.
+    // yields percentages in the hundreds for a process that did nothing. The
+    // reading it gets is the one from a second ago — 0%, over that second.
     h.advance(40);
     h.setTable([row(1, 0), row(10, 1, { cpuMs: 20 })]);
     const tooSoon = await h.svc.snapshot();
-    expect(tooSoon.chats[0].cpuPct).toBeNull();
-    expect(tooSoon.windowMs).toBe(0);
+    expect(tooSoon.chats[0].cpuPct).toBe(0);
+    expect(tooSoon.windowMs).toBe(1000);
 
     // ...but the baseline still advanced, so the next poll is clean rather
     // than inheriting the bad window.
@@ -262,6 +283,65 @@ describe("ResourceService.snapshot", () => {
     expect(next.chats[0].cpuPct).toBeCloseTo(50);
   });
 
+  it("throws a stale baseline away and re-primes instead of averaging over it", async () => {
+    // THE BUG. The baseline only advances when someone asks, so the first
+    // hover after a quiet stretch differenced against a scan from minutes or
+    // hours ago. Over that window a process spawned since is "new" and skipped
+    // entirely, and one that survived is averaged over the whole stretch. On a
+    // live install the pill read "Dispatch 1.2%" while six chats of headless
+    // Chrome held half the machine.
+    const h = harness([row(1, 0), row(10, 1, { cpuMs: 0 })], {
+      sessionPids: new Map([["chat-a", 10], ["chat-b", 20]]),
+      whilePriming: (p) => {
+        // Both processes burn half a core during the re-prime's one second.
+        p.setTable([row(1, 0), row(10, 1, { cpuMs: 10_500 }), row(20, 1, { cpuMs: 500_500 })]);
+      },
+    });
+    await h.svc.snapshot();
+
+    // Ten minutes later: pid 10 has used 10 s of CPU in total (1.7% smeared
+    // over the stretch), and pid 20 — busy the entire time — did not exist at
+    // the baseline at all.
+    h.advance(600_000);
+    h.setTable([row(1, 0), row(10, 1, { cpuMs: 10_000 }), row(20, 1, { cpuMs: 500_000 })]);
+    const snap = await h.svc.snapshot();
+    expect(snap.windowMs).toBe(1000);
+    const byChat = Object.fromEntries(snap.chats.map((c) => [c.chatId, c.cpuPct]));
+    expect(byChat["chat-a"]).toBeCloseTo(50);
+    expect(byChat["chat-b"]).toBeCloseTo(50);
+  });
+
+  it("shares one re-prime between readers that open together", async () => {
+    const h = harness([row(1, 0), row(10, 1, { cpuMs: 0 })], {
+      sessionPids: new Map([["chat-a", 10]]),
+    });
+    // Two tabs, same instant. One baseline scan, one re-prime scan — not two
+    // of each, and neither reader handed the empty first half.
+    const [a, b] = await Promise.all([h.svc.snapshot(), h.svc.snapshot()]);
+    expect(h.scans()).toBe(2);
+    expect(a.windowMs).toBe(1000);
+    expect(b.windowMs).toBe(1000);
+    expect(a.chats[0].cpuPct).toBe(0);
+    expect(b.chats[0].cpuPct).toBe(0);
+  });
+
+  it("does not re-prime while a live poll keeps the baseline fresh", async () => {
+    const h = harness([row(1, 0), row(10, 1, { cpuMs: 0 })], {
+      sessionPids: new Map([["chat-a", 10]]),
+    });
+    await h.svc.snapshot();
+    const primed = h.scans();
+
+    // The page's cadence: well inside the stale limit, so each poll is one
+    // scan differenced against the last — no extra spawn, no extra wait.
+    h.advance(10_000);
+    h.setTable([row(1, 0), row(10, 1, { cpuMs: 5_000 })]);
+    const next = await h.svc.snapshot();
+    expect(h.scans()).toBe(primed + 1);
+    expect(next.windowMs).toBe(10_000);
+    expect(next.chats[0].cpuPct).toBeCloseTo(50);
+  });
+
   it("keeps a tree's CPU when only some of its processes are measurable", async () => {
     const h = harness([row(1, 0), row(10, 1, { cpuMs: 0 }), row(11, 10, { cpuMs: 0 })], {
       sessionPids: new Map([["chat-a", 10]]),
@@ -301,7 +381,7 @@ describe("ResourceService dispatch tree", () => {
       serverRssBytes: 300,
     });
     // The server (300) plus the unowned runner (400); the chat's 200 is not.
-    expect(snap.dispatch?.unattributed).toEqual({ procs: 2, rssBytes: 700, cpuPct: null });
+    expect(snap.dispatch?.unattributed).toEqual({ procs: 2, rssBytes: 700, cpuPct: 0 });
   });
 
   it("reports CPU for the part of the tree no chat claims", async () => {
@@ -356,7 +436,7 @@ describe("ResourceService dispatch tree", () => {
       serverPid: 1,
     });
     const snap = await h.svc.snapshot();
-    expect(snap.dispatch?.unattributed).toEqual({ procs: 1, rssBytes: 300, cpuPct: null });
+    expect(snap.dispatch?.unattributed).toEqual({ procs: 1, rssBytes: 300, cpuPct: 0 });
   });
 });
 
