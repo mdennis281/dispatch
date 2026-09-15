@@ -90,37 +90,47 @@ export function unquotePath(raw: string): string {
 }
 
 /**
- * Resolve a numstat rename path to its NEW name.
+ * Split a numstat rename path into its OLD and NEW names.
  *
  * Two forms: a shared-prefix brace (`src/{old => new}/a.ts`, and the braces
  * may be empty on one side — `src/{ => lib}/a.ts`) and the whole-path arrow
- * (`old.ts => new.ts`). The new name is the one whose extension matters from
- * here on.
+ * (`old.ts => new.ts`). Both names matter: the new one is where the lines
+ * live from here on, and the old one is where the accumulator has to fetch
+ * them FROM when the rename changes the growth key (see `feed`).
  */
-export function renameTarget(path: string): string {
+export function splitRename(path: string): { from: string | null; to: string } {
   const brace = path.match(/^(.*)\{(.*) => (.*)\}(.*)$/);
   if (brace) {
-    const [, pre, , to, post] = brace;
-    // `src/{ => lib}/a.ts` → `src/lib/a.ts`, but `src/{old => }/a.ts` must
-    // collapse the doubled slash to `src/a.ts`.
-    return `${pre}${to}${post}`.replace(/\/{2,}/g, "/");
+    const [, pre, from, to, post] = brace;
+    // `src/{old => }/a.ts` must collapse the doubled slash to `src/a.ts`.
+    const join = (mid: string) => `${pre}${mid}${post}`.replace(/\/{2,}/g, "/");
+    return { from: join(from!), to: join(to!) };
   }
   const arrow = path.indexOf(" => ");
-  return arrow >= 0 ? path.slice(arrow + 4) : path;
+  if (arrow >= 0) return { from: path.slice(0, arrow), to: path.slice(arrow + 4) };
+  return { from: null, to: path };
 }
 
 /** One numstat line, or `null` for the blank and header lines around it. */
-export function parseNumstatLine(
-  line: string,
-): { additions: number; deletions: number; binary: boolean; path: string } | null {
-  const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line);
+export function parseNumstatLine(line: string): {
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  /** The path after this commit. */
+  path: string;
+  /** The path before it, when this entry is a rename. */
+  from: string | null;
+} | null {
+  const m = /^(\d+|-)	(\d+|-)	(.+)$/.exec(line);
   if (!m) return null;
   const binary = m[1] === "-";
+  const { from, to } = splitRename(unquotePath(m[3]!));
   return {
     additions: binary ? 0 : Number(m[1]),
     deletions: binary ? 0 : Number(m[2]),
     binary,
-    path: renameTarget(unquotePath(m[3]!)),
+    path: to,
+    from,
   };
 }
 
@@ -147,6 +157,24 @@ interface Commit {
 export class GrowthAccumulator {
   private readonly days = new Map<number, GrowthPoint>();
   private readonly totals = new Map<string, GrowthDelta>();
+  /**
+   * Every live path's current line count.
+   *
+   * Exact, because the first-parent chain is a linear sequence of diffs and
+   * numstat is exact per file — so a path's count after commit N is its count
+   * after N−1 plus that commit's additions minus its deletions. It exists for
+   * ONE reason: a rename. Git reports `git mv a.js a.ts` as `0 0 a.js => a.ts`,
+   * which is correct as churn and wrong as attribution — the ten lines that
+   * were counted under `.js` when the file was born stay there forever, and
+   * `.ts` owns a file it was never credited with. A `.js → .ts` migration is
+   * the commonest event of its kind and would leave a phantom `.js` row in
+   * the composition table and undercount TypeScript by the size of the
+   * migration. So when a rename CHANGES the key, the file's count moves with
+   * it: a deletion from the old key and an addition to the new one, in the
+   * commit that renamed it. A rename that keeps its key (`a.ts` → `lib/a.ts`)
+   * stays at the zero churn git reported.
+   */
+  private readonly lines = new Map<string, number>();
   private readonly authors = new Set<string>();
   private readonly top: Commit[] = [];
   private current: Commit | null = null;
@@ -193,22 +221,46 @@ export class GrowthAccumulator {
       return;
     }
     const key = classifyPath(entry.path);
-    const point = this.point;
-    point.additions += entry.additions;
-    point.deletions += entry.deletions;
+
+    // Where the file's lines were before this commit — under its old name if
+    // it was renamed, else under its own.
+    let before = this.lines.get(entry.path) ?? 0;
+    if (entry.from !== null) {
+      before = this.lines.get(entry.from) ?? 0;
+      this.lines.delete(entry.from);
+      const fromKey = classifyPath(entry.from);
+      if (fromKey !== key && before > 0) {
+        // The reclassifying rename: the old key gives the lines up and the
+        // new key takes them, as churn dated to this commit.
+        this.bump(fromKey, 0, before);
+        this.bump(key, before, 0);
+      }
+    }
+    const after = before + entry.additions - entry.deletions;
+    if (after > 0) this.lines.set(entry.path, after);
+    else this.lines.delete(entry.path);
+
+    this.bump(key, entry.additions, entry.deletions);
+    if (key !== GROWTH_GENERATED_KEY) this.current.files += 1;
+  }
+
+  /** Credit lines to a key in the open commit's day, totals and commit. */
+  private bump(key: string, additions: number, deletions: number): void {
+    const point = this.point!;
+    point.additions += additions;
+    point.deletions += deletions;
     const slot = (point.keys[key] ??= { additions: 0, deletions: 0 });
-    slot.additions += entry.additions;
-    slot.deletions += entry.deletions;
+    slot.additions += additions;
+    slot.deletions += deletions;
     const total = this.totals.get(key) ?? { additions: 0, deletions: 0 };
-    total.additions += entry.additions;
-    total.deletions += entry.deletions;
+    total.additions += additions;
+    total.deletions += deletions;
     this.totals.set(key, total);
     // A lockfile churn is the biggest diff in most repos and the least
     // interesting, so a commit ranks by the lines a human might have written.
     if (key !== GROWTH_GENERATED_KEY) {
-      this.current.additions += entry.additions;
-      this.current.deletions += entry.deletions;
-      this.current.files += 1;
+      this.current!.additions += additions;
+      this.current!.deletions += deletions;
     }
   }
 
@@ -314,6 +366,12 @@ export class GrowthService {
         // diff it landed, or a merge-commit workflow shows a flat line with
         // no growth at all.
         "--diff-merges=first-parent",
+        // OLDEST FIRST, because the accumulator follows each path's line
+        // count forward through renames (see `GrowthAccumulator.lines`), and
+        // newest-first would meet a rename before the file it renames exists.
+        // Git still computes each commit's diff as it prints it, so the
+        // progress stream is unaffected — only the cheap rev-walk is buffered.
+        "--reverse",
         "--numstat",
         `--format=${HEADER}`,
         "HEAD",
