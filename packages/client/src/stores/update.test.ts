@@ -151,7 +151,7 @@ describe("installing", () => {
  * and healthy for the whole download and dependency install — answers a probe.
  */
 describe("the in-flight marker", () => {
-  const HEALTH = { ok: true, pid: 4242, startedAt: 1_760_000_000_000, sha: "abc" };
+  const HEALTH = { ok: true, pid: 4242, startedAt: 1_760_000_000_000, sha: "abc", version: INSTALLED.version };
 
   function routeFetch(over: { health?: unknown; install?: unknown } = {}) {
     const mock = vi.fn(async (input: RequestInfo | URL) => {
@@ -182,8 +182,20 @@ describe("the in-flight marker", () => {
       version: LATEST.version,
       fromPid: 4242,
       fromStartedAt: 1_760_000_000_000,
+      fromVersion: INSTALLED.version,
     });
     expect(useUpdate.getState().flight).not.toBeNull();
+  });
+
+  it("records the build the SERVER says it is installing, not the one the card showed", async () => {
+    // The server re-resolves the channel head before accepting. A release that
+    // landed since the card was drawn is the one going in, and the screen's
+    // "Updating to vX" must name it — as must the marker a reload rehydrates.
+    routeFetch({ install: { ok: true, tag: "v2026.08.16.63367", version: "2026.08.16.63367" } });
+    useUpdate.getState().set(status());
+    await useUpdate.getState().install();
+
+    expect(readFlight()).toMatchObject({ tag: "v2026.08.16.63367", version: "2026.08.16.63367" });
   });
 
   it("probes the baseline BEFORE asking for the install", async () => {

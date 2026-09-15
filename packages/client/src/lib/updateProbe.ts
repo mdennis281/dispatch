@@ -28,6 +28,8 @@ export interface HealthProbe {
   pid: number | null;
   startedAt: number | null;
   sha: string | null;
+  /** Release version of the answering payload — see `HealthReport.version`. */
+  version: string | null;
 }
 
 export async function probeHealth(): Promise<HealthProbe | null> {
@@ -37,16 +39,51 @@ export async function probeHealth(): Promise<HealthProbe | null> {
     // problem. That is still "it came back", and the reloaded page is where the
     // problem gets reported, so it must not be filtered out here.
     if (res.status !== 200 && res.status !== 503) return null;
+    // ...but only when it is DISPATCH's 503. A reverse proxy with nothing behind
+    // it (HAProxy, for the minutes the backend is down) answers the same status
+    // with an HTML page, and that is "down", not "degraded". The content type is
+    // the tell; `res.json()` would throw on the HTML anyway, but checking first
+    // says what is being checked.
+    if (!(res.headers.get("content-type") ?? "").includes("json")) return null;
     const body = (await res.json()) as Partial<HealthProbe>;
     return {
       ok: body.ok === true,
       pid: typeof body.pid === "number" ? body.pid : null,
       startedAt: typeof body.startedAt === "number" ? body.startedAt : null,
       sha: typeof body.sha === "string" ? body.sha : null,
+      version: typeof body.version === "string" ? body.version : null,
     };
   } catch {
     return null; // down — the expected state for most of the swap
   }
+}
+
+/**
+ * Will a reload of this page actually land on the app?
+ *
+ * A new process answering `/api/health` is necessary but not sufficient. Behind
+ * a reverse proxy the backend can be up and healthy while the proxy is still
+ * answering every request — the document included — with its own 503 for as
+ * long as its health checks take to notice; and the SPA is served by a different
+ * route than the health probe, so a payload whose `dist/` is missing answers the
+ * probe and 404s the page. Reloading into either strands the user on an error
+ * page with no script left to retry from. So the document itself is fetched
+ * first, `no-store` so the service worker's cached shell cannot answer for it.
+ */
+export async function probeReady(): Promise<boolean> {
+  try {
+    const res = await fetch("/", { cache: "no-store" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** The identity of the server an install was accepted by — what the screen watches for the loss of. */
+export interface FromIdentity {
+  fromPid: number | null;
+  fromStartedAt: number | null;
+  fromVersion: string | null;
 }
 
 /**
@@ -56,16 +93,16 @@ export async function probeHealth(): Promise<HealthProbe | null> {
  * waiting" rather than "declare victory and reload", and waiting is recoverable
  * by the patience timer while a wrong reload is the bug being fixed.
  */
-export function isNewProcess(
-  probe: HealthProbe,
-  fromPid: number | null,
-  fromStartedAt: number | null,
-): boolean {
-  if (fromPid === null && fromStartedAt === null) return false;
+export function isNewProcess(probe: HealthProbe, from: FromIdentity): boolean {
+  const { fromPid, fromStartedAt, fromVersion } = from;
+  if (fromPid === null && fromStartedAt === null && fromVersion === null) return false;
   if (probe.pid !== null && fromPid !== null && probe.pid !== fromPid) return true;
   // A recycled pid is not far-fetched on a machine that just restarted a service,
   // so process start time is checked independently rather than as a tiebreak.
   if (probe.startedAt !== null && fromStartedAt !== null && probe.startedAt > fromStartedAt) return true;
+  // A different release version is a different build, whatever its pid — the
+  // one test that works when the process identity was never captured.
+  if (probe.version !== null && fromVersion !== null && probe.version !== fromVersion) return true;
   return false;
 }
 

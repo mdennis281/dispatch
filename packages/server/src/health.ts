@@ -28,6 +28,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Store } from "./store/index.js";
+import { readInstalledRelease } from "./services/release.js";
 
 /** Millisecond epoch this process finished loading — the process's identity in time. */
 const STARTED_AT = Date.now();
@@ -41,6 +42,15 @@ export interface HealthReport {
   status: "ok" | "degraded";
   /** Commit the running payload was built from, when it can be determined. */
   sha?: string;
+  /**
+   * Release version of the running payload (`release-manifest.json`), absent on
+   * a source checkout. This is the identity the updating screen can rely on
+   * when `pid`/`startedAt` cannot be: a tab that never managed to record the
+   * outgoing process (the baseline probe was dropped, or the marker was written
+   * by an older build) still knows which VERSION it was leaving, and a health
+   * report naming a different one is proof the swap happened.
+   */
+  version?: string;
   /** OS pid — proves which process answered. */
   pid: number;
   /** When this process came up (ms epoch) — distinguishes a restart from a survivor. */
@@ -90,6 +100,18 @@ function payloadSha(): string | undefined {
     }
   }
   return cachedSha ?? undefined;
+}
+
+/**
+ * The payload's release version, resolved once. The manifest cannot change
+ * under a running process — an update replaces the whole `app/` directory and
+ * this process with it — so re-reading it on every poll would be a stat and a
+ * JSON parse for an answer that is constant for the life of the process.
+ */
+let cachedVersion: string | null | undefined;
+function payloadVersion(): string | undefined {
+  if (cachedVersion === undefined) cachedVersion = readInstalledRelease()?.version ?? null;
+  return cachedVersion ?? undefined;
 }
 
 /**
@@ -172,10 +194,12 @@ export async function healthReport(deps: HealthDeps): Promise<HealthReport> {
   // the contract `upgrade.mjs` needs: a probe that 500s reads as "degraded, no
   // reason given" and burns the whole health timeout before rolling back.
   const sha = payloadSha();
+  const version = payloadVersion();
   return {
     ok: problems.length === 0,
     status: problems.length === 0 ? "ok" : "degraded",
     ...(sha ? { sha } : {}),
+    ...(version ? { version } : {}),
     pid: process.pid,
     startedAt: STARTED_AT,
     uptimeMs: Date.now() - STARTED_AT,

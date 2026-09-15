@@ -48,6 +48,9 @@ describe("healthReport", () => {
       expect(r.uptimeMs).toBeGreaterThanOrEqual(0);
       // Best effort: a payload without git is unusual, not unhealthy.
       if (r.sha !== undefined) expect(r.sha).toMatch(/^[0-9a-f]{40}$/);
+      // A source checkout has no release manifest, so no version — and the
+      // field is absent rather than "", the same rule `sha` follows.
+      expect(r.version).toBeUndefined();
     } finally {
       store.close();
       await rm(dir, { recursive: true, force: true });

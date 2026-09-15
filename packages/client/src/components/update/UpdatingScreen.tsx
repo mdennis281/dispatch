@@ -30,6 +30,13 @@
  *      reads the installer's own output. While the old server is alive that is
  *      live truth; once it goes down the phase is inferred (`swapping`), and the
  *      new server re-reads the same log to report the outcome.
+ *   4. **Never reload into a page that will not load.** A new process answering
+ *      the health probe is the backend's word, not the endpoint's: behind a
+ *      reverse proxy the document goes on 503ing for minutes after the backend
+ *      is up. The reload waits until `/` itself is served (`probeReady`), and
+ *      the service worker falls back to the cached shell on a 5xx navigation
+ *      so that even a reload that does land on the proxy's error page comes
+ *      back here rather than on a page with no script to retry from.
  *
  * The reload at the end is still a reload: an update replaces the SPA bundle and
  * the service worker, so resuming in the old bundle would leave a client talking
@@ -42,7 +49,7 @@ import { Button } from "../ui/Button.js";
 import { useUpdate } from "../../stores/update.js";
 import type { UpdateFlight } from "../../lib/updatePrefs.js";
 import { LAYER } from "../../lib/layers.js";
-import { isNewProcess, probeHealth, probeProgress } from "../../lib/updateProbe.js";
+import { isNewProcess, probeHealth, probeProgress, probeReady } from "../../lib/updateProbe.js";
 
 /** Fast enough to feel live, slow enough to be free — the probe is two stats. */
 const POLL_MS = 1_500;
@@ -56,6 +63,18 @@ const POLL_MS = 1_500;
  * `swapping` at the right moment instead of flickering there and back.
  */
 const DOWN_STREAK = 3;
+
+/**
+ * Consecutive ticks the document itself must be served before the reload.
+ *
+ * A reverse proxy in front of Dispatch goes on answering 503 for a while after
+ * the backend is healthy — its own checks have to notice first — and it can
+ * flap on the way up. One good answer is a sample; two in a row, three seconds
+ * apart, is a proxy that has made up its mind. A reload that lands on the
+ * proxy's 503 page has no script in it to try again, so this is the one place
+ * being slow beats being early.
+ */
+const READY_STREAK = 2;
 
 /**
  * When to stop promising and offer a manual reload. The installer re-runs `pnpm
@@ -84,7 +103,12 @@ const STEPS: ReadonlyArray<{ phase: UpdatePhase; label: string }> = [
 
 const stepIndex = (phase: UpdatePhase): number => STEPS.findIndex((s) => s.phase === phase);
 
-type Stage = "working" | "failed";
+/**
+ * `ready` is the tail of `working`: the new build has answered and the page is
+ * waiting for the endpoint to serve it — named so the copy can say so, since
+ * "Starting the new build" is no longer true once it has started.
+ */
+type Stage = "working" | "ready" | "failed";
 
 export function UpdatingScreen() {
   const flight = useUpdate((s) => s.flight);
@@ -135,6 +159,7 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
   useEffect(() => {
     let stopped = false;
     let downStreak = 0;
+    let readyStreak = 0;
     // Decided on the FIRST answering probe. If the very first thing we see is
     // already a different process, this page was loaded AFTER the swap — it is
     // running the new bundle — so the update is simply over and reloading it
@@ -169,7 +194,7 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
       const wentDown = downStreak >= DOWN_STREAK;
       downStreak = 0;
 
-      const fresh = isNewProcess(health, flight.fromPid, flight.fromStartedAt);
+      const fresh = isNewProcess(health, flight);
       if (mountedAfterSwap === null) mountedAfterSwap = fresh;
 
       const progress = await probeProgress();
@@ -195,10 +220,22 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
       // even when there is no identity to compare.
       if (!fresh && !wentDown) return;
 
-      // A new build is answering. Reload — unless this page already IS the new
-      // build, having been loaded after the swap, in which case the marker is
-      // just stale bookkeeping to clear.
-      finish(mountedAfterSwap !== true);
+      // A new build is answering. If this page already IS the new build, having
+      // been loaded after the swap, the marker is just stale bookkeeping to
+      // clear — no reload, or this would be the loop the screen exists to end.
+      if (mountedAfterSwap === true) {
+        finish(false);
+        return;
+      }
+
+      // Otherwise reload — but not until the page a reload would fetch is being
+      // served. The health probe proves the backend; it says nothing about the
+      // proxy in front of it, which can 503 the document for minutes after.
+      ratchet("done");
+      setStage("ready");
+      readyStreak = (await probeReady()) ? readyStreak + 1 : 0;
+      if (stopped) return;
+      if (readyStreak >= READY_STREAK) finish(true);
     };
 
     void tick();
@@ -253,7 +290,9 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
               <span className="ml-1.5 text-faint">{elapsed(waited)}</span>
             </p>
             <p className="mt-1 text-center text-xs leading-relaxed text-muted">
-              {phase === "swapping"
+              {stage === "ready"
+                ? "The new build is up. Waiting for it to be reachable at this address before reloading."
+                : phase === "swapping"
                 ? "Dispatch is restarting. This page is waiting for the new build — you don't need to do anything."
                 : patient
                   ? "This is taking longer than usual. The installer keeps the previous build and rolls it back on its own if the new one doesn't come up."
@@ -269,7 +308,21 @@ function Attempt({ flight }: { flight: UpdateFlight }) {
             </Button>
           ) : (
             patient && (
-              <Button variant="primary" leftIcon={<RotateCw />} onClick={() => location.reload()}>
+              // The marker is cleared FIRST. This button is the escape hatch for
+              // an update this page cannot see the end of, and a reload that
+              // keeps the marker lands straight back on this screen — which is
+              // how it came to sit over the sign-in form until localStorage was
+              // cleared by hand. If an install genuinely is still running, the
+              // reloaded page adopts a fresh marker from the server's own
+              // `installing` flag, with a newly probed identity to watch for.
+              <Button
+                variant="primary"
+                leftIcon={<RotateCw />}
+                onClick={() => {
+                  endFlight();
+                  location.reload();
+                }}
+              >
                 Reload now
               </Button>
             )

@@ -1241,10 +1241,13 @@ export const api = {
     /**
      * Launch the installer. The server goes down moments after this answers.
      * `tag` names the channel head explicitly, which is the only way to ask for
-     * a step-back — the server refuses any tag that is not that head.
+     * a step-back — the server refuses any tag that is not that head. The
+     * answer's `tag`/`version` are what is ACTUALLY being installed: the server
+     * re-resolves the head on the way in, so they can be newer than what the
+     * card that was clicked showed.
      */
     install: (tag?: string) =>
-      post<{ ok: boolean; tag?: string; error?: string }>(
+      post<{ ok: boolean; tag?: string; version?: string | null; error?: string }>(
         "/api/update/install",
         tag ? { tag } : undefined,
       ),

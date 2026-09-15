@@ -392,11 +392,22 @@ export class ReleaseService {
   /**
    * Check now, coalescing concurrent callers and floor-spacing manual clicks.
    * Never rejects: a failure is reported in the status, not thrown at a route.
+   *
+   * `"install"` is the one caller that skips the floor. An install has to be
+   * decided against the head as it is NOW, not as it was when the last poll ran
+   * (up to six hours ago, or ten seconds ago after a "Check now"): a release
+   * that dropped in between would otherwise be skipped over for the one the
+   * card happened to be showing, and the user would land on a build that is
+   * already stale — with a fresh nudge waiting for them.
    */
-  async check(force = false): Promise<UpdateStatus> {
+  async check(force: boolean | "install" = false): Promise<UpdateStatus> {
     if (!this.supported) return this.status();
     if (this.inflight) return this.inflight;
-    if (force && this.checkedAt !== null && this.now() - this.checkedAt < MIN_MANUAL_GAP_MS) {
+    if (
+      force === true &&
+      this.checkedAt !== null &&
+      this.now() - this.checkedAt < MIN_MANUAL_GAP_MS
+    ) {
       return this.status();
     }
     this.inflight = this.runCheck().finally(() => {

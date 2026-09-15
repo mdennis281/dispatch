@@ -156,9 +156,25 @@ self.addEventListener("fetch", (event) => {
       (async () => {
         try {
           const fresh = await fetch(request);
-          // Keep the shell current so the fallback below stays useful.
-          const cache = await caches.open(CACHE);
-          cache.put("/", fresh.clone());
+          if (fresh.ok) {
+            // Keep the shell current so the fallback below stays useful.
+            const cache = await caches.open(CACHE);
+            cache.put("/", fresh.clone());
+            return fresh;
+          }
+          // A 5xx here is almost never Dispatch's: it is the reverse proxy
+          // answering for a backend that is restarting — the middle of every
+          // update. Two things went wrong with treating it as a page. It was
+          // cached as the shell, so the next OFFLINE load was served the
+          // proxy's error page instead of the app; and it was shown as-is, a
+          // page with no script in it, so a reload that landed on it during an
+          // update was the end of the road. The cached shell instead carries
+          // the updating/connecting screens, which keep probing until the
+          // server is actually back.
+          if (fresh.status >= 500) {
+            const cached = await caches.match("/");
+            if (cached) return cached;
+          }
           return fresh;
         } catch {
           const cached = await caches.match("/");
