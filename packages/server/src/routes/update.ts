@@ -139,7 +139,14 @@ export function registerUpdateRoutes(app: FastifyInstance): void {
       reply.code(409);
       return { ok: false, error: "there is no newer release to install" };
     }
-    if (status.installing) {
+    // Read LIVE, not off `status`. That object is a snapshot taken by the
+    // re-check above — one that coalesces concurrent callers onto one promise —
+    // so two clicks arriving during the same GitHub round-trip are handed the
+    // same snapshot, both with `installing` unset, and the second would sail
+    // past a check on it after the first had already latched. There is no
+    // `await` between this read and `markInstalling()`, which is what makes the
+    // pair atomic.
+    if (release.status().installing) {
       reply.code(409);
       return { ok: false, error: "an update is already running" };
     }

@@ -265,6 +265,26 @@ describe("POST /api/update/install", () => {
     expect(res.json().error).toContain("already running");
   });
 
+  it("latches exactly one of two installs that arrive during the same re-check", async () => {
+    // The re-check is an `await`, and it coalesces callers onto one promise —
+    // so both requests wake with the SAME status snapshot. The latch has to be
+    // read live after that wake, or the second request passes a check on a
+    // snapshot the first has already invalidated and two installers race for
+    // one `app/` rename.
+    await withRelease(MANIFEST, "v2026.08.14.85068");
+    const [a, b] = await Promise.all([
+      app.inject({ method: "POST", url: "/api/update/install" }),
+      app.inject({ method: "POST", url: "/api/update/install" }),
+    ]);
+    const codes = [a.statusCode, b.statusCode].sort();
+    expect(codes).toEqual([200, 409]);
+    expect([a.json(), b.json()].find((r) => !r.ok)?.error).toContain("already running");
+    await settleLaunch("v2026.08.14.85068");
+    // Settled on ONE launch — and it stays one. A second would be the race.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(launchUpdate).toHaveBeenCalledTimes(1);
+  });
+
   it("installs an explicitly named tag when it is the channel head", async () => {
     // The step-back: the head is OLDER than what is installed, so `available` is
     // false and the tag-less form would be refused. Naming it is the ask.
