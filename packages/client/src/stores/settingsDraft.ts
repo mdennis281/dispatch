@@ -75,6 +75,7 @@ const SECTION_SLICE: Record<
     s.showInjectedContext,
     s.shellFilter,
     s.spawnChat,
+    s.issueWatcher,
     s.harness?.defaultHarness,
     s.harness?.defaults,
   ],

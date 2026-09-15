@@ -19,6 +19,7 @@ import {
   Bot,
   Boxes,
   Brain,
+  CircleDot,
   FileCog,
   GitPullRequest,
   KeyRound,
@@ -92,6 +93,20 @@ export const SECTIONS: SectionDef[] = [
       "where you point that job at a Dispatch agent instead, and decide whose name the review " +
       "goes out under: yours, or a machine account with its own.",
     noun: "reviewer",
+    manifestBacked: true,
+    countable: false,
+  },
+  {
+    id: "issues",
+    icon: CircleDot,
+    label: "Issues",
+    blurb: "Start a chat when an issue is opened",
+    explainer:
+      "Polls this project's tracker on a schedule and starts one chat per batch of newly " +
+      "opened issues — to triage them, or to implement the clear ones. Off until you turn it " +
+      "on, and only issues opened after that are ever taken. Because an issue's text becomes " +
+      "the agent's brief, the default filter admits only people the repo already trusts.",
+    noun: "issue",
     manifestBacked: true,
     countable: false,
   },

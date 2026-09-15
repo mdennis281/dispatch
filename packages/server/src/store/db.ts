@@ -257,6 +257,27 @@ const MIGRATIONS: ReadonlyArray<string> = [
   );
   CREATE INDEX runner_line_runner ON runner_line(runner_id, seq);
   `,
+
+  // 6 — issue-triggered chats.
+  //
+  // `issue` is one row per tracker issue this instance has claimed (the label on
+  // the issue is the other half of the lock, the half a second instance sees).
+  // `issue_watch` is one row per project: the enrolment baseline and the last
+  // poll. Both are JSON bodies validated by zod on read, like `pr`, so a field
+  // added later is a schema edit rather than a migration.
+  `
+  CREATE TABLE issue (
+    seq        INTEGER PRIMARY KEY,
+    key        TEXT NOT NULL UNIQUE,
+    project_id TEXT NOT NULL,
+    body       TEXT NOT NULL
+  );
+  CREATE INDEX issue_project ON issue(project_id, seq);
+  CREATE TABLE issue_watch (
+    project_id TEXT PRIMARY KEY,
+    body       TEXT NOT NULL
+  );
+  `,
 ];
 
 /** Schema version a database must be at for this build to use it. */

@@ -89,6 +89,7 @@ function normalize(s: AppSettings): AppSettings {
       deleteBranch: s.worktreeCleanup?.deleteBranch ?? true,
       graceMinutes: s.worktreeCleanup?.graceMinutes,
     },
+    issueWatcher: { enabled: s.issueWatcher?.enabled ?? true },
     harness: {
       defaultHarness: s.harness?.defaultHarness ?? DEFAULT_HARNESS,
       defaults: s.harness?.defaults ?? {},

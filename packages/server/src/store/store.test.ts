@@ -7,7 +7,7 @@ import { Store } from "./index.js";
 import { STATE_DB_FILENAME } from "./db.js";
 import { DatabaseSync } from "node:sqlite";
 import { renameWithRetry, writeJsonAtomic, readJson } from "./fsq.js";
-import type { Project, Chat, ChatMessage, RunnerInstance, Checkpoint, PrRecord } from "@dispatch/shared";
+import type { Project, Chat, ChatMessage, RunnerInstance, Checkpoint, PrRecord, IssueClaim } from "@dispatch/shared";
 import { PrRecordSchema } from "@dispatch/shared";
 
 let dir: string;
@@ -681,5 +681,50 @@ describe("worktree records", () => {
     expect(await store.getWorktreeRecord("/wt/a")).not.toBeNull();
     await store.deleteWorktreeRecord("/wt/a");
     expect(await store.getWorktreeRecord("/wt/a")).toBeNull();
+  });
+});
+
+describe("Store issue claims + watch", () => {
+  const claim = (n: number, over: Partial<IssueClaim> = {}): IssueClaim => ({
+    key: `github:acme/api#${n}`,
+    projectId: "p1",
+    source: { provider: "github", repo: "acme/api" },
+    number: n,
+    title: `Issue ${n}`,
+    url: `https://github.com/acme/api/issues/${n}`,
+    state: "claimed",
+    mode: "triage",
+    claimedAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
+  it("claims only the keys not already on file, in one transaction", async () => {
+    const first = await store.claimIssues([claim(1), claim(2)]);
+    expect(first.map((c) => c.number)).toEqual([1, 2]);
+    // A concurrent poll offering an overlapping set gets only the new one.
+    const second = await store.claimIssues([claim(2), claim(3)]);
+    expect(second.map((c) => c.number)).toEqual([3]);
+    expect((await store.listIssueClaims("p1")).map((c) => c.number)).toEqual([1, 2, 3]);
+    expect(await store.listIssueClaims("other")).toEqual([]);
+  });
+
+  it("updates a claim in place and refuses to invent one", async () => {
+    await store.claimIssues([claim(5)]);
+    const updated = await store.updateIssueClaim("github:acme/api#5", { state: "working", chatId: "c1" });
+    expect(updated).toMatchObject({ number: 5, state: "working", chatId: "c1", title: "Issue 5" });
+    expect(await store.updateIssueClaim("github:acme/api#404", { state: "done" })).toBeNull();
+    expect(await store.getIssueClaim("github:acme/api#5")).toMatchObject({ chatId: "c1" });
+    await store.deleteIssueClaim("github:acme/api#5");
+    expect(await store.getIssueClaim("github:acme/api#5")).toBeNull();
+  });
+
+  it("keeps one watch row per project", async () => {
+    expect(await store.getIssueWatch("p1")).toBeNull();
+    await store.saveIssueWatch({ projectId: "p1", baselineAt: 10 });
+    await store.saveIssueWatch({ projectId: "p1", baselineAt: 10, lastPolledAt: 20, lastError: "x" });
+    expect(await store.getIssueWatch("p1")).toEqual({ projectId: "p1", baselineAt: 10, lastPolledAt: 20, lastError: "x" });
+    await store.deleteIssueWatch("p1");
+    expect(await store.getIssueWatch("p1")).toBeNull();
   });
 });

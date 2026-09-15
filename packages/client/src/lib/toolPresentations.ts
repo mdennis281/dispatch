@@ -20,6 +20,9 @@ export interface ShellToolPresentation {
 export type DispatchToolCategory =
   | "wait"
   | "pr"
+  // Its own category, not `pr`: a `pr` call is filed INSIDE a pull-request card,
+  // and an issue read under a "Pull request" header names the wrong thing.
+  | "issue"
   | "terminal"
   | "preview"
   | "memory"
@@ -198,10 +201,10 @@ const DISPATCH_COPY: Record<string, { title: string; activity: string; category:
   secret_request: { title: "Request secret", activity: "Waiting for a secret", category: "config" },
   secret_list: { title: "List secrets", activity: "Listing secrets", category: "config" },
   secret_delete: { title: "Delete secret", activity: "Deleting secret", category: "config" },
-  issue_list: { title: "List issues", activity: "Listing issues", category: "pr" },
-  issue_read: { title: "Read issue", activity: "Reading issue", category: "pr" },
-  issue_comment: { title: "Comment on issue", activity: "Commenting", category: "pr" },
-  issue_update: { title: "Update issue", activity: "Updating issue", category: "pr" },
+  issue_list: { title: "List issues", activity: "Listing issues", category: "issue" },
+  issue_read: { title: "Read issue", activity: "Reading issue", category: "issue" },
+  issue_comment: { title: "Comment on issue", activity: "Commenting", category: "issue" },
+  issue_update: { title: "Update issue", activity: "Updating issue", category: "issue" },
   wait: { title: "Wait", activity: "Waiting", category: "wait" },
   wait_for_chat: { title: "Wait for chat", activity: "Watching chat", category: "wait" },
   terminal_output: { title: "Terminal output", activity: "Reading terminal", category: "terminal" },

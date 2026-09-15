@@ -1,6 +1,7 @@
 import { memo, useEffect, useState, type ReactNode } from "react";
 import {
   Brain,
+  CircleDot,
   BookOpen,
   Check,
   Circle,
@@ -43,6 +44,7 @@ function toolState(result?: ToolResultRow, task?: TaskStatusRow): ToolDetailStat
 function categoryIcon(category: DispatchToolCategory): ReactNode {
   if (category === "wait") return <Clock3 />;
   if (category === "pr") return <GitPullRequest />;
+  if (category === "issue") return <CircleDot />;
   if (category === "terminal") return <SquareTerminal />;
   if (category === "preview") return <MonitorPlay />;
   if (category === "memory") return <Brain />;
@@ -97,6 +99,7 @@ function promptFor(tool: string, category: DispatchToolCategory): string {
 function promptColor(category: DispatchToolCategory): string {
   if (category === "wait") return "text-warn";
   if (category === "pr") return "text-info-hi";
+  if (category === "issue") return "text-info-hi";
   if (category === "memory") return "text-accent-2-hi";
   if (category === "config") return "text-accent-2-hi";
   if (category === "preview") return "text-success";
@@ -107,6 +110,7 @@ function promptColor(category: DispatchToolCategory): string {
 function progressColor(category: DispatchToolCategory): string {
   if (category === "wait") return "bg-warn";
   if (category === "pr") return "bg-info";
+  if (category === "issue") return "bg-info";
   if (category === "memory") return "bg-accent-2";
   if (category === "config") return "bg-accent-2";
   if (category === "preview") return "bg-success";

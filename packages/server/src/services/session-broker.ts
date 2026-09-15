@@ -227,6 +227,7 @@ import {
   resolveLayered,
   type ChatPosture,
   type ManagerToolName,
+  ISSUE_HANDLE_KIND,
   type ProjectConfigDefaults,
 } from "@dispatch/shared";
 
@@ -5454,6 +5455,15 @@ export class SessionBroker {
       .catch(() => undefined);
     const auto = resolveLayered({ project: projectPolicy, app: appPolicy }, false).effective;
     if (auto) return { approved: true, auto: true };
+    // A chat the issue watcher started has nobody watching it: a consent card
+    // there waits for a human who is not coming and then times out, so the
+    // delegation the briefing recommends could never happen. Enrolling the
+    // project in unattended issue handling IS the consent — for children in
+    // that same project only, so the grant is exactly as wide as the switch.
+    const spawner = await this.store.getChat(chatId).catch(() => null);
+    if (spawner?.purpose?.kind === ISSUE_HANDLE_KIND && spawner.projectId === target.id) {
+      return { approved: true, auto: true };
+    }
 
     const { approved, message } = await this.requestApproval(chatId, {
       toolName: "spawn_chat",
