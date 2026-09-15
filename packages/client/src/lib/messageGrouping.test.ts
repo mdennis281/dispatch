@@ -54,6 +54,18 @@ describe("continuedAssistantIds", () => {
     expect([...subagent]).toEqual([]);
   });
 
+  it("groups across an item the filter has collapsed, which takes up no space", () => {
+    const thinking: TranscriptItem = {
+      kind: "thinking",
+      rows: [{ id: "t", chatId: "c", ts: 0, kind: "assistant", text: "", thinking: "hmm" }],
+    };
+    const items = [item(say("a")), thinking, item(say("b"))];
+    // Shown, the stack sits between them and `b` needs its header back.
+    expect([...continuedAssistantIds(items)]).toEqual([]);
+    // Hidden, nothing is visibly between them.
+    expect([...continuedAssistantIds(items, (i) => i === thinking)]).toEqual(["b"]);
+  });
+
   it("groups across a usage-limit sentence, which renders nothing", () => {
     const limit = say("limit", {
       text: "You've hit your 5-hour limit — resets 4:50pm (America/Chicago)",
