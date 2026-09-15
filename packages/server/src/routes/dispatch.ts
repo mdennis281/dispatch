@@ -541,6 +541,14 @@ export async function dispatchClientAction(
         broker.clearContext(action.chatId);
         return;
 
+      case "clear-error":
+        // `ensureSession` rather than a bare store patch: a chat that errored
+        // BEFORE this server started has no live session, and `resume` is what
+        // reconciles its stale record into the `error` the clear then lifts.
+        await ensureSession(services, action.chatId);
+        broker.clearError(action.chatId);
+        return;
+
       case "rollback": {
         const cp = await store.getCheckpoint(action.chatId, action.messageId);
         if (!cp) {

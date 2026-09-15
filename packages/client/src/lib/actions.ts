@@ -197,6 +197,10 @@ export const actions = {
   clearContext(chatId: string): void {
     ws.send({ type: "clear-context", chatId });
   },
+  /** Settle a `failed`/`error` chat back to idle without sending a message. */
+  clearError(chatId: string): void {
+    ws.send({ type: "clear-error", chatId });
+  },
   rollback(chatId: string, messageId: string): void {
     ws.send({ type: "rollback", chatId, messageId });
   },

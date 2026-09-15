@@ -3148,6 +3148,24 @@ export class SessionBroker {
   }
 
   /**
+   * Settle a `failed`/`error` chat back to `idle` without a new turn.
+   *
+   * Those two statuses are otherwise only overwritten by the next message, so a
+   * chat whose last turn died stayed in the sidebar's "needs input" queue until
+   * someone talked to it or deleted it. Nothing else is touched: `onTurnFailed`
+   * keeps the runtime session alive, and `onError` has already torn it down —
+   * either way the next message does exactly what it would have done.
+   *
+   * A no-op on any other status, so a stale button click can't yank a chat
+   * that has since started running back to idle.
+   */
+  clearError(chatId: string): void {
+    const session = this.mustGet(chatId);
+    if (session.status !== "failed" && session.status !== "error") return;
+    this.setStatus(session, "idle", { state: "idle" });
+  }
+
+  /**
    * Clear the model's context via the SDK's native `/clear` command — starts the
    * next turn fresh. The persisted transcript (messages.jsonl) is intentionally
    * left intact; only the model's working context is reset. A notice records it.

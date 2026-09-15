@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
   ChevronsUpDown,
@@ -55,7 +55,9 @@ import {
   isChatWorking,
   isReviewerChat,
   reviewTargetKey,
+  CHAT_SECTIONS,
   type ChatBranch,
+  type ChatSection,
   type ProjectAgentCounts,
 } from "../../stores/chats.js";
 import { usePrs } from "../../stores/prs.js";
@@ -414,6 +416,14 @@ const atDepth = <T,>(table: readonly [T, ...T[]], depth: number): T => {
   // total — TS cannot see that a clamped index is in range, and a `!` here
   // would assert exactly what this proves.
   return table[clamped] ?? table[0];
+};
+
+/** Header text for each chat queue — see `CHAT_SECTIONS` for what fills them. */
+const SECTION_LABEL: Record<ChatSection, string> = {
+  new: "New",
+  attention: "Needs input",
+  working: "Working",
+  idle: "Idle",
 };
 
 /**
@@ -1758,17 +1768,33 @@ export function Sidebar() {
               {project ? "No chats yet." : "Select a project to see its chats."}
             </p>
           ) : (
-            branches.map((branch) => (
-              <ChatBranchRows
-                key={branch.chat.id}
-                branch={branch}
-                activeChatId={activeChatId}
-                attentionByChat={attentionByChat}
-                runtimeByChat={runtimeByChat}
-                now={now}
-                onSelect={setActiveChat}
-              />
-            ))
+            // One run per queue, labelled only when it has rows: an empty
+            // "Needs input" header would be a permanent line of chrome saying
+            // nothing. The rows stay direct siblings under `chatListRef` (no
+            // wrapper per queue) so the FLIP animation still sees a row cross
+            // from one queue to another as one element moving.
+            CHAT_SECTIONS.map((section) => {
+              const run = branches.filter((b) => b.section === section);
+              if (run.length === 0) return null;
+              return (
+                <Fragment key={section}>
+                  <SectionLabel className="px-2.5 pb-0.5 pt-2 first:pt-0 !text-[0.6rem]">
+                    {SECTION_LABEL[section]}
+                  </SectionLabel>
+                  {run.map((branch) => (
+                    <ChatBranchRows
+                      key={branch.chat.id}
+                      branch={branch}
+                      activeChatId={activeChatId}
+                      attentionByChat={attentionByChat}
+                      runtimeByChat={runtimeByChat}
+                      now={now}
+                      onSelect={setActiveChat}
+                    />
+                  ))}
+                </Fragment>
+              );
+            })
           )}
         </div>
       </ScrollArea>

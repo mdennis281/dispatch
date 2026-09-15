@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   RotateCcw,
   Brain,
+  Check,
   CheckCircle2,
   XCircle,
   Cpu,
@@ -12,6 +13,7 @@ import {
 import type { NoticeRow, ResultRow, SystemMessageRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { TypingPulse } from "../../ui/Spinner.js";
+import { Button } from "../../ui/Button.js";
 import { Chip } from "../../ui/Chip.js";
 import { Tooltip } from "../../ui/Tooltip.js";
 import { StreamingMarkdown } from "../Markdown.js";
@@ -103,10 +105,13 @@ function CenterNote({
   icon,
   children,
   tone = "faint",
+  action,
 }: {
   icon?: ReactNode;
   children: ReactNode;
   tone?: "faint" | "muted" | "danger";
+  /** Trailing control, drawn after the text inside the same centred pill. */
+  action?: ReactNode;
 }) {
   const toneCls =
     tone === "danger" ? "text-danger" : tone === "muted" ? "text-muted" : "text-faint";
@@ -117,16 +122,54 @@ function CenterNote({
         {icon}
         {children}
       </span>
+      {action}
       <span className="h-px flex-1 bg-line-soft" />
     </div>
   );
 }
 
+/**
+ * The control that settles a `failed`/`error` chat back to idle. Lives on the
+ * error row itself rather than in the header: the row is what tells you WHAT
+ * went wrong, so it is where you decide you're done with it.
+ */
+function ClearErrorButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Button variant="subtle" leftIcon={<Check />} onClick={onClick} title="Mark this error as seen — the chat goes back to idle">
+      Clear
+    </Button>
+  );
+}
+
+/**
+ * The fallback error settle row, for a chat in `failed`/`error` whose error row
+ * isn't in the loaded window — paged out, or the status came from a restart
+ * reconciling a chat the server never saw finish, which writes no row at all.
+ */
+export function ErrorSettleRow({ onClear }: { onClear: () => void }) {
+  return (
+    <CenterNote tone="danger" icon={<XCircle />} action={<ClearErrorButton onClick={onClear} />}>
+      Last turn ended with an error
+    </CenterNote>
+  );
+}
+
 /** The turn-done result marker — steps / duration / cost, or an error line. */
-export const ResultRowView = memo(function ResultRowView({ row }: { row: ResultRow }) {
+export const ResultRowView = memo(function ResultRowView({
+  row,
+  onClear,
+}: {
+  row: ResultRow;
+  /** Set on the row that carries the chat's CURRENT error, and only then. */
+  onClear?: () => void;
+}) {
   if (row.isError) {
     return (
-      <CenterNote tone="danger" icon={<XCircle />}>
+      <CenterNote
+        tone="danger"
+        icon={<XCircle />}
+        action={onClear && <ClearErrorButton onClick={onClear} />}
+      >
         {row.result || "Turn ended with an error"}
       </CenterNote>
     );
@@ -165,7 +208,14 @@ export const SystemRowView = memo(function SystemRowView({ row }: { row: SystemM
 });
 
 /** A local, non-agent notice (rollback, info, error) woven into the transcript. */
-export const NoticeRowView = memo(function NoticeRowView({ row }: { row: NoticeRow }) {
+export const NoticeRowView = memo(function NoticeRowView({
+  row,
+  onClear,
+}: {
+  row: NoticeRow;
+  /** Set on the row that carries the chat's CURRENT error, and only then. */
+  onClear?: () => void;
+}) {
   const Icon = row.level === "error" ? AlertTriangle : row.text.startsWith("Rolled back") ? RotateCcw : Info;
   const tone =
     row.level === "error" ? "text-danger" : row.level === "warn" ? "text-warn" : "text-muted";
@@ -174,6 +224,7 @@ export const NoticeRowView = memo(function NoticeRowView({ row }: { row: NoticeR
       <div className="ml-7 flex items-center gap-2">
         <Icon className={cn("size-3.5", tone)} />
         <span className={cn("text-xs", tone)}>{row.text}</span>
+        {onClear && <ClearErrorButton onClick={onClear} />}
       </div>
     </div>
   );

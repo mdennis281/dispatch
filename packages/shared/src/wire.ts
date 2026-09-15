@@ -736,6 +736,17 @@ export const ClearContextActionSchema = z.object({
   chatId: z.string(),
 });
 
+/**
+ * Settle a chat stuck on `failed`/`error` back to `idle` without sending a
+ * message. Those two statuses only ever cleared on the NEXT turn, so a chat
+ * whose last turn died sat in the sidebar's "needs input" queue until you
+ * either talked to it or deleted it. A no-op on any other status.
+ */
+export const ClearErrorActionSchema = z.object({
+  type: z.literal("clear-error"),
+  chatId: z.string(),
+});
+
 /** Roll back the chat (code + conversation) to a given message. */
 export const RollbackActionSchema = z.object({
   type: z.literal("rollback"),
@@ -842,6 +853,7 @@ export const WsClientActionSchema = z.discriminatedUnion("type", [
   InterruptActionSchema,
   CompactContextActionSchema,
   ClearContextActionSchema,
+  ClearErrorActionSchema,
   RollbackActionSchema,
   StartRunnerActionSchema,
   StopRunnerActionSchema,

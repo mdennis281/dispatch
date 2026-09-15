@@ -13,7 +13,7 @@ import { DispatchToolCard } from "./rows/DispatchToolCard.js";
 import { SubagentCard } from "./rows/SubagentCard.js";
 import { ThinkingGroup } from "./rows/ThinkingGroup.js";
 import { PermissionCard } from "./rows/PermissionCard.js";
-import { NoticeRowView, ResultRowView, SystemRowView } from "./rows/MiscRows.js";
+import { ErrorSettleRow, NoticeRowView, ResultRowView, SystemRowView } from "./rows/MiscRows.js";
 import { LimitPausedCard } from "./rows/LimitPausedCard.js";
 import { actions } from "../../lib/actions.js";
 import {
@@ -24,6 +24,21 @@ import {
 } from "../../lib/toolPresentations.js";
 import { continuedAssistantIds, isLimitSentence, stackThinkingAcrossHidden } from "../../lib/messageGrouping.js";
 import { presentationFilterCategory, useShellFilter } from "../../lib/shellFilter.js";
+import { useChats } from "../../stores/chats.js";
+
+/**
+ * The row that explains a chat's current `failed`/`error` status, if it is in
+ * the window: the newest errored turn result or error notice. A usage-limit
+ * result is excluded — that one is a pause with its own card, not a failure.
+ */
+function currentErrorRowId(rows: ChatMessage[]): string | undefined {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i]!;
+    if (r.kind === "result" && r.isError && !isLimitSentence(r.result)) return r.id;
+    if (r.kind === "notice" && r.level === "error") return r.id;
+  }
+  return undefined;
+}
 
 export type { StreamRow } from "../../stores/messages.js";
 
@@ -120,6 +135,15 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
     [transcriptItems, isHidden],
   );
 
+  // The "Clear" control goes on the row that explains the CURRENT error, and
+  // only while the chat is actually in that state — an old error row in a chat
+  // that has long since moved on gets no button. Read off the status, not the
+  // rows: the status is what the sidebar queues on, so it is what "clear" means.
+  const status = useChats((s) => s.byId[chatId]?.status);
+  const errored = status === "failed" || status === "error";
+  const errorRowId = useMemo(() => (errored ? currentErrorRowId(roots) : undefined), [errored, roots]);
+  const clearError = useCallback(() => actions.clearError(chatId), [chatId]);
+
   // Stable across renders (deps only change when the transcript does) so the
   // memoized row components actually get to bail out.
   const renderRow = useCallback(
@@ -186,16 +210,28 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           if (row.isError && isLimitSentence(row.result)) {
             return <LimitPausedCard key={row.id} row={row} reason={row.result!} />;
           }
-          return <ResultRowView key={row.id} row={row} />;
+          return (
+            <ResultRowView
+              key={row.id}
+              row={row}
+              onClear={row.id === errorRowId ? clearError : undefined}
+            />
+          );
         case "system":
           return <SystemRowView key={row.id} row={row} />;
         case "notice":
-          return <NoticeRowView key={row.id} row={row} />;
+          return (
+            <NoticeRowView
+              key={row.id}
+              row={row}
+              onClear={row.id === errorRowId ? clearError : undefined}
+            />
+          );
         default:
           return null;
       }
     },
-    [chatId, continued, resultsByUse, runsById, taskStatus],
+    [chatId, continued, resultsByUse, runsById, taskStatus, errorRowId, clearError],
   );
 
   return (
@@ -269,6 +305,11 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
           </div>
         );
       })}
+      {errored && !errorRowId && (
+        <div className="cm-row-cv">
+          <ErrorSettleRow onClear={clearError} />
+        </div>
+      )}
     </>
   );
 });
