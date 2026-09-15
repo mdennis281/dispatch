@@ -88,6 +88,8 @@ import * as z from "zod";
 import {
   MemoryTypeSchema,
   ManifestMcpTransportSchema,
+  PermissionModeSchema,
+  type PermissionMode,
   MERGE_HOLD_LABEL,
   encodePrToolPayload,
   WATCH_PR_DEFAULT_TIMEOUT_SECONDS,
@@ -150,6 +152,8 @@ import {
   PROVIDER_IDS,
 } from "@dispatch/shared";
 import type { EventBus } from "../../bus.js";
+import type { ManagerMcpModes, ModeScope, WritableModeScope } from "./mode-editor.js";
+import { MODE_SCOPES } from "./mode-editor.js";
 import type { SpawnNestingVerdict } from "../chat-nesting.js";
 import type { BoundIssueTracker } from "../issues/service.js";
 import { clampBody } from "../memory.js";
@@ -1845,6 +1849,20 @@ export interface ManagerMcpMessaging {
   reply(input: { askId: string; answer: string }): PeerReplyResult;
   /** Pure read — never wakes the chat it describes. */
   state(chatId: string): Promise<PeerChatState | null>;
+  /**
+   * Re-point a chat at a mode (`null` = clear its pin and inherit the project's).
+   * Applies live: the broker pushes the new permission posture into a running
+   * session. Works on the CALLING chat too — that is the "switch me to plan
+   * mode" case — so `chatId` may be its own.
+   */
+  setMode(chatId: string, modeId: string | null): Promise<{ permissionMode: PermissionMode }>;
+  /**
+   * Re-point a chat at a persona (`null` = off). A persona is fixed at runtime
+   * start, so the broker retires the target's idle runtime and resumes its
+   * transcript; it REFUSES while the target is mid-turn — including when the
+   * target is the caller, which is always mid-turn from inside a tool call.
+   */
+  setPersona(chatId: string, personaId: string | null): Promise<void>;
 }
 
 /**
@@ -1937,8 +1955,10 @@ export interface ManagerMcpContext {
   chats?: ManagerMcpChats;
   /** Project MCP-config editor for this session (omitted → no `mcp_*` tools). */
   mcpConfig?: ManagerMcpConfig;
-  /** Instruction/skill authoring for this session (omitted → no `config_*` tools). */
+  /** Instruction/skill/persona authoring for this session (omitted → no `config_*` tools). */
   authoring?: ManagerMcpAuthoring;
+  /** Mode authoring for this session (omitted → no `mode_*` tools). */
+  modes?: ManagerMcpModes;
   /** Cross-chat read surface (omitted → no `chat_find`/`chat_read`/`project_info`). */
   inspect?: ManagerMcpInspect;
   /** Cross-chat WRITE surface (omitted → no `chat_send`/`chat_ask`/`chat_reply`/`chat_state`). */
@@ -6035,7 +6055,9 @@ ${look}` : "")
       "model loads only when its description matches the task, and which the human " +
       "can invoke by typing /<name>. Prefer a SKILL for anything task-specific: an " +
       "instruction costs prompt budget on every single turn, forever. persona = an optional " +
-      "role description injected only when selected on a chat; use global or project scope to customize it.",
+      "ROLE (product owner, reviewer, …) injected only on chats that select it — pick it " +
+      "with chat_set_persona or spawn_chat's personaId; a persona never changes model or " +
+      "permissions. For a permission posture, see the mode_* tools.",
   );
 
   const scopeArg = AuthoredScopeSchema.optional().describe(
@@ -6052,7 +6074,7 @@ ${look}` : "")
       "Call this before writing one so you extend what exists instead of adding a " +
       "near-duplicate, and to find the exact name to pass to `config_read`.",
     {
-      kind: AuthoredKindSchema.optional().describe("Omit to list both kinds."),
+      kind: AuthoredKindSchema.optional().describe("Omit to list all three kinds."),
       scope: scopeArg,
     },
     async (args): Promise<CallToolResult> => {
@@ -6230,7 +6252,7 @@ ${look}` : "")
 
   const configDelete = tool(
     "config_delete",
-    "Delete an instruction or skill so it stops being injected/offered. For an " +
+    "Delete an instruction, skill or persona so it stops being injected/offered. For an " +
       "instruction this also drops its `project.yaml` entry — leaving one behind " +
       "makes every later config load report a missing file. This removes COMMITTED " +
       "config other people rely on; only do it when the user asked.",
@@ -6260,6 +6282,223 @@ ${look}` : "")
       } catch (err) {
         return textResult(
           `Could not delete that ${args.kind}: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  /* ------------------------------------------------------------------ modes
+   * A mode is the one authored thing that is NOT a markdown body: a named
+   * permission posture plus an optional overlay. It gets its own four tools
+   * rather than a fourth `kind` on `config_*` so the arguments can be typed —
+   * `permissionMode` is an enum the SDK enforces, not prose. */
+
+  const modeScopeArg = z
+    .enum(MODE_SCOPES)
+    .optional()
+    .describe(
+      "project = committed in this repo's .dispatch/modes/ (the default, and the only " +
+        "one teammates get; wins on an id collision). global = this machine's Dispatch " +
+        "store, every project here. builtin = the fixed ids Dispatch ships (plan, auto, " +
+        "yolo, …); readable, never writable.",
+    );
+
+  const writableModeScopeArg = z
+    .enum(["project", "global"])
+    .optional()
+    .describe("Where to write. Defaults to project when this session has one, else global.");
+
+  const permissionModeArg = PermissionModeSchema.describe(
+    "The posture the harness runs under while this mode is selected. default = ask on " +
+      "every edit and command; acceptEdits = edits go through, commands ask; plan = read-only " +
+      "planning; auto = the model decides what needs asking; dontAsk = deny anything that " +
+      "would have asked; bypassPermissions = nothing asks.",
+  );
+
+  const renderMode = (m: {
+    id: string;
+    name: string;
+    scope: string;
+    permissionMode: string;
+    description?: string;
+  }) =>
+    `  • ${m.id} (${m.scope}, ${m.permissionMode})${m.name !== m.id ? ` — ${m.name}` : ""}${
+      m.description ? `: ${m.description}` : ""
+    }`;
+
+  const modeList = tool(
+    "mode_list",
+    "List every MODE a chat here can be switched to — the named permission postures " +
+      "(plan-only, accept edits, bypass, …) with any instruction overlay they carry — " +
+      "across all three scopes: this repo's committed `.dispatch/modes/`, this machine's " +
+      "global store, and Dispatch's built-ins. Most specific first, and when the same id " +
+      "appears twice the FIRST listing is the one in effect. Call this before mode_write " +
+      "so you extend a mode instead of shadowing one, and to find the id to hand to " +
+      "chat_set_mode or spawn_chat.",
+    {
+      scope: modeScopeArg,
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.modes) return textResult("Mode authoring is not available in this session.", true);
+      try {
+        const all = (await ctx.modes.list()).filter((m) => !args.scope || m.scope === args.scope);
+        const seen = new Set<string>();
+        const lines = all.map((m) => {
+          const shadowed = seen.has(m.id);
+          seen.add(m.id);
+          return `${renderMode(m)}${shadowed ? " [shadowed by a more specific scope]" : ""}${
+            m.instructions ? " [has instructions]" : ""
+          }`;
+        });
+        return textResult(
+          `Modes (${all.length}):\n${lines.length ? lines.join("\n") : "  (none)"}\n\n` +
+            "Read one with mode_read; create or replace one with mode_write; switch a " +
+            "chat with chat_set_mode.",
+        );
+      } catch (err) {
+        return textResult(
+          `Could not list modes: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const modeRead = tool(
+    "mode_read",
+    "Read one mode in full — its posture and the complete instruction overlay. Use it " +
+      "before mode_write when you mean to EXTEND a mode: a write replaces the whole " +
+      "definition, overlay included.",
+    {
+      id: z.string().describe("The mode id, as shown by mode_list."),
+      scope: modeScopeArg,
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.modes) return textResult("Mode authoring is not available in this session.", true);
+      const id = typeof args.id === "string" ? args.id.trim() : "";
+      if (!id) return textResult("mode_read requires an id.", true);
+      try {
+        const found = await ctx.modes.read(id, args.scope as ModeScope | undefined);
+        if (!found) {
+          return textResult(
+            `No mode "${id}"${args.scope ? ` in the ${args.scope} scope` : ""}. ` +
+              "Call mode_list to see what exists.",
+            true,
+          );
+        }
+        const head = [
+          `### ${found.id} (${found.scope})`,
+          `name: ${found.name}`,
+          `permissionMode: ${found.permissionMode}`,
+          ...(found.description ? [`description: ${found.description}`] : []),
+          ...(found.path ? [found.path] : []),
+        ];
+        return textResult(
+          `${head.join("\n")}\n\n${
+            found.instructions ? clampBody(found.instructions, 24000) : "(no instruction overlay)"
+          }`,
+        );
+      } catch (err) {
+        return textResult(
+          `Could not read that mode: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const modeWrite = tool(
+    "mode_write",
+    "Create or REPLACE a mode — a named permission posture the human (or chat_set_mode) " +
+      "can switch any chat here to, optionally with instructions that are appended to the " +
+      "system prompt only while the mode is selected. Reach for it when the user wants a " +
+      "reusable way of working — a read-only 'audit' mode, a 'trusted' mode that skips the " +
+      "edit prompts, a 'careful review' mode with its own rules. The id is derived from " +
+      "`name` (kebab-case), and a project mode with the same id as a global or built-in one " +
+      "shadows it. This edits COMMITTED config every teammate gets, so write project scope " +
+      "when the user asked for a project mode, and global for their own habits. The whole " +
+      "definition is replaced — mode_read first if you mean to extend one.",
+    {
+      name: z
+        .string()
+        .describe("Display name, e.g. 'Careful review'. Its kebab-case slug becomes the id."),
+      permissionMode: permissionModeArg,
+      description: z
+        .string()
+        .optional()
+        .describe("One line on WHEN to pick this mode. Shown in listings, never injected."),
+      instructions: z
+        .string()
+        .optional()
+        .describe(
+          "Markdown appended to the system prompt while the mode is selected. Omit for a " +
+            "posture-only mode. Keep it to what differs from normal work — it rides on " +
+            "every turn of every chat in the mode.",
+        ),
+      scope: writableModeScopeArg,
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.modes) return textResult("Mode authoring is not available in this session.", true);
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      if (!name) return textResult("mode_write requires a name.", true);
+      const scope = (args.scope ?? (ctx.modes.hasProject ? "project" : "global")) as WritableModeScope;
+      if (scope === "project" && !ctx.modes.hasProject) {
+        return textResult(
+          "This session has no project, so there is no `.dispatch/modes/` to write to. " +
+            "Use scope:'global' to author for this machine instead.",
+          true,
+        );
+      }
+      try {
+        const written = await ctx.modes.write({
+          scope,
+          name,
+          permissionMode: args.permissionMode,
+          description: args.description?.trim() || undefined,
+          instructions: args.instructions?.trim() || undefined,
+        });
+        return textResult(
+          `Wrote the ${scope} mode "${written.id}" (${written.permissionMode})` +
+            `${written.path ? ` to ${written.path}` : ""}. ` +
+            `Switch a chat to it with chat_set_mode { modeId: "${written.id}" }, or pass it ` +
+            "as spawn_chat's modeId.",
+        );
+      } catch (err) {
+        return textResult(
+          `Could not write that mode: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const modeDelete = tool(
+    "mode_delete",
+    "Delete a project or global mode. A chat pinned to it keeps the id and falls back to " +
+      "the default posture on its next resolve, so tell the human which chats were using " +
+      "it. This removes COMMITTED config other people rely on; only do it when the user asked.",
+    {
+      id: z.string().describe("The mode id, as shown by mode_list."),
+      scope: writableModeScopeArg,
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.modes) return textResult("Mode authoring is not available in this session.", true);
+      const id = typeof args.id === "string" ? args.id.trim() : "";
+      if (!id) return textResult("mode_delete requires an id.", true);
+      const scope = (args.scope ?? (ctx.modes.hasProject ? "project" : "global")) as WritableModeScope;
+      try {
+        const removed = await ctx.modes.remove(id, scope);
+        return removed
+          ? textResult(`Deleted the ${scope} mode "${id}".`)
+          : textResult(
+              `No ${scope} mode named "${id}". Built-in modes cannot be deleted; ` +
+                "mode_list shows which scope each id lives in.",
+              true,
+            );
+      } catch (err) {
+        return textResult(
+          `Could not delete that mode: ${err instanceof Error ? err.message : String(err)}`,
           true,
         );
       }
@@ -6726,6 +6965,118 @@ ${look}` : "")
     },
   );
 
+  const chatSetMode = tool(
+    "chat_set_mode",
+    "Switch a chat to a MODE — a named permission posture from mode_list (plan, auto, " +
+      "a project's own 'careful-review', …). Applies live, mid-turn or idle, and works " +
+      "on THIS chat too: omit chatId to switch yourself, e.g. into plan mode before an " +
+      "exploratory read or into acceptEdits once the human has approved a plan. Pass " +
+      "modeId:null to clear the chat's pin so it inherits the project's default again. " +
+      "Changing another chat's posture changes what it is allowed to do next — say so " +
+      "in its transcript with chat_send if it isn't expecting it.",
+    {
+      modeId: z
+        .string()
+        .nullable()
+        .describe("A mode id from mode_list, or null to unpin and inherit."),
+      chatId: z
+        .string()
+        .optional()
+        .describe("The chat to switch, as reported by chat_find. Omit for this chat."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.messaging) {
+        return textResult("The chat_set_mode tool is not available in this session.", true);
+      }
+      const chatId =
+        typeof args.chatId === "string" && args.chatId.trim() ? args.chatId.trim() : ctx.chatId;
+      const modeId =
+        args.modeId === null ? null : typeof args.modeId === "string" ? args.modeId.trim() : "";
+      if (modeId === "") {
+        return textResult("chat_set_mode requires a modeId (or null to unpin).", true);
+      }
+      // Refused up front rather than pinned: the broker would happily pin an
+      // unknown id and resolve it to `default`, which reads as "worked" while
+      // silently dropping the posture that was asked for. Only for THIS chat,
+      // though — `ctx.modes` sees the caller's project, and a peer in another
+      // project may legitimately name a mode that exists only in its own
+      // `.dispatch/modes/`. The broker resolves those against every loaded
+      // project, so a peer switch is handed straight through.
+      if (
+        modeId !== null &&
+        chatId === ctx.chatId &&
+        ctx.modes &&
+        !(await ctx.modes.read(modeId))
+      ) {
+        return textResult(
+          `No mode "${modeId}" exists in any scope. Call mode_list to see what does, or ` +
+            "mode_write to create it.",
+          true,
+        );
+      }
+      try {
+        const { permissionMode } = await ctx.messaging.setMode(chatId, modeId);
+        const who = chatId === ctx.chatId ? "this chat" : `chat ${chatId}`;
+        return textResult(
+          modeId === null
+            ? `Unpinned ${who}'s mode; it now inherits the project default (${permissionMode}).`
+            : `Switched ${who} to mode "${modeId}" (${permissionMode}).`,
+        );
+      } catch (err) {
+        return textResult(
+          `Could not set that mode: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
+  const chatSetPersona = tool(
+    "chat_set_persona",
+    "Give ANOTHER chat a PERSONA — an authored role from config_list kind:persona — or " +
+      "take one away with personaId:null. A persona is fixed when a chat's runtime starts, " +
+      "so the target must be IDLE: Dispatch retires its runtime and resumes the transcript " +
+      "under the new role. That is also why this cannot change the calling chat — a tool " +
+      "call is always mid-turn. To work under a persona yourself, ask the human to pick it " +
+      "from the chat header, or spawn_chat with personaId.",
+    {
+      personaId: z
+        .string()
+        .regex(/^[a-z0-9][a-z0-9-]{0,63}$/)
+        .nullable()
+        .describe("A persona name from config_list kind:persona, or null for off."),
+      chatId: z.string().describe("The chat to change, as reported by chat_find."),
+    },
+    async (args): Promise<CallToolResult> => {
+      if (!ctx.messaging) {
+        return textResult("The chat_set_persona tool is not available in this session.", true);
+      }
+      const chatId = typeof args.chatId === "string" ? args.chatId.trim() : "";
+      if (!chatId) return textResult("chat_set_persona requires a chatId.", true);
+      if (chatId === ctx.chatId) {
+        return textResult(
+          "A chat cannot change its own persona from inside a turn — the runtime has to " +
+            "restart to pick it up. Ask the human to select it from the chat header, or " +
+            "spawn_chat with personaId to start a chat under it.",
+          true,
+        );
+      }
+      try {
+        await ctx.messaging.setPersona(chatId, args.personaId);
+        return textResult(
+          args.personaId === null
+            ? `Cleared chat ${chatId}'s persona; its next turn runs without one.`
+            : `Chat ${chatId} now runs as the "${args.personaId}" persona from its next turn.`,
+        );
+      } catch (err) {
+        return textResult(
+          `Could not set that persona: ${err instanceof Error ? err.message : String(err)}`,
+          true,
+        );
+      }
+    },
+  );
+
   const secretRequest = tool(
     "secret_request",
     "Ask the human to store a secret (API key, token, password) under a NAME, and wait. The " +
@@ -6958,12 +7309,18 @@ ${look}` : "")
     configRead,
     configWrite,
     configDelete,
+    modeList,
+    modeRead,
+    modeWrite,
+    modeDelete,
     chatFind,
     chatRead,
     chatSend,
     chatAsk,
     chatReply,
     chatState,
+    chatSetMode,
+    chatSetPersona,
     projectInfo,
   };
 }
@@ -7032,12 +7389,18 @@ const TOOL_WIRE_NAME: Record<ManagerToolKey, ManagerToolName> = {
   configRead: "config_read",
   configWrite: "config_write",
   configDelete: "config_delete",
+  modeList: "mode_list",
+  modeRead: "mode_read",
+  modeWrite: "mode_write",
+  modeDelete: "mode_delete",
   chatFind: "chat_find",
   chatRead: "chat_read",
   chatSend: "chat_send",
   chatAsk: "chat_ask",
   chatReply: "chat_reply",
   chatState: "chat_state",
+  chatSetMode: "chat_set_mode",
+  chatSetPersona: "chat_set_persona",
   projectInfo: "project_info",
 };
 
@@ -7084,12 +7447,18 @@ const MANAGER_TOOL_GATE: Record<ManagerToolName, ManagerToolBinding | null> = {
   config_read: "authoring",
   config_write: "authoring",
   config_delete: "authoring",
+  mode_list: "authoring",
+  mode_read: "authoring",
+  mode_write: "authoring",
+  mode_delete: "authoring",
   chat_find: "inspect",
   chat_read: "inspect",
   chat_send: "messaging",
   chat_ask: "messaging",
   chat_reply: "messaging",
   chat_state: "messaging",
+  chat_set_mode: "messaging",
+  chat_set_persona: "messaging",
   project_info: "inspect",
   secret_request: "secrets",
   secret_list: "secrets",
@@ -7188,6 +7557,12 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     config_read: Boolean(ctx.authoring),
     config_write: Boolean(ctx.authoring),
     config_delete: Boolean(ctx.authoring),
+    // Modes share the catalog gate but bind on their own surface: a session can
+    // author prose without having a mode store to write into.
+    mode_list: Boolean(ctx.modes),
+    mode_read: Boolean(ctx.modes),
+    mode_write: Boolean(ctx.modes),
+    mode_delete: Boolean(ctx.modes),
     // Read-only cross-chat inspection. Bound together because they're one
     // workflow — find the chat, read it, then read its project's config.
     chat_find: Boolean(ctx.inspect),
@@ -7209,6 +7584,10 @@ function boundTools(ctx: ManagerMcpContext): Record<ManagerToolName, boolean> {
     chat_ask: Boolean(ctx.messaging),
     chat_reply: Boolean(ctx.messaging),
     chat_state: Boolean(ctx.messaging),
+    // The posture writes ride the same binding: re-pointing a chat's mode or
+    // persona is the same kind of reach into another chat as sending to it.
+    chat_set_mode: Boolean(ctx.messaging),
+    chat_set_persona: Boolean(ctx.messaging),
   };
 }
 

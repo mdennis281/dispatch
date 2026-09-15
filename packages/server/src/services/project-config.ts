@@ -166,7 +166,9 @@ export function configModeToModeConfig(
   return ModeConfigSchema.parse({
     id: mode.id,
     name: mode.name,
+    description: mode.description,
     permissionMode: mode.permissionMode,
+    instructions: mode.instructions,
     scope: "project",
     projectId,
   });
@@ -1128,6 +1130,10 @@ export class ProjectConfigService {
           permissionMode: permMode.data,
           allowedTools: toToolList(data.allowedTools),
           disallowedTools: toToolList(data.disallowedTools),
+          instructions:
+            typeof data.instructions === "string" && data.instructions.trim()
+              ? data.instructions.trim()
+              : undefined,
           file,
         });
         seen.add(id);

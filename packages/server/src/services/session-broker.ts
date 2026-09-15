@@ -179,6 +179,7 @@ import type { SecretRefresher } from "./secret-refresh.js";
 import type { SpawnNestingVerdict } from "./chat-nesting.js";
 import { createMcpConfigEditor } from "./mcp/mcp-config-editor.js";
 import { createAuthoringEditor } from "./mcp/authoring-editor.js";
+import { createModeEditor } from "./mcp/mode-editor.js";
 import { resolvePersona } from "./personas.js";
 import { configPathsFor } from "./config-location.js";
 import type { AuthoredConfigService } from "./authored-config.js";
@@ -283,7 +284,11 @@ export function buildManagerToolsDirective(caps: {
   if (caps.issues) {
     lines.push("- `dispatch-issues` — read, comment on, label and close this project's tracker issues.");
   }
-  if (caps.authoring) lines.push("- `dispatch-config` — author injected instructions and reusable skills.");
+  if (caps.authoring) {
+    lines.push(
+      "- `dispatch-config` — author injected instructions, reusable skills, personas and modes.",
+    );
+  }
   if (caps.mcpConfig) lines.push("- `dispatch-mcp` — inspect and configure project MCP servers.");
   if (caps.inspect) lines.push("- `dispatch-project` — read Dispatch's project-level context.");
   if (caps.bundledServers?.length) {
@@ -7094,6 +7099,18 @@ export class SessionBroker {
                   : null,
             })
           : undefined,
+        // Modes, bound alongside the prose: a `.dispatch/modes/` file for the
+        // project scope, the `.data` store for global — the same store the
+        // Settings UI and `GET /api/modes` read, so a mode written here is one
+        // the composer's picker can see. The built-in table rides along so
+        // `mode_list` can name the ids the broker falls back to.
+        modes: this.authored
+          ? createModeEditor({
+              store: this.store,
+              configPaths: projectConfigPaths,
+              builtin: BUILTIN_MODE_PERMISSION,
+            })
+          : undefined,
         // The escape hatch for a guard that has stranded this chat. Bound ONLY
         // where the guard actually refuses things (`guard: "deny"`) — on `warn`
         // or `off` nothing is blocked, so a tool for un-blocking it would be an
@@ -7136,6 +7153,19 @@ export class SessionBroker {
               reply: ({ askId, answer }) =>
                 this.messenger!.reply({ from: session.chatId, askId, answer }),
               state: (chatId) => this.messenger!.state(chatId),
+              // The posture writes go straight to the broker rather than through
+              // the messenger: nothing lands in the target's transcript, so there
+              // is no row to attribute and no send to rate-limit. What they share
+              // with messaging is the reach — a session touching a chat that
+              // isn't its own — which is why they are gated together.
+              setMode: async (chatId, modeId) => {
+                await this.ensureRegistered(chatId);
+                return { permissionMode: await this.setMode(chatId, modeId) };
+              },
+              setPersona: async (chatId, personaId) => {
+                await this.ensureRegistered(chatId);
+                await this.setPersona(chatId, personaId);
+              },
             }
           : undefined,
         signal: session.abortController?.signal,
@@ -7378,6 +7408,23 @@ export class SessionBroker {
     const session = this.sessions.get(chatId);
     if (!session) throw new Error(`No live session for chat ${chatId}`);
     return session;
+  }
+
+  /**
+   * Register a stored chat with the broker without starting it — the same
+   * dance the chat routes do before `setMode`/`setPersona`, so a posture write
+   * from one chat can reach a DORMANT target (one nobody has opened since the
+   * server came up) instead of failing on `mustGet`. Registration is not a
+   * launch: nothing runs until a message arrives.
+   */
+  private async ensureRegistered(chatId: string): Promise<void> {
+    if (this.sessions.has(chatId)) return;
+    const chat = await this.store.getChat(chatId);
+    if (!chat) throw new Error(`No chat "${chatId}" exists. Find the right id with chat_find.`);
+    const project = await this.store.getProject(chat.projectId).catch(() => null);
+    const cwd = chat.worktrees[0];
+    if (chat.sessionId) this.resume(chat, project, cwd);
+    else this.create(chat, project, cwd);
   }
 
   private view(s: LiveSession): SessionView {

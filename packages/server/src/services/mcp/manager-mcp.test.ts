@@ -52,6 +52,7 @@ import {
   type ManagerMcpChats,
   type ManagerMcpMessaging,
   type ManagerMcpExemptions,
+  type ManagerMcpContext,
   type SpawnChatConsent,
   type SpawnChatRequest,
   type SpawnChatTarget,
@@ -4689,6 +4690,8 @@ describe("peer messages are capped in length", () => {
         return { ok: true, askerChatId: "c2" };
       },
       state: async () => null,
+      setMode: async () => ({ permissionMode: "default" }),
+      setPersona: async () => {},
     };
     return { calls, binding };
   }
@@ -4862,5 +4865,191 @@ describe("issue tools", () => {
     );
     expect(res.isError).toBe(true);
     expect(update).not.toHaveBeenCalled();
+  });
+});
+
+/* ------------------------------------------------------- modes + postures */
+
+/**
+ * The mode tools are a typed CRUD over a binding; what these pin down is the
+ * behaviour a caller cannot see from the binding alone — which scope a write
+ * defaults to, that a shadowed id is SAID to be shadowed, and that switching a
+ * chat to a mode nobody defined is refused rather than pinned to `default`.
+ */
+describe("manager-mcp — mode tools and chat posture", () => {
+  type ModeRecord = Awaited<ReturnType<NonNullable<ManagerMcpContext["modes"]>["list"]>>[number];
+  function fakeModes(seed: ModeRecord[], hasProject = true) {
+    const records = [...seed];
+    const writes: unknown[] = [];
+    const binding: NonNullable<ManagerMcpContext["modes"]> = {
+      hasProject,
+      list: async () => records,
+      read: async (id, scope) =>
+        records.find((m) => m.id === id && (!scope || m.scope === scope)) ?? null,
+      write: async (input) => {
+        writes.push(input);
+        const id = input.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        const rec: ModeRecord = {
+          ...input,
+          id,
+          path: input.scope === "project" ? `/cfg/modes/${id}.yaml` : undefined,
+        };
+        records.unshift(rec);
+        return rec;
+      },
+      remove: async (id, scope) => {
+        const i = records.findIndex((m) => m.id === id && m.scope === scope);
+        if (i < 0) return false;
+        records.splice(i, 1);
+        return true;
+      },
+    };
+    return { binding, writes, records };
+  }
+  const messaging = () => {
+    const calls: unknown[] = [];
+    const binding: ManagerMcpMessaging = {
+      send: async () => ({ ok: true, held: false, woke: false }),
+      ask: async () => ({ ok: true, answered: true, answer: "", askId: "a" }),
+      reply: () => ({ ok: true, askerChatId: "c2" }),
+      state: async () => null,
+      setMode: async (chatId, modeId) => {
+        calls.push(["mode", chatId, modeId]);
+        return { permissionMode: "plan" };
+      },
+      setPersona: async (chatId, personaId) => {
+        calls.push(["persona", chatId, personaId]);
+      },
+    };
+    return { binding, calls };
+  };
+  const seed: ModeRecord[] = [
+    { id: "plan", name: "Plan", scope: "project", permissionMode: "plan", instructions: "Read only." },
+    { id: "plan", name: "plan", scope: "builtin", permissionMode: "plan" },
+    { id: "auto", name: "auto", scope: "builtin", permissionMode: "auto" },
+  ];
+  const ctx = (extra: Partial<ManagerMcpContext>) => ({
+    chatId: "c1",
+    bus,
+    broker: fakeBroker({}),
+    ...extra,
+  });
+
+  it("lists most-specific first and flags the id a project mode shadows", async () => {
+    const { modeList } = createManagerTools(ctx({ modes: fakeModes(seed).binding }));
+    const text = resultText(await modeList.handler({ scope: undefined }, {}));
+    const projectLine = text.indexOf("plan (project, plan)");
+    const builtinLine = text.indexOf("plan (builtin, plan)");
+    expect(projectLine).toBeGreaterThan(-1);
+    expect(builtinLine).toBeGreaterThan(projectLine);
+    expect(text.slice(builtinLine)).toContain("[shadowed by a more specific scope]");
+    expect(text.slice(projectLine, builtinLine)).toContain("[has instructions]");
+  });
+
+  it("writes to project scope by default, and to global when there is no project", async () => {
+    const withProject = fakeModes([]);
+    const { modeWrite } = createManagerTools(ctx({ modes: withProject.binding }));
+    const args = {
+      name: "Careful review",
+      permissionMode: "default" as const,
+      description: undefined,
+      instructions: undefined,
+      scope: undefined,
+    };
+    const res = await modeWrite.handler(args, {});
+    expect(res.isError).toBeFalsy();
+    expect(withProject.writes[0]).toMatchObject({ scope: "project", name: "Careful review" });
+    expect(resultText(res)).toContain('chat_set_mode { modeId: "careful-review" }');
+
+    const noProject = fakeModes([], false);
+    const tools = createManagerTools(ctx({ modes: noProject.binding }));
+    await tools.modeWrite.handler(args, {});
+    expect(noProject.writes[0]).toMatchObject({ scope: "global" });
+    // …and an explicit project write without a project is refused, not redirected.
+    const refused = await tools.modeWrite.handler({ ...args, scope: "project" }, {});
+    expect(refused.isError).toBe(true);
+    expect(noProject.writes).toHaveLength(1);
+  });
+
+  it("reads the overlay in full and says when there is none", async () => {
+    const { modeRead } = createManagerTools(ctx({ modes: fakeModes(seed).binding }));
+    expect(resultText(await modeRead.handler({ id: "plan", scope: undefined }, {}))).toContain(
+      "Read only.",
+    );
+    expect(resultText(await modeRead.handler({ id: "auto", scope: undefined }, {}))).toContain(
+      "no instruction overlay",
+    );
+    expect((await modeRead.handler({ id: "nope", scope: undefined }, {})).isError).toBe(true);
+  });
+
+  it("deletes only what exists in the named scope and says built-ins can't go", async () => {
+    const modes = fakeModes(seed);
+    const { modeDelete } = createManagerTools(ctx({ modes: modes.binding }));
+    expect((await modeDelete.handler({ id: "plan", scope: undefined }, {})).isError).toBeFalsy();
+    expect(modes.records.filter((m) => m.id === "plan")).toHaveLength(1);
+    const again = await modeDelete.handler({ id: "plan", scope: undefined }, {});
+    expect(again.isError).toBe(true);
+    expect(resultText(again)).toContain("Built-in modes cannot be deleted");
+  });
+
+  it("chat_set_mode defaults to the calling chat and refuses an unknown mode before pinning it", async () => {
+    const m = messaging();
+    const { chatSetMode } = createManagerTools(
+      ctx({ modes: fakeModes(seed).binding, messaging: m.binding }),
+    );
+    const ok = await chatSetMode.handler({ modeId: "plan", chatId: undefined }, {});
+    expect(resultText(ok)).toContain('Switched this chat to mode "plan" (plan)');
+    expect(m.calls).toEqual([["mode", "c1", "plan"]]);
+
+    const unknown = await chatSetMode.handler({ modeId: "ghost", chatId: undefined }, {});
+    expect(unknown.isError).toBe(true);
+    expect(m.calls).toHaveLength(1);
+
+    // A PEER may live in another project whose modes this session can't see,
+    // so an id unknown here is handed to the broker rather than refused.
+    const peer = await chatSetMode.handler({ modeId: "ghost", chatId: "c2" }, {});
+    expect(peer.isError).toBeFalsy();
+    expect(m.calls[1]).toEqual(["mode", "c2", "ghost"]);
+
+    const unpin = await chatSetMode.handler({ modeId: null, chatId: "c2" }, {});
+    expect(resultText(unpin)).toContain("Unpinned chat c2");
+    expect(m.calls[2]).toEqual(["mode", "c2", null]);
+  });
+
+  it("chat_set_persona reaches another chat but never the caller", async () => {
+    const m = messaging();
+    const { chatSetPersona } = createManagerTools(ctx({ messaging: m.binding }));
+    const self = await chatSetPersona.handler({ personaId: "product-owner", chatId: "c1" }, {});
+    expect(self.isError).toBe(true);
+    expect(resultText(self)).toContain("spawn_chat");
+    expect(m.calls).toEqual([]);
+
+    const other = await chatSetPersona.handler({ personaId: "product-owner", chatId: "c2" }, {});
+    expect(other.isError).toBeFalsy();
+    expect(m.calls).toEqual([["persona", "c2", "product-owner"]]);
+    // A broker refusal (target mid-turn) is surfaced verbatim, not swallowed.
+    m.binding.setPersona = async () => {
+      throw new Error("Wait for the current turn to finish before changing persona.");
+    };
+    const busy = await chatSetPersona.handler({ personaId: null, chatId: "c2" }, {});
+    expect(busy.isError).toBe(true);
+    expect(resultText(busy)).toContain("Wait for the current turn");
+  });
+
+  it("serves the mode tools from dispatch-config and the posture tools from dispatch-chat", () => {
+    const servers = createManagerMcpServers(
+      ctx({ modes: fakeModes([]).binding, messaging: messaging().binding }),
+    );
+    const names = (server: unknown) =>
+      Object.keys(
+        (server as { instance: { _registeredTools?: Record<string, unknown> } }).instance
+          ._registeredTools ?? {},
+      );
+    expect(names(servers["dispatch-config"])).toEqual(
+      expect.arrayContaining(["mode_list", "mode_read", "mode_write", "mode_delete"]),
+    );
+    expect(names(servers["dispatch-chat"])).toEqual(
+      expect.arrayContaining(["chat_set_mode", "chat_set_persona"]),
+    );
   });
 });

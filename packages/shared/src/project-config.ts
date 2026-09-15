@@ -446,6 +446,13 @@ export const ConfigModeSchema = z.object({
   permissionMode: PermissionModeSchema,
   allowedTools: z.array(z.string()).optional(),
   disallowedTools: z.array(z.string()).optional(),
+  /**
+   * Optional system-prompt overlay appended while the mode is selected — the
+   * same field a `.data` mode carries. Without it a `.dispatch/modes/` mode
+   * could only set a permission posture, so a "careful review" mode had no
+   * way to say what careful means.
+   */
+  instructions: z.string().optional(),
   /** Relative source file (within the config dir), for round-tripping. */
   file: z.string().optional(),
 });
