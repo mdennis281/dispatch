@@ -26,11 +26,11 @@ import { LAYER } from "../../lib/layers.js";
  *    which looks like the bottom of the app being cut off. This is the one that
  *    matters; it is what four PRs shipped against a `dead` of 0 while missing.
  *  - `dead` is how much of the screen the shell does NOT cover. In a browser
- *    tab it is the URL bar. In the installed iOS app it is the standalone
- *    shrink — ~59 — and `heal` is the store's attempt to get it back: `wins /
- *    attempts` and what the last try did. `dead 59` with `heal … miss` means
- *    the re-measure no longer works on this iOS; `dead 59` with `heal 0/0`
- *    means it never ran (not iOS, not standalone, or a field still focused).
+ *    tab it is the URL bar. In the installed iOS app it is the status bar —
+ *    ~59 on a Face ID phone — and that is CORRECT: without `viewport-fit=cover`
+ *    the window starts below the status bar, and `fixed-top` at the top of
+ *    the ruler should sit just under the clock. `safe-t` must be 0 there and
+ *    `safe-b` should be 34 (the home-indicator fallback), not `env()`'s 0.
  *  - `safe-t` non-zero means the status bar is ours to pad around. It describes
  *    the SCREEN, not the layout viewport, so `safe-b` can be reserving space
  *    for a home indicator that is below the viewport entirely — compare
@@ -124,6 +124,12 @@ function PaintRuler() {
   );
 }
 
+function viewportFit(): string {
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+  const match = meta?.content.match(/viewport-fit\s*=\s*(\w+)/);
+  return match?.[1] ?? "auto";
+}
+
 function ViewportReadout() {
   const m = useViewport();
 
@@ -171,10 +177,9 @@ function ViewportReadout() {
     ["safe-b", `${m.safeBottom}`, false],
     ["screen", `${m.screenHeight}`, false],
     ["scale", m.vvScale.toFixed(2), Math.abs(m.vvScale - 1) > 0.01],
-    ["heal", `${m.heal.wins}/${m.heal.attempts}${m.heal.last ? ` ${m.heal.last}` : ""}`, m.heal.last === "miss"],
-    // What the page LOADED with, not what was last chosen — the choice only
-    // applies at the next launch, and this row is how you know it did.
-    ["fit", m.viewportFit, m.viewportFit === "auto"],
+    // Read off the meta itself so a build that somehow ships `cover` again is
+    // visible on the device that cares.
+    ["fit", viewportFit(), viewportFit() !== "auto"],
   ];
 
   return (

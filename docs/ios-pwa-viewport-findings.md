@@ -1,5 +1,20 @@
 # iOS standalone PWA viewport: what actually governs the geometry
 
+> **Resolved 2026-09-15 (PRs #242, #243): the cause was `viewport-fit=cover`.**
+> Dropping it from the viewport meta makes iOS lay the installed app out
+> *below* the status bar and down to the bottom of the glass, and the window
+> stays that size across keyboard raises. On-device readout with `cover`:
+> `inner 873 (-59 of 932)`, `safe-t 59`, `safe-b 34`, nav 59px short of the
+> home indicator, and #238's display-toggle heal missed 3/3. With `auto`:
+> `inner 873` from cold, `safe-t 0`, `safe-b 0`, `fixed-top` just under the
+> clock, nav at the glass. So `screen − inner = 59` is *the status bar*, not a
+> bug, and every `env()` inset is 0 — which is why `--cm-safe-bottom` now
+> folds in `--cm-home-indicator` (34px when the status bar is ≥40px, i.e. a
+> Face ID phone; `stores/viewport.ts`) and `html` takes the top bar's
+> background so the status-bar band matches the header. The comparison that
+> found it was weatherlite.app, which never set `cover`. The heal from #238 is
+> gone. Everything below is the record of how the wrong model was ruled out.
+
 Research + audit, 2026-08-17. **No runtime behaviour changes in this PR.** This
 document exists to stop the seventh attempt at this area being another guess.
 
