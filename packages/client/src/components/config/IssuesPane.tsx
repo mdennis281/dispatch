@@ -361,21 +361,18 @@ export function IssuesPane({ projectId, hasConfigDir }: { projectId: string; has
               {ISSUE_AUTHOR_TRUST.map((t) => {
                 const on = policy.filters.trust.includes(t);
                 return (
-                  <button
+                  <Button
                     key={t}
-                    type="button"
+                    variant="toggle"
+                    aria-pressed={on}
                     onClick={() => {
                       const next = on ? policy.filters.trust.filter((x) => x !== t) : [...policy.filters.trust, t];
                       patchFilters({ trust: next as IssueAuthorTrust[] });
                     }}
-                    className={cn(
-                      "rounded-md border px-2 py-0.5 text-2xs",
-                      on ? "border-accent-line bg-accent-ghost text-accent-hi" : "border-line text-faint hover:text-secondary",
-                    )}
                     title={DEFAULT_ISSUE_TRUST.includes(t) ? "on by default" : "off by default"}
                   >
                     {t}
-                  </button>
+                  </Button>
                 );
               })}
               <label className="ml-2 flex items-center gap-1.5 text-2xs text-faint">
@@ -559,9 +556,9 @@ function WatchStatus({ watch, claims }: { watch: IssueWatch | null; claims: Issu
                   {c.state}
                 </Chip>
                 {c.chatId && (
-                  <button type="button" onClick={() => selectChat(c.chatId!)} className="shrink-0 text-faint hover:text-secondary">
+                  <Button variant="link" onClick={() => selectChat(c.chatId!)} className="shrink-0">
                     open chat
-                  </button>
+                  </Button>
                 )}
                 {c.note && <span className="shrink-0 text-faint" title={c.note}>·</span>}
               </li>
