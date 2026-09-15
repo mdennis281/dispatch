@@ -98,6 +98,9 @@ import type {
   ResourceSnapshot,
   SystemResources,
   ChatProcessDetail,
+  GrowthFrame,
+  GrowthProgress,
+  GrowthReport,
 } from "@dispatch/shared";
 import {
   DEFAULT_HARNESS,
@@ -466,6 +469,52 @@ async function request<T>(
 }
 
 const get = <T>(path: string) => request<T>("GET", path);
+
+/**
+ * A GET whose body is newline-delimited JSON, read frame by frame as it
+ * arrives. The one consumer is the growth walk, which reports progress for
+ * the seconds-to-minutes a long history takes and would otherwise be a
+ * spinner the whole way. A non-2xx status is still the ordinary `ApiError`,
+ * because the server only starts streaming once it has agreed to the walk.
+ */
+async function stream<T>(
+  path: string,
+  onFrame: (frame: T) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await sessionFetch(`${BASE}${path}`, { method: "GET", signal });
+  if (!res.ok) {
+    let detail: unknown;
+    try {
+      detail = await res.json();
+    } catch {
+      /* non-JSON error body */
+    }
+    const msg =
+      (detail && typeof detail === "object" && "error" in detail
+        ? String((detail as { error: unknown }).error)
+        : res.statusText) || `HTTP ${res.status}`;
+    throw new ApiError(res.status, msg, detail);
+  }
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let carry = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    carry += decoder.decode(value, { stream: true });
+    // A chunk boundary can land mid-frame, so only whole lines are parsed and
+    // the tail waits for the next read.
+    let nl: number;
+    while ((nl = carry.indexOf("\n")) >= 0) {
+      const line = carry.slice(0, nl);
+      carry = carry.slice(nl + 1);
+      if (line.trim()) onFrame(JSON.parse(line) as T);
+    }
+  }
+  if (carry.trim()) onFrame(JSON.parse(carry) as T);
+}
 const post = <T>(path: string, body?: unknown) => request<T>("POST", path, body);
 const put = <T>(path: string, body?: unknown) => request<T>("PUT", path, body);
 const del = <T>(path: string, body?: unknown) => request<T>("DELETE", path, body);
@@ -1334,6 +1383,35 @@ export const api = {
     snapshot: (fresh = false) =>
       get<ResourceSnapshot>(`/api/resources${fresh ? "?fresh=1" : ""}`),
     chatDetail: (chatId: string) => get<ChatProcessDetail>(`/api/resources/chat/${chatId}`),
+  },
+
+  /**
+   * Codebase growth — a walk of the project's git history, streamed. The
+   * promise resolves with the report once the `result` frame lands; every
+   * progress frame before it goes to `onProgress`. There is no cached form of
+   * this call on purpose (see `shared/growth.ts`).
+   */
+  growth: {
+    walk: async (
+      projectId: string,
+      onProgress: (p: GrowthProgress) => void,
+      signal?: AbortSignal,
+    ): Promise<GrowthReport> => {
+      let report: GrowthReport | null = null;
+      let failure: string | null = null;
+      await stream<GrowthFrame>(
+        `/api/metrics/growth${qs({ projectId })}`,
+        (frame) => {
+          if (frame.type === "progress") onProgress(frame.progress);
+          else if (frame.type === "result") report = frame.report;
+          else failure = frame.error;
+        },
+        signal,
+      );
+      if (failure) throw new Error(failure);
+      if (!report) throw new Error("the growth walk ended without a result");
+      return report;
+    },
   },
 };
 

@@ -57,7 +57,7 @@ const MAX_BAR = 24;
 const GAP = 2;
 
 /** The bucket widths a series response can come back at. */
-type BucketWidth = "hour" | "day" | "week" | "month";
+export type BucketWidth = "hour" | "day" | "week" | "month";
 
 /** One group's value per bucket, aligned to {@link ChartTime.buckets}. */
 export interface ChartSeries {
@@ -107,7 +107,7 @@ export type ChartFormatter = (value: number) => string;
 export type ChartTicker = (max: number) => number[];
 
 /** Format a bucket start for an axis tick, at the width the bucket implies. */
-function tickFor(bucket: BucketWidth): (ms: number) => string {
+export function tickFor(bucket: BucketWidth): (ms: number) => string {
   // UTC throughout, matching the server's bucketing — a boundary that moved
   // with the viewer's timezone would make the axis disagree with the numbers.
   const opts: Intl.DateTimeFormatOptions =
@@ -121,7 +121,7 @@ function tickFor(bucket: BucketWidth): (ms: number) => string {
 }
 
 /** Full stamp for the tooltip header, where there is room to be unambiguous. */
-function stampFor(bucket: BucketWidth, ms: number): string {
+export function stampFor(bucket: BucketWidth, ms: number): string {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
     ...(bucket === "hour" ? { timeStyle: "short" } : {}),
@@ -131,7 +131,7 @@ function stampFor(bucket: BucketWidth, ms: number): string {
 
 /* ----------------------------------------------------------------- tooltip */
 
-interface TooltipRow {
+export interface TooltipRow {
   key: string;
   label: string;
   value: string;
@@ -146,7 +146,16 @@ interface TooltipRow {
  * Labels come from tool names, agent ids and memory names — untrusted strings —
  * and are rendered as React children (text nodes), never as markup.
  */
-function Readout({ title, rows }: { title: string; rows: TooltipRow[] }) {
+export function Readout({
+  title,
+  rows,
+  footer,
+}: {
+  title: string;
+  rows: TooltipRow[];
+  /** A closing line under the rows — a total, a commit count. Muted ink. */
+  footer?: string;
+}) {
   if (!rows.length) return null;
   return (
     <div className="pointer-events-none rounded-md border border-line bg-elevated px-2.5 py-2 shadow-lg">
@@ -168,6 +177,7 @@ function Readout({ title, rows }: { title: string; rows: TooltipRow[] }) {
           </li>
         ))}
       </ul>
+      {footer && <p className="mt-1.5 text-2xs text-faint">{footer}</p>}
     </div>
   );
 }

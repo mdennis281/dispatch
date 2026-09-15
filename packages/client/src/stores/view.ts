@@ -77,10 +77,12 @@ export type AppOverlay = "workspace" | "mcp" | "agents" | "processes";
  */
 /**
  * Metrics subpages. Usage counts what agents reached for, runtime measures
- * where the wall clock went, and resources measures what is resident RIGHT NOW
- * — the only one of the three that is a live reading rather than a ledger.
+ * where the wall clock went, resources measures what is resident RIGHT NOW —
+ * the only one of the four that is a live reading rather than a ledger — and
+ * growth reads the repo's own history out of git rather than anything
+ * Dispatch recorded.
  */
-export type MetricsSection = "usage" | "runtime" | "resources";
+export type MetricsSection = "usage" | "runtime" | "resources" | "growth";
 
 interface ViewStore {
   view: AppView;

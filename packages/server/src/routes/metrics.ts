@@ -17,6 +17,17 @@
  *   POST /api/metrics/spans/facets   → MetricSpanFacetsResponse  (filter controls)
  *   POST /api/metrics/spans/recent   → MetricSpan[]              (activity tail)
  *
+ * And one read that is not over the ledger at all:
+ *
+ *   GET  /api/metrics/growth?projectId= → NDJSON of GrowthFrame  (the Growth tab)
+ *
+ * That one STREAMS. It walks the project's git history on every call — no
+ * cache, by design (see `shared/growth.ts`) — and a long history takes long
+ * enough that a bare pending request reads as a hung page. So the response is
+ * newline-delimited JSON: progress frames as the walk goes, then exactly one
+ * `result` or `error` frame. The reply is hijacked from Fastify's serializer
+ * because a serializer wants one body, and this has many.
+ *
  * Separate paths rather than a `measure` flag on the existing ones: the two
  * halves have different dimensions (a span has `state`, an event has `category`)
  * and different responses, so one endpoint would have to accept a filter it
@@ -36,6 +47,7 @@
 import type { FastifyInstance } from "fastify";
 import * as z from "zod";
 import {
+  type GrowthFrame,
   MetricDimensionSchema,
   MetricFilterSchema,
   MetricQuerySchema,
@@ -78,7 +90,8 @@ const SpanRecentSchema = SpanScopeSchema.extend({
 });
 
 export function registerMetricsRoutes(app: FastifyInstance): void {
-  const { metrics } = app.services;
+  const { metrics, growth } = app.services;
+  const { store } = app.cm;
 
   app.post<{ Body: unknown }>("/api/metrics/series", async (req, reply) => {
     const parsed = MetricQuerySchema.safeParse(req.body ?? {});
@@ -146,4 +159,49 @@ export function registerMetricsRoutes(app: FastifyInstance): void {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
     return { deleted: metrics.prune(parsed.data.before) };
   });
+
+  app.get<{ Querystring: { projectId?: string } }>(
+    "/api/metrics/growth",
+    async (req, reply) => {
+      // The two refusals are ordinary JSON replies — only a walk that actually
+      // starts becomes a stream, so a 400/404 stays a 400/404 to the client.
+      const projectId = req.query.projectId;
+      if (!projectId) return reply.code(400).send({ error: "projectId required" });
+      const project = await store.getProject(projectId);
+      if (!project) return reply.code(404).send({ error: "project not found" });
+
+      reply.hijack();
+      const raw = reply.raw;
+      raw.writeHead(200, {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        "cache-control": "no-store",
+        // Nothing between here and the browser may hold frames back: a proxy
+        // that buffers the body turns the progress bar back into a spinner.
+        "x-accel-buffering": "no",
+      });
+      const send = (frame: GrowthFrame): void => {
+        if (!raw.writableEnded && !raw.destroyed) raw.write(`${JSON.stringify(frame)}\n`);
+      };
+
+      // A closed socket cancels the git walk; nobody is going to read it.
+      const abort = new AbortController();
+      raw.once("close", () => abort.abort());
+
+      try {
+        const report = await growth.walk({
+          projectId,
+          repoPath: project.repoPath,
+          signal: abort.signal,
+          onProgress: (progress) => send({ type: "progress", progress }),
+        });
+        send({ type: "result", report });
+      } catch (err) {
+        if (!abort.signal.aborted) {
+          send({ type: "error", error: err instanceof Error ? err.message : String(err) });
+        }
+      } finally {
+        if (!raw.writableEnded) raw.end();
+      }
+    },
+  );
 }

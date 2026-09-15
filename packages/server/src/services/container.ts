@@ -58,6 +58,7 @@ import { WorktreeReaper } from "./worktree-reaper.js";
 import { RetentionService } from "./retention.js";
 import { deleteChat } from "./chat-deletion.js";
 import { GitService } from "./git.js";
+import { GrowthService } from "./growth.js";
 import { CommitMessageService } from "./commit-message.js";
 import { RunnerService } from "./runner.js";
 import { ProcessService, defaultProcTable } from "./processes.js";
@@ -117,6 +118,7 @@ export interface ServiceOverrides {
   worktreeReaper?: WorktreeReaper;
   retention?: RetentionService;
   git?: GitService;
+  growth?: GrowthService;
   commitMessage?: CommitMessageService;
   runner?: RunnerService;
   processes?: ProcessService;
@@ -182,6 +184,8 @@ export interface Services extends ServiceBase {
   retention: RetentionService;
   /** Working-copy git (status/stage/commit/branch/stash) for the Source Control UI. */
   git: GitService;
+  /** The Growth tab's on-demand `git log --numstat` walk. Stateless, no cache. */
+  growth: GrowthService;
   /** One-shot AI commit messages drafted from the staged diff. */
   commitMessage: CommitMessageService;
   runner: RunnerService;
@@ -386,6 +390,7 @@ export function createServices(
   // Working-copy git for the Source Control view. Stateless (every call is
   // scoped to a `repoPath` the route passes), so it needs no bus/store wiring.
   const git = overrides.git ?? new GitService();
+  const growth = overrides.growth ?? new GrowthService();
   const commitMessage =
     overrides.commitMessage ?? new CommitMessageService({ git });
   const runner =
@@ -992,6 +997,7 @@ export function createServices(
     worktreeReaper,
     retention,
     git,
+    growth,
     commitMessage,
     runner,
     processes,
