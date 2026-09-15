@@ -37,6 +37,7 @@ beforeEach(() => {
     order: [],
     activeChatId: null,
     lastActivity: {},
+    sectionSince: {},
     activity: {},
     queued: {},
     prSettled: {},
@@ -532,6 +533,119 @@ describe("buildChatTree — spawned chats file under the chat that spawned them"
     });
 
     expect(shape(tree)).toEqual([["parent", ["r", "s"]]]);
+  });
+});
+
+describe("buildChatTree — rows file into status queues, not one recency list", () => {
+  const withStatus = (id: string, status: Chat["status"], since: number): Chat => ({
+    ...chat(id, "p1", since),
+    sessionId: "s",
+    status,
+  });
+  const order = (bs: ReturnType<typeof buildChatTree>) =>
+    bs.map((b) => `${b.section}:${b.chat.id}`);
+
+  it("orders the queues new → needs input → working → idle", () => {
+    const chats = [
+      withStatus("idle", "idle", 900),
+      withStatus("working", "running", 800),
+      withStatus("blocked", "awaiting-input", 700),
+      { ...chat("fresh", "p1", 600), sessionId: undefined },
+    ];
+
+    expect(order(buildChatTree(chats, {}, {}))).toEqual([
+      "new:fresh",
+      "attention:blocked",
+      "working:working",
+      "idle:idle",
+    ]);
+  });
+
+  it("files failed and error under needs-input, never idle", () => {
+    const chats = [withStatus("f", "failed", 1), withStatus("e", "error", 2), withStatus("i", "idle", 3)];
+
+    expect(order(buildChatTree(chats, {}, {}))).toEqual(["attention:e", "attention:f", "idle:i"]);
+  });
+
+  it("appends a newly-working chat at the BOTTOM of its queue, newest elsewhere at the top", () => {
+    // The whole point: a chat that just started must not shove the ones you
+    // were about to click. Everywhere else the newest entry is the one you're
+    // reaching for.
+    const working = [withStatus("old", "running", 10), withStatus("new", "running", 20)];
+    const idle = [withStatus("old", "idle", 10), withStatus("new", "idle", 20)];
+
+    expect(order(buildChatTree(working, {}, {}))).toEqual(["working:old", "working:new"]);
+    expect(order(buildChatTree(idle, {}, {}))).toEqual(["idle:new", "idle:old"]);
+  });
+
+  it("ranks by when the chat ENTERED the queue, not its activity clock", () => {
+    // `sectionSince` wins over `updatedAt`, which is what a streaming chat bumps
+    // every second — the swap-under-the-pointer this replaces.
+    const chats = [withStatus("a", "running", 500), withStatus("b", "running", 10)];
+
+    expect(order(buildChatTree(chats, { a: 1, b: 2 }, {}))).toEqual(["working:a", "working:b"]);
+  });
+
+  it("lifts a branch into its most urgent descendant's queue", () => {
+    const parent = withStatus("parent", "idle", 10);
+    const child: Chat = { ...withStatus("child", "awaiting-input", 20), parentChatId: "parent" };
+    const other = withStatus("other", "idle", 900);
+
+    const tree = buildChatTree([parent, child, other], {}, {});
+    expect(order(tree)).toEqual(["attention:parent", "idle:other"]);
+    expect(tree[0]!.children.map((c) => c.chat.id)).toEqual(["child"]);
+  });
+
+  it("is a chat's own `working` clock that holds a branch still when a second child starts", () => {
+    // Oldest working member sets the branch's slot, so a sibling spinning up
+    // later doesn't re-append the whole branch.
+    const p1 = withStatus("p1", "idle", 1);
+    const c1a: Chat = { ...withStatus("c1a", "running", 10), parentChatId: "p1" };
+    const c1b: Chat = { ...withStatus("c1b", "running", 40), parentChatId: "p1" };
+    const p2 = withStatus("p2", "running", 20);
+
+    expect(order(buildChatTree([p1, c1a, c1b, p2], {}, {}))).toEqual(["working:p1", "working:p2"]);
+  });
+});
+
+describe("sectionSince — advanced only on a queue change", () => {
+  it("stamps the transition and leaves a same-queue status write alone", () => {
+    const c: Chat = { ...chat("a", "p1", 10), sessionId: "s", status: "idle" };
+    useChats.getState().hydrate([c]);
+    expect(useChats.getState().sectionSince.a).toBe(10);
+
+    useChats.getState().setStatus("a", "running");
+    const entered = useChats.getState().sectionSince.a!;
+    expect(entered).toBeGreaterThan(10);
+
+    // running → waiting is the same queue: the row must not move.
+    useChats.getState().setStatus("a", "waiting");
+    expect(useChats.getState().sectionSince.a).toBe(entered);
+
+    useChats.getState().setStatus("a", "idle");
+    expect(useChats.getState().sectionSince.a).toBeGreaterThanOrEqual(entered);
+  });
+
+  it("moves a chat out of `new` when the session id lands via chat-update", () => {
+    const fresh = chat("a", "p1", 10);
+    useChats.getState().hydrate([fresh]);
+    const before = useChats.getState().sectionSince.a;
+
+    useChats.getState().upsertChat({ ...fresh, status: "idle" });
+    expect(useChats.getState().sectionSince.a).toBe(before); // still new
+
+    useChats.getState().upsertChat({ ...fresh, status: "idle", sessionId: "s" });
+    expect(useChats.getState().sectionSince.a).toBeGreaterThan(before!);
+  });
+
+  it("survives a re-hydrate when the queue hasn't changed", () => {
+    const c: Chat = { ...chat("a", "p1", 10), sessionId: "s", status: "idle" };
+    useChats.getState().hydrate([c]);
+    useChats.getState().setStatus("a", "running");
+    const entered = useChats.getState().sectionSince.a;
+
+    useChats.getState().hydrate([{ ...c, status: "running", updatedAt: 999 }]);
+    expect(useChats.getState().sectionSince.a).toBe(entered);
   });
 });
 

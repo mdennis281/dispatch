@@ -51,6 +51,17 @@ interface ChatsStore {
    * put a wrongly-bumped age back.
    */
   lastActivity: Record<string, number>;
+  /**
+   * chatId → epoch-ms the chat last CHANGED sidebar section (see
+   * {@link chatSection}). This — not `lastActivity` — is what orders rows
+   * inside a section: a streaming chat bumps `lastActivity` every second, so
+   * sorting on it had two chats that were working at once swapping places
+   * under the pointer, and a section list ordered by it would do the same one
+   * section down. Seeded from `updatedAt` at hydrate (the record carries no
+   * transition time, and a reload re-sorting once is fine); advanced only when
+   * the section actually changes.
+   */
+  sectionSince: Record<string, number>;
 
   /**
    * Open a chat, or `null` for "nothing open" (the empty state).
@@ -85,6 +96,7 @@ export const useChats = create<ChatsStore>((set) => ({
   prSettled: {},
   exemptions: {},
   lastActivity: {},
+  sectionSince: {},
 
   setActiveChat: (id) => set({ activeChatId: id }),
 
@@ -92,10 +104,19 @@ export const useChats = create<ChatsStore>((set) => ({
     set((s) => {
       const byId: Record<string, Chat> = {};
       const lastActivity: Record<string, number> = {};
+      const sectionSince: Record<string, number> = {};
       const prSettled: Record<string, boolean> = {};
       for (const c of chats) {
         byId[c.id] = c;
         lastActivity[c.id] = c.updatedAt ?? c.createdAt;
+        // Carried across a reconnect when the section hasn't moved: a hydrate
+        // is not a transition, and re-seeding from `updatedAt` would reshuffle
+        // every section on each WebSocket reconnect.
+        const prev = s.byId[c.id];
+        sectionSince[c.id] =
+          prev && s.sectionSince[c.id] != null && chatSection(prev) === chatSection(c)
+            ? s.sectionSince[c.id]!
+            : (c.updatedAt ?? c.createdAt);
         // Rebuilt from the record on every load. `prSettled` is otherwise only
         // ever written by a live `chat-status` event, so a reload turned every
         // chat that had already landed its PR back into an anonymous gray "idle".
@@ -115,24 +136,33 @@ export const useChats = create<ChatsStore>((set) => ({
       // Deliberately dropped, not carried: a reconnect means the sessions that
       // held these may not exist any more (an exemption dies with its session),
       // and `loadExemptions` re-reads the open chat's straight afterwards.
-      return { byId, order, lastActivity, prSettled, exemptions: {}, activeChatId };
+      return { byId, order, lastActivity, sectionSince, prSettled, exemptions: {}, activeChatId };
     }),
 
   upsertChat: (chat) =>
-    set((s) => ({
-      byId: { ...s.byId, [chat.id]: chat },
-      order: s.order.includes(chat.id) ? s.order : [chat.id, ...s.order],
-      // A `chat-update` is how the settled PR ref reaches the client, so re-derive
-      // here too rather than waiting for the next status event to carry the flag.
-      prSettled: { ...s.prSettled, [chat.id]: isPrSettledIdle(chat) },
-      lastActivity: {
-        ...s.lastActivity,
-        [chat.id]: Math.max(
-          s.lastActivity[chat.id] ?? 0,
-          chat.updatedAt ?? chat.createdAt,
-        ),
-      },
-    })),
+    set((s) => {
+      const prev = s.byId[chat.id];
+      // A `chat-update` can move the section without any status event — the
+      // `sessionId` landing is what takes a chat out of "new".
+      const moved = !prev || chatSection(prev) !== chatSection(chat);
+      return {
+        byId: { ...s.byId, [chat.id]: chat },
+        order: s.order.includes(chat.id) ? s.order : [chat.id, ...s.order],
+        // A `chat-update` is how the settled PR ref reaches the client, so re-derive
+        // here too rather than waiting for the next status event to carry the flag.
+        prSettled: { ...s.prSettled, [chat.id]: isPrSettledIdle(chat) },
+        lastActivity: {
+          ...s.lastActivity,
+          [chat.id]: Math.max(
+            s.lastActivity[chat.id] ?? 0,
+            chat.updatedAt ?? chat.createdAt,
+          ),
+        },
+        sectionSince: moved
+          ? { ...s.sectionSince, [chat.id]: Date.now() }
+          : s.sectionSince,
+      };
+    }),
 
   bumpActivity: (chatId, ts) =>
     set((s) => {
@@ -164,6 +194,8 @@ export const useChats = create<ChatsStore>((set) => ({
       delete exemptions[chatId];
       const lastActivity = { ...s.lastActivity };
       delete lastActivity[chatId];
+      const sectionSince = { ...s.sectionSince };
+      delete sectionSince[chatId];
       const order = s.order.filter((id) => id !== chatId);
       // Keep a selection alive, but only WITHIN the deleted chat's project —
       // falling through to any remaining chat used to open one from a project
@@ -172,19 +204,33 @@ export const useChats = create<ChatsStore>((set) => ({
         s.activeChatId === chatId
           ? (order.find((id) => byId[id]?.projectId === removed.projectId) ?? null)
           : s.activeChatId;
-      return { byId, order, activity, queued, prSettled, exemptions, lastActivity, activeChatId };
+      return {
+        byId,
+        order,
+        activity,
+        queued,
+        prSettled,
+        exemptions,
+        lastActivity,
+        sectionSince,
+        activeChatId,
+      };
     });
   },
 
   setStatus: (chatId, status, activity, queued, prSettled) =>
-    set((s) => ({
-      byId: s.byId[chatId]
-        ? { ...s.byId, [chatId]: { ...s.byId[chatId]!, status } }
-        : s.byId,
-      activity: { ...s.activity, [chatId]: activity },
-      queued: { ...s.queued, [chatId]: queued ?? 0 },
-      prSettled: { ...s.prSettled, [chatId]: prSettled ?? false },
-    })),
+    set((s) => {
+      const prev = s.byId[chatId];
+      const next = prev ? { ...prev, status } : undefined;
+      const moved = prev && next && chatSection(prev) !== chatSection(next);
+      return {
+        byId: next ? { ...s.byId, [chatId]: next } : s.byId,
+        activity: { ...s.activity, [chatId]: activity },
+        queued: { ...s.queued, [chatId]: queued ?? 0 },
+        prSettled: { ...s.prSettled, [chatId]: prSettled ?? false },
+        sectionSince: moved ? { ...s.sectionSince, [chatId]: Date.now() } : s.sectionSince,
+      };
+    }),
 
   setExemptions: (chatId, exemptions) =>
     set((s) => ({ exemptions: { ...s.exemptions, [chatId]: exemptions } })),
@@ -359,9 +405,75 @@ function renderParentOf(
   return path[Math.min(path.length, MAX_CHAT_NEST_DEPTH) - 1] ?? null;
 }
 
+/**
+ * The sidebar queue a chat sits in. Listed in DISPLAY order, top to bottom.
+ *
+ * Queues rather than one recency-sorted list because recency is exactly the
+ * wrong key when several chats are live at once: each one bumps its clock
+ * about once a second while it streams, so two working chats swapped rows
+ * under the pointer and the one you were about to click was somewhere else by
+ * the time you did. Inside a queue nothing competes — rows only move when a
+ * chat changes queue.
+ */
+export type ChatSection = "new" | "attention" | "working" | "idle";
+export const CHAT_SECTIONS: readonly ChatSection[] = ["new", "attention", "working", "idle"];
+
+/**
+ * Which queue wins when a BRANCH has chats in several — the row a branch draws
+ * at is the parent's, so the parent files where its most urgent descendant
+ * does. "Needs input" beats "working" because a blocked child is the one thing
+ * in the branch that won't sort itself out; "new" ranks below both because a
+ * branch with children has already sent a message, so it can only be new by
+ * accident.
+ */
+const SECTION_PRECEDENCE: Record<ChatSection, number> = {
+  attention: 3,
+  working: 2,
+  new: 1,
+  idle: 0,
+};
+
+/**
+ * Whether a queue reads newest-entry-FIRST. `working` is the exception: a chat
+ * that just started is appended at the bottom so the ones already running
+ * stay where they are — the "new arrival shoves everything down" is the whole
+ * complaint this replaces. The other three want the newest at the top: a new
+ * chat you just opened, a question that just landed, the chat that just
+ * finished are each the one you're most likely reaching for.
+ */
+const NEWEST_FIRST: Record<ChatSection, boolean> = {
+  new: true,
+  attention: true,
+  working: false,
+  idle: true,
+};
+
+/**
+ * `failed`/`error` file under "needs input" rather than idle: nothing will
+ * move on that chat until a human reads what went wrong, which is the
+ * definition of the queue. The transcript's error row carries the button that
+ * clears it back to idle (`clear-error`).
+ *
+ * "new" is read off `sessionId`, which the first turn's init event sets — the
+ * record carries no message count. A chat whose very first turn died before
+ * the session came up would still count as new; it shows its error either way.
+ */
+export function chatSection(chat: Chat): ChatSection {
+  const s = chat.status;
+  if (s === "awaiting-input" || s === "failed" || s === "error") return "attention";
+  if (isChatWorking(s)) return "working";
+  if (!chat.sessionId) return "new";
+  return "idle";
+}
+
 /** A chat row and the rows drawn beneath it. */
 export interface ChatBranch {
   chat: Chat;
+  /**
+   * The queue this branch is drawn in: the highest-precedence section of any
+   * chat in it, its own or a descendant's.
+   */
+  section: ChatSection;
   /**
    * The chats filed DIRECTLY under this one, as branches of their own — a
    * spawned chat's reviewers hang off the spawned chat, not off the top-level
@@ -396,16 +508,19 @@ export interface ChatBranch {
  * the PR it is reading, and a spawned chat under the chat that spawned it — as
  * deep as {@link MAX_CHAT_NEST_DEPTH} draws.
  *
- * A branch ranks by the NEWEST clock in it, its own or any descendant's. Without
- * that, a review that starts on a week-old chat sinks to wherever its parent sits
- * and the one row that is actually doing something is off the bottom of the list.
+ * Every level is sorted by QUEUE first ({@link CHAT_SECTIONS}) and then by when
+ * the branch entered that queue — never by activity, which is what made rows
+ * swap under the pointer. A branch files in the most urgent queue of any chat
+ * in it, so a review that starts on a week-old chat lifts its parent into
+ * "working" rather than leaving the one row doing something off the bottom of
+ * the list.
  */
 export function buildChatTree(
   chats: Chat[],
-  lastActivity: Record<string, number>,
+  sectionSince: Record<string, number>,
   prsByKey: Record<string, PrRecord>,
 ): ChatBranch[] {
-  const at = (c: Chat) => lastActivity[c.id] ?? c.updatedAt ?? c.createdAt;
+  const at = (c: Chat) => sectionSince[c.id] ?? c.updatedAt ?? c.createdAt;
   const present = new Set(chats.map((c) => c.id));
   const byId = new Map(chats.map((c) => [c.id, c]));
   const children = new Map<string, Chat[]>();
@@ -435,21 +550,46 @@ export function buildChatTree(
   // that has done nothing for a week. Same failure this function's docblock
   // names, one level down.
   const branch = (chat: Chat): ChatBranch => {
-    const kids = (children.get(chat.id) ?? [])
-      .map(branch)
-      .sort((a, b) => rankBranch(b, at) - rankBranch(a, at));
+    const kids = (children.get(chat.id) ?? []).map(branch).sort(compare);
+    const descendants = kids.flatMap((k) => [k.chat, ...k.descendants]);
     return {
       chat,
+      section: [chat, ...descendants]
+        .map(chatSection)
+        .reduce((top, s) => (SECTION_PRECEDENCE[s] > SECTION_PRECEDENCE[top] ? s : top)),
       children: kids,
-      descendants: kids.flatMap((k) => [k.chat, ...k.descendants]),
+      descendants,
     };
   };
 
-  return roots.map(branch).sort((a, b) => rankBranch(b, at) - rankBranch(a, at));
+  // Display order, not precedence: "new" draws ABOVE "needs input" (an empty
+  // chat you opened is there to be used or deleted, so it stays in your face)
+  // even though a branch with both files under the question.
+  const compare = (a: ChatBranch, b: ChatBranch): number => {
+    const bySection = CHAT_SECTIONS.indexOf(a.section) - CHAT_SECTIONS.indexOf(b.section);
+    if (bySection !== 0) return bySection;
+    const delta = branchSince(b, at) - branchSince(a, at);
+    return NEWEST_FIRST[a.section] ? delta : -delta;
+  };
+
+  return roots.map(branch).sort(compare);
 }
 
-const rankBranch = (b: ChatBranch, at: (c: Chat) => number): number =>
-  b.descendants.reduce((max, r) => Math.max(max, at(r)), at(b.chat));
+/**
+ * When a branch entered its queue: the clock of the members that PUT it there.
+ *
+ * Newest member for the newest-first queues, so a child that just asked a
+ * question lifts its parent to the top the way a fresh question should.
+ * Oldest member for `working`, so a second child starting up leaves the branch
+ * where it already was instead of re-appending it — that queue's one job is to
+ * hold still.
+ */
+const branchSince = (b: ChatBranch, at: (c: Chat) => number): number => {
+  const clocks = [b.chat, ...b.descendants]
+    .filter((c) => chatSection(c) === b.section)
+    .map(at);
+  return NEWEST_FIRST[b.section] ? Math.max(...clocks) : Math.min(...clocks);
+};
 
 /**
  * Selector: this project's chats as branches, newest first.
@@ -462,11 +602,11 @@ const rankBranch = (b: ChatBranch, at: (c: Chat) => number): number =>
  */
 export function useProjectChatTree(projectId: string | null): ChatBranch[] {
   const chats = useProjectChats(projectId);
-  const lastActivity = useChats((s) => s.lastActivity);
+  const sectionSince = useChats((s) => s.sectionSince);
   const prsByKey = usePrs((s) => s.byKey);
   return useMemo(
-    () => buildChatTree(chats, lastActivity, prsByKey),
-    [chats, lastActivity, prsByKey],
+    () => buildChatTree(chats, sectionSince, prsByKey),
+    [chats, sectionSince, prsByKey],
   );
 }
 
