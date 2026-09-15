@@ -907,10 +907,12 @@ describe("buildTaskParts — issue handling", () => {
     expect(brief.text).toContain("**Mode: triage.** Do not change code.");
     expect(brief.text).toContain("`dispatch:working`");
     expect(brief.text).toContain("spawn_chat");
-    expect(context.text).toContain("### #7 Issue 7");
+    expect(context.text).toContain("### #7\n");
+    // The title is inside the fence with the body, never a bare heading.
+    expect(context.text).not.toContain("# Issue 7");
     expect(context.text).toContain("opened by @mallory (none)");
-    // The body holds a ``` run, so the fence around it is longer.
-    expect(context.text).toContain("````\nSteps:");
+    // The body holds a ``` run, so the fence around title + body is longer.
+    expect(context.text).toContain("````\nTitle: Issue 7\n\nSteps:");
   });
 
   it("briefs implement mode to ship through a PR that closes the issue", () => {

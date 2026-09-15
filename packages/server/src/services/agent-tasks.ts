@@ -856,14 +856,18 @@ function fenceIssueText(text: string): string {
   return `${fence}\n${text.trim() || "(empty)"}\n${fence}`;
 }
 
-/** One issue, as the briefing lists it. */
+/**
+ * One issue, as the briefing lists it. The title goes INSIDE the fence with the
+ * body: it is the same author's free text, and a title left as a bare heading
+ * beside the real instructions is the one line an injection would aim for.
+ */
 function issueBriefEntry(issue: Issue): string {
   const labels = issue.labels.length ? ` — labels: ${issue.labels.join(", ")}` : "";
   return [
-    `### #${issue.number} ${issue.title}`,
+    `### #${issue.number}`,
     `${issue.url} — opened by @${issue.author} (${issue.authorTrust})${labels}`,
     "",
-    fenceIssueText(issue.body),
+    fenceIssueText(`Title: ${issue.title.replace(/\s+/g, " ").trim()}\n\n${issue.body}`),
   ].join("\n");
 }
 

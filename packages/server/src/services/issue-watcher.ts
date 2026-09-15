@@ -46,6 +46,15 @@ export const ISSUE_TICK_MS = 60_000;
 /** Issues read per poll — enough that a burst since the last poll all fits. */
 const POLL_LIMIT = 100;
 
+/**
+ * How long a row may sit at `claimed` with no chat before it is treated as an
+ * interrupted claim. Claim → label → spawn spans several awaits, and a restart
+ * in that window (every app upgrade is one) leaves the row parked there with
+ * nothing that would ever move it. Generous, because a slow spawn is not a
+ * dead one: launching a chat reads GitHub and starts a runtime.
+ */
+export const CLAIM_GRACE_MS = 10 * 60_000;
+
 export interface IssueWatcherSpawn {
   projectId: string;
   issues: Issue[];
@@ -62,6 +71,7 @@ export interface IssueWatcherOptions {
     | "listIssueClaims"
     | "claimIssues"
     | "updateIssueClaim"
+    | "deleteIssueClaim"
     | "getIssueWatch"
     | "saveIssueWatch"
   >;
@@ -245,7 +255,12 @@ export class IssueWatcher {
       return { ...result, error };
     }
 
-    const claims = await this.store.listIssueClaims(projectId).catch(() => []);
+    const claims = await this.reapInterrupted(
+      tracker,
+      policy,
+      await this.store.listIssueClaims(projectId).catch(() => []),
+      now,
+    );
     const claimed = new Map(claims.map((c) => [c.key, c]));
     // Settle BEFORE counting: an issue the last chat closed is a slot this poll
     // can use, not one it should wait a full interval to notice.
@@ -365,6 +380,31 @@ export class IssueWatcher {
     }
     await save({ lastError: result.error, lastSeen: result.seen });
     return result;
+  }
+
+  /**
+   * Drop claims a crash or restart left at `claimed` with no chat. The row is
+   * DELETED rather than released: released means a human ended it and it must
+   * not come back, whereas this one was never handed to anyone — the issue is
+   * still new, and the next poll should take it again. The label comes off so
+   * that poll (or the other instance) is not turned away by our own lock.
+   */
+  private async reapInterrupted(
+    tracker: BoundIssueTracker,
+    policy: ResolvedIssuePolicy,
+    claims: IssueClaim[],
+    now: number,
+  ): Promise<IssueClaim[]> {
+    const kept: IssueClaim[] = [];
+    for (const c of claims) {
+      if (c.state === "claimed" && !c.chatId && now - c.claimedAt > CLAIM_GRACE_MS) {
+        await tracker.update(c.number, { removeLabels: [policy.claimLabel] }).catch(() => {});
+        await this.store.deleteIssueClaim(c.key).catch(() => {});
+        continue;
+      }
+      kept.push(c);
+    }
+    return kept;
   }
 
   /**

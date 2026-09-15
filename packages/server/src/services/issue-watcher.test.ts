@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Issue, IssueClaim, IssueConfig, IssueWatch, Project } from "@dispatch/shared";
 import type { AppSettings } from "../store/index.js";
 import { EventBus } from "../bus.js";
-import { IssueWatcher, type IssueWatcherOptions, type IssueWatcherSpawn } from "./issue-watcher.js";
+import { CLAIM_GRACE_MS, IssueWatcher, type IssueWatcherOptions, type IssueWatcherSpawn } from "./issue-watcher.js";
 import type { BoundIssueTracker } from "./issues/service.js";
 
 const HOUR = 60 * 60_000;
@@ -44,6 +44,9 @@ function fakeStore(over: { settings?: Partial<AppSettings>; projects?: string[] 
         taken.push(c);
       }
       return taken;
+    },
+    deleteIssueClaim: async (key) => {
+      claims.delete(key);
     },
     updateIssueClaim: async (key, update) => {
       const prev = claims.get(key);
@@ -273,6 +276,64 @@ describe("IssueWatcher", () => {
     t.clock.now = T0 + 2 * HOUR;
     expect((await t.w.pollNow("p1")).taken).toEqual([61]);
     expect(t.claims.get("github:acme/api#60")).toMatchObject({ state: "released", note: "chat gone" });
+  });
+
+  it("drops a claim a restart left at claimed with no chat, and takes the issue again", async () => {
+    const open: Issue[] = [];
+    // A spawn that never returns: the process restarted mid-claim.
+    const t = watcher({ open, config: { enabled: true, maxConcurrent: 1 }, spawn: () => new Promise(() => {}) });
+    await t.enrol();
+    open.push(issue(70, { createdAt: new Date(T0 + 1).toISOString() }));
+    t.clock.now = T0 + HOUR;
+    void t.w.pollNow("p1");
+    await new Promise((r) => setTimeout(r, 5));
+    expect(t.claims.get("github:acme/api#70")).toMatchObject({ state: "claimed" });
+    expect(t.labels.get(70)?.has("dispatch:working")).toBe(true);
+    // A fresh watcher over the same store (the restarted process) reaps it once
+    // the grace has passed — the slot frees, the label comes off, and it is retried.
+    const spawns: IssueWatcherSpawn[] = [];
+    const w2 = new IssueWatcher({
+      store: t.store,
+      bus: t.bus,
+      configFor: () => ({ enabled: true, maxConcurrent: 1 }),
+      trackerFor: async () => t.tracker,
+      spawn: async (s) => {
+        spawns.push(s);
+        return { chatId: "chat-after-restart" };
+      },
+      now: () => T0 + HOUR + CLAIM_GRACE_MS + 1,
+      setTimer: () => 1,
+      clearTimer: () => {},
+    });
+    const r = await w2.pollNow("p1");
+    expect(r.taken).toEqual([70]);
+    expect(spawns).toHaveLength(1);
+    expect(t.claims.get("github:acme/api#70")).toMatchObject({ state: "working", chatId: "chat-after-restart" });
+  });
+
+  it("does not reap a fresh claimed row — a slow spawn is not a dead one", async () => {
+    const open: Issue[] = [];
+    const t = watcher({ open, config: { enabled: true, maxConcurrent: 1 }, spawn: () => new Promise(() => {}) });
+    await t.enrol();
+    open.push(issue(71, { createdAt: new Date(T0 + 1).toISOString() }));
+    t.clock.now = T0 + HOUR;
+    void t.w.pollNow("p1");
+    await new Promise((r) => setTimeout(r, 5));
+    const w2 = new IssueWatcher({
+      store: t.store,
+      bus: t.bus,
+      configFor: () => ({ enabled: true, maxConcurrent: 1 }),
+      trackerFor: async () => t.tracker,
+      spawn: async () => ({ chatId: "x" }),
+      now: () => T0 + HOUR + 1000,
+      setTimer: () => 1,
+      clearTimer: () => {},
+    });
+    const r = await w2.pollNow("p1");
+    expect(r.taken).toEqual([]);
+    expect(r.seen[0]?.reason).toBe("claimed by this instance");
+    expect(t.claims.get("github:acme/api#71")).toMatchObject({ state: "claimed" });
+    expect(t.labels.get(71)?.has("dispatch:working")).toBe(true);
   });
 
   it("records a tracker failure on the watch row and warns, rather than throwing out of the sweep", async () => {
