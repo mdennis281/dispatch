@@ -563,6 +563,7 @@ export const ConfigSectionSchema = z.enum([
   "workflow",
   "chat",
   "reviewer",
+  "issues",
   "secrets",
   "instructions",
   "agents",

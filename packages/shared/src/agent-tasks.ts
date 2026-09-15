@@ -39,6 +39,7 @@ export const AGENT_TASK_IDS = [
   "git:commit-sweep",
   "memory:consolidate",
   "pr:review",
+  "issue:handle",
 ] as const;
 
 export const AgentTaskIdSchema = z.enum(AGENT_TASK_IDS);
@@ -316,6 +317,18 @@ export const AGENT_TASKS: Record<AgentTaskId, AgentTaskMeta> = {
         default: true,
       },
     ],
+  },
+  "issue:handle": {
+    id: "issue:handle",
+    action: "Handle these issues",
+    noun: "issue handling",
+    icon: "CircleDot",
+    titlePrefix: "issue",
+    blurb: "Reads newly opened tracker issues and triages or implements them, one chat per batch.",
+    placeholder: "optional — e.g. label everything, but only implement bugs",
+    // A one-shot job that ends in code or a public comment on the issue —
+    // either is expensive to get wrong, so effort is not where to save.
+    defaultEffort: "high",
   },
 };
 

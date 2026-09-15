@@ -357,3 +357,73 @@ export function matchIssue(issue: Issue, policy: Pick<ResolvedIssuePolicy, "filt
   }
   return { ok: true };
 }
+
+/* ------------------------------------------------------------------ claims */
+
+/**
+ * Where a claimed issue is in its life. Rows never go back: a `released` issue
+ * is one a human ended (deleted the chat), and re-claiming it automatically
+ * would undo exactly the thing they did — it can only be picked up again by hand.
+ */
+export const IssueClaimStateSchema = z.enum(["claimed", "working", "done", "released", "failed"]);
+export type IssueClaimState = z.infer<typeof IssueClaimStateSchema>;
+
+/**
+ * One issue this instance has taken on — the `state.db` half of the lock. The
+ * other half is the claim label on the issue itself, which is what a SECOND
+ * instance (or a human) sees; this row is what stops this instance from
+ * re-spawning for an issue it already handed to a chat.
+ */
+export const IssueClaimSchema = z.object({
+  /** {@link issueKey}: `github:owner/repo#12`. */
+  key: z.string(),
+  projectId: z.string(),
+  source: IssueSourceSchema,
+  number: z.number().int().positive(),
+  title: z.string(),
+  url: z.string(),
+  state: IssueClaimStateSchema,
+  mode: IssueModeSchema,
+  /** The chat handling it (absent while `claimed` — before the spawn landed). */
+  chatId: z.string().optional(),
+  /** Why it failed or was released, when it was. */
+  note: z.string().optional(),
+  claimedAt: z.number(),
+  updatedAt: z.number(),
+});
+export type IssueClaim = z.infer<typeof IssueClaimSchema>;
+
+/**
+ * Per-project poll bookkeeping. `baselineAt` is the enrolment moment: only an
+ * issue opened AFTER it is ever picked up, so switching a project on does not
+ * hand the whole backlog to agents in one pass.
+ */
+export const IssueWatchSchema = z.object({
+  projectId: z.string(),
+  baselineAt: z.number(),
+  lastPolledAt: z.number().optional(),
+  lastError: z.string().optional(),
+  /** What the last poll saw, for the pane: every open issue and why it was or wasn't taken. */
+  lastSeen: z
+    .array(
+      z.object({
+        number: z.number().int(),
+        title: z.string(),
+        url: z.string(),
+        taken: z.boolean(),
+        reason: z.string().optional(),
+      }),
+    )
+    .optional(),
+});
+export type IssueWatch = z.infer<typeof IssueWatchSchema>;
+
+/** The chat purpose kind the watcher spawns — matches the `issue:handle` task. */
+export const ISSUE_HANDLE_KIND = "issue:handle";
+
+/** The sidebar sentence for an issue-handling chat. */
+export function issueHandlingPurposeLabel(sourceLabel: string, numbers: readonly number[]): string {
+  return numbers.length === 1
+    ? `Handling issue #${numbers[0]} in ${sourceLabel}`
+    : `Handling ${numbers.length} issues in ${sourceLabel}`;
+}

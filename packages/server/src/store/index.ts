@@ -93,6 +93,10 @@ import {
   type TerminalLineRecord,
   PrRecordSchema,
   type PrRecord,
+  IssueClaimSchema,
+  type IssueClaim,
+  IssueWatchSchema,
+  type IssueWatch,
   McpPortLeaseSchema,
   type McpPortLease,
   ShellTranscriptFilterSchema,
@@ -271,6 +275,20 @@ export const AppSettingsSchema = z.object({
       deleteBranch: z.boolean().default(true),
       /** Minutes a tree must sit untouched before the unattended sweep takes it. */
       graceMinutes: z.number().int().positive().optional(),
+    })
+    .optional(),
+  /**
+   * Issue-triggered chats (see IssueWatcher) — the master switch.
+   *
+   * ON by default, because enrolment is per project: nothing polls until a
+   * project authors `issues.enabled: true`, so this switch only ever turns OFF
+   * something a human already asked for. It exists so one flip stops every
+   * project at once — an agent spawning on somebody's issue text is the kind of
+   * thing you want a single, findable off switch for.
+   */
+  issueWatcher: z
+    .object({
+      enabled: z.boolean().default(true),
     })
     .optional(),
   /**
@@ -1703,6 +1721,79 @@ export class Store {
 
   async deletePrRecord(key: string): Promise<void> {
     this.db.prepare("DELETE FROM pr WHERE key = ?").run(key);
+  }
+
+  /* ------------------------------------------------------------ issues */
+
+  async listIssueClaims(projectId?: string): Promise<IssueClaim[]> {
+    const rows = projectId
+      ? this.rows("SELECT body FROM issue WHERE project_id = ? ORDER BY seq", projectId)
+      : this.rows("SELECT body FROM issue ORDER BY seq");
+    return rows.flatMap((r) => {
+      const c = decodeRow(IssueClaimSchema, r.body);
+      return c ? [c] : [];
+    });
+  }
+
+  async getIssueClaim(key: string): Promise<IssueClaim | null> {
+    const row = this.db.prepare("SELECT body FROM issue WHERE key = ?").get(key);
+    return row ? decodeRow(IssueClaimSchema, row.body) : null;
+  }
+
+  /**
+   * Take the issues that are not already on file, in ONE transaction, and say
+   * which ones were actually taken. Two polls landing together — a forced
+   * "poll now" during a scheduled pass — each get a disjoint set instead of
+   * both spawning a chat for the same issue.
+   */
+  async claimIssues(claims: IssueClaim[]): Promise<IssueClaim[]> {
+    return this.db.tx(() => {
+      const taken: IssueClaim[] = [];
+      const exists = this.db.prepare("SELECT 1 FROM issue WHERE key = ?");
+      const insert = this.db.prepare("INSERT INTO issue (key, project_id, body) VALUES (?, ?, ?)");
+      for (const claim of claims) {
+        if (exists.get(claim.key)) continue;
+        const parsed = IssueClaimSchema.parse(claim);
+        insert.run(parsed.key, parsed.projectId, JSON.stringify(parsed));
+        taken.push(parsed);
+      }
+      return taken;
+    });
+  }
+
+  async updateIssueClaim(key: string, update: Partial<Omit<IssueClaim, "key">>): Promise<IssueClaim | null> {
+    return this.db.tx(() => {
+      const row = this.db.prepare("SELECT body FROM issue WHERE key = ?").get(key);
+      const prev = row ? decodeRow(IssueClaimSchema, row.body) : null;
+      if (!prev) return null;
+      const result = IssueClaimSchema.parse({ ...prev, ...update, key });
+      this.db.prepare("UPDATE issue SET body = ? WHERE key = ?").run(JSON.stringify(result), key);
+      return result;
+    });
+  }
+
+  async deleteIssueClaim(key: string): Promise<void> {
+    this.db.prepare("DELETE FROM issue WHERE key = ?").run(key);
+  }
+
+  async getIssueWatch(projectId: string): Promise<IssueWatch | null> {
+    const row = this.db.prepare("SELECT body FROM issue_watch WHERE project_id = ?").get(projectId);
+    return row ? decodeRow(IssueWatchSchema, row.body) : null;
+  }
+
+  async saveIssueWatch(watch: IssueWatch): Promise<IssueWatch> {
+    const parsed = IssueWatchSchema.parse(watch);
+    this.db
+      .prepare(
+        "INSERT INTO issue_watch (project_id, body) VALUES (?, ?)" +
+          " ON CONFLICT(project_id) DO UPDATE SET body = excluded.body",
+      )
+      .run(parsed.projectId, JSON.stringify(parsed));
+    return parsed;
+  }
+
+  async deleteIssueWatch(projectId: string): Promise<void> {
+    this.db.prepare("DELETE FROM issue_watch WHERE project_id = ?").run(projectId);
   }
 
   /* ------------------------------------------------------- checkpoints */

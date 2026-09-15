@@ -66,6 +66,7 @@ import { ProcTableCache } from "./proc-table-cache.js";
 import { ResourceService } from "./resources.js";
 import { GitHubService } from "./github.js";
 import { IssueService } from "./issues/service.js";
+import { IssueWatcher } from "./issue-watcher.js";
 import { Notifier } from "./notifier.js";
 import { PushService } from "./push.js";
 import { AttentionQueue } from "./attention.js";
@@ -137,6 +138,7 @@ export interface ServiceOverrides {
   fsExplorer?: FsExplorerService;
   trunkSync?: TrunkSyncService;
   prReviewWatcher?: PrReviewWatcher;
+  issueWatcher?: IssueWatcher;
   prRegistry?: PrRegistry;
   chatMessenger?: ChatMessenger;
 }
@@ -217,6 +219,8 @@ export interface Services extends ServiceBase {
   trunkSync: TrunkSyncService;
   /** Raises `review` attention (and wakes the owning chat) on PR activity. */
   prReviewWatcher: PrReviewWatcher;
+  /** Polls enrolled projects' trackers and starts a chat per batch of new issues. */
+  issueWatcher: IssueWatcher;
   /** The tracked-PR catalog — the Workspace view's third registry. */
   prRegistry: PrRegistry;
   /** Start background wiring (attention, notifier, reconcile, auto-checkpoint). */
@@ -782,6 +786,46 @@ export function createServices(
         },
       },
     });
+  const issueWatcher =
+    overrides.issueWatcher ??
+    new IssueWatcher({
+      store,
+      bus,
+      configFor: (projectId) => projectConfig.getIssues(projectId),
+      trackerFor: (projectId) => issues.forProject(projectId),
+      chatExists: async (chatId) => !!(await store.getChat(chatId).catch(() => null)),
+      // Only the INSTALLED app polls. Stable and dev share config/ (both would
+      // see a project enrolled) but not data/ (neither sees the other's
+      // claims), so a dev checkout polling too would race stable for every
+      // issue. `release.supported` is "this payload came from a release", which
+      // is exactly the installed/dev line. The env var is the escape hatch for
+      // exercising the watcher from a checkout on purpose.
+      active: () => {
+        const forced = process.env.DISPATCH_ISSUE_WATCHER;
+        if (forced === "1" || forced === "true") return true;
+        if (forced === "0" || forced === "false") return false;
+        return release.supported;
+      },
+      spawn: async ({ projectId, issues: batch, policy, sourceLabel }) => {
+        const out = await launchAgentTask(services, {
+          projectId,
+          taskId: "issue:handle",
+          effort: policy.effort,
+          harness: policy.harness,
+          model: policy.model,
+          agentId: policy.agentId,
+          personaId: policy.personaId,
+          params: {
+            issues: batch,
+            mode: policy.mode,
+            sourceLabel,
+            claimLabel: policy.claimLabel,
+            houseRules: policy.instructions,
+          },
+        }).catch(() => null);
+        return out ? { chatId: out.chat.id } : null;
+      },
+    });
   // `create_pr` pre-seeds the watcher so the first sweep after a PR opens can't
   // badge the chat for activity that predates it.
   // Fire-and-forget: arming now reads GitHub, and `create_pr` must not wait on
@@ -1013,6 +1057,7 @@ export function createServices(
     metricsBackfill,
     trunkSync,
     prReviewWatcher,
+    issueWatcher,
     prRegistry,
     restartResume,
 
@@ -1106,6 +1151,7 @@ export function createServices(
       // Notices review rounds on PRs chats own — the half of the loop that
       // doesn't require an agent to keep asking — and keeps the catalog current.
       safeStart("prReviewWatcher", () => prReviewWatcher.start());
+      safeStart("issueWatcher", () => issueWatcher.start());
 
       // Agent-created worktree detection: subscribe to turn-complete signals and
       // seed the per-project baseline. Best-effort — a git/seed failure here must
@@ -1245,6 +1291,8 @@ export function createServices(
       // the store out from under it.
       prReviewWatcher.dispose();
       await prReviewWatcher.drain().catch(() => {});
+      issueWatcher.dispose();
+      await issueWatcher.drain().catch(() => {});
       usage.stop();
       accountUsage.stop();
       release.stop();

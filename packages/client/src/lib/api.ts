@@ -94,6 +94,11 @@ import type {
   SecretPut,
   SecretRefreshReport,
   SecretSummary,
+  IssueConfig,
+  IssueSource,
+  IssueWatch,
+  IssueClaim,
+  ResolvedIssuePolicy,
   ReviewerVerify,
   ResourceSnapshot,
   SystemResources,
@@ -195,6 +200,8 @@ export interface AppSettings {
     deleteBranch?: boolean;
     graceMinutes?: number;
   };
+  /** Issue-triggered chats — the app-wide switch. ON when unset; enrolment is per project. */
+  issueWatcher?: { enabled?: boolean };
   auth?: {
     enabled?: boolean;
     firstRunDismissed?: boolean;
@@ -653,6 +660,15 @@ export const api = {
       put<{ target: "manifest"; project: Project; manifestPath?: string }>(
         `/api/projects/${projectId}/config/defaults`,
         patch,
+      ),
+    /**
+     * Replace (or with `null`, remove) the manifest's `issues:` block. Manifest-
+     * only, like `saveDefaults`.
+     */
+    saveIssues: (projectId: string, block: IssueConfig | null) =>
+      put<{ target: "manifest"; project: Project; manifestPath?: string }>(
+        `/api/projects/${projectId}/config/issues`,
+        block,
       ),
     /** Derive a config dir from the project's `.data` record. */
     scaffold: (projectId: string, force?: boolean) =>
@@ -1201,6 +1217,36 @@ export const api = {
    * committed. The token is WRITE-ONLY across this boundary; nothing here ever
    * returns it, so a session that didn't set it can't read it back.
    */
+  /** Issue-triggered chats (see routes/issues.ts). */
+  issues: {
+    /** What origin implies vs what the manifest authored — the pane's autofill. */
+    source: (projectId: string) =>
+      get<{
+        configured: IssueSource | null;
+        detected: IssueSource | null;
+        remote: string | null;
+        effective: { source: IssueSource; from: "config" | "origin" } | null;
+      }>(`/api/projects/${projectId}/issues/source`),
+    status: (projectId: string) =>
+      get<{
+        config: IssueConfig | null;
+        policy: ResolvedIssuePolicy;
+        globalEnabled: boolean;
+        active: boolean;
+        watch: IssueWatch | null;
+        claims: IssueClaim[];
+      }>(`/api/projects/${projectId}/issues/status`),
+    /** Poll now, ignoring the interval. */
+    poll: (projectId: string) =>
+      post<{
+        skipped?: string;
+        seen: Array<{ number: number; title: string; url: string; taken: boolean; reason?: string }>;
+        taken: number[];
+        chatId?: string;
+        error?: string;
+      }>(`/api/projects/${projectId}/issues/poll`),
+  },
+
   /**
    * The secret store (see routes/secrets.ts). Write-only: nothing here returns a
    * value, and there is deliberately no way to ask for one.

@@ -29,6 +29,7 @@ import {
   type Project,
   type ShellTranscriptFilter,
   type WorkflowConfig,
+  type IssueConfig,
 } from "@dispatch/shared";
 import type { Store } from "../store/index.js";
 import type { ProjectConfigService } from "./project-config.js";
@@ -293,4 +294,58 @@ export async function saveProjectDefaults(
   await deps.projectConfig.reload(projectId);
   const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
   return { target: "manifest", project: project2, manifestPath };
+}
+
+/**
+ * Write (or remove) the manifest's `issues:` block — the project's enrolment in
+ * issue-triggered chats and everything about how it handles them.
+ *
+ * Replaced WHOLE rather than patched key by key, unlike `saveProjectDefaults`:
+ * the block is a single decision ("handle issues like this"), the pane edits it
+ * as one form, and a partial patch would leave a filter from last week under a
+ * mode chosen today. Manifest-only for the same reason as the defaults writer —
+ * this block is read from the loaded config and nowhere else. Absent keys are
+ * pruned from what is written so the file reads as authored, not as a dump.
+ */
+export async function saveProjectIssues(
+  deps: { store: Store; projectConfig: ProjectConfigService },
+  projectId: string,
+  block: IssueConfig | null,
+): Promise<ProjectSettingSaveResult | null> {
+  const project = await deps.store.getProject(projectId).catch(() => null);
+  if (!project) return null;
+  const externalDir = deps.store.projectConfigDir(projectId);
+  const paths = isManifestBacked(project, externalDir) ? configPathsFor(project, externalDir) : null;
+  if (!paths) {
+    throw new Error(
+      "This project has no config dir yet. Create one (Project config → Create config) " +
+        "and the issue settings will be written to its project.yaml.",
+    );
+  }
+  const loaded = await loadManifest(paths);
+  const pruned = block ? prune(block) : null;
+  if (pruned && Object.keys(pruned).length) loaded.doc.setIn(["issues"], pruned);
+  else loaded.doc.delete("issues");
+  const manifestPath = await saveManifest(loaded);
+  await deps.projectConfig.reload(projectId);
+  const project2 = (await deps.store.getProject(projectId).catch(() => null)) ?? project;
+  return { target: "manifest", project: project2, manifestPath };
+}
+
+/** Drop `undefined`, empty strings and empty arrays/objects, recursively. */
+function prune(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const out = value.map(prune).filter((v) => v !== undefined);
+    return out.length ? out : undefined;
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      const p = prune(v);
+      if (p !== undefined) out[k] = p;
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+  if (value === "" || value === undefined) return undefined;
+  return value;
 }

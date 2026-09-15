@@ -324,6 +324,28 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
           </div>
         )}
       </div>
+
+      <div className="border-t border-line-soft pt-3">
+        <SectionLabel className="mb-1.5 px-0">Issues</SectionLabel>
+        {/* The master switch only. Enrolment is per project (Project config →
+            Issues), so this is never what turns the feature ON — it is the one
+            place that turns every project OFF at once. */}
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-secondary">Start chats from new issues</div>
+            <p className="mt-0.5 text-2xs leading-snug text-faint">
+              Polls the tracker of every project that opted in (Project config → Issues) and
+              starts a chat for each batch of newly opened issues. Off here stops all of them,
+              whatever the projects say.
+            </p>
+          </div>
+          <Switch
+            checked={draft.issueWatcher?.enabled !== false}
+            onChange={(v) => patch({ issueWatcher: { enabled: v } })}
+            label={draft.issueWatcher?.enabled !== false ? "On" : "Off"}
+          />
+        </div>
+      </div>
     </div>
   );
 }
