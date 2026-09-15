@@ -205,7 +205,7 @@ export const ShellRunGroup = memo(function ShellRunGroup({
               // Counted, never hardcoded: the list has already lost a category
               // (`pr`, now its own card) and a stale "of 7" is a lie the UI
               // tells with total confidence.
-              tip={`Shell visibility · ${filter.enabled.length} of ${SHELL_FILTER_OPTIONS.length} shown`}
+              tip={`Transcript visibility · ${filter.enabled.length} of ${SHELL_FILTER_OPTIONS.length} shown`}
               active={filter.enabled.length < SHELL_FILTER_OPTIONS.length}
               onClick={() => setFilterOpen(true)}
             >

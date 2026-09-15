@@ -1,5 +1,5 @@
 import { parseSessionLimit, type AssistantMessageRow } from "@dispatch/shared";
-import type { TranscriptItem } from "./toolPresentations.js";
+import type { TranscriptItem, TranscriptThinkingItem } from "./toolPresentations.js";
 
 /**
  * Is this text nothing but a usage-limit notice? Single-line, so a real answer
@@ -44,4 +44,46 @@ export function continuedAssistantIds(items: TranscriptItem[]): Set<string> {
     prev = null;
   }
   return ids;
+}
+
+/**
+ * Merge thinking stacks that are separated only by items the reader cannot
+ * see, moving the invisible items after the merged stack.
+ *
+ * Thinking is almost never literally adjacent to more thinking: a turn thinks,
+ * then calls a tool, then thinks again. So with every category shown the
+ * stacks are singletons and this is a no-op — the honest sequence. But hide the
+ * shell (the whole point of the filter, and how a long tool stretch is usually
+ * read) and the transcript becomes thought / nothing / thought / nothing, which
+ * should read as ONE run of reasoning. `groupTranscriptRows` cannot know that:
+ * it is filter-agnostic, and the filter is a per-chat React subscription.
+ *
+ * The hidden items are kept, not dropped — they still render (collapsed and
+ * animated by their own component), so un-hiding them later has something to
+ * expand. They are pushed after the stack rather than left inside it, which
+ * changes DOM order only while they are invisible.
+ */
+export function stackThinkingAcrossHidden(
+  items: TranscriptItem[],
+  isHidden: (item: TranscriptItem) => boolean,
+): TranscriptItem[] {
+  const out: TranscriptItem[] = [];
+  // Index in `out` of the stack the next thinking item may join, if everything
+  // pushed since it was hidden.
+  let open = -1;
+  for (const item of items) {
+    if (item.kind === "thinking") {
+      if (open >= 0) {
+        const stack = out[open] as TranscriptThinkingItem;
+        out[open] = { kind: "thinking", rows: [...stack.rows, ...item.rows] };
+      } else {
+        out.push(item);
+        open = out.length - 1;
+      }
+      continue;
+    }
+    out.push(item);
+    if (!(open >= 0 && isHidden(item))) open = -1;
+  }
+  return out;
 }

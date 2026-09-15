@@ -628,7 +628,7 @@ export function ProjectSettingsView() {
                   disabled={saving}
                 />
                 <div className="border-t border-line-soft pt-3">
-                  <div className="mb-1 text-xs font-medium text-secondary">Transcript shell</div>
+                  <div className="mb-1 text-xs font-medium text-secondary">Transcript visibility</div>
                   <p className="mb-2 text-2xs leading-snug text-faint">
                     Project visibility defaults. Chats inherit this filter until they override it.
                   </p>

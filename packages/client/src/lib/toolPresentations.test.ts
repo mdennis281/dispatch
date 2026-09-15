@@ -98,6 +98,29 @@ describe("groupTranscriptRows", () => {
     expect(grouped[0]).toMatchObject({ kind: "shell", rows: [shell, recall, remember] });
   });
 
+  it("stacks adjacent thinking-only rows, and splits a row that thinks then speaks", () => {
+    const think = (id: string, text = ""): ChatMessage => ({
+      kind: "assistant", id, chatId: "chat", ts: 1, text, thinking: `hmm ${id}`,
+    });
+    const answer = think("c", "Done.");
+    const grouped = groupTranscriptRows([think("a"), think("b"), answer]);
+    // The final thought stacks with the ones before it; the text is its own row.
+    expect(grouped).toEqual([
+      { kind: "thinking", rows: [think("a"), think("b"), answer] },
+      { kind: "row", row: answer },
+    ]);
+    // A tool call between two thoughts is real and closes the stack.
+    const bash = tool("Bash", { command: "pwd" }, "bash");
+    expect(groupTranscriptRows([think("a"), bash, think("b")])).toEqual([
+      { kind: "thinking", rows: [think("a")] },
+      { kind: "shell", rows: [bash] },
+      { kind: "thinking", rows: [think("b")] },
+    ]);
+    // No thinking, no stack.
+    const plain: ChatMessage = { kind: "assistant", id: "p", chatId: "chat", ts: 1, text: "hi" };
+    expect(groupTranscriptRows([plain])).toEqual([{ kind: "row", row: plain }]);
+  });
+
   it("keeps an unhandled tool on the existing row path", () => {
     const unknown = tool("WebFetch", { url: "https://example.com" });
     expect(groupTranscriptRows([unknown])).toEqual([{ kind: "row", row: unknown }]);

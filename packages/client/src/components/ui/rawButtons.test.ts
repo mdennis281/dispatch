@@ -115,8 +115,12 @@ const ALLOWED_DIR = join(SRC, "components", "ui");
  * 89 → 88: the top bar's 380px faux search field became an `IconButton`. It was
  * a raw `<button>` styled as a text input, and its only behaviour was opening
  * the palette modal, which has its own.
+ *
+ * 88 → 87: the assistant row's hand-rolled "Thought for a moment" toggle went
+ * with the thinking it folded — reasoning is its own stacked block now
+ * (`chat/rows/ThinkingGroup.tsx`), built on `Button` and `IconButton`.
  */
-const BASELINE = 88;
+const BASELINE = 87;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

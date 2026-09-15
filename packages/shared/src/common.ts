@@ -6,12 +6,21 @@
 import * as z from "zod";
 
 /**
- * Tool families that can be shown inside Dispatch's compact transcript shell.
+ * Tool families that can be shown inside Dispatch's compact transcript shell,
+ * plus the model's own reasoning.
  *
  * `pr` was here and is deliberately gone: pull-request tools left the terminal
  * frame for cards of their own, so a toggle that hid them among shell commands
  * no longer describes anything. Retiring a category is exactly why the filter
  * parses leniently below.
+ *
+ * `thinking` is not a tool at all — it is the reasoning the model emits between
+ * steps. It lives in this list because the reader's question is the same one
+ * ("show me the work, or just the answers?") and it deserves the same
+ * chat → project → app layering rather than a second settings surface. The
+ * list is opt-in, so a filter saved before `thinking` existed reads as hiding
+ * it — a one-time re-tick for anyone with a custom filter, and nothing at all
+ * for the default (absent = every category on).
  */
 export const SHELL_TRANSCRIPT_CATEGORIES = [
   "shell",
@@ -20,6 +29,7 @@ export const SHELL_TRANSCRIPT_CATEGORIES = [
   "preview",
   "chat",
   "dispatch",
+  "thinking",
 ] as const;
 export const ShellTranscriptCategorySchema = z.enum(SHELL_TRANSCRIPT_CATEGORIES);
 export type ShellTranscriptCategory = z.infer<typeof ShellTranscriptCategorySchema>;
