@@ -39,6 +39,7 @@ export * from "./titles.js";
 export * from "./version.js";
 export * from "./wire.js";
 export * from "./metrics.js";
+export * from "./growth.js";
 export * from "./pr-tools.js";
 export * from "./manager-tools.js";
 export * from "./human-review.js";
