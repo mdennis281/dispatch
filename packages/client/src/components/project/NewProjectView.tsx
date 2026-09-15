@@ -335,10 +335,14 @@ export function NewProjectView({ setup = false, onBack, onDone }: NewProjectView
   const yaml = adoptedConfig ?? draftYaml;
 
   // Where task worktrees actually land, and whether that's inside the checkout —
-  // which is what decides whether the `.gitignore` advice applies at all.
+  // which is what decides whether the warning below applies at all.
   const resolvedWorktree = resolvedWorktreeRoot(draft.repoPath, draft.worktreeRoot);
   const repoPrefix = draft.repoPath.trim().replace(/\\/g, "/").replace(/\/+$/, "");
   const worktreeInsideRepo = !!repoPrefix && resolvedWorktree.startsWith(`${repoPrefix}/`);
+  // The layout the warning points at: a sibling named after the repo, which is
+  // what this project itself uses. Offered as a concrete value rather than
+  // "put it somewhere else" so fixing it is a paste, not a decision.
+  const siblingWorktreeRoot = `../${repoPrefix.split("/").pop() || "repo"}-worktrees`;
 
   const configRoot = (probe?.repoRoot ?? draft.repoPath.trim()).replace(/\/+$/, "");
   const manifestPath = configRoot
@@ -568,28 +572,43 @@ export function NewProjectView({ setup = false, onBack, onDone }: NewProjectView
                 </div>
                 <p className="text-2xs leading-snug text-faint">
                   One directory per repo holding a subdirectory per branch — the convention
-                  worktree tooling has settled on.{" "}
-                  {/* The .gitignore advice only applies to a root that actually
-                      lands inside the checkout; for a sibling or absolute root
-                      git never sees it, and saying otherwise is noise. */}
-                  {worktreeInsideRepo ? (
-                    <>
-                      Keeping it inside the repo makes the project one folder you can move or
-                      delete as a unit; add{" "}
-                      <span className="cm-mono">{draft.worktreeRoot || DEFAULT_WORKTREE_ROOT}</span>{" "}
-                      to <span className="cm-mono">.gitignore</span>.
-                    </>
-                  ) : (
-                    <>Kept outside the repo, so git never sees it.</>
-                  )}
+                  worktree tooling has settled on.
                   {draft.repoPath.trim() && (
                     <>
                       {" "}
                       Task worktrees land in{" "}
-                      <span className="cm-mono text-muted">{resolvedWorktree}</span>.
+                      <span className="cm-mono text-muted">{resolvedWorktree}</span>
+                      {worktreeInsideRepo ? "." : " — outside the repo, so git never sees it."}
                     </>
                   )}
                 </p>
+                {/* A root inside the checkout puts a full copy of the tree under
+                    the tree, once per open task. Every recursive search then
+                    walks all of them and reports each hit N times, and anything
+                    that indexes or watches the repo pays the same. `.gitignore`
+                    only quiets the tools that read it (git, ripgrep) — plain
+                    grep, find, IDE indexers and glob-based tool configs don't.
+                    A warning rather than a refusal because the layout is fine
+                    for a small repo; it just has to be chosen knowing the cost,
+                    which the old "one folder you can move as a unit" copy sold
+                    as a feature. */}
+                {worktreeInsideRepo && (
+                  <div
+                    className="flex items-start gap-1.5 text-xs leading-snug text-warn [&_svg]:mt-px [&_svg]:size-3.5 [&_svg]:shrink-0"
+                    data-testid="worktree-inside-repo-warning"
+                  >
+                    <TriangleAlert />
+                    <span className="min-w-0">
+                      Inside the checkout. Each task worktree is a complete copy of the repo, so
+                      grep, find and IDE search walk every copy and return each hit once per
+                      worktree; indexers and file watchers pay the same. Listing{" "}
+                      <span className="cm-mono">{draft.worktreeRoot || DEFAULT_WORKTREE_ROOT}</span>{" "}
+                      in <span className="cm-mono">.gitignore</span> only helps the tools that
+                      read it. A sibling directory such as{" "}
+                      <span className="cm-mono">{siblingWorktreeRoot}</span> avoids all of it.
+                    </span>
+                  </div>
+                )}
               </Section>
 
               <Section title="Workflow" hint="how change ships here">
