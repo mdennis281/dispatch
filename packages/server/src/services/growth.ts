@@ -19,6 +19,7 @@
  * leaving it to finish diffing a history nobody will read.
  */
 import { execa } from "execa";
+import treeKill from "tree-kill";
 import {
   GROWTH_GENERATED_KEY,
   classifyPath,
@@ -325,9 +326,24 @@ export class GrowthService {
         // Read as it comes; buffering the whole numstat would hold tens of MB
         // for a long history and defeat the progress stream.
         buffer: false,
-        ...(signal ? { cancelSignal: signal } : {}),
+        // NO `cancelSignal` here, deliberately — see `onAbort` below.
       },
     );
+
+    // Cancellation is a TREE kill, and nothing else may touch the process
+    // first. On Windows the `git` on PATH is usually the `Git/cmd/git.exe`
+    // shim, which runs the real binary as a CHILD. execa's `cancelSignal`
+    // kills the shim alone — and because it is registered at spawn it fires
+    // BEFORE any listener added here, so a tree-kill that follows it finds a
+    // dead parent whose children `taskkill /T` can no longer enumerate. The
+    // real git then keeps diffing until its stdout pipe breaks. Measured:
+    // a 30k-commit walk survived an abort for the rest of its run. So the
+    // abort listener owns the kill outright, and the iteration below ends
+    // when the pipe does.
+    const onAbort = () => {
+      if (child.pid) treeKill(child.pid, "SIGKILL", () => {});
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     let lastReport = Date.now();
     try {
@@ -342,6 +358,8 @@ export class GrowthService {
     } catch (err) {
       if (signal?.aborted) throw new Error("cancelled");
       throw err;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
     }
     const result = await child;
     if (result.exitCode !== 0) {

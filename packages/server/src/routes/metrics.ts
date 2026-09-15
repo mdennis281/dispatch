@@ -180,8 +180,7 @@ export function registerMetricsRoutes(app: FastifyInstance): void {
         "x-accel-buffering": "no",
       });
       const send = (frame: GrowthFrame): void => {
-        if (!raw.writableEnded && !raw.destroyed) raw.write(`${JSON.stringify(frame)}
-`);
+        if (!raw.writableEnded && !raw.destroyed) raw.write(`${JSON.stringify(frame)}\n`);
       };
 
       // A closed socket cancels the git walk; nobody is going to read it.

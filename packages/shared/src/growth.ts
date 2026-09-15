@@ -98,6 +98,7 @@ const GENERATED_SUFFIXES = [
   ".pb.ts",
   "_pb2.py",
   ".d.ts.map",
+  ".tsbuildinfo",
 ];
 
 /**
