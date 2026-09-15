@@ -5001,13 +5001,19 @@ describe("manager-mcp — mode tools and chat posture", () => {
     expect(resultText(ok)).toContain('Switched this chat to mode "plan" (plan)');
     expect(m.calls).toEqual([["mode", "c1", "plan"]]);
 
-    const unknown = await chatSetMode.handler({ modeId: "ghost", chatId: "c2" }, {});
+    const unknown = await chatSetMode.handler({ modeId: "ghost", chatId: undefined }, {});
     expect(unknown.isError).toBe(true);
     expect(m.calls).toHaveLength(1);
 
+    // A PEER may live in another project whose modes this session can't see,
+    // so an id unknown here is handed to the broker rather than refused.
+    const peer = await chatSetMode.handler({ modeId: "ghost", chatId: "c2" }, {});
+    expect(peer.isError).toBeFalsy();
+    expect(m.calls[1]).toEqual(["mode", "c2", "ghost"]);
+
     const unpin = await chatSetMode.handler({ modeId: null, chatId: "c2" }, {});
     expect(resultText(unpin)).toContain("Unpinned chat c2");
-    expect(m.calls[1]).toEqual(["mode", "c2", null]);
+    expect(m.calls[2]).toEqual(["mode", "c2", null]);
   });
 
   it("chat_set_persona reaches another chat but never the caller", async () => {

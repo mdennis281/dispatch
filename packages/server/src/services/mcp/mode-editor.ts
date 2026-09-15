@@ -150,7 +150,14 @@ export function createModeEditor(deps: ModeEditorDeps): ManagerMcpModes {
         if (!configPaths) throw new Error("this session has no project to write a mode into");
         const dir = await modesDir(configPaths);
         await mkdir(dir, { recursive: true });
-        const path = join(dir, `${id}.yaml`);
+        // A REPLACE has to leave exactly one file for the id. The loader takes
+        // either extension, so a hand-authored `<id>.yml` must be overwritten in
+        // place rather than joined by a fresh `<id>.yaml` — two files for one
+        // id is a `duplicate mode id` config error on every reload, with the
+        // alphabetical loser silently ignored.
+        const yml = join(dir, `${id}.yml`);
+        const path = existsSync(yml) && !existsSync(join(dir, `${id}.yaml`)) ? yml : join(dir, `${id}.yaml`);
+        if (path !== yml && existsSync(yml)) await rm(yml, { force: true });
         // Key order is the order a human reads the file in: what it's called,
         // when to use it, what it permits, then the overlay.
         const doc: Record<string, unknown> = { name };

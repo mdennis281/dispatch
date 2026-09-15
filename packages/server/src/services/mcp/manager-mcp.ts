@@ -6997,8 +6997,17 @@ ${look}` : "")
       }
       // Refused up front rather than pinned: the broker would happily pin an
       // unknown id and resolve it to `default`, which reads as "worked" while
-      // silently dropping the posture that was asked for.
-      if (modeId !== null && ctx.modes && !(await ctx.modes.read(modeId))) {
+      // silently dropping the posture that was asked for. Only for THIS chat,
+      // though — `ctx.modes` sees the caller's project, and a peer in another
+      // project may legitimately name a mode that exists only in its own
+      // `.dispatch/modes/`. The broker resolves those against every loaded
+      // project, so a peer switch is handed straight through.
+      if (
+        modeId !== null &&
+        chatId === ctx.chatId &&
+        ctx.modes &&
+        !(await ctx.modes.read(modeId))
+      ) {
         return textResult(
           `No mode "${modeId}" exists in any scope. Call mode_list to see what does, or ` +
             "mode_write to create it.",

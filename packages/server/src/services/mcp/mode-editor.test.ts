@@ -121,6 +121,22 @@ describe("mode-editor", () => {
     expect((await editor.read("plan"))?.scope).toBe("builtin");
   });
 
+  it("replacing a hand-authored .yml mode overwrites it in place instead of adding a twin", async () => {
+    const editor = createModeEditor({
+      store: fakeStore(),
+      configPaths: resolveProjectPaths(root),
+      builtin: BUILTIN,
+    });
+    const dir = join(root, ".dispatch", "modes");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "audit.yml"), "name: Audit\npermissionMode: plan\n", "utf8");
+    const written = await editor.write({ scope: "project", name: "Audit", permissionMode: "auto" });
+    expect(written.path).toBe(join(dir, "audit.yml"));
+    expect(existsSync(join(dir, "audit.yaml"))).toBe(false);
+    // One file for the id — the loader would otherwise report a duplicate.
+    expect((await readModesDir(dir)).map((m) => [m.id, m.permissionMode])).toEqual([["audit", "auto"]]);
+  });
+
   it("readModesDir skips a file with no usable posture rather than failing the listing", async () => {
     const dir = join(root, "modes");
     await mkdir(dir);
