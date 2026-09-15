@@ -1,5 +1,5 @@
 /**
- * The Metrics screen — the shell over its two subpages.
+ * The Metrics screen — the shell over its subpages.
  *
  * The ledger has two halves and they answer different questions. USAGE counts
  * what agents reached for (400 Bash calls); RUNTIME measures where the wall
@@ -28,17 +28,19 @@
  * which is a second filter row on a page that already has one, and the thing
  * this layout avoids.
  */
-import { Activity, BarChart3, Gauge, RefreshCw } from "lucide-react";
+import { Activity, BarChart3, Gauge, RefreshCw, TrendingUp } from "lucide-react";
 import { ScrollArea } from "../ui/ScrollArea.js";
 import { IconButton } from "../ui/IconButton.js";
 import { Tabs } from "../ui/Tabs.js";
 import { useMetrics } from "../../stores/metrics.js";
 import { useSpanMetrics } from "../../stores/metrics-spans.js";
 import { useResources } from "../../stores/resources.js";
+import { useGrowth } from "../../stores/growth.js";
 import { useView, type MetricsSection } from "../../stores/view.js";
 import { RuntimeMetrics } from "./RuntimeMetrics.js";
 import { UsageMetrics } from "./UsageMetrics.js";
 import { ResourceMetrics } from "./ResourceMetrics.js";
+import { GrowthMetrics } from "./GrowthMetrics.js";
 import { count } from "./chrome.js";
 import { cn } from "../../lib/cn.js";
 
@@ -63,15 +65,29 @@ export function MetricsView() {
   const resourceBusy = useResources((s) => s.refetching);
   const rescan = useResources((s) => s.refreshSnapshot);
 
+  // Growth is a WALK of the project's git history rather than a query, so its
+  // "rows" is commits on the trunk and its reload walks again from scratch —
+  // there is no cache for it to bypass.
+  const growthCommits = useGrowth((s) => s.report?.commits ?? 0);
+  const growthBusy = useGrowth((s) => s.loading);
+  const rewalk = useGrowth((s) => s.load);
+
   const runtime = section === "runtime";
   const resources = section === "resources";
-  const rows = resources ? resourceChats : runtime ? spanRows : usageRows;
-  const busy = resources ? resourceBusy : runtime ? spanBusy : usageBusy;
+  const growth = section === "growth";
+  const rows = growth ? growthCommits : resources ? resourceChats : runtime ? spanRows : usageRows;
+  const busy = growth ? growthBusy : resources ? resourceBusy : runtime ? spanBusy : usageBusy;
   // FORCED for the resource tab. Its snapshot is served off a 10 s table
   // cache, so a plain refetch inside that window returns a byte-identical
   // answer and the button reads as broken.
-  const reload = resources ? () => rescan(true) : runtime ? reloadSpans : reloadUsage;
-  const unit = resources ? "chats" : runtime ? "spans" : "rows";
+  const reload = growth
+    ? rewalk
+    : resources
+      ? () => rescan(true)
+      : runtime
+        ? reloadSpans
+        : reloadUsage;
+  const unit = growth ? "commits" : resources ? "chats" : runtime ? "spans" : "rows";
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">
@@ -85,6 +101,7 @@ export function MetricsView() {
             { id: "usage", label: "Usage", icon: <BarChart3 size={13} /> },
             { id: "runtime", label: "Runtime", icon: <Activity size={13} /> },
             { id: "resources", label: "Resources", icon: <Gauge size={13} /> },
+            { id: "growth", label: "Growth", icon: <TrendingUp size={13} /> },
           ]}
         />
         <span className="cm-mono !text-2xs text-faint">
@@ -101,7 +118,15 @@ export function MetricsView() {
           relative to `Date.now()`, so a "last 7 days" render held from an hour
           ago is quietly answering a different question than its own label. */}
       <ScrollArea className="min-h-0 flex-1">
-        {resources ? <ResourceMetrics /> : runtime ? <RuntimeMetrics /> : <UsageMetrics />}
+        {growth ? (
+          <GrowthMetrics />
+        ) : resources ? (
+          <ResourceMetrics />
+        ) : runtime ? (
+          <RuntimeMetrics />
+        ) : (
+          <UsageMetrics />
+        )}
       </ScrollArea>
     </div>
   );
