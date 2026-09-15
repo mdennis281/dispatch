@@ -216,6 +216,8 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
   const typing = focused || kb > 0;
   const debug = useViewport((s) => s.debug);
   const toggleDebug = useViewport((s) => s.toggleDebug);
+  const viewportFit = useViewport((s) => s.viewportFit);
+  const setViewportFit = useViewport((s) => s.setViewportFit);
   const [moreOpen, setMoreOpen] = useState(false);
 
   const project = useProjects((s) => s.activeProjectId);
@@ -474,6 +476,22 @@ export function BottomNav({ chat }: { chat: Chat | null }) {
             label={debug ? "Hide viewport readout" : "Viewport readout"}
             onClick={toggleDebug}
           />
+          {/* EXPERIMENT, only reachable with the readout up: swap the viewport
+              meta between `viewport-fit=cover` (ours) and none (what the PWA
+              that reaches the home indicator uses). Takes effect on the next
+              launch — quit the app fully — and the readout's `fit` row says
+              which one is live. See docs/ios-pwa-viewport-findings.md. */}
+          {debug && (
+            <SheetRow
+              icon={<Ruler />}
+              label={
+                viewportFit === "auto"
+                  ? "Viewport fit: auto (relaunch → cover)"
+                  : "Viewport fit: cover (relaunch → auto)"
+              }
+              onClick={() => setViewportFit(viewportFit === "auto" ? "cover" : "auto")}
+            />
+          )}
           <div className="my-1 h-px bg-line-soft" />
           {/* The attention queue is a triage LIST, not a destination, so it keeps
               its popover rather than becoming a row that opens another sheet. */}

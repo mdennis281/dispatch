@@ -108,6 +108,9 @@ interface ViewportStore extends ViewportMetrics {
   maxInnerHeight: number;
   /** How the shrink heal is going — see `healViewport`. Diagnostic. */
   heal: HealStats;
+  /** Which viewport meta the page loaded with — see `setViewportFit`. */
+  viewportFit: ViewportFit;
+  setViewportFit: (fit: ViewportFit) => void;
   debug: boolean;
   toggleDebug: () => void;
   set: (m: ViewportMetrics, maxInnerHeight: number, heal: HealStats) => void;
@@ -124,10 +127,49 @@ export interface HealStats {
 
 const NO_HEALS: HealStats = { attempts: 0, wins: 0, last: "" };
 
+export type ViewportFit = "cover" | "auto";
+
+/**
+ * The same key `index.html`'s pre-paint script reads. iOS applies the viewport
+ * meta once at load, so the switch has to be honoured there; this store only
+ * remembers the choice and reports what the page actually loaded with.
+ */
+const VIEWPORT_FIT_KEY = "dispatch:viewport-fit";
+
+function readViewportFit(): ViewportFit {
+  if (typeof document === "undefined") return "cover";
+  return document.documentElement.dataset.viewportFit === "auto" ? "auto" : "cover";
+}
+
 export const useViewport = create<ViewportStore>((set) => ({
   ...EMPTY,
   maxInnerHeight: 0,
   heal: NO_HEALS,
+  viewportFit: readViewportFit(),
+  // Persisted, unlike `debug`, because it can only take effect on the NEXT
+  // launch — the page has to load with the other meta. The readout's `fit` row
+  // says which one is live so a stale choice can't hide.
+  setViewportFit: (fit) => {
+    try {
+      if (fit === "auto") localStorage.setItem(VIEWPORT_FIT_KEY, "auto");
+      else localStorage.removeItem(VIEWPORT_FIT_KEY);
+    } catch {
+      // Storage blocked: nothing to remember, so the next launch is `cover`.
+    }
+    // Also try it live. WebKit re-reads a changed viewport meta at runtime for
+    // zoom settings; whether it does for `viewport-fit` is one of the things
+    // the readout is there to show. A resize follows if it did.
+    const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+    if (meta) {
+      meta.content =
+        fit === "auto"
+          ? "width=device-width, initial-scale=1.0"
+          : "width=device-width, initial-scale=1.0, viewport-fit=cover";
+    }
+    if (fit === "auto") document.documentElement.dataset.viewportFit = "auto";
+    else delete document.documentElement.dataset.viewportFit;
+    set({ viewportFit: fit });
+  },
   // Not persisted: this is a "show me what's happening right now" switch, and a
   // diagnostic overlay that survives a reload is one you forget you left on.
   debug: false,
@@ -349,6 +391,11 @@ export function startViewportTracking(): () => void {
    */
   const maybeHeal = () => {
     if (!healable || healFrom >= 0) return;
+    // Under `viewport-fit=auto` the window is EXPECTED to be a status bar
+    // short of the screen from the first frame — that is the inset layout the
+    // experiment is asking for, not the shrink — so there is nothing to heal
+    // and the attempts would only burn the circuit breaker.
+    if (useViewport.getState().viewportFit === "auto") return;
     // Three misses and never a hit means this is not the bug we know, and a
     // reflow of the entire app on every blur is not a price worth paying to
     // keep checking.
