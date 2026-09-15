@@ -3,14 +3,16 @@
  *   GET  /api/update          → UpdateStatus (cached; never hits the network)
  *   POST /api/update/check    → refresh from GitHub, then UpdateStatus
  *   PUT  /api/update/channel  → switch stable/unstable, then UpdateStatus
- *   POST /api/update/install  → { ok: true }, then the installer takes over
+ *   POST /api/update/install  → { ok: true, tag, version }, then the installer takes over
  *
  * `POST /api/update/install` is the only endpoint here with teeth, and it stays
  * deliberately narrow: the ONLY tag it will ever install is the head of the
- * subscribed channel, which the server resolved itself. A caller may now name
- * that tag explicitly — that is how the unstable → stable step-back works, since
- * a downgrade is by definition not `available` — but naming any OTHER tag is
- * refused, so this cannot be talked into fetching a build from somewhere else.
+ * subscribed channel, which the server resolved itself — and re-resolves on the
+ * way in, so the build installed is the newest one, not the newest one the last
+ * poll happened to see. A caller may name the head explicitly — that is how the
+ * unstable → stable step-back works, since a downgrade is by definition not
+ * `available` — but naming any OTHER tag is refused, so this cannot be talked
+ * into fetching a build from somewhere else.
  * It also refuses on a payload that is not a release install (`supported:
  * false`) — there, the installer has nothing to replace.
  *
@@ -97,8 +99,17 @@ export function registerUpdateRoutes(app: FastifyInstance): void {
   });
 
   app.post("/api/update/install", async (req, reply) => {
-    const status = release.status();
     const requested = (req.body as { tag?: unknown } | undefined)?.tag;
+    // The head the caller was LOOKING at when it clicked, captured before the
+    // re-check below can move it. A named tag is validated against this as
+    // well as the fresh head, so a release landing between "Check now" and
+    // "Update" turns the click into an install of the newer build rather than
+    // a refusal for naming a tag that stopped being the head a moment ago.
+    const shownHead = release.headTag();
+    // Re-resolved on every install, past the manual-click floor. What gets
+    // installed is whatever the channel's head IS, not whatever it was when the
+    // card was drawn — see `ReleaseService.check`.
+    const status = await release.check("install");
 
     if (!status.supported) {
       reply.code(409);
@@ -113,8 +124,11 @@ export function registerUpdateRoutes(app: FastifyInstance): void {
     // BEFORE `available` — a downgrade is never "available" by construction.
     // What it must be is the head of the channel you are actually subscribed to,
     // which is the whole of the trust boundary here.
+    const head = release.headTag();
     if (requested !== undefined) {
-      if (typeof requested !== "string" || requested !== release.headTag()) {
+      const isHead =
+        typeof requested === "string" && head !== null && (requested === head || requested === shownHead);
+      if (!isHead) {
         reply.code(409);
         return {
           ok: false,
@@ -125,12 +139,23 @@ export function registerUpdateRoutes(app: FastifyInstance): void {
       reply.code(409);
       return { ok: false, error: "there is no newer release to install" };
     }
-    if (status.installing) {
+    // Read LIVE, not off `status`. That object is a snapshot taken by the
+    // re-check above — one that coalesces concurrent callers onto one promise —
+    // so two clicks arriving during the same GitHub round-trip are handed the
+    // same snapshot, both with `installing` unset, and the second would sail
+    // past a check on it after the first had already latched. There is no
+    // `await` between this read and `markInstalling()`, which is what makes the
+    // pair atomic.
+    if (release.status().installing) {
       reply.code(409);
       return { ok: false, error: "an update is already running" };
     }
 
-    const tag = typeof requested === "string" ? requested : status.latest!.tag;
+    // Always the CURRENT head — even when the caller named the previous one.
+    // A named tag is the caller saying "yes, even though it is not `available`"
+    // (the step-back), not a request for that specific build over a newer one.
+    const tag = head!;
+    const version = status.latest?.version ?? null;
     // Latched before the reply, not after the spawn: two clicks that arrive
     // together would otherwise both pass the check above and start two
     // installers racing for the same `app/` rename.
@@ -151,6 +176,8 @@ export function registerUpdateRoutes(app: FastifyInstance): void {
       }, SETTLE_MS).unref?.();
     });
 
-    return { ok: true, tag };
+    // `version` rides along so the client's in-flight record names the build
+    // actually being installed, not the one its (possibly stale) card showed.
+    return { ok: true, tag, version };
   });
 }

@@ -309,6 +309,19 @@ describe("ReleaseService", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  it("lets an install re-check past the floor", async () => {
+    // An install is decided against the head as it is NOW. A "Check now" ten
+    // seconds earlier must not pin it to that answer — the whole reason the
+    // install re-checks is the release that landed in between.
+    let clock = 1_000_000;
+    const fetchImpl = vi.fn(async () => jsonResponse(releaseJson("v2026.08.14.85068")));
+    const service = await svc({ fetchImpl: fetchImpl as unknown as typeof fetch, now: () => clock });
+
+    await service.check(true);
+    await service.check("install");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it("stops advertising the button once an install has been launched", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(releaseJson("v2026.08.14.85068")));
     const service = await svc({ fetchImpl: fetchImpl as unknown as typeof fetch });

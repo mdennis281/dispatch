@@ -32,6 +32,9 @@ const MANIFEST = {
 
 let dir: string;
 let app: FastifyInstance;
+/** What GitHub answers as the channel head; mutable so a test can move it mid-flight. */
+const head: { tag: string | null } = { tag: null };
+let ticks = 0;
 let bus: EventBus;
 const roots: string[] = [];
 
@@ -47,14 +50,24 @@ async function payloadDir(manifest: unknown): Promise<string> {
   return appDir;
 }
 
-/** Build an app whose ReleaseService sees `manifest` and `latestTag`. */
+/**
+ * Build an app whose ReleaseService sees `manifest` and `latestTag`.
+ *
+ * `head` is a box, not a value, because the property the install tests care
+ * most about is what happens when GitHub's answer CHANGES between the check
+ * that drew the card and the install that followed it.
+ */
 async function withRelease(manifest: unknown, latestTag: string | null): Promise<ReleaseService> {
+  head.tag = latestTag;
   const store = new Store(dir);
   await store.init();
   const release = new ReleaseService({
     bus,
     appDir: await payloadDir(manifest),
     env: {},
+    // The route's install re-check must not be floor-spaced away; a real clock
+    // would put every install inside the 10s manual gap of the check above.
+    now: () => Date.now() + 60_000 * ++ticks,
     // The same channel wiring `createServices` installs. Built over the real
     // store rather than stubbed, because the property most worth testing here is
     // that the subscription survives a full-replace PUT /api/settings.
@@ -66,12 +79,12 @@ async function withRelease(manifest: unknown, latestTag: string | null): Promise
       },
     },
     fetchImpl: (async () => ({
-      ok: latestTag !== null,
-      status: latestTag !== null ? 200 : 500,
+      ok: head.tag !== null,
+      status: head.tag !== null ? 200 : 500,
       headers: new Headers(),
       json: async () => ({
-        tag_name: latestTag,
-        html_url: `https://github.com/mdennis281/dispatch/releases/tag/${latestTag}`,
+        tag_name: head.tag,
+        html_url: `https://github.com/mdennis281/dispatch/releases/tag/${head.tag}`,
       }),
     })) as unknown as typeof fetch,
   });
@@ -180,7 +193,47 @@ describe("POST /api/update/install", () => {
     // Answering before the installer stops this server is the whole ordering
     // contract; a caller that gets a dropped socket cannot tell start from fail.
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.85068" });
+    expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.85068", version: "2026.08.14.85068" });
+    await settleLaunch("v2026.08.14.85068");
+  });
+
+  it("installs the head as it is NOW, not as the last check saw it", async () => {
+    // The card was drawn from a poll up to six hours old. A release that landed
+    // since is the one that gets installed — otherwise the user lands on a
+    // build that is already stale, with a fresh nudge waiting for them.
+    await withRelease(MANIFEST, "v2026.08.14.85068");
+    head.tag = "v2026.08.16.63367";
+    const res = await app.inject({ method: "POST", url: "/api/update/install" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, tag: "v2026.08.16.63367", version: "2026.08.16.63367" });
+    await settleLaunch("v2026.08.16.63367");
+  });
+
+  it("accepts a named tag that WAS the head and installs the one that replaced it", async () => {
+    // The step-back names the head it was shown. If the head moved between the
+    // showing and the click, the click still means "install the channel head",
+    // and refusing it for naming a tag that stopped being the head a moment
+    // ago would make the button fail exactly when a release is fresh.
+    await withRelease(MANIFEST, "v2026.08.14.79778");
+    head.tag = "v2026.08.14.80000";
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/update/install",
+      payload: { tag: "v2026.08.14.79778" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, tag: "v2026.08.14.80000" });
+    await settleLaunch("v2026.08.14.80000");
+  });
+
+  it("keeps the last known head when the re-check fails", async () => {
+    // Rule 2 of ReleaseService: a failed check never destroys a good answer.
+    // Offline at the moment of the click still installs what the card showed.
+    await withRelease(MANIFEST, "v2026.08.14.85068");
+    head.tag = null;
+    const res = await app.inject({ method: "POST", url: "/api/update/install" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, tag: "v2026.08.14.85068" });
     await settleLaunch("v2026.08.14.85068");
   });
 
@@ -212,6 +265,26 @@ describe("POST /api/update/install", () => {
     expect(res.json().error).toContain("already running");
   });
 
+  it("latches exactly one of two installs that arrive during the same re-check", async () => {
+    // The re-check is an `await`, and it coalesces callers onto one promise —
+    // so both requests wake with the SAME status snapshot. The latch has to be
+    // read live after that wake, or the second request passes a check on a
+    // snapshot the first has already invalidated and two installers race for
+    // one `app/` rename.
+    await withRelease(MANIFEST, "v2026.08.14.85068");
+    const [a, b] = await Promise.all([
+      app.inject({ method: "POST", url: "/api/update/install" }),
+      app.inject({ method: "POST", url: "/api/update/install" }),
+    ]);
+    const codes = [a.statusCode, b.statusCode].sort();
+    expect(codes).toEqual([200, 409]);
+    expect([a.json(), b.json()].find((r) => !r.ok)?.error).toContain("already running");
+    await settleLaunch("v2026.08.14.85068");
+    // Settled on ONE launch — and it stays one. A second would be the race.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(launchUpdate).toHaveBeenCalledTimes(1);
+  });
+
   it("installs an explicitly named tag when it is the channel head", async () => {
     // The step-back: the head is OLDER than what is installed, so `available` is
     // false and the tag-less form would be refused. Naming it is the ask.
@@ -222,7 +295,7 @@ describe("POST /api/update/install", () => {
       payload: { tag: "v2026.08.14.79778" },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.79778" });
+    expect(res.json()).toEqual({ ok: true, tag: "v2026.08.14.79778", version: "2026.08.14.79778" });
     await settleLaunch("v2026.08.14.79778");
   });
 

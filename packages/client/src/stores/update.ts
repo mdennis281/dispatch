@@ -16,7 +16,7 @@ import {
   writeFlight,
   type UpdateFlight,
 } from "../lib/updatePrefs.js";
-import { probeHealth } from "../lib/updateProbe.js";
+import { probeHealth, type HealthProbe } from "../lib/updateProbe.js";
 
 interface UpdateStore {
   status: UpdateStatus | null;
@@ -63,6 +63,35 @@ interface UpdateStore {
 }
 
 const initialFlight = readFlight();
+
+/**
+ * The outgoing server's identity, or as much of it as can be had.
+ *
+ * Retried, because one dropped probe here costs more than anywhere else: a
+ * flight recorded with no identity at all could only ever be resolved by
+ * watching the server go down and come back in this very tab — and a tab that
+ * reloaded during the swap, or that was opened after it, never sees the going.
+ * The old screen then waited out its patience timer, offered a reload that
+ * landed on the same marker, and repeated until the marker expired a day later.
+ */
+async function probeBaseline(): Promise<HealthProbe | null> {
+  for (let attempt = 0; attempt < BASELINE_ATTEMPTS; attempt++) {
+    const probe = await probeHealth();
+    if (probe) return probe;
+    await new Promise((resolve) => setTimeout(resolve, BASELINE_RETRY_MS));
+  }
+  return null;
+}
+const BASELINE_ATTEMPTS = 3;
+const BASELINE_RETRY_MS = 500;
+
+function identityOf(baseline: HealthProbe | null): Pick<UpdateFlight, "fromPid" | "fromStartedAt" | "fromVersion"> {
+  return {
+    fromPid: baseline?.pid ?? null,
+    fromStartedAt: baseline?.startedAt ?? null,
+    fromVersion: baseline?.version ?? null,
+  };
+}
 
 export const useUpdate = create<UpdateStore>((set, get) => ({
   status: null,
@@ -122,7 +151,7 @@ export const useUpdate = create<UpdateStore>((set, get) => ({
     // the outgoing process. Probing afterwards would race the shutdown and could
     // record the identity of the build we are waiting for as the one we are
     // waiting to LOSE, which strands the screen forever.
-    const baseline = await probeHealth();
+    const baseline = await probeBaseline();
 
     try {
       const res = await api.update.install(tag);
@@ -130,11 +159,13 @@ export const useUpdate = create<UpdateStore>((set, get) => ({
         set({ installing: false });
         return res;
       }
+      // The server's answer names the build, not the card that was clicked: it
+      // re-resolves the channel head before accepting, and a release that
+      // landed since the last check is the one now being installed.
       const flight: UpdateFlight = {
         tag: res.tag ?? tag ?? null,
-        version: get().status?.latest?.version ?? null,
-        fromPid: baseline?.pid ?? null,
-        fromStartedAt: baseline?.startedAt ?? null,
+        version: res.version ?? get().status?.latest?.version ?? null,
+        ...identityOf(baseline),
         startedAt: Date.now(),
       };
       writeFlight(flight);
@@ -148,7 +179,7 @@ export const useUpdate = create<UpdateStore>((set, get) => ({
 
   adopt: async () => {
     if (get().flight) return;
-    const baseline = await probeHealth();
+    const baseline = await probeBaseline();
     // Re-checked after the await: another caller may have landed a flight while
     // the probe was out, and two markers for one install would disagree about
     // which process to watch for.
@@ -156,8 +187,7 @@ export const useUpdate = create<UpdateStore>((set, get) => ({
     const flight: UpdateFlight = {
       tag: get().status?.latest?.tag ?? null,
       version: get().status?.latest?.version ?? null,
-      fromPid: baseline?.pid ?? null,
-      fromStartedAt: baseline?.startedAt ?? null,
+      ...identityOf(baseline),
       startedAt: Date.now(),
     };
     writeFlight(flight);

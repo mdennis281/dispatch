@@ -69,6 +69,16 @@ export interface UpdateFlight {
   fromPid: number | null;
   /** `startedAt` (ms epoch) from that same health report. */
   fromStartedAt: number | null;
+  /**
+   * `version` from that same health report — the build being LEFT. The one
+   * identity that survives a lost baseline: a marker written with neither pid
+   * nor start time (the probe was dropped mid-`pnpm install`, or the old build
+   * did not report them) used to be undecidable, and an undecidable marker held
+   * the updating screen over the login form until the 24h expiry — the only way
+   * out was clearing localStorage by hand. A health report naming any OTHER
+   * version settles it.
+   */
+  fromVersion: string | null;
   /** Client clock when the install was accepted. */
   startedAt: number;
 }
@@ -76,10 +86,18 @@ export interface UpdateFlight {
 /**
  * Beyond this, a marker is junk left by a browser profile restored much later,
  * not an update in progress. The screen self-heals long before this (a server
- * with a different pid resolves it on the first poll); this only bounds the case
- * where the marker outlives the machine's memory of the whole affair.
+ * with a different pid or version resolves it on the first poll); this only
+ * bounds the case where the marker outlives the machine's memory of the whole
+ * affair.
+ *
+ * Thirty minutes, down from a day. The marker's only job on a reload is to hold
+ * the screen up across the minutes the server is DOWN; once anything answers,
+ * the outcome is decided from that answer, and a server that still says
+ * `installing` gets a fresh marker adopted from its own identity. A marker old
+ * enough to have outlived all of that is not protecting an update any more — it
+ * is standing between the user and the sign-in form.
  */
-const FLIGHT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const FLIGHT_MAX_AGE_MS = 30 * 60 * 1000;
 
 export function readFlight(): UpdateFlight | null {
   try {
@@ -96,6 +114,7 @@ export function readFlight(): UpdateFlight | null {
       version: typeof parsed.version === "string" ? parsed.version : null,
       fromPid: typeof parsed.fromPid === "number" ? parsed.fromPid : null,
       fromStartedAt: typeof parsed.fromStartedAt === "number" ? parsed.fromStartedAt : null,
+      fromVersion: typeof parsed.fromVersion === "string" ? parsed.fromVersion : null,
       startedAt: parsed.startedAt,
     };
   } catch {
