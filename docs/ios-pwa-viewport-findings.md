@@ -315,7 +315,11 @@ is needed. If nothing appears — because that band was never paintable — we a
 done. This is the whole of symptom B and it is a deletion, not an addition.
 
 **Step 2 — only if step 1 leaves a visible band: attack the shrink, not the
-symptom.** The community workaround forces WebKit to re-measure after keyboard
+symptom.** *(Step 1 shipped in #91 and the band WAS visible — the nav sat 59px
+above the home indicator over a black strip, so the band is dead space, not
+"never paintable". The heal below is live in `stores/viewport.ts`, gated to
+installed iOS, run 140ms+ after blur once no field is focused and the visual
+viewport equals the window, with a `heal wins/attempts` row in the readout.)* The community workaround forces WebKit to re-measure after keyboard
 blur — `display: none` → sync reflow → `display: ''` on a full-viewport-height
 element, ~140ms after blur ([DEV writeup][dev]). It fits the existing burst
 sampler in `startViewportTracking`. *Predicts:* `inner`/`dvh`/`client` return to

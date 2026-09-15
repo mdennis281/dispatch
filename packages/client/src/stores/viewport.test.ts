@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { keyboardInset } from "./viewport.js";
+import { keyboardInset, viewportShrunk } from "./viewport.js";
 
 // The shell IS the window — `height: 100dvh`, no correction. There used to be a
 // `standaloneShellHeight` that pinned it to the tallest window ever seen and
@@ -70,5 +70,33 @@ describe("keyboardInset", () => {
     // is correct depends on whether `100dvh` shrank with it — which is why the
     // debug overlay reports `dvh` and `inner` side by side.
     expect(plain(596, 596, 0)).toBe(0);
+  });
+});
+
+describe("viewportShrunk", () => {
+  it("is false when the window is the screen", () => {
+    expect(viewportShrunk(932, 932, 0, 932)).toBe(false);
+  });
+
+  it("is true for the iOS standalone shrink signature", () => {
+    // No keyboard — the visual viewport IS the window — yet the window is a
+    // status bar short of the screen. Nothing but a heal can grow it.
+    expect(viewportShrunk(873, 873, 0, 932)).toBe(true);
+  });
+
+  it("is false while a keyboard is covering the window", () => {
+    // Same short window, but the visual viewport is shorter still: that is
+    // the keyboard, and the heal has to wait for it to leave.
+    expect(viewportShrunk(873, 519, 0, 932)).toBe(false);
+  });
+
+  it("is false while iOS has scrolled the page to reveal a caret", () => {
+    // `offsetTop` non-zero with the keyboard already down is the iOS 26
+    // regression; a re-measure taken then would settle on a moved band.
+    expect(viewportShrunk(873, 873, 40, 932)).toBe(false);
+  });
+
+  it("ignores a pixel of rounding", () => {
+    expect(viewportShrunk(930, 930, 0, 932)).toBe(false);
   });
 });
