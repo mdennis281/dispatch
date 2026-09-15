@@ -172,6 +172,9 @@ function ViewportReadout() {
     ["screen", `${m.screenHeight}`, false],
     ["scale", m.vvScale.toFixed(2), Math.abs(m.vvScale - 1) > 0.01],
     ["heal", `${m.heal.wins}/${m.heal.attempts}${m.heal.last ? ` ${m.heal.last}` : ""}`, m.heal.last === "miss"],
+    // What the page LOADED with, not what was last chosen — the choice only
+    // applies at the next launch, and this row is how you know it did.
+    ["fit", m.viewportFit, m.viewportFit === "auto"],
   ];
 
   return (

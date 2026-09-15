@@ -36,6 +36,21 @@
           // Storage blocked (private mode, embedded webview). The `data-theme`
           // already on <html> is the dark default, so we simply keep it.
         }
+        // Viewport-fit EXPERIMENT (More sheet → Viewport readout → "Viewport
+        // fit"). The installed iOS app's window shrinks 932 → 873 after the
+        // first keyboard and never recovers under `viewport-fit=cover`; an
+        // older PWA of Michael's that never set `cover` reaches the home
+        // indicator every time. This is the switch that lets the phone say
+        // whether `cover` is the cause. iOS reads the viewport meta once, at
+        // load, so a mode chosen on the device has to be applied HERE, before
+        // the first layout — `stores/viewport.ts` owns the same key.
+        try {
+          if (localStorage.getItem("dispatch:viewport-fit") === "auto") {
+            var vp = document.querySelector('meta[name="viewport"]');
+            if (vp) vp.content = "width=device-width, initial-scale=1.0";
+            document.documentElement.dataset.viewportFit = "auto";
+          }
+        } catch (e) {}
       })();
     </script>
     <!-- brand:generated:start -->
