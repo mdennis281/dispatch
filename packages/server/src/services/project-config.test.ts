@@ -179,7 +179,14 @@ describe("ProjectConfigService — load a valid .dispatch/", () => {
     );
     await writeConfig(
       "modes/careful.yaml",
-      ["name: Careful", "description: read-only", "permissionMode: plan", "allowedTools: [Read, Grep]"].join("\n"),
+      [
+        "name: Careful",
+        "description: read-only",
+        "permissionMode: plan",
+        "allowedTools: [Read, Grep]",
+        "instructions: |",
+        "  Look, don't touch.",
+      ].join("\n"),
     );
 
     const svc = new ProjectConfigService({ store, bus });
@@ -232,6 +239,8 @@ describe("ProjectConfigService — load a valid .dispatch/", () => {
       name: "Careful",
       permissionMode: "plan",
       allowedTools: ["Read", "Grep"],
+      description: "read-only",
+      instructions: "Look, don't touch.",
     });
 
     // resolved dirs.
@@ -560,13 +569,24 @@ describe("project-config registry helpers", () => {
 
   it("configModeToModeConfig maps a ConfigMode onto the store ModeConfig shape", () => {
     const mode = configModeToModeConfig(
-      { id: "careful", name: "Careful", permissionMode: "plan", allowedTools: ["Read"] },
+      {
+        id: "careful",
+        name: "Careful",
+        description: "read-only",
+        permissionMode: "plan",
+        allowedTools: ["Read"],
+        instructions: "Look, don't touch.",
+      },
       "p1",
     );
+    // The overlay and blurb ride along: without them a `.dispatch/modes/`
+    // mode could set a posture but never say what the posture is for.
     expect(mode).toMatchObject({
       id: "careful",
       name: "Careful",
+      description: "read-only",
       permissionMode: "plan",
+      instructions: "Look, don't touch.",
       scope: "project",
       projectId: "p1",
     });

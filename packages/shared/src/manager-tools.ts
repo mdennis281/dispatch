@@ -130,6 +130,12 @@ export const MANAGER_TOOL_CATEGORY = {
   chat_ask: "chat",
   chat_reply: "chat",
   chat_state: "chat",
+  /* …and the two POSTURE writes: re-pointing a chat at a mode or a persona.
+     They ride the same `messaging` binding as `chat_send`, because both are
+     the same kind of act — reaching into another chat and changing what it
+     does next — and want the same attribution and rate-limit story. */
+  chat_set_mode: "chat",
+  chat_set_persona: "chat",
 
   /* memory — the durable write surface plus the curation reads. */
   remember: "memory",
@@ -140,15 +146,22 @@ export const MANAGER_TOOL_CATEGORY = {
   memory_history: "memory",
   memory_similar: "memory",
 
-  /* config — authoring the INSTRUCTIONS and SKILLS a session is given, the same
-     way memory authors durable facts. Separate from `mcp` on purpose: `mcp_*`
-     wires up external SERVERS through the CLI's config core, while these write
-     the prose (`instructions/*.md`) and the procedures (`skills/<name>/SKILL.md`)
-     that shape how an agent works here. */
+  /* config — authoring the INSTRUCTIONS, SKILLS, PERSONAS and MODES a session
+     is given, the same way memory authors durable facts. Separate from `mcp` on
+     purpose: `mcp_*` wires up external SERVERS through the CLI's config core,
+     while these write the prose (`instructions/*.md`, `personas/*.md`), the
+     procedures (`skills/<name>/SKILL.md`) and the permission postures
+     (`modes/<id>.yaml`) that shape how an agent works here. Modes get their own
+     four tools rather than a fourth `kind` on `config_*`: a mode is a structured
+     record (permissionMode + optional overlay), not a markdown body. */
   config_list: "config",
   config_read: "config",
   config_write: "config",
   config_delete: "config",
+  mode_list: "config",
+  mode_read: "config",
+  mode_write: "config",
+  mode_delete: "config",
 
   /* workspace — where the work physically happens: trees, shells, running apps. */
   worktree: "workspace",

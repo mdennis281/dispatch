@@ -146,6 +146,8 @@ export type AgentConfigInput = z.input<typeof AgentConfigSchema>;
 export const ModeConfigSchema = z.object({
   id: z.string(),
   name: z.string(),
+  /** One line on when to pick this mode — shown in listings, never injected. */
+  description: z.string().optional(),
   permissionMode: PermissionModeSchema,
   instructions: z.string().optional(),
   scope: ConfigScopeSchema.default("global"),
