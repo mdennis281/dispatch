@@ -1,5 +1,5 @@
 import { parseSessionLimit, type AssistantMessageRow } from "@dispatch/shared";
-import type { TranscriptItem } from "./toolPresentations.js";
+import type { TranscriptItem, TranscriptThinkingItem } from "./toolPresentations.js";
 
 /**
  * Is this text nothing but a usage-limit notice? Single-line, so a real answer
@@ -23,14 +23,19 @@ function sameSpeaker(a: AssistantMessageRow, b: AssistantMessageRow): boolean {
  * The assistant rows that should render WITHOUT a header — avatar, name, model
  * chip and clock — because they continue the message directly above them.
  *
- * Adjacency is literal: a tool card, a shell run, a permission, a turn footer,
- * anything at all between two messages brings the header back, because the
- * reader's eye has left the speaker and needs telling who resumed. The one
- * exception is a row that renders nothing — a usage-limit sentence is dropped
- * from the transcript (it reappears as the pause card), so it must not break a
- * block it is invisible inside of.
+ * Adjacency is VISUAL: a tool card, a shell run, a permission, a turn footer,
+ * anything the reader can see between two messages brings the header back,
+ * because their eye has left the speaker and needs telling who resumed. What
+ * they cannot see must not: a usage-limit sentence is dropped from the
+ * transcript (it reappears as the pause card), and an item the filter has
+ * collapsed — a hidden shell run, a hidden thinking stack — is still in the
+ * list but takes up no space, so a header after it would announce a speaker
+ * who, on screen, never left.
  */
-export function continuedAssistantIds(items: TranscriptItem[]): Set<string> {
+export function continuedAssistantIds(
+  items: TranscriptItem[],
+  isHidden: (item: TranscriptItem) => boolean = () => false,
+): Set<string> {
   const ids = new Set<string>();
   let prev: AssistantMessageRow | null = null;
   for (const item of items) {
@@ -41,7 +46,52 @@ export function continuedAssistantIds(items: TranscriptItem[]): Set<string> {
       prev = row;
       continue;
     }
+    if (isHidden(item)) continue;
     prev = null;
   }
   return ids;
+}
+
+/**
+ * Merge thinking stacks that are separated only by items the reader cannot
+ * see, moving the invisible items after the merged stack. `isHidden` is the
+ * same predicate {@link continuedAssistantIds} takes — one definition of
+ * "invisible" for both, so the two can never disagree about what is on screen.
+ *
+ * Thinking is almost never literally adjacent to more thinking: a turn thinks,
+ * then calls a tool, then thinks again. So with every category shown the
+ * stacks are singletons and this is a no-op — the honest sequence. But hide the
+ * shell (the whole point of the filter, and how a long tool stretch is usually
+ * read) and the transcript becomes thought / nothing / thought / nothing, which
+ * should read as ONE run of reasoning. `groupTranscriptRows` cannot know that:
+ * it is filter-agnostic, and the filter is a per-chat React subscription.
+ *
+ * The hidden items are kept, not dropped — they still render (collapsed and
+ * animated by their own component), so un-hiding them later has something to
+ * expand. They are pushed after the stack rather than left inside it, which
+ * changes DOM order only while they are invisible.
+ */
+export function stackThinkingAcrossHidden(
+  items: TranscriptItem[],
+  isHidden: (item: TranscriptItem) => boolean,
+): TranscriptItem[] {
+  const out: TranscriptItem[] = [];
+  // Index in `out` of the stack the next thinking item may join, if everything
+  // pushed since it was hidden.
+  let open = -1;
+  for (const item of items) {
+    if (item.kind === "thinking") {
+      if (open >= 0) {
+        const stack = out[open] as TranscriptThinkingItem;
+        out[open] = { kind: "thinking", rows: [...stack.rows, ...item.rows] };
+      } else {
+        out.push(item);
+        open = out.length - 1;
+      }
+      continue;
+    }
+    out.push(item);
+    if (!(open >= 0 && isHidden(item))) open = -1;
+  }
+  return out;
 }

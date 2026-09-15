@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AssistantMessageRow, ChatMessage } from "@dispatch/shared";
-import { continuedAssistantIds } from "./messageGrouping.js";
-import type { TranscriptItem } from "./toolPresentations.js";
+import { continuedAssistantIds, stackThinkingAcrossHidden } from "./messageGrouping.js";
+import type { TranscriptItem, TranscriptThinkingItem } from "./toolPresentations.js";
 
 function say(id: string, over: Partial<AssistantMessageRow> = {}): AssistantMessageRow {
   return { id, chatId: "c", ts: 0, kind: "assistant", text: `body ${id}`, ...over };
@@ -54,6 +54,18 @@ describe("continuedAssistantIds", () => {
     expect([...subagent]).toEqual([]);
   });
 
+  it("groups across an item the filter has collapsed, which takes up no space", () => {
+    const thinking: TranscriptItem = {
+      kind: "thinking",
+      rows: [{ id: "t", chatId: "c", ts: 0, kind: "assistant", text: "", thinking: "hmm" }],
+    };
+    const items = [item(say("a")), thinking, item(say("b"))];
+    // Shown, the stack sits between them and `b` needs its header back.
+    expect([...continuedAssistantIds(items)]).toEqual([]);
+    // Hidden, nothing is visibly between them.
+    expect([...continuedAssistantIds(items, (i) => i === thinking)]).toEqual(["b"]);
+  });
+
   it("groups across a usage-limit sentence, which renders nothing", () => {
     const limit = say("limit", {
       text: "You've hit your 5-hour limit — resets 4:50pm (America/Chicago)",
@@ -62,5 +74,33 @@ describe("continuedAssistantIds", () => {
     // The limit row is dropped from the transcript, so `b` is visually adjacent
     // to `a` — and the invisible row must not claim a header of its own either.
     expect([...ids]).toEqual(["b"]);
+  });
+});
+
+describe("stackThinkingAcrossHidden", () => {
+  const think = (id: string): TranscriptThinkingItem => ({
+    kind: "thinking",
+    rows: [{ id, chatId: "c", ts: 0, kind: "assistant", text: "", thinking: `hmm ${id}` }],
+  });
+  const hiddenShell = { ...shell, rows: [{ ...shell.rows[0]!, id: "hidden", toolUseId: "uh" }] };
+  const isHidden = (i: TranscriptItem) => i === hiddenShell;
+
+  it("is the identity when nothing is hidden", () => {
+    const items = [think("a"), shell, think("b")];
+    expect(stackThinkingAcrossHidden(items, isHidden)).toEqual(items);
+  });
+
+  it("merges thoughts separated only by hidden runs and moves those runs after the stack", () => {
+    const out = stackThinkingAcrossHidden([think("a"), hiddenShell, think("b"), hiddenShell, think("c")], isHidden);
+    expect(out).toEqual([
+      { kind: "thinking", rows: [...think("a").rows, ...think("b").rows, ...think("c").rows] },
+      hiddenShell,
+      hiddenShell,
+    ]);
+  });
+
+  it("stops at anything visible", () => {
+    const out = stackThinkingAcrossHidden([think("a"), hiddenShell, item(say("x")), think("b")], isHidden);
+    expect(out).toEqual([think("a"), hiddenShell, item(say("x")), think("b")]);
   });
 });

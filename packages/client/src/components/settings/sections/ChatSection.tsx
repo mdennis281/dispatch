@@ -235,7 +235,7 @@ export function ChatSection({ draft, patch, harnesses, catalogs }: AppPaneProps)
         </div>
 
         <div className="mt-4">
-          <div className="mb-1 text-xs font-medium text-secondary">Transcript shell</div>
+          <div className="mb-1 text-xs font-medium text-secondary">Transcript visibility</div>
           <p className="mb-2 text-2xs leading-snug text-faint">
             App-wide visibility defaults. Projects and chats inherit these until they set their
             own filter.

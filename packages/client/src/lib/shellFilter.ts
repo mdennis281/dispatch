@@ -21,6 +21,7 @@ export const SHELL_FILTER_OPTIONS: ReadonlyArray<{
   { id: "preview", label: "App previews", description: "Starting and inspecting project apps" },
   { id: "chat", label: "Chat context", description: "Context usage, compaction, and chat operations" },
   { id: "dispatch", label: "Other Dispatch tools", description: "Worktrees and newly added manager tools" },
+  { id: "thinking", label: "Thinking", description: "The model's reasoning between steps" },
 ];
 
 /**

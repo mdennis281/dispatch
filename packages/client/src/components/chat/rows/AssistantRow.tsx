@@ -1,11 +1,10 @@
-import { memo, useMemo, useState } from "react";
-import { Brain, ChevronRight, Sparkles } from "lucide-react";
+import { memo, useMemo } from "react";
+import { Sparkles } from "lucide-react";
 import type { AssistantMessageRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
 import { Markdown } from "../Markdown.js";
 import { makeCodeRefResolver } from "../codeRefs.js";
 import { Chip } from "../../ui/Chip.js";
-import { cn } from "../../../lib/cn.js";
 import { actions } from "../../../lib/actions.js";
 import { useHasCheckpoint } from "../../../stores/checkpoints.js";
 import { useChats } from "../../../stores/chats.js";
@@ -14,7 +13,9 @@ import { useProjects } from "../../../stores/projects.js";
 import { rowHarnessLabel } from "../../../lib/harness.js";
 
 /**
- * An assistant turn: optional collapsed reasoning + rendered markdown body.
+ * An assistant turn: the rendered markdown body. Its reasoning, if any, is not
+ * rendered here — `groupTranscriptRows` lifts `thinking` into a ThinkingGroup
+ * above this row so it stacks with the thoughts that preceded it.
  *
  * Memoized because this is the expensive row — every render re-parses markdown
  * (react-markdown + remark-gfm) and re-runs Prism over each code fence. A long
@@ -31,7 +32,6 @@ export const AssistantRow = memo(function AssistantRow({
   /** The row directly above is the same speaker — render as one block, no header. */
   continued?: boolean;
 }) {
-  const [showThinking, setShowThinking] = useState(false);
   const canRollback = useHasCheckpoint(chatId, row.id);
 
   // Resolver for clickable code pointers (path:line) in the message body — maps
@@ -67,23 +67,6 @@ export const AssistantRow = memo(function AssistantRow({
         </span>
       }
     >
-      {row.thinking && (
-        <div className="mb-2">
-          <button
-            onClick={() => setShowThinking((v) => !v)}
-            className="inline-flex items-center gap-1.5 rounded-[5px] px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-active hover:text-secondary [&_svg]:size-3"
-          >
-            <Brain />
-            <span>Thought for a moment</span>
-            <ChevronRight className={cn("transition-transform", showThinking && "rotate-90")} />
-          </button>
-          {showThinking && (
-            <div className="mt-1 border-l-2 border-line pl-3 text-sm italic leading-[1.55] text-muted cm-anim-rise">
-              {row.thinking}
-            </div>
-          )}
-        </div>
-      )}
       <Markdown resolve={resolveRef} chatId={chatId}>{row.text}</Markdown>
     </RowShell>
   );

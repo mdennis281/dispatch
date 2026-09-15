@@ -1,6 +1,7 @@
 import {
   fileToolAction,
   isManagerServerOrLegacy,
+  type AssistantMessageRow,
   type ChatMessage,
   type FileToolAction,
   type ToolUseRow,
@@ -307,11 +308,30 @@ export interface TranscriptPrItem {
   rows: ToolUseRow[];
 }
 
+/**
+ * Adjacent reasoning, as one stack.
+ *
+ * The SDK finalizes one assistant message per API turn, and a turn that thinks
+ * and then calls a tool yields a row that is NOTHING but thinking. A long
+ * stretch of tool work is therefore dozens of such rows, and rendering each as
+ * a full "Claude · model · time" message made the transcript read as if the
+ * agent had said something twenty times when it had said nothing at all.
+ *
+ * A row that thinks AND speaks is split: its thinking joins this stack and its
+ * text stays a `row` item, so the final thought before an answer stacks with
+ * the thoughts that led to it.
+ */
+export interface TranscriptThinkingItem {
+  kind: "thinking";
+  rows: AssistantMessageRow[];
+}
+
 export type TranscriptItem =
   | TranscriptRowItem
   | TranscriptShellItem
   | TranscriptFilesItem
-  | TranscriptPrItem;
+  | TranscriptPrItem
+  | TranscriptThinkingItem;
 
 /**
  * Group adjacent terminal-style calls and adjacent file calls into their own
@@ -324,7 +344,10 @@ export type TranscriptItem =
  */
 export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
-  let run: { kind: "shell" | "files" | "pr"; rows: ToolUseRow[] } | null = null;
+  let run:
+    | { kind: "shell" | "files" | "pr"; rows: ToolUseRow[] }
+    | { kind: "thinking"; rows: AssistantMessageRow[] }
+    | null = null;
   const resultsByUse = new Map(
     rows
       .filter((row) => row.kind === "tool_result")
@@ -334,7 +357,7 @@ export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
   const seenToolUseIds = new Set<string>();
 
   const flush = () => {
-    if (run?.rows.length) items.push({ kind: run.kind, rows: run.rows });
+    if (run?.rows.length) items.push(run as TranscriptItem);
     run = null;
   };
 
@@ -354,6 +377,19 @@ export function groupTranscriptRows(rows: ChatMessage[]): TranscriptItem[] {
     // Results and task statuses are folded into their owning command. They do
     // not interrupt a run of commands, just as they did not create visible rows.
     if (row.kind === "tool_result" || row.kind === "task_status") continue;
+    if (row.kind === "assistant" && row.thinking) {
+      if (run?.kind === "thinking") run.rows.push(row);
+      else {
+        flush();
+        run = { kind: "thinking", rows: [row] };
+      }
+      // Thinking-only: the whole row is in the stack. Otherwise the text is its
+      // own item, and it closes the stack because the agent has now spoken.
+      if (!row.text.trim()) continue;
+      flush();
+      items.push({ kind: "row", row });
+      continue;
+    }
     if (row.kind === "tool_use") {
       const presentation = toolPresentation(row);
       if (presentation) {

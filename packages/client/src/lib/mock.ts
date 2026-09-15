@@ -401,6 +401,55 @@ export const MOCK_MESSAGES: Record<string, ChatMessage[]> = {
       content:
         "packages/config/src/enemies/hive.ts:42:  introWave: 10,\npackages/config/src/enemies/index.ts:88:  hive,",
     },
+    // Thinking-only turns: the SDK finalizes one message per API turn, so a
+    // turn that reasons and then calls a tool is a row with NO text. Two of
+    // them around a shell call is the shape a tool-heavy stretch really has.
+    {
+      kind: "assistant",
+      id: "m4a",
+      chatId: CHAT_NECRO,
+      ts: ago(8.5),
+      turn: 0,
+      uuid: "u_4a",
+      model: "claude-opus-4-8",
+      text: "",
+      thinking:
+        "Only one registration, so the wave-10 slot is a single edit. Before touching it I want to know whether anything reads `introWave` reflectively — the wiki does, and it may cache the boss list.",
+    },
+    {
+      kind: "tool_use",
+      id: "m4b",
+      chatId: CHAT_NECRO,
+      ts: ago(8.4),
+      turn: 0,
+      toolUseId: "t_bash1b",
+      name: "Bash",
+      input: { command: "rg -n \"introWave\" packages/wiki/src", description: "Find reflective readers" },
+    },
+    {
+      kind: "tool_result",
+      id: "m4c",
+      chatId: CHAT_NECRO,
+      ts: ago(8.3),
+      turn: 0,
+      toolUseId: "t_bash1b",
+      name: "Bash",
+      ok: true,
+      durationMs: 220,
+      content: "packages/wiki/src/enemies.ts:17:  .sort((a, b) => a.introWave - b.introWave)",
+    },
+    {
+      kind: "assistant",
+      id: "m4d",
+      chatId: CHAT_NECRO,
+      ts: ago(8.2),
+      turn: 0,
+      uuid: "u_4d",
+      model: "claude-opus-4-8",
+      text: "",
+      thinking:
+        "The wiki sorts by introWave at render time and doesn't cache, so swapping the boss is safe. I'll confirm the page still renders before editing.",
+    },
     {
       kind: "tool_use",
       id: "m5",

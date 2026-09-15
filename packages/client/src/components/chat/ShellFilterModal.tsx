@@ -70,8 +70,8 @@ export function ShellFilterModal({
       onClose={onClose}
       width={500}
       icon={<SlidersHorizontal />}
-      title="Shell visibility"
-      description="Choose which tool exchanges stay in the transcript shell."
+      title="Transcript visibility"
+      description="Choose which tool exchanges and reasoning stay in the transcript."
       footer={
         <>
           {error && <div className="mr-auto min-w-0 flex-1"><InlineError message={error} /></div>}

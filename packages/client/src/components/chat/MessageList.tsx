@@ -11,12 +11,19 @@ import { FileRunGroup } from "./rows/FileRunGroup.js";
 import { PrRunGroup } from "./rows/PrRunGroup.js";
 import { DispatchToolCard } from "./rows/DispatchToolCard.js";
 import { SubagentCard } from "./rows/SubagentCard.js";
+import { ThinkingGroup } from "./rows/ThinkingGroup.js";
 import { PermissionCard } from "./rows/PermissionCard.js";
 import { NoticeRowView, ResultRowView, SystemRowView } from "./rows/MiscRows.js";
 import { LimitPausedCard } from "./rows/LimitPausedCard.js";
 import { actions } from "../../lib/actions.js";
-import { groupTranscriptRows, toolPresentation } from "../../lib/toolPresentations.js";
-import { continuedAssistantIds, isLimitSentence } from "../../lib/messageGrouping.js";
+import {
+  groupTranscriptRows,
+  shellGroupPresentation,
+  toolPresentation,
+  type TranscriptItem,
+} from "../../lib/toolPresentations.js";
+import { continuedAssistantIds, isLimitSentence, stackThinkingAcrossHidden } from "../../lib/messageGrouping.js";
+import { presentationFilterCategory, useShellFilter } from "../../lib/shellFilter.js";
 
 export type { StreamRow } from "../../stores/messages.js";
 
@@ -77,11 +84,41 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
   // Provider-specific tool names are normalized by presentation handlers. Only
   // handled shell calls take this grouped route; everything else reaches the
   // existing renderRow/ToolCallCard fallback unchanged.
-  const transcriptItems = useMemo(() => groupTranscriptRows(roots), [roots]);
+  const grouped = useMemo(() => groupTranscriptRows(roots), [roots]);
 
-  // Two messages from the same speaker with nothing between them are one thing
-  // being said, not two: only the first keeps its avatar/name/model/time.
-  const continued = useMemo(() => continuedAssistantIds(transcriptItems), [transcriptItems]);
+  // Which grouped items the filter has collapsed to nothing. The groups hide
+  // THEMSELVES (animated, and a shell run that is still active stays visible),
+  // so this is a prediction of what is on screen, used only for the two
+  // decisions below that depend on visual adjacency.
+  const { enabled } = useShellFilter(chatId);
+  const isHidden = useCallback(
+    (item: TranscriptItem): boolean => {
+      const shown = new Set(enabled);
+      if (item.kind === "thinking") return !shown.has("thinking");
+      if (item.kind !== "shell") return false;
+      return item.rows.every((use) => {
+        const presentation = shellGroupPresentation(use);
+        return presentation ? !shown.has(presentationFilterCategory(presentation)) : false;
+      });
+    },
+    [enabled],
+  );
+
+  // Reasoning separated only by filtered-out shell runs reads as one run of
+  // reasoning, so it stacks across them. This is the one place the transcript's
+  // SHAPE depends on the filter.
+  const transcriptItems = useMemo(
+    () => stackThinkingAcrossHidden(grouped, isHidden),
+    [grouped, isHidden],
+  );
+
+  // Two messages from the same speaker with nothing VISIBLE between them are
+  // one thing being said, not two: only the first keeps its avatar/name/model/
+  // time. A collapsed stack or shell run is not something between them.
+  const continued = useMemo(
+    () => continuedAssistantIds(transcriptItems, isHidden),
+    [transcriptItems, isHidden],
+  );
 
   // Stable across renders (deps only change when the transcript does) so the
   // memoized row components actually get to bail out.
@@ -187,6 +224,14 @@ export const MessageList = memo(function MessageList({ chatId, messages }: Messa
                   return { use, result, task: findTaskStatus(taskStatus, use.toolUseId, result) };
                 })}
               />
+            </div>
+          );
+        }
+        if (item.kind === "thinking") {
+          const first = item.rows[0]!;
+          return (
+            <div key={`thinking:${first.id}`} className="cm-row-cv">
+              <ThinkingGroup rows={item.rows} />
             </div>
           );
         }
