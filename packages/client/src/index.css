@@ -200,12 +200,17 @@
     /*
      * Safe areas, named once.
      *
-     * `index.html` sets `viewport-fit=cover` and
-     * `apple-mobile-web-app-status-bar-style: black-translucent`, which is what
-     * makes the installed PWA look like an app — and also what puts the top bar
-     * under the notch/status bar and a fixed bottom nav under the home
-     * indicator. `env()` is only readable in CSS, and it is 0 everywhere that
-     * isn't an inset display, so these are inert on desktop.
+     * `env()` is only readable in CSS, and it is 0 everywhere that isn't an
+     * inset display, so these are inert on desktop. They are ALSO 0 in the
+     * installed iOS app now: `index.html` deliberately does not set
+     * `viewport-fit=cover` (that armed the window-shrink bug — see the comment
+     * there), so iOS keeps the layout viewport below the status bar itself and
+     * there is nothing at the top to pad. The bottom is the exception: the
+     * viewport still runs to the bottom of the glass, under the home
+     * indicator, and `env()` no longer says so. `--cm-home-indicator` is
+     * `stores/viewport.ts` working that out from `screen.height - innerHeight`
+     * (a Face ID status bar means a home-indicator phone) and it is folded in
+     * here so every consumer of `--cm-safe-bottom` gets it for free.
      *
      * Aliased into `--cm-safe-*` rather than used inline so a call site can
      * `calc()` with them without repeating the fallback: bare `env(x)` with no
@@ -214,7 +219,7 @@
      */
     --cm-safe-top: env(safe-area-inset-top, 0px);
     --cm-safe-right: env(safe-area-inset-right, 0px);
-    --cm-safe-bottom: env(safe-area-inset-bottom, 0px);
+    --cm-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--cm-home-indicator, 0px));
     --cm-safe-left: env(safe-area-inset-left, 0px);
 
     /*
@@ -320,6 +325,16 @@
   html {
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+    /*
+     * The canvas colour — what shows where no element is painted. Inside the
+     * window that is nowhere (the shell is a fixed, opaque box), so this is
+     * only ever seen OUTSIDE it: the status-bar band in the installed iOS app,
+     * which sits above the layout viewport now that `viewport-fit=cover` is
+     * gone. The top bar is directly below that band, so the band takes the
+     * top bar's colour, or the two read as a stripe of the wrong shade over
+     * the header. `body` keeps `--p-app` for the rest of the document.
+     */
+    background: var(--p-surface);
   }
 
   body {

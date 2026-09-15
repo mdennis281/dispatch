@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { keyboardInset, viewportShrunk } from "./viewport.js";
+import { keyboardInset, homeIndicator } from "./viewport.js";
 
 // The shell IS the window — `height: 100dvh`, no correction. There used to be a
 // `standaloneShellHeight` that pinned it to the tallest window ever seen and
@@ -73,30 +73,29 @@ describe("keyboardInset", () => {
   });
 });
 
-describe("viewportShrunk", () => {
-  it("is false when the window is the screen", () => {
-    expect(viewportShrunk(932, 932, 0, 932)).toBe(false);
+describe("homeIndicator", () => {
+  it("is 34 on a Face ID phone in the installed app", () => {
+    // No `viewport-fit=cover`, so the window starts below a 59px status bar
+    // and `env(safe-area-inset-bottom)` is 0 — but the home indicator is
+    // still drawn over the bottom of the window.
+    expect(homeIndicator(true, 873, 873, 0, 932)).toBe(34);
   });
 
-  it("is true for the iOS standalone shrink signature", () => {
-    // No keyboard — the visual viewport IS the window — yet the window is a
-    // status bar short of the screen. Nothing but a heal can grow it.
-    expect(viewportShrunk(873, 873, 0, 932)).toBe(true);
+  it("is 0 on a home-button phone", () => {
+    // A 20px status bar: no notch, no indicator, nothing to clear.
+    expect(homeIndicator(true, 647, 647, 0, 667)).toBe(0);
   });
 
-  it("is false while a keyboard is covering the window", () => {
-    // Same short window, but the visual viewport is shorter still: that is
-    // the keyboard, and the heal has to wait for it to leave.
-    expect(viewportShrunk(873, 519, 0, 932)).toBe(false);
+  it("is 0 outside the installed iOS app", () => {
+    // A Safari tab is short by the URL bar, and Safari's own chrome already
+    // keeps the page clear of the indicator.
+    expect(homeIndicator(false, 811, 811, 0, 932)).toBe(0);
   });
 
-  it("is false while iOS has scrolled the page to reveal a caret", () => {
-    // `offsetTop` non-zero with the keyboard already down is the iOS 26
-    // regression; a re-measure taken then would settle on a moved band.
-    expect(viewportShrunk(873, 873, 40, 932)).toBe(false);
-  });
-
-  it("ignores a pixel of rounding", () => {
-    expect(viewportShrunk(930, 930, 0, 932)).toBe(false);
+  it("does not decide while a keyboard is up", () => {
+    // The visual viewport is shorter than the window: that is the keyboard,
+    // not the status bar, and the previous answer stands.
+    expect(homeIndicator(true, 873, 519, 0, 932)).toBe(-1);
+    expect(homeIndicator(true, 873, 873, 40, 932)).toBe(-1);
   });
 });

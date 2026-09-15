@@ -26,19 +26,17 @@ export interface ViewportMetrics {
   /** What `100dvh` currently evaluates to, measured with a probe element. */
   dvh: number;
   /**
-   * `env(safe-area-inset-bottom)`, likewise measured rather than guessed.
-   *
-   * Careful: iOS reports the insets against the SCREEN, and in an installed PWA
-   * the layout viewport can be ~59px shorter than the screen. When it is, the
-   * home indicator this describes is below the viewport entirely and the 34px
-   * is clearing something that isn't there. `screenHeight - clientHeight` is
-   * how you tell. See docs/ios-pwa-viewport-findings.md §1.2.
+   * `--cm-safe-bottom` as the engine resolves it — `env(safe-area-inset-bottom)`
+   * or, in the installed iOS app, the home-indicator band `homeIndicator`
+   * below supplies because `env()` has nothing to say there any more (see
+   * `index.css`). Measured, not guessed.
    */
   safeBottom: number;
   /**
    * `env(safe-area-inset-top)` — how much of the top of the viewport the status
-   * bar covers, which is what a top bar has to pad around. It describes the
-   * SCREEN, not the (possibly shrunk) layout viewport: see `safeBottom`.
+   * bar covers, which is what a top bar has to pad around. Expected to be 0 in
+   * the installed iOS app now: without `viewport-fit=cover` the layout viewport
+   * starts BELOW the status bar, so there is nothing to pad.
    */
   safeTop: number;
   /** The height the shell is actually laid out at, fallbacks resolved. */
@@ -79,6 +77,62 @@ export function keyboardInset(
   return Math.max(0, covered);
 }
 
+/**
+ * How much the home indicator needs at the bottom, on a device where `env()`
+ * won't say.
+ *
+ * `index.html` deliberately does NOT set `viewport-fit=cover` — that is what
+ * armed the WebKit standalone bug that shrank the window by the status bar on
+ * the first keyboard and never gave it back (docs/ios-pwa-viewport-findings.md).
+ * Without it the installed iOS app's layout viewport starts below the status
+ * bar and still runs to the bottom of the glass, and every
+ * `env(safe-area-inset-*)` reads 0 — including the bottom one, so the bottom
+ * nav's labels sat under the home indicator the first time this was tried.
+ *
+ * What the engine still admits to is `screen.height - innerHeight`: with no
+ * keyboard, no URL bar and no `cover`, that IS the status bar, and a status
+ * bar ≥40px is a Face ID phone — a phone with a home indicator, which Apple
+ * draws in a 34px band. A 20px bar is a home-button iPhone with no indicator
+ * at all. (An iPad's 20–24px bar lands on the same side; its indicator is
+ * thin and the tab bars of native apps sit under it too.)
+ *
+ * Only the installed app: a Safari tab is short by the URL bar, and its own
+ * chrome already keeps the page clear of the indicator.
+ */
+export function homeIndicator(
+  standaloneIOS: boolean,
+  innerHeight: number,
+  vvHeight: number,
+  vvOffsetTop: number,
+  screenHeight: number,
+): number {
+  if (!standaloneIOS) return 0;
+  // A keyboard also shortens what you can see — but it shows up as a visual
+  // viewport smaller than the window, and the window itself keeps its size.
+  if (keyboardInset(innerHeight, vvHeight, vvOffsetTop) !== 0 || Math.round(vvOffsetTop) !== 0) {
+    return -1;
+  }
+  return screenHeight - innerHeight >= 40 ? 34 : 0;
+}
+
+/**
+ * Only an installed iOS app has a status bar taken out of the window with
+ * nothing else to account for it. An installed DESKTOP window is whatever
+ * size it was dragged to, and Android's `screen.height` counts the system bars.
+ */
+export function isStandaloneIOS(): boolean {
+  const nav = navigator as Navigator & { standalone?: boolean };
+  const ios =
+    /iP(hone|ad|od)/.test(nav.userAgent) ||
+    // iPadOS asks for the desktop site and calls itself a Mac; the touch
+    // points give it away.
+    (nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
+  const standalone =
+    nav.standalone === true ||
+    (typeof matchMedia === "function" && matchMedia("(display-mode: standalone)").matches);
+  return ios && standalone;
+}
+
 const EMPTY: ViewportMetrics = {
   inset: 0,
   innerHeight: 0,
@@ -97,8 +151,8 @@ const EMPTY: ViewportMetrics = {
 interface ViewportStore extends ViewportMetrics {
   /**
    * The tallest `innerHeight` seen at the current width. DIAGNOSTIC ONLY — the
-   * readout shows `inner` against it so the iOS standalone shrink is visible as
-   * it happens.
+   * readout shows `inner` against it so a window that shrinks and stays shrunk
+   * is visible as it happens.
    *
    * It used to SIZE the shell, which is what cut the bottom off every window
    * you made shorter: an installed desktop PWA is `standalone` too, and
@@ -106,162 +160,20 @@ interface ViewportStore extends ViewportMetrics {
    * untouched, so the shell stayed pinned at the height you no longer had.
    */
   maxInnerHeight: number;
-  /** How the shrink heal is going — see `healViewport`. Diagnostic. */
-  heal: HealStats;
-  /** Which viewport meta the page loaded with — see `setViewportFit`. */
-  viewportFit: ViewportFit;
-  setViewportFit: (fit: ViewportFit) => void;
   debug: boolean;
   toggleDebug: () => void;
-  set: (m: ViewportMetrics, maxInnerHeight: number, heal: HealStats) => void;
-}
-
-export interface HealStats {
-  /** Times the display toggle was run. */
-  attempts: number;
-  /** Times the window grew back afterwards. */
-  wins: number;
-  /** What the most recent attempt did — "" before any has run. */
-  last: "" | "ok" | "miss";
-}
-
-const NO_HEALS: HealStats = { attempts: 0, wins: 0, last: "" };
-
-export type ViewportFit = "cover" | "auto";
-
-/**
- * The same key `index.html`'s pre-paint script reads. iOS applies the viewport
- * meta once at load, so the switch has to be honoured there; this store only
- * remembers the choice and reports what the page actually loaded with.
- */
-const VIEWPORT_FIT_KEY = "dispatch:viewport-fit";
-
-function readViewportFit(): ViewportFit {
-  if (typeof document === "undefined") return "cover";
-  return document.documentElement.dataset.viewportFit === "auto" ? "auto" : "cover";
+  set: (m: ViewportMetrics, maxInnerHeight: number) => void;
 }
 
 export const useViewport = create<ViewportStore>((set) => ({
   ...EMPTY,
   maxInnerHeight: 0,
-  heal: NO_HEALS,
-  viewportFit: readViewportFit(),
-  // Persisted, unlike `debug`, because it can only take effect on the NEXT
-  // launch — the page has to load with the other meta. The readout's `fit` row
-  // says which one is live so a stale choice can't hide.
-  setViewportFit: (fit) => {
-    try {
-      if (fit === "auto") localStorage.setItem(VIEWPORT_FIT_KEY, "auto");
-      else localStorage.removeItem(VIEWPORT_FIT_KEY);
-    } catch {
-      // Storage blocked: nothing to remember, so the next launch is `cover`.
-    }
-    // Also try it live. WebKit re-reads a changed viewport meta at runtime for
-    // zoom settings; whether it does for `viewport-fit` is one of the things
-    // the readout is there to show. A resize follows if it did.
-    const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
-    if (meta) {
-      meta.content =
-        fit === "auto"
-          ? "width=device-width, initial-scale=1.0"
-          : "width=device-width, initial-scale=1.0, viewport-fit=cover";
-    }
-    if (fit === "auto") document.documentElement.dataset.viewportFit = "auto";
-    else delete document.documentElement.dataset.viewportFit;
-    set({ viewportFit: fit });
-  },
   // Not persisted: this is a "show me what's happening right now" switch, and a
   // diagnostic overlay that survives a reload is one you forget you left on.
   debug: false,
   toggleDebug: () => set((s) => ({ debug: !s.debug })),
-  set: (m, maxInnerHeight, heal) => set({ ...m, maxInnerHeight, heal }),
+  set: (m, maxInnerHeight) => set({ ...m, maxInnerHeight }),
 }));
-
-/**
- * Is the window shorter than the screen for no reason we can see?
- *
- * The iOS standalone shrink (docs/ios-pwa-viewport-findings.md §1.1) leaves the
- * layout viewport ~59px short of the glass with NO keyboard up — `innerHeight`,
- * `visualViewport.height` and `100dvh` all agree on the short number, so the
- * only thing left that still knows the true height is `screen.height`. A
- * keyboard also makes the window look short, but it shows up as a visual
- * viewport smaller than the window (`keyboardInset`) or pushed down it
- * (`offsetTop`), and both of those mean "wait", not "heal".
- *
- * Pure so it can be pinned in tests; the caller is responsible for only asking
- * on a platform where a short window is a bug rather than a URL bar.
- */
-export function viewportShrunk(
-  innerHeight: number,
-  vvHeight: number,
-  vvOffsetTop: number,
-  screenHeight: number,
-): boolean {
-  if (keyboardInset(innerHeight, vvHeight, vvOffsetTop) !== 0) return false;
-  if (Math.round(vvOffsetTop) !== 0) return false;
-  // A pixel or two is rounding; the shrink is a status bar.
-  return screenHeight - innerHeight >= 4;
-}
-
-/**
- * Only an installed iOS app has a window that is short of the screen by
- * mistake. A Safari tab is short by the URL bar, an installed DESKTOP window is
- * whatever size it was dragged to, and Android's `screen.height` counts the
- * system bars — on every one of those a heal would toggle the whole app off
- * and on for nothing, forever.
- */
-function isStandaloneIOS(): boolean {
-  const nav = navigator as Navigator & { standalone?: boolean };
-  const ios =
-    /iP(hone|ad|od)/.test(nav.userAgent) ||
-    // iPadOS asks for the desktop site and calls itself a Mac; the touch
-    // points give it away.
-    (nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
-  const standalone =
-    nav.standalone === true ||
-    (typeof matchMedia === "function" && matchMedia("(display-mode: standalone)").matches);
-  return ios && standalone;
-}
-
-/**
- * Make WebKit re-measure the window.
- *
- * After the first soft-keyboard raise an installed iOS app's layout viewport
- * shrinks by the status bar's height and stays that way for the life of the
- * process — nothing the page does with `scrollTo`, `visualViewport` or the
- * viewport meta gets it back, and everything past the short edge is simply
- * never painted, so the bottom nav sat ~59px above the home indicator with a
- * black band under it. What DOES get it back is a full-viewport-height element
- * leaving and rejoining layout: WebKit recomputes the viewport on the way back
- * and hands the missing band over. (Found by the author of the write-up linked
- * from docs/ios-pwa-viewport-findings.md, who noticed a route change in their
- * SPA snapped the window back; this is the same recompute without the
- * navigation.) The flip is synchronous, so no frame is painted without the
- * app in it.
- *
- * `display: none` throws away every scroll position under it, so those are put
- * back by hand — the chat you were reading must not jump to the top because
- * the keyboard went away.
- *
- * Whether it WORKED cannot be read here: the new height arrives from the UI
- * process a frame or two later. The caller watches `innerHeight` afterwards.
- */
-function healViewport(root: HTMLElement): void {
-  const scrolled: Array<[Element, number, number]> = [];
-  for (const el of root.querySelectorAll("*")) {
-    if (el.scrollTop || el.scrollLeft) scrolled.push([el, el.scrollTop, el.scrollLeft]);
-  }
-  const was = root.style.display;
-  root.style.display = "none";
-  // Force the layout that makes the element actually leave; without it the two
-  // writes collapse into no change at all.
-  void root.offsetHeight;
-  root.style.display = was;
-  for (const [el, top, left] of scrolled) {
-    el.scrollTop = top;
-    el.scrollLeft = left;
-  }
-}
 
 /**
  * A hidden element whose only job is to be measured.
@@ -283,11 +195,15 @@ function makeProbe(height: string): HTMLDivElement {
 export function startViewportTracking(): () => void {
   const vv = window.visualViewport;
   const dvhProbe = makeProbe("100dvh");
-  const safeProbe = makeProbe("env(safe-area-inset-bottom, 0px)");
+  // The RESOLVED bottom inset, fallback included — what `.cm-safe-b` actually
+  // pads — rather than the raw `env()`, which is 0 in the installed iOS app.
+  const safeProbe = makeProbe("var(--cm-safe-bottom, 0px)");
   const safeTopProbe = makeProbe("env(safe-area-inset-top, 0px)");
+  const standaloneIOS = isStandaloneIOS();
 
   let frame = 0;
   let lastInset = -1;
+  let lastHome = -1;
   // Diagnostic only — nothing is SIZED from this any more (see the note on
   // `maxInnerHeight`). Reset per width so a rotation's portrait maximum isn't
   // reported against a landscape window.
@@ -303,19 +219,6 @@ export function startViewportTracking(): () => void {
     if (!shellEl?.isConnected) shellEl = document.querySelector("[data-cm-shell]");
     return shellEl ? Math.round(shellEl.getBoundingClientRect().bottom) : 0;
   };
-
-  const healable = isStandaloneIOS();
-  let heal: HealStats = NO_HEALS;
-  // The window height the last heal was trying to grow, or -1 with none
-  // outstanding. Compared against every subsequent reading: the moment the
-  // window is taller than this, the heal took.
-  let healFrom = -1;
-  // When focus last moved. The heal must not run while the keyboard is still
-  // sliding away — the visual viewport reports its final height early, so
-  // `inset` reads 0 before the retraction finishes, and a re-measure taken
-  // mid-slide can settle on a mid-slide number.
-  let focusChangedAt = 0;
-  const HEAL_SETTLE_MS = 140;
 
   const apply = () => {
     // Cancel rather than just forget: the burst loop calls `apply` directly, so
@@ -335,6 +238,7 @@ export function startViewportTracking(): () => void {
     const innerHeight = window.innerHeight;
     const vvHeight = vv?.height ?? innerHeight;
     const vvOffsetTop = vv?.offsetTop ?? 0;
+    const screenHeight = window.screen.height;
     const dvh = Math.round(dvhProbe.getBoundingClientRect().height);
     const safeTop = Math.round(safeTopProbe.getBoundingClientRect().height);
 
@@ -358,9 +262,12 @@ export function startViewportTracking(): () => void {
       }
     }
 
-    if (healFrom >= 0 && innerHeight > healFrom) {
-      healFrom = -1;
-      heal = { ...heal, wins: heal.wins + 1, last: "ok" };
+    // -1 means "can't tell right now" (keyboard up); the last known answer
+    // stands until the window is at rest again.
+    const home = homeIndicator(standaloneIOS, innerHeight, vvHeight, vvOffsetTop, screenHeight);
+    if (home >= 0 && home !== lastHome) {
+      lastHome = home;
+      document.documentElement.style.setProperty("--cm-home-indicator", `${home}px`);
     }
 
     useViewport.getState().set(
@@ -378,44 +285,10 @@ export function startViewportTracking(): () => void {
         // Read, not derived — see `shellBottom`. Absent element (first frame,
         // or a test that never mounts App) reports 0 rather than a fake edge.
         shellBottom: shellRect(),
-        screenHeight: window.screen.height,
+        screenHeight,
       },
       maxInnerHeight,
-      heal,
     );
-  };
-
-  /**
-   * Run the heal if this frame is one it can be trusted on. Called from the
-   * burst so it sees a settled reading, never from a lone frame.
-   */
-  const maybeHeal = () => {
-    if (!healable || healFrom >= 0) return;
-    // Under `viewport-fit=auto` the window is EXPECTED to be a status bar
-    // short of the screen from the first frame — that is the inset layout the
-    // experiment is asking for, not the shrink — so there is nothing to heal
-    // and the attempts would only burn the circuit breaker.
-    if (useViewport.getState().viewportFit === "auto") return;
-    // Three misses and never a hit means this is not the bug we know, and a
-    // reflow of the entire app on every blur is not a price worth paying to
-    // keep checking.
-    if (heal.wins === 0 && heal.attempts >= 3) return;
-    if (performance.now() - focusChangedAt < HEAL_SETTLE_MS) return;
-    // A field still focused means the keyboard is up or on its way — the
-    // short window is the keyboard's, and healing under it would re-measure
-    // a window we are about to lose anyway.
-    const active = document.activeElement;
-    if (active && active !== document.body && active.matches("input, textarea, [contenteditable]")) return;
-    const innerHeight = window.innerHeight;
-    if (!viewportShrunk(innerHeight, vv?.height ?? innerHeight, vv?.offsetTop ?? 0, window.screen.height)) return;
-    const root = document.getElementById("root");
-    if (!root) return;
-    healFrom = innerHeight;
-    heal = { ...heal, attempts: heal.attempts + 1, last: "miss" };
-    healViewport(root);
-    // Keep sampling: the grown window lands a frame or two out, and `apply`
-    // has to see it to publish the new `--cm-kb` baseline and score the heal.
-    burstUntil = Math.max(burstUntil, performance.now() + 600);
   };
 
   const schedule = () => {
@@ -438,29 +311,14 @@ export function startViewportTracking(): () => void {
   const burst = () => {
     burstFrame = 0;
     apply();
-    maybeHeal();
-    if (performance.now() < burstUntil) {
-      burstFrame = requestAnimationFrame(burst);
-    } else if (healFrom >= 0) {
-      // The burst ran out without the window growing: that attempt missed.
-      healFrom = -1;
-    }
+    if (performance.now() < burstUntil) burstFrame = requestAnimationFrame(burst);
   };
   const scheduleBurst = () => {
     burstUntil = performance.now() + 600;
     if (!burstFrame) burstFrame = requestAnimationFrame(burst);
   };
-  const onFocusChange = () => {
-    focusChangedAt = performance.now();
-    scheduleBurst();
-  };
 
   apply();
-  // The shrink is sticky across relaunches too — quit and reopen without
-  // force-quitting and the app cold-starts into a window that is already
-  // short. One burst on start gives the heal a look at that case; it is a
-  // no-op when the window is already the screen.
-  const startupBurst = window.setTimeout(scheduleBurst, 400);
   vv?.addEventListener("resize", schedule);
   vv?.addEventListener("scroll", schedule);
   window.addEventListener("resize", schedule);
@@ -469,11 +327,10 @@ export function startViewportTracking(): () => void {
   // run at all. iOS's focus scroll fires no resize, so without this the shell
   // sits displaced until something else happens to schedule a frame.
   window.addEventListener("scroll", schedule, { passive: true });
-  document.addEventListener("focusin", onFocusChange);
-  document.addEventListener("focusout", onFocusChange);
+  document.addEventListener("focusin", scheduleBurst);
+  document.addEventListener("focusout", scheduleBurst);
 
   return () => {
-    clearTimeout(startupBurst);
     if (frame) cancelAnimationFrame(frame);
     if (burstFrame) cancelAnimationFrame(burstFrame);
     vv?.removeEventListener("resize", schedule);
@@ -481,11 +338,12 @@ export function startViewportTracking(): () => void {
     window.removeEventListener("resize", schedule);
     window.removeEventListener("orientationchange", schedule);
     window.removeEventListener("scroll", schedule);
-    document.removeEventListener("focusin", onFocusChange);
-    document.removeEventListener("focusout", onFocusChange);
+    document.removeEventListener("focusin", scheduleBurst);
+    document.removeEventListener("focusout", scheduleBurst);
     dvhProbe.remove();
     safeProbe.remove();
     safeTopProbe.remove();
     document.documentElement.style.removeProperty("--cm-kb");
+    document.documentElement.style.removeProperty("--cm-home-indicator");
   };
 }
