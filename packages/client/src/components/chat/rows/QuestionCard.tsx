@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type TextareaHTMLAttributes } from "react";
 import { MessageCircleQuestion, CornerDownLeft, Check, Undo2 } from "lucide-react";
 import { composeMessageText, type MessagePart, type PermissionRow } from "@dispatch/shared";
 import { RowShell } from "./RowShell.js";
@@ -138,6 +138,52 @@ function Marker({ checked, multi }: { checked: boolean; multi: boolean }) {
   );
 }
 
+/**
+ * A one-line-looking field that grows with what's typed. These used to be
+ * <input>s, which clip a long custom answer or note into a horizontal scroll
+ * — the option descriptions around them wrap, so a paragraph-length answer
+ * read as a single unreadable line. A textarea sized to its content wraps
+ * like the options do; Enter still submits (Shift+Enter for a newline) so
+ * the keyboard grammar of the card doesn't change with the element.
+ */
+const AnswerField = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(
+  function AnswerField({ className, value, onInput, ...rest }, ref) {
+    const inner = useRef<HTMLTextAreaElement | null>(null);
+    const fit = (el: HTMLTextAreaElement | null) => {
+      if (!el) return;
+      // Reset first so a deleted line lets the box shrink back; scrollHeight
+      // only ever reports the larger of content and current height.
+      el.style.height = "auto";
+      // scrollHeight excludes the border, but preflight makes the element
+      // border-box, so `height = scrollHeight` on the two variants that carry
+      // their own border comes out 2px short — a permanent overflow that
+      // overflow-y-auto renders as a scrollbar on a single line of text.
+      el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
+    };
+    // Height tracks the CONTROLLED value, not just keystrokes: the card
+    // re-mounts with prior text on a re-answer, and a paste lands as one
+    // change event rather than a stream of input events.
+    useLayoutEffect(() => fit(inner.current), [value]);
+    return (
+      <textarea
+        ref={(el) => {
+          inner.current = el;
+          if (typeof ref === "function") ref(el);
+          else if (ref) ref.current = el;
+        }}
+        rows={1}
+        value={value}
+        onInput={(e) => {
+          fit(e.currentTarget);
+          onInput?.(e);
+        }}
+        className={cn("cm-scroll max-h-40 resize-none overflow-y-auto leading-snug", className)}
+        {...rest}
+      />
+    );
+  },
+);
+
 type OneAnswer = {
   questionIndex: number;
   optionId?: string;
@@ -192,7 +238,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
   // typing while an option was checked used to silently override it, which read
   // as the click being ignored.
   const [custom, setCustom] = useState<Record<number, boolean>>({});
-  const customRefs = useRef<Record<number, HTMLInputElement | null>>({});
+  const customRefs = useRef<Record<number, HTMLTextAreaElement | null>>({});
   // Extra instructions carried WITH the chosen option (as opposed to freeText,
   // which replaces it).
   const [notes, setNotes] = useState<Record<number, string>>({});
@@ -540,7 +586,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
                         pickCustom(qi, !q.multiSelect);
                       }}
                       className={cn(
-                        "flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 transition-colors",
+                        "flex w-full items-start gap-2 rounded-md border px-2.5 py-1.5 transition-colors",
                         customSel
                           ? "border-accent-line bg-accent-ghost"
                           : "border-line bg-panel-2 hover:border-line-strong",
@@ -548,7 +594,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
                       )}
                     >
                       <Marker checked={customSel} multi={q.multiSelect} />
-                      <input
+                      <AnswerField
                         ref={(el) => {
                           customRefs.current[qi] = el;
                         }}
@@ -561,9 +607,9 @@ export function QuestionCard({ row }: QuestionCardProps) {
                         onFocus={() => pickCustom(qi, !q.multiSelect)}
                         disabled={busy}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter" && allAnswered) {
+                          if (e.key === "Enter" && !e.shiftKey) {
                             e.preventDefault();
-                            submitAll();
+                            if (allAnswered) submitAll();
                           }
                         }}
                         placeholder="Type a custom answer"
@@ -574,7 +620,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
                       />
                     </div>
                   ) : (
-                    <input
+                    <AnswerField
                       value={freeText[qi] ?? ""}
                       onChange={(e) => {
                         touch();
@@ -582,14 +628,14 @@ export function QuestionCard({ row }: QuestionCardProps) {
                       }}
                       disabled={busy}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter" && allAnswered) {
+                        if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
-                          submitAll();
+                          if (allAnswered) submitAll();
                         }
                       }}
                       placeholder="Type your answer"
                       className={cn(
-                        "h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-sm text-primary",
+                        "min-w-0 rounded-md border border-line bg-panel-2 px-2 py-1 text-sm text-primary",
                         "placeholder:text-faint focus:border-line-strong focus:outline-none",
                       )}
                     />
@@ -597,7 +643,7 @@ export function QuestionCard({ row }: QuestionCardProps) {
 
                   {/* Notes stay a qualifier, below every choice: they ride WITH
                       whichever option is checked rather than being one. */}
-                  <input
+                  <AnswerField
                     value={notes[qi] ?? ""}
                     onChange={(e) => {
                       touch();
@@ -605,14 +651,14 @@ export function QuestionCard({ row }: QuestionCardProps) {
                     }}
                     disabled={busy}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter" && allAnswered) {
+                      if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
-                        submitAll();
+                        if (allAnswered) submitAll();
                       }
                     }}
                     placeholder="Notes (optional) — sent with your answer"
                     className={cn(
-                      "mt-1 h-7 min-w-0 rounded-md border border-line bg-panel-2 px-2 text-sm text-primary",
+                      "mt-1 min-w-0 rounded-md border border-line bg-panel-2 px-2 py-1 text-sm text-primary",
                       "placeholder:text-faint focus:border-line-strong focus:outline-none",
                     )}
                   />
