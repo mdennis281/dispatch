@@ -106,20 +106,120 @@ interface ViewportStore extends ViewportMetrics {
    * untouched, so the shell stayed pinned at the height you no longer had.
    */
   maxInnerHeight: number;
+  /** How the shrink heal is going — see `healViewport`. Diagnostic. */
+  heal: HealStats;
   debug: boolean;
   toggleDebug: () => void;
-  set: (m: ViewportMetrics, maxInnerHeight: number) => void;
+  set: (m: ViewportMetrics, maxInnerHeight: number, heal: HealStats) => void;
 }
+
+export interface HealStats {
+  /** Times the display toggle was run. */
+  attempts: number;
+  /** Times the window grew back afterwards. */
+  wins: number;
+  /** What the most recent attempt did — "" before any has run. */
+  last: "" | "ok" | "miss";
+}
+
+const NO_HEALS: HealStats = { attempts: 0, wins: 0, last: "" };
 
 export const useViewport = create<ViewportStore>((set) => ({
   ...EMPTY,
   maxInnerHeight: 0,
+  heal: NO_HEALS,
   // Not persisted: this is a "show me what's happening right now" switch, and a
   // diagnostic overlay that survives a reload is one you forget you left on.
   debug: false,
   toggleDebug: () => set((s) => ({ debug: !s.debug })),
-  set: (m, maxInnerHeight) => set({ ...m, maxInnerHeight }),
+  set: (m, maxInnerHeight, heal) => set({ ...m, maxInnerHeight, heal }),
 }));
+
+/**
+ * Is the window shorter than the screen for no reason we can see?
+ *
+ * The iOS standalone shrink (docs/ios-pwa-viewport-findings.md §1.1) leaves the
+ * layout viewport ~59px short of the glass with NO keyboard up — `innerHeight`,
+ * `visualViewport.height` and `100dvh` all agree on the short number, so the
+ * only thing left that still knows the true height is `screen.height`. A
+ * keyboard also makes the window look short, but it shows up as a visual
+ * viewport smaller than the window (`keyboardInset`) or pushed down it
+ * (`offsetTop`), and both of those mean "wait", not "heal".
+ *
+ * Pure so it can be pinned in tests; the caller is responsible for only asking
+ * on a platform where a short window is a bug rather than a URL bar.
+ */
+export function viewportShrunk(
+  innerHeight: number,
+  vvHeight: number,
+  vvOffsetTop: number,
+  screenHeight: number,
+): boolean {
+  if (keyboardInset(innerHeight, vvHeight, vvOffsetTop) !== 0) return false;
+  if (Math.round(vvOffsetTop) !== 0) return false;
+  // A pixel or two is rounding; the shrink is a status bar.
+  return screenHeight - innerHeight >= 4;
+}
+
+/**
+ * Only an installed iOS app has a window that is short of the screen by
+ * mistake. A Safari tab is short by the URL bar, an installed DESKTOP window is
+ * whatever size it was dragged to, and Android's `screen.height` counts the
+ * system bars — on every one of those a heal would toggle the whole app off
+ * and on for nothing, forever.
+ */
+function isStandaloneIOS(): boolean {
+  const nav = navigator as Navigator & { standalone?: boolean };
+  const ios =
+    /iP(hone|ad|od)/.test(nav.userAgent) ||
+    // iPadOS asks for the desktop site and calls itself a Mac; the touch
+    // points give it away.
+    (nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
+  const standalone =
+    nav.standalone === true ||
+    (typeof matchMedia === "function" && matchMedia("(display-mode: standalone)").matches);
+  return ios && standalone;
+}
+
+/**
+ * Make WebKit re-measure the window.
+ *
+ * After the first soft-keyboard raise an installed iOS app's layout viewport
+ * shrinks by the status bar's height and stays that way for the life of the
+ * process — nothing the page does with `scrollTo`, `visualViewport` or the
+ * viewport meta gets it back, and everything past the short edge is simply
+ * never painted, so the bottom nav sat ~59px above the home indicator with a
+ * black band under it. What DOES get it back is a full-viewport-height element
+ * leaving and rejoining layout: WebKit recomputes the viewport on the way back
+ * and hands the missing band over. (Found by the author of the write-up linked
+ * from docs/ios-pwa-viewport-findings.md, who noticed a route change in their
+ * SPA snapped the window back; this is the same recompute without the
+ * navigation.) The flip is synchronous, so no frame is painted without the
+ * app in it.
+ *
+ * `display: none` throws away every scroll position under it, so those are put
+ * back by hand — the chat you were reading must not jump to the top because
+ * the keyboard went away.
+ *
+ * Whether it WORKED cannot be read here: the new height arrives from the UI
+ * process a frame or two later. The caller watches `innerHeight` afterwards.
+ */
+function healViewport(root: HTMLElement): void {
+  const scrolled: Array<[Element, number, number]> = [];
+  for (const el of root.querySelectorAll("*")) {
+    if (el.scrollTop || el.scrollLeft) scrolled.push([el, el.scrollTop, el.scrollLeft]);
+  }
+  const was = root.style.display;
+  root.style.display = "none";
+  // Force the layout that makes the element actually leave; without it the two
+  // writes collapse into no change at all.
+  void root.offsetHeight;
+  root.style.display = was;
+  for (const [el, top, left] of scrolled) {
+    el.scrollTop = top;
+    el.scrollLeft = left;
+  }
+}
 
 /**
  * A hidden element whose only job is to be measured.
@@ -162,6 +262,19 @@ export function startViewportTracking(): () => void {
     return shellEl ? Math.round(shellEl.getBoundingClientRect().bottom) : 0;
   };
 
+  const healable = isStandaloneIOS();
+  let heal: HealStats = NO_HEALS;
+  // The window height the last heal was trying to grow, or -1 with none
+  // outstanding. Compared against every subsequent reading: the moment the
+  // window is taller than this, the heal took.
+  let healFrom = -1;
+  // When focus last moved. The heal must not run while the keyboard is still
+  // sliding away — the visual viewport reports its final height early, so
+  // `inset` reads 0 before the retraction finishes, and a re-measure taken
+  // mid-slide can settle on a mid-slide number.
+  let focusChangedAt = 0;
+  const HEAL_SETTLE_MS = 140;
+
   const apply = () => {
     // Cancel rather than just forget: the burst loop calls `apply` directly, so
     // clearing the id without cancelling would leave a live rAF nothing is
@@ -203,6 +316,11 @@ export function startViewportTracking(): () => void {
       }
     }
 
+    if (healFrom >= 0 && innerHeight > healFrom) {
+      healFrom = -1;
+      heal = { ...heal, wins: heal.wins + 1, last: "ok" };
+    }
+
     useViewport.getState().set(
       {
         inset: lastInset < 0 ? inset : lastInset,
@@ -221,7 +339,36 @@ export function startViewportTracking(): () => void {
         screenHeight: window.screen.height,
       },
       maxInnerHeight,
+      heal,
     );
+  };
+
+  /**
+   * Run the heal if this frame is one it can be trusted on. Called from the
+   * burst so it sees a settled reading, never from a lone frame.
+   */
+  const maybeHeal = () => {
+    if (!healable || healFrom >= 0) return;
+    // Three misses and never a hit means this is not the bug we know, and a
+    // reflow of the entire app on every blur is not a price worth paying to
+    // keep checking.
+    if (heal.wins === 0 && heal.attempts >= 3) return;
+    if (performance.now() - focusChangedAt < HEAL_SETTLE_MS) return;
+    // A field still focused means the keyboard is up or on its way — the
+    // short window is the keyboard's, and healing under it would re-measure
+    // a window we are about to lose anyway.
+    const active = document.activeElement;
+    if (active && active !== document.body && active.matches("input, textarea, [contenteditable]")) return;
+    const innerHeight = window.innerHeight;
+    if (!viewportShrunk(innerHeight, vv?.height ?? innerHeight, vv?.offsetTop ?? 0, window.screen.height)) return;
+    const root = document.getElementById("root");
+    if (!root) return;
+    healFrom = innerHeight;
+    heal = { ...heal, attempts: heal.attempts + 1, last: "miss" };
+    healViewport(root);
+    // Keep sampling: the grown window lands a frame or two out, and `apply`
+    // has to see it to publish the new `--cm-kb` baseline and score the heal.
+    burstUntil = Math.max(burstUntil, performance.now() + 600);
   };
 
   const schedule = () => {
@@ -244,14 +391,29 @@ export function startViewportTracking(): () => void {
   const burst = () => {
     burstFrame = 0;
     apply();
-    if (performance.now() < burstUntil) burstFrame = requestAnimationFrame(burst);
+    maybeHeal();
+    if (performance.now() < burstUntil) {
+      burstFrame = requestAnimationFrame(burst);
+    } else if (healFrom >= 0) {
+      // The burst ran out without the window growing: that attempt missed.
+      healFrom = -1;
+    }
   };
   const scheduleBurst = () => {
     burstUntil = performance.now() + 600;
     if (!burstFrame) burstFrame = requestAnimationFrame(burst);
   };
+  const onFocusChange = () => {
+    focusChangedAt = performance.now();
+    scheduleBurst();
+  };
 
   apply();
+  // The shrink is sticky across relaunches too — quit and reopen without
+  // force-quitting and the app cold-starts into a window that is already
+  // short. One burst on start gives the heal a look at that case; it is a
+  // no-op when the window is already the screen.
+  const startupBurst = window.setTimeout(scheduleBurst, 400);
   vv?.addEventListener("resize", schedule);
   vv?.addEventListener("scroll", schedule);
   window.addEventListener("resize", schedule);
@@ -260,10 +422,11 @@ export function startViewportTracking(): () => void {
   // run at all. iOS's focus scroll fires no resize, so without this the shell
   // sits displaced until something else happens to schedule a frame.
   window.addEventListener("scroll", schedule, { passive: true });
-  document.addEventListener("focusin", scheduleBurst);
-  document.addEventListener("focusout", scheduleBurst);
+  document.addEventListener("focusin", onFocusChange);
+  document.addEventListener("focusout", onFocusChange);
 
   return () => {
+    clearTimeout(startupBurst);
     if (frame) cancelAnimationFrame(frame);
     if (burstFrame) cancelAnimationFrame(burstFrame);
     vv?.removeEventListener("resize", schedule);
@@ -271,8 +434,8 @@ export function startViewportTracking(): () => void {
     window.removeEventListener("resize", schedule);
     window.removeEventListener("orientationchange", schedule);
     window.removeEventListener("scroll", schedule);
-    document.removeEventListener("focusin", scheduleBurst);
-    document.removeEventListener("focusout", scheduleBurst);
+    document.removeEventListener("focusin", onFocusChange);
+    document.removeEventListener("focusout", onFocusChange);
     dvhProbe.remove();
     safeProbe.remove();
     safeTopProbe.remove();

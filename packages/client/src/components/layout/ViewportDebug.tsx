@@ -25,9 +25,12 @@ import { LAYER } from "../../lib/layers.js";
  *    the layout viewport has, and everything past that edge is never painted —
  *    which looks like the bottom of the app being cut off. This is the one that
  *    matters; it is what four PRs shipped against a `dead` of 0 while missing.
- *  - `dead` is how much of the screen the shell does NOT cover. On iOS after
- *    the standalone shrink this is legitimately ~59, because that band is not
- *    paintable by anything. In a browser tab it is just the URL bar.
+ *  - `dead` is how much of the screen the shell does NOT cover. In a browser
+ *    tab it is the URL bar. In the installed iOS app it is the standalone
+ *    shrink — ~59 — and `heal` is the store's attempt to get it back: `wins /
+ *    attempts` and what the last try did. `dead 59` with `heal … miss` means
+ *    the re-measure no longer works on this iOS; `dead 59` with `heal 0/0`
+ *    means it never ran (not iOS, not standalone, or a field still focused).
  *  - `safe-t` non-zero means the status bar is ours to pad around. It describes
  *    the SCREEN, not the layout viewport, so `safe-b` can be reserving space
  *    for a home indicator that is below the viewport entirely — compare
@@ -168,6 +171,7 @@ function ViewportReadout() {
     ["safe-b", `${m.safeBottom}`, false],
     ["screen", `${m.screenHeight}`, false],
     ["scale", m.vvScale.toFixed(2), Math.abs(m.vvScale - 1) > 0.01],
+    ["heal", `${m.heal.wins}/${m.heal.attempts}${m.heal.last ? ` ${m.heal.last}` : ""}`, m.heal.last === "miss"],
   ];
 
   return (
