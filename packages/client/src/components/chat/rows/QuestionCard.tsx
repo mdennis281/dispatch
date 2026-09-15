@@ -154,7 +154,11 @@ const AnswerField = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLT
       // Reset first so a deleted line lets the box shrink back; scrollHeight
       // only ever reports the larger of content and current height.
       el.style.height = "auto";
-      el.style.height = `${el.scrollHeight}px`;
+      // scrollHeight excludes the border, but preflight makes the element
+      // border-box, so `height = scrollHeight` on the two variants that carry
+      // their own border comes out 2px short — a permanent overflow that
+      // overflow-y-auto renders as a scrollbar on a single line of text.
+      el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
     };
     // Height tracks the CONTROLLED value, not just keystrokes: the card
     // re-mounts with prior text on a re-answer, and a paste lands as one
