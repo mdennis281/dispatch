@@ -1321,6 +1321,34 @@ describe("SessionBroker — permissions", () => {
       await rm(shots, { recursive: true, force: true });
     });
 
+    it("accepts a WebM clip as review evidence, typed by its bytes", async () => {
+      // The gate was image-only, which is why agents converted recordings to
+      // GIF. A clip must ride the same `screenshots` field and land as video.
+      const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
+      await store.saveChat(chatFor("c1"));
+      broker.create(chatFor("c1"));
+      const shots = await mkdtemp(join(tmpdir(), "cm-review-shots-"));
+      const clip = join(shots, "flow.gif"); // misnamed on purpose: bytes win
+      const WEBM_HEAD = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(28)]);
+      await writeFile(clip, WEBM_HEAD);
+
+      const reqP = nextPermissionId();
+      const verdictP = broker.requestHumanReview("c1", { ...request, screenshots: [clip] });
+      const reqId = await reqP;
+
+      const raised = events.find(
+        (e): e is Extract<WsServerEvent, { type: "permission-request" }> =>
+          e.type === "permission-request" && e.request.id === reqId,
+      );
+      const review = raised?.request.input.review as { screenshots: { path: string }[] };
+      expect(review.screenshots[0]).toMatchObject({ mimeType: "video/webm", alt: "flow.gif" });
+      expect(review.screenshots[0]!.path).toMatch(/\.webm$/);
+
+      broker.answerQuestion(reqId, { answer: HUMAN_REVIEW_ANSWERS.approve });
+      await expect(verdictP).resolves.toEqual({ status: "reviewed", verdict: "approve" });
+      await rm(shots, { recursive: true, force: true });
+    });
+
     it("refuses a screenshot that isn't an image, without raising a card", async () => {
       const broker = makeBroker(makeFakeQuery(() => [resultMsg()]).fn);
       await store.saveChat(chatFor("c1"));
@@ -1336,7 +1364,7 @@ describe("SessionBroker — permissions", () => {
       });
 
       expect(notImage).toMatchObject({ status: "invalid" });
-      expect(notImage.status === "invalid" && notImage.message).toContain("not an image");
+      expect(notImage.status === "invalid" && notImage.message).toContain("not an image or video");
       expect(missing.status === "invalid" && missing.message).toContain("does not exist");
       expect(events.some((e) => e.type === "permission-request")).toBe(false);
       await rm(shots, { recursive: true, force: true });

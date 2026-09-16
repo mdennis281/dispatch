@@ -232,6 +232,21 @@ import {
 } from "@dispatch/shared";
 
 /**
+ * Cap for a VIDEO on the review card. A screenshot's 8 MB cap is generous for
+ * a PNG and useless for a clip: a 20-second 1080p WebM lands around 3–6 MB and
+ * a longer walkthrough clears 8 without being long. Still bounded, because the
+ * card reads the whole file into memory and the client downloads it whole
+ * before the first frame (see `AssetMedia`).
+ */
+const MAX_REVIEW_VIDEO_BYTES = 32 * 1024 * 1024;
+
+/** What the review card will draw: a still or a clip, never a download chip. */
+function isReviewMedia(mimeType: string): boolean {
+  const kind = mediaKind(mimeType);
+  return kind === "image" || kind === "video";
+}
+
+/**
  * A deliberately SMALL map of the MCP servers injected into this session.
  *
  * Exact tool descriptions and schemas already live in tool search. Repeating
@@ -5376,8 +5391,15 @@ export class SessionBroker {
    * it took the screenshot in is routinely NOT the session's cwd (a chat started
    * in the primary checkout works under `.worktrees/…`), so that confinement
    * would refuse the ordinary case. What this does insist on is that the BYTES
-   * are an image: the card is for looking at, not a way to put any file on disk
-   * in front of the human.
+   * are something to LOOK AT — an image or a short video: the card is for
+   * looking at, not a way to put any file on disk in front of the human.
+   *
+   * Video is in because refusing it produced GIFs. This gate used to be
+   * image-only, so an agent that wanted to show motion — the approve-me demo of
+   * a UI change — reached for the one image format that moves, and a GIF of a
+   * screen recording is 10–50× the bytes of the same clip as WebM, which the
+   * card then decoded frame by frame. Video also gets its own, larger cap: the
+   * "capture the viewport" advice on the image cap is meaningless for a clip.
    */
   private async ingestReviewScreenshot(
     session: LiveSession,
@@ -5395,8 +5417,8 @@ export class SessionBroker {
         name,
         /\.[^.]+$/.test(name) ? "application/octet-stream" : "image/png",
       );
-      if (mediaKind(mimeType) !== "image") {
-        return `Screenshot ${given} doesn't look like an image (${mimeType}).`;
+      if (!isReviewMedia(mimeType)) {
+        return `Screenshot ${given} doesn't look like an image or video (${mimeType}).`;
       }
       return { id: this.genId(), path: given, mimeType, alt: name };
     }
@@ -5408,18 +5430,27 @@ export class SessionBroker {
       const real = await realpath(abs);
       const info = await stat(real);
       if (!info.isFile()) return `Screenshot ${abs} is not a file.`;
-      if (info.size > MAX_INLINE_ASSET_BYTES) {
+      // The video cap is checked AFTER sniffing, since only the bytes say which
+      // cap applies; the larger one is the ceiling for the read itself.
+      if (info.size > MAX_REVIEW_VIDEO_BYTES) {
         return (
           `Screenshot ${abs} is ${formatBytes(info.size)}; the limit is ` +
-          `${formatBytes(MAX_INLINE_ASSET_BYTES)}. Capture the viewport rather than the full page.`
+          `${formatBytes(MAX_REVIEW_VIDEO_BYTES)}. Record a shorter clip at a lower resolution.`
         );
       }
       const buf = await readFile(real);
       // Sniffed with no declared type on purpose: a `.png` extension on a text
       // file must not be enough to get it drawn on the card.
       const { mimeType, width, height } = identifyMedia(buf);
-      if (mediaKind(mimeType) !== "image") {
-        return `Screenshot ${abs} is not an image (read as ${mimeType}).`;
+      if (!isReviewMedia(mimeType)) {
+        return `Screenshot ${abs} is not an image or video (read as ${mimeType}).`;
+      }
+      if (mediaKind(mimeType) === "image" && info.size > MAX_INLINE_ASSET_BYTES) {
+        return (
+          `Screenshot ${abs} is ${formatBytes(info.size)}; the limit is ` +
+          `${formatBytes(MAX_INLINE_ASSET_BYTES)}. Capture the viewport rather than the full page` +
+          (mimeType === "image/gif" ? ", or record it as WebM/MP4 instead of a GIF." : ".")
+        );
       }
       const name = `${this.genId()}${extFromMediaType(mimeType, ".png")}`;
       const relPath = await this.store.writeChatAsset(session.chatId, name, buf);

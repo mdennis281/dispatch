@@ -2965,8 +2965,11 @@ export function createManagerTools(ctx: ManagerMcpContext) {
         .max(HUMAN_REVIEW_MAX_SCREENSHOTS)
         .optional()
         .describe(
-          "Absolute paths to screenshot files on this machine (PNG/JPEG/WebP/GIF — e.g. what " +
-            "browser_take_screenshot saved), or http(s) image URLs. Shown on the card.",
+          "Absolute paths to screenshot files on this machine (PNG/JPEG/WebP — e.g. what " +
+            "browser_take_screenshot saved), or http(s) image URLs. Shown on the card. For " +
+            "anything that MOVES — a flow, an animation, a before/after — attach a short " +
+            "WebM or MP4 clip (≤32 MB); it plays inline, muted and looping. Never convert a " +
+            "recording to GIF for this: a GIF is 10–50× the bytes and loads far slower.",
         ),
       previewUrl: z
         .string()

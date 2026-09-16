@@ -24,12 +24,22 @@ export function AssetMedia({
   asset,
   className,
   onOpen,
+  preview = false,
 }: {
   chatId: string;
   asset: ImageRef;
   className?: string;
   /** Open this in the full-screen viewer. Supplied by `MediaGroup` for video. */
   onOpen?: () => void;
+  /**
+   * Play a video the way a GIF would — muted, looping, from the moment it
+   * loads, filling its cell. For EVIDENCE (the review card), where the clip IS
+   * the message and waiting to be pressed is the point missed: the reason
+   * agents kept attaching GIFs was that a GIF plays by itself. A video in a
+   * transcript row stays paused with controls; ten of those autoplaying while
+   * you scroll would be noise.
+   */
+  preview?: boolean;
 }) {
   const { src, failed } = useAssetSrc(chatId, asset);
   const name = asset.alt ?? asset.path.split(/[\\/]/).pop() ?? asset.path;
@@ -58,12 +68,28 @@ export function AssetMedia({
 
   if (kind === "video") {
     return (
-      <figure className="overflow-hidden rounded-md border border-line bg-inset">
+      <figure
+        className={cn(
+          "overflow-hidden rounded-md border border-line bg-inset",
+          preview && "w-full",
+        )}
+      >
         <video
           src={src}
           controls
-          preload="metadata"
-          className="block max-h-72 max-w-full bg-black"
+          preload={preview ? "auto" : "metadata"}
+          autoPlay={preview}
+          muted={preview}
+          loop={preview}
+          playsInline
+          className={cn(
+            "block max-w-full bg-black",
+            // Same cell sizing as a `fill` ImageThumb, so a clip beside two
+            // stills lines up with them instead of sitting short in its cell.
+            preview
+              ? "h-[var(--thumb-h,auto)] max-h-[var(--thumb-max-h,22rem)] w-full object-contain"
+              : "max-h-72",
+          )}
         />
         <MediaCaption name={name} src={src} onOpen={onOpen} />
       </figure>

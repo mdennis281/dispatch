@@ -29,9 +29,15 @@ export function Attachment({
   const kind = mediaKind(asset.mimeType);
   // Video goes through the viewer too — full-screen with the same download and
   // open-in-tab controls, rather than a 240px inline player and nothing else.
+  // `fill` is the evidence layout, and evidence that moves should be moving.
   return kind === "image" ? (
     <ImageThumb chatId={chatId} img={asset} onOpen={onOpen} variant={variant} />
   ) : (
-    <AssetMedia chatId={chatId} asset={asset} onOpen={kind === "video" ? onOpen : undefined} />
+    <AssetMedia
+      chatId={chatId}
+      asset={asset}
+      onOpen={kind === "video" ? onOpen : undefined}
+      preview={variant === "fill"}
+    />
   );
 }
