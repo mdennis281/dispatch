@@ -1,6 +1,6 @@
 import { useState, type CSSProperties } from "react";
 import { Images } from "lucide-react";
-import type { ImageRef } from "@dispatch/shared";
+import { type ImageRef, mediaKind } from "@dispatch/shared";
 import { cn } from "../../../lib/cn.js";
 import { indexOfAsset, useChatMedia } from "../../../lib/chatMedia.js";
 import { Attachment } from "./Attachment.js";
@@ -84,7 +84,10 @@ export function MediaGroup({
         {tiled && (
           <div className="mb-1.5 flex items-center gap-1.5 text-2xs text-faint [&_svg]:size-3">
             <Images />
-            <span>{assets.length} images</span>
+            <span>
+              {assets.length}{" "}
+              {assets.every((a) => mediaKind(a.mimeType) === "image") ? "images" : "attachments"}
+            </span>
           </div>
         )}
         <div
