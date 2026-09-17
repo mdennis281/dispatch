@@ -367,7 +367,16 @@ describe("GitService argument construction", () => {
       return { stdout: "abc123\n", stderr: "", exitCode: 0 };
     }
     if (args[0] === "status") {
-      return { stdout: ["? untracked.txt", ""].join("\0"), stderr: "", exitCode: 0 };
+      return {
+        stdout: [
+          "1 .M N... 100644 100644 100644 aaa bbb src/edited.ts",
+          "u UU N... 100644 100644 100644 100644 aaa bbb ccc src/conflict.ts",
+          "? untracked.txt",
+          "",
+        ].join("\0"),
+        stderr: "",
+        exitCode: 0,
+      };
     }
     return { stdout: "", stderr: "", exitCode: 0 };
   };
@@ -404,11 +413,13 @@ describe("GitService argument construction", () => {
     expect(argv).toContainEqual(["checkout", "--", "src/tracked.ts"]);
   });
 
-  it("discards everything with a checkout of `.` then a clean, never `-x`", async () => {
+  it("discards everything by restoring unstaged paths (not `.`) then a clean, never `-x`", async () => {
     await git.discardAll("C:/repo");
-    const argv = calls.map((c) => c.args);
+    const argv = calls.filter((c) => c.args[0] !== "status").map((c) => c.args);
+    // A conflicted path is NOT in the restore list — `checkout -- .` would have
+    // refused the whole batch over it.
     expect(argv).toEqual([
-      ["checkout", "-q", "--", "."],
+      ["checkout", "-q", "--", "src/edited.ts"],
       ["clean", "-f", "-d", "-q"],
     ]);
   });

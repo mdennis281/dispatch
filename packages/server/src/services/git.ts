@@ -458,9 +458,19 @@ export class GitService {
    * place a "clear the deck" sweep should not reach without being asked).
    * Ignored files are kept — no `-x` — because the build outputs and
    * `node_modules` under a checkout are not "changes".
+   *
+   * Tracked files are restored BY PATH, not with `checkout -- .`: the
+   * whole-tree form refuses to run at all while any path is unmerged ("path
+   * 'a' is unmerged") and touches nothing, so one conflicted file would veto
+   * discarding every unrelated edit beside it. Conflicts aren't in the
+   * unstaged list — the UI shows them in their own group — so they stay put.
    */
   async discardAll(repoPath: string): Promise<void> {
-    await this.git(["checkout", "-q", "--", "."], repoPath);
+    const status = await this.status(repoPath);
+    const tracked = status.unstaged.map((f) => f.path);
+    if (tracked.length) {
+      await this.git(["checkout", "-q", "--", ...normalizePaths(tracked)], repoPath);
+    }
     await this.git(["clean", "-f", "-d", "-q"], repoPath);
   }
 

@@ -615,9 +615,11 @@ export function GitView() {
           repoPath={repoPath}
           trunk={trunk}
           status={status}
+          branches={branches}
           onClose={() => setResetting(false)}
-          onDone={() => {
-            // Files the diff pane was showing may no longer exist.
+          onSettled={() => {
+            // Files the diff pane was showing may no longer exist — on failure
+            // too, since the wipe precedes the step that can fail.
             select(null);
             void refresh({ full: true });
           }}

@@ -19,7 +19,7 @@
  */
 import { useState } from "react";
 import { AlertTriangle, RotateCcw } from "lucide-react";
-import type { GitResetSummary, GitStatus } from "@dispatch/shared";
+import type { GitBranch, GitResetSummary, GitStatus } from "@dispatch/shared";
 import { Modal, InlineError } from "../sidebar/Modal.js";
 import { Button } from "../ui/Button.js";
 import { Spinner } from "../ui/Spinner.js";
@@ -30,8 +30,28 @@ function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
+/**
+ * The trunk's own ahead/behind, whatever is checked out. `status.ahead` is the
+ * CURRENT branch's number, which says nothing about the trunk when the
+ * checkout is parked elsewhere (an aborted rebase leaves it just so) — and the
+ * whole point of the drop-local-commits checkbox is to be reachable in exactly
+ * that state, because it is the escape hatch the server's conflict error
+ * points at. The branch list carries per-branch tracking counts; fall back to
+ * status only when we are on the trunk and the list hasn't loaded.
+ */
+export function trunkCounts(
+  status: GitStatus | null,
+  branches: GitBranch[],
+  trunk: string,
+): { ahead: number; behind: number } {
+  const local = branches.find((b) => !b.isRemote && b.name === trunk);
+  if (local) return { ahead: local.ahead ?? 0, behind: local.behind ?? 0 };
+  if (status?.branch === trunk) return { ahead: status.ahead, behind: status.behind };
+  return { ahead: 0, behind: 0 };
+}
+
 /** One line per thing the reset will do, so an empty list means "nothing". */
-export function resetPlan(status: GitStatus | null, trunk: string): string[] {
+export function resetPlan(status: GitStatus | null, branches: GitBranch[], trunk: string): string[] {
   if (!status) return [];
   const lines: string[] = [];
   const edits = status.staged.length + status.unstaged.length + status.conflicted.length;
@@ -42,11 +62,8 @@ export function resetPlan(status: GitStatus | null, trunk: string): string[] {
   if (status.detached || (status.branch && status.branch !== trunk)) {
     lines.push(`Switch from ${status.detached ? "a detached HEAD" : status.branch} to ${trunk}`);
   }
-  // ahead/behind only describe the trunk when we are ON it; from another branch
-  // the numbers are that branch's and would mislead.
-  if (status.branch === trunk && status.behind > 0) {
-    lines.push(`Pull ${plural(status.behind, "commit")} from origin/${trunk}`);
-  }
+  const { behind } = trunkCounts(status, branches, trunk);
+  if (behind > 0) lines.push(`Pull ${plural(behind, "commit")} from origin/${trunk}`);
   return lines;
 }
 
@@ -66,22 +83,28 @@ export function ResetTrunkModal({
   repoPath,
   trunk,
   status,
+  branches,
   onClose,
-  onDone,
+  onSettled,
 }: {
   repoPath: string;
   trunk: string;
   status: GitStatus | null;
+  branches: GitBranch[];
   onClose: () => void;
-  onDone: () => void;
+  /**
+   * Called after the attempt whether it succeeded or not. A failure is thrown
+   * from the LAST step (the replay) — the fetch, the wipe and the branch switch
+   * have already happened by then — so the view must re-read either way.
+   */
+  onSettled: () => void;
 }) {
   const [dropLocal, setDropLocal] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const plan = resetPlan(status, trunk);
-  const onTrunk = status?.branch === trunk;
-  const ahead = onTrunk ? (status?.ahead ?? 0) : 0;
+  const plan = resetPlan(status, branches, trunk);
+  const { ahead } = trunkCounts(status, branches, trunk);
 
   const run = async () => {
     setRunning(true);
@@ -95,12 +118,12 @@ export function ResetTrunkModal({
         text: `${trunk} reset to origin`,
         detail: summarize(summary),
       });
-      onDone();
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRunning(false);
+      onSettled();
     }
   };
 
