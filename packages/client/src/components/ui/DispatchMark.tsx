@@ -34,8 +34,11 @@ const BRANCH_DELAYS: Record<string, number> = {
   lower: 300,
 };
 
+// The root lands as soon as the trunk starts drawing, so the graph grows OUT
+// of a dot rather than a line appearing from nowhere; the tips land after
+// their branch finishes.
 const NODE_DELAYS: Record<string, number> = {
-  junction: 320,
+  root: 0,
   "upper-tip": 700,
   "lower-tip": 820,
 };

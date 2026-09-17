@@ -9,7 +9,15 @@
  */
 
 export type DispatchBranchId = "trunk" | "upper" | "lower";
-export type DispatchNodeId = "junction" | "upper-tip" | "lower-tip";
+/**
+ * The three nodes sit on the three FREE line ends — the trunk's root and the two
+ * branch tips — and the junction itself is bare. A node was tried at the
+ * junction instead of the root: three dots clustered on the right half made the
+ * mark read as a "Y" with a knot, and the trunk looked like a stray underline.
+ * Dotting the ends makes every stroke a connector BETWEEN two nodes, which is
+ * what a source-control graph is.
+ */
+export type DispatchNodeId = "root" | "upper-tip" | "lower-tip";
 export type DispatchMarkPart = DispatchBranchId | DispatchNodeId;
 
 type Point = readonly [x: number, y: number];
@@ -39,7 +47,7 @@ export const DISPATCH_MARK_BRANCHES: readonly DispatchBranch[] = [
 ] as const;
 
 export const DISPATCH_MARK_NODES: readonly DispatchNode[] = [
-  { id: "junction", cx: 36, cy: 32, radius: 3.5 },
+  { id: "root", cx: 12, cy: 32, radius: 3.5 },
   { id: "upper-tip", cx: 52, cy: 20, radius: 3.5 },
   { id: "lower-tip", cx: 52, cy: 44, radius: 3.5 },
 ] as const;
