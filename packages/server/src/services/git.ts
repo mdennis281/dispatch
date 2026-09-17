@@ -35,6 +35,7 @@ import {
   type GitCommit,
   type GitCommitFile,
   type GitFileChange,
+  type GitResetSummary,
   type GitStash,
   type GitStatus,
   GIT_REV_INDEX,
@@ -68,6 +69,7 @@ export type GitExecFn = (
 const DEFAULT_TIMEOUT_MS = 30_000;
 /** Network ops (fetch/pull/push) get a longer leash. */
 const NETWORK_TIMEOUT_MS = 120_000;
+
 /** Source-control image previews may exceed Monaco's 2 MB text cap. */
 const MAX_IMAGE_PREVIEW_BYTES = 32 * 1024 * 1024;
 
@@ -449,6 +451,19 @@ export class GitService {
     }
   }
 
+  /**
+   * DESTRUCTIVE — throw away EVERY working-tree change: tracked files go back
+   * to the index, untracked files and directories are deleted. Like `discard`,
+   * the index itself is left alone, so staged work survives (that is the one
+   * place a "clear the deck" sweep should not reach without being asked).
+   * Ignored files are kept — no `-x` — because the build outputs and
+   * `node_modules` under a checkout are not "changes".
+   */
+  async discardAll(repoPath: string): Promise<void> {
+    await this.git(["checkout", "-q", "--", "."], repoPath);
+    await this.git(["clean", "-f", "-d", "-q"], repoPath);
+  }
+
   /* ------------------------------------------------------------ committing */
 
   /**
@@ -604,6 +619,99 @@ export class GitService {
     if (r.exitCode !== 0) throw gitError(args, r);
     // git reports progress on stderr even on success — that IS the summary.
     return (r.stdout.trim() || r.stderr.trim()).slice(0, 2_000);
+  }
+
+  /**
+   * DESTRUCTIVE — put the checkout back on a pristine `trunk` that matches
+   * `origin/<trunk>`: fetch, abandon any half-finished merge/rebase, drop every
+   * working-tree and index change, switch to the trunk, then bring it level
+   * with origin.
+   *
+   * This is the "my main is a mess" button. Under the review profile the
+   * primary checkout only ever sits on the trunk, so drift there is always
+   * junk — a stray scratch dir, a file an agent edited in the wrong place, a
+   * rebase the trunk-sync aborted — and there is nothing to keep.
+   *
+   * Local-only COMMITS are the exception, and the one thing this does NOT drop
+   * unless told to: the memory committer writes `chore(memory)` commits straight
+   * onto the local trunk, and losing an unpushed one loses the memory. So by
+   * default divergence is replayed with a rebase; `dropLocalCommits` is the
+   * caller saying "no, hard-reset to origin" with the count in front of them.
+   */
+  async resetToOrigin(
+    repoPath: string,
+    trunk: string,
+    opts: { dropLocalCommits?: boolean; remote?: string } = {},
+  ): Promise<GitResetSummary> {
+    const branch = assertRev(trunk);
+    const remote = opts.remote ? assertRev(opts.remote) : "origin";
+    const upstream = `${remote}/${branch}`;
+
+    const fetched = await this.exec("git", ["fetch", "--prune", remote, branch], {
+      cwd: repoPath,
+      timeout: NETWORK_TIMEOUT_MS,
+    });
+    if (fetched.exitCode !== 0) throw gitError(["fetch", remote, branch], fetched);
+
+    // A stranded rebase/merge (the trunk-sync aborts its own, but a human's or
+    // an agent's can be left behind) blocks `checkout` and `reset` alike, so
+    // clear it first. Neither command is an error when there is nothing to abort.
+    await this.exec("git", ["rebase", "--abort"], { cwd: repoPath });
+    await this.exec("git", ["merge", "--abort"], { cwd: repoPath });
+
+    const before = await this.status(repoPath);
+    const discarded =
+      before.staged.length + before.unstaged.length + before.untracked.length + before.conflicted.length;
+    await this.git(["reset", "-q", "--hard"], repoPath);
+    await this.git(["clean", "-f", "-d", "-q"], repoPath);
+
+    if (before.branch !== branch) {
+      const has = await this.exec(
+        "git",
+        ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+        { cwd: repoPath },
+      );
+      await this.git(
+        has.exitCode === 0
+          ? ["checkout", "-q", branch, "--"]
+          : ["checkout", "-q", "-b", branch, upstream, "--"],
+        repoPath,
+      );
+    }
+
+    // `left...right --left-right`: left = commits only on the local trunk,
+    // right = commits only on origin. Counted AFTER the switch so a checkout
+    // that was sitting on another branch reports the trunk's numbers.
+    const counts = await this.git(
+      ["rev-list", "--left-right", "--count", `${branch}...${upstream}`],
+      repoPath,
+    );
+    const [aheadRaw, behindRaw] = counts.trim().split(/\s+/);
+    const ahead = Number(aheadRaw) || 0;
+    const behind = Number(behindRaw) || 0;
+
+    let dropped = 0;
+    let replayed = 0;
+    if (opts.dropLocalCommits) {
+      await this.git(["reset", "-q", "--hard", upstream], repoPath);
+      dropped = ahead;
+    } else if (ahead === 0) {
+      if (behind > 0) await this.git(["merge", "--ff-only", "-q", upstream], repoPath);
+    } else if (behind > 0) {
+      const r = await this.exec("git", ["rebase", upstream], { cwd: repoPath });
+      if (r.exitCode !== 0) {
+        // Leave no half-finished rebase behind — the tree must be usable
+        // whatever the outcome, and the caller gets a message it can act on.
+        await this.exec("git", ["rebase", "--abort"], { cwd: repoPath });
+        throw new Error(
+          `${branch} has ${ahead} local commit(s) that conflict with ${upstream}; ` +
+            `discard them to sync (${(r.stderr.trim() || r.stdout.trim()).slice(0, 300)})`,
+        );
+      }
+      replayed = ahead;
+    }
+
+    return { branch, discarded, pulled: behind, dropped, replayed, kept: ahead - dropped };
   }
 
   /* ------------------------------------------------------------- internals */

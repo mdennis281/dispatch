@@ -151,3 +151,19 @@ export const GitActionResultSchema = z.object({
   message: z.string().optional(),
 });
 export type GitActionResult = z.infer<typeof GitActionResultSchema>;
+
+/** What a reset-to-origin did — the numbers the toast reports back. */
+export const GitResetSummarySchema = z.object({
+  branch: z.string(),
+  /** Working-tree + index entries thrown away. */
+  discarded: z.number().int(),
+  /** Commits origin had that the local trunk didn't. */
+  pulled: z.number().int(),
+  /** Local-only commits hard-reset away (only when asked to drop them). */
+  dropped: z.number().int(),
+  /** Local-only commits replayed onto the new origin tip. */
+  replayed: z.number().int(),
+  /** Local-only commits still on the branch afterwards. */
+  kept: z.number().int(),
+});
+export type GitResetSummary = z.infer<typeof GitResetSummarySchema>;

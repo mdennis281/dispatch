@@ -49,6 +49,7 @@ import type {
   GitCommit,
   GitCommitFile,
   GitStash,
+  GitResetSummary,
   ProjectConfigResult,
   ProjectConfigLocation,
   UsageSnapshot,
@@ -1161,6 +1162,9 @@ export const api = {
     /** DESTRUCTIVE — deletes untracked files, reverts tracked ones. Confirm first. */
     discard: (repoPath: string, paths: string[]) =>
       post<GitStatus>("/api/git/discard", { repoPath, paths }),
+    /** DESTRUCTIVE — every unstaged change and untracked file at once. */
+    discardAll: (repoPath: string) =>
+      post<GitStatus>("/api/git/discard", { repoPath, all: true }),
 
     commit: (repoPath: string, message: string, opts?: { amend?: boolean }) =>
       post<{ commit: GitCommit; status: GitStatus }>("/api/git/commit", {
@@ -1206,6 +1210,17 @@ export const api = {
         op,
         setUpstream: opts?.setUpstream,
         branch: opts?.branch,
+      }),
+    /**
+     * DESTRUCTIVE — fetch, throw away every uncommitted change, switch to
+     * `branch` and bring it level with origin. Local-only commits are replayed
+     * unless `dropLocalCommits`, in which case they go too.
+     */
+    resetToOrigin: (repoPath: string, branch: string, opts?: { dropLocalCommits?: boolean }) =>
+      post<{ summary: GitResetSummary; status: GitStatus }>("/api/git/reset-to-origin", {
+        repoPath,
+        branch,
+        dropLocalCommits: opts?.dropLocalCommits,
       }),
   },
 

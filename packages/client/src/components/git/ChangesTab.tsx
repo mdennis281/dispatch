@@ -91,14 +91,18 @@ function FileRow({
   );
 }
 
-/** Two-click confirm for the one action here that can't be undone. */
-function DiscardButton({ onDiscard }: { onDiscard: () => void }) {
+/**
+ * Two-click confirm for the one action here that can't be undone. The same
+ * control serves a single row and the group header's "discard all" — only the
+ * tip changes, so the bulk sweep says how many files it is about to take.
+ */
+function DiscardButton({ onDiscard, tip = "Discard changes" }: { onDiscard: () => void; tip?: string }) {
   const [confirming, setConfirming] = useState(false);
   if (!confirming) {
     return (
       <IconButton
         size="sm"
-        tip="Discard changes"
+        tip={tip}
         className="hover:!text-danger"
         onClick={() => setConfirming(true)}
       >
@@ -112,7 +116,10 @@ function DiscardButton({ onDiscard }: { onDiscard: () => void }) {
         size="sm"
         tip="Confirm discard — this cannot be undone"
         className="!text-danger hover:!bg-danger/15"
-        onClick={onDiscard}
+        onClick={() => {
+          setConfirming(false);
+          onDiscard();
+        }}
       >
         <Check />
       </IconButton>
@@ -299,6 +306,7 @@ export interface ChangesTabProps {
   onDiscard: (paths: string[]) => void;
   onStageAll: () => void;
   onUnstageAll: () => void;
+  onDiscardAll: () => void;
 }
 
 export function ChangesTab(props: ChangesTabProps) {
@@ -312,6 +320,7 @@ export function ChangesTab(props: ChangesTabProps) {
     onDiscard,
     onStageAll,
     onUnstageAll,
+    onDiscardAll,
   } = props;
 
   const isActive = (path: string, staged: boolean) =>
@@ -395,9 +404,15 @@ export function ChangesTab(props: ChangesTabProps) {
           title="Changes"
           files={unstagedAll}
           headerActions={
-            <IconButton size="sm" tip="Stage all" onClick={onStageAll}>
-              <Plus />
-            </IconButton>
+            <>
+              <DiscardButton
+                tip={`Discard all ${unstagedAll.length} change${unstagedAll.length === 1 ? "" : "s"}`}
+                onDiscard={onDiscardAll}
+              />
+              <IconButton size="sm" tip="Stage all" onClick={onStageAll}>
+                <Plus />
+              </IconButton>
+            </>
           }
         >
           {unstagedAll.map((f) => (

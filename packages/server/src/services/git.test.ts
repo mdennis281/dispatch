@@ -404,6 +404,15 @@ describe("GitService argument construction", () => {
     expect(argv).toContainEqual(["checkout", "--", "src/tracked.ts"]);
   });
 
+  it("discards everything with a checkout of `.` then a clean, never `-x`", async () => {
+    await git.discardAll("C:/repo");
+    const argv = calls.map((c) => c.args);
+    expect(argv).toEqual([
+      ["checkout", "-q", "--", "."],
+      ["clean", "-f", "-d", "-q"],
+    ]);
+  });
+
   it("refuses an empty commit message before touching git", async () => {
     await expect(git.commit("C:/repo", "   ")).rejects.toThrow(/message is empty/);
     expect(calls).toHaveLength(0);
@@ -438,6 +447,77 @@ describe("GitService argument construction", () => {
     calls = [];
     await git.sync("C:/repo", "push");
     expect(calls[0]?.args).toEqual(["push", "origin"]);
+  });
+
+  describe("resetToOrigin", () => {
+    /** Mock exec with a scripted branch header and left-right count. */
+    const make = (o: { branch: string; counts: string; rebaseFails?: boolean }) => {
+      const log: string[][] = [];
+      const exec: GitExecFn = async (_f, args) => {
+        log.push(args);
+        if (args[0] === "status") {
+          return {
+            stdout: [`# branch.head ${o.branch}`, "? junk.txt", ""].join(" "),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (args[0] === "rev-list") return { stdout: `${o.counts}
+`, stderr: "", exitCode: 0 };
+        if (args[0] === "rev-parse") return { stdout: "", stderr: "", exitCode: 0 };
+        if (args[0] === "rebase" && args[1] !== "--abort" && o.rebaseFails) {
+          return { stdout: "", stderr: "CONFLICT (content): a.ts", exitCode: 1 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      };
+      return { log, svc: new GitService({ exec }) };
+    };
+
+    it("fetches, clears a stranded rebase/merge, wipes the tree and fast-forwards", async () => {
+      const { log, svc } = make({ branch: "main", counts: "0	3" });
+      const r = await svc.resetToOrigin("C:/repo", "main");
+      expect(log[0]).toEqual(["fetch", "--prune", "origin", "main"]);
+      expect(log).toContainEqual(["rebase", "--abort"]);
+      expect(log).toContainEqual(["merge", "--abort"]);
+      expect(log).toContainEqual(["reset", "-q", "--hard"]);
+      expect(log).toContainEqual(["clean", "-f", "-d", "-q"]);
+      expect(log).toContainEqual(["merge", "--ff-only", "-q", "origin/main"]);
+      // Already on main: no checkout.
+      expect(log.some((a) => a[0] === "checkout")).toBe(false);
+      expect(r).toEqual({ branch: "main", discarded: 1, pulled: 3, dropped: 0, replayed: 0, kept: 0 });
+    });
+
+    it("switches to the trunk when the checkout is on another branch", async () => {
+      const { log, svc } = make({ branch: "feat/x", counts: "0	0" });
+      await svc.resetToOrigin("C:/repo", "main");
+      expect(log).toContainEqual(["checkout", "-q", "main", "--"]);
+    });
+
+    it("replays local-only commits by default and drops them only when told", async () => {
+      const a = make({ branch: "main", counts: "2	1" });
+      const r1 = await a.svc.resetToOrigin("C:/repo", "main");
+      expect(a.log).toContainEqual(["rebase", "origin/main"]);
+      expect(r1).toMatchObject({ replayed: 2, dropped: 0, kept: 2 });
+
+      const b = make({ branch: "main", counts: "2	1" });
+      const r2 = await b.svc.resetToOrigin("C:/repo", "main", { dropLocalCommits: true });
+      expect(b.log).toContainEqual(["reset", "-q", "--hard", "origin/main"]);
+      expect(b.log.some((x) => x[0] === "rebase" && x[1] === "origin/main")).toBe(false);
+      expect(r2).toMatchObject({ replayed: 0, dropped: 2, kept: 0 });
+    });
+
+    it("aborts a conflicting replay and says how to get past it", async () => {
+      const { log, svc } = make({ branch: "main", counts: "1	1", rebaseFails: true });
+      await expect(svc.resetToOrigin("C:/repo", "main")).rejects.toThrow(/discard them to sync/);
+      // The abort that follows the failed rebase, not just the pre-flight one.
+      expect(log.filter((a) => a[0] === "rebase" && a[1] === "--abort")).toHaveLength(2);
+    });
+
+    it("rejects a crafted branch name before spawning git", async () => {
+      const { log, svc } = make({ branch: "main", counts: "0	0" });
+      await expect(svc.resetToOrigin("C:/repo", "--force")).rejects.toThrow(/invalid rev/);
+      expect(log).toHaveLength(0);
+    });
   });
 
   it("reads the index side with the empty-rev object spec (`:path`)", async () => {

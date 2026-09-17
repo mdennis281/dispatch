@@ -24,6 +24,7 @@ import {
   GitCommitVertical,
   GitCompare,
   RefreshCw,
+  RotateCcw,
   RotateCw,
   Trash2,
 } from "lucide-react";
@@ -47,6 +48,7 @@ import { HistoryTab } from "./HistoryTab.js";
 import { StashesTab } from "./StashesTab.js";
 import { BranchMenu, localNameFor } from "./BranchMenu.js";
 import { CleanupWorktreesModal } from "./CleanupWorktreesModal.js";
+import { ResetTrunkModal } from "./ResetTrunkModal.js";
 import { GitDiffPane } from "./GitDiffPane.js";
 
 /** How often the open view re-reads git state (cheap: one `git status`). */
@@ -228,6 +230,7 @@ export function GitView() {
   const [stashFiles, setStashFiles] = useState<Record<string, GitCommitFile[]>>({});
   const [generating, setGenerating] = useState(false);
   const [cleaning, setCleaning] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   // Point the store at the project checkout whenever the project changes; the
   // picker below can then move it to any worktree.
@@ -396,6 +399,11 @@ export function GitView() {
   // A sweep can commit what's already staged too, so it has a wider notion of
   // "there is work here" than Stash does.
   const anyChanges = dirty || (status?.staged.length ?? 0) > 0;
+  const trunk = project.defaultBranch || "main";
+  // "Reset main" is about the PRIMARY checkout — the one that is supposed to
+  // sit on the trunk. A worktree can't even check the trunk out (the primary
+  // holds it), so the button only shows when the picker is on the checkout.
+  const onPrimary = repoPath === project.repoPath;
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-app">
@@ -463,6 +471,18 @@ export function GitView() {
           >
             Clean up
           </Button>
+          {onPrimary && (
+            <Button
+              size="sm"
+              variant="subtle"
+              leftIcon={<RotateCcw />}
+              disabled={!!busy}
+              onClick={() => setResetting(true)}
+              title={`Discard everything here and make ${trunk} match origin/${trunk}`}
+            >
+              Reset {trunk}
+            </Button>
+          )}
           <SweepButton
             projectId={project.id}
             repoPath={repoPath}
@@ -540,6 +560,7 @@ export function GitView() {
               onDiscard={(paths) => void run("Discard", (repo) => api.git.discard(repo, paths))}
               onStageAll={() => void run("Stage all", (repo) => api.git.stageAll(repo))}
               onUnstageAll={() => void run("Unstage all", (repo) => api.git.unstageAll(repo))}
+              onDiscardAll={() => void run("Discard all", (repo) => api.git.discardAll(repo))}
             />
           )}
 
@@ -588,6 +609,20 @@ export function GitView() {
           </div>
         )}
       </div>
+
+      {resetting && repoPath && (
+        <ResetTrunkModal
+          repoPath={repoPath}
+          trunk={trunk}
+          status={status}
+          onClose={() => setResetting(false)}
+          onDone={() => {
+            // Files the diff pane was showing may no longer exist.
+            select(null);
+            void refresh({ full: true });
+          }}
+        />
+      )}
 
       {cleaning && (
         <CleanupWorktreesModal
