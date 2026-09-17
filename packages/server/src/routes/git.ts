@@ -11,7 +11,7 @@
  *   GET    /api/git/file?repoPath=&relPath=&rev=     → WorktreeFile (Monaco)
  *   POST   /api/git/stage        {repoPath, paths?|all}
  *   POST   /api/git/unstage      {repoPath, paths?|all}
- *   POST   /api/git/discard      {repoPath, paths}        (destructive)
+ *   POST   /api/git/discard      {repoPath, paths?|all}   (destructive)
  *   POST   /api/git/commit       {repoPath, message, amend?}
  *   POST   /api/git/commit-message {repoPath, hint?}      → AI-drafted message
  *   POST   /api/git/checkout     {repoPath, branch, create?, from?}
@@ -20,6 +20,7 @@
  *   POST   /api/git/stash/apply  {repoPath, index, pop?}
  *   DELETE /api/git/stash        {repoPath, index}
  *   POST   /api/git/sync         {repoPath, op: fetch|pull|push, setUpstream?}
+ *   POST   /api/git/reset-to-origin {repoPath, branch, dropLocalCommits?} (destructive)
  *
  * Every failure comes back as `{ error }`: 400 for a bad request or a rejected
  * path/ref, 502 for a git command that ran and failed (the message is git's own
@@ -232,11 +233,12 @@ export function registerGitRoutes(app: FastifyInstance): void {
   // DESTRUCTIVE: throws away working-tree edits and deletes untracked files.
   // The client confirms before calling; there is no undo on the server side.
   app.post("/api/git/discard", async (req, reply) => {
-    const body = (req.body ?? {}) as { repoPath?: string; paths?: string[] };
+    const body = (req.body ?? {}) as { repoPath?: string; paths?: string[]; all?: boolean };
     const cwd = await repo(body.repoPath, reply);
     if (!cwd) return reply;
     try {
-      await git.discard(cwd, body.paths ?? []);
+      if (body.all) await git.discardAll(cwd);
+      else await git.discard(cwd, body.paths ?? []);
       return await git.status(cwd);
     } catch (err) {
       const { code, body: b } = fail(err);
@@ -394,6 +396,29 @@ export function registerGitRoutes(app: FastifyInstance): void {
         remote: body.remote,
       });
       return { message, status: await git.status(cwd) };
+    } catch (err) {
+      const { code, body: b } = fail(err);
+      return reply.code(code).send(b);
+    }
+  });
+
+  // DESTRUCTIVE: drops every uncommitted change in the checkout and (with
+  // `dropLocalCommits`) every commit origin doesn't have. The client shows the
+  // counts and confirms before calling.
+  app.post("/api/git/reset-to-origin", async (req, reply) => {
+    const body = (req.body ?? {}) as {
+      repoPath?: string;
+      branch?: string;
+      dropLocalCommits?: boolean;
+    };
+    const cwd = await repo(body.repoPath, reply);
+    if (!cwd) return reply;
+    if (!body.branch) return reply.code(400).send({ error: "branch required" });
+    try {
+      const summary = await git.resetToOrigin(cwd, body.branch, {
+        dropLocalCommits: body.dropLocalCommits,
+      });
+      return { summary, status: await git.status(cwd) };
     } catch (err) {
       const { code, body: b } = fail(err);
       return reply.code(code).send(b);
