@@ -13,7 +13,8 @@ describe("DispatchMark", () => {
     expect(html.match(/data-kind="branch"/g)).toHaveLength(3);
     expect(html.match(/data-kind="node"/g)).toHaveLength(3);
     expect(html).toContain('data-part="upper"');
-    expect(html).toContain('data-part="junction"');
+    expect(html).toContain('data-part="root"');
+    expect(html).not.toContain('data-part="junction"');
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Dispatch"');
   });

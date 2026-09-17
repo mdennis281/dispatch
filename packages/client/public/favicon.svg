@@ -6,7 +6,7 @@
     <path d="M36 32 C42 32 43 42 52 44" />
   </g>
   <g fill="#E5A33C">
-    <circle cx="36" cy="32" r="3.5" />
+    <circle cx="12" cy="32" r="3.5" />
     <circle cx="52" cy="20" r="3.5" />
     <circle cx="52" cy="44" r="3.5" />
   </g>

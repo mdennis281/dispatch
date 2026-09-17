@@ -44,7 +44,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
  * bare dot with a strip of the title bar to itself — a 7px circle alone at the
  * far left of an 800px band, reading as a stray pixel rather than as the app's
  * pulse. It belongs WITH the brand, since "is Dispatch there" is a fact about
- * Dispatch, but NOT IN the mark: it was tried lighting the mark's junction node,
+ * Dispatch, but NOT IN the mark: it was tried lighting one of the mark's nodes,
  * and a green node inside the logo reads as the logo recoloured, not as a
  * status beside it. So it ends the wordmark: "Dispatch ●".
  *
