@@ -305,12 +305,44 @@ describe("SessionBroker neutral harness path", () => {
     expect(await broker.interrupt(chat.id)).toBe(true);
     session.emit({ type: "turn-end", ok: false, subtype: "interrupted", result: "interrupted" });
 
-    await broker.waitFor(chat.id, "failed");
+    // Idle, not failed: the user stopped it, so there is no error to clear.
+    await broker.waitFor(chat.id, "idle");
     expect(session.sent).toHaveLength(1);
     const rows = await store.readMessages(chat.id);
     expect(rows.some((row) => row.kind === "result" && row.subtype === "guard-recovered")).toBe(false);
     expect(rows.find((row) => row.kind === "result" && row.subtype === "interrupted")).toMatchObject({
-      isError: true,
+      isError: false,
+    });
+  });
+
+  it("settles a user Stop as a stopped turn, not a failure, whatever the provider calls it", async () => {
+    session = new FakeHarnessSession(true);
+    const chat = await store.saveChat({
+      id: "chat-user-stop",
+      projectId: "project-1",
+      title: "User stop",
+      modeId: "auto",
+      effort: "low",
+      harness: "codex",
+      worktrees: [],
+      prs: [],
+      createdAt: 1,
+    });
+    broker.create(chat);
+    await broker.sendMessage(chat.id, "long job");
+    await waitUntil(() => session.sent.length === 1);
+    session.emit({ type: "init", sessionId: "thread-stop", model: "gpt-test" });
+
+    expect(await broker.interrupt(chat.id)).toBe(true);
+    // What the Claude harness actually reports for a Stop: a failed turn with
+    // no message at all, which is what used to read "Turn ended with an error".
+    session.emit({ type: "turn-end", ok: false, subtype: "error_during_execution" });
+
+    await broker.waitFor(chat.id, "idle");
+    const rows = await store.readMessages(chat.id);
+    expect(rows.find((row) => row.kind === "result")).toMatchObject({
+      subtype: "interrupted",
+      isError: false,
     });
   });
 

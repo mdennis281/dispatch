@@ -4404,15 +4404,22 @@ export class SessionBroker {
         // A different terminal outcome must not let an old guard marker recover
         // an unrelated later turn.
         session.guardRecoveries.length = 0;
+        // You pressed Stop. Every provider reports that as a failed turn —
+        // Claude as `error_during_execution` with no message at all, which
+        // surfaced as a red "Turn ended with an error" plus a chat stuck in
+        // `failed` until you cleared it. Nothing went wrong: the turn ended
+        // because you ended it, so say that and settle back to idle.
+        const stopped = explicitlyInterrupted && !event.ok;
+        const ok = event.ok || stopped;
         const endTurnCost = this.turnCost(session, event.costUsd);
         await this.emit(session, {
           ...base,
           kind: "result",
-          subtype: event.subtype,
-          isError: !event.ok,
+          subtype: stopped ? "interrupted" : event.subtype,
+          isError: !ok,
           numTurns: event.numTurns,
           durationMs: event.durationMs,
-          result: event.result,
+          result: stopped ? undefined : event.result,
           usage: event.usage,
           contextTokens: session.lastContextTokens,
           contextWindow: session.contextWindow,
@@ -4420,13 +4427,15 @@ export class SessionBroker {
           turnCostUsd: endTurnCost,
         });
         session.turn += 1;
-        if (!event.ok) this.onTurnError?.(session.chatId, event.result ?? event.limit?.reason);
+        if (!ok) this.onTurnError?.(session.chatId, event.result ?? event.limit?.reason);
+        // `event.ok`, not `ok`: a stopped turn counts as settled for status, but
+        // Stop must not be what kicks off an auto-compact turn.
         await this.compactIfPastThreshold(session, event.ok);
         if ((session.harnessSession?.pending() ?? 0) > 0 || session.outbox.length > 0) {
           session.turnOpen = true;
           this.setStatus(session, "running", { state: "thinking" });
           this.flushOutbox(session);
-        } else if (!event.ok) {
+        } else if (!ok) {
           this.onTurnFailed(session);
         } else {
           this.onTurnEnd(session);
